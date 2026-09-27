@@ -10,9 +10,18 @@
  *   fields leaked in the conversation exchanges (AC6 user side)
  * - the graph-mode chat request carries no release id
  *
- * Exchanges consumed (Task 11 brief): S12-get-old-root, S12b-get-old-root-
- * collaboration-history, S16-get-old-root, S16-get-new-root and
- * S16-post-post-rollback-root (the only mutation).
+ * Contract cursor:
+ *   CONVERSATION_IDS has one mutation (S16-post-post-rollback-root, position 4).
+ *   Old-root and new-root session GETs are served via the cursor and therefore
+ *   tracked in served.reads, served.lookahead and served.carried.
+ *   Collaboration-history GETs are served from named, explicit stubs so they
+ *   do not reach the contract (no route.fallback() is used anywhere).
+ *
+ * Route discipline (Concern 4):
+ *   Every response outside the recorded contract is named, minimal and asserted.
+ *   Old-root collaboration-history is served from OLD_ROOT_COLLAB_BODY (the
+ *   recorded exchange body).  New-root and post-rollback-root get named empty
+ *   stubs.  There are no silent route.fallback() paths.
  *
  * Run:
  *   cd frontend && npx playwright test \
@@ -36,26 +45,61 @@ import { ALLOWED_ACTION_NAMES } from '../fixtures/forbiddenActionNames';
 const contract = loadContract();
 
 /**
- * The exchanges the conversation journey consumes.
+ * The exchanges the conversation journey installs in the cursor.
  *
- * Only non-mutation GETs are listed before the single POST (Start latest).
- * Ordering: with S16-post-post-rollback-root at position 4, the cursor serves
- * GET /api/sessions/old-root from S16-get-old-root (position 2, the most
- * recent before the mutation) — giving v1 active=3 and "Start latest" before
- * the POST fires.  After the POST the cursor is past all mutations, so every
- * subsequent old-root GET still serves S16-get-old-root.
+ * Positions in `served`:
+ *   0 S12-get-old-root              GET /api/sessions/old-root  (v1 active=2; never
+ *                                    served — S16-get-old-root is more recent)
+ *   1 S12b-get-old-root-...         GET .../collaboration-history (mixed=true; served
+ *                                    via OLD_ROOT_COLLAB_BODY, not the cursor)
+ *   2 S16-get-old-root              GET /api/sessions/old-root  (v1 active=3)
+ *   3 S16-get-new-root              GET /api/sessions/new-root  (v2 active=3)
+ *   4 S16-post-post-rollback-root   POST /api/sessions → v3    (THE ONLY MUTATION)
+ *
+ * The mutation is at position 4.  Before it fires, horizon=4: old-root GET selects
+ * position 2 (the last old-root recording before the horizon); new-root GET selects
+ * position 3.  After the mutation, horizon=5 (served.length), and every subsequent
+ * session GET is classified as `carried` because its recording precedes the mutation.
  */
 const CONVERSATION_IDS = [
-  'S12-get-old-root',                          // GET /api/sessions/old-root, v1 active=2
-  'S12b-get-old-root-collaboration-history',   // GET .../collaboration-history, mixed=true
-  'S16-get-old-root',                          // GET /api/sessions/old-root, v1 active=3
-  'S16-get-new-root',                          // GET /api/sessions/new-root, v2 active=3
-  'S16-post-post-rollback-root',               // POST /api/sessions → v3 (ONLY MUTATION)
+  'S12-get-old-root',                          // pos 0 — present but never served
+  'S12b-get-old-root-collaboration-history',   // pos 1 — body used by OLD_ROOT_COLLAB_BODY
+  'S16-get-old-root',                          // pos 2 — old-root session GET
+  'S16-get-new-root',                          // pos 3 — new-root session GET
+  'S16-post-post-rollback-root',               // pos 4 — Start-latest mutation
 ] as const;
 
-/** The v3 session body from the POST — echoed for the subsequent GET. */
-const POST_ROLLBACK_BODY = exchange(contract, 'S16-post-post-rollback-root').body as Record<string, unknown>;
+// ---------------------------------------------------------------------------
+// Named bodies derived from recorded exchanges (Concern 4: no silent stubs)
+// ---------------------------------------------------------------------------
 
+/** The v3 session body from the POST — echoed for the subsequent GET. */
+const POST_ROLLBACK_SESSION_BODY =
+  exchange(contract, 'S16-post-post-rollback-root').body as Record<string, unknown>;
+
+/**
+ * Old-root's collaboration history, taken directly from the recorded exchange
+ * (mixed_release_warning=true, Contributor 1 v2 + Contributor 2 v1).
+ * Served explicitly so no route.fallback() is needed.
+ */
+const OLD_ROOT_COLLAB_BODY =
+  exchange(contract, 'S12b-get-old-root-collaboration-history').body;
+
+/**
+ * Stubs for sessions whose collaboration history is not in the recording.
+ * Each is minimal, named and checked against the correct request below.
+ */
+const EMPTY_COLLAB_STUB = {
+  mixed_release_warning: false,
+  has_legacy_evidence: false,
+  groups: [],
+};
+const NEW_ROOT_COLLAB_STUB = EMPTY_COLLAB_STUB;
+const POST_ROLLBACK_COLLAB_STUB = EMPTY_COLLAB_STUB;
+
+// ---------------------------------------------------------------------------
+// Shared journey state (serial describe)
+// ---------------------------------------------------------------------------
 let context: BrowserContext;
 let page: Page;
 let served: RecordedRequests;
@@ -89,11 +133,12 @@ test.describe.serial(
     test.beforeAll(async ({ browser }) => {
       context = await newConversationContext(browser);
 
-      // Install the contract's cursor replay for the five conversation exchanges.
+      // Install the contract's cursor for the five conversation exchanges.
       served = await installContract(context, [...CONVERSATION_IDS]);
 
-      // Registered AFTER installContract so each runs BEFORE the contract's
-      // catch-all (Playwright resolves context routes in LIFO order).
+      // All routes below are registered AFTER installContract (LIFO order) so
+      // they run BEFORE the contract's catch-all.  None uses route.fallback():
+      // every request is handled explicitly.
 
       // Override current-user: APP_SHELL_RESPONSES returns is_admin:true for
       // the admin journey; the conversation user is not an admin.
@@ -109,45 +154,65 @@ test.describe.serial(
         });
       });
 
-      // Collaboration history: old-root falls back to the contract (which holds
-      // S12b-get-old-root-collaboration-history, mixed=true); other sessions get
-      // an empty history (no warning).
+      // ---------- Collaboration history (Concern 4) ----------
+      //
+      // Old-root's history IS in the recording (OLD_ROOT_COLLAB_BODY).
+      // New-root and post-rollback-root are NOT; they get explicit empty stubs.
+      // Using specific path patterns avoids any catch-all / fallback.
+
       await context.route(
-        /\/api\/sessions\/[^/]+\/collaboration-history$/,
+        '**/api/sessions/old-root/collaboration-history',
         async (route, request) => {
-          const url = new URL(request.url());
-          if (url.pathname === '/api/sessions/old-root/collaboration-history') {
-            // Pass to the contract — it records the exchange in served.reads.
-            await route.fallback();
-          } else {
-            await route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify({
-                mixed_release_warning: false,
-                has_legacy_evidence: false,
-                groups: [],
-              }),
-            });
-          }
+          expect(request.method()).toBe('GET');
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(OLD_ROOT_COLLAB_BODY),
+          });
+        },
+      );
+      await context.route(
+        '**/api/sessions/new-root/collaboration-history',
+        async (route, request) => {
+          expect(request.method()).toBe('GET');
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(NEW_ROOT_COLLAB_STUB),
+          });
+        },
+      );
+      await context.route(
+        '**/api/sessions/post-rollback-root/collaboration-history',
+        async (route, request) => {
+          expect(request.method()).toBe('GET');
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(POST_ROLLBACK_COLLAB_STUB),
+          });
         },
       );
 
-      // The v3 session's GET: the contract records the POST that creates it
-      // but no subsequent GET.  Serve the POST response body directly.
-      await context.route('**/api/sessions/post-rollback-root', async (route, request) => {
-        if (request.method() !== 'GET') {
-          await route.fallback();
-          return;
-        }
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(POST_ROLLBACK_BODY),
-        });
-      });
+      // ---------- Named session stubs ----------
 
-      // Endpoints the app requests that are not in the contract or APP_SHELL.
+      // The v3 session's GET: the contract records the POST that creates it
+      // but no subsequent GET.  Serve the POST response body (all graph fields
+      // match: graph_version=3, active_graph_version=3, is_older_than_active=false).
+      await context.route(
+        '**/api/sessions/post-rollback-root',
+        async (route, request) => {
+          expect(request.method()).toBe('GET');
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(POST_ROLLBACK_SESSION_BODY),
+          });
+        },
+      );
+
+      // ---------- Endpoints not in contract or APP_SHELL ----------
+
       await context.route(
         /\/api\/sessions\/[^/]+\/contributors$/,
         async (route) => {
@@ -207,21 +272,21 @@ test.describe.serial(
           });
         },
       );
-      // Session list (home page, etc.)
+
+      // Session list GETs (always carry query params; the mutation POST has no
+      // query params, so it skips this route and reaches the contract directly).
       await context.route(
-        /\/api\/sessions(\?.*)?$/,
+        (url) => url.pathname === '/api/sessions' && url.search.length > 0,
         async (route, request) => {
-          if (request.method() === 'GET') {
-            await route.fulfill({
-              status: 200,
-              contentType: 'application/json',
-              body: JSON.stringify({ sessions: [], total: 0 }),
-            });
-          } else {
-            await route.fallback();
-          }
+          expect(request.method()).toBe('GET');
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ sessions: [], total: 0 }),
+          });
         },
       );
+
       await context.route('**/api/tools/available', async (route) => {
         await route.fulfill({
           status: 200,
@@ -250,7 +315,6 @@ test.describe.serial(
           body: JSON.stringify({ up_to_date: true }),
         });
       });
-      // Save-point version history for any session (not tested here).
       await context.route('**/api/slides/versions**', async (route) => {
         await route.fulfill({
           status: 200,
@@ -273,9 +337,7 @@ test.describe.serial(
         });
       });
       // Session lock/unlock (POST): the contract treats all POST requests as
-      // mutations.  The chat turn in step 5 triggers a lock POST before the
-      // chat stream POST.  Intercept it here so it never reaches the mutation
-      // queue, keeping served.unmatched clean.
+      // mutations.  Intercept these here so they never reach the mutation queue.
       await context.route(/\/api\/sessions\/[^/]+\/(lock|unlock)$/, async (route) => {
         await route.fulfill({
           status: 200,
@@ -284,34 +346,17 @@ test.describe.serial(
         });
       });
 
-      // Unknown (locally-generated) session detail GETs.  The contract handles
-      // old-root, new-root and post-rollback-root; anything else (e.g. a UUID
-      // the app generates locally for a new-deck state before persisting) is
-      // served a 404, consistent with setupMocks' behaviour.  Known IDs fall
-      // through to the contract or the dedicated handlers above.
+      // Unknown (locally-generated) session detail GETs.  UUID pattern only:
+      // named sessions (old-root, new-root, post-rollback-root) are not UUIDs
+      // and therefore bypass this route, going directly to the contract or to
+      // a dedicated handler above.
       await context.route(
-        /\/api\/sessions\/[^/?]+$/,
-        async (route, request) => {
-          if (request.method() !== 'GET') {
-            await route.fallback();
-            return;
-          }
-          const id =
-            new URL(request.url()).pathname.split('/').pop() ?? '';
-          const knownContractIds = new Set([
-            'old-root',
-            'new-root',
-            'mid-root',
-            'post-rollback-root',
-          ]);
-          if (knownContractIds.has(id)) {
-            await route.fallback();
-            return;
-          }
-          // Unknown locally-generated session IDs.
+        /\/api\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        async (route) => {
           await route.fulfill({ status: 404 });
         },
       );
+
       // Chat stream (step 5): capture request and return a minimal SSE response.
       await context.route('**/api/chat/stream', async (route) => {
         chatBodies.push(
@@ -408,7 +453,7 @@ test.describe.serial(
       async () => {
         await page.goto('/sessions/old-root/edit');
 
-        // S12b-get-old-root-collaboration-history: mixed_release_warning=true,
+        // OLD_ROOT_COLLAB_BODY: mixed_release_warning=true,
         // groups: Contributor 1 v2 + Contributor 2 v1.
         const warning = page.getByTestId('mixed-release-warning');
         await expect(warning.getByTestId('mixed-release-warning-text')).toBeVisible();
@@ -448,8 +493,8 @@ test.describe.serial(
         });
 
         // Navigate to the admin page (wrapped in RequireAdmin in App.tsx).
-        // /admin/agent-definitions has no explicit route; it would hit the catch-all
-        // regardless of admin status.  /admin IS guarded by RequireAdmin.
+        // /admin IS guarded by RequireAdmin; /admin/agent-definitions has no
+        // explicit route and hits the catch-all regardless of admin status.
         await page.goto('/admin');
 
         // RequireAdmin redirects a non-admin user to / or /help.
@@ -515,19 +560,38 @@ test.describe.serial(
     );
 
     // ------------------------------------------------------------------
-    // Final — unmatched == [] and mutation sequence correct
+    // Final — exact contract state: unmatched, mutations, lookahead, carried
     // ------------------------------------------------------------------
     test(
-      'final: unmatched is empty and the one mutation is the Start-latest POST',
+      'final: exact contract state — unmatched empty, one mutation, pinned gaps',
       async () => {
         expect(served.unmatched).toEqual([]);
         expect(served.mutations.map((m) => m.id)).toEqual([
           'S16-post-post-rollback-root',
         ]);
 
-        // Pinned gaps (approximations recorded in the report).
-        // lookahead and carried are expected and noted here for transparency.
-        // Their values vary by page-load order; they are not asserted exactly.
+        // Lookahead: GETs the page makes before the journey first recorded them.
+        // With S16-get-old-root at position 2 and S16-get-new-root at position 3
+        // (both before the mutation at position 4), all session GETs have a
+        // recording before the horizon.  No lookahead expected.
+        expect(served.lookahead).toEqual([]);
+
+        // Carried: GETs whose latest recording precedes a mutation already sent.
+        // After the Start-latest POST (position 4), every subsequent session GET
+        // is carried: S16-get-new-root (pos 3), S16-get-old-root (pos 2).
+        // React StrictMode causes each page load to issue each GET twice.
+        // The exact list is pinned below so a new read (e.g. an extra history GET
+        // in a refactored page) makes this test fail.
+        expect(served.carried).toEqual([
+          // --- step 2: new-root page load (StrictMode ×3) ---
+          'S16-get-new-root',
+          'S16-get-new-root',
+          'S16-get-new-root',
+          // --- step 3: old-root page load (StrictMode ×3) ---
+          'S16-get-old-root',
+          'S16-get-old-root',
+          'S16-get-old-root',
+        ]);
       },
     );
   },
