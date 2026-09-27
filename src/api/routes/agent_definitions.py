@@ -1242,13 +1242,18 @@ def list_agent_test_case_runs(
 # body is exactly ``{verdict, notes}``.  The writer waits on the run row's L3
 # ``FOR UPDATE`` lock, so it runs in the threadpool (a body route must be
 # ``async`` to read the body).  Readiness waits on the shared L0 parent lock and
-# is a plain ``def`` handler, which FastAPI runs there.  An ``IntegrityError``
-# from the verdict write (the DDL checks, or #269's linked-verdict trigger) is
-# never mapped: it propagates as a 500 and #269 owns any friendlier mapping (C7).
+# is a plain ``def`` handler, which FastAPI runs there.  A verdict on a run that
+# is published evidence is the typed ``linked_to_release`` 422 (#269 C48).  An
+# ``IntegrityError`` from the verdict write (the DDL checks, or #269's linked-
+# verdict trigger, the backstop for direct writes) is never mapped: it
+# propagates as a 500 (C7).
 
 _INELIGIBLE_MESSAGES = {
     "not_completed": "Only a completed run can take a verdict.",
     "checks_failed": "A run whose deterministic checks failed cannot be approved.",
+    "linked_to_release": (
+        "This run is evidence for a published Graph Version; its verdict cannot change."
+    ),
 }
 
 

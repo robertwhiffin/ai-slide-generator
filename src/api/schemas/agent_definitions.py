@@ -715,7 +715,7 @@ class IneligibleForApprovalResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: Literal["ineligible_for_approval"]
-    reason: Literal["not_completed", "checks_failed"]
+    reason: Literal["not_completed", "checks_failed", "linked_to_release"]
     message: str
 
 

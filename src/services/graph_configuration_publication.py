@@ -418,11 +418,12 @@ class _GraphConfigurationPublication(_GraphConfigurationDraft):
         release_id: int,
         evidence: tuple[EvidenceLink, ...],
     ) -> None:
-        """Phase A: no evidence table writer exists yet; Task 4 replaces this body."""
-        if evidence:
-            raise GraphConfigurationIntegrityError(
-                "release evidence linking is not available"
-            )
+        """Link the gate's locked evidence to the new release (Task 4)."""
+        # Imported here: ``graph_release_evidence`` imports this module (and
+        # #268's workbench, which imports the ``GraphConfiguration`` facade).
+        from src.services.graph_release_evidence import link_release_evidence
+
+        link_release_evidence(session, release_id=release_id, evidence=evidence)
 
 
 def _model_nodes(
