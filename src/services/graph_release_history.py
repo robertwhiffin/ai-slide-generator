@@ -199,21 +199,15 @@ def _read_history(session: Session) -> _HistorySnapshot:
     )
 
 
-def list_release_history(session: Session) -> tuple[ReleaseHistoryEntry, ...]:
-    """Every Graph Release, newest first, as of this function's first statement."""
-    return _read_history(session).entries
+def _release_definitions(
+    session: Session, mapping: Mapping[str, int]
+) -> Mapping[AgentKey, ReleaseDefinition]:
+    """One release's exact seven definitions, hash-validated, read-only.
 
-
-def read_release_detail(session: Session, *, version_number: int) -> ReleaseDetail:
-    """One release's entry, exact seven definitions, and linked candidate evidence."""
-    snapshot = _read_history(session)
-    entry = next(
-        (e for e in snapshot.entries if e.version_number == version_number), None
-    )
-    if entry is None:
-        raise GraphVersionNotFound(version_number)
-    mapping = snapshot.mappings[entry.release_id]
-
+    ``mapping`` is one entry of ``_HistorySnapshot.mappings`` (already checked to
+    name exactly the seven roles).  Each revision must exist, belong to its own
+    role, and match its persisted hash; any failure is an integrity error.
+    """
     revisions = {
         revision.id: revision
         for revision in session.scalars(
@@ -242,6 +236,23 @@ def read_release_detail(session: Session, *, version_number: int) -> ReleaseDeta
             content_hash=revision.content_hash,
             content=content,
         )
+    return MappingProxyType(definitions)
+
+
+def list_release_history(session: Session) -> tuple[ReleaseHistoryEntry, ...]:
+    """Every Graph Release, newest first, as of this function's first statement."""
+    return _read_history(session).entries
+
+
+def read_release_detail(session: Session, *, version_number: int) -> ReleaseDetail:
+    """One release's entry, exact seven definitions, and linked candidate evidence."""
+    snapshot = _read_history(session)
+    entry = next(
+        (e for e in snapshot.entries if e.version_number == version_number), None
+    )
+    if entry is None:
+        raise GraphVersionNotFound(version_number)
+    definitions = _release_definitions(session, snapshot.mappings[entry.release_id])
 
     rows = session.execute(
         select(GraphReleaseTestRun, AgentTestRun)
@@ -291,6 +302,6 @@ def read_release_detail(session: Session, *, version_number: int) -> ReleaseDeta
     )
     return ReleaseDetail(
         entry=entry,
-        definitions=MappingProxyType(definitions),
+        definitions=definitions,
         evidence=tuple(evidence),
     )

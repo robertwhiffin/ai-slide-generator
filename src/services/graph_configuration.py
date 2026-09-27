@@ -47,6 +47,14 @@ from src.services.graph_configuration_publication import (
     _GraphConfigurationPublication,
     definition_field_diffs,
 )
+from src.services.graph_configuration_rollback import (
+    AgentComparison,
+    DraftEffect,
+    ReleaseComparison,
+    RollbackBlock,
+    RollbackPreview,
+    _GraphConfigurationRollback,
+)
 from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
 from src.services.graph_configuration_workbench import (
     ActiveReleaseSnapshot,
@@ -64,15 +72,17 @@ if TYPE_CHECKING:
 
 
 class GraphConfiguration(
+    _GraphConfigurationRollback,
     _GraphConfigurationPublication,
     _GraphConfigurationDraft,
     _GraphConfigurationWorkbench,
     _GraphConfigurationBootstrap,
 ):
-    """Read, edit, publish, or atomically bootstrap the Graph Configuration aggregate.
+    """Read, edit, publish, roll back, or bootstrap the Graph Configuration aggregate.
 
-    ``_GraphConfigurationBootstrap`` and ``_GraphConfigurationPublication`` rely
-    on ``_GraphConfigurationWorkbench``'s parent lock through this MRO.
+    ``_GraphConfigurationBootstrap``, ``_GraphConfigurationPublication`` and
+    ``_GraphConfigurationRollback`` rely on ``_GraphConfigurationWorkbench``'s
+    parent lock through this MRO.
     """
 
 
@@ -111,6 +121,7 @@ def bootstrap_graph_configuration(session_factory: sessionmaker) -> BootstrapRes
 
 __all__ = [
     "ActiveReleaseSnapshot",
+    "AgentComparison",
     "BootstrapResult",
     "CatalogRemoteEndpointDraftValidator",
     "ChangedDefinitionPreview",
@@ -119,6 +130,7 @@ __all__ = [
     "DraftCandidateValidator",
     "DraftContentRejected",
     "DraftDefinitionSnapshot",
+    "DraftEffect",
     "DraftLegacyPromptSource",
     "DraftLegacyPromptSourceRecord",
     "DraftMetadataSnapshot",
@@ -146,8 +158,11 @@ __all__ = [
     "PublishedMapping",
     "PublishedRelease",
     "REQUIRED_SMOKE_PAYLOADS",
+    "ReleaseComparison",
     "ReleasePreview",
     "RemoteEndpointDraftValidator",
+    "RollbackBlock",
+    "RollbackPreview",
     "bootstrap_graph_configuration",
     "build_remote_endpoint_draft_validator",
     "definition_field_diffs",
