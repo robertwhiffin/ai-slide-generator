@@ -409,7 +409,7 @@ def test_databricks_model_adapter_never_binds_legacy_tool_grants():
     assert structured_bindings == [OUTPUT_SCHEMAS["data_analyst"]]
     assert constructed == [
         {
-            "endpoint": "databricks-claude-opus-4-6",
+            "model": "databricks-claude-opus-4-6",
             "temperature": 0.7,
             "max_tokens": 60000,
             "top_p": 0.95,
@@ -672,7 +672,7 @@ def test_structured_output_runtime_adapter_binds_through_the_extracted_helper(mo
         (
             "model_factory",
             {
-                "endpoint": "saved exact endpoint-name",
+                "model": "saved exact endpoint-name",
                 "temperature": 0.25,
                 "max_tokens": 321,
                 "top_p": 0.75,
@@ -688,7 +688,7 @@ def test_structured_output_runtime_and_model_endpoint_probe_share_one_helper(mon
     """Catches the probe binding its own structured model instead of the runtime's.
 
     Both paths are driven with the same recording factories: each must pass the
-    exact saved endpoint as ``endpoint`` and the runtime-identity client as
+    exact saved endpoint as ``model`` and the runtime-identity client as
     ``workspace_client``, and bind before invoking, through the one helper.
     """
     from src.services.model_endpoint_probe import (
@@ -730,7 +730,7 @@ def test_structured_output_runtime_and_model_endpoint_probe_share_one_helper(mon
     assert runtime_kwargs["workspace_client"] is runtime_client
     assert probe_kwargs["workspace_client"] is probe_client
     for kwargs in (runtime_kwargs, probe_kwargs):
-        assert kwargs["endpoint"] == "saved exact endpoint-name"
+        assert kwargs["model"] == "saved exact endpoint-name"
         assert (kwargs["temperature"], kwargs["max_tokens"], kwargs["top_p"]) == (
             0.25,
             321,
@@ -1441,7 +1441,7 @@ def _drive_adapter_kwargs(adapter: DatabricksModelAdapter) -> dict[str, Any]:
 
 
 _SAVED_MODEL_KWARGS = {
-    "endpoint": "saved exact endpoint-name",
+    "model": "saved exact endpoint-name",
     "temperature": 0.25,
     "max_tokens": 321,
     "top_p": 0.75,
@@ -1629,12 +1629,25 @@ def test_run_published_baseline_raises_loader_failures_as_run_does():
 # ---------------------------------------------------------------------------
 
 
-def _real_chat_adapter(usage):
-    from tests.fixtures.mock_chat_completions import MockChatCompletionsWorkspace
+def _real_chat_adapter(monkeypatch, usage):
+    from databricks_langchain import chat_models
+    from tests.fixtures.mock_chat_completions import (
+        MockChatCompletionsWorkspace,
+        install_mock_gateway_transport,
+    )
 
+    install_mock_gateway_transport(monkeypatch)
     workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=usage)
+    # Inject the mock workspace at get_openai_client level to bypass
+    # ChatDatabricks's pydantic workspace_client: Optional[WorkspaceClient] check.
+    original = chat_models.get_openai_client
+
+    def _use_workspace(workspace_client=None, **kwargs):
+        return original(workspace_client=workspace, **kwargs)
+
+    monkeypatch.setattr(chat_models, "get_openai_client", _use_workspace)
     adapter = DatabricksModelAdapter(
-        client_factory=lambda: workspace,
+        client_factory=lambda: None,  # None passes pydantic; workspace injected above
         transport_options={
             "timeout": runtime_module.TEST_RUN_TIMEOUT_SECONDS,
             "max_retries": runtime_module.TEST_RUN_MAX_RETRIES,
@@ -1643,9 +1656,9 @@ def _real_chat_adapter(usage):
     return adapter, workspace
 
 
-def _observed_real_runs(usage):
+def _observed_real_runs(monkeypatch, usage):
     """One candidate run and one baseline rerun, each with its own observation."""
-    adapter, workspace = _real_chat_adapter(usage)
+    adapter, workspace = _real_chat_adapter(monkeypatch, usage)
     runtime, _ = _baseline_runtime(adapter)
     content, candidate_hash = _candidate("architect")
     candidate_observation = RunObservation()
@@ -1670,7 +1683,47 @@ def _observed_real_runs(usage):
     return (candidate, candidate_observation), (baseline, baseline_observation)
 
 
-def test_an_observed_real_provider_run_records_the_reported_token_usage():
+def test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route(monkeypatch):
+    """Spec §6.1: the real ChatDatabricks posts to {host}/ai-gateway/mlflow/v1, stored name unchanged."""
+    from databricks_langchain import chat_models
+    from tests.fixtures.mock_chat_completions import (
+        MOCK_CHAT_HOST,
+        MockChatCompletionsWorkspace,
+        install_mock_gateway_transport,
+    )
+
+    install_mock_gateway_transport(monkeypatch)
+    workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=None)
+    # Inject the mock workspace at get_openai_client level to bypass
+    # ChatDatabricks's pydantic workspace_client: Optional[WorkspaceClient] check.
+    original = chat_models.get_openai_client
+
+    def _use_workspace(workspace_client=None, **kwargs):
+        return original(workspace_client=workspace, **kwargs)
+
+    monkeypatch.setattr(chat_models, "get_openai_client", _use_workspace)
+    adapter = DatabricksModelAdapter(client_factory=lambda: None)
+
+    adapter.invoke(
+        agent_key="architect",
+        configuration=AgentModelConfiguration(
+            endpoint_name="databricks-claude-opus-4-6",
+            temperature=0.7,
+            max_tokens=60000,
+            top_p=0.95,
+        ),
+        schema=OUTPUT_SCHEMAS["architect"],
+        prompt="assembled prompt",
+    )
+
+    assert len(workspace.requests) == 1
+    request = workspace.requests[0]
+    assert request.url.host == MOCK_CHAT_HOST
+    assert request.url.path == "/ai-gateway/mlflow/v1/chat/completions"
+    assert json.loads(request.content)["model"] == "databricks-claude-opus-4-6"
+
+
+def test_an_observed_real_provider_run_records_the_reported_token_usage(monkeypatch):
     """I-1: the counts an endpoint reports reach the observation, for both run kinds."""
     from tests.fixtures.mock_chat_completions import (
         MOCK_COMPLETION_TOKENS,
@@ -1678,7 +1731,7 @@ def test_an_observed_real_provider_run_records_the_reported_token_usage():
         MOCK_USAGE,
     )
 
-    for outcome, observation in _observed_real_runs(MOCK_USAGE):
+    for outcome, observation in _observed_real_runs(monkeypatch, MOCK_USAGE):
         assert outcome.status == "completed"
         assert outcome.raw_output == fake_output("architect")
         assert (observation.input_tokens, observation.output_tokens) == (
@@ -1689,9 +1742,9 @@ def test_an_observed_real_provider_run_records_the_reported_token_usage():
         assert type(observation.output_tokens) is int
 
 
-def test_an_observed_real_provider_run_without_usage_records_none():
+def test_an_observed_real_provider_run_without_usage_records_none(monkeypatch):
     """P9: an endpoint that reports no usage leaves both counts unset ("not reported")."""
-    for outcome, observation in _observed_real_runs(None):
+    for outcome, observation in _observed_real_runs(monkeypatch, None):
         assert outcome.status == "completed"
         assert (observation.input_tokens, observation.output_tokens) == (None, None)
 
@@ -1732,7 +1785,7 @@ def test_production_run_binds_exactly_as_before_and_reads_no_usage(monkeypatch):
         return bound
 
     monkeypatch.setattr(runtime_module, "bind_structured_output_model", _recording_helper)
-    adapter, workspace = _real_chat_adapter(MOCK_USAGE)
+    adapter, workspace = _real_chat_adapter(monkeypatch, MOCK_USAGE)
     runtime, _ = _baseline_runtime(adapter)
 
     result = runtime.run("architect", 7, {"message": "m"}, AgentAssemblyContext(False))

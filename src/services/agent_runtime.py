@@ -231,7 +231,7 @@ def bind_structured_output_model(
     the plain structured-output binding of ``schema``.
     """
     model = model_factory(
-        endpoint=configuration.endpoint_name,
+        model=configuration.endpoint_name,
         temperature=configuration.temperature,
         max_tokens=configuration.max_tokens,
         top_p=configuration.top_p,
@@ -322,7 +322,9 @@ class DatabricksModelAdapter:
     def _default_model_factory(**kwargs: Any) -> Any:
         from databricks_langchain import ChatDatabricks  # type: ignore[import-untyped]
 
-        return ChatDatabricks(**kwargs)
+        # Workstream 2a: every graph model call goes through Unity AI Gateway
+        # ({host}/ai-gateway/mlflow/v1).  There is no /serving-endpoints fallback.
+        return ChatDatabricks(use_ai_gateway=True, **kwargs)
 
     @staticmethod
     def _default_client_factory() -> Any:

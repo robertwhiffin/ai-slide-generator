@@ -1096,7 +1096,7 @@ def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
     client_factory_calls: list[None] = []
 
     def model_factory(**kwargs):
-        model_endpoint_attempts.append(kwargs["endpoint"])
+        model_endpoint_attempts.append(kwargs["model"])
         if phase == "model":
             raise provider_error
         return Model()
@@ -1167,7 +1167,7 @@ def test_removed_endpoint_is_attempted_once_without_a_default_fallback():
             return Structured()
 
     def model_factory(**kwargs):
-        model_endpoint_attempts.append(kwargs["endpoint"])
+        model_endpoint_attempts.append(kwargs["model"])
         return Model()
 
     def client_factory():
