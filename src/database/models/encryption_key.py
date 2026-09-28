@@ -4,8 +4,12 @@ Holds the Fernet master key for OAuth credential/token encryption in the
 ACL-governed Lakebase data schema instead of app.yaml. Single-row table
 (id = 1). Deliberately shares the data schema's grants: the key carries
 the same ACLs as the ciphertext it protects — an explicitly accepted risk
-in the SDR-4437 remediation design. Do NOT add key-specific grant
-tightening here.
+in the SDR-4437 remediation. Do NOT add key-specific grant tightening here.
+
+Deployments that need the key out of Lakebase entirely can opt into the
+secret-backed path instead, in which case this table stays empty and the key
+lives in a Databricks secret injected as TELLR_ENCRYPTION_KEY. See
+docs/superpowers/specs/2026-08-20-secret-backed-fernet-key-design.md.
 """
 
 from sqlalchemy import Column, DateTime, Integer, Text

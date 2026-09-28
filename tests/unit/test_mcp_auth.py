@@ -226,8 +226,15 @@ def test_scope_clears_context_even_on_exception(fake_user_client):
         assert set_perm.call_args_list[-1].args[0] is None
 
 
-def test_scope_uses_system_client_for_forwarded_identity(monkeypatch):
-    """Priority 3 path binds tellr's SP client (no user token available)."""
+def test_scope_leaves_user_client_unset_for_forwarded_identity(monkeypatch):
+    """Priority 3 (app-to-app, no user token) must NOT bind any client into the
+    user-client ContextVar.
+
+    Leaving it unset is what makes get_user_client() fail closed for agent
+    tools, so a tool can never run as the app service principal on this path
+    (SDR-4437 / F-CR-3). current_user and permission_context ARE still bound on
+    entry (and cleared on exit) so attribution and authz keep working.
+    """
     monkeypatch.setenv("TELLR_TRUST_FORWARDED_IDENTITY", "true")
     req = _FakeRequest(
         headers={
@@ -235,24 +242,58 @@ def test_scope_uses_system_client_for_forwarded_identity(monkeypatch):
             "x-forwarded-user": "12345@99999",
         }
     )
-    sp_client = MagicMock(name="sp_client")
 
-    with patch("src.api.mcp_auth.get_system_client", return_value=sp_client), \
-         patch("src.api.mcp_auth.get_or_create_user_client") as user_client_factory, \
-         patch("src.api.mcp_auth.set_user_client") as set_client:
+    with patch("src.api.mcp_auth.get_or_create_user_client") as user_client_factory, \
+         patch("src.api.mcp_auth.set_current_user") as set_user, \
+         patch("src.api.mcp_auth.set_user_client") as set_client, \
+         patch("src.api.mcp_auth.set_permission_context") as set_perm:
 
         with mcp_auth_scope(req) as identity:
             assert identity.source == "x-forwarded-identity"
             assert identity.token is None
 
-        # User-client factory should never be touched (no token to pass)
-        user_client_factory.assert_not_called()
-        # SP client was bound on entry
-        bound_clients = [
-            call.args[0] for call in set_client.call_args_list
-            if call.args[0] is not None
-        ]
-        assert bound_clients == [sp_client]
+    # No user token -> the OBO client factory is never called.
+    user_client_factory.assert_not_called()
+
+    # The user-client ContextVar is NEVER bound to a real client on this path:
+    # every set_user_client call is with None (the else-branch guard on entry
+    # plus the finally cleanup).
+    assert set_client.call_args_list, "set_user_client should have been called"
+    assert all(
+        call.args[0] is None for call in set_client.call_args_list
+    ), set_client.call_args_list
+
+    # Identity + permission context ARE set on entry and cleared on exit.
+    assert set_user.call_args_list[0].args[0] == "alice@example.com"
+    assert set_user.call_args_list[-1].args[0] is None
+    non_none_perm = [
+        c.args[0] for c in set_perm.call_args_list if c.args[0] is not None
+    ]
+    assert len(non_none_perm) == 1
+    assert set_perm.call_args_list[-1].args[0] is None
+
+
+def test_tool_client_resolution_fails_closed_on_forwarded_identity(monkeypatch):
+    """End-to-end invariant: under the priority-3 scope in production, a tool
+    that resolves its client via get_user_client() fails closed instead of
+    silently receiving the app service principal (SDR-4437 / F-CR-3)."""
+    from src.core.databricks_client import (
+        UserClientRequiredError,
+        get_user_client,
+    )
+
+    monkeypatch.setenv("TELLR_TRUST_FORWARDED_IDENTITY", "true")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    req = _FakeRequest(
+        headers={
+            "x-forwarded-email": "alice@example.com",
+            "x-forwarded-user": "12345@99999",
+        }
+    )
+
+    with mcp_auth_scope(req):
+        with pytest.raises(UserClientRequiredError):
+            get_user_client()
 
 
 def test_mcp_identity_repr_does_not_leak_token():
