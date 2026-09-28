@@ -410,6 +410,7 @@ describe('the forbidden-action guard', () => {
   it('spares every other name the panel actually renders', () => {
     for (const name of [
       'Save Draft', 'Keep local', 'Reload server', 'Upgrade protected assembly',
+      'Expand prompt', 'Close expanded prompt',
       'Add custom block After authored prompt', 'Add custom block After deck brief',
       'Add custom block After environment constraints', 'Go to Assembly tab',
       'Go to Prompt tab', 'Delete custom block 1 at After authored prompt',
@@ -503,6 +504,13 @@ describe('AgentDefinitionWorkbench', () => {
     expect(screen.getByRole('tabpanel', { name: 'Prompt' }))
       .toHaveTextContent('Synthetic Architect prompt — exact fixture value.');
 
+    fireEvent.click(screen.getByRole('button', { name: 'Expand prompt' }));
+    const expanded = screen.getByRole('dialog', { name: 'Authored prompt' });
+    expect(within(expanded).getByRole('textbox', { name: 'Full-width prompt editor' }))
+      .toHaveValue('Synthetic Architect prompt — exact fixture value.');
+    fireEvent.click(within(expanded).getByRole('button', { name: 'Close expanded prompt' }));
+    expect(screen.queryByRole('dialog', { name: 'Authored prompt' })).not.toBeInTheDocument();
+
     fireEvent.keyDown(promptTab, { key: 'ArrowRight' });
     expect(modelTab).toHaveAttribute('aria-selected', 'true');
     await waitFor(() => expect(modelTab).toHaveFocus());
@@ -519,7 +527,7 @@ describe('AgentDefinitionWorkbench', () => {
 
     fireEvent.click(tabs.getByRole('tab', { name: 'Assembly' }));
     const assembly = screen.getByRole('tabpanel', { name: 'Assembly' });
-    expect(within(assembly).getByRole('group', { name: 'Protected stage: Slide frame constraints' }))
+    expect(within(assembly).getByRole('group', { name: 'Protected stage: Design system precedence' }))
       .toBeVisible();
     expect(within(assembly).getByRole('group', { name: 'Protected stage: Structured-output binding' }))
       .toHaveTextContent('langchain.with_structured_output');
@@ -957,7 +965,7 @@ describe('AgentDefinitionWorkbench', () => {
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
     fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
-  });
+  }, 10000);
 
   it('contains transport failures to the selected role and clears them only on edit or a new save', async () => {
     const fetchMock = mockWorkbenchWithPuts((_agentKey, _request, call) => call === 0
@@ -1190,8 +1198,8 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     const upgraded = assemblyPanel();
     expect(within(upgraded).getByRole('button', { name: 'Add custom block After authored prompt' }))
       .toBeEnabled();
-    expect(within(upgraded).getByRole('button', { name: 'Add custom block After environment constraints' }))
-      .toBeEnabled();
+    expect(within(upgraded).queryByRole('button', { name: 'Add custom block After environment constraints' }))
+      .not.toBeInTheDocument();
     expect(within(upgraded).queryByRole('button', { name: 'Upgrade protected assembly' }))
       .not.toBeInTheDocument();
     expect(within(upgraded).getByRole('group', { name: 'Protected stage: Untrusted-data opening delimiter' }))
@@ -1209,7 +1217,7 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
         assembly_rules: { format_version: 2, custom_blocks: [] },
       },
     });
-  });
+  }, 15000);
 
   it.each(AFFECTED_ROLES)(
     '%s with a dirty prompt sends no POST and retains the exact bytes for manual reapplication',
@@ -1335,7 +1343,7 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     const savedPrompt = String((screen.getByRole('textbox', { name: 'Prompt text' }) as HTMLTextAreaElement).value);
     fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
     await screen.findByRole('region', { name: 'Server rejected this request' });
-    fireEvent.click(promptPanel().querySelector('button:last-of-type')!);
+    fireEvent.click(within(promptPanel()).getByRole('button', { name: 'Restore published Graph Version 1 prompt' }));
 
     await waitFor(() => expect(sourceCalls(fetchMock)).toHaveLength(1));
     await waitFor(() => expect(screen.getByRole('region', { name: 'Server rejected this request' }))

@@ -599,7 +599,6 @@ def _assert_authored_only_persisted_v2(
         expected_ids.append("build_reviewer_criteria")
     expected_ids.extend(
         [
-            "slide_frame_constraints",
             "untrusted_data_notice",
             "untrusted_data_open",
             "runtime_payload",
@@ -1196,6 +1195,14 @@ def _expected_v1_rows(agent_key: str, digest: str) -> list[dict[str, object]]:
             },
         ]
     )
+    rows = [
+        row
+        for row in rows
+        if not (
+            (row["stage_id"] == "slide_frame_constraints" and agent_key != "builder")
+            or (row["stage_id"] == "design_system_precedence" and agent_key != "architect")
+        )
+    ]
     for row in rows:
         row.update({"locked": True, "bundle_version": 1, "bundle_digest": digest})
     return rows
@@ -1275,6 +1282,14 @@ def _expected_v2_rows(agent_key: str, digest: str) -> list[dict[str, object]]:
             },
         ]
     )
+    rows = [
+        row
+        for row in rows
+        if not (
+            (row["stage_id"] == "slide_frame_constraints" and agent_key != "builder")
+            or (row["stage_id"] == "design_system_precedence" and agent_key != "architect")
+        )
+    ]
     for row in rows:
         row.update({"locked": True, "bundle_version": 2, "bundle_digest": digest})
     return rows

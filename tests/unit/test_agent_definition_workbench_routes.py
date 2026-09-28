@@ -1314,6 +1314,14 @@ def _edit_prompt_by_one_code_point(
     assert response.status_code == 200
 
 
+def _environment_stage_ids(agent_key: str) -> list[str]:
+    if agent_key == "builder":
+        return ["slide_frame_constraints"]
+    if agent_key == "architect":
+        return ["design_system_precedence"]
+    return []
+
+
 def test_workbench_get_exposes_the_exact_server_derived_v1_protected_stage_view(
     session_factory, monkeypatch
 ):
@@ -1325,9 +1333,10 @@ def test_workbench_get_exposes_the_exact_server_derived_v1_protected_stage_view(
     for node in _model_nodes(body):
         for definition in (node["published"], node["draft"]):
             assert isinstance(definition, dict)
-            expected_ids = ["slide_frame_constraints", "design_system_precedence"]
+            expected_ids = []
             if node["agent_key"] == "build_reviewer":
-                expected_ids.insert(0, "build_reviewer_deck_brief")
+                expected_ids.append("build_reviewer_deck_brief")
+            expected_ids.extend(_environment_stage_ids(node["agent_key"]))
             expected_ids.extend(["runtime_payload", "structured_output_binding"])
             assert _stage_ids(definition) == expected_ids
             rows = _stage_view(definition)
@@ -1346,10 +1355,12 @@ def test_workbench_get_exposes_the_exact_server_derived_v1_protected_stage_view(
                 "bundle_digest",
                 "legal_adjacent_custom_anchors",
             }
-            assert rows["slide_frame_constraints"]["display_text"] == _SLIDE_FRAME_CONSTRAINTS
-            assert rows["slide_frame_constraints"]["condition"] == "design_system_inactive"
-            assert rows["design_system_precedence"]["display_text"] == DESIGN_SYSTEM_PRECEDENCE
-            assert rows["design_system_precedence"]["condition"] == "design_system_active"
+            if "slide_frame_constraints" in rows:
+                assert rows["slide_frame_constraints"]["display_text"] == _SLIDE_FRAME_CONSTRAINTS
+                assert rows["slide_frame_constraints"]["condition"] == "design_system_inactive"
+            if "design_system_precedence" in rows:
+                assert rows["design_system_precedence"]["display_text"] == DESIGN_SYSTEM_PRECEDENCE
+                assert rows["design_system_precedence"]["condition"] == "design_system_active"
             assert rows["runtime_payload"]["display_text"] == V1_PAYLOAD_DISPLAY
             assert rows["structured_output_binding"]["display_text"] == TERMINAL_BINDING
             if node["agent_key"] == "build_reviewer":
@@ -1376,20 +1387,24 @@ def test_v2_serializers_expose_only_legal_pre_payload_anchors_and_exact_display(
     node = _model_node(body, agent_key)
     for definition in (node["draft"], success_definition):
         assert isinstance(definition, dict)
-        expected_ids = [
-            "slide_frame_constraints",
-            "design_system_precedence",
-            "untrusted_data_notice",
-            "untrusted_data_open",
-            "runtime_payload",
-            "untrusted_data_close",
-            "structured_output_binding",
-        ]
+        expected_ids = []
         if agent_key == "build_reviewer":
-            expected_ids = [
-                "build_reviewer_criteria",
-                "build_reviewer_deck_brief",
-            ] + expected_ids
+            expected_ids.extend(
+                [
+                    "build_reviewer_criteria",
+                    "build_reviewer_deck_brief",
+                ]
+            )
+        expected_ids.extend(_environment_stage_ids(agent_key))
+        expected_ids.extend(
+            [
+                "untrusted_data_notice",
+                "untrusted_data_open",
+                "runtime_payload",
+                "untrusted_data_close",
+                "structured_output_binding",
+            ]
+        )
         assert _stage_ids(definition) == expected_ids
         rows = _stage_view(definition)
         assert all(row["locked"] is True for row in rows.values())
@@ -1401,14 +1416,16 @@ def test_v2_serializers_expose_only_legal_pre_payload_anchors_and_exact_display(
         assert rows["untrusted_data_close"]["display_text"] == "</untrusted-data>"
         assert rows["runtime_payload"]["display_text"] == V2_PAYLOAD_DISPLAY
         assert rows["structured_output_binding"]["display_text"] == TERMINAL_BINDING
-        assert rows["slide_frame_constraints"]["display_text"] == _SLIDE_FRAME_CONSTRAINTS
-        assert rows["design_system_precedence"]["display_text"] == DESIGN_SYSTEM_PRECEDENCE
-        assert rows["slide_frame_constraints"]["legal_adjacent_custom_anchors"] == [
-            "after_environment_constraints"
-        ]
-        assert rows["design_system_precedence"]["legal_adjacent_custom_anchors"] == [
-            "after_environment_constraints"
-        ]
+        if "slide_frame_constraints" in rows:
+            assert rows["slide_frame_constraints"]["display_text"] == _SLIDE_FRAME_CONSTRAINTS
+            assert rows["slide_frame_constraints"]["legal_adjacent_custom_anchors"] == [
+                "after_environment_constraints"
+            ]
+        if "design_system_precedence" in rows:
+            assert rows["design_system_precedence"]["display_text"] == DESIGN_SYSTEM_PRECEDENCE
+            assert rows["design_system_precedence"]["legal_adjacent_custom_anchors"] == [
+                "after_environment_constraints"
+            ]
         assert rows["untrusted_data_notice"]["legal_adjacent_custom_anchors"] == []
         assert rows["runtime_payload"]["legal_adjacent_custom_anchors"] == []
         assert rows["structured_output_binding"]["legal_adjacent_custom_anchors"] == []
