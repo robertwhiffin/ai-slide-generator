@@ -130,6 +130,62 @@ databricks apps logs db-tellr-dev-<id> -p tellr-dev-oauth
 
 If the token is expired: `databricks auth login --host <workspace-host> -p tellr-dev-oauth`.
 A failed BUILD-phase `Could not find a version ...` right after publishing usually
-means proxy mirror lag — wait and re-run the deploy step.
+means proxy mirror lag. Wait a few minutes and re-run the deploy step. If it keeps
+failing, see the next section.
+
+## When the PyPI index is stale (`Could not find a version` that persists)
+
+On 2026-09-28, dev29 and dev30 uploaded successfully but stayed invisible for
+hours. PyPI answered `200 OK` on upload, then `400 File already exists` on
+re-upload, but its cached project-level pages (the web page, `/pypi/<pkg>/json`
+and `/simple/<pkg>/`) kept showing an older list. The Databricks PyPI proxies
+inherited the stale list. The build was fine; the app's code change was not the
+cause.
+
+**Diagnose, don't guess.** pypi.org is blocked from Databricks laptops ("Web Page
+Blocked"), so query the proxy. Its per-version JSON is fresh even when the index
+is stale:
+
+```bash
+P=https://pypi-proxy.dev.databricks.com
+curl -s $P/simple/databricks-tellr-app/ | grep -oE 'dev[0-9]+-py3' | sort -u | tail -3   # what pip sees
+curl -s $P/pypi/databricks-tellr-app/<version>/json | python -m json.tool | head      # does the file exist?
+```
+
+If the per-version JSON has the file but `/simple/` doesn't list it, the index
+is stale, not the build. The app's build proxy can differ from the one you can
+reach, so treat its `from versions: ...` list in the build log as the truth for
+what the app can see.
+
+**Publishing while the index is stale:** auto-increment reads the stale project
+JSON, so it re-picks a version that already exists, and the publish fails with
+`400 File already exists`. Pass the next version explicitly:
+
+```bash
+gh workflow run publish-dev.yml --ref <branch> -f version=0.4.3.devN
+```
+
+**Deploying while the index is stale: pin by direct URL.** The Apps BUILD phase
+can fetch straight from `files.pythonhosted.org` (verified 2026-09-28). After a
+normal `deploy_local create|update` has uploaded the app files, overwrite the
+app's `requirements.txt` with a hash-pinned direct URL and redeploy:
+
+```bash
+V=0.4.3.devN; ID=<instance>
+SRC=/Workspace/Users/<you>/.apps/devloop/tellr/$ID
+curl -s https://pypi-proxy.dev.databricks.com/pypi/databricks-tellr-app/$V/json | python -c "
+import json,sys; u=[x for x in json.load(sys.stdin)['urls'] if x['filename'].endswith('.whl')][0]
+print('databricks-tellr-app @ %s#sha256=%s' % (u['url'], u['digests']['sha256']))" > /tmp/req.txt
+databricks workspace import $SRC/requirements.txt --file /tmp/req.txt --format AUTO --overwrite --profile tellr-dev
+databricks apps deploy db-tellr-dev-$ID --source-code-path $SRC --profile tellr-dev
+```
+
+Confirm the right wheel installed: the app log's pip lines name the
+`...-$V-py3-none-any.whl#sha256=...` URL. This is a hand edit. The next
+`deploy_local --from-pypi` rewrites the normal `==<version>` pin, which fails
+again until the index catches up.
+
+Do not deploy a different version to an instance someone else is using. Create a
+new devloop instance instead.
 
 See `docs/technical/dev-deploy.md` for the full background.
