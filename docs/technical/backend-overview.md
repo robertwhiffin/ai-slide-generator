@@ -516,6 +516,7 @@ Keep this doc synchronized whenever you add new modules, features (e.g., streami
 ## Cross-References
 
 - [Frontend Overview](frontend-overview.md) -- UI/state patterns and backend touchpoints
+- [Agent definition consistency](agent-definition-consistency.md) -- seven graph roles vs Admin → Agent Definitions prompts
 - [LLM as Judge Verification](llm-as-judge-verification.md) -- Slide verification (MLflow default; optional Direct) and **agent** MLflow span policy when Direct (`mlflow_agent_spans.py`)
 - [Database Configuration](database-configuration.md) -- Schema details including `verification_map` for content-hash-based verification persistence
 - [Real-Time Streaming](real-time-streaming.md) -- SSE events and conversation persistence

@@ -40,7 +40,7 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 - **Design Systems** (`/design-systems`): Brand bundle library — tokens, fonts, assets, named templates. See [Design System Library](design-system-library.md)
 - **Images** (`/images`): Image library management
 - **Help** (`/help`): Documentation and usage guide
-- **Admin** (`/admin`): Wrapped in `<RequireAdmin>`. Six tabs — Usage, Feedback, Google Slides, Design System, Slide Style, Judge. The Design System and Slide Style tabs are the **only** place the workspace-wide org default is set
+- **Admin** (`/admin`): Wrapped in `<RequireAdmin>`. Seven tabs — Usage, Feedback, Google Slides, Design System, Slide Style, Judge, Agent Definitions. The Design System and Slide Style tabs are the **only** place the workspace-wide org default is set. Agent Definitions edits the seven model-driven graph roles; see [Agent definition consistency](agent-definition-consistency.md).
 - **Feedback redirect** (`/feedback`): Redirects to `/admin`
 
 The landing page (`/`) now shows the generator directly in pre-session mode.
