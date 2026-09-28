@@ -17,7 +17,8 @@ pydantic-settings==2.12.0
 
 # Databricks integration
 databricks-sdk==0.91.0
-databricks-langchain==0.9.0
+databricks-langchain==0.20.0
+databricks-openai==0.17.1
 databricks-mcp>=0.1.0  # MCP server tool support (DatabricksMCPClient)
 
 # LLM framework
@@ -31,7 +32,7 @@ langchain-community==0.4.2
 langchain-text-splitters==1.1.2
 litellm==1.80.11
 # agent_runtime.py and model_endpoint_probe.py import openai at module level;
-# databricks-langchain==0.9.0 requires openai>=1.99.9 directly.
+# databricks-langchain==0.20.0 / databricks-openai==0.17.1 require openai>=1.99.9.
 openai>=1.99.9
 
 # MLflow and observability

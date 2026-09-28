@@ -14,7 +14,8 @@ dependencies = [
     "python-multipart==0.0.20",
     "pydantic==2.12.4",
     "pydantic-settings==2.12.0",
-    "databricks-langchain==0.9.0",
+    "databricks-langchain==0.20.0",
+    "databricks-openai==0.17.1",
     "langchain==1.3.14",
     "langchain-core==1.5.3",
     "langchain-community==0.4.2",
@@ -22,7 +23,7 @@ dependencies = [
     "litellm==1.80.11",
     "mcp==1.27.0",
     # agent_runtime.py and model_endpoint_probe.py import openai at module level;
-    # databricks-langchain==0.9.0 requires openai>=1.99.9 directly.
+    # databricks-langchain==0.20.0 / databricks-openai==0.17.1 require openai>=1.99.9.
     "openai>=1.99.9",
     "opentelemetry-api==1.38.0",
     "opentelemetry-sdk==1.38.0",
