@@ -4500,7 +4500,9 @@ def test_model_endpoint_probe_route_later_save_cannot_change_the_reported_identi
                         session,
                         agent_key="architect",
                         expected_lock_version=0,
-                        candidate=_domain_candidate(before, "architect", "system.ai.saved-mid-probe"),
+                        candidate=_domain_candidate(
+                            before, "architect", "system.ai.saved-mid-probe"
+                        ),
                         actor="concurrent-admin@example.com",
                     )
                 saved.append(outcome.draft.lock_version)

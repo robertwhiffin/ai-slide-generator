@@ -318,6 +318,8 @@ The brief's `_service()` placeholder does not exist in `tests/unit/test_graph_co
 
 ## Task 4: precedence relative to the stale-lock check
 
+> **SUPERSEDED by the controller ruling (Task 4, fix round 1, I-1) below.** The gateway check now runs after the lock comparison.
+
 The brief says to call the gateway validator right after `_save_local_validators()`, and it is placed there. That position is before the lock-version comparison. A **stale** save that also changes the model to a non-`system.ai.*` name therefore returns 422 `endpoint_not_gateway_model` rather than a 409. This matches the existing precedence, where local validators (URL policy, overlay) already give 422 before 409. The "current" name it compares against is `locked.selected.draft.content`, the row under the lock, which is the latest committed value. Two stale-save fixtures needed a rename because of this ordering (see the table): the stale `loser` save in the Postgres workbench test, and `test_locally_valid_endpoint_plus_stale_lock_is_seven_role_409_with_zero_remote_calls`, which reuses `CUSTOM_ENDPOINT`. Without the rename, each would get a 422 where it asserts a 409.
 
 ## Task 4: rulings on tests with ambiguous intent
@@ -355,3 +357,24 @@ The brief says to call the gateway validator right after `_save_local_validators
 | tests/integration/test_lakebase_contract_failures_postgres.py:565 | `SONNET == "databricks-claude-sonnet-4-5"` | `SONNET == "system.ai.claude-sonnet-4-5"` | stored/pinned-name expected literal follows the journey constant |
 
 ---
+
+## Task 4 fix round 1: CONTROLLER RULING I-1 (overrides spec §5.2's "immediately afterwards")
+
+In both `save_editable_model_draft` and `save_draft_content`, the `_gateway_model_name_validator` call now runs **after** the lock-version comparison, meaning after the `DraftSaveConflict` early return. It still runs before `post_stale_validators`, the remote check and the writer.
+
+**Why:** the rule compares the candidate with `locked.selected.draft.content`. For a stale request, that row is another admin's newer value. Take a stale prompt-only save from an admin whose view still shows a `databricks-*` model, made after someone else has moved the draft to `system.ai.*`. Pre-lock, it got a false 422 `endpoint_not_gateway_model`. It must get the 409 conflict. After the lock check, the locked draft is the client's own base. So "changed" means "changed by this request".
+
+**Consequences:**
+- A stale save that really does change to a non-`system.ai` name now gets a 409. After reconciling, it gets the 422 on the next save.
+- The URL and overlay checks stay pre-lock, and their ordering tests are unchanged. Those checks depend only on the candidate.
+- The earlier stale-loser fixture renames are no longer strictly needed. They are kept as valid `system.ai.*` changes.
+
+**Regression tests (both paths):**
+- `test_stale_prompt_only_save_on_a_legacy_view_is_a_409_not_a_gateway_422` (I-1);
+- `test_saving_the_published_legacy_name_back_over_a_gateway_draft_is_refused` (I-3: "changed" means differs from the draft, not from the published release).
+
+**I-2 (save-path no-normalisation coverage):**
+- `test_changing_the_model_to_a_non_gateway_name_is_refused_before_any_write` now also runs over `" system.ai.claude-opus-5-5 "` and `"System.AI.Claude-Opus-5-5"`. Refusing the raw input on both paths proves the save path does not trim or lowercase before validating.
+- `test_changing_the_model_to_a_system_ai_name_saves` now also stores `"system.ai.m0.v_2-x.9"` and asserts it comes back byte-for-byte.
+
+**Minor fixes:** M-1, the URL-first test now runs on both paths. M-2, E302 before `_save_model` in `test_graph_release_rollback.py`. The E501 from the rename at routes `:4503` is wrapped.
