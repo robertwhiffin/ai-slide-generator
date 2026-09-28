@@ -378,3 +378,82 @@ In both `save_editable_model_draft` and `save_draft_content`, the `_gateway_mode
 - `test_changing_the_model_to_a_system_ai_name_saves` now also stores `"system.ai.m0.v_2-x.9"` and asserts it comes back byte-for-byte.
 
 **Minor fixes:** M-1, the URL-first test now runs on both paths. M-2, E302 before `_save_model` in `test_graph_release_rollback.py`. The E501 from the rename at routes `:4503` is wrapped.
+
+---
+
+## Task 6 — Integration test retargets (three files, not in brief's git add)
+
+**Brief reference:** Step 4 says "grep tests/ for other tests that patch ChatDatabricks in chat_service for titles. Retarget them to session_naming.build_session_title_model without removing assertions."
+
+**Files retargeted (not in the brief's Step 6 git add list):**
+
+| File | Old patches | New patch |
+|---|---|---|
+| `tests/unit/test_session_naming.py` (~line 263) | `patch("databricks_langchain.ChatDatabricks")` + `patch("src.core.databricks_client.get_user_client")` | `patch("src.api.services.session_naming.build_session_title_model")` |
+| `tests/integration/test_graph_mode_turn.py` (~line 407) | `setattr("src.core.databricks_client.get_user_client", ...)` + `setattr("databricks_langchain.ChatDatabricks", MagicMock())` | `setattr("src.api.services.session_naming.build_session_title_model", MagicMock())` |
+| `tests/integration/test_graph_lifecycle_runtime_postgres.py` (~line 385) | same two patches | same retarget |
+| `tests/integration/test_architect_reply_is_persisted.py` (~line 227) | same two patches | same retarget |
+
+**Ruling:** All four retargets were included in the Task 6 commit (1a13f5cf5) alongside the four brief-specified files. The old patches worked correctly after Task 6 (the global `databricks_langchain.ChatDatabricks` setattr still intercepted the lazy import in `build_session_title_model`), but the retarget is cleaner and matches the brief's intent.
+
+---
+
+## Task 6 — max_tokens=50 check confirmed safe
+
+**Brief note:** "if one does [another legitimate max_tokens=50], narrow the assertion and record the ruling."
+
+**Actual:** `grep -n "max_tokens=50" src/api/services/chat_service.py` returned exactly two occurrences (lines 1454 and 2009), both at the two title construction sites that Task 6 replaces. No other `max_tokens=50` exists in `chat_service.py`. The test assertion `assert "max_tokens=50" not in source` is safe as written.
+
+---
+
+## Task 7 — vitest unavailable in this checkout (sabotage/green/red steps unrunnable locally)
+
+**Brief reference:** Steps 2, 5, 6 require `npx vitest run`.
+
+**Actual:** `frontend/node_modules/.bin/vitest` does not exist in the branch-eval checkout (`node_modules` is not installed). The other checkout's binary (`slide-generator/.../node_modules/.bin/vitest`) fails with `ERR_MODULE_NOT_FOUND: Cannot find package 'vitest'` when pointed at this project's `vitest.config.ts`. Per the controller's instruction, vitest steps were skipped; `npx tsc --noEmit` passed clean. CI must verify the red→green→sabotage sequence.
+
+---
+
+## Task 7 — URL policy test deleted (behavior removed)
+
+**Brief reference:** Step 4 says "Every test that typed into the custom field now selects a radio for the same name." The URL-shaped test values (`https://…`, `serving-endpoints/../secrets`, `x?token=abc`) cannot be radio names and the test's behavior (typing a URL into the custom endpoint field and getting a `URL_NOT_ALLOWED` error) is no longer possible since the text input is removed.
+
+**Decision:** Deleted the `it.each(…)('a URL- or path-shaped custom name %j shows…')` test (3 parametrized cases). The `endpointNamePolicyError` function still exists and is unit-tested in `draftEditorState.test.ts`. No behavioral assertion about the UI field was moved to another element because no element accepts URL-shaped free-text entry.
+
+---
+
+## Task 7 — `syntheticSystemModelEndpoints` extended with two system.ai.* entries
+
+**Brief reference:** Step 4 says it is acceptable (and preferable) to move `syntheticSystemModelEndpoints` entries to `system.ai.*` names. Instead of renaming existing entries (which would break many assertions tied to the `databricks-*` names), two new entries were added:
+
+- `{ name: 'system.ai.endpoint-a2', ... }` — needed globally because `editArchitectFiveFields` uses the default catalog and clicks this radio.
+- `{ name: 'system.ai.endpoint-b', ... }` — needed in "clears old result" test which uses `defaultCatalogResponse`.
+
+Existing `databricks-*` fixture names are left unchanged. The `SEED_MODEL_ENDPOINT_NAME = 'databricks-claude-opus-4-6'` is still the first entry and is still found (checked) by default. The "current model not in list" test works by filtering it out via `syntheticSystemModelEndpoints.filter((item) => item.name !== SEED_MODEL_ENDPOINT_NAME)`.
+
+---
+
+## Task 7 — Migrated tests list
+
+All tests that used `customEndpoint()` or directly referenced the `'Custom endpoint name'` textbox:
+
+| Test description (abbreviated) | Old element | New element |
+|---|---|---|
+| `editArchitectFiveFields` helper | `fireEvent.change(textbox, 'endpoint-a2')` | `fireEvent.click(radio('system.ai.endpoint-a2'))` |
+| "defaults deterministically to Prompt…" (keyboard nav) | `getByRole('textbox').toHaveValue('databricks-claude-opus-4-6')` | `getByText('Current model').parentElement.toHaveTextContent(…)` |
+| "typing and navigation never save…" | `textbox.toHaveValue('endpoint-a2')` | `radio('system.ai.endpoint-a2').toBeChecked()` |
+| "saves exactly the five-field candidate…" | `endpoint_name: 'endpoint-a2'` in body assertion | `endpoint_name: 'system.ai.endpoint-a2'` |
+| "associates all five 422 messages…" (endpoint-error move) | `textbox.toHaveAccessibleDescription('Endpoint rejected.')` | `radiogroup.toHaveAccessibleDescription('Endpoint rejected.')` |
+| "rejects %s as an invalid response…" | `textbox.toHaveValue('endpoint-a2')` | `radio('system.ai.endpoint-a2').toBeChecked()` |
+| "exposes Refresh models…" (title + assertion) | title: "…a separate custom endpoint field"; `textbox.toHaveValue(SEED)` | title: "…the current model paragraph"; `getByText('Current model').parentElement.toHaveTextContent(SEED)` |
+| "selection copies exactly the item name…" | `customEndpoint().toHaveValue(item.name)` | `getByText('Current model').parentElement.toHaveTextContent(item.name)` |
+| "searches locally…" | `customEndpoint().toHaveValue(SEED)` | `getByText('Current model').parentElement.toHaveTextContent(SEED)` |
+| "says exactly when no foundation-model endpoint…" | `customEndpoint().toHaveValue(SEED)` | same pattern |
+| "a %i failure is an alert…" | `customEndpoint().toHaveValue(SEED)` | same pattern |
+| "a newer discovered item never moves the seed…" | `customEndpoint().toHaveValue(SEED/newer)` | same pattern |
+| "saves a selected model…" (renamed from "saves a manual exact name…") | `fireEvent.change(customEndpoint(), manual)` + `not.toContain(manual)` | `fireEvent.click(radio(manual))` + `toContain(manual)`; catalog extended locally |
+| "binds a server endpoint issue…" (renamed from "binds a typed server endpoint…") | `customEndpoint()` for click, accessible description, identity, value | radiogroup for accessible description and identity; Current model for value; radio clicks |
+| "is disabled while the local endpoint is unsaved…" | `fireEvent.change(customEndpoint(), 'Team Manual Endpoint')` | `fireEvent.click(radio('Team Shared Endpoint (EU)'))` |
+| "clears an old result…" | `fireEvent.change(customEndpoint(), 'endpoint-b')` and `SEED` | `fireEvent.click(radio('system.ai.endpoint-b'))` and `radio(SEED)` |
+| All probe tests with `customEndpoint().toHaveValue(SEED)` | `customEndpoint().toHaveValue(SEED_MODEL_ENDPOINT_NAME)` × 8 | `getByText('Current model').parentElement.toHaveTextContent(SEED_MODEL_ENDPOINT_NAME)` |
+| `NAMES_266` label inventory | `'Custom endpoint name'` | `'Current model'` |

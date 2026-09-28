@@ -492,8 +492,17 @@ export function DefinitionEditor({
                 : modelCatalog.errorMessage}
             </div>
           )}
+          <p className="text-xs text-gray-600">
+            <span className="font-semibold">Current model</span>{' '}
+            <span className="break-all font-mono">{entry.local.endpoint_name}</span>
+          </p>
           {visibleModels.length > 0 && (
-            <div role="radiogroup" aria-label="Discovered models" className="max-h-48 space-y-1 overflow-y-auto">
+            <div
+              role="radiogroup"
+              aria-label="Discovered models"
+              aria-describedby={endpointMessage ? `${agentKey}-endpoint-error` : undefined}
+              className="max-h-48 space-y-1 overflow-y-auto"
+            >
               {visibleModels.map((item) => {
                 const optionId = `${agentKey}-discovered-model-${modelCatalog.items.indexOf(item)}`;
                 const details = [item.display_name, item.description].filter((text): text is string => text !== null);
@@ -523,20 +532,6 @@ export function DefinitionEditor({
               })}
             </div>
           )}
-        </div>
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Advanced</p>
-          <label htmlFor={`${agentKey}-endpoint`} className="block text-sm font-medium text-gray-700">
-            Custom endpoint name
-          </label>
-          <input
-            id={`${agentKey}-endpoint`}
-            aria-describedby={endpointMessage ? `${agentKey}-endpoint-error` : undefined}
-            type="text"
-            value={entry.local.endpoint_name}
-            onChange={(event) => onEdit(agentKey, 'endpoint_name', event.currentTarget.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
-          />
           <FieldError id={`${agentKey}-endpoint-error`} message={endpointMessage} />
         </div>
         <div className="space-y-2">

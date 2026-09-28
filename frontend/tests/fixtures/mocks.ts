@@ -1547,6 +1547,18 @@ export const syntheticSystemModelEndpoints: SystemModelEndpoint[] = [
     description: null,
     docs: null,
   },
+  {
+    name: 'system.ai.endpoint-a2',
+    display_name: null,
+    description: null,
+    docs: null,
+  },
+  {
+    name: 'system.ai.endpoint-b',
+    display_name: null,
+    description: null,
+    docs: null,
+  },
 ];
 
 /** A newer family member that a refresh may expose; it must never move the seed. */
