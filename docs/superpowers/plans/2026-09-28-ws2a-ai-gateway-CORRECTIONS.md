@@ -486,3 +486,32 @@ All tests that used `customEndpoint()` or directly referenced the `'Custom endpo
 - Restored: `225 passed (225)` ✓
 
 **Full Admin folder:** 991/991 passed (11 files). `tsc --noEmit` clean.
+
+## Task 9 live acceptance
+
+**Status: BLOCKED at step (a), the OBO-title stop condition (spec §4 step 5, brief Step 2).** I did not run steps b–h.
+
+**Deploy (PASS).**
+- `gh auth status`: `robertwhiffin` was the active account.
+- Publish run 36473449785, `--ref feat/ws2a-ai-gateway`, built 0a4f904ab. Run log line: `Resolved version: version=0.4.3.dev33`. Log also shows `Uploading databricks_tellr_app-0.4.3.dev33-py3-none-any.whl`.
+- Ran `./scripts/deploy_local.sh update --env devloop --instance ws2a --profile tellr-dev --from-pypi 0.4.3.dev33`. Deployment 01f1bb745ceb171e8ca53d76a49964a4.
+- App state: `app_status.state=RUNNING`, active deployment `SUCCEEDED`. Pip lines name `databricks-tellr-app==0.4.3.dev33 -> -r requirements.txt`.
+- The API returned 502 until 19:49:07Z while the startup slide backfill ran, then 200.
+
+**Step (a): conversation L, before publish (FAIL, stop condition).**
+- 2026-09-28T19:50:19Z: `POST /api/chat/async` with a first message containing `USE AGENT MODE` (no session_id).
+  - Session: `wjLan_1qWaljBcnmbD_hXIik9_vjXhdsuxKlObgwtIQ`. Request: `PuZAVlIscaW3GWVLfSc8nqLGeoiPqlff`.
+- Graph turn: it completed at 19:52:39Z with `metadata.engine_mode=graph` and 2 slides. The session has `graph_version=1` (the seeded release, whose model is `databricks-claude-opus-4-6` on every model node). The graph's calls to `.../ai-gateway/mlflow/v1/chat/completions` returned `200 OK`; they run as the service principal through `get_system_client`.
+- **OBO title: FAILED.** At 19:50:21Z the title call `POST https://fevm-db-tellr-dev-workspace.cloud.databricks.com/ai-gateway/mlflow/v1/chat/completions` returned **`403 Forbidden`**. The error was `PermissionDeniedError: Error code: 403 - {'error_code': 403, 'message': 'Provided OAuth token does not have required scopes: ai-gateway [ReqId: 3ff8f85b-502c-45d1-b23f-d871afa77d4a]'}`. The app logged `WARNING Failed to generate session title` at `session_naming.py:145`.
+- The session title does read "Why teams adopt code review", but the title generator did not produce it. It is the graph's DeckSpec title, written by `deck_level_writer.py:330`: the deck title is the same string. On the monolith path, and on any turn that writes no DeckSpec, the session would keep its default name.
+- Cause: the app's `user_api_scopes` are `sql, dashboards.genie, catalog.tables:read, catalog.schemas:read, catalog.catalogs:read, serving.serving-endpoints`. That list comes from `packages/databricks-tellr/databricks_tellr/deploy.py:1677`, and it has no `ai-gateway` scope. So the user token that the Apps proxy forwards is refused by the Gateway. This disproves the spec §4 assumption that a `serving.serving-endpoints` user token is accepted by the Gateway route.
+- Caveat: I authenticated to the app with the `tellr-dev-oauth` CLI token as Bearer, not through a browser. The token that reached the Gateway is the one the Apps proxy forwards, which is limited to the app's declared scopes. So a browser user is expected to see the same 403, but I did not check this through a browser.
+
+**Steps b–h: SKIPPED.** The stop condition fired, so I made no draft edits, publishes or rollbacks. The workbench draft is unchanged (lock_version 0) and release v1 is still active.
+
+**Decision needed (user, spec §4):**
+1. accept silent title failures; or
+2. move both title paths to the service-principal identity; or
+3. (not listed in the spec) add the `ai-gateway` user API scope in `deploy.py` and redeploy.
+
+After that decision, re-run Task 9 from step (a).
