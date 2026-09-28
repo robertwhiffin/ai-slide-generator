@@ -201,7 +201,9 @@ admin changes its model. At that point the new model must be a `system.ai.*` mod
 `DatabricksModelEndpointCatalog.validate_custom_endpoint_remote` keeps its name and its
 caller (`CatalogRemoteEndpointDraftValidator`). Its body replaces the
 `serving_endpoints.get` + `READY` + `NOT_UPDATING` check with a Gateway lookup:
-1. Map `system.ai.<model>` to `databricks-<model>`.
+1. Map `system.ai.<model>` to `databricks-<model>`. Any other name is looked up as it is.
+   A legacy `databricks-*` name can reach this step on a save that leaves the model
+   unchanged (§5.2), and the Gateway lists those names directly.
 2. Call `GET /api/ai-gateway/v2/endpoints/databricks-<model>` through the existing bounded
    catalog client (5 s retry, 3 s HTTP), which runs under the draft lock.
 3. Map the result:
