@@ -307,3 +307,51 @@ After Task 3 the implementation calls `api_client.do("GET", "/api/ai-gateway/v2/
 The pre-pass note "keep the bounded-client tests at :375-480 as they are" applied to Task 2 only; Task 3 necessarily changes the URL being validated.
 
 ---
+
+## Task 4: service builder name
+
+The brief's `_service()` placeholder does not exist in `tests/unit/test_graph_configuration_draft.py`. The real no-remote builder there is **`GraphConfiguration()`**. Its `remote_endpoint_validator` defaults to `None`, so `_validate_remote_endpoint` returns without making a remote call. The new tests use `GraphConfiguration()`.
+
+## Task 4: `system.ai.a` is refused on purpose
+
+`^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$` needs at least two characters after the prefix: one leading and one trailing alphanumeric. So `system.ai.a` is refused and `system.ai.a1` is accepted. This follows directly from the spec §5.2 regex and is kept deliberately. `test_validate_gateway_model_name_refuses_other_shapes` pins it.
+
+## Task 4: precedence relative to the stale-lock check
+
+The brief says to call the gateway validator right after `_save_local_validators()`, and it is placed there. That position is before the lock-version comparison. A **stale** save that also changes the model to a non-`system.ai.*` name therefore returns 422 `endpoint_not_gateway_model` rather than a 409. This matches the existing precedence, where local validators (URL policy, overlay) already give 422 before 409. The "current" name it compares against is `locked.selected.draft.content`, the row under the lock, which is the latest committed value. Two stale-save fixtures needed a rename because of this ordering (see the table): the stale `loser` save in the Postgres workbench test, and `test_locally_valid_endpoint_plus_stale_lock_is_seven_role_409_with_zero_remote_calls`, which reuses `CUSTOM_ENDPOINT`. Without the rename, each would get a 422 where it asserts a 409.
+
+## Task 4: rulings on tests with ambiguous intent
+
+1. **`test_exact_five_field_save_preserves_every_server_owned_value_and_artifact`** (unit draft `:144`) and **`test_put_save_draft_returns_exact_changed_contract_and_preserves_release`** (routes `:681`) saved `" custom-endpoint-name "`, with leading and trailing spaces, to prove the name is stored byte-for-byte and never trimmed. The new regex refuses any padded name, so a padded changed name can no longer reach storage. **Ruling:** both tests intend to change the model, so the name becomes `"system.ai.custom-endpoint-name"`, and the stored-value assertions (`after.model.endpoint_name == ...` and the route's `definition["model"] == {...}`) are updated to that same literal. Exact storage is still asserted. The no-trim property is now covered by refusal instead: the padded input `" system.ai.claude"` is refused in `test_validate_gateway_model_name_refuses_other_shapes`.
+2. **Routes `_CUSTOM_ENDPOINT = "Custom-Endpoint_266"`** (`:3479`): the mixed case proved the name is not case-normalised. Uppercase is now refused, so **ruling:** `"system.ai.custom-endpoint_266"`, which keeps the underscore. Every route assertion on this constant (`validated_names == [...]`, `not in response.text`, stored name) still runs against the new value.
+3. **`graph_lifecycle_journey.py` `OPUS`/`SONNET`**: only `SONNET` is saved as a changed model (S06 changes the fixer to it). **Ruling:** rename `SONNET` only. `OPUS` appears only in the fake discovery list and is never a save target, so it is left as `databricks-claude-opus-4-6`.
+
+## Task 4: fixture edits (old → new). No expected code changed and no assertion removed.
+
+| File:line(s) | Old | New | Why |
+|---|---|---|---|
+| tests/unit/test_graph_configuration_draft.py:3153 | `CUSTOM_ENDPOINT = "custom endpoint name"` | `"system.ai.custom-endpoint-name"` | changed-model fixture shared by the remote-table, stale-409, remote-once, flush-rollback and default-facade tests |
+| tests/unit/test_graph_configuration_draft.py:144, 172 | `" custom-endpoint-name "` | `"system.ai.custom-endpoint-name"` | ruling 1; :172 is the stored-name expected literal |
+| tests/unit/test_graph_configuration_draft.py:193 | `{"endpoint_name": " changed endpoint "}` | `{"endpoint_name": "system.ai.changed-endpoint"}` | the endpoint-field hash case changes the model |
+| tests/unit/test_graph_configuration_workbench.py:107, 111 | `"architect exact endpoint"` | `"system.ai.architect-exact-endpoint"` | save + expected snapshot |
+| tests/unit/test_graph_configuration_workbench.py:108, 112 | `"fixer exact endpoint"` | `"system.ai.fixer-exact-endpoint"` | save + expected snapshot |
+| tests/unit/test_graph_configuration_workbench.py:134, 144 | `"builder moved"` | `"system.ai.builder-moved"` | save + expected server name |
+| tests/unit/test_graph_configuration_workbench.py:211 | `"fine"` | `"system.ai.fine"` | a valid changed name that seeds the lock |
+| tests/unit/test_model_endpoint_probe.py:386 | `"architect exact endpoint"` | `"system.ai.architect-exact-endpoint"` | save |
+| tests/unit/test_model_endpoint_probe.py:387, 399, 408 | `"builder exact endpoint"` | `"system.ai.builder-exact-endpoint"` | save + expected probe config + identity |
+| tests/unit/test_model_endpoint_probe.py:443 | `"moved on"` | `"system.ai.moved-on"` | save |
+| tests/unit/test_model_endpoint_probe.py:502 | `"saved mid-probe"` | `"system.ai.saved-mid-probe"` | save |
+| tests/unit/test_graph_release_rollback.py:692, 697, 703 | `"databricks-other-endpoint"` | `"system.ai.other-endpoint"` | fixer changes model; the failing-set and expected-calls literals follow it |
+| tests/unit/test_agent_definition_workbench_routes.py:681 | `" custom-endpoint-name "` | `"system.ai.custom-endpoint-name"` | ruling 1 |
+| tests/unit/test_agent_definition_workbench_routes.py:3479 | `_CUSTOM_ENDPOINT = "Custom-Endpoint_266"` | `"system.ai.custom-endpoint_266"` | ruling 2 |
+| tests/unit/test_agent_definition_workbench_routes.py:4190, 4198, 4205 | `"architect exact endpoint"` | `"system.ai.architect-exact-endpoint"` | save + expected |
+| tests/unit/test_agent_definition_workbench_routes.py:4191, 4197, 4204 | `"builder exact endpoint"` | `"system.ai.builder-exact-endpoint"` | save + expected |
+| tests/unit/test_agent_definition_workbench_routes.py:4356, 4369 | `"moved on"` | `"system.ai.moved-on"` | save + expected server name |
+| tests/unit/test_agent_definition_workbench_routes.py:4503, 4516 | `"saved mid-probe"` | `"system.ai.saved-mid-probe"` | save + expected |
+| tests/integration/test_agent_definition_workbench_postgres.py:1614 | `"loser endpoint name"` | `"system.ai.loser-endpoint-name"` | stale loser changes the model (precedence note above) |
+| tests/integration/test_agent_definition_workbench_postgres.py:1633, 1651, 1665, 1678 | `"winner endpoint name"` | `"system.ai.winner-endpoint-name"` | save + remote-call/stored expected literals |
+| tests/integration/test_agent_definition_workbench_postgres.py:1745, 1791 | `"saved while probing"` | `"system.ai.saved-while-probing"` | save + stored expected |
+| tests/integration/graph_lifecycle_journey.py:125 | `SONNET = "databricks-claude-sonnet-4-5"` | `"system.ai.claude-sonnet-4-5"` | ruling 3 (S06 changes fixer to SONNET) |
+| tests/integration/test_lakebase_contract_failures_postgres.py:565 | `SONNET == "databricks-claude-sonnet-4-5"` | `SONNET == "system.ai.claude-sonnet-4-5"` | stored/pinned-name expected literal follows the journey constant |
+
+---

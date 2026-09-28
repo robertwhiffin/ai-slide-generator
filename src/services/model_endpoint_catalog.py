@@ -125,6 +125,20 @@ def validate_endpoint_name_policy(name: str) -> None:
         )
 
 
+_GATEWAY_MODEL_NAME = re.compile(r"^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$")
+
+
+def validate_gateway_model_name(name: str) -> None:
+    """A changed draft model must be a ``system.ai.*`` Gateway name (spec §5.2)."""
+    if not _GATEWAY_MODEL_NAME.fullmatch(name):
+        raise EndpointValidationFailure(
+            "endpoint_not_gateway_model",
+            "Model name must start with `system.ai.` and contain only lowercase letters, "
+            "digits, hyphens, underscores and periods.",
+            False,
+        )
+
+
 #: The remote check runs while the save holds the exclusive draft lock, so its
 #: client must not inherit the SDK's 300 s default retry window.  With a 5 s
 #: window and a 3 s per-request timeout, measured transport exhaustion ends

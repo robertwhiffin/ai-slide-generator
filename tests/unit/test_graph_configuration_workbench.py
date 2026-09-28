@@ -104,12 +104,12 @@ def test_model_endpoint_probe_snapshot_is_the_selected_roles_exact_saved_candida
     session_factory,
 ):
     """Catches a snapshot of another role, the published revision, or a default."""
-    _save(session_factory, "architect", "architect exact endpoint", 0)
-    _save(session_factory, "fixer", "fixer exact endpoint", 1)
+    _save(session_factory, "architect", "system.ai.architect-exact-endpoint", 0)
+    _save(session_factory, "fixer", "system.ai.fixer-exact-endpoint", 1)
 
     for agent_key, endpoint_name in (
-        ("architect", "architect exact endpoint"),
-        ("fixer", "fixer exact endpoint"),
+        ("architect", "system.ai.architect-exact-endpoint"),
+        ("fixer", "system.ai.fixer-exact-endpoint"),
     ):
         node = _draft_node(session_factory, agent_key)
         snapshot = _read(session_factory, agent_key, 2)
@@ -131,7 +131,7 @@ def test_model_endpoint_probe_snapshot_stale_lock_is_the_null_candidate_conflict
     session_factory,
 ):
     """Catches a stale probe read returning a snapshot instead of the 409 outcome."""
-    _save(session_factory, "builder", "builder moved", 0)
+    _save(session_factory, "builder", "system.ai.builder-moved", 0)
 
     outcome = _read(session_factory, "builder", 0)
 
@@ -141,7 +141,7 @@ def test_model_endpoint_probe_snapshot_stale_lock_is_the_null_candidate_conflict
     assert set(outcome.server.definitions) == set(GRAPH_V1_AGENT_KEYS)
     assert (
         outcome.server.definitions["builder"].content.model.endpoint_name
-        == "builder moved"
+        == "system.ai.builder-moved"
     )
 
 
@@ -208,7 +208,7 @@ def test_model_endpoint_probe_snapshot_rechecks_the_saved_name_policy(
 
 def test_model_endpoint_probe_snapshot_stale_precedes_the_policy_recheck(session_factory):
     """Catches the policy re-check pre-empting the coherent stale conflict."""
-    _save(session_factory, "architect", "fine", 0)
+    _save(session_factory, "architect", "system.ai.fine", 0)
     _store_endpoint_directly(session_factory, "architect", "https://h.example/x")
 
     outcome = _read(session_factory, "architect", 0)

@@ -141,7 +141,7 @@ def test_exact_five_field_save_preserves_every_server_owned_value_and_artifact(
     before, old_hash = _stored_content(session_factory)
     candidate = EditableModelDraft(
         prompt_text="Architect draft changed by #263",
-        endpoint_name=" custom-endpoint-name ",
+        endpoint_name="system.ai.custom-endpoint-name",
         temperature=0.25,
         max_tokens=4096,
         top_p=0.8,
@@ -169,7 +169,7 @@ def test_exact_five_field_save_preserves_every_server_owned_value_and_artifact(
         "assembly_rules": None,
         "schema_overlay": None,
     }
-    assert after.model.endpoint_name == " custom-endpoint-name "
+    assert after.model.endpoint_name == "system.ai.custom-endpoint-name"
     assert after.agent_key == before.agent_key
     assert after.definition_version == before.definition_version
     assert after.schema_overlay == before.schema_overlay
@@ -190,7 +190,7 @@ def test_exact_five_field_save_preserves_every_server_owned_value_and_artifact(
     "updates",
     [
         {"prompt_text": "changed prompt"},
-        {"endpoint_name": " changed endpoint "},
+        {"endpoint_name": "system.ai.changed-endpoint"},
         {"temperature": 0.11},
         {"max_tokens": 3210},
         {"top_p": 0.22},
@@ -3150,7 +3150,7 @@ ENDPOINT_URL_TUPLE = (
         "Endpoint must be a Databricks endpoint name, not a URL.",
     ),
 )
-CUSTOM_ENDPOINT = "custom endpoint name"
+CUSTOM_ENDPOINT = "system.ai.custom-endpoint-name"
 SAVE_PATHS = ("editable", "trusted")
 
 
@@ -3772,3 +3772,101 @@ def test_production_remote_endpoint_validator_maps_a_system_client_failure_to_un
     assert "SECRET_TOKEN_266" not in str(raised.value)
     assert isinstance(raised.value.__cause__, databricks_client.DatabricksClientError)
     assert built == []
+
+
+# ===========================================================================
+# ws2a Task 4: a save that CHANGES the model must name a system.ai.* Gateway
+# model.  An unchanged (legacy databricks-*) model keeps saving.  The service
+# builder is ``GraphConfiguration()``: its remote endpoint validator defaults to
+# ``None``, so these saves run no remote check.
+# ===========================================================================
+
+GATEWAY_NAME_TUPLE = (
+    (
+        ENDPOINT_FIELD,
+        "endpoint_not_gateway_model",
+        "Model name must start with `system.ai.` and contain only lowercase letters, "
+        "digits, hyphens, underscores and periods.",
+    ),
+)
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_changing_the_model_to_a_non_gateway_name_is_refused_before_any_write(
+    session_factory, monkeypatch, path
+):
+    current, before_hash = _stored_content(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    service = GraphConfiguration()
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        _save_endpoint_candidate(
+            session,
+            service,
+            path,
+            _endpoint_candidate(current, path, endpoint_name="databricks-claude-sonnet-4-5"),
+            lock_version=0,
+            actor="test:gateway-name",
+        )
+
+    assert _issue_tuples(caught) == GATEWAY_NAME_TUPLE
+    assert write_log == []
+    assert _stored_content(session_factory) == (current, before_hash)
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_changing_the_model_to_a_system_ai_name_saves(session_factory, path):
+    current, _ = _stored_content(session_factory)
+    service = GraphConfiguration()
+    with session_factory() as session:
+        _save_endpoint_candidate(
+            session,
+            service,
+            path,
+            _endpoint_candidate(current, path, endpoint_name="system.ai.claude-opus-5-5"),
+            lock_version=0,
+            actor="test:gateway-name",
+        )
+    assert _stored_content(session_factory)[0].model.endpoint_name == (
+        "system.ai.claude-opus-5-5"
+    )
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_unchanged_legacy_model_saves(session_factory, path):
+    """Review Focus 2: a prompt-only edit on a databricks-* role is not blocked."""
+    current, _ = _stored_content(session_factory)
+    assert current.model.endpoint_name.startswith("databricks-")
+    service = GraphConfiguration()
+    with session_factory() as session:
+        _save_endpoint_candidate(
+            session,
+            service,
+            path,
+            _endpoint_candidate(
+                current,
+                path,
+                endpoint_name=current.model.endpoint_name,
+                prompt_text=current.prompt_text + "\nedited",
+            ),
+            lock_version=0,
+            actor="test:gateway-name",
+        )
+    saved, _ = _stored_content(session_factory)
+    assert saved.prompt_text.endswith("\nedited")
+    assert saved.model.endpoint_name == current.model.endpoint_name
+
+
+def test_url_policy_still_runs_first_for_a_changed_url_shaped_name(session_factory):
+    current, _ = _stored_content(session_factory)
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        _save_endpoint_candidate(
+            session,
+            GraphConfiguration(),
+            "editable",
+            _endpoint_candidate(current, "editable", endpoint_name="https://x.example/serving"),
+            lock_version=0,
+            actor="test:gateway-name",
+        )
+    assert _issue_tuples(caught) == ENDPOINT_URL_TUPLE

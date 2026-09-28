@@ -131,6 +131,30 @@ def _save_prompt(factory, agent_key, suffix, *, lock, prompt_text=None):
     return out
 
 
+def _save_model(factory, agent_key, endpoint_name, *, lock):
+    service = GraphConfiguration()
+    with factory() as db:
+        snap = service.read_workbench(db)
+        db.rollback()
+    content = next(n for n in snap.nodes if n.agent_key == agent_key).draft.content
+    with factory() as db:
+        out = service.save_editable_model_draft(
+            db,
+            agent_key=agent_key,
+            expected_lock_version=lock,
+            actor="editor@example.com",
+            candidate=EditableModelDraft(
+                prompt_text=content.prompt_text,
+                endpoint_name=endpoint_name,
+                temperature=float(content.model.temperature),
+                max_tokens=content.model.max_tokens,
+                top_p=float(content.model.top_p),
+            ),
+        )
+    assert isinstance(out, DraftSaveResult)
+    return out
+
+
 def _artifacts(factory) -> dict[str, list[tuple[object, ...]]]:
     with factory() as db:
         return {
@@ -902,3 +926,14 @@ def test_an_active_release_that_is_not_the_latest_version_is_an_integrity_error(
         _publish(factory, lock=1, gate=_NoEvidenceGate())
 
     assert _artifacts(factory) == before
+
+
+def test_publication_with_untouched_legacy_roles_is_not_blocked(factory):
+    """Review Focus 3: one role moves to system.ai.*, six stay on databricks-*, publish succeeds."""
+    _backdate_v1(factory)
+    _save_model(factory, "architect", "system.ai.claude-opus-5-5", lock=0)
+    _save_prompt(factory, "builder", "\nlegacy-role edit", lock=1)
+
+    outcome = _publish(factory, lock=2, gate=_NoEvidenceGate())
+
+    assert isinstance(outcome, PublishedRelease)

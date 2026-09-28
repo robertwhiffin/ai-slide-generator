@@ -383,8 +383,8 @@ def test_model_endpoint_probe_service_probes_the_selected_roles_saved_candidate(
     session_factory,
 ):
     """Catches the service probing another role, a default, or a client value."""
-    _save_endpoint(session_factory, "architect", "architect exact endpoint", 0)
-    _save_endpoint(session_factory, "builder", "builder exact endpoint", 1)
+    _save_endpoint(session_factory, "architect", "system.ai.architect-exact-endpoint", 0)
+    _save_endpoint(session_factory, "builder", "system.ai.builder-exact-endpoint", 1)
     builder_hash = _saved_hash(session_factory, "builder")
     adapter = FakeStructuredOutputProbe()
     service = ModelEndpointProbeService(adapter)
@@ -396,7 +396,7 @@ def test_model_endpoint_probe_service_probes_the_selected_roles_saved_candidate(
 
     assert adapter.calls == [
         AgentModelConfiguration(
-            endpoint_name="builder exact endpoint",
+            endpoint_name="system.ai.builder-exact-endpoint",
             temperature=0.125,
             max_tokens=4321,
             top_p=0.5,
@@ -405,7 +405,7 @@ def test_model_endpoint_probe_service_probes_the_selected_roles_saved_candidate(
     assert result == SavedEndpointProbeResult(
         identity=SavedEndpointProbeIdentity(
             agent_key="builder",
-            endpoint_name="builder exact endpoint",
+            endpoint_name="system.ai.builder-exact-endpoint",
             candidate_hash=builder_hash,
             lock_version=2,
         ),
@@ -440,7 +440,7 @@ def test_model_endpoint_probe_service_returns_the_typed_failure_with_identity(
 
 def test_model_endpoint_probe_service_stale_lock_conflicts_before_any_probe(session_factory):
     """Catches a stale request reaching the model before the lock comparison."""
-    _save_endpoint(session_factory, "architect", "moved on", 0)
+    _save_endpoint(session_factory, "architect", "system.ai.moved-on", 0)
     adapter = FakeStructuredOutputProbe()
 
     with session_factory() as session:
@@ -499,7 +499,7 @@ def test_model_endpoint_probe_service_reports_the_copied_identity_after_a_later_
     class _SaveDuringProbe:
         def probe(self, configuration: AgentModelConfiguration) -> None:
             saved_during.append(
-                _save_endpoint(session_factory, "architect", "saved mid-probe", 0)
+                _save_endpoint(session_factory, "architect", "system.ai.saved-mid-probe", 0)
             )
 
     with session_factory() as session:

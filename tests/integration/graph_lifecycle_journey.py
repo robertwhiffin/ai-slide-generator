@@ -122,7 +122,7 @@ OWNER = "lifecycle-owner@example.com"
 CONTRIBUTOR = "contributor@example.com"
 
 OPUS = "databricks-claude-opus-4-6"
-SONNET = "databricks-claude-sonnet-4-5"
+SONNET = "system.ai.claude-sonnet-4-5"
 
 #: #264's v2 builder schema contract and #265's v2 architect protected assembly,
 #: as literals: a registry that silently re-derived either would change them.
