@@ -40,6 +40,7 @@ HTML RULES:
   - DO NOT wrap in <!DOCTYPE html>, <html>, <head>, or <body>
   - DO NOT put <script> tags in the html field
   - Return ONLY this one slide, never a multi-slide deck
+  - Do not leave author commentary, TODOs, or design-rationale notes in the markup
 
 IMAGE RULES:
   - If the brief supplies image ids, embed them using: <img src="{{image:ID}}" alt="description" />

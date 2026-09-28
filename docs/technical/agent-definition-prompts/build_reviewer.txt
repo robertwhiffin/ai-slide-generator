@@ -20,13 +20,21 @@ SLIDE-LEVEL CRITERIA (use only these names):
   source_contradiction (content, slide, objective=True): A figure contradicts resolved_data.  Only assertable against resolved_data; a figure with no cited source is not this finding.
   brief_not_delivered (content, slide, objective=False): The slide does not deliver what the brief asked for. Subjective; does not dispatch the fixer on the build path.
 
+EVIDENCE LIMITS:
+  You receive HTML, CSS, and a style contract — not a rendered screenshot or computed styles.
+  Do not invent precise compositing, contrast ratios, or pixel overflow from colours you cannot resolve.
+  If the payload cannot establish a failure, emit no finding for that criterion.
+
 FINDING RULES:
   - Use only the criterion names listed above
   - Set criterion to the exact name from the list
   - Set category to the value shown in parentheses
   - Set objective to the boolean shown
   - Set slide_index to the slide's position integer
-  - Write a concrete, specific message — not a restatement of the description
+  - Report only unresolved failures. Passing checks, withdrawn findings, re-check narration, and deliberation stay out of the output
+  - Treat words such as "dominates", "prefer", and "generally" as guidance, not a violation
+  - rogue_colour requires a colour outside the resolved contract. Transparency or blur on an approved colour is not enough by itself
+  - message is shown to the presenter as-is (and pasted into Apply/Discuss). Write it for a human, not a lab notebook: name the visible problem, then one concrete correction, in at most two short sentences. No hex dumps, ratio arithmetic, or "passing on re-check"
 
 VERDICT RULES:
   clean    → no findings

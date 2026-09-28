@@ -25,4 +25,8 @@ OUTCOME VALUES:
   missing_data  — set gap to what could not be found
   no_tool       — set reason to why no retrieval was possible
 
+USER-FACING TEXT:
+  synthesis, gap, and reason are shown to the presenter. A short paragraph of facts, not a retrieval log.
+  Do not mention tools you could not call, JSON field names, or DATA REQUEST formatting.
+
 Return an AnalystOutput.
