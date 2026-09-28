@@ -161,22 +161,34 @@ the source of truth.
 The existing failure codes (`catalog_forbidden`, `catalog_unavailable`), the bounded
 client timeouts and the typed-error rules (never echo provider text) are unchanged.
 
-### 5.2 Local name policy (`_endpoint_name_policy_validator` in `graph_configuration_draft.py`)
+### 5.2 Local name policy (a new save-only validator in `graph_configuration_draft.py`)
 
-The `system.ai` check is added to the draft-only validator `_endpoint_name_policy_validator`
-(`graph_configuration_draft.py:277`), after its existing call to
-`validate_endpoint_name_policy`. It is **not** added to `validate_endpoint_name_policy`
-itself. That shared function is also called by the #267 test-run path
-(`agent_test_workbench.py:1359`) and by the remote check. Test runs can target a published
-release whose roles still name `databricks-*` endpoints, so those names must keep passing it.
+The `system.ai` check is a **new** validator, `_gateway_model_name_validator`. It runs only
+in the two draft saves: `save_editable_model_draft` and `save_draft_content`. They already
+run `self._save_local_validators()`; they now also run the new validator immediately
+afterwards.
+
+It must **not** be added to any of the following, because each is reached by a path that
+must keep accepting stored `databricks-*` names:
+
+| Must not be added to | Reached by |
+|---|---|
+| `validate_endpoint_name_policy` | the #267 published test-run path (`agent_test_workbench.py:1359`) and the remote check |
+| `_endpoint_name_policy_validator` | the #266 saved-candidate read (`graph_configuration_draft.py:721`) |
+| `_save_local_validators` | publication (`graph_configuration_publication.py:472`) **and rollback** (`graph_configuration_rollback.py:512`) |
+
+Rollback re-validates all seven roles of a historical release. Enforcing the rule there
+would make every pre-2a release impossible to roll back to.
 
 A **new draft save** requires the name to match `^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$` (requiring
 trailing alphanumeric to prevent names ending in `-`, `_` or `.`),
 with a new typed code `endpoint_not_gateway_model` and user message "Model name must start with `system.ai.` and contain only lowercase letters, digits, hyphens, underscores and periods.". Add this code to the `EndpointValidationCode` Literal. The existing URL and path-metacharacter
 rejection stays, and runs first.
 
-Stored releases are never re-validated, so pinned `databricks-*` names remain valid for
-execution (§6.2).
+Stored releases are never re-validated against this rule, so pinned `databricks-*` names
+remain valid for execution (§6.2), for publication of untouched roles and for rollback.
+A draft role that still carries a `databricks-*` name can be saved again only after the
+admin chooses a `system.ai.*` model for it.
 
 ### 5.3 Remote check on save (Gateway lookup replaces serving-endpoint check)
 
