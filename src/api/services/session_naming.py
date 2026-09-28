@@ -88,6 +88,22 @@ def _was_truncated(response: object) -> bool:
     return False
 
 
+def build_session_title_model():
+    """The title model: Gateway-routed, on the requesting user's OBO identity."""
+    from databricks_langchain import ChatDatabricks
+
+    from src.core.databricks_client import get_user_client
+    from src.core.defaults import SESSION_TITLE_MODEL
+
+    return ChatDatabricks(
+        model=SESSION_TITLE_MODEL,
+        use_ai_gateway=True,
+        max_tokens=50,
+        temperature=0.3,
+        workspace_client=get_user_client(),
+    )
+
+
 def generate_session_title(
     user_message: str,
     model,

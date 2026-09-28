@@ -405,9 +405,8 @@ def graph_chat_env(graph_turn_env, monkeypatch):
         fake_generate_session_title,
     )
     monkeypatch.setattr(
-        "src.core.databricks_client.get_user_client", lambda: MagicMock()
+        "src.api.services.session_naming.build_session_title_model", MagicMock()
     )
-    monkeypatch.setattr("databricks_langchain.ChatDatabricks", MagicMock())
 
     def explode(*args, **kwargs):
         raise _MonolithReached(

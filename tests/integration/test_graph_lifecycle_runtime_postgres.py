@@ -382,8 +382,9 @@ def open_turn_driver(journey, monkeypatch, caplog) -> GraphTurnDriver:
     monkeypatch.setattr(
         "src.api.services.chat_service.generate_session_title", lambda message, model: None
     )
-    monkeypatch.setattr("src.core.databricks_client.get_user_client", lambda: MagicMock())
-    monkeypatch.setattr("databricks_langchain.ChatDatabricks", MagicMock())
+    monkeypatch.setattr(
+        "src.api.services.session_naming.build_session_title_model", MagicMock()
+    )
 
     def explode(*args, **kwargs):
         raise _MonolithReached("a graph-mode turn reached _build_agent_for_session")
