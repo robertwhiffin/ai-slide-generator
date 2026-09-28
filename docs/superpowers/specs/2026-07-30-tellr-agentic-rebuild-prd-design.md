@@ -169,6 +169,15 @@ in the workbench and fixes per release (ws9). Hardcoded endpoints remain in:
 **No production call records token usage**; only admin test runs in the workbench do. No
 Gateway configuration exists anywhere in the app. Both remain workstream 2's job.
 
+*2026-09-28 (ws2a built; live acceptance pending Task 9):* The graph (all seven roles,
+including the #266 saved-candidate probe and #267 workbench test runs), PPTX and Google
+Slides export, and session titles on both paths now call models through Unity AI Gateway
+(`system.ai.*` names). Export and titles use `system.ai` named constants (not yet
+configurable). Hardcoded endpoints remain in the monolith, the MCP door, the verification
+judge, and the feedback assistant. No production call records token usage. Attribution,
+the admin dashboard, rate limits, and the remaining call sites belong to workstream 2b
+(see §10, row 2b).
+
 **No regression** (release gate)
 - Existing decks and sessions open and remain editable after cutover.
 - `create_deck` / `edit_deck` callers work unchanged — TAP, DAIS and KPMG skills
@@ -537,13 +546,23 @@ at all.
   custom regex safety gate. The endpoint abstraction makes both cheap to add later;
   they are explicitly out of scope for the first pass.
 
-*Status 2026-09-28:* **not started.** Workstream 9 changes the premise in one respect:
-admins can already choose the exact endpoint and parameters for each graph role, and each
-release fixes that choice. A cheaper reviewer model is therefore now an admin setting, not
-a code change. That is manual per-role selection, not Gateway routing: the calls still go
-out as the app service principal, with no usage capture and no rate limits. The facts a
-workstream-2 spec needs are collected in
-`docs/superpowers/plans/2026-09-28-ws2-ai-gateway-HANDOVER.md`.
+*Status 2026-09-28 (after ws9):* **not yet started at this writing.** Workstream 9
+changed the premise in one respect: admins can already choose the exact endpoint and
+parameters for each graph role, and each release fixes that choice. A cheaper reviewer
+model is therefore now an admin setting, not a code change. That is manual per-role
+selection, not Gateway routing: the calls still go out as the app service principal, with
+no usage capture and no rate limits. The facts the workstream-2 spec relied on are
+collected in `docs/superpowers/plans/2026-09-28-ws2-ai-gateway-HANDOVER.md`.
+
+*2026-09-28 (ws2a built; live acceptance pending Task 9):* The graph (all seven roles,
+the #266 saved-candidate probe and #267 workbench test runs), PPTX and Google Slides
+export, and session titles (both paths) now route through Unity AI Gateway using
+`system.ai.*` model names. The workbench picker reads the Gateway endpoint list
+(`GET /api/ai-gateway/v2/endpoints`) and accepts only `system.ai.*` names when a model
+changes on a draft save. Hardcoded endpoints remain in the monolith, MCP door,
+verification judge, and feedback assistant. Per-user and per-session attribution, token
+and cost capture, the admin dashboard, rate-limit UX, and Gateway request tags belong to
+2b. Spec: `docs/superpowers/specs/2026-09-28-ws2a-ai-gateway-system-ai-design.md`.
 
 ### 8.2 ~~Unity Catalog requirement (cross-cutting tradeoff)~~
 
@@ -616,7 +635,8 @@ defines the end state and the seams.
 | 0a | ✅ **DONE** — **Row-per-slide schema** — `session_slides` (one row per slide), per-row verification, deck-spec column | — | M | Merged 2026-08-12 (PR #235). Prerequisite for 4; see §10.2 |
 | 0b | ✅ **DONE** — **Dependency stack upgrade** — langgraph 1.2.10 pinned and proven on the Apps build proxy | — | S | Merged 2026-08-12 (PR #236). Prerequisite for 4; see §10.2 |
 | 1 | ❌ **DELETED (2026-09-18, §16)** — ~~**UC-in-setup**~~ | — | — | Existed only to provision UC for MLflow tracing. §8.2 struck, so there is nothing to provision. Row kept so numbering and history stay legible |
-| 2 | ⏭️ **NEXT** — **Gateway endpoint abstraction** — de-hardcode the model, route via Gateway, usage tracking & rate limits | — | ~~S~~ M | Independent. **Picked up next (2026-09-28).** The graph roles' endpoints are already admin-configured (ws9), so what remains is Gateway routing, usage attribution, rate-limit UX, and the non-graph call sites. Re-sized: those non-graph sites and the attribution-identity question make it bigger than S. Handover: `docs/superpowers/plans/2026-09-28-ws2-ai-gateway-HANDOVER.md` |
+| 2a | ✅ **built; live acceptance pending (Task 9)** — **Unity AI Gateway routing** — graph (all 7 roles + #266 probe + #267 workbench test runs), PPTX/Google Slides export and session titles route through the Gateway; workbench picker reads `system.ai.*` models from the Gateway list | — | M | Spec: `docs/superpowers/specs/2026-09-28-ws2a-ai-gateway-system-ai-design.md`. Handover (starting state for 2b): `docs/superpowers/plans/2026-09-28-ws2-ai-gateway-HANDOVER.md` |
+| 2b | ⏭️ **NEXT** — **Gateway attribution, rate limits & remaining call sites** — per-user/per-session attribution, token and cost capture, admin dashboard, rate-limit policy and 429 UX, Gateway request tags, remaining call sites (monolith, MCP, judge, feedback, validator), configurable export and title models. Housekeeping: localhost Postgres test URLs in `.github/workflows/test.yml` trip the pre-push hook on new branches (forward-fix: `POSTGRES_HOST_AUTH_METHOD: trust` + allow-list the four historical fingerprints in `#no-secrets-in-code`; not yet done) | 2a | M | Starting reference: `docs/superpowers/plans/2026-09-28-ws2-ai-gateway-HANDOVER.md` |
 | 3 | 🔄 **REDEFINED (2026-09-18, §16)** — **Agent-quality CI gates** — fixture-based recall/precision gate over the review agents, extending `tests/agentic`; plus deletion of all MLflow code from the product | — | S | Was "MLflow rebuild". No longer depends on 1. **Cannot be validated until the repo leaves a personal account and the prompts are authored** — see §16. *2026-09-28:* not started, and every MLflow item in §16.4 is still present. Ws9 gives admins a place to author, test and publish prompts, but it is not the gate: its only automatic check is output-schema validity |
 | 4 | ✅ **DONE** — **LangGraph core** — supervisor + builder, deck-spec state, two front doors; runs *alongside* the monolith | 2 | L | The big one. Merged 2026-09-16 into `feat/langgraph-core` as five workstreams, ws4a–ws4e (merge `60789f72`). **Two deliberate exclusions:** the monolith is not deleted, and MCP stays on it — both belong to a later PR. See `docs/superpowers/plans/ws4e-HANDOVER.md` |
 | 5 | **Review subsystem** — 3 agents + remediation loop | 4 | L | ~~3, 4~~ — no longer depends on 3 (§16). ~~as scorers~~ — reviewers are participants, not scorers (§7.1 as revised). Much of this shipped incidentally in workstream 4: the three reviewer nodes, the nine-criterion registry with its `objective` predicate, and the foreman→fixer→fix_reviewer loop all exist |
@@ -663,7 +683,8 @@ defines the end state and the seams.
 - **9** ✅ **is done** (2026-09-27): the agent review & release workbench (epic #258). It
   was not in the original plan. It makes the prompt-authoring work in §12.1 and §16.5 an
   admin task in the app instead of a code change, but it does not do that authoring.
-- **2 is next** (picked up 2026-09-28).
+- **2a is built** (2026-09-28; live acceptance pending Task 9). **2b is next**, starting
+  from the handover document.
 
 **Where the work physically is (updated 2026-09-28).** All of it sits on the integration
 branch `feat/langgraph-core`, pushed to origin at `b9bacf8b5`. It is **897 commits ahead
