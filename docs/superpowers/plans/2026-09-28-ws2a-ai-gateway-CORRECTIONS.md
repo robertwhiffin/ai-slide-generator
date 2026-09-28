@@ -95,3 +95,69 @@ Five test files ERROR in the `-n auto` parallel run but pass (36 tests) when run
 
 ---
 
+
+## Task 0b — Step 6: Post-bump baseline (BLOCKED)
+
+_Run on 2026-09-28, after controller-ruling pin commit (`1262f2ffe`)._
+
+**Total: 39 failed, 7393 passed, 110 skipped, 816 warnings, 7 errors.**
+
+### Step 6 controller-ruling pin changes applied before baseline
+
+- `packages/databricks-tellr-app/pyproject.toml`: `"openai>=1.99.9"` → `"openai==3.19.2"`, added `"openai-agents==0.22.2"`, comment updated.
+- `requirements.txt`: same two changes.
+- Root `pyproject.toml`: openai left as `>=1.99.9` (ranged, as instructed).
+- `databricks-ai-bridge==0.21.0` in the app pyproject: local env resolves to 0.22.0; databricks-openai 0.17.1 requires `>=0.21.0`, which `0.21.0` satisfies; no change yet — left for the build to judge (as instructed).
+- Committed as `1262f2ffe`: `build: pin openai 3.19.2 and openai-agents 0.22.2 to the tested closure`.
+
+### Cause D — openai pin change breaks wheel-dependency test (STOP condition triggered)
+
+The controller-authorized change from `openai>=1.99.9` to `openai==3.19.2` caused a new test failure that is not the ChatDatabricks/serving_endpoints mock cause and is not in Causes A/B/C. Per task instructions, this is a STOP condition.
+
+**Failing test:**
+- `tests/unit/test_app_wheel_dependencies.py::test_the_manifests_declare_openai_within_the_transitive_bounds`
+
+**Last traceback line:**
+```
+AssertionError: assert <SpecifierSet('==3.19.2')> == <SpecifierSet('>=1.99.9')>
+tests/unit/test_app_wheel_dependencies.py:189
+```
+
+**Root cause:** The test asserts that all three manifests (app pyproject, root pyproject, requirements.txt) declare `openai>=1.99.9` with no upper cap. After the pin change, `app_deps["openai"]` is `==3.19.2`, which does not equal `>=1.99.9`.
+
+**Recommended fix (for controller to authorize):** Update the test to accept the new intended state:
+- `app_deps["openai"]` and `req_deps["openai"]` → assert `==3.19.2`
+- `root_deps["openai"]` → assert `>=1.99.9` (ranged, unchanged)
+
+The test docstring also references `databricks-langchain==0.9.0` and `openai 1.105.0` and needs updating.
+
+### Cause E — ChatDatabricks/serving_endpoints mock (expected new cause)
+
+These are the expected new failures from databricks-langchain 0.20.0 no longer calling `serving_endpoints.get_open_ai_client`. The `MockTransportWorkspace` transport receives 0 requests instead of 1.
+
+**test_agent_runtime.py (3 tests):**
+- `test_an_observed_real_provider_run_records_the_reported_token_usage`
+- `test_an_observed_real_provider_run_without_usage_records_none`
+- `test_production_run_binds_exactly_as_before_and_reads_no_usage`
+
+**test_agent_test_workbench.py (2 tests):**
+- `test_a_real_provider_candidate_and_baseline_run_persist_the_reported_tokens`
+- `test_a_real_provider_run_without_usage_persists_null_tokens`
+
+**test_model_endpoint_probe.py (8 tests):**
+- `test_model_endpoint_probe_real_provider_success_over_mock_transport`
+- `test_model_endpoint_probe_real_provider_errors_are_classified[400-unsupported_structured_output]`
+- `test_model_endpoint_probe_real_provider_errors_are_classified[401-endpoint_probe_forbidden]`
+- `test_model_endpoint_probe_real_provider_errors_are_classified[403-endpoint_probe_forbidden]`
+- `test_model_endpoint_probe_real_provider_errors_are_classified[404-unsupported_structured_output]`
+- `test_model_endpoint_probe_real_provider_errors_are_classified[422-unsupported_structured_output]`
+- `test_model_endpoint_probe_real_provider_errors_are_classified[429-structured_output_probe_failed]`
+- `test_model_endpoint_probe_real_provider_errors_are_classified[500-structured_output_probe_failed]`
+- `test_model_endpoint_probe_real_provider_errors_are_classified[connection-structured_output_probe_failed]`
+
+**test_agent_definition_workbench_routes.py (8 tests):**
+`test_model_endpoint_probe_route_maps_real_provider_errors` with 8 parametrized outcomes. These tests also use `MockTransportWorkspace` and `real_provider_probe`. Same root cause — not listed in the brief's expected three files, but same cause class (MockTransportWorkspace/serving_endpoints path). Last traceback line: `assert 0 == 1` at `test_agent_definition_workbench_routes.py:4668`.
+
+### Step 6 status: BLOCKED
+
+Task 0b Steps 7, 8, 9 not executed. Steps 7–9 must wait until Cause D is resolved by the controller (either authorize a test update or change the pinning strategy).
