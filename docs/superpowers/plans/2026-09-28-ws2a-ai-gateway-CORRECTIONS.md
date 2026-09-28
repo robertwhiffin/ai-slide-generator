@@ -406,11 +406,23 @@ In both `save_editable_model_draft` and `save_draft_content`, the `_gateway_mode
 
 ---
 
-## Task 7 — vitest unavailable in this checkout (sabotage/green/red steps unrunnable locally)
+## Task 7 — vitest now available via run-vitest.sh (Steps 2/5/6 complete)
 
 **Brief reference:** Steps 2, 5, 6 require `npx vitest run`.
 
-**Actual:** `frontend/node_modules/.bin/vitest` does not exist in the branch-eval checkout (`node_modules` is not installed). The other checkout's binary (`slide-generator/.../node_modules/.bin/vitest`) fails with `ERR_MODULE_NOT_FOUND: Cannot find package 'vitest'` when pointed at this project's `vitest.config.ts`. Per the controller's instruction, vitest steps were skipped; `npx tsc --noEmit` passed clean. CI must verify the red→green→sabotage sequence.
+**Resolution:** The controller provided `.superpowers/sdd/2026-09-28-ws2a-ai-gateway/run-vitest.sh` which copies the frontend to a temp dir and symlinks `node_modules` from the other checkout. All Steps 2/5/6 were subsequently run and passed.
+
+**Step 2 (new tests fail on old component):**
+At 4fe06556d DefinitionEditor + Task 7 test file → 21 failed including:
+- `offers no free-text endpoint field` ✗
+- `shows the current model when it is not in the discovered list` ✗
+
+**Step 5 (all Admin tests pass):**
+Full Admin folder: 990 passed / 0 failed (11 test files). `npx tsc --noEmit` clean.
+
+**Step 6 (sabotage):**
+Custom field re-added to DefinitionEditor → `offers no free-text endpoint field` ✗ (2 failed / 222 passed).
+Field removed (restored) → 224 passed / 0 failed.
 
 ---
 
