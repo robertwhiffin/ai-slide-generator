@@ -9,8 +9,7 @@ from typing import Any, Literal, Protocol
 
 import requests
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import DatabricksError, PermissionDenied, ResourceDoesNotExist
-from databricks.sdk.service.serving import EndpointStateConfigUpdate, EndpointStateReady
+from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied
 
 CatalogFailureCode = Literal["catalog_forbidden", "catalog_unavailable"]
 EndpointValidationCode = Literal[
@@ -23,6 +22,8 @@ EndpointValidationCode = Literal[
     "endpoint_update_in_progress",
     "endpoint_update_failed",
     "endpoint_update_canceled",
+    "endpoint_not_gateway_model",
+    "endpoint_not_chat_model",
 ]
 
 
@@ -219,9 +220,10 @@ class DatabricksModelEndpointCatalog:
     def validate_custom_endpoint_remote(self, name: str) -> None:
         # Defensive: never let a path-shaped name reach the interpolated request.
         validate_endpoint_name_policy(name)
+        path = f"{GATEWAY_ENDPOINTS_PATH}/{gateway_endpoint_name(name)}"
         try:
-            detail = self._workspace_client.serving_endpoints.get(name)
-        except ResourceDoesNotExist as error:
+            detail = self._workspace_client.api_client.do("GET", path)
+        except NotFound as error:
             raise _validation_failure(
                 "endpoint_unknown", "Endpoint name was not found.", False
             ) from error
@@ -238,41 +240,10 @@ class DatabricksModelEndpointCatalog:
                 True,
             ) from error
 
-        if getattr(detail, "name", None) != name:
+        api_types = (detail or {}).get("supported_api_types") or ()
+        if GATEWAY_CHAT_API_TYPE not in api_types:
             raise _validation_failure(
-                "endpoint_name_mismatch",
-                "Endpoint validation did not return the exact requested name.",
-                False,
-            )
-
-        state = getattr(detail, "state", None)
-        config_update = getattr(state, "config_update", None)
-        if config_update == EndpointStateConfigUpdate.IN_PROGRESS:
-            raise _validation_failure(
-                "endpoint_update_in_progress",
-                "Endpoint configuration update is in progress.",
-                True,
-            )
-        if config_update == EndpointStateConfigUpdate.UPDATE_FAILED:
-            raise _validation_failure(
-                "endpoint_update_failed",
-                "Endpoint configuration update failed.",
-                False,
-            )
-        if config_update == EndpointStateConfigUpdate.UPDATE_CANCELED:
-            raise _validation_failure(
-                "endpoint_update_canceled",
-                "Endpoint configuration update was canceled.",
-                False,
-            )
-        if (
-            getattr(state, "ready", None) != EndpointStateReady.READY
-            or config_update != EndpointStateConfigUpdate.NOT_UPDATING
-        ):
-            raise _validation_failure(
-                "endpoint_not_ready",
-                "Endpoint is not ready for invocation.",
-                True,
+                "endpoint_not_chat_model", "Endpoint is not a chat model.", False
             )
 
 

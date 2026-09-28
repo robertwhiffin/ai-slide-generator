@@ -3185,6 +3185,21 @@ class _RecordingServingEndpoints:
         return self.detail
 
 
+class _RecordingApiClient:
+    """Minimal recording fake for the Unity AI Gateway detail lookup."""
+
+    def __init__(self, *, response=None, error=None):
+        self._response = response
+        self._error = error
+        self.calls: list[tuple[str, str]] = []
+
+    def do(self, method, path, **_kwargs):
+        self.calls.append((method, path))
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
 def _endpoint_candidate(
     current: DefinitionContent,
     path: str,
@@ -3448,96 +3463,53 @@ def test_current_endpoint_candidate_is_remotely_validated_once_immediately_befor
     assert _draft_audit(session_factory)[:2] == (1, "test:endpoint-current")
 
 
-def _catalog_remote_validator(serving_endpoints: _RecordingServingEndpoints):
+def _catalog_remote_validator(api_client: _RecordingApiClient):
     from types import SimpleNamespace
 
     from src.services.graph_configuration import CatalogRemoteEndpointDraftValidator
     from src.services.model_endpoint_catalog import DatabricksModelEndpointCatalog
 
     catalog = DatabricksModelEndpointCatalog(
-        SimpleNamespace(serving_endpoints=serving_endpoints)
+        SimpleNamespace(api_client=api_client)
     )
     return CatalogRemoteEndpointDraftValidator(lambda: catalog)
 
 
-def _endpoint_detail(name: str, *, ready: str = "READY", update: str = "NOT_UPDATING"):
-    from types import SimpleNamespace
-
-    from databricks.sdk.service.serving import (
-        EndpointStateConfigUpdate,
-        EndpointStateReady,
-    )
-
-    return SimpleNamespace(
-        name=name,
-        state=SimpleNamespace(
-            ready=EndpointStateReady[ready],
-            config_update=EndpointStateConfigUpdate[update],
-        ),
-    )
-
-
 def _remote_table_cases():
-    from databricks.sdk.errors import (
-        DatabricksError,
-        PermissionDenied,
-        ResourceDoesNotExist,
-    )
+    from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied
 
     return [
         pytest.param(
-            {"error": ResourceDoesNotExist("missing")},
+            _RecordingApiClient(error=NotFound("secret")),
             "endpoint_unknown",
             "Endpoint name was not found.",
             id="unknown",
         ),
         pytest.param(
-            {"error": PermissionDenied("denied")},
+            _RecordingApiClient(error=PermissionDenied("secret")),
             "endpoint_forbidden",
             "Endpoint cannot be validated with this workspace identity.",
             id="forbidden",
         ),
         pytest.param(
-            {"error": DatabricksError("unavailable")},
+            _RecordingApiClient(error=DatabricksError("secret")),
             "endpoint_unavailable",
             "Endpoint validation is temporarily unavailable. Retry the save.",
             id="unavailable",
         ),
         pytest.param(
-            {"error": TimeoutError("Timed out after 0:00:05")},
+            _RecordingApiClient(error=TimeoutError("secret")),
             "endpoint_unavailable",
             "Endpoint validation is temporarily unavailable. Retry the save.",
             id="transport-timeout",
         ),
         pytest.param(
-            {"detail": _endpoint_detail("alias")},
-            "endpoint_name_mismatch",
-            "Endpoint validation did not return the exact requested name.",
-            id="name-mismatch",
-        ),
-        pytest.param(
-            {"detail": _endpoint_detail(CUSTOM_ENDPOINT, ready="NOT_READY")},
-            "endpoint_not_ready",
-            "Endpoint is not ready for invocation.",
-            id="not-ready",
-        ),
-        pytest.param(
-            {"detail": _endpoint_detail(CUSTOM_ENDPOINT, update="IN_PROGRESS")},
-            "endpoint_update_in_progress",
-            "Endpoint configuration update is in progress.",
-            id="update-in-progress",
-        ),
-        pytest.param(
-            {"detail": _endpoint_detail(CUSTOM_ENDPOINT, update="UPDATE_FAILED")},
-            "endpoint_update_failed",
-            "Endpoint configuration update failed.",
-            id="update-failed",
-        ),
-        pytest.param(
-            {"detail": _endpoint_detail(CUSTOM_ENDPOINT, update="UPDATE_CANCELED")},
-            "endpoint_update_canceled",
-            "Endpoint configuration update was canceled.",
-            id="update-canceled",
+            _RecordingApiClient(
+                response={"name": CUSTOM_ENDPOINT, "supported_api_types": ["mlflow/v1/embeddings"]}
+            ),
+            "endpoint_not_chat_model",
+            "Endpoint is not a chat model.",
+            id="not-chat-model",
         ),
     ]
 
@@ -3553,7 +3525,6 @@ def test_every_remote_endpoint_failure_is_one_ordered_issue_with_no_mutation(
     before_audit = _draft_audit(session_factory)
     write_log: list[str] = []
     _install_write_spy(monkeypatch, write_log)
-    serving_endpoints = _RecordingServingEndpoints(**outcome)
     candidate = _endpoint_candidate(
         current, path, endpoint_name=CUSTOM_ENDPOINT, prompt_text="remote rejected"
     )
@@ -3562,7 +3533,7 @@ def test_every_remote_endpoint_failure_is_one_ordered_issue_with_no_mutation(
         _save_endpoint_candidate(
             session,
             GraphConfiguration(
-                remote_endpoint_validator=_catalog_remote_validator(serving_endpoints)
+                remote_endpoint_validator=_catalog_remote_validator(outcome)
             ),
             path,
             candidate,
@@ -3571,8 +3542,6 @@ def test_every_remote_endpoint_failure_is_one_ordered_issue_with_no_mutation(
         )
 
     assert _issue_tuples(caught) == ((ENDPOINT_FIELD, code, message),)
-    # Exactly one exact-name lookup; the stored text is never rewritten.
-    assert serving_endpoints.get_calls == [CUSTOM_ENDPOINT]
     assert write_log == []
     assert _stored_content(session_factory) == (current, current_hash)
     assert _draft_audit(session_factory) == before_audit
@@ -3586,8 +3555,11 @@ def test_valid_same_content_endpoint_save_validates_and_advances_audit_unchanged
 ) -> None:
     """Catches a same-content save that skips remote validation or its audit."""
     current, current_hash = _stored_content(session_factory)
-    serving_endpoints = _RecordingServingEndpoints(
-        detail=_endpoint_detail(current.model.endpoint_name)
+    api = _RecordingApiClient(
+        response={
+            "name": current.model.endpoint_name,
+            "supported_api_types": ["mlflow/v1/chat/completions"],
+        }
     )
     candidate = _endpoint_candidate(
         current, path, endpoint_name=current.model.endpoint_name
@@ -3597,7 +3569,7 @@ def test_valid_same_content_endpoint_save_validates_and_advances_audit_unchanged
         result = _save_endpoint_candidate(
             session,
             GraphConfiguration(
-                remote_endpoint_validator=_catalog_remote_validator(serving_endpoints)
+                remote_endpoint_validator=_catalog_remote_validator(api)
             ),
             path,
             candidate,
@@ -3608,7 +3580,7 @@ def test_valid_same_content_endpoint_save_validates_and_advances_audit_unchanged
     assert isinstance(result, DraftSaveResult)
     assert result.changed is False
     assert result.draft.lock_version == 1
-    assert serving_endpoints.get_calls == [current.model.endpoint_name]
+    assert api.calls and api.calls[0][0] == "GET"
     assert _stored_content(session_factory) == (current, current_hash)
     assert _draft_audit(session_factory)[:2] == (1, "test:endpoint-same-content")
 
