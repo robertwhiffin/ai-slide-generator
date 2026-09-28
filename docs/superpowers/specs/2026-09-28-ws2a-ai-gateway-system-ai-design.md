@@ -180,15 +180,21 @@ must keep accepting stored `databricks-*` names:
 Rollback re-validates all seven roles of a historical release. Enforcing the rule there
 would make every pre-2a release impossible to roll back to.
 
-A **new draft save** requires the name to match `^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$` (requiring
+**The rule fires only when the model changes.** A save is checked when its candidate
+`endpoint_name` differs from the role's currently stored draft `endpoint_name`
+(`locked.selected.draft.content.model.endpoint_name`). A save that leaves the model
+unchanged, such as a prompt-only or temperature-only edit on a role still named
+`databricks-*`, is not checked by this rule. (User decision, 2026-09-28.)
+
+Such a changed name must match `^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$` (requiring
 trailing alphanumeric to prevent names ending in `-`, `_` or `.`),
 with a new typed code `endpoint_not_gateway_model` and user message "Model name must start with `system.ai.` and contain only lowercase letters, digits, hyphens, underscores and periods.". Add this code to the `EndpointValidationCode` Literal. The existing URL and path-metacharacter
 rejection stays, and runs first.
 
 Stored releases are never re-validated against this rule, so pinned `databricks-*` names
 remain valid for execution (§6.2), for publication of untouched roles and for rollback.
-A draft role that still carries a `databricks-*` name can be saved again only after the
-admin chooses a `system.ai.*` model for it.
+A draft role that still carries a `databricks-*` name keeps saving normally until the
+admin changes its model. At that point the new model must be a `system.ai.*` model.
 
 ### 5.3 Remote check on save (Gateway lookup replaces serving-endpoint check)
 
