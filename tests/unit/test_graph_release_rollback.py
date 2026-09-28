@@ -1612,6 +1612,7 @@ def test_candidate_hash_writer_scan_detects_each_write_form(tmp_path, snippet, k
     (tmp_path / "rogue.py").write_text(f"def rogue(row, h):\n    {snippet}\n")
     assert _candidate_hash_writers(tmp_path) == [f"rogue.py:rogue:{kind}"]
 
+
 def _save_model(factory, agent_key, endpoint_name, *, lock):
     service = GraphConfiguration()
     with factory() as db:

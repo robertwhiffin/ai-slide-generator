@@ -461,11 +461,6 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     raise
                 raise DraftContentRejected(_EDITABLE_RULES_INVALID) from exc
             self._run_candidate_validators(self._save_local_validators(), content)
-            gateway_issues = _gateway_model_name_validator(
-                locked.selected.draft.content, content
-            )
-            if gateway_issues:
-                raise DraftContentRejected(*gateway_issues)
             if expected_lock_version != locked.snapshot.draft.lock_version:
                 return DraftSaveConflict(
                     expected_lock_version=expected_lock_version,
@@ -473,6 +468,14 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     client_candidate=candidate,
                     server=self._draft_aggregate_snapshot(locked.snapshot),
                 )
+            # Post-lock (ruling I-1): the locked draft is now the client's own
+            # base, so "changed" means changed by this request, never by a
+            # concurrent save that a stale client has not seen.
+            gateway_issues = _gateway_model_name_validator(
+                locked.selected.draft.content, content
+            )
+            if gateway_issues:
+                raise DraftContentRejected(*gateway_issues)
             self._run_candidate_validators(self.post_stale_validators, content)
             self._validate_remote_endpoint(content)
             return self._write_locked_content(
@@ -525,11 +528,6 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
             if issues:
                 raise DraftContentRejected(*issues)
             self._run_candidate_validators(self._save_local_validators(), validated)
-            gateway_issues = _gateway_model_name_validator(
-                locked.selected.draft.content, validated
-            )
-            if gateway_issues:
-                raise DraftContentRejected(*gateway_issues)
             if expected_lock_version != locked.snapshot.draft.lock_version:
                 return DraftSaveConflict(
                     expected_lock_version=expected_lock_version,
@@ -537,6 +535,14 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     client_candidate=validated,
                     server=self._draft_aggregate_snapshot(locked.snapshot),
                 )
+            # Post-lock (ruling I-1): the locked draft is now the client's own
+            # base, so "changed" means changed by this request, never by a
+            # concurrent save that a stale client has not seen.
+            gateway_issues = _gateway_model_name_validator(
+                locked.selected.draft.content, validated
+            )
+            if gateway_issues:
+                raise DraftContentRejected(*gateway_issues)
             self._run_candidate_validators(self.post_stale_validators, validated)
             self._validate_remote_endpoint(validated)
             return self._write_locked_content(

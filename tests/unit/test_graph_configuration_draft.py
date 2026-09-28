@@ -3791,9 +3791,19 @@ GATEWAY_NAME_TUPLE = (
 )
 
 
+@pytest.mark.parametrize(
+    "endpoint_name",
+    [
+        "databricks-claude-sonnet-4-5",
+        # Refusing the raw padded / mixed-case input proves the save path does
+        # not trim or lowercase the name before validating it (review I-2).
+        " system.ai.claude-opus-5-5 ",
+        "System.AI.Claude-Opus-5-5",
+    ],
+)
 @pytest.mark.parametrize("path", SAVE_PATHS)
 def test_changing_the_model_to_a_non_gateway_name_is_refused_before_any_write(
-    session_factory, monkeypatch, path
+    session_factory, monkeypatch, path, endpoint_name
 ):
     current, before_hash = _stored_content(session_factory)
     write_log: list[str] = []
@@ -3805,7 +3815,7 @@ def test_changing_the_model_to_a_non_gateway_name_is_refused_before_any_write(
             session,
             service,
             path,
-            _endpoint_candidate(current, path, endpoint_name="databricks-claude-sonnet-4-5"),
+            _endpoint_candidate(current, path, endpoint_name=endpoint_name),
             lock_version=0,
             actor="test:gateway-name",
         )
@@ -3815,8 +3825,12 @@ def test_changing_the_model_to_a_non_gateway_name_is_refused_before_any_write(
     assert _stored_content(session_factory) == (current, before_hash)
 
 
+@pytest.mark.parametrize(
+    "endpoint_name", ["system.ai.claude-opus-5-5", "system.ai.m0.v_2-x.9"]
+)
 @pytest.mark.parametrize("path", SAVE_PATHS)
-def test_changing_the_model_to_a_system_ai_name_saves(session_factory, path):
+def test_changing_the_model_to_a_system_ai_name_saves(session_factory, path, endpoint_name):
+    """The accepted name round-trips byte-for-byte, with its `.`, `_` and `-`."""
     current, _ = _stored_content(session_factory)
     service = GraphConfiguration()
     with session_factory() as session:
@@ -3824,13 +3838,11 @@ def test_changing_the_model_to_a_system_ai_name_saves(session_factory, path):
             session,
             service,
             path,
-            _endpoint_candidate(current, path, endpoint_name="system.ai.claude-opus-5-5"),
+            _endpoint_candidate(current, path, endpoint_name=endpoint_name),
             lock_version=0,
             actor="test:gateway-name",
         )
-    assert _stored_content(session_factory)[0].model.endpoint_name == (
-        "system.ai.claude-opus-5-5"
-    )
+    assert _stored_content(session_factory)[0].model.endpoint_name == endpoint_name
 
 
 @pytest.mark.parametrize("path", SAVE_PATHS)
@@ -3858,15 +3870,98 @@ def test_unchanged_legacy_model_saves(session_factory, path):
     assert saved.model.endpoint_name == current.model.endpoint_name
 
 
-def test_url_policy_still_runs_first_for_a_changed_url_shaped_name(session_factory):
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_url_policy_still_runs_first_for_a_changed_url_shaped_name(session_factory, path):
     current, _ = _stored_content(session_factory)
     with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
         _save_endpoint_candidate(
             session,
             GraphConfiguration(),
-            "editable",
-            _endpoint_candidate(current, "editable", endpoint_name="https://x.example/serving"),
+            path,
+            _endpoint_candidate(current, path, endpoint_name="https://x.example/serving"),
             lock_version=0,
             actor="test:gateway-name",
         )
     assert _issue_tuples(caught) == ENDPOINT_URL_TUPLE
+
+
+def _move_draft_model_to_gateway(factory: sessionmaker) -> None:
+    """Another admin moves the stored architect draft to a system.ai model (lock 0 -> 1)."""
+    current, _ = _stored_content(factory)
+    with factory() as session:
+        result = GraphConfiguration().save_editable_model_draft(
+            session,
+            agent_key="architect",
+            expected_lock_version=0,
+            candidate=_editable(current, endpoint_name="system.ai.claude-opus-5-5"),
+            actor="test:other-admin",
+        )
+    assert isinstance(result, DraftSaveResult)
+    assert result.draft.lock_version == 1
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_stale_prompt_only_save_on_a_legacy_view_is_a_409_not_a_gateway_422(
+    session_factory, monkeypatch, path
+):
+    """Review I-1: the rule compares against the client's own base, never a newer draft."""
+    legacy, _ = _stored_content(session_factory)
+    assert legacy.model.endpoint_name.startswith("databricks-")
+    _move_draft_model_to_gateway(session_factory)
+    moved, moved_hash = _stored_content(session_factory)
+    before_db = _database_snapshot(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+    remote = _RecordingRemoteEndpointValidator(write_log)
+    stale_candidate = _endpoint_candidate(
+        legacy,
+        path,
+        endpoint_name=legacy.model.endpoint_name,
+        prompt_text=legacy.prompt_text + "\nstale prompt-only edit",
+    )
+
+    with session_factory() as session:
+        outcome = _save_endpoint_candidate(
+            session,
+            GraphConfiguration(remote_endpoint_validator=remote),
+            path,
+            stale_candidate,
+            lock_version=0,
+            actor="test:stale-admin",
+        )
+
+    assert isinstance(outcome, DraftSaveConflict), outcome
+    assert (outcome.expected_lock_version, outcome.current_lock_version) == (0, 1)
+    assert outcome.server.definitions["architect"].content.model.endpoint_name == (
+        "system.ai.claude-opus-5-5"
+    )
+    assert remote.contents == []
+    assert write_log == []
+    assert _stored_content(session_factory) == (moved, moved_hash)
+    assert _database_snapshot(session_factory) == before_db
+
+
+@pytest.mark.parametrize("path", SAVE_PATHS)
+def test_saving_the_published_legacy_name_back_over_a_gateway_draft_is_refused(
+    session_factory, monkeypatch, path
+):
+    """Review I-3: "changed" means differs from the DRAFT, not from the published release."""
+    legacy, _ = _stored_content(session_factory)
+    _move_draft_model_to_gateway(session_factory)
+    moved, moved_hash = _stored_content(session_factory)
+    write_log: list[str] = []
+    _install_write_spy(monkeypatch, write_log)
+
+    with session_factory() as session, pytest.raises(DraftContentRejected) as caught:
+        _save_endpoint_candidate(
+            session,
+            GraphConfiguration(),
+            path,
+            _endpoint_candidate(moved, path, endpoint_name=legacy.model.endpoint_name),
+            lock_version=1,
+            actor="test:revert-to-legacy",
+        )
+
+    assert _issue_tuples(caught) == GATEWAY_NAME_TUPLE
+    assert write_log == []
+    assert _stored_content(session_factory) == (moved, moved_hash)
