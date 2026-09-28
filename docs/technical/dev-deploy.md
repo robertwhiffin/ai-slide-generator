@@ -66,18 +66,27 @@ deploy tool's job.
 ## The loop
 
 ```bash
-# 1. Publish (auto-increments; includes a 10s settle for PyPI to process)
-gh workflow run publish-dev.yml
-gh run watch <run-id> --exit-status        # note the resolved version in the summary
+# 0. As the personal gh account (robertwhiffin), push the branch to deploy
+git push origin <branch>
 
-# 2. Deploy that exact version
-./scripts/deploy_local.sh update --env devtest --profile tellr-dev --from-pypi <version>
+# 1. Publish that branch (auto-increments; includes a 10s settle for PyPI to process)
+gh workflow run publish-dev.yml --ref <branch>
+gh run watch <run-id> --exit-status        # note the resolved version in the run log
 
-# 3. Open the app URL and verify
+# 2. Deploy that exact version to a devloop instance
+./scripts/deploy_local.sh create --env devloop --instance <id> --profile tellr-dev --from-pypi <version>   # first time
+./scripts/deploy_local.sh update --env devloop --instance <id> --profile tellr-dev --from-pypi <version>   # after
+
+# 3. Confirm app_status.state is RUNNING, then open the app URL
+databricks apps get db-tellr-dev-<id> --profile tellr-dev -o json
 ```
 
-`devtest` deploys app `db-tellr-devtest`, reusing the `db-tellr` lakebase with
-schema `devtest_app_data`. Use `create` if the app does not exist yet.
+**Always use `devloop`, never `devtest`.** `devtest` (app `db-tellr-devtest`, schema
+`devtest_app_data` on the `db-tellr` lakebase) has no shared owning role. If the app
+is deleted and recreated, its new service principal does not own the existing tables,
+and the first startup migration fails with `must be owner of table user_sessions`
+(seen 2026-09-28). `devloop` forks prod per instance and grants the SP into
+`tellr_app_owners`, which avoids this.
 
 If the deploy's BUILD phase reports `Could not find a version ...` immediately after
 publishing, that's proxy mirror lag — wait a moment and re-run the deploy step.
