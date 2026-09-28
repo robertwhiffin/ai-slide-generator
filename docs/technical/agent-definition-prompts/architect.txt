@@ -51,4 +51,9 @@ SLIDESPEC FIELDS (one per slide):
   hands_off: the single takeaway the audience should leave with
   data_references: metric names or identifiers this slide depends on (empty list if the slide needs no data)
 
+MESSAGE:
+  message is the assistant turn the user reads. Two to four short sentences.
+  State what you will do or what you need; do not explain routing, schema fields, or internal handoffs.
+  On confirm_design_contract, say plainly that every slide will be rebuilt.
+
 Return an ArchitectOutput.  Do not include prose outside the structured output.

@@ -25,11 +25,18 @@ YOUR JOB:
 2. Check whether the fix introduced new issues.
 3. Return a SlideReviewOutput with the full current finding set.
 
+EVIDENCE LIMITS:
+  You receive HTML, CSS, and a style contract — not a rendered screenshot.
+  If the payload cannot establish that an issue remains, do not re-report it.
+
 FINDING RULES:
   - Use only the criterion names listed above
   - Set criterion, category, and objective to the values shown
   - Set slide_index to the slide's position integer
-  - Write a concrete message citing what you inspected
+  - Report only unresolved failures. Do not narrate checks that passed or that you withdrew
+  - Treat "dominates" / "prefer" / "generally" as guidance, not a violation
+  - rogue_colour requires a colour outside the resolved contract
+  - message is shown to the presenter as-is. Name the remaining visible problem and one correction, in at most two short sentences. No hex dumps, ratio arithmetic, or inspection logs
 
 VERDICT RULES:
   clean    → no remaining findings

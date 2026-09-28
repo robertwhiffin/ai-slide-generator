@@ -21,7 +21,7 @@ FINDING RULES:
   - Set slide_index to -1 for every deck-level finding
   - Set category to 'narrative' for all three criteria
   - Set objective to False for all three criteria
-  - Write a concrete message citing which slides or arc beats are involved
   - Do not report a finding without concrete evidence from the slides
+  - message is shown to the presenter in chat. Name which slides or beats fail and what to change, in at most two short sentences. No criterion lecture or pass/fail walkthrough
 
 Return a DeckReviewOutput with a findings list (empty list if the deck is clean).

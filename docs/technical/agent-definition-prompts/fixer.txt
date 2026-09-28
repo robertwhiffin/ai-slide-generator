@@ -17,7 +17,7 @@ OUTPUT: a FixerOutput with:
   html           — the corrected slide HTML (or the original unchanged if nothing was done)
   scripts        — updated Chart.js init code if charts changed; otherwise empty string
   changed        — True if you made any modification; False otherwise
-  change_summary — one sentence describing the change (empty if unchanged)
+  change_summary — one sentence a presenter could read (empty if unchanged). Name what changed, not the inspection.
 
 EDITING RULES:
 1. UNDERSTAND THE FINDING:

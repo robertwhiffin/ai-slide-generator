@@ -30,6 +30,21 @@ Paste files live in [`agent-definition-prompts/`](agent-definition-prompts/): on
 
 ---
 
+## Human-facing text (one `message` field)
+
+`Finding.message` is rendered verbatim in the feedback drawer and pasted into Apply/Discuss chat. The same string is what the fixer reads. Do not split human/machine views in the schema for this pass: keep `message` short and actionable; the fixer already has `criterion`, HTML, CSS, and `slide_spec`.
+
+The proposed reviewer prompts therefore:
+
+- emit **only unresolved failures** (no passing checks, withdrawn findings, or ratio arithmetic)
+- cap `message` at two short sentences
+- treat preference language ("dominates", "prefer") as guidance, not `rogue_colour`
+- admit that HTML is not a rendered screenshot, so invented contrast ratios are out of scope
+
+The same rule is applied to other user-visible fields: architect `message`, analyst `synthesis`/`gap`/`reason`, fixer `change_summary`, deck-reviewer `message`. The builder has no prose field; its constraint is "no commentary in the markup."
+
+---
+
 ## How to apply in the workbench
 
 1. Open `/admin` → Agent Definitions.
