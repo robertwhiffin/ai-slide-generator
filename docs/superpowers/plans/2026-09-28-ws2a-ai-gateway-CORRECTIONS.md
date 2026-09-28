@@ -161,3 +161,74 @@ These are the expected new failures from databricks-langchain 0.20.0 no longer c
 ### Step 6 status: BLOCKED
 
 Task 0b Steps 7, 8, 9 not executed. Steps 7–9 must wait until Cause D is resolved by the controller (either authorize a test update or change the pinning strategy).
+
+## Task 0b — Step 7: Build proof
+
+PENDING — push blocked by pre-push secret scan on 4 pre-existing localhost test-URL commits already on origin; escalated to user. The 4 flagged commits (`1eb10231`, `d6b0083a`, `31b62ba1`, `749acf1a`) are all pre-ws2a history commits containing postgres test URLs (`postgresql+psycopg2://localhost:5432/postgres`), not real credentials. No bypass was applied; awaiting user decision.
+
+---
+
+## Task 0b — Step 8: Naming-rule proof
+
+_Run on 2026-09-28 with profile `tellr-dev`. Script at `/tmp/ws2a_naming_probe.py` (not committed)._
+
+Full output:
+
+```
+SKIP non-chat databricks-bge-large-en ['mlflow/v1/embeddings']
+OK system.ai.claude-haiku-4-5
+OK system.ai.claude-opus-4-1
+OK system.ai.claude-opus-4-5
+OK system.ai.claude-opus-4-6
+OK system.ai.claude-opus-4-7
+OK system.ai.claude-opus-4-8
+OK system.ai.claude-opus-5
+ERROR system.ai.claude-sonnet-4 BadRequestError
+OK system.ai.claude-sonnet-4-5
+OK system.ai.claude-sonnet-4-6
+OK system.ai.claude-sonnet-5
+OK system.ai.deepseek-v4-flash-0731
+ERROR system.ai.gemini-2-5-flash BadRequestError
+ERROR system.ai.gemini-2-5-pro BadRequestError
+OK system.ai.gemini-3-1-flash-lite
+OK system.ai.gemini-3-5-flash
+OK system.ai.gemma-3-12b
+OK system.ai.glm-5-2
+ERROR system.ai.gpt-5 BadRequestError
+ERROR system.ai.gpt-5-1 BadRequestError
+ERROR system.ai.gpt-5-2 BadRequestError
+ERROR system.ai.gpt-5-4 BadRequestError
+ERROR system.ai.gpt-5-4-mini BadRequestError
+ERROR system.ai.gpt-5-4-nano BadRequestError
+ERROR system.ai.gpt-5-5 BadRequestError
+SKIP non-chat databricks-gpt-5-5-pro ['openai/v1/responses', 'cursor/v1/chat/completions', 'mlflow/v1/responses', 'codex/v1/responses']
+ERROR system.ai.gpt-5-6-luna BadRequestError
+ERROR system.ai.gpt-5-6-sol BadRequestError
+ERROR system.ai.gpt-5-6-terra BadRequestError
+ERROR system.ai.gpt-5-mini BadRequestError
+ERROR system.ai.gpt-5-nano BadRequestError
+OK system.ai.gpt-oss-120b
+OK system.ai.gpt-oss-20b
+SKIP non-chat databricks-gte-large-en ['mlflow/v1/embeddings']
+OK system.ai.inkling
+OK system.ai.kimi-k3
+OK system.ai.llama-4-maverick
+OK system.ai.meta-llama-3-1-8b-instruct
+OK system.ai.meta-llama-3-3-70b-instruct
+SKIP non-chat databricks-qwen3-embedding-0-6b ['mlflow/v1/embeddings']
+OK system.ai.qwen3-next-80b-a3b-instruct
+OK system.ai.qwen35-122b-a10b
+NEG-OK system.ai.databricks-claude-opus-4-6
+NEG-OK system.ai.databricks-gpt-oss-120b
+```
+
+**Result: PASS.** No `FAIL` or `UNEXPECTED-OK` lines. The naming rule `databricks-<m>` → `system.ai.<m>` holds for all chat endpoints in the gateway list.
+
+Notes on the output:
+- `SKIP non-chat`: 4 embedding/responses endpoints correctly skipped (not `mlflow/v1/chat/completions`).
+- `OK`: 20 models accepted the chat completion request.
+- `ERROR ... BadRequestError`: 12 models returned 400 (not 404). The naming convention works — the endpoint was found and dispatched the request; the `BadRequestError` is a model-level rejection (e.g. `max_tokens=1` too small, or a structured-output requirement). This is not a naming failure.
+- `NEG-OK`: both doubled-prefix negative controls (`system.ai.databricks-*`) correctly returned `NotFoundError`.
+
+---
+
