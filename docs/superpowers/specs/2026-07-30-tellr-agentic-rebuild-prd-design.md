@@ -1,7 +1,7 @@
 # Tellr Agentic Rebuild — Product Requirements (Umbrella PRD)
 
 **Status:** Design / PRD (not an implementation plan)
-**Date:** 2026-07-30
+**Date:** 2026-07-30 · **Status last brought up to date:** 2026-09-28 (after workstream 9, epic #258)
 **Author:** Robert Whiffin (with Claude)
 **Scope:** Re-architecture of the core slide-generation agent and its surrounding
 experience. This is the north-star document. Each workstream in §10 gets its own
@@ -74,7 +74,15 @@ finished outline.
 | "Fix this text myself" | HTML editor is broken | Inline WYSIWYG on the stage | ws8 |
 | "Don't lose my verified slides when I reorder or restore" | Verdicts live in one shared blob; reorder and restore lose or mis-attribute them | A verdict follows its slide through reorder, edit-and-revert, and save-point restore | ✅ ws0a |
 
-**Status against these jobs: none of them are delivered yet.** Workstreams 0a and 0b
+*Status update 2026-09-28:* the paragraph below was written after 0a/0b and is now
+superseded. Since then workstreams 4, 6 and 9 landed on the integration branch. On the
+graph path, "help me work out what this deck should say", "build it from our data" and
+"change slides 5, 6 and 10 differently" now have working machinery. The review agents also
+run, and their slide findings reach the drawer. **None of this is yet evidence of quality**,
+because the agent prompts are still placeholders (§12.1). Inline WYSIWYG (ws8) is not
+started. Nothing has been released.
+
+**Status against these jobs (2026-08-12): none of them are delivered yet.** Workstreams 0a and 0b
 (§10) changed no user-visible behaviour by design — they are the data model and dependency
 groundwork the remaining workstreams stand on. The one row above marked ✅ is the exception,
 and it is a *fidelity* guarantee rather than a new capability: per-slide verdicts now
@@ -149,6 +157,17 @@ checkpoints; each workstream spec derives its own acceptance tests.
   the agent did — is met by an app-native activity view over Lakebase, subject to the
   app's existing deck permissions.
 - No hardcoded model endpoint remains.
+
+*Status 2026-09-28 (platform criteria):* **partly met, for the graph only.** Each of the
+seven graph roles now uses an exact endpoint, with its own parameters, that an admin sets
+in the workbench and fixes per release (ws9). Hardcoded endpoints remain in:
+- the monolith and the MCP door, the verification judge and session-title generation,
+  including on graph turns (`src/core/defaults.py`);
+- PPTX and Google Slides export (Sonnet 4.5);
+- the feedback assistant (Gemma).
+
+**No production call records token usage**; only admin test runs in the workbench do. No
+Gateway configuration exists anywhere in the app. Both remain workstream 2's job.
 
 **No regression** (release gate)
 - Existing decks and sessions open and remain editable after cutover.
@@ -342,6 +361,9 @@ slide viewer** (retire the scroll list), plus a redesigned direct editor.
 > `SlideFinding`/`DrawerCallbacks` and are hard-wired to `[]` in production — the
 > producing backend is **workstream 5**, so Apply and Discuss currently only log.
 > The drawer's empty state is therefore expected, not a defect.
+> **Superseded (ws4b, 2026-09-13):** the deck read path now serves real reviewer
+> findings to the drawer, so graph-mode decks show them. What Apply and Discuss do with
+> a finding is still workstream 5's to finish.
 >
 > **Deliberately deferred:** speaker notes (no domain field exists; the drawer is a
 > one-tab shell so notes drop in without restructuring) and the `@slide` reference
@@ -515,6 +537,14 @@ at all.
   custom regex safety gate. The endpoint abstraction makes both cheap to add later;
   they are explicitly out of scope for the first pass.
 
+*Status 2026-09-28:* **not started.** Workstream 9 changes the premise in one respect:
+admins can already choose the exact endpoint and parameters for each graph role, and each
+release fixes that choice. A cheaper reviewer model is therefore now an admin setting, not
+a code change. That is manual per-role selection, not Gateway routing: the calls still go
+out as the app service principal, with no usage capture and no rate limits. The facts a
+workstream-2 spec needs are collected in
+`docs/superpowers/plans/2026-09-28-ws2-ai-gateway-HANDOVER.md`.
+
 ### 8.2 ~~Unity Catalog requirement (cross-cutting tradeoff)~~
 
 > ❌ **STRUCK IN FULL, 2026-09-18 — see §16.** Tellr remains **UC-agnostic**. No Unity
@@ -586,13 +616,14 @@ defines the end state and the seams.
 | 0a | ✅ **DONE** — **Row-per-slide schema** — `session_slides` (one row per slide), per-row verification, deck-spec column | — | M | Merged 2026-08-12 (PR #235). Prerequisite for 4; see §10.2 |
 | 0b | ✅ **DONE** — **Dependency stack upgrade** — langgraph 1.2.10 pinned and proven on the Apps build proxy | — | S | Merged 2026-08-12 (PR #236). Prerequisite for 4; see §10.2 |
 | 1 | ❌ **DELETED (2026-09-18, §16)** — ~~**UC-in-setup**~~ | — | — | Existed only to provision UC for MLflow tracing. §8.2 struck, so there is nothing to provision. Row kept so numbering and history stay legible |
-| 2 | **Gateway endpoint abstraction** — de-hardcode the model, route via Gateway, usage tracking & rate limits | — | S | Independent |
-| 3 | 🔄 **REDEFINED (2026-09-18, §16)** — **Agent-quality CI gates** — fixture-based recall/precision gate over the review agents, extending `tests/agentic`; plus deletion of all MLflow code from the product | — | S | Was "MLflow rebuild". No longer depends on 1. **Cannot be validated until the repo leaves a personal account and the prompts are authored** — see §16 |
+| 2 | ⏭️ **NEXT** — **Gateway endpoint abstraction** — de-hardcode the model, route via Gateway, usage tracking & rate limits | — | ~~S~~ M | Independent. **Picked up next (2026-09-28).** The graph roles' endpoints are already admin-configured (ws9), so what remains is Gateway routing, usage attribution, rate-limit UX, and the non-graph call sites. Re-sized: those non-graph sites and the attribution-identity question make it bigger than S. Handover: `docs/superpowers/plans/2026-09-28-ws2-ai-gateway-HANDOVER.md` |
+| 3 | 🔄 **REDEFINED (2026-09-18, §16)** — **Agent-quality CI gates** — fixture-based recall/precision gate over the review agents, extending `tests/agentic`; plus deletion of all MLflow code from the product | — | S | Was "MLflow rebuild". No longer depends on 1. **Cannot be validated until the repo leaves a personal account and the prompts are authored** — see §16. *2026-09-28:* not started, and every MLflow item in §16.4 is still present. Ws9 gives admins a place to author, test and publish prompts, but it is not the gate: its only automatic check is output-schema validity |
 | 4 | ✅ **DONE** — **LangGraph core** — supervisor + builder, deck-spec state, two front doors; runs *alongside* the monolith | 2 | L | The big one. Merged 2026-09-16 into `feat/langgraph-core` as five workstreams, ws4a–ws4e (merge `60789f72`). **Two deliberate exclusions:** the monolith is not deleted, and MCP stays on it — both belong to a later PR. See `docs/superpowers/plans/ws4e-HANDOVER.md` |
 | 5 | **Review subsystem** — 3 agents + remediation loop | 4 | L | ~~3, 4~~ — no longer depends on 3 (§16). ~~as scorers~~ — reviewers are participants, not scorers (§7.1 as revised). Much of this shipped incidentally in workstream 4: the three reviewer nodes, the nine-criterion registry with its `objective` predicate, and the foreman→fixer→fix_reviewer loop all exist |
 | 6 | ✅ **DONE** — **Flip-through viewer + feedback drawer** — new slide stage + AI feedback UI | — (stub) | M | Shipped on `feat/flip-through-viewer`; see §6.2 for what landed vs. deferred |
 | 7 | 🟢 **BELIEVED DELIVERED by 4 and 6 without being worked on — needs a revisit, not a build** — **Conversational multi-target editing** — supervisor intent parsing, retire checkboxes | 4 | M | **Delivered incidentally:** checkboxes and `SelectionContext` are gone (6); the graph is invoked with `{"architect_message": message}` **and nothing else**, so §6.1's "no selection state and no `slide_context` round-trip" holds *structurally* rather than by discipline; and **the operator tested multi-target editing on 2026-09-16 and it behaved as expected.** §6.1's "@slide" chip is **dropped** — see §6.1. **What is genuinely open is whether this workstream is still needed at all**, and that cannot be settled yet: the seven agent prompts are **placeholders**, so today's behaviour is not the behaviour that ships. **Revisit once real prompts land** — with a bias toward closing it rather than planning it. **The one real gap either way: no automated test covers multi-target editing**, so it can regress in silence |
-| 8 | **Inline WYSIWYG editor** — click-to-edit, move/resize, drag-reorder, raw-HTML escape hatch | 6 | L | Largest FE build |
+| 8 | **Inline WYSIWYG editor** — click-to-edit, move/resize, drag-reorder, raw-HTML escape hatch | 6 | L | Largest FE build. Not started |
+| 9 | ✅ **DONE** — **Agent review & release workbench** (epic #258, issues #259–#271). Admins review and change what each of the seven graph agents does, without shipping code: prompt, exact model endpoint and parameters, output-schema additions, and extra prompt blocks around protected ones. They test each change against saved cases, approve the results, and publish all seven as one numbered, immutable release. They can view release history and roll back. Every conversation stays on the release it started with, and the chat shows which one | 4 | L | Not in the original decomposition. Merged 2026-09-27 into `feat/langgraph-core` (merge `30547b5b7`). Accepted against 111 acceptance criteria. **Two items left open:** a trigger for clearing old test runs (#282), and the other follow-ups filed as #276–#290. The live endpoint check (#266) passed on 2026-09-28. Graph configuration now comes only from Lakebase, and a turn fails explicitly if it is missing. **It is not prompt authoring:** release 1 is the ws4 placeholder text verbatim. Spec: `docs/superpowers/specs/2026-09-21-agent-definition-workbench-design.md` |
 
 ### 10.1 Sequencing notes
 
@@ -629,12 +660,25 @@ defines the end state and the seams.
   removing `src/services/agent.py` and the `USE AGENT MODE` trigger phrase, and moving the
   MCP one-shot door (§9.2) onto the graph.
 
-**Where the work physically is.** All of it sits on the integration branch
-`feat/langgraph-core`, which is **586 commits ahead of `main` and 0 behind**. `main` is
-still at the 0.4.1 bump. Unreleased there: workstreams 0a, 0b, 6 and 4, the Design System
-Library, and six SDR-4437 security PRs. That is this section's "big-bang release" posture
-working as intended, but it is worth stating plainly rather than inferring from the
-absence of a note: **nothing in this table has reached `main`.**
+- **9** ✅ **is done** (2026-09-27): the agent review & release workbench (epic #258). It
+  was not in the original plan. It makes the prompt-authoring work in §12.1 and §16.5 an
+  admin task in the app instead of a code change, but it does not do that authoring.
+- **2 is next** (picked up 2026-09-28).
+
+**Where the work physically is (updated 2026-09-28).** All of it sits on the integration
+branch `feat/langgraph-core`, pushed to origin at `b9bacf8b5`. It is **897 commits ahead
+of `main` and 59 behind**.
+- `main` has moved to **0.4.3** and carries work the branch lacks: the SDR-4437 security
+  PRs #247–#254 (including the secret-backed Fernet key deploy mode and the removal of
+  `DATABRICKS_TOKEN` from the app template), the 0.4.3 release, and the Genie One MCP docs
+  (#256, #274).
+- **`main` must be merged into the branch before release.** Nobody has attempted that
+  merge yet.
+- Unreleased on the branch: workstreams 0a, 0b, 4, 6 and 9, the Design System Library, and
+  the earlier security PRs.
+- **Nothing in this table has reached `main`.**
+- When the branch does go to `main`, use a merge commit, not a squash. A squash breaks a
+  recorded-contract test (#288).
 
 ### 10.2 What the prerequisites delivered (and what they oblige workstream 4 to do)
 
@@ -707,6 +751,7 @@ subsystems are reused and must keep working:
 - Review-loop iteration cap value and back-off behavior.
 - How auto-fixed vs. surfaced findings are persisted across turns and save points.
 - Gateway endpoint provisioning: is it FE-provided, per-workspace, or app-managed?
+  *Still open; to be settled in the workstream-2 spec. See the handover's scope questions.*
 - ~~UC schema migration UX for existing production deployments.~~ ❌ **MOOT (§16)** — no UC
   requirement, so no migration.
 - Whether/when to promote specialist agents to governed serving endpoints (the
@@ -773,12 +818,23 @@ rediscover. Recorded here so they are not lost between documents.
     **Do not weaken a layer-3 assertion to make a placeholder satisfy it** — a skipped
     honest test beats a passing dishonest one.
   **Authoring the real prompts is unassigned work and is not in any workstream above.**
+  *Update 2026-09-28 (ws9):* the prompts are no longer code. They live in Lakebase as
+  versioned agent definitions, and admins edit, test and publish them in the workbench.
+  **The text is unchanged:** release 1 is the placeholder prose above, word for word, so
+  every consequence listed here still holds. Authoring is still unassigned; it is now
+  admin work in the app rather than a pull request. Layer 3 is still skipped, and its
+  gate is now tied to release 1.
 
 - **Security surface of review agents.** Review agents read untrusted deck content
   and tool output, and their findings feed instructions back to the builder. The
   existing `<untrusted-data>` wrapping/injection scanning and the output safety gate
   must extend to cover reviewer input and remediation output — including re-gating
   auto-remediated HTML. Affects workstream 5.
+  *Status 2026-09-28:* ws9 added a second prompt-assembly format that wraps each role's
+  runtime input in an `<untrusted-data>` boundary. **The active release 1 uses the first
+  format**, which, like ws4 before it, inserts the runtime input unwrapped. So the
+  boundary takes effect for every role only once an admin moves each definition to the
+  new format and publishes.
 - **OBO propagation.** The user's token must reach tool calls made from any agent in
   the graph, and deck/profile permission checks still apply. Affects workstream 4/5.
   **EXTENDED 2026-09-18 (§16): OBO-derived data must not be written to any store whose
@@ -949,6 +1005,10 @@ Genuinely independent and urgent:
   the fixer stops rewriting correct slides against a hallucinated finding (§16.6, item 1).
   A live defect that damages user work on every graph turn, and a small change. **This is
   the only item here that should not wait for anything.**
+  *Still NOT done (2026-09-28).* In release 1 an admin could remove the criterion by
+  editing the build reviewer's prompt in the workbench. In the new assembly format the
+  criteria block is protected and generated from the registry, so there it needs a code
+  change.
 - **Author the fixtures.** They can be written before they can be run.
 
 Coupled to a UI update, and therefore *not* independent:
@@ -958,7 +1018,7 @@ Coupled to a UI update, and therefore *not* independent:
   `mlflow.set_experiment` block, `src/services/evaluation/llm_judge.py`, the
   `mlflow.log_feedback` call in `src/api/routes/verification.py`, the admin judge-backend
   control with the `llm_judge_backend` column, the experiment link at `AppLayout.tsx:750`
-  with its `experiment_url` plumbing and `session.experiment_id`, the four `TELLR_MLFLOW_*`
+  with its `experiment_url` plumbing and `session.experiment_id` (the link is at line 814 as of 2026-09-28), the four `TELLR_MLFLOW_*`
   variables in `app.yaml.template` with `deploy.py`'s substitution machinery, and
   `docs/technical/mlflow-uc-tracing.md`. The monolith's own MLflow calls ride the pull
   request that deletes `src/services/agent.py`.
@@ -1036,6 +1096,9 @@ the whole registry, so a per-slide reviewer is told about `arc_gap`,
 while `deck_reviewer` does receive the converse instruction.
 
 **4. Token usage is discarded at the one point every agent passes through.**
+*(2026-09-28: still true in production. The single binding is now
+`bind_structured_output_model` in `src/services/agent_runtime.py`; `get_structured_model`
+is gone. Tokens are captured only for workbench test runs.)*
 `get_structured_model` returns `model.with_structured_output(schema)`, so `.invoke()` yields
 the parsed object and the `AIMessage` — carrying `usage_metadata` — is dropped. No token or
 cost capture exists anywhere in `src/`. §3's cost-visibility criterion therefore has no
