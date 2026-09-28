@@ -336,7 +336,7 @@ async function editArchitectFiveFields(assertNoPut?: () => void) {
   assertNoPut?.();
   fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
   assertNoPut?.();
-  fireEvent.click(screen.getByRole('radio', { name: 'system.ai.endpoint-a2' }));
+  fireEvent.click(await within(modelPanel()).findByRole('radio', { name: 'system.ai.endpoint-a2' }));
   assertNoPut?.();
   fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.4' } });
   assertNoPut?.();
@@ -506,7 +506,7 @@ describe('AgentDefinitionWorkbench', () => {
     fireEvent.keyDown(promptTab, { key: 'ArrowRight' });
     expect(modelTab).toHaveAttribute('aria-selected', 'true');
     await waitFor(() => expect(modelTab).toHaveFocus());
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent('databricks-claude-opus-4-6');
+    expect(within(modelPanel()).getByText('Current model').parentElement).toHaveTextContent('databricks-claude-opus-4-6');
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(60000);
 
     fireEvent.click(tabs.getByRole('tab', { name: 'Output Schema' }));
@@ -658,7 +658,7 @@ describe('AgentDefinitionWorkbench', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('radio', { name: 'system.ai.endpoint-a2' })).toBeChecked();
+    expect(within(modelPanel()).getByRole('radio', { name: 'system.ai.endpoint-a2' })).toBeChecked();
     expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.4);
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(8192);
     expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.8);
@@ -894,7 +894,7 @@ describe('AgentDefinitionWorkbench', () => {
 
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveAccessibleDescription('Prompt rejected.');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('radiogroup', { name: 'Discovered models' })).toHaveAccessibleDescription('Endpoint rejected.');
+    expect(await within(modelPanel()).findByRole('radiogroup', { name: 'Discovered models' })).toHaveAccessibleDescription('Endpoint rejected.');
     expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveAccessibleDescription('Temperature rejected.');
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveAccessibleDescription('Maximum tokens rejected.');
     expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveAccessibleDescription('Top-p rejected.');
@@ -944,7 +944,7 @@ describe('AgentDefinitionWorkbench', () => {
     );
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('radio', { name: 'system.ai.endpoint-a2' })).toBeChecked();
+    expect(within(modelPanel()).getByRole('radio', { name: 'system.ai.endpoint-a2' })).toBeChecked();
     expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.4);
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(8192);
     expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.8);
@@ -2423,7 +2423,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(discoveredNames()).toEqual([]);
     expect(panel).toHaveTextContent(NO_SEARCH_MATCH);
 
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(architectStatus(navigation)).not.toHaveAccessibleDescription('Unsaved');
     fireEvent.change(search, { target: { value: '' } });
     expect(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
@@ -2440,7 +2440,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(await within(panel).findByText(EMPTY_DISCOVERY)).toBeVisible();
     expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
   });
 
   it.each([
@@ -2463,7 +2463,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(alert).toHaveTextContent(message);
     expect(within(panel).queryByText(EMPTY_DISCOVERY)).not.toBeInTheDocument();
     expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(architectStatus(navigation)).not.toHaveAccessibleDescription('Unsaved');
     const refresh = within(panel).getByRole('button', { name: 'Refresh models' });
     expect(refresh).toBeEnabled();
@@ -2588,7 +2588,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
     await within(panel).findByRole('radio', { name: syntheticNewerModelEndpoint.name });
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
     expect(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name })).not.toBeChecked();
     expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
@@ -2606,7 +2606,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
       },
     });
     await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(syntheticNewerModelEndpoint.name);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(syntheticNewerModelEndpoint.name);
   });
 
   it('keeps same-content Save enabled with the catalog loaded', async () => {
@@ -2843,7 +2843,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(region.textContent).not.toMatch(/approv|publish|release|ready|verified|passed/i);
     expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(catalogGets(fetchMock)).toHaveLength(1);
     expect(workbenchGets(fetchMock)).toHaveLength(1);
@@ -2874,7 +2874,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(probeBody(fetchMock, 0)).toBe('{"lock_version":0}');
     expect(probeBody(fetchMock, 0)).not.toContain(syntheticNewerModelEndpoint.name);
     expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name })).not.toBeChecked();
     expect(putCalls(fetchMock)).toHaveLength(0);
   });
@@ -2975,7 +2975,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(region).not.toHaveTextContent(PROBE_SUCCEEDED_TEXT);
     expect(screen.queryByRole('region', { name: 'Server rejected this request' })).not.toBeInTheDocument();
     expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(probeButton()).toBeEnabled();
     expectNoForbiddenActionNames();
@@ -3081,7 +3081,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(within(conflict).queryByRole('group', { name: 'Submitted values' })).not.toBeInTheDocument();
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
     expect(probeResult()).not.toBeInTheDocument();
-    expect(screen.getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(probeCalls(fetchMock)).toHaveLength(1);
     expect(putCalls(fetchMock)).toHaveLength(0);
 
