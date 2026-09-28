@@ -165,8 +165,11 @@ client timeouts and the typed-error rules (never echo provider text) are unchang
 
 The `system.ai` check is a **new** validator, `_gateway_model_name_validator`. It runs only
 in the two draft saves: `save_editable_model_draft` and `save_draft_content`. They already
-run `self._save_local_validators()`; they now also run the new validator immediately
-afterwards.
+run `self._save_local_validators()`. The new validator runs **after** the lock-version
+comparison (after the `DraftSaveConflict` early return) and before the remote check, so a
+stale save reports the 409 Conflict rather than a 422. This overrides the "immediately
+afterwards" wording of the original spec; the ruling is recorded in the corrections file
+(2026-09-28, ruling I-1).
 
 It must **not** be added to any of the following, because each is reached by a path that
 must keep accepting stored `databricks-*` names:
@@ -378,6 +381,32 @@ original §8.1 and handover §8 that 2a does not deliver:
 
 The handover document remains 2b's starting-state reference. 2a updates its §2 table to
 mark the migrated sites.
+
+Two items discovered during 2a testing are added to 2b's scope:
+
+- **Filter deprecated-but-listed Gateway models.** Some models (e.g.
+  `system.ai.gemini-2-5-flash`, `system.ai.claude-sonnet-4`) appear in the Gateway
+  endpoint list and pass the save-time `supported_api_types` check but return
+  400 "endpoint is deprecated" at invocation. The #266 structured-output probe surfaces
+  this at test time; a deployed release built on such a model fails closed with
+  `pinned_graph_configuration_unavailable`. 2b should filter deprecated entries from the
+  picker or surface a deprecation warning at save time.
+- **Hide non-chat models from the picker.** Embedding endpoints (e.g.
+  `system.ai.bge_large_en_v1_5`) appear in the discovery list and are refused at save
+  time by the remote `mlflow/v1/chat/completions` check, but their presence in the picker
+  is confusing. 2b should filter them at discovery time (a per-entry lookup during list
+  was rejected in 2a as too expensive; a name or type heuristic may be feasible by then).
+
+**Open housekeeping item (not done in 2a): secret-scanner CI false positives.** Localhost
+CI/test Postgres URLs in `.github/workflows/test.yml` (and a few docs examples) contain
+credentials of the form `postgresql+psycopg2://user:password@localhost:5432/postgres` that
+trip the Databricks pre-push hook when creating a new branch from any commit containing
+these patterns. Four historical commits on `feat/langgraph-core` were gated behind
+`SKIP_SECRET_SCAN=1` for the 2a push, with the author posting in `#no-secrets-in-code`.
+Forward-fix candidate: adopt `POSTGRES_HOST_AUTH_METHOD: trust` and remove the inline
+password from CI Postgres URLs; allow-list the four historical commit fingerprints in
+`#no-secrets-in-code`. Neither step has been applied; this is a 2b housekeeping item, not
+a security issue (the credentials are local-only test values with no network exposure).
 
 ## 11. Documentation changes
 

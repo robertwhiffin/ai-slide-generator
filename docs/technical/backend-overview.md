@@ -443,6 +443,49 @@ Key helpers in `src/core/databricks_client.py`:
 
 ---
 
+## Workbench Model Selection (ws2a — Unity AI Gateway)
+
+The Agent Definition Workbench (`/admin`) lets administrators configure which model each
+of the seven graph roles uses. Since workstream 2a, model discovery and validation run
+through the Unity AI Gateway rather than the Serving Endpoints API.
+
+### Discovery (`src/services/model_endpoint_catalog.py`)
+
+`DatabricksModelEndpointCatalog.list_system_models` calls
+`GET /api/ai-gateway/v2/endpoints` as the app service principal, using the SDK's generic
+`api_client.do`. For each returned entry whose name begins with `databricks-`, it maps
+`databricks-<model>` → `system.ai.<model>` and surfaces the `system.ai.*` name in the
+picker. Entries without the `databricks-` prefix are dropped, because the naming rule
+gives them no invocable `system.ai` form. The list response carries no
+`supported_api_types`, so discovery does not filter by API type — embedding and other
+non-chat endpoints appear in the list and are refused at save time.
+
+There is no custom-name free-text input field. The workbench offers only models the
+Gateway list returns.
+
+### Save-time validation
+
+**Local name policy.** When a draft save changes the model, `_gateway_model_name_validator`
+checks that the new name matches `^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$`. This
+validator runs after the lock-version comparison (after the `DraftSaveConflict` early
+return) and before the remote check, so a stale save reports 409 Conflict rather than 422.
+A save that leaves the model unchanged is not checked by this rule, which means a role
+still named `databricks-*` continues saving normally until an admin changes its model.
+
+**Remote Gateway lookup.** `validate_custom_endpoint_remote` calls
+`GET /api/ai-gateway/v2/endpoints/<name>` through a bounded catalog client (5 s retry,
+3 s HTTP). It maps `system.ai.<m>` to `databricks-<m>` before the lookup. If the response
+`supported_api_types` does not contain `mlflow/v1/chat/completions`, the save is rejected
+with `endpoint_not_chat_model`.
+
+### Legacy names on stored releases
+
+Conversations pinned to releases created before ws2a store `databricks-*` endpoint names.
+At runtime the name is passed through to the Gateway unchanged — the Gateway accepts both
+forms — so no rewriting or republishing is required. The v1 seed manifest is not changed.
+
+---
+
 ## Contributor Sessions Architecture
 
 Decks can be shared with other users or groups via **deck contributors** (stored in the `deck_contributors` table), or with all Tellr workspace users via **`user_sessions.global_permission`** on the root session (CAN_VIEW or CAN_EDIT only). Individual contributor grants use CAN_VIEW, CAN_EDIT, and CAN_MANAGE.
