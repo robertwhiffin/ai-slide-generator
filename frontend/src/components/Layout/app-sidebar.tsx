@@ -9,12 +9,15 @@ import {
   Layers,
   Compass,
   Shapes,
+  ShieldCheck,
 } from "lucide-react"
+import { useNavigate } from "react-router-dom"
 import { NavMain } from "@/components/Layout/nav-main"
 import { NavSecondary } from "@/components/Layout/nav-secondary"
 import { DeckHistory } from "@/components/Layout/deck-history"
 import { BrandHeader } from "@/components/Layout/brand-header"
 import { useTour } from "@/contexts/TourContext"
+import { useCurrentUser } from "@/hooks/useCurrentUser"
 import {
   Sidebar,
   SidebarContent,
@@ -95,6 +98,12 @@ export function AppSidebar({
   ...props
 }: AppSidebarProps) {
   const { startTour } = useTour()
+  const navigate = useNavigate()
+  // UX only: /admin enforces its own gate and every admin API route checks server-side.
+  const { isAdmin, loading } = useCurrentUser()
+  const configureItems = !loading && isAdmin
+    ? [...navSecondaryItems, { title: "Admin", viewId: "admin", icon: ShieldCheck }]
+    : navSecondaryItems
 
   return (
     <Sidebar className="border-r-0" data-tour="sidebar" {...props}>
@@ -126,9 +135,15 @@ export function AppSidebar({
         <SidebarGroup data-tour="configure-section">
           <SidebarGroupLabel>Configure</SidebarGroupLabel>
           <NavSecondary
-            items={navSecondaryItems}
+            items={configureItems}
             activeView={currentView}
-            onNavigate={(viewId) => onViewChange(viewId as ViewMode)}
+            onNavigate={(viewId) => {
+              if (viewId === 'admin') {
+                navigate('/admin')
+              } else {
+                onViewChange(viewId as ViewMode)
+              }
+            }}
           />
         </SidebarGroup>
         <SidebarMenu>
