@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any, get_args
 
 import httpx
@@ -152,7 +153,7 @@ def test_model_endpoint_probe_success_constructs_binds_then_invokes_exactly():
         (
             "model_factory",
             {
-                "endpoint": "exact saved endpoint",
+                "model": "exact saved endpoint",
                 "temperature": 0.2,
                 "max_tokens": 64,
                 "top_p": 0.9,
@@ -586,13 +587,16 @@ REAL_PROVIDER_CASES = [
 
 
 class MockTransportWorkspace:
-    """A workspace-client stand-in exposing only the one method the chat model uses."""
+    """A workspace-client stand-in exposing only what ``DatabricksOpenAI`` reads."""
 
     def __init__(self, outcome: int | str) -> None:
         self.outcome = outcome
         self.requests: list[httpx.Request] = []
         self.client_kwargs: list[dict[str, Any]] = []
-        self.serving_endpoints = self
+        self.config = SimpleNamespace(
+            host=f"https://{MOCK_HOST}",
+            authenticate=lambda: {"Authorization": "Bearer unit-test-dummy-key"},
+        )
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -632,34 +636,55 @@ class MockTransportWorkspace:
             int(self.outcome), json={"error": {"message": PROVIDER_SECRET}}
         )
 
-    def get_open_ai_client(self, **kwargs: Any) -> openai.OpenAI:
-        self.client_kwargs.append(kwargs)
-        return openai.OpenAI(
-            base_url=f"https://{MOCK_HOST}/serving-endpoints",
-            api_key="unit-test-dummy-key",
-            http_client=httpx.Client(transport=httpx.MockTransport(self._handle)),
-            **kwargs,
-        )
-
 
 def real_provider_probe(workspace: MockTransportWorkspace) -> DatabricksStructuredOutputProbe:
-    """The production model factory (real ``ChatDatabricks``) over the mock workspace."""
-    return DatabricksStructuredOutputProbe(client_factory=lambda: workspace)
+    """The production model factory (real ``ChatDatabricks``) over the mock workspace.
+
+    Note: ``client_factory=lambda: None`` avoids pydantic's ``workspace_client``
+    type-check on ``ChatDatabricks``; the mock workspace is injected via
+    ``_install_real_provider`` which wraps ``get_openai_client``.
+    """
+    return DatabricksStructuredOutputProbe(client_factory=lambda: None)
+
+
+def _install_real_provider(monkeypatch, workspace: MockTransportWorkspace) -> None:
+    """Install the mock transport and record ``get_openai_client`` kwargs.
+
+    Patches ``_get_authorized_http_client`` so the underlying ``httpx.Client``
+    routes through ``workspace._handle``, and wraps ``get_openai_client`` to
+    inject the mock workspace (bypassing ``ChatDatabricks``'s pydantic
+    ``workspace_client: Optional[WorkspaceClient]`` field) and record kwargs.
+    """
+    from databricks_langchain import chat_models
+    from tests.fixtures.mock_chat_completions import install_mock_gateway_transport
+
+    install_mock_gateway_transport(monkeypatch)
+    original = chat_models.get_openai_client
+
+    def _recording(workspace_client=None, **kwargs):
+        workspace.client_kwargs.append(kwargs)
+        # Inject the mock workspace so DatabricksOpenAI uses workspace.config.host
+        # and _get_authorized_http_client routes to workspace._handle.
+        return original(workspace_client=workspace, **kwargs)
+
+    monkeypatch.setattr(chat_models, "get_openai_client", _recording)
 
 
 def _assert_only_the_mock_was_reached(workspace: MockTransportWorkspace) -> None:
     assert workspace.client_kwargs == [
-        {"timeout": PROBE_TIMEOUT_SECONDS, "max_retries": PROBE_MAX_RETRIES}
+        {"timeout": PROBE_TIMEOUT_SECONDS, "max_retries": PROBE_MAX_RETRIES, "use_ai_gateway": True}
     ]
     assert len(workspace.requests) == 1  # one attempt: max_retries=0 reached openai
     request = workspace.requests[0]
     assert request.url.host == MOCK_HOST
+    assert request.url.path == "/ai-gateway/mlflow/v1/chat/completions"
     assert request.headers["authorization"] == "Bearer unit-test-dummy-key"
 
 
-def test_model_endpoint_probe_real_provider_success_over_mock_transport():
+def test_model_endpoint_probe_real_provider_success_over_mock_transport(monkeypatch):
     """Catches the real provider path failing to bind or parse the ``ok`` schema."""
     workspace = MockTransportWorkspace(200)
+    _install_real_provider(monkeypatch, workspace)
 
     assert real_provider_probe(workspace).probe(CONFIGURATION) is None
 
@@ -670,9 +695,10 @@ def test_model_endpoint_probe_real_provider_success_over_mock_transport():
 
 
 @pytest.mark.parametrize(("outcome", "code"), REAL_PROVIDER_CASES, ids=str)
-def test_model_endpoint_probe_real_provider_errors_are_classified(outcome, code):
+def test_model_endpoint_probe_real_provider_errors_are_classified(monkeypatch, outcome, code):
     """Catches every real rejection collapsing to the retryable 503 (review I1)."""
     workspace = MockTransportWorkspace(outcome)
+    _install_real_provider(monkeypatch, workspace)
 
     with pytest.raises(StructuredOutputProbeFailure) as caught:
         real_provider_probe(workspace).probe(CONFIGURATION)

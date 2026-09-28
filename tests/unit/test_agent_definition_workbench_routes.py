@@ -4655,11 +4655,13 @@ def test_model_endpoint_probe_route_maps_real_provider_errors(
         MOCK_HOST,
         PROVIDER_SECRET,
         MockTransportWorkspace,
+        _install_real_provider,
         real_provider_probe,
     )
 
     _force_admin(monkeypatch, is_admin=True)
     workspace = MockTransportWorkspace(outcome)
+    _install_real_provider(monkeypatch, workspace)
     with _app_for(session_factory, probe=real_provider_probe(workspace)) as client:
         body = _workbench(client)
         response = client.post(_probe_url("architect"), json={"lock_version": 0})

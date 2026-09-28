@@ -1,21 +1,22 @@
 """A workspace-client stand-in that serves the REAL ``ChatDatabricks`` a canned
-chat completion over ``httpx.MockTransport`` (#267 whole-branch fix I-1).
+chat completion over ``httpx.MockTransport`` (#267 whole-branch fix I-1, ws2a).
 
-It follows #266's probe harness (``tests/unit/test_model_endpoint_probe.py``):
-the chat model gets an ``openai.OpenAI`` whose only transport is the mock, with
-a literal dummy key and an ``.invalid`` host, so no request can reach a network
-and no ambient credential is read.  The completion answers the bound schema's
-own tool with ``arguments``; ``usage`` is included only when given, so a test
-can drive an endpoint that reports token usage and one that does not.
+``install_mock_gateway_transport`` patches the one HTTP-client factory that
+``DatabricksOpenAI`` calls, so every request from real ``ChatDatabricks`` is
+routed through ``MockChatCompletionsWorkspace._handle`` instead of hitting a
+network.  The real ``BearerAuth`` still reads
+``workspace_client.config.authenticate``, and the real base-URL resolution
+still decides the path (``{host}/ai-gateway/mlflow/v1``), so the full
+production code path executes — only the transport is replaced.
 """
 
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
-import openai
 
 MOCK_CHAT_HOST = "chat.invalid"
 
@@ -30,13 +31,20 @@ MOCK_USAGE = {
 
 
 class MockChatCompletionsWorkspace:
-    """Expose only ``serving_endpoints.get_open_ai_client``, as the chat model uses."""
+    """Expose only what ``DatabricksOpenAI`` reads: ``config.host`` and ``config.authenticate``.
+
+    ``install_mock_gateway_transport`` routes the client's HTTP through ``_handle``,
+    so no request can reach a network and no ambient credential is read.
+    """
 
     def __init__(self, arguments: dict[str, Any], *, usage: dict[str, int] | None) -> None:
         self.arguments = arguments
         self.usage = usage
         self.requests: list[httpx.Request] = []
-        self.serving_endpoints = self
+        self.config = SimpleNamespace(
+            host=f"https://{MOCK_CHAT_HOST}",
+            authenticate=lambda: {"Authorization": "Bearer unit-test-dummy-key"},
+        )
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -72,13 +80,24 @@ class MockChatCompletionsWorkspace:
             body["usage"] = dict(self.usage)
         return httpx.Response(200, json=body)
 
-    def get_open_ai_client(self, **kwargs: Any) -> openai.OpenAI:
-        return openai.OpenAI(
-            base_url=f"https://{MOCK_CHAT_HOST}/serving-endpoints",
-            api_key="unit-test-dummy-key",
-            http_client=httpx.Client(transport=httpx.MockTransport(self._handle)),
-            **kwargs,
+
+def install_mock_gateway_transport(monkeypatch) -> None:
+    """Make ``DatabricksOpenAI`` send through the workspace stand-in's ``_handle``.
+
+    Only the transport is replaced: the real ``BearerAuth`` still reads
+    ``workspace_client.config.authenticate``, and the real base-URL resolution still
+    decides the path.
+    """
+    from databricks_openai.utils import clients
+
+    def _mock_http_client(workspace_client, follow_redirects: bool = True) -> httpx.Client:
+        return httpx.Client(
+            auth=clients.BearerAuth(workspace_client.config.authenticate),
+            transport=httpx.MockTransport(workspace_client._handle),
+            follow_redirects=follow_redirects,
         )
+
+    monkeypatch.setattr(clients, "_get_authorized_http_client", _mock_http_client)
 
 
 __all__ = [
@@ -87,4 +106,5 @@ __all__ = [
     "MOCK_PROMPT_TOKENS",
     "MOCK_USAGE",
     "MockChatCompletionsWorkspace",
+    "install_mock_gateway_transport",
 ]

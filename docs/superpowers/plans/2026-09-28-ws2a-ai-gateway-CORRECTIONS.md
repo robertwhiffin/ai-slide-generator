@@ -232,3 +232,36 @@ Notes on the output:
 
 ---
 
+
+## Task 1 — Seam-key renames (every edited assertion line)
+
+All `"endpoint"` key renames in model-factory kwargs assertions:
+
+| File | Line (approx) | Change |
+|---|---|---|
+| `tests/unit/test_agent_runtime.py` | ~412 | `"endpoint": "databricks-claude-opus-4-6"` → `"model"` |
+| `tests/unit/test_agent_runtime.py` | ~675 | `"endpoint": "saved exact endpoint-name"` → `"model"` |
+| `tests/unit/test_agent_runtime.py` | ~733 | `kwargs["endpoint"]` → `kwargs["model"]` |
+| `tests/unit/test_agent_runtime.py` | ~691 (docstring) | `"as ``endpoint``"` → `"as ``model``"` |
+| `tests/unit/test_agent_runtime.py` | ~1444 (_SAVED_MODEL_KWARGS) | `"endpoint": "saved exact endpoint-name"` → `"model"` |
+| `tests/unit/test_model_endpoint_probe.py` | ~155 | `"endpoint": "exact saved endpoint"` → `"model"` |
+| `tests/unit/test_persisted_agent_runtime.py` | ~1099 | `kwargs["endpoint"]` → `kwargs["model"]` (extra file, not in brief — same cause) |
+| `tests/unit/test_persisted_agent_runtime.py` | ~1170 | `kwargs["endpoint"]` → `kwargs["model"]` (extra file, not in brief — same cause) |
+
+---
+
+## Task 1 — Pydantic workspace_client deviation
+
+**Brief intent:** `install_mock_gateway_transport(monkeypatch)` + `client_factory=lambda: workspace` should route `ChatDatabricks` requests through the mock transport.
+
+**Actual behaviour:** `ChatDatabricks` declares `workspace_client: Optional[sdk.WorkspaceClient] = Field(default=None, exclude=True)`. Pydantic v2 raises `ValidationError: Input should be an instance of WorkspaceClient` when a mock workspace is passed directly. `arbitrary_types_allowed=True` is set but does not bypass `is_instance_of` checks on explicitly-typed fields.
+
+**Resolution:** Changed all real-provider test helpers to:
+1. `client_factory=lambda: None` — passes pydantic (None is valid for `Optional[sdk.WorkspaceClient]`).
+2. Wrap `chat_models.get_openai_client` to inject the mock workspace from closure: `original(workspace_client=workspace, **kwargs)`. This makes `DatabricksOpenAI(workspace_client=workspace, ...)` (no pydantic validation on `DatabricksOpenAI`) use `workspace.config.host` for the base URL and `_get_authorized_http_client(workspace, ...)` for the mock transport.
+
+Affected helpers: `_real_chat_adapter`, `_real_provider_executor`, `real_provider_probe`, `_install_real_provider`, and the new gateway test `test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route`.
+
+The `_install_real_provider` signature and usage are unchanged; only the body deviates from the brief (`workspace_client=workspace` in place of `workspace_client=workspace_client`).
+
+---
