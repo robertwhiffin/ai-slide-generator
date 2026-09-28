@@ -149,7 +149,7 @@ class TestAgentRuntimePromptAssembly:
         from src.services.agent_resolution import resolve_style_source
 
         case1 = _assembled_prompt(
-            "build_reviewer",
+            "architect",
             {},
             design_system_active=True,
         )
@@ -157,7 +157,7 @@ class TestAgentRuntimePromptAssembly:
         resolved2 = resolve_style_source(AgentConfig())
         assert resolved2.design_system_active is False
         case2 = _assembled_prompt(
-            "build_reviewer",
+            "builder",
             {},
             design_system_active=resolved2.design_system_active,
         )
@@ -175,7 +175,7 @@ class TestAgentRuntimePromptAssembly:
 
         assert resolved3.design_system_active is False
         case3 = _assembled_prompt(
-            "build_reviewer",
+            "builder",
             {},
             design_system_active=resolved3.design_system_active,
         )

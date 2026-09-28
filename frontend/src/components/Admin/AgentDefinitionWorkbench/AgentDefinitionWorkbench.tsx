@@ -145,7 +145,7 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
       <div data-testid="workbench-overflow" className="max-w-full overflow-x-auto pb-2">
         <div
           data-testid="workbench-grid"
-          className="grid min-w-[1100px] grid-cols-[220px_minmax(520px,1fr)_260px] gap-4"
+          className="grid min-w-[1100px] grid-cols-[200px_minmax(640px,1fr)_240px] gap-4"
         >
           <nav aria-label="Graph nodes" className="rounded-lg border border-gray-200 bg-white p-3">
             <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Graph nodes</h3>

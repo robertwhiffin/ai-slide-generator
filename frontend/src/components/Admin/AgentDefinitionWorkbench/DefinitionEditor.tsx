@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type {
   AgentKey,
   AgentReadiness,
@@ -34,6 +34,12 @@ const TAB_LABELS: Record<DefinitionTab, string> = {
   'output-schema': 'Output Schema',
   assembly: 'Assembly',
 };
+
+const PROMPT_TAB_INTRO =
+  'This is the authored instruction for this role — the part you edit. Locked assembly stages wrap it at run time with payload delimiters and any role-specific constraints.';
+
+const ASSEMBLY_TAB_INTRO =
+  'Assembly is the locked pipeline that wraps the authored prompt with this role\'s constraints, untrusted-data delimiters, and the runtime payload. After upgrading to Graph Version 2 you can insert custom text at allowed points. Slide-frame constraints apply only to Builder; design-system precedence applies only to Architect.';
 
 /**
  * The one workbench-owned discovery catalog (#266 correction 16). `items` is the last
@@ -225,7 +231,17 @@ export function DefinitionEditor({
 }: DefinitionEditorProps) {
   const [activeTab, setActiveTab] = useState<DefinitionTab>('prompt');
   const [modelSearch, setModelSearch] = useState('');
+  const [promptExpanded, setPromptExpanded] = useState(false);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  useEffect(() => {
+    if (!promptExpanded) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setPromptExpanded(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [promptExpanded]);
 
   const selectTab = (tab: DefinitionTab, focus = false) => {
     setActiveTab(tab);
@@ -428,6 +444,7 @@ export function DefinitionEditor({
         hidden={activeTab !== 'prompt'}
         className="min-h-72 rounded-md border border-gray-200 bg-gray-50 p-4"
       >
+        <p className="mb-3 text-sm leading-6 text-gray-600">{PROMPT_TAB_INTRO}</p>
         <label htmlFor={`${agentKey}-prompt`} className="mb-2 block text-sm font-medium text-gray-700">
           Prompt text
         </label>
@@ -437,9 +454,49 @@ export function DefinitionEditor({
           value={entry.local.prompt_text}
           disabled={promptDisabled}
           onChange={(event) => onEdit(agentKey, 'prompt_text', event.currentTarget.value)}
-          className="min-h-56 w-full rounded-md border border-gray-300 p-3 font-mono text-sm"
+          className="min-h-72 w-full rounded-md border border-gray-300 p-3 font-mono text-sm leading-6"
         />
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setPromptExpanded(true)}
+            className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700"
+          >
+            Expand prompt
+          </button>
+        </div>
         <FieldError id={`${agentKey}-prompt-error`} message={entry.fieldErrors.prompt_text} />
+        {promptExpanded && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`${agentKey}-prompt-expanded-title`}
+            className="fixed inset-4 z-50 flex flex-col rounded-lg border border-gray-300 bg-white p-4 shadow-lg"
+          >
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h4 id={`${agentKey}-prompt-expanded-title`} className="text-base font-semibold text-gray-900">
+                Authored prompt
+              </h4>
+              <button
+                type="button"
+                onClick={() => setPromptExpanded(false)}
+                className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700"
+              >
+                Close expanded prompt
+              </button>
+            </div>
+            <label htmlFor={`${agentKey}-prompt-expanded`} className="sr-only">
+              Full-width prompt editor
+            </label>
+            <textarea
+              id={`${agentKey}-prompt-expanded`}
+              value={entry.local.prompt_text}
+              disabled={promptDisabled}
+              onChange={(event) => onEdit(agentKey, 'prompt_text', event.currentTarget.value)}
+              className="min-h-0 flex-1 rounded-md border border-gray-300 p-4 font-mono text-sm leading-6"
+            />
+          </div>
+        )}
         {legacyRole && promptDirty && (
           <button type="button" onClick={() => onRestoreSavedPrompt(agentKey)} className="mt-2">
             Restore saved prompt
@@ -620,6 +677,7 @@ export function DefinitionEditor({
         hidden={activeTab !== 'assembly'}
         className="min-h-72 space-y-3 rounded-md border border-gray-200 bg-gray-50 p-4"
       >
+        <p className="text-sm leading-6 text-gray-600">{ASSEMBLY_TAB_INTRO}</p>
         {savedFormatVersion === 1 && (
           <button
             type="button"
