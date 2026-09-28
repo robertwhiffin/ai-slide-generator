@@ -61,6 +61,9 @@ facts marked *(Task 0)* across the full model list.
 ### 2.1 Client libraries
 
 - `databricks-langchain` **≥ 0.19.0** adds `ChatDatabricks(model=..., use_ai_gateway=True)`.
+  Task 0 pins exactly **0.20.0** in `packages/databricks-tellr-app/pyproject.toml` because the
+  Apps BUILD phase must resolve within its 10-minute budget; exact pins short-circuit backtracking
+  (see the speedup comment in that file).
   The flag makes the client use base URL `{host}/ai-gateway/mlflow/v1`, with no fallback
   to `/serving-endpoints`. `endpoint=` is deprecated in favour of `model=`. The default
   structured-output method is still `function_calling`.
@@ -96,8 +99,10 @@ facts marked *(Task 0)* across the full model list.
    - use exact pins, following the file's existing practice;
    - update the stale `databricks-langchain==0.9.0` comment about `openai`.
 
-   Mirror the pins in the repo-root `pyproject.toml` and `requirements.txt`, which also pin
-   `databricks-langchain`. Never `pip install` into the shared environment.
+   Mirror the pins in the repo-root `pyproject.toml` and `requirements.txt`: raise the floor of
+   `databricks-langchain` in root `pyproject.toml` to `>=0.19.0` (its existing ranged style),
+   add `databricks-openai>=0.14.0` to root `pyproject.toml`, and use exact pins in `requirements.txt`
+   matching the app wheel. Never `pip install` into the shared environment.
 3. **Prove the build.** Publish a `.devN` and deploy it to a **new** `devloop` instance.
    Do not redeploy `epic258` or `epic258-admin`. The Apps BUILD must resolve inside its
    time budget, and the app must start and pass its startup migration.
@@ -107,6 +112,8 @@ facts marked *(Task 0)* across the full model list.
    - look up each one by name;
    - for every endpoint whose `supported_api_types` contains
      `mlflow/v1/chat/completions`, invoke `system.ai.<model>` with a one-token request;
+   - for a sample of endpoints, verify that the UC registered-model name `system.ai.databricks-<model>`
+     returns 404 (confirming the negative case of §2);
    - record any endpoint where the rule does not hold, other than region blocks.
 
    **Record the result in the plan's corrections file.**
@@ -116,10 +123,11 @@ facts marked *(Task 0)* across the full model list.
    route.
 
 **Stop condition:** if step 3 cannot be made to resolve, or step 5 shows that OBO tokens
-are rejected, stop and return to the user before building further. Known fallbacks:
-- for the build, a hand-built Gateway OpenAI client with the same base URL and the SDK's
-  bearer-auth pattern, keeping `databricks-langchain==0.9.0`;
-- for OBO, a user decision on moving titles to the service principal.
+are rejected, stop and return to the user before building further. If OBO fails (no generated
+title appears), the fallback is a user decision: either accept silent title generation failures
+(current behaviour) or migrate both title paths to the app's service-principal identity.
+Another fallback for build resolution issues: a hand-built Gateway OpenAI client with the
+same base URL and the SDK's bearer-auth pattern, while keeping `databricks-langchain==0.9.0`.
 
 ## 5. Model catalog and draft validation
 
@@ -131,9 +139,10 @@ are rejected, stop and return to the user before building further. Known fallbac
 bounded discovery client, using the SDK's generic `api_client.do`.
 
 For each returned endpoint:
-- a name of the form `databricks-<model>` is surfaced as `system.ai.<model>`;
-- names without the `databricks-` prefix are dropped, because the naming rule gives
-  them no invocable `system.ai` name.
+- if the name is of the form `databricks-<model>`, surface it as `system.ai.<model>` in the picker;
+- if the name is not prefixed with `databricks-`, drop it from the list, because the naming rule gives
+  them no invocable `system.ai` name. On the dev workspace, all 43 listed names carry the prefix,
+  so this rule is defensive against future entries.
 
 The list response carries no `supported_api_types`, so discovery does **not** filter by
 API type. It shows every mapped entry, so embedding models such as `system.ai.bge_large_en_v1_5`
@@ -152,30 +161,41 @@ the source of truth.
 The existing failure codes (`catalog_forbidden`, `catalog_unavailable`), the bounded
 client timeouts and the typed-error rules (never echo provider text) are unchanged.
 
-### 5.2 Local name policy (`validate_endpoint_name_policy` and the draft validator)
+### 5.2 Local name policy (`_endpoint_name_policy_validator` in `graph_configuration_draft.py`)
 
-A **new draft save** requires the name to match `^system\.ai\.[a-z0-9][a-z0-9._-]*$`,
-with a new typed code `endpoint_not_gateway_model`. The existing URL and path-metacharacter
+The `system.ai` check is added to the draft-only validator `_endpoint_name_policy_validator`
+(`graph_configuration_draft.py:277`), after its existing call to
+`validate_endpoint_name_policy`. It is **not** added to `validate_endpoint_name_policy`
+itself. That shared function is also called by the #267 test-run path
+(`agent_test_workbench.py:1359`) and by the remote check. Test runs can target a published
+release whose roles still name `databricks-*` endpoints, so those names must keep passing it.
+
+A **new draft save** requires the name to match `^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$` (requiring
+trailing alphanumeric to prevent names ending in `-`, `_` or `.`),
+with a new typed code `endpoint_not_gateway_model` and user message "Model name must start with `system.ai.` and contain only lowercase letters, digits, hyphens, underscores and periods.". Add this code to the `EndpointValidationCode` Literal. The existing URL and path-metacharacter
 rejection stays, and runs first.
 
 Stored releases are never re-validated, so pinned `databricks-*` names remain valid for
 execution (§6.2).
 
-### 5.3 Remote check on save (`validate_custom_endpoint_remote` → renamed)
+### 5.3 Remote check on save (Gateway lookup replaces serving-endpoint check)
 
-This replaces the `serving_endpoints.get` + `READY` + `NOT_UPDATING` check with a Gateway
-lookup:
+`DatabricksModelEndpointCatalog.validate_custom_endpoint_remote` keeps its name and its
+caller (`CatalogRemoteEndpointDraftValidator`). Its body replaces the
+`serving_endpoints.get` + `READY` + `NOT_UPDATING` check with a Gateway lookup:
 1. Map `system.ai.<model>` to `databricks-<model>`.
 2. Call `GET /api/ai-gateway/v2/endpoints/databricks-<model>` through the existing bounded
    catalog client (5 s retry, 3 s HTTP), which runs under the draft lock.
 3. Map the result:
 
-   | Result | Code |
-   |---|---|
-   | 404 | `endpoint_not_found` (existing) |
-   | Permission denied | existing forbidden code |
-   | Transport failure | existing unavailable code |
-   | `supported_api_types` does not contain `mlflow/v1/chat/completions` | new code `endpoint_not_chat_model` |
+   | Result | Code | User message |
+   |---|---|---|
+   | 404 | `endpoint_unknown` (existing) | Endpoint name was not found. |
+   | Permission denied | `endpoint_forbidden` (existing) | Endpoint cannot be validated with this workspace identity. |
+   | Transport failure | `endpoint_unavailable` (existing) | Endpoint validation is temporarily unavailable. Retry the save. |
+   | `supported_api_types` does not contain `mlflow/v1/chat/completions` | `endpoint_not_chat_model` (new) | Endpoint is not a chat model. |
+
+Add the two new codes to the `EndpointValidationCode` Literal in `src/services/model_endpoint_catalog.py`.
 
 The name is still passed through the path-policy check before interpolation.
 
@@ -184,9 +204,20 @@ already classifies an invocation `NotFound`.
 
 ### 5.4 Frontend
 
-The workbench model picker (`/admin`) removes the custom-name entry and displays
-`system.ai.*` names. New codes get user-facing messages next to the existing endpoint
-codes. No other UI change is made.
+The workbench model picker (`/admin`):
+- fetches the list via `GET /api/admin/agent-definitions/model-endpoints`, which calls the catalog's
+  `list_system_models` (§5.1);
+- displays only `system.ai.*` names returned from the catalog, sorted by display name (the catalog's existing sort);
+- removes the custom-name free-text input field entirely (users can only choose from the list);
+- shows an error message if discovery fails (reusing the existing `catalog_unavailable` or
+  `catalog_forbidden` UI treatment);
+- does not show `databricks-*` names, even for pinned releases (the UI displays only the
+  `system.ai` form; saved releases retain their stored `databricks-*` names and pass through
+  unchanged at runtime, §6.2);
+- displays the new error codes (`endpoint_not_gateway_model`, `endpoint_not_chat_model`) with
+  their user-facing messages next to the existing endpoint codes.
+  
+No other UI change is made.
 
 ## 6. Graph runtime
 
@@ -196,7 +227,9 @@ codes. No other UI change is made.
 `ChatDatabricks(model=..., use_ai_gateway=True, ...)`.
 
 `bind_structured_output_model` currently passes `endpoint=configuration.endpoint_name`.
-It changes to `model=`, which is the non-deprecated keyword. The factory's other
+It changes to `model=configuration.endpoint_name`, which is the non-deprecated keyword. The factory itself
+adds `use_ai_gateway=True` to the kwargs before passing to the constructed `ChatDatabricks`;
+callers do not add this flag. The factory's other
 arguments are unchanged.
 
 Because the flag lives in the default factory, all three users of the binding seam (the
@@ -217,7 +250,12 @@ file.
 
 A pinned release whose role names `databricks-claude-opus-4-6` is invoked with that
 name, unchanged, through the Gateway route, which accepts it (§2). No name rewriting
-happens at runtime. The v1 seed manifest is not changed.
+happens at runtime, and the v1 seed manifest is not changed.
+
+**Pinned releases are unaffected by Gateway list changes:** because the runtime passes
+the stored endpoint name through without re-validation, a conversation pinned to a release
+will continue to work even if the model drops off the Gateway list, as long as the Gateway
+still routes the `databricks-*` name (§2).
 
 ### 6.3 Fail-closed
 
@@ -235,7 +273,8 @@ app LLM calls, and are unchanged.
 
 In `src/services/html_to_pptx.py` and `src/services/html_to_google_slides.py`:
 - `self.ws_client.serving_endpoints.get_open_ai_client()` becomes
-  `DatabricksOpenAI(workspace_client=self.ws_client, use_ai_gateway=True)`;
+  `DatabricksOpenAI(workspace_client=self.ws_client, use_ai_gateway=True)`, using the app's
+  service-principal identity;
 - `DEFAULT_MODEL` becomes `"system.ai.claude-sonnet-4-5"`.
 
 The extended-thinking request (`extra_body.thinking`), the budgets and the truncation
@@ -276,12 +315,17 @@ title is actually generated.
   - URL-shaped names;
   - path-shaped names;
   - empty slugs;
+  - names ending in `-`, `_` or `.`;
 - the remote check covers:
-  - a 404;
-  - a permission denial;
-  - a transport failure;
-  - a non-chat `supported_api_types`;
-  - success;
+  - mock `GET /api/ai-gateway/v2/endpoints/<name>` responses for:
+    - 404 (endpoint_unknown);
+    - permission denied (endpoint_forbidden);
+    - transport timeout (endpoint_unavailable);
+    - successful response with `supported_api_types` omitting `mlflow/v1/chat/completions`
+      (endpoint_not_chat_model);
+    - successful response with chat capability (success);
+  - update `FakeModelEndpointCatalog` to mock the new `validate_custom_endpoint_remote`
+    Gateway lookup instead of calling serving_endpoints;
 - the export parser handles the recorded reasoning-block shape.
 
 **Rules** (from `executing-plans-tellr`):
