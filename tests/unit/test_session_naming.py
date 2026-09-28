@@ -260,14 +260,12 @@ class TestSessionNamingInStreaming:
         service._persist_genie_conversation_ids = MagicMock()
 
         with patch("src.core.settings_db.get_settings") as mock_settings, \
-             patch("databricks_langchain.ChatDatabricks") as mock_chat_cls, \
-             patch("src.core.databricks_client.get_user_client") as mock_get_client:
+             patch("src.api.services.session_naming.build_session_title_model") as mock_build:
             mock_settings.return_value = MagicMock(
                 profile_id=None,
                 profile_name=None,
             )
-            mock_chat_cls.return_value = MagicMock()
-            mock_get_client.return_value = MagicMock()
+            mock_build.return_value = MagicMock()
 
             events = self._collect_events(
                 service.send_message_streaming(
@@ -476,3 +474,34 @@ class TestDegenerateOverrunTitles:
         title = generate_session_title("Quarter end prep", mock_model)
 
         assert title == "Preparing for Quarter End"
+
+
+class TestBuildSessionTitleModel:
+    def test_builds_the_gateway_title_model_as_the_user(self, monkeypatch):
+        import databricks_langchain
+
+        from src.api.services import session_naming
+
+        constructed = []
+        user_client = object()
+        monkeypatch.setattr(databricks_langchain, "ChatDatabricks", lambda **kw: constructed.append(kw) or "model")
+        monkeypatch.setattr("src.core.databricks_client.get_user_client", lambda: user_client)
+
+        assert session_naming.build_session_title_model() == "model"
+        assert constructed == [{
+            "model": "system.ai.claude-opus-4-6",
+            "use_ai_gateway": True,
+            "max_tokens": 50,
+            "temperature": 0.3,
+            "workspace_client": user_client,
+        }]
+
+    def test_both_chat_service_title_sites_use_the_helper(self):
+        import inspect
+
+        from src.api.services import chat_service
+
+        source = inspect.getsource(chat_service)
+        assert source.count("build_session_title_model()") == 2
+        assert 'DEFAULT_CONFIG["llm"]["endpoint"],\n                    max_tokens=50' not in source
+        assert "max_tokens=50" not in source

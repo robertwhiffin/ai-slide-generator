@@ -232,3 +232,7 @@ This means the user wants to modify these specific slides. Your response should:
    For these operations, respond with a helpful message guiding users to the UI or workaround - do NOT attempt to return HTML.""",
     },
 }
+
+#: Session-title generation (both engine paths) goes through Unity AI Gateway (ws2a).
+#: Kept separate from DEFAULT_CONFIG["llm"], which the out-of-scope monolith still reads.
+SESSION_TITLE_MODEL = "system.ai.claude-opus-4-6"
