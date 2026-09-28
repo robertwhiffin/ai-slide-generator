@@ -15,6 +15,8 @@ from src.services.model_endpoint_catalog import (
     SystemModelEndpoint,
     bounded_catalog_workspace_client,
     bounded_discovery_workspace_client,
+    gateway_endpoint_name,
+    gateway_invocable_name,
     validate_endpoint_name_policy,
 )
 
@@ -71,95 +73,113 @@ def foundation_model(*, display_name=None, description=None, docs=None):
     )
 
 
-def test_list_system_models_selects_foundation_endpoints_once_and_sorts_exact_names():
-    alpha = endpoint(
-        "alpha exact name",
-        foundation_model(display_name="Zeta", description="alpha", docs="docs-a"),
-        foundation_model(display_name="Ignored duplicate", description="duplicate", docs="x"),
+class RecordingApiClient:
+    def __init__(self, *, responses=None, errors=None):
+        self.responses = dict(responses or {})
+        self.errors = dict(errors or {})
+        self.calls: list[tuple[str, str]] = []
+
+    def do(self, method, path, **kwargs):
+        assert not kwargs, f"unexpected request options: {kwargs}"
+        self.calls.append((method, path))
+        if path in self.errors:
+            raise self.errors[path]
+        return self.responses[path]
+
+
+def gateway_catalog(api_client):
+    return DatabricksModelEndpointCatalog(SimpleNamespace(api_client=api_client))
+
+
+LIST_PATH = "/api/ai-gateway/v2/endpoints"
+
+
+def test_list_system_models_maps_gateway_endpoints_to_system_ai_names_sorted():
+    api = RecordingApiClient(responses={LIST_PATH: {"endpoints": [
+        {"name": "databricks-gpt-oss-120b"},
+        {"name": "databricks-claude-opus-5-5"},
+        {"name": "databricks-bge-large-en"},
+    ]}})
+
+    discovery = gateway_catalog(api).list_system_models()
+
+    assert api.calls == [("GET", LIST_PATH)]
+    assert [item.name for item in discovery.endpoints] == [
+        "system.ai.bge-large-en",
+        "system.ai.claude-opus-5-5",
+        "system.ai.gpt-oss-120b",
+    ]
+    assert all(
+        (item.display_name, item.description, item.docs) == (None, None, None)
+        for item in discovery.endpoints
     )
-    beta = endpoint("beta", foundation_model(display_name="Alpha"))
-    task_only = endpoint("task-only", task="llm/v1/chat")
-    serving_endpoints = RecordingServingEndpoints(listed=[alpha, task_only, beta])
-
-    discovery = catalog_for(serving_endpoints).list_system_models()
-
-    assert discovery == SystemModelDiscovery(
-        endpoints=(
-            SystemModelEndpoint("beta", "Alpha", None, None),
-            SystemModelEndpoint("alpha exact name", "Zeta", "alpha", "docs-a"),
-        )
-    )
-    assert serving_endpoints.list_calls == 1
 
 
-def test_list_system_models_includes_an_endpoint_whose_foundation_entity_is_not_first():
-    """Catches discovery that classifies an endpoint by its first served entity only."""
-    mixed = SimpleNamespace(
-        name="mixed-entities",
-        task=None,
-        config=SimpleNamespace(
-            served_entities=[
-                SimpleNamespace(
-                    foundation_model=None,
-                    external_model=SimpleNamespace(name="external-first"),
-                ),
-                SimpleNamespace(
-                    foundation_model=foundation_model(
-                        display_name="Second entity", description="found", docs="d"
-                    )
-                ),
-            ]
-        ),
-    )
-    external_only = SimpleNamespace(
-        name="external-only",
-        task="llm/v1/chat",
-        config=SimpleNamespace(
-            served_entities=[
-                SimpleNamespace(
-                    foundation_model=None,
-                    external_model=SimpleNamespace(name="external"),
-                )
-            ]
-        ),
-    )
-    serving_endpoints = RecordingServingEndpoints(listed=[external_only, mixed])
+def test_list_system_models_drops_names_without_the_databricks_prefix():
+    api = RecordingApiClient(responses={LIST_PATH: {"endpoints": [
+        {"name": "my-provisioned-endpoint"},
+        {"name": "databricks-gemma-3-12b"},
+    ]}})
 
-    discovery = catalog_for(serving_endpoints).list_system_models()
-
-    assert discovery == SystemModelDiscovery(
-        endpoints=(
-            SystemModelEndpoint("mixed-entities", "Second entity", "found", "d"),
-        )
-    )
-    assert serving_endpoints.list_calls == 1
+    assert [item.name for item in gateway_catalog(api).list_system_models().endpoints] == [
+        "system.ai.gemma-3-12b"
+    ]
 
 
-def test_list_system_models_returns_empty_success_and_never_fabricates_missing_name():
-    empty = catalog_for(RecordingServingEndpoints(listed=[])).list_system_models()
-    assert empty == SystemModelDiscovery(endpoints=())
+def test_list_system_models_returns_empty_success_for_no_endpoints():
+    api = RecordingApiClient(responses={LIST_PATH: {}})
 
-    nameless = endpoint(None, foundation_model(display_name="Foundation"))
-    with pytest.raises(ModelEndpointCatalogFailure) as failure:
-        catalog_for(RecordingServingEndpoints(listed=[nameless])).list_system_models()
+    assert gateway_catalog(api).list_system_models() == SystemModelDiscovery(endpoints=())
 
-    assert failure.value.code == "catalog_unavailable"
-    assert failure.value.retryable is True
+
+def test_list_system_models_refuses_an_entry_without_a_name():
+    api = RecordingApiClient(responses={LIST_PATH: {"endpoints": [{"id": "x"}]}})
+
+    with pytest.raises(ModelEndpointCatalogFailure) as caught:
+        gateway_catalog(api).list_system_models()
+    assert caught.value.code == "catalog_unavailable"
 
 
 @pytest.mark.parametrize(
     ("error", "code", "retryable"),
     [
-        (PermissionDenied("denied"), "catalog_forbidden", False),
-        (DatabricksError("unavailable"), "catalog_unavailable", True),
+        (PermissionDenied("PROVIDER_SECRET"), "catalog_forbidden", False),
+        (DatabricksError("PROVIDER_SECRET"), "catalog_unavailable", True),
+        (TimeoutError("PROVIDER_SECRET"), "catalog_unavailable", True),
+        (requests.exceptions.ConnectionError("PROVIDER_SECRET"), "catalog_unavailable", True),
     ],
 )
-def test_list_system_models_keeps_forbidden_and_unavailable_observable(error, code, retryable):
-    with pytest.raises(ModelEndpointCatalogFailure) as failure:
-        catalog_for(RecordingServingEndpoints(list_error=error)).list_system_models()
+def test_list_system_models_maps_gateway_failures(error, code, retryable):
+    api = RecordingApiClient(errors={LIST_PATH: error})
 
-    assert failure.value.code == code
-    assert failure.value.retryable is retryable
+    with pytest.raises(ModelEndpointCatalogFailure) as caught:
+        gateway_catalog(api).list_system_models()
+    assert (caught.value.code, caught.value.retryable) == (code, retryable)
+    assert "PROVIDER_SECRET" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("gateway", "invocable"),
+    [
+        ("databricks-claude-opus-5-5", "system.ai.claude-opus-5-5"),
+        ("databricks-", None),
+        ("claude-opus-5-5", None),
+        ("xdatabricks-claude", None),
+    ],
+)
+def test_gateway_invocable_name(gateway, invocable):
+    assert gateway_invocable_name(gateway) == invocable
+
+
+@pytest.mark.parametrize(
+    ("model", "gateway"),
+    [
+        ("system.ai.claude-opus-5-5", "databricks-claude-opus-5-5"),
+        ("databricks-claude-opus-4-6", "databricks-claude-opus-4-6"),
+    ],
+)
+def test_gateway_endpoint_name(model, gateway):
+    assert gateway_endpoint_name(model) == gateway
 
 
 @pytest.mark.parametrize("url", ["http://host", " https://host", "//host", "dbfs://host"])
@@ -272,22 +292,6 @@ _TRANSPORT_EXHAUSTION = [
     pytest.param(requests.exceptions.ConnectionError("reset"), id="requests-transport"),
     pytest.param(OSError("socket closed"), id="os-transport"),
 ]
-
-
-@pytest.mark.parametrize("error", _TRANSPORT_EXHAUSTION)
-def test_list_system_models_maps_transport_exhaustion_to_catalog_unavailable(error):
-    serving_endpoints = RecordingServingEndpoints(list_error=error)
-
-    with pytest.raises(ModelEndpointCatalogFailure) as failure:
-        catalog_for(serving_endpoints).list_system_models()
-
-    assert serving_endpoints.list_calls == 1
-    assert failure.value.code == "catalog_unavailable"
-    assert failure.value.retryable is True
-    assert str(failure.value) == (
-        "Model endpoint discovery is temporarily unavailable. Retry the request."
-    )
-    assert failure.value.__cause__ is error
 
 
 @pytest.mark.parametrize("error", _TRANSPORT_EXHAUSTION)
