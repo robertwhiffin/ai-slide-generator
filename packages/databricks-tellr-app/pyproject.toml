@@ -23,8 +23,10 @@ dependencies = [
     "litellm==1.80.11",
     "mcp==1.27.0",
     # agent_runtime.py and model_endpoint_probe.py import openai at module level;
-    # databricks-langchain==0.20.0 / databricks-openai==0.17.1 require openai>=1.99.9.
-    "openai>=1.99.9",
+    # openai and openai-agents pinned to the versions databricks-openai 0.17.1 resolves
+    # to so the Apps build matches local tests.
+    "openai==3.19.2",
+    "openai-agents==0.22.2",
     "opentelemetry-api==1.38.0",
     "opentelemetry-sdk==1.38.0",
     "beautifulsoup4==4.14.2",
