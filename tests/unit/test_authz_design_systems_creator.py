@@ -244,22 +244,38 @@ def test_admin_can_set_default(client, db_session, admin, as_other_user):
     assert resp.status_code == 200, resp.text
 
 
-# --- (g) the core user story: contributing stays OPEN ----------------------
+# --- (g) contributing is now ADMIN-ONLY (SDR-4437 F-CR-17) -----------------
+#
+# This section previously asserted the opposite — "(g) the core user story:
+# contributing stays OPEN" — and it is the user story that changed, not the test.
+# The creator-or-admin model below is UNAFFECTED and still holds: a user who owns
+# a design system may still rename and delete it (sections a–f). What changed is
+# who may bring a NEW one into existence.
+#
+# The reason is the downstream blast radius rather than the write itself. A design
+# system's ``compiled_style_content`` embeds the bundle's README/SKILL.md verbatim
+# (``design_system_compiler._brand_manual_section``) and is injected into the
+# generation system prompt of every user who selects it, under a heading calling
+# it authoritative. Contributing was therefore a write into other users' prompt
+# context, which is the privilege class the slide-style and deck-prompt libraries
+# already gate. See ``tests/unit/test_authz_design_systems_admin.py`` for the
+# admin-path coverage and the compiler's ``DESIGN_SYSTEM_SCOPE_FIREWALL`` for the
+# prompt-side half of the fix.
 
 
-def test_non_admin_can_still_import_bundle(client, non_admin, as_other_user):
-    """(g) Any authenticated user may CONTRIBUTE a design system by upload."""
+def test_non_admin_cannot_import_bundle(client, non_admin, as_other_user):
+    """(g) Contribution by upload is ADMIN-ONLY (SDR-4437 F-CR-17)."""
     resp = client.post(
         f"{BASE}/import",
         files={"file": ("synthetic.zip", make_bundle_zip(), "application/zip")},
     )
-    assert resp.status_code == 201, resp.text
+    assert resp.status_code == 403, resp.text
 
 
-def test_non_admin_can_still_create(client, non_admin, as_other_user):
-    """(g) Any authenticated user may CONTRIBUTE a design system via create."""
+def test_non_admin_cannot_create(client, non_admin, as_other_user):
+    """(g) Contribution via create is ADMIN-ONLY (SDR-4437 F-CR-17)."""
     resp = client.post(BASE, json={"name": "Contributed by a regular user"})
-    assert resp.status_code == 201, resp.text
+    assert resp.status_code == 403, resp.text
 
 
 # --- (h) blank authorship falls back to ADMIN-ONLY (security requirement) --

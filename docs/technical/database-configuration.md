@@ -53,7 +53,7 @@ The database holds **28 tables**, every `__tablename__` declared under `src/data
 
 **Identity & Key Tables:**
 27. **`app_identities`** - Databricks UC identity cache (users/groups seen by the app)
-28. **`encryption_keys`** - Single-row (`id = 1`) Fernet master key for Google OAuth credential and token encryption, held in the ACL-governed data schema rather than `app.yaml`
+28. **`encryption_keys`** - Single-row (`id = 1`) Fernet master key for Google OAuth credential and token encryption. In Lakebase-backed deployments (the default) the key lives here, held in the ACL-governed data schema rather than `app.yaml`. In secret-backed deployments the key lives in a Databricks secret and this table stays empty — see `docs/technical/databricks-app-deployment.md`.
 
 ### Entity Relationships
 

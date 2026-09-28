@@ -171,3 +171,86 @@ class TestExecuteThroughChunkedService:
         )
         assert err is None
         assert calls["n"] >= 2  # retried after the 429
+
+
+class TestDriveAssetLifetime:
+    """SDR-4437: a Drive image asset is uploaded anyone:reader so Google's
+    servers can fetch it for createImage. It must not outlive the batchUpdate
+    that consumes it, on the success path or the failure path."""
+
+    @staticmethod
+    def _drive(tmp_path, file_id="FILEID"):
+        from unittest.mock import MagicMock
+        (tmp_path / "chart_0.png").write_bytes(b"\x89PNG\r\n")
+        drive = MagicMock()
+        drive.files().create().execute.return_value = {"id": file_id}
+        drive.permissions().create().execute.return_value = {}
+        return drive
+
+    @staticmethod
+    def _reqs():
+        return [{"createImage": {"objectId": "i", "url": "tellr-asset://chart_0.png"}}]
+
+    def test_uploader_reports_ids_for_this_call(self, tmp_path):
+        drive = self._drive(tmp_path)
+        got = []
+        _conv()._upload_and_substitute_assets(
+            self._reqs(), drive, str(tmp_path), got,
+        )
+        assert got == ["FILEID"]
+
+    def test_asset_deleted_after_successful_slide(self, tmp_path):
+        from unittest.mock import MagicMock
+        drive = self._drive(tmp_path)
+        conv = _conv()
+        assert conv._execute_slide_requests(
+            self._reqs(), MagicMock(), drive, "PRES", "PAGE", str(tmp_path), 1,
+        ) is None
+        drive.files().delete.assert_called_with(fileId="FILEID")
+        assert conv._uploaded_file_ids == []
+
+    def test_asset_deleted_when_the_slide_fails(self, tmp_path, monkeypatch):
+        """The failure path is the one that used to orphan assets.
+
+        Patch the chunked service itself rather than mocking a 429 on
+        batchUpdate: the chunker deliberately retries a failed chunk request by
+        request, so a mock failure there is absorbed and the slide still
+        succeeds. Raising from the wrapper is what makes execution genuinely
+        fail after the upload has happened.
+        """
+        from unittest.mock import MagicMock
+
+        import src.services.html_to_google_slides as g
+
+        def _explode(*a, **k):
+            raise Exception("batchUpdate exploded")
+
+        monkeypatch.setattr(g, "_ChunkedSlidesService", _explode)
+        drive = self._drive(tmp_path)
+        conv = _conv()
+        err = conv._execute_slide_requests(
+            self._reqs(), MagicMock(), drive, "PRES", "PAGE", str(tmp_path), 1,
+        )
+        assert err is not None
+        drive.files().delete.assert_called_with(fileId="FILEID")
+        assert conv._uploaded_file_ids == []
+
+    def test_failed_delete_stays_pending_for_the_sweep(self, tmp_path):
+        """A delete that errors must leave the id pending, not silently drop it."""
+        from unittest.mock import MagicMock
+        drive = self._drive(tmp_path)
+        drive.files().delete().execute.side_effect = Exception("503")
+        conv = _conv()
+        conv._execute_slide_requests(
+            self._reqs(), MagicMock(), drive, "PRES", "PAGE", str(tmp_path), 1,
+        )
+        assert conv._uploaded_file_ids == ["FILEID"]
+
+    def test_sweep_retries_pending_ids(self, tmp_path):
+        from unittest.mock import MagicMock
+        drive = MagicMock()
+        conv = _conv()
+        conv._uploaded_file_ids = ["A", "B"]
+        conv._delete_drive_assets(drive, list(conv._uploaded_file_ids))
+        assert conv._uploaded_file_ids == []
+        assert drive.files().delete.call_count == 2
