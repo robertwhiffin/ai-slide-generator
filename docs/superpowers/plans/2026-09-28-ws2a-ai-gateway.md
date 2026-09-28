@@ -50,8 +50,11 @@ implements.
     contain only lowercase letters, digits, hyphens, underscores and periods."
   - `endpoint_not_chat_model`, message: "Endpoint is not a chat model."
 - **Constants:**
-  - export `DEFAULT_MODEL = "system.ai.claude-sonnet-4-5"`;
-  - `SESSION_TITLE_MODEL = "system.ai.claude-opus-4-6"` in `src/core/defaults.py`;
+  - export `DEFAULT_MODEL = "system.ai.claude-sonnet-4-5"`, updated in class constants
+    `HtmlToPptxConverterV3` (`src/services/html_to_pptx.py:51`) and
+    `HtmlToGoogleSlidesConverter` (`src/services/html_to_google_slides.py:342`),
+    changing from `"databricks-claude-sonnet-4-5"`;
+  - `SESSION_TITLE_MODEL = "system.ai.claude-opus-4-6"` (new) in `src/core/defaults.py`;
   - `DEFAULT_CONFIG["llm"]` is **unchanged**.
 - **Out of scope; do not touch their model calls:** the monolith (`agent.py`,
   `agent_factory.py`), MCP, the judge (`llm_judge.py`), feedback (`feedback_service.py`) and
