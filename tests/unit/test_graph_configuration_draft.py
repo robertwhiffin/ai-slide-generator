@@ -3170,21 +3170,6 @@ class _RecordingRemoteEndpointValidator:
             raise self._outcome
 
 
-class _RecordingServingEndpoints:
-    """Fake SDK surface for the production catalog; no SDK mock library."""
-
-    def __init__(self, *, detail=None, error: Exception | None = None):
-        self.detail = detail
-        self.error = error
-        self.get_calls: list[str] = []
-
-    def get(self, name: str):
-        self.get_calls.append(name)
-        if self.error is not None:
-            raise self.error
-        return self.detail
-
-
 class _RecordingApiClient:
     """Minimal recording fake for the Unity AI Gateway detail lookup."""
 
