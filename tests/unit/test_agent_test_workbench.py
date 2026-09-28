@@ -2105,7 +2105,6 @@ def test_the_default_executor_uses_the_bounded_test_runtime(factory, monkeypatch
 
 
 def _real_provider_executor(factory: sessionmaker, monkeypatch, usage):
-    from databricks_langchain import chat_models
     from src.services.agent_runtime import (
         TEST_RUN_MAX_RETRIES,
         TEST_RUN_TIMEOUT_SECONDS,
@@ -2118,16 +2117,8 @@ def _real_provider_executor(factory: sessionmaker, monkeypatch, usage):
 
     install_mock_gateway_transport(monkeypatch)
     workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=usage)
-    # Inject the mock workspace at get_openai_client level to bypass
-    # ChatDatabricks's pydantic workspace_client: Optional[WorkspaceClient] check.
-    original = chat_models.get_openai_client
-
-    def _use_workspace(workspace_client=None, **kwargs):
-        return original(workspace_client=workspace, **kwargs)
-
-    monkeypatch.setattr(chat_models, "get_openai_client", _use_workspace)
     adapter = DatabricksModelAdapter(
-        client_factory=lambda: None,  # None passes pydantic; workspace injected above
+        client_factory=lambda: workspace,
         transport_options={
             "timeout": TEST_RUN_TIMEOUT_SECONDS,
             "max_retries": TEST_RUN_MAX_RETRIES,

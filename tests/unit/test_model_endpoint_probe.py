@@ -18,6 +18,7 @@ import httpx
 import openai
 import pytest
 import requests
+from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import InternalError, PermissionDenied, Unauthenticated
 from pydantic import ValidationError
 from sqlalchemy import create_engine, event, select
@@ -586,14 +587,23 @@ REAL_PROVIDER_CASES = [
 ]
 
 
-class MockTransportWorkspace:
-    """A workspace-client stand-in exposing only what ``DatabricksOpenAI`` reads."""
+class MockTransportWorkspace(WorkspaceClient):
+    """A ``WorkspaceClient`` subclass used as a probe workspace stand-in.
+
+    Subclassing satisfies ChatDatabricks 0.20.0's pydantic
+    ``workspace_client: Optional[WorkspaceClient]`` field, so
+    ``real_provider_probe`` can use ``client_factory=lambda: workspace``
+    and the identity chain from ``client_factory`` → ``_default_model_factory``
+    → ``ChatDatabricks`` → ``DatabricksOpenAI`` → ``_get_authorized_http_client``
+    is end-to-end tested.
+    """
 
     def __init__(self, outcome: int | str) -> None:
+        # Do NOT call super().__init__() — it tries to resolve credentials.
         self.outcome = outcome
         self.requests: list[httpx.Request] = []
         self.client_kwargs: list[dict[str, Any]] = []
-        self.config = SimpleNamespace(
+        self._config = SimpleNamespace(
             host=f"https://{MOCK_HOST}",
             authenticate=lambda: {"Authorization": "Bearer unit-test-dummy-key"},
         )
@@ -638,22 +648,18 @@ class MockTransportWorkspace:
 
 
 def real_provider_probe(workspace: MockTransportWorkspace) -> DatabricksStructuredOutputProbe:
-    """The production model factory (real ``ChatDatabricks``) over the mock workspace.
-
-    Note: ``client_factory=lambda: None`` avoids pydantic's ``workspace_client``
-    type-check on ``ChatDatabricks``; the mock workspace is injected via
-    ``_install_real_provider`` which wraps ``get_openai_client``.
-    """
-    return DatabricksStructuredOutputProbe(client_factory=lambda: None)
+    """The production model factory (real ``ChatDatabricks``) over the mock workspace."""
+    return DatabricksStructuredOutputProbe(client_factory=lambda: workspace)
 
 
 def _install_real_provider(monkeypatch, workspace: MockTransportWorkspace) -> None:
     """Install the mock transport and record ``get_openai_client`` kwargs.
 
     Patches ``_get_authorized_http_client`` so the underlying ``httpx.Client``
-    routes through ``workspace._handle``, and wraps ``get_openai_client`` to
-    inject the mock workspace (bypassing ``ChatDatabricks``'s pydantic
-    ``workspace_client: Optional[WorkspaceClient]`` field) and record kwargs.
+    routes through ``workspace._handle``.  Also wraps ``get_openai_client`` to
+    record the kwargs ChatDatabricks passes (proving ``use_ai_gateway=True``
+    reaches the client) and asserts that ``workspace_client is workspace``
+    (proving the identity from ``client_factory`` reaches the provider call).
     """
     from databricks_langchain import chat_models
     from tests.fixtures.mock_chat_completions import install_mock_gateway_transport
@@ -662,10 +668,12 @@ def _install_real_provider(monkeypatch, workspace: MockTransportWorkspace) -> No
     original = chat_models.get_openai_client
 
     def _recording(workspace_client=None, **kwargs):
+        assert workspace_client is workspace, (
+            f"Expected the mock workspace to reach get_openai_client unchanged, "
+            f"got {workspace_client!r}"
+        )
         workspace.client_kwargs.append(kwargs)
-        # Inject the mock workspace so DatabricksOpenAI uses workspace.config.host
-        # and _get_authorized_http_client routes to workspace._handle.
-        return original(workspace_client=workspace, **kwargs)
+        return original(workspace_client=workspace_client, **kwargs)
 
     monkeypatch.setattr(chat_models, "get_openai_client", _recording)
 

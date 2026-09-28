@@ -1630,7 +1630,6 @@ def test_run_published_baseline_raises_loader_failures_as_run_does():
 
 
 def _real_chat_adapter(monkeypatch, usage):
-    from databricks_langchain import chat_models
     from tests.fixtures.mock_chat_completions import (
         MockChatCompletionsWorkspace,
         install_mock_gateway_transport,
@@ -1638,16 +1637,8 @@ def _real_chat_adapter(monkeypatch, usage):
 
     install_mock_gateway_transport(monkeypatch)
     workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=usage)
-    # Inject the mock workspace at get_openai_client level to bypass
-    # ChatDatabricks's pydantic workspace_client: Optional[WorkspaceClient] check.
-    original = chat_models.get_openai_client
-
-    def _use_workspace(workspace_client=None, **kwargs):
-        return original(workspace_client=workspace, **kwargs)
-
-    monkeypatch.setattr(chat_models, "get_openai_client", _use_workspace)
     adapter = DatabricksModelAdapter(
-        client_factory=lambda: None,  # None passes pydantic; workspace injected above
+        client_factory=lambda: workspace,
         transport_options={
             "timeout": runtime_module.TEST_RUN_TIMEOUT_SECONDS,
             "max_retries": runtime_module.TEST_RUN_MAX_RETRIES,
@@ -1685,7 +1676,6 @@ def _observed_real_runs(monkeypatch, usage):
 
 def test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route(monkeypatch):
     """Spec §6.1: the real ChatDatabricks posts to {host}/ai-gateway/mlflow/v1, stored name unchanged."""
-    from databricks_langchain import chat_models
     from tests.fixtures.mock_chat_completions import (
         MOCK_CHAT_HOST,
         MockChatCompletionsWorkspace,
@@ -1694,15 +1684,7 @@ def test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route(monk
 
     install_mock_gateway_transport(monkeypatch)
     workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=None)
-    # Inject the mock workspace at get_openai_client level to bypass
-    # ChatDatabricks's pydantic workspace_client: Optional[WorkspaceClient] check.
-    original = chat_models.get_openai_client
-
-    def _use_workspace(workspace_client=None, **kwargs):
-        return original(workspace_client=workspace, **kwargs)
-
-    monkeypatch.setattr(chat_models, "get_openai_client", _use_workspace)
-    adapter = DatabricksModelAdapter(client_factory=lambda: None)
+    adapter = DatabricksModelAdapter(client_factory=lambda: workspace)
 
     adapter.invoke(
         agent_key="architect",
@@ -1720,6 +1702,7 @@ def test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route(monk
     request = workspace.requests[0]
     assert request.url.host == MOCK_CHAT_HOST
     assert request.url.path == "/ai-gateway/mlflow/v1/chat/completions"
+    assert request.headers["authorization"] == "Bearer unit-test-dummy-key"
     assert json.loads(request.content)["model"] == "databricks-claude-opus-4-6"
 
 

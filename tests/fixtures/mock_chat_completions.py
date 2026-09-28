@@ -1,13 +1,19 @@
 """A workspace-client stand-in that serves the REAL ``ChatDatabricks`` a canned
 chat completion over ``httpx.MockTransport`` (#267 whole-branch fix I-1, ws2a).
 
-``install_mock_gateway_transport`` patches the one HTTP-client factory that
-``DatabricksOpenAI`` calls, so every request from real ``ChatDatabricks`` is
-routed through ``MockChatCompletionsWorkspace._handle`` instead of hitting a
-network.  The real ``BearerAuth`` still reads
-``workspace_client.config.authenticate``, and the real base-URL resolution
-still decides the path (``{host}/ai-gateway/mlflow/v1``), so the full
-production code path executes — only the transport is replaced.
+``MockChatCompletionsWorkspace`` is a ``WorkspaceClient`` subclass with a
+no-op ``__init__`` that sets only what ``DatabricksOpenAI`` reads
+(``_config.host``, ``_config.authenticate``) and ``_handle`` for the mock
+transport.  Because it is a real ``WorkspaceClient`` subclass, ChatDatabricks
+0.20.0 accepts it as ``workspace_client`` directly (pydantic ``isinstance``
+check passes), and the entire production path from ``client_factory`` through
+``_default_model_factory`` → ``ChatDatabricks`` → ``DatabricksOpenAI`` →
+``_get_authorized_http_client`` runs unmodified — only the HTTP transport
+layer is replaced.
+
+``install_mock_gateway_transport`` patches ``_get_authorized_http_client`` so
+every request is routed through the workspace's own ``_handle`` with no network
+contact and no ambient credential.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+from databricks.sdk import WorkspaceClient
 
 MOCK_CHAT_HOST = "chat.invalid"
 
@@ -30,18 +37,27 @@ MOCK_USAGE = {
 }
 
 
-class MockChatCompletionsWorkspace:
-    """Expose only what ``DatabricksOpenAI`` reads: ``config.host`` and ``config.authenticate``.
+class MockChatCompletionsWorkspace(WorkspaceClient):
+    """A ``WorkspaceClient`` subclass that stands in for a real workspace.
 
-    ``install_mock_gateway_transport`` routes the client's HTTP through ``_handle``,
-    so no request can reach a network and no ambient credential is read.
+    Subclassing satisfies ChatDatabricks 0.20.0's pydantic
+    ``workspace_client: Optional[WorkspaceClient]`` field check, so tests
+    can use ``client_factory=lambda: workspace`` with the real production
+    factory without any mock substitution higher up the call stack.
+
+    Only ``_config.host`` and ``_config.authenticate`` are set; every other
+    WorkspaceClient attribute is absent, which is fine because DatabricksOpenAI
+    only reads those two.
     """
 
     def __init__(self, arguments: dict[str, Any], *, usage: dict[str, int] | None) -> None:
+        # Do NOT call super().__init__() — it would try to resolve Databricks
+        # credentials.  We set only _config (the attribute the .config property
+        # reads) and _handle (used by the patched _get_authorized_http_client).
         self.arguments = arguments
         self.usage = usage
         self.requests: list[httpx.Request] = []
-        self.config = SimpleNamespace(
+        self._config = SimpleNamespace(
             host=f"https://{MOCK_CHAT_HOST}",
             authenticate=lambda: {"Authorization": "Bearer unit-test-dummy-key"},
         )
@@ -82,11 +98,12 @@ class MockChatCompletionsWorkspace:
 
 
 def install_mock_gateway_transport(monkeypatch) -> None:
-    """Make ``DatabricksOpenAI`` send through the workspace stand-in's ``_handle``.
+    """Patch ``_get_authorized_http_client`` so requests go through ``_handle``.
 
-    Only the transport is replaced: the real ``BearerAuth`` still reads
-    ``workspace_client.config.authenticate``, and the real base-URL resolution still
-    decides the path.
+    The real ``BearerAuth`` reads ``workspace_client.config.authenticate``,
+    and the real ``_resolve_base_url`` decides the path
+    (``{host}/ai-gateway/mlflow/v1``), so the entire production chain runs —
+    only the HTTP transport layer is replaced.
     """
     from databricks_openai.utils import clients
 
