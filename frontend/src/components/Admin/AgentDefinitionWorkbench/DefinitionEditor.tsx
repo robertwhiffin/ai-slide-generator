@@ -492,7 +492,10 @@ export function DefinitionEditor({
                 : modelCatalog.errorMessage}
             </div>
           )}
-          <p className="text-xs text-gray-600">
+          <p
+            className="text-xs text-gray-600"
+            aria-describedby={endpointMessage ? `${agentKey}-endpoint-error` : undefined}
+          >
             <span className="font-semibold">Current model</span>{' '}
             <span className="break-all font-mono">{entry.local.endpoint_name}</span>
           </p>
