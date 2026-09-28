@@ -240,6 +240,12 @@ def test_remote_check_refuses_a_detail_without_api_types():
          "Endpoint validation is temporarily unavailable. Retry the save.", True),
         (TimeoutError("PROVIDER_SECRET"), "endpoint_unavailable",
          "Endpoint validation is temporarily unavailable. Retry the save.", True),
+        (RuntimeError("Exceeded max retry attempts (3)"), "endpoint_unavailable",
+         "Endpoint validation is temporarily unavailable. Retry the save.", True),
+        (requests.exceptions.ConnectionError("PROVIDER_SECRET"), "endpoint_unavailable",
+         "Endpoint validation is temporarily unavailable. Retry the save.", True),
+        (OSError("PROVIDER_SECRET"), "endpoint_unavailable",
+         "Endpoint validation is temporarily unavailable. Retry the save.", True),
     ],
 )
 def test_remote_check_maps_gateway_lookup_failures(error, code, message, retryable):
