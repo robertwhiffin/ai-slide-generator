@@ -17,6 +17,7 @@ from src.services.model_endpoint_catalog import (
     gateway_endpoint_name,
     gateway_invocable_name,
     validate_endpoint_name_policy,
+    validate_gateway_model_name,
 )
 
 
@@ -463,3 +464,36 @@ def test_bounded_discovery_client_has_its_own_finite_bound_and_leaves_the_system
     assert system_client.config._inner == system_inner
     assert system_client.config.retry_timeout_seconds is None
     assert system_client.config.http_timeout_seconds is None
+
+
+@pytest.mark.parametrize(
+    "name", ["system.ai.claude-opus-5-5", "system.ai.gpt-oss-120b", "system.ai.a1"]
+)
+def test_validate_gateway_model_name_accepts_system_ai_names(name):
+    assert validate_gateway_model_name(name) is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "databricks-claude-opus-4-6",
+        "system.ai.",
+        "system.ai.x-",
+        "system.ai.x.",
+        "system.ai.x_",
+        "System.AI.claude",
+        "system.ai.Claude",
+        "system.aiclaude",
+        " system.ai.claude",
+        "system.ai.a",
+    ],
+)
+def test_validate_gateway_model_name_refuses_other_shapes(name):
+    with pytest.raises(EndpointValidationFailure) as caught:
+        validate_gateway_model_name(name)
+    assert caught.value.code == "endpoint_not_gateway_model"
+    assert caught.value.message == (
+        "Model name must start with `system.ai.` and contain only lowercase letters, "
+        "digits, hyphens, underscores and periods."
+    )
+    assert name.strip() not in caught.value.message.replace("system.ai.", "")
