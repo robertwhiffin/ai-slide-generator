@@ -15,6 +15,7 @@ import { configApi } from '../../api/config';
 import type { SlideStyle, SlideStyleCreate, SlideStyleUpdate } from '../../api/config';
 import { SlideStyleForm } from './SlideStyleForm';
 import { ConfirmDialog } from './ConfirmDialog';
+import { LazySlideStylePreview } from './SlideStylePreviewFrame';
 
 export const SlideStyleList: React.FC = () => {
   const [styles, setStyles] = useState<SlideStyle[]>([]);
@@ -25,6 +26,9 @@ export const SlideStyleList: React.FC = () => {
   const [editingStyle, setEditingStyle] = useState<SlideStyle | null>(null);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [expandedStyleId, setExpandedStyleId] = useState<number | null>(null);
+  // Raw style-text visibility is independent of the visual preview so a user can
+  // read the prose guidance whether or not the generated preview succeeded.
+  const [showRawStyleId, setShowRawStyleId] = useState<number | null>(null);
   const [userDefaultStyleId, setUserDefaultStyleId] = useState<number | null>(() => {
     const stored = localStorage.getItem('userDefaultSlideStyleId');
     return stored ? Number(stored) : null;
@@ -274,15 +278,35 @@ export const SlideStyleList: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Expanded Content */}
+                  {/* Expanded Content: rendered visual preview + optional raw text */}
                   {expandedStyleId === style.id && (
                     <div className="mt-3 rounded-md border border-border bg-muted/30 p-3">
-                      <label className="text-xs font-medium uppercase text-muted-foreground">
-                        Style Content
-                      </label>
-                      <pre className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-background p-3 font-mono text-xs text-foreground">
-                        {style.style_content}
-                      </pre>
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-medium uppercase text-muted-foreground">
+                          Style Preview
+                        </label>
+                        <button
+                          type="button"
+                          className="rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                          onClick={() =>
+                            setShowRawStyleId(showRawStyleId === style.id ? null : style.id)
+                          }
+                          data-testid="slide-style-raw-toggle"
+                        >
+                          {showRawStyleId === style.id ? 'Hide style text' : 'Show style text'}
+                        </button>
+                      </div>
+                      <LazySlideStylePreview
+                        styleId={style.id}
+                        name={style.name}
+                        canRegenerate={!style.is_system}
+                        className="mt-2 max-w-md"
+                      />
+                      {showRawStyleId === style.id && (
+                        <pre className="mt-3 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-background p-3 font-mono text-xs text-foreground">
+                          {style.style_content}
+                        </pre>
+                      )}
                     </div>
                   )}
                 </div>
