@@ -1,6 +1,6 @@
 # ws2a — Tasks 5–9
 
-Part of `2026-09-28-ws2a-ai-gateway.md` (index: goal, global constraints, review focus, file map). Read the index first; its Global Constraints apply to every task here. Tasks 0–4 (`2026-09-28-ws2a-ai-gateway-tasks-0-4.md`) must be complete before these start.
+Part of `2026-09-28-ws2a-ai-gateway.md` (index: goal, global constraints, review focus, file map). Read the index first; its Global Constraints apply to every task here. Tasks 0–4 (`2026-09-28-ws2a-ai-gateway-tasks-0-4.md`) must be complete before these start. The corrections file `docs/superpowers/plans/2026-09-28-ws2a-ai-gateway-CORRECTIONS.md` is created in Task 0 and appended to by every subsequent task.
 
 ### Task 5: Export converters through the Gateway
 
@@ -10,6 +10,8 @@ Part of `2026-09-28-ws2a-ai-gateway.md` (index: goal, global constraints, review
 - Test: `tests/unit/test_gateway_openai.py` (new), `tests/unit/test_html_to_pptx.py`, `tests/unit/test_google_slides_converter.py`
 
 **Interfaces:**
+- Consumes: `install_mock_gateway_transport` from `tests.fixtures.mock_chat_completions`,
+  produced by Task 1.
 - Produces: `gateway_openai_client(workspace_client) -> openai.OpenAI`, which returns
   `DatabricksOpenAI(workspace_client=..., use_ai_gateway=True)`.
 
@@ -81,8 +83,8 @@ def test_converter_defaults_to_the_gateway_model_and_client(monkeypatch):
 ```
 
   Write the Google Slides equivalents against `HtmlToGoogleSlidesConverter`. Pass a stub
-  `google_auth=object()` so no Google auth is built. Check its content parser's name, around
-  `html_to_google_slides.py:850`, and use it.
+  `google_auth=object()` so no Google auth is built. Check its content parser's name, which
+  is `_extract_text` defined at `html_to_google_slides.py:993`, and use it.
 
 - [ ] **Step 2: Run them and verify they fail.** Run
   `pytest tests/unit/test_gateway_openai.py tests/unit/test_html_to_pptx.py tests/unit/test_google_slides_converter.py -q -k "gateway"`.
@@ -141,6 +143,8 @@ git commit -m "feat(export): call the converter model through Unity AI Gateway"
 **Interfaces:**
 - Produces: `build_session_title_model() -> ChatDatabricks`, constructed with
   `model=SESSION_TITLE_MODEL, use_ai_gateway=True, max_tokens=50, temperature=0.3, workspace_client=get_user_client()`.
+
+**Note on model choice:** Each call site keeps the model it uses today for parity. Title sites currently use `DEFAULT_CONFIG["llm"]["endpoint"]` = `"databricks-claude-opus-4-6"` (spec §8 / `src/core/defaults.py:31`), and exports use `DEFAULT_MODEL` = `"databricks-claude-sonnet-4-5"` (spec §7 / `html_to_pptx.py:51`, `html_to_google_slides.py:342`).
 
 - [ ] **Step 1: Write the failing tests.** In `tests/unit/test_session_naming.py`:
 
@@ -246,7 +250,7 @@ git commit -m "feat(titles): generate session titles through Unity AI Gateway"
 **Files:**
 - Modify: `frontend/src/components/Admin/AgentDefinitionWorkbench/DefinitionEditor.tsx:526-541`
 - Test: `frontend/src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx`
-  (helper `customEndpoint()` at `:2259`, and uses at `:339`, `:509`, `:661`, `:897`, `:947`,
+  (helper `customEndpoint()` at `:2258`, and uses at `:339`, `:509`, `:661`, `:897`, `:947`,
   `:2326-2341`, `:2632`, `:3209`)
 
 **Interfaces:**
@@ -270,9 +274,7 @@ git commit -m "feat(titles): generate session titles through Unity AI Gateway"
 
   it('shows the current model when it is not in the discovered list', async () => {
     // Discovery returns only system.ai names; the seed role is on SEED_MODEL_ENDPOINT_NAME.
-    mockWorkbenchWithPuts(() => apiResponse(500, null), {
-      models: syntheticSystemModelEndpoints.filter((item) => item.name !== SEED_MODEL_ENDPOINT_NAME),
-    });
+    mockWorkbenchWithPuts(() => apiResponse(500, null), syntheticAgentDefinitionWorkbench, () => catalogResponse(syntheticSystemModelEndpoints.filter((item) => item.name !== SEED_MODEL_ENDPOINT_NAME)));
     render(<AgentDefinitionWorkbench />);
     await loadedNodeNavigation();
     const panel = openModelTab();
@@ -284,10 +286,9 @@ git commit -m "feat(titles): generate session titles through Unity AI Gateway"
   });
 ```
 
-  **Check `mockWorkbenchWithPuts`.** If it does not accept a discovery override, find how
-  the existing tests vary the discovery response. Search the file for
-  `syntheticSystemModelEndpoints` and `catalogGets`, and use that mechanism instead. Record
-  the helper you used in the corrections file.
+  The mock signature is `mockWorkbenchWithPuts(put, workbench, catalog, probe?)` (`:299-303`),
+  where `catalog` is a function. Use the `catalogResponse` helper (`:2268`) to override
+  the discovered models list.
 
   **The endpoint-error test is a move, not a new test.** At `:897`, change
   `screen.getByRole('textbox', { name: 'Custom endpoint name' })` to

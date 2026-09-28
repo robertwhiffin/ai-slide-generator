@@ -61,22 +61,35 @@ git commit -m "build: pin databricks-langchain 0.20.0 and add databricks-openai 
 ```
 
 - [ ] **Step 5: HUMAN STEP — upgrade the shared environment.** The agent must not do this.
-  Ask the user to run it and wait for confirmation:
+  Ask the user to run it and wait for confirmation. The `!` prefix is Claude Code notation
+  to run commands in the session (or type it in a terminal directly without the `!`):
 
 ```
 ! pip install "databricks-langchain==0.20.0" "databricks-openai==0.17.1"
 ```
 
-  Then verify:
+  Then verify both patch points that Task 1 and later tasks rely on:
 
 ```bash
 python -c "import databricks_langchain, databricks_openai, importlib.metadata as m; print(m.version('databricks-langchain'), m.version('databricks-openai'))"
 python -c "from databricks_openai.utils import clients; print(clients._get_authorized_http_client, clients._resolve_base_url)"
+python -c "from databricks_langchain import chat_models; print(chat_models.get_openai_client)"
 ```
 
-  Expected: `0.20.0 0.17.1`, and two function reprs. If
-  `databricks_openai.utils.clients._get_authorized_http_client` does not exist, record the
-  real location in the corrections file. Task 1's fixture patches it.
+  Expected: `0.20.0 0.17.1`, two function reprs from `databricks_openai.utils.clients`,
+  and the `get_openai_client` function. **Stop if any is absent.** If any verification fails:
+  - If `databricks_openai.utils.clients._get_authorized_http_client` is not found, record
+    the real location in the corrections file.
+  - If `databricks_langchain.chat_models.get_openai_client` is not found, record that Task 1
+    Step 6 must patch a different name or path, and stop.
+  
+  Also verify that the SDK's `NotFound` exception is available for Task 3's remote check:
+  
+```bash
+python -c "from databricks.sdk.errors import NotFound; print(NotFound)"
+```
+  
+  Expected: the `NotFound` class. Task 3 Step 3 relies on catching it for 404s.
 
 - [ ] **Step 6: Post-bump baseline.** Run the same command into
   `/tmp/ws2a-baseline-post.txt`. The new failures are expected to be exactly the tests that
@@ -291,7 +304,7 @@ def install_mock_gateway_transport(monkeypatch) -> None:
 - [ ] **Step 5: Rename the seam keys.** In `tests/unit/test_agent_runtime.py`:
   - at `:412` and `:675`, `"endpoint": ...` becomes `"model": ...`;
   - at `:733`, `kwargs["endpoint"]` becomes `kwargs["model"]`;
-  - update the docstring at `:707` ("as `endpoint`") to say `model`.
+  - update the docstring at `:691` (in `test_structured_output_runtime_and_model_endpoint_probe_share_one_helper`, "as ``endpoint``") to say `model`.
 
   Grep `tests/` for other `["endpoint"]` or `"endpoint":` assertions on model-factory kwargs
   (for example `tests/unit/test_model_endpoint_probe.py:155`) and rename those too. List
