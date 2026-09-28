@@ -83,15 +83,15 @@ are `openai.*` exceptions, and it retries twice by default. OAI means the raw
 
 | # | Call site | Endpoint chosen by | Client | Identity | Token usage | ws2 status |
 |---|---|---|---|---|---|---|
-| G1 | **Graph, all 7 roles**: `DatabricksModelAdapter.invoke` → `bind_structured_output_model` (`agent_runtime.py:206-245, 333-375`). Callers in `src/services/graph/nodes.py` | Pinned release's role config | CD | App SP (`agent_runtime.py:327-331`) | **Discarded** (no `include_raw`) | → Gateway (ws2a) |
-| G2 | #266 saved-candidate probe (`model_endpoint_probe.py:130-160`) | Draft candidate | CD | SP | not captured | → Gateway (ws2a) |
-| G3 | #267 workbench test runs (`agent_runtime.py:592-691, 893-914`) | Draft or published | CD, `timeout=120`, `max_retries=0` | SP | **Captured** by `_TokenUsageCallback` (`:255-300`) into `agent_test_run.input_tokens/output_tokens` | → Gateway (ws2a) |
+| G1 | **Graph, all 7 roles**: `DatabricksModelAdapter.invoke` → `bind_structured_output_model` (`agent_runtime.py:206-245, 333-375`). Callers in `src/services/graph/nodes.py` | Pinned release's role config | CD (`use_ai_gateway=True`, `agent_runtime.py:327`) | App SP (`agent_runtime.py:327-331`) | **Discarded** (no `include_raw`) | → Gateway (ws2a) |
+| G2 | #266 saved-candidate probe (`model_endpoint_probe.py:130-160`) | Draft candidate | CD (`use_ai_gateway=True`) | SP | not captured | → Gateway (ws2a) |
+| G3 | #267 workbench test runs (`agent_runtime.py:592-691, 893-914`) | Draft or published | CD (`use_ai_gateway=True`), `timeout=120`, `max_retries=0` | SP | **Captured** by `_TokenUsageCallback` (`:255-300`) into `agent_test_run.input_tokens/output_tokens` | → Gateway (ws2a) |
 | M1 | Monolith `SlideGeneratorAgent._create_model` (`src/services/agent.py:436-467`) and `agent_factory._create_model` (`agent_factory.py:50-83`) | **Hardcoded** `DEFAULT_CONFIG["llm"]["endpoint"]` (`src/core/defaults.py:29-36`) | CD | SP | no | unchanged, ws2b |
 | MCP | `create_deck` / `edit_deck` (`src/api/mcp_server.py`) run on the monolith | = M1 | = M1 | = M1 | no | unchanged, ws2b |
-| T1/T2 | Session titles, monolith and **graph** paths (`chat_service.py:1447-1458`, `:2002-2012`) | Hardcoded DEFAULT_CONFIG, `max_tokens=50` | CD | **OBO user** | no; failures swallowed | → Gateway (ws2a) |
+| T1/T2 | Session titles, monolith and **graph** paths (`chat_service.py:1447-1458`, `:2002-2012`) | `SESSION_TITLE_MODEL = "system.ai.claude-opus-4-6"` (`src/core/defaults.py:238`), via `build_session_title_model()` (`session_naming.py`); `max_tokens=50` | CD (`use_ai_gateway=True`) | **OBO user** | no; failures swallowed | → Gateway (ws2a) |
 | J1/J2 | Verification judge, direct and MLflow backends (`src/services/evaluation/llm_judge.py:204-229, 368-388`) | DEFAULT_CONFIG | CD / MLflow | SP | no | unchanged, ws2b |
 | F1 | Feedback assistant (`src/api/services/feedback_service.py:44-85, 295`) | `FEEDBACK_LLM_ENDPOINT` env, default `databricks-gemma-3-12b` | CD | SP | no | unchanged, ws2b |
-| X1/X2 | PPTX and Google Slides converters (`html_to_pptx.py:51, 520-540`; `html_to_google_slides.py:342, 824-835`) | Hardcoded `databricks-claude-sonnet-4-5` | OAI, extended thinking | SP | no | → Gateway (ws2a) |
+| X1/X2 | PPTX and Google Slides converters (`html_to_pptx.py:51, 520-540`; `html_to_google_slides.py:342, 824-835`) | `DEFAULT_MODEL = "system.ai.claude-sonnet-4-5"` (`html_to_pptx.py:52`, `html_to_google_slides.py:343`) | `DatabricksOpenAI(use_ai_gateway=True)` via `gateway_openai_client` (`src/services/gateway_openai.py`); extended thinking | SP | no | → Gateway (ws2a) |
 | V1 | Config validator (`src/services/config_validator.py:100-115`) | DEFAULT_CONFIG | CD | env default | no (no route caller found) | unchanged, ws2b |
 | U1 | User-configured tools (`tools/model_endpoint_tool.py`, `tools/agent_bricks_tool.py`): user data calls, not app LLM calls | User's tool config | REST | OBO user | no | unchanged, ws2b |
 

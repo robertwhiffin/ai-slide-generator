@@ -481,8 +481,12 @@ with `endpoint_not_chat_model`.
 ### Legacy names on stored releases
 
 Conversations pinned to releases created before ws2a store `databricks-*` endpoint names.
-At runtime the name is passed through to the Gateway unchanged — the Gateway accepts both
-forms — so no rewriting or republishing is required. The v1 seed manifest is not changed.
+At runtime the name is passed through to the Gateway unchanged. The Gateway accepts both
+`system.ai.*` and `databricks-*` forms: live-probed 2026-09-28 — `databricks-claude-haiku-4-5`
+and `databricks-claude-opus-5-5` both answered on the Gateway route (ws2a spec §2
+platform-facts table). Task 9's live acceptance test re-confirms this for a pinned
+pre-ws2a conversation against the deployed instance. No rewriting or republishing is
+required. The v1 seed manifest is not changed.
 
 ---
 
