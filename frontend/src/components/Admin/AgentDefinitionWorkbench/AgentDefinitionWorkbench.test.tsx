@@ -2443,6 +2443,32 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
   });
 
+  it('shows the endpoint error and its accessible description even when discovery returns nothing', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(422, {
+        code: 'invalid_draft',
+        errors: [{ field: 'candidate.model.endpoint_name', code: 'endpoint_unknown', message: 'Endpoint name was not found.' }],
+      }),
+      syntheticAgentDefinitionWorkbench,
+      () => catalogResponse([]),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    expect(await within(panel).findByText(EMPTY_DISCOVERY)).toBeVisible();
+    expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+
+    // FieldError must render outside the visibleModels condition.
+    await waitFor(() => expect(within(panel).getByRole('alert')).toHaveTextContent('Endpoint name was not found.'));
+    // The "Current model" paragraph must carry aria-describedby so the error is
+    // announced even when there is no radiogroup.
+    expect(within(panel).getByText('Current model').parentElement).toHaveAccessibleDescription('Endpoint name was not found.');
+  });
+
   it.each([
     [503, MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE.message, MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE],
     [403, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN.message, MODEL_ENDPOINT_DISCOVERY_FORBIDDEN],

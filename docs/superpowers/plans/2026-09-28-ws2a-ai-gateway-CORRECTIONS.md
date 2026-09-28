@@ -469,3 +469,20 @@ All tests that used `customEndpoint()` or directly referenced the `'Custom endpo
 | "clears an old result…" | `fireEvent.change(customEndpoint(), 'endpoint-b')` and `SEED` | `fireEvent.click(radio('system.ai.endpoint-b'))` and `radio(SEED)` |
 | All probe tests with `customEndpoint().toHaveValue(SEED)` | `customEndpoint().toHaveValue(SEED_MODEL_ENDPOINT_NAME)` × 8 | `getByText('Current model').parentElement.toHaveTextContent(SEED_MODEL_ENDPOINT_NAME)` |
 | `NAMES_266` label inventory | `'Custom endpoint name'` | `'Current model'` |
+
+---
+
+## Task 7 fix round 2 — I-1 + M-1 (endpoint error when discovery is empty)
+
+**Review finding I-1:** Reviewer sabotage of moving `<FieldError>` back inside `{visibleModels.length > 0 && (...)}` produced 0 red tests. The spec §5.4 requirement "error shows even when discovery returns nothing" had no test guard.
+
+**Fix (DefinitionEditor.tsx):** Added `aria-describedby={endpointMessage ? \`${agentKey}-endpoint-error\` : undefined}` to the "Current model" `<p>` element. This keeps the ARIA connection in place even when `visibleModels.length === 0` and no radiogroup is rendered (M-1 gap closed).
+
+**Fix (AgentDefinitionWorkbench.test.tsx):** Added `'shows the endpoint error and its accessible description even when discovery returns nothing'` test in the Model-tab endpoint discovery section. The test: empty catalog (`catalogResponse([])`), save → 422 with `candidate.model.endpoint_name` error, asserts `role="alert"` visible in panel AND `within(panel).getByText('Current model').parentElement.toHaveAccessibleDescription('Endpoint name was not found.')`.
+
+**Sabotage outputs:**
+- (1) `<FieldError>` moved inside `visibleModels > 0` condition: `1 failed | 224 passed` (new test red) ✓
+- (2) `aria-describedby` removed from `<p>`: `1 failed | 224 passed` (accessible-description assertion red) ✓
+- Restored: `225 passed (225)` ✓
+
+**Full Admin folder:** 991/991 passed (11 files). `tsc --noEmit` clean.
