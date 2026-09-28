@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied, ResourceDoesNotExist
+from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied
 
 from src.services.model_endpoint_catalog import (
     CATALOG_RETRY_TIMEOUT_SECONDS,
