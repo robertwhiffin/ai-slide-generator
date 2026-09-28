@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from databricks.sdk import WorkspaceClient
 
 from src.services.converter_jail.codeprep import _fix_apostrophe_strings
+from src.services.gateway_openai import gateway_openai_client
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
 from src.services.google_slides_prompts_defaults import (
     DEFAULT_GSLIDES_SYSTEM_PROMPT,
@@ -339,7 +340,7 @@ class GoogleSlidesConversionError(Exception):
 class HtmlToGoogleSlidesConverter:
     """LLM-powered converter: HTML → Google Slides API code → execution."""
 
-    DEFAULT_MODEL = "databricks-claude-sonnet-4-5"
+    DEFAULT_MODEL = "system.ai.claude-sonnet-4-5"
 
     def __init__(
         self,
@@ -355,7 +356,7 @@ class HtmlToGoogleSlidesConverter:
             from src.core.databricks_client import get_databricks_client
             self.ws_client = get_databricks_client()
 
-        self.llm_client = self.ws_client.serving_endpoints.get_open_ai_client()
+        self.llm_client = gateway_openai_client(self.ws_client)
         self.auth = google_auth or GoogleSlidesAuth()
         self.SYSTEM_PROMPT = DEFAULT_GSLIDES_SYSTEM_PROMPT
         self.USER_PROMPT = DEFAULT_GSLIDES_USER_PROMPT
