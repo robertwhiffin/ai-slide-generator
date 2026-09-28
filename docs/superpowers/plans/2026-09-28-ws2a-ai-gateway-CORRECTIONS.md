@@ -265,3 +265,45 @@ Affected helpers: `_real_chat_adapter`, `_real_provider_executor`, `real_provide
 The `_install_real_provider` signature and usage are unchanged; only the body deviates from the brief (`workspace_client=workspace` in place of `workspace_client=workspace_client`).
 
 ---
+
+## Task 3 — Literal codes grep (frontend/src and src/api)
+
+Grepped `frontend/src` and `src/api` for `endpoint_name_mismatch`, `endpoint_not_ready`, and `endpoint_update_*`. **Zero matches found** in either location. The codes are consumed only in Python test assertions (which are being replaced). Decision: keep all old codes in the `EndpointValidationCode` Literal — removing Literal members could break any future enum consumer or serialised payload that uses those string values.
+
+Old codes kept (no active users found): `endpoint_name_mismatch`, `endpoint_not_ready`, `endpoint_update_in_progress`, `endpoint_update_failed`, `endpoint_update_canceled`.
+
+---
+
+## Task 3 — Deleted READY/NOT_UPDATING cases from `_remote_table_cases`
+
+The following cases were removed from `_remote_table_cases` in `tests/unit/test_graph_configuration_draft.py` because the new Gateway lookup no longer checks endpoint state or name echo:
+
+| id | old code | old message |
+|---|---|---|
+| `name-mismatch` | `endpoint_name_mismatch` | "Endpoint validation did not return the exact requested name." |
+| `not-ready` | `endpoint_not_ready` | "Endpoint is not ready for invocation." |
+| `update-in-progress` | `endpoint_update_in_progress` | "Endpoint configuration update is in progress." |
+| `update-failed` | `endpoint_update_failed` | "Endpoint configuration update failed." |
+| `update-canceled` | `endpoint_update_canceled` | "Endpoint configuration update was canceled." |
+
+The deleted cases used `_endpoint_detail` (SDK serving-endpoint `SimpleNamespace` with `.state.ready` and `.state.config_update` fields) which is also deleted. The replacement `_remote_table_cases` covers four Gateway error mappings plus the non-chat-model case.
+
+---
+
+## Task 3 — Bounded-client transport test URL update
+
+`test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_unavailable` in `tests/unit/test_model_endpoint_catalog.py` previously asserted:
+
+```
+("GET", "https://unit.invalid/api/2.0/serving-endpoints/exact endpoint name")
+```
+
+After Task 3 the implementation calls `api_client.do("GET", "/api/ai-gateway/v2/endpoints/exact endpoint name")` (since `"exact endpoint name"` is not a `system.ai.` name, `gateway_endpoint_name` returns it as-is). Updated assertion:
+
+```
+("GET", "https://unit.invalid/api/ai-gateway/v2/endpoints/exact endpoint name")
+```
+
+The pre-pass note "keep the bounded-client tests at :375-480 as they are" applied to Task 2 only; Task 3 necessarily changes the URL being validated.
+
+---

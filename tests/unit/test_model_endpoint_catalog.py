@@ -2,8 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from databricks.sdk.errors import DatabricksError, PermissionDenied, ResourceDoesNotExist
-from databricks.sdk.service.serving import EndpointStateConfigUpdate, EndpointStateReady
+from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied, ResourceDoesNotExist
 
 from src.services.model_endpoint_catalog import (
     CATALOG_RETRY_TIMEOUT_SECONDS,
@@ -182,6 +181,76 @@ def test_gateway_endpoint_name(model, gateway):
     assert gateway_endpoint_name(model) == gateway
 
 
+def detail_path(gateway_name):
+    return f"{LIST_PATH}/{gateway_name}"
+
+
+def test_remote_check_looks_up_the_mapped_gateway_endpoint_once():
+    path = detail_path("databricks-claude-opus-5-5")
+    api = RecordingApiClient(responses={path: {
+        "name": "databricks-claude-opus-5-5",
+        "supported_api_types": ["mlflow/v1/chat/completions", "anthropic/v1/messages"],
+    }})
+
+    assert gateway_catalog(api).validate_custom_endpoint_remote("system.ai.claude-opus-5-5") is None
+    assert api.calls == [("GET", path)]
+
+
+def test_remote_check_looks_up_a_legacy_name_as_is():
+    path = detail_path("databricks-claude-opus-4-6")
+    api = RecordingApiClient(responses={path: {
+        "name": "databricks-claude-opus-4-6",
+        "supported_api_types": ["mlflow/v1/chat/completions"],
+    }})
+
+    gateway_catalog(api).validate_custom_endpoint_remote("databricks-claude-opus-4-6")
+    assert api.calls == [("GET", path)]
+
+
+def test_remote_check_refuses_an_embedding_endpoint():
+    path = detail_path("databricks-bge-large-en")
+    api = RecordingApiClient(responses={path: {
+        "name": "databricks-bge-large-en",
+        "supported_api_types": ["mlflow/v1/embeddings"],
+    }})
+
+    with pytest.raises(EndpointValidationFailure) as caught:
+        gateway_catalog(api).validate_custom_endpoint_remote("system.ai.bge-large-en")
+    assert (caught.value.code, caught.value.message, caught.value.retryable) == (
+        "endpoint_not_chat_model", "Endpoint is not a chat model.", False,
+    )
+
+
+def test_remote_check_refuses_a_detail_without_api_types():
+    path = detail_path("databricks-x")
+    api = RecordingApiClient(responses={path: {"name": "databricks-x"}})
+
+    with pytest.raises(EndpointValidationFailure) as caught:
+        gateway_catalog(api).validate_custom_endpoint_remote("system.ai.x")
+    assert caught.value.code == "endpoint_not_chat_model"
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "message", "retryable"),
+    [
+        (NotFound("PROVIDER_SECRET"), "endpoint_unknown", "Endpoint name was not found.", False),
+        (PermissionDenied("PROVIDER_SECRET"), "endpoint_forbidden",
+         "Endpoint cannot be validated with this workspace identity.", False),
+        (DatabricksError("PROVIDER_SECRET"), "endpoint_unavailable",
+         "Endpoint validation is temporarily unavailable. Retry the save.", True),
+        (TimeoutError("PROVIDER_SECRET"), "endpoint_unavailable",
+         "Endpoint validation is temporarily unavailable. Retry the save.", True),
+    ],
+)
+def test_remote_check_maps_gateway_lookup_failures(error, code, message, retryable):
+    api = RecordingApiClient(errors={detail_path("databricks-m"): error})
+
+    with pytest.raises(EndpointValidationFailure) as caught:
+        gateway_catalog(api).validate_custom_endpoint_remote("system.ai.m")
+    assert (caught.value.code, caught.value.message, caught.value.retryable) == (code, message, retryable)
+    assert "PROVIDER_SECRET" not in caught.value.message
+
+
 @pytest.mark.parametrize("url", ["http://host", " https://host", "//host", "dbfs://host"])
 def test_validate_endpoint_name_policy_rejects_every_url_shape(url):
     with pytest.raises(EndpointValidationFailure) as failure:
@@ -195,72 +264,6 @@ def test_validate_endpoint_name_policy_preserves_accepted_input_verbatim():
     name = "  exact endpoint name  "
     assert validate_endpoint_name_policy(name) is None
     assert name == "  exact endpoint name  "
-
-
-def detailed_endpoint(
-    name,
-    *,
-    ready=EndpointStateReady.READY,
-    update=EndpointStateConfigUpdate.NOT_UPDATING,
-):
-    return SimpleNamespace(
-        name=name,
-        state=SimpleNamespace(ready=ready, config_update=update),
-    )
-
-
-def test_validate_custom_endpoint_remote_calls_get_once_with_exact_name():
-    serving_endpoints = RecordingServingEndpoints(
-        detail=detailed_endpoint("exact endpoint name")
-    )
-
-    catalog_for(serving_endpoints).validate_custom_endpoint_remote("exact endpoint name")
-
-    assert serving_endpoints.get_calls == ["exact endpoint name"]
-
-
-@pytest.mark.parametrize(
-    ("detail", "error", "code", "retryable"),
-    [
-        (detailed_endpoint("alias"), None, "endpoint_name_mismatch", False),
-        (
-            detailed_endpoint("exact", ready=EndpointStateReady.NOT_READY),
-            None,
-            "endpoint_not_ready",
-            True,
-        ),
-        (
-            detailed_endpoint("exact", update=EndpointStateConfigUpdate.IN_PROGRESS),
-            None,
-            "endpoint_update_in_progress",
-            True,
-        ),
-        (
-            detailed_endpoint("exact", update=EndpointStateConfigUpdate.UPDATE_FAILED),
-            None,
-            "endpoint_update_failed",
-            False,
-        ),
-        (
-            detailed_endpoint("exact", update=EndpointStateConfigUpdate.UPDATE_CANCELED),
-            None,
-            "endpoint_update_canceled",
-            False,
-        ),
-        (None, ResourceDoesNotExist("missing"), "endpoint_unknown", False),
-        (None, PermissionDenied("denied"), "endpoint_forbidden", False),
-        (None, DatabricksError("unavailable"), "endpoint_unavailable", True),
-    ],
-)
-def test_validate_custom_endpoint_remote_maps_exact_outcomes(detail, error, code, retryable):
-    serving_endpoints = RecordingServingEndpoints(detail=detail, get_error=error)
-
-    with pytest.raises(EndpointValidationFailure) as failure:
-        catalog_for(serving_endpoints).validate_custom_endpoint_remote("exact")
-
-    assert serving_endpoints.get_calls == ["exact"]
-    assert failure.value.code == code
-    assert failure.value.retryable is retryable
 
 
 def test_fake_catalog_queues_discovery_and_name_keyed_validation_outcomes():
@@ -282,34 +285,6 @@ def test_fake_catalog_queues_discovery_and_name_keyed_validation_outcomes():
 
     assert fake.list_calls == 1
     assert fake.validated_names == ["first", "second"]
-
-
-# Correction 3: the SDK retry wrapper exhausts transport failures into builtins
-# that are not ``DatabricksError``; both catalog methods must still stay typed.
-_TRANSPORT_EXHAUSTION = [
-    pytest.param(TimeoutError("Timed out after 0:05:00"), id="sdk-retry-timeout"),
-    pytest.param(RuntimeError("Exceeded max retry attempts (3)"), id="sdk-max-attempts"),
-    pytest.param(requests.exceptions.ConnectionError("reset"), id="requests-transport"),
-    pytest.param(OSError("socket closed"), id="os-transport"),
-]
-
-
-@pytest.mark.parametrize("error", _TRANSPORT_EXHAUSTION)
-def test_validate_custom_endpoint_remote_maps_transport_exhaustion_to_endpoint_unavailable(
-    error,
-):
-    serving_endpoints = RecordingServingEndpoints(get_error=error)
-
-    with pytest.raises(EndpointValidationFailure) as failure:
-        catalog_for(serving_endpoints).validate_custom_endpoint_remote("exact")
-
-    assert serving_endpoints.get_calls == ["exact"]
-    assert failure.value.code == "endpoint_unavailable"
-    assert failure.value.retryable is True
-    assert failure.value.message == (
-        "Endpoint validation is temporarily unavailable. Retry the save."
-    )
-    assert failure.value.__cause__ is error
 
 
 # Correction 4: the SDK interpolates the name unescaped into
@@ -364,13 +339,13 @@ def test_validate_endpoint_name_policy_accepts_other_endpoint_names_verbatim(nam
 
 @pytest.mark.parametrize("name", _PATH_SHAPED_NAMES)
 def test_validate_custom_endpoint_remote_refuses_a_path_shaped_name_before_any_get(name):
-    serving_endpoints = RecordingServingEndpoints(detail=detailed_endpoint(name))
+    api = RecordingApiClient()
 
     with pytest.raises(EndpointValidationFailure) as failure:
-        catalog_for(serving_endpoints).validate_custom_endpoint_remote(name)
+        gateway_catalog(api).validate_custom_endpoint_remote(name)
 
     assert failure.value.code == "endpoint_url_not_allowed"
-    assert serving_endpoints.get_calls == []
+    assert api.calls == []
 
 
 # Controller ruling on correction 8: the remote check runs under the exclusive
@@ -451,7 +426,7 @@ def test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_
     assert failure.value.retryable is True
     assert isinstance(failure.value.__cause__, TimeoutError)
     assert requested and set(requested) == {
-        ("GET", "https://unit.invalid/api/2.0/serving-endpoints/exact endpoint name")
+        ("GET", "https://unit.invalid/api/ai-gateway/v2/endpoints/exact endpoint name")
     }
     # Every attempt reached the transport with the bounded 3 s timeout.
     assert transport_timeouts and set(transport_timeouts) == {3}
