@@ -192,7 +192,13 @@ class DatabricksStructuredOutputProbe:
             raise _failure(_FAILED, None)
 
 
-#: Strip URLs, bearer/dapi/JWT-like tokens, and long hex/base64 runs.
+#: Dashed-UUID pattern (8-4-4-4-12) preserved for support diagnostics (e.g. ReqId).
+_DASHED_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_UUID_PLACEHOLDER = "\x00UUID\x00"
+#: Strip URLs, bearer/dapi/JWT-like tokens, and long undashed hex/base64 runs.
+#: Dashed UUIDs are excluded via pre/post substitution in _sanitise_provider_detail.
 _URL_RE = re.compile(r"https?://\S+")
 _TOKEN_RE = re.compile(r"\b(?:Bearer|dapi)[^\s,;\"']+", re.IGNORECASE)
 _HEX_BASE64_RE = re.compile(r"[A-Za-z0-9+/=_\-]{32,}")
@@ -207,8 +213,9 @@ def _sanitise_provider_detail(raw: str) -> str:
     - ``{"message": ...}`` (Gateway body; the value may itself be nested JSON)
     - ``{"error": {"message": ...}}`` (openai-style error body)
 
-    After extraction, strips URLs, bearer/dapi tokens, long hex/base64 runs
-    (≥32 chars), collapses whitespace, and caps at 300 characters.
+    After extraction, strips URLs, bearer/dapi tokens, and long undashed hex/base64
+    runs (≥32 chars).  Dashed UUIDs (8-4-4-4-12 hex, e.g. request IDs) are preserved.
+    Collapses whitespace and caps at 300 characters.
     """
     # Try to parse as JSON and extract the message field.
     text = raw
@@ -241,8 +248,15 @@ def _sanitise_provider_detail(raw: str) -> str:
     text = _URL_RE.sub("", text)
     # Strip bearer/dapi tokens.
     text = _TOKEN_RE.sub("", text)
-    # Strip long hex/base64 runs (>= 32 chars).
+    # Preserve dashed UUIDs (8-4-4-4-12) before stripping long hex/base64 runs.
+    # They carry request IDs useful for support diagnostics.
+    uuids = _DASHED_UUID_RE.findall(text)
+    text = _DASHED_UUID_RE.sub(_UUID_PLACEHOLDER, text)
+    # Strip long undashed hex/base64 runs (>= 32 chars).
     text = _HEX_BASE64_RE.sub("", text)
+    # Restore dashed UUIDs.
+    for uuid in uuids:
+        text = text.replace(_UUID_PLACEHOLDER, uuid, 1)
     # Collapse whitespace.
     text = _WHITESPACE_RE.sub(" ", text).strip()
     # Cap at 300 characters.
@@ -393,5 +407,4 @@ __all__ = [
     "StructuredOutputProbeAdapter",
     "StructuredOutputProbeCode",
     "StructuredOutputProbeFailure",
-    "_sanitise_provider_detail",
 ]
