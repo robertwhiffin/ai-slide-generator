@@ -764,6 +764,12 @@ Branch `feat/ws2a-probe-detail` (based on 5efc1b557).
 
 ---
 
+## Follow-up merge: contract re-record (2026-09-29)
+
+The hand-edited S03-put-architect REQUEST had temperature 0.7 (correct), but the RESPONSE body still held `definition.model.temperature` 0.4 with a stale `candidate_hash` — uncaught by any consumer. Fixed the journey's S03 step to send the stored value (removed `model={"temperature": 0.4}` override), updated four assertions that expected 0.4 (S03, S05, S07 adapter calls, S10 field_diffs), and re-recorded the contract via `--write-contract` against local Postgres with a throwaway SQLite `DATABASE_URL`. Commit `324c672e8`. Diff confined to: temperature changes 0.4→0.7 in S03/S05/S07/S11 bodies and requests, `model.temperature` removed from S10+S14+S15 field-diff lists, session-title timestamps, and ids/hashes. Sabotage: setting S03 response temperature back to 0.4 turns the Playwright admin journey spec 3 red (1 failed); the unit contract test and Postgres acceptance test remain green (known gap: neither validates response body temperature values). All suites restored: `test_graph_lifecycle_playwright_contract.py` 145 passed; `test_graph_lifecycle_acceptance_postgres.py` 2 passed 0 skipped; Playwright 91/91; Admin vitest 995/995; `tsc --noEmit` clean (note: the frontend root `tsconfig.json` is references-only and does not type-check `src` — use `tsc -b` / `npm run build` for a valid type-check).
+
+---
+
 ## Follow-up live check 2026-09-29
 
 **Status: BLOCKED at deploy. No live step ran.** (12:32–12:34Z)
