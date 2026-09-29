@@ -159,10 +159,56 @@ async function fulfillJson(route: Route, status: number, body: unknown) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 }
 
+// ws2a: the free-text "Custom endpoint name" field is gone. A model changes only by
+// selecting a discovered `system.ai.*` radio inside the Model tab panel, and the role's
+// current endpoint name is read from that panel's "Current model" paragraph.
+function discoveredModel(page: Page, name: string) {
+  return modelTabPanel(page).getByRole('radiogroup', { name: 'Discovered models', exact: true })
+    .getByRole('radio', { name, exact: true });
+}
+
+async function selectModel(page: Page, name: string) {
+  await discoveredModel(page, name).check();
+}
+
+async function expectCurrentModel(page: Page, name: string) {
+  await expect(modelTabPanel(page).getByText('Current model', { exact: true }).locator('..'))
+    .toHaveText(`Current model ${name}`);
+}
+
+/**
+ * The sentinel models the retained-alternative tests used to type: each is now a
+ * discoverable `system.ai.*` name, so a test can select it. Distinct from the seed and
+ * from each other, exactly as the typed sentinels were.
+ */
+const SENTINEL_MODELS = {
+  retainedA: 'system.ai.endpoint-retained-a',
+  localB: 'system.ai.endpoint-local-b',
+  unselectedA: 'system.ai.endpoint-unselected-a',
+  keepA: 'system.ai.endpoint-keep-a',
+  keepB: 'system.ai.endpoint-keep-b',
+} as const;
+
+function discoveryWith(...names: string[]) {
+  return syntheticModelEndpointDiscovery([
+    ...syntheticSystemModelEndpoints,
+    ...names.map((name) => ({ name, display_name: null, description: null, docs: null })),
+  ]);
+}
+
+/** Registered after `installWorkbenchMock`, so it wins over the shared default. */
+async function installSentinelCatalog(page: Page) {
+  await page.route(MODEL_ENDPOINTS_ENDPOINT, (route) => fulfillJson(
+    route,
+    200,
+    discoveryWith(...Object.values(SENTINEL_MODELS)),
+  ));
+}
+
 async function editArchitectFiveFields(page: Page) {
   await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
   await page.getByRole('tab', { name: 'Model' }).click();
-  await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-a2');
+  await selectModel(page, 'system.ai.endpoint-a2');
   await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.4');
   await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('8192');
   await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.8');
@@ -172,7 +218,8 @@ async function expectArchitectFiveFields(page: Page) {
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
   await page.getByRole('tab', { name: 'Model' }).click();
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-a2');
+  await expect(discoveredModel(page, 'system.ai.endpoint-a2')).toBeChecked();
+  await expectCurrentModel(page, 'system.ai.endpoint-a2');
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.4');
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('8192');
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.8');
@@ -182,7 +229,7 @@ async function expectBuilderFormUnchanged(page: Page) {
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder retained B2');
   await page.getByRole('tab', { name: 'Model' }).click();
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('databricks-claude-opus-4-6');
+  await expectCurrentModel(page, 'databricks-claude-opus-4-6');
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.7');
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.95');
@@ -208,7 +255,7 @@ test('loads lazily once, preserves exact topology, and exposes exact definition 
   );
 
   await page.getByRole('tab', { name: 'Model' }).click();
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('databricks-claude-opus-4-6');
+  await expectCurrentModel(page, 'databricks-claude-opus-4-6');
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.7');
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.95');
@@ -261,7 +308,7 @@ test('explicit Save is the only write and sends the exact five-field candidate w
       lock_version: 0,
       candidate: {
         prompt_text: 'Architect A2',
-        model: { endpoint_name: 'endpoint-a2', temperature: 0.4, max_tokens: 8192, top_p: 0.8 },
+        model: { endpoint_name: 'system.ai.endpoint-a2', temperature: 0.4, max_tokens: 8192, top_p: 0.8 },
       },
     },
   });
@@ -1083,6 +1130,7 @@ for (const agentKey of AFFECTED_ROLES) {
 test('while an Upgrade is in flight the prompt is frozen, safe fields stay editable, and a queued prompt action is retained', async ({ page }) => {
   await installExactIdentityMock(page);
   await installWorkbenchMock(page);
+  await installSentinelCatalog(page);
   const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, {}));
   let heldRoute: Route | null = null;
   const upgrades = await installPostMock(page, UPGRADE_ENDPOINT, (route) => { heldRoute = route; });
@@ -1095,7 +1143,7 @@ test('while an Upgrade is in flight the prompt is frozen, safe fields stay edita
   // A refused dirty Upgrade leaves one pre-existing alternative to queue later.
   await prompt.fill(DIRTY_LEGACY_PROMPT);
   await page.getByRole('tab', { name: 'Model' }).click();
-  await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-retained-A');
+  await selectModel(page, SENTINEL_MODELS.retainedA);
   await page.getByRole('tab', { name: 'Assembly' }).click();
   await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
   expect(upgrades).toHaveLength(0);
@@ -1114,14 +1162,14 @@ test('while an Upgrade is in flight the prompt is frozen, safe fields stay edita
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(prompt).toBeDisabled();
   await page.getByRole('tab', { name: 'Model' }).click();
-  const endpoint = page.getByRole('textbox', { name: 'Custom endpoint name' });
+  const endpoint = discoveredModel(page, SENTINEL_MODELS.localB);
   await expect(endpoint).toBeEnabled();
-  await endpoint.fill('endpoint-local-B');
+  await endpoint.check();
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toBeEnabled();
 
   // Restoring an alternative mid-flight is a prompt action: it is queued, not applied.
   await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
-  await expect(endpoint).toHaveValue('endpoint-retained-A');
+  await expectCurrentModel(page, SENTINEL_MODELS.retainedA);
   await expect(retainedAlternative(page, 2)).toContainText(
     'Prompt edits are not accepted while this Upgrade is in flight.',
   );
@@ -1134,7 +1182,7 @@ test('while an Upgrade is in flight the prompt is frozen, safe fields stay edita
   await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
   await page.getByRole('tab', { name: 'Model' }).click();
   // Safe edits made while pending survive the authoritative adoption.
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-retained-A');
+  await expectCurrentModel(page, SENTINEL_MODELS.retainedA);
   expect(upgrades).toHaveLength(1);
   expect(saves).toHaveLength(0);
 });
@@ -1199,6 +1247,7 @@ for (const agentKey of AFFECTED_ROLES) {
     test(`${DISPLAY_NAMES[agentKey]}: a selected ${operation} 409 crossing to Graph Version 2 appends, restores by ID, and never resubmits v1 bytes`, async ({ page }) => {
       await installExactIdentityMock(page);
       await installWorkbenchMock(page);
+      await installSentinelCatalog(page);
       const saves = await installSaveMock(page, (route, save, call) => (
         operation === 'save' && call === 0
           ? fulfillJson(route, 409, crossVersionSaveConflict(save.body, [agentKey]))
@@ -1217,7 +1266,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // A pre-existing retained v1 alternative carrying its own sentinels.
       await prompt.fill(DIRTY_LEGACY_PROMPT);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-retained-A');
+      await selectModel(page, SENTINEL_MODELS.retainedA);
       await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.11');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('1111');
       await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.11');
@@ -1230,7 +1279,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // ordinary Save is what crosses the version, because the reducer refuses to
       // start an Upgrade from a dirty affected prompt at all.
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-local-B');
+      await selectModel(page, SENTINEL_MODELS.localB);
       await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.22');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('2222');
       await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.22');
@@ -1251,7 +1300,7 @@ for (const agentKey of AFFECTED_ROLES) {
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-local-B');
+      await expectCurrentModel(page, SENTINEL_MODELS.localB);
       await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.22');
 
       // Reload appends a further alternative rather than overwriting either one.
@@ -1280,14 +1329,14 @@ for (const agentKey of AFFECTED_ROLES) {
       // Each stable ID restores its own safe fields and never its prompt.
       await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-retained-A');
+      await expectCurrentModel(page, SENTINEL_MODELS.retainedA);
       await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('1111');
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
 
       await retainedAlternative(page, 2).getByRole('button', { name: 'Restore retained values' }).click();
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-local-B');
+      await expectCurrentModel(page, SENTINEL_MODELS.localB);
       await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('2222');
 
       // The immediate PUT can contain none of the v1 or manual-only strings.
@@ -1308,6 +1357,7 @@ for (const agentKey of AFFECTED_ROLES) {
     test(`${DISPLAY_NAMES[agentKey]}: an unselected affected entry in an ${operation} 409 is quarantined and restorable by ID`, async ({ page }) => {
       await installExactIdentityMock(page);
       await installWorkbenchMock(page);
+      await installSentinelCatalog(page);
       const saves = await installSaveMock(page, (route, save, call) => (
         operation === 'save' && call === 0
           ? fulfillJson(route, 409, crossVersionSaveConflict(save.body, [agentKey]))
@@ -1324,7 +1374,7 @@ for (const agentKey of AFFECTED_ROLES) {
       await navigation.getByRole('button', { name: DISPLAY_NAMES[agentKey] }).click();
       await page.getByRole('textbox', { name: 'Prompt text' }).fill(DIRTY_LEGACY_PROMPT);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-unselected-A');
+      await selectModel(page, SENTINEL_MODELS.unselectedA);
       await navigation.getByRole('button', { name: 'Architect' }).click();
       if (operation === 'save') {
         await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
@@ -1355,7 +1405,7 @@ for (const agentKey of AFFECTED_ROLES) {
 
       await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-unselected-A');
+      await expectCurrentModel(page, SENTINEL_MODELS.unselectedA);
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(page.getByRole('textbox', { name: 'Prompt text' }))
         .toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
@@ -1970,6 +2020,7 @@ for (const agentKey of AFFECTED_ROLES) {
     test(`${DISPLAY_NAMES[agentKey]}: Keep local after a ${operation} 409 crossing to Graph Version 2 retains every alternative and resubmits no v1 bytes`, async ({ page }) => {
       await installExactIdentityMock(page);
       const workbenchRequestCount = await installWorkbenchMock(page);
+      await installSentinelCatalog(page);
       const saves = await installSaveMock(page, (route, save, call) => (
         operation === 'save' && call === 0
           ? fulfillJson(route, 409, crossVersionSaveConflict(save.body, [agentKey]))
@@ -1988,7 +2039,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // A pre-existing retained v1 alternative with its own safe sentinels.
       await prompt.fill(DIRTY_LEGACY_PROMPT);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-keep-A');
+      await selectModel(page, SENTINEL_MODELS.keepA);
       await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.33');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('3333');
       await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.33');
@@ -2000,7 +2051,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // Distinct current-local sentinels, and a dirty prompt only where the reducer
       // permits the operation to start at all.
       await page.getByRole('tab', { name: 'Model' }).click();
-      await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill('endpoint-keep-B');
+      await selectModel(page, SENTINEL_MODELS.keepB);
       await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.44');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('4444');
       await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.44');
@@ -2048,7 +2099,7 @@ for (const agentKey of AFFECTED_ROLES) {
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-keep-B');
+      await expectCurrentModel(page, SENTINEL_MODELS.keepB);
       await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('4444');
       await page.getByRole('tab', { name: 'Assembly' }).click();
       await expect(assemblyPanel(page)).toContainText('Protected assembly version 2');
@@ -2056,10 +2107,10 @@ for (const agentKey of AFFECTED_ROLES) {
       // Each retained ID still restores its own safe tuple independently after Keep local.
       await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
       await page.getByRole('tab', { name: 'Model' }).click();
-      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-keep-A');
+      await expectCurrentModel(page, SENTINEL_MODELS.keepA);
       await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('3333');
       await retainedAlternative(page, 2).getByRole('button', { name: 'Restore retained values' }).click();
-      await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-keep-B');
+      await expectCurrentModel(page, SENTINEL_MODELS.keepB);
       await page.getByRole('tab', { name: 'Prompt' }).click();
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
 
@@ -2088,9 +2139,10 @@ const PROBE_BUTTON = 'Test structured output';
 const PROBE_RETRY_BUTTON = 'Retry structured output test';
 const PROBE_RESULT_REGION = 'Structured output test result';
 const PROBE_SUCCEEDED_TEXT = 'Structured output test succeeded for the saved candidate.';
-const URL_NOT_ALLOWED = 'Endpoint must be a Databricks endpoint name, not a URL.';
 const EMPTY_DISCOVERY = 'No Databricks foundation-model endpoints are available to this identity.';
 const SEED_MODEL = { temperature: 0.7, max_tokens: 60000, top_p: 0.95 };
+/** ws2a: the newer family member a refresh exposes, under its Gateway `system.ai.*` name. */
+const GATEWAY_NEWER_MODEL = { ...syntheticNewerModelEndpoint, name: 'system.ai.claude-opus-4-7' };
 
 function probeIdentityText(endpoint: string, hash: string, lock: number) {
   return `Endpoint ${endpoint} · Candidate hash ${hash} · Draft lock ${lock}`;
@@ -2177,10 +2229,10 @@ test('model endpoint discovery: first Model-tab read, local search, a refresh ex
   const workbenchRequestCount = await installWorkbenchMock(page);
   const reads = await installCatalogMock(page, (route, call) => fulfillJson(route, 200, call === 0
     ? syntheticModelEndpointDiscovery()
-    : syntheticModelEndpointDiscovery([syntheticNewerModelEndpoint, ...syntheticSystemModelEndpoints])));
+    : syntheticModelEndpointDiscovery([GATEWAY_NEWER_MODEL, ...syntheticSystemModelEndpoints])));
   const saves = await installSaveMock(page, (route, save) => fulfillJson(route, 200, saveSuccessFor(save)));
   const probes = await installProbeMock(page, (route) => fulfillJson(route, 200, syntheticProbeSuccess({
-    endpoint_name: syntheticNewerModelEndpoint.name,
+    endpoint_name: GATEWAY_NEWER_MODEL.name,
     candidate_hash: 'd'.repeat(64),
     lock_version: 1,
   })));
@@ -2206,19 +2258,19 @@ test('model endpoint discovery: first Model-tab read, local search, a refresh ex
   expect(reads).toHaveLength(1);
 
   await panel.getByRole('button', { name: 'Refresh models' }).click();
-  const newer = group.getByRole('radio', { name: syntheticNewerModelEndpoint.name, exact: true });
+  const newer = group.getByRole('radio', { name: GATEWAY_NEWER_MODEL.name, exact: true });
   await expect(newer).toBeVisible();
   expect(reads).toHaveLength(2);
   // The seed stays exact: a newer family member never moves it on its own.
   await expect(newer).not.toBeChecked();
   await expect(group.getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME, exact: true })).toBeChecked();
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+  await expectCurrentModel(page, SEED_MODEL_ENDPOINT_NAME);
   await expect(architectNavStatus(page)).not.toHaveAccessibleDescription('Unsaved');
   expect(saves).toHaveLength(0);
   expect(probes.posts).toHaveLength(0);
 
   await newer.check();
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(syntheticNewerModelEndpoint.name);
+  await expectCurrentModel(page, GATEWAY_NEWER_MODEL.name);
   await expect(panel.getByRole('button', { name: PROBE_BUTTON })).toBeDisabled();
   expect(saves).toHaveLength(0);
   await page.getByRole('button', { name: 'Save Draft' }).click();
@@ -2227,7 +2279,7 @@ test('model endpoint discovery: first Model-tab read, local search, a refresh ex
     lock_version: 0,
     candidate: {
       prompt_text: syntheticDraftDefinitions.architect.prompt_text,
-      model: { endpoint_name: syntheticNewerModelEndpoint.name, ...SEED_MODEL },
+      model: { endpoint_name: GATEWAY_NEWER_MODEL.name, ...SEED_MODEL },
     },
   });
   await expect(architectNavStatus(page)).toHaveAccessibleDescription('Needs test');
@@ -2237,7 +2289,7 @@ test('model endpoint discovery: first Model-tab read, local search, a refresh ex
   await probe.click();
   await expect(probeResultRegion(page)).toContainText(PROBE_SUCCEEDED_TEXT);
   await expect(probeResultRegion(page))
-    .toContainText(probeIdentityText(syntheticNewerModelEndpoint.name, 'd'.repeat(64), 1));
+    .toContainText(probeIdentityText(GATEWAY_NEWER_MODEL.name, 'd'.repeat(64), 1));
   expect(probes.raw).toEqual(['{"lock_version":1}']);
   expect(probes.posts.map((post) => post.agentKey)).toEqual(['architect']);
   expect(saves).toHaveLength(1);
@@ -2247,11 +2299,11 @@ test('model endpoint discovery: first Model-tab read, local search, a refresh ex
   await expect.poll(workbenchRequestCount).toBe(1);
 });
 
-test('model endpoint manual custom name: an exact name absent from discovery saves only the five leaves, is retained, then probes', async ({ page }) => {
-  const manual = 'Team Exact Endpoint 9';
+test('model endpoint selected name: a discovered system.ai name saves only the five leaves, is retained, then probes', async ({ page }) => {
+  const manual = 'system.ai.team-exact-endpoint-9';
   await installExactIdentityMock(page);
   const workbenchRequestCount = await installWorkbenchMock(page);
-  const reads = await installCatalogMock(page, (route) => fulfillJson(route, 200, syntheticModelEndpointDiscovery()));
+  const reads = await installCatalogMock(page, (route) => fulfillJson(route, 200, discoveryWith(manual)));
   const saves = await installSaveMock(page, (route, save) => fulfillJson(route, 200, saveSuccessFor(save)));
   const rawSaves: string[] = [];
   page.on('request', (request) => {
@@ -2265,11 +2317,12 @@ test('model endpoint manual custom name: an exact name absent from discovery sav
   await openWorkbench(page);
   await page.getByRole('tab', { name: 'Model' }).click();
   const panel = modelTabPanel(page);
-  await expect(panel.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length);
-  await expect(panel.getByRole('radio', { name: manual })).toHaveCount(0);
+  await expect(panel.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length + 1);
+  await expect(discoveredModel(page, manual)).not.toBeChecked();
 
-  await page.getByRole('textbox', { name: 'Custom endpoint name' }).fill(manual);
-  await expect(panel.getByRole('radio', { checked: true })).toHaveCount(0);
+  await selectModel(page, manual);
+  await expect(discoveredModel(page, manual)).toBeChecked();
+  await expect(panel.getByRole('radio', { checked: true })).toHaveCount(1);
   await page.getByRole('button', { name: 'Save Draft' }).click();
   await expect.poll(() => saves.length).toBe(1);
 
@@ -2296,7 +2349,7 @@ test('model endpoint manual custom name: an exact name absent from discovery sav
 
   // Exact retention after success: the name, the lock and the status.
   await expect(architectNavStatus(page)).toHaveAccessibleDescription('Needs test');
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(manual);
+  await expectCurrentModel(page, manual);
   await expect(page.getByText('Lock version').locator('..')).toContainText('Lock version1');
 
   await panel.getByRole('button', { name: PROBE_BUTTON }).click();
@@ -2308,10 +2361,11 @@ test('model endpoint manual custom name: an exact name absent from discovery sav
 });
 
 test('model endpoint manual server-validation failure: a typed endpoint issue keeps the whole unsaved form, and the corrected name retries through the same PUT without remount', async ({ page }) => {
-  const missing = 'Team Missing Endpoint';
-  const corrected = 'Team Found Endpoint';
+  const missing = 'system.ai.team-missing-endpoint';
+  const corrected = 'system.ai.team-found-endpoint';
   await installExactIdentityMock(page);
   const workbenchRequestCount = await installWorkbenchMock(page);
+  await installCatalogMock(page, (route) => fulfillJson(route, 200, discoveryWith(missing, corrected)));
   const saves = await installSaveMock(page, (route, save, call) => (call === 0
     ? fulfillJson(route, 422, {
       code: 'invalid_draft',
@@ -2331,8 +2385,8 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
   await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect unsaved prompt');
   await page.getByRole('tab', { name: 'Model' }).click();
   const panel = modelTabPanel(page);
-  const endpoint = page.getByRole('textbox', { name: 'Custom endpoint name' });
-  await endpoint.fill(missing);
+  const endpoint = panel.getByRole('radiogroup', { name: 'Discovered models', exact: true });
+  await selectModel(page, missing);
   await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.3');
   await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.5');
   // A DOM marker proves the same element survives: no remount, no reload.
@@ -2346,7 +2400,8 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
   await expect(alerts).toHaveText('Endpoint name was not found.');
   await expect(alerts).not.toContainText(missing);
   await expect(page.getByRole('region', { name: 'Server rejected this request' })).toHaveCount(0);
-  await expect(endpoint).toHaveValue(missing);
+  await expect(discoveredModel(page, missing)).toBeChecked();
+  await expectCurrentModel(page, missing);
   await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.3');
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
   await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.5');
@@ -2356,7 +2411,7 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect unsaved prompt');
   await page.getByRole('tab', { name: 'Model' }).click();
 
-  await endpoint.fill(corrected);
+  await selectModel(page, corrected);
   await expect(endpoint).not.toHaveAccessibleDescription('Endpoint name was not found.');
   await page.getByRole('button', { name: 'Save Draft' }).click();
   await expect.poll(() => saves.length).toBe(2);
@@ -2369,7 +2424,8 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
     },
   });
   await expect(architectNavStatus(page)).toHaveAccessibleDescription('Needs test');
-  await expect(endpoint).toHaveValue(corrected);
+  await expect(discoveredModel(page, corrected)).toBeChecked();
+  await expectCurrentModel(page, corrected);
   await expect(endpoint).toHaveAttribute('data-remount-marker', 'kept');
   await expect(panel.getByRole('alert')).toHaveCount(0);
 
@@ -2400,7 +2456,7 @@ for (const code of ['unsupported_structured_output', 'endpoint_probe_forbidden',
     await expect(region).toContainText(probeIdentityText(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
     await expect(region).not.toContainText(PROBE_SUCCEEDED_TEXT);
     expect(await navStatusText(architectNavStatus(page))).toBe(statusBefore);
-    await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    await expectCurrentModel(page, SEED_MODEL_ENDPOINT_NAME);
     expect(probes.raw).toEqual(['{"lock_version":0}']);
 
     const retry = region.getByRole('button', { name: PROBE_RETRY_BUTTON });
@@ -2431,43 +2487,13 @@ test('model endpoint empty discovery says so, keeps the saved seed, and still pr
   await expect(panel).toContainText(EMPTY_DISCOVERY);
   await expect(panel.getByRole('radiogroup')).toHaveCount(0);
   await expect(panel.getByRole('alert')).toHaveCount(0);
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+  await expectCurrentModel(page, SEED_MODEL_ENDPOINT_NAME);
 
   await panel.getByRole('button', { name: PROBE_BUTTON }).click();
   await expect(probeResultRegion(page))
     .toContainText(probeIdentityText(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
   expect(probes.raw).toEqual(['{"lock_version":0}']);
   expectBareCatalogReads(reads);
-});
-
-test('model endpoint URL rejection shows the table message and sends zero PUT and zero probe', async ({ page }) => {
-  await installExactIdentityMock(page);
-  await installWorkbenchMock(page);
-  const saves = await installSaveMock(page, (route) => fulfillJson(route, 500, null));
-  const probes = await installProbeMock(page, (route) => fulfillJson(route, 200, syntheticProbeSuccess()));
-  await openWorkbench(page);
-  await page.getByRole('tab', { name: 'Model' }).click();
-  const panel = modelTabPanel(page);
-  await expect(panel.getByRole('radio')).toHaveCount(syntheticSystemModelEndpoints.length);
-
-  for (const value of [
-    'https://example.cloud.databricks.com/serving-endpoints/x/invocations',
-    'serving-endpoints/../secrets',
-    'x?token=abc',
-  ]) {
-    const endpoint = page.getByRole('textbox', { name: 'Custom endpoint name' });
-    await endpoint.fill(value);
-    await expect(endpoint).toHaveAccessibleDescription(URL_NOT_ALLOWED);
-    await expect(panel.getByRole('alert')).toHaveText(URL_NOT_ALLOWED);
-    await expect(endpoint).toHaveValue(value);
-    await expect(page.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
-    await expect(panel.getByRole('button', { name: PROBE_BUTTON })).toBeDisabled();
-    await page.getByRole('button', { name: 'Save Draft' }).click({ force: true });
-    await panel.getByRole('button', { name: PROBE_BUTTON }).click({ force: true });
-  }
-  await page.waitForTimeout(200);
-  expect(saves).toHaveLength(0);
-  expect(probes.posts).toHaveLength(0);
 });
 
 test('model endpoint catalogue 503 is an alert that recovers through Refresh models without remount', async ({ page }) => {
@@ -2483,7 +2509,7 @@ test('model endpoint catalogue 503 is an alert that recovers through Refresh mod
   await expect(panel.getByRole('alert')).toContainText(MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE.message);
   await expect(panel.getByRole('radiogroup')).toHaveCount(0);
   await expect(panel).not.toContainText(EMPTY_DISCOVERY);
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+  await expectCurrentModel(page, SEED_MODEL_ENDPOINT_NAME);
   const search = panel.getByRole('searchbox', { name: 'Search discovered models' });
   await search.fill('opus');
   await search.evaluate((element) => { element.setAttribute('data-remount-marker', 'kept'); });
@@ -2795,7 +2821,11 @@ test('Agent Test Cases: every control stays inside the guard, and no #266 or #26
     await expect(page.getByRole('button', { name })).toHaveCount(1);
   }
   await expect(page.getByRole('searchbox', { name: 'Search discovered models' })).toHaveCount(1);
-  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveCount(1);
+  // ws2a: no free-text endpoint field exists; the active Model panel shows one
+  // "Current model" paragraph (every role's editor is mounted, so scope to the panel).
+  await expect(page.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveCount(0);
+  await expect(page.getByRole('radiogroup', { name: 'Discovered models' })).toHaveCount(1);
+  await expect(modelTabPanel(page).getByText('Current model', { exact: true })).toHaveCount(1);
   await expect(page.getByRole('region', { name: 'Test case evidence' })).toHaveCount(1);
   await expect(page.getByRole('region', { name: PROBE_RESULT_REGION })).toHaveCount(0);
 });
