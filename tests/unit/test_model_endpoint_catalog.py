@@ -126,6 +126,24 @@ def test_list_system_models_drops_names_without_the_databricks_prefix():
     ]
 
 
+def test_list_system_models_drops_names_the_save_rule_would_refuse():
+    """Every offered name must pass ``validate_gateway_model_name``: an entry
+    with a trailing ``_``/``-``/``.`` or uppercase letters is dropped, not
+    offered and then refused at save with ``endpoint_not_gateway_model``."""
+    api = RecordingApiClient(responses={LIST_PATH: {"endpoints": [
+        {"name": "databricks-trailing_"},
+        {"name": "databricks-trailing-"},
+        {"name": "databricks-Claude-Upper"},
+        {"name": "databricks-gemma-3-12b"},
+    ]}})
+
+    offered = [item.name for item in gateway_catalog(api).list_system_models().endpoints]
+
+    assert offered == ["system.ai.gemma-3-12b"]
+    for name in offered:
+        validate_gateway_model_name(name)
+
+
 def test_list_system_models_returns_empty_success_for_no_endpoints():
     api = RecordingApiClient(responses={LIST_PATH: {}})
 
