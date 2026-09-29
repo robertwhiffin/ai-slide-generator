@@ -7,18 +7,18 @@ Covers:
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from fastapi.testclient import TestClient
 
 from src.core.database import Base, get_db
 from src.core.encryption import encrypt_data
 from src.database.models import GoogleGlobalCredentials
-
+from src.database.models.google_oauth_token import GoogleOAuthToken
 
 # Sample credentials.json — must include auth_uri/token_uri for Flow.from_client_config
 VALID_CREDENTIALS = json.dumps({
@@ -158,17 +158,69 @@ class TestHelpers:
 class TestAuthStatus:
 
     def test_returns_false_for_no_creds(self, test_client):
-        """No global credentials → authorized=false."""
+        """No global credentials → authorized=false, has_credentials=false."""
         resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
-        assert resp.json()["authorized"] is False
+        body = resp.json()
+        assert body["authorized"] is False
+        assert body["has_credentials"] is False
 
     def test_returns_false_with_creds_but_no_token(self, test_client, session_factory):
         """Global credentials exist but user hasn't authorized yet."""
         _seed_global_credentials(session_factory)
         resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
-        assert resp.json()["authorized"] is False
+        body = resp.json()
+        assert body["authorized"] is False
+        assert body["has_credentials"] is True
+
+
+def _seed_user_token(session_factory, user_identity: str) -> None:
+    db = session_factory()
+    token_json = json.dumps({
+        "token": "ya29.test",
+        "refresh_token": "1//test",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "test-id.apps.googleusercontent.com",
+        "client_secret": "test-secret",
+        "scopes": ["https://www.googleapis.com/auth/presentations"],
+        "expiry": None,
+    })
+    db.add(GoogleOAuthToken(
+        user_identity=user_identity,
+        token_encrypted=encrypt_data(token_json),
+    ))
+    db.commit()
+    db.close()
+
+
+class TestRevokeAuth:
+
+    def test_revoke_is_idempotent_when_no_token(self, test_client):
+        resp = test_client.delete("/api/export/google-slides/auth")
+        assert resp.status_code == 204
+        status = test_client.get("/api/export/google-slides/auth/status")
+        assert status.json()["authorized"] is False
+
+    def test_revoke_deletes_only_current_user_token(self, test_client, session_factory):
+        _seed_global_credentials(session_factory)
+        _seed_user_token(session_factory, "local_dev")
+        _seed_user_token(session_factory, "other@example.com")
+
+        resp = test_client.delete("/api/export/google-slides/auth")
+        assert resp.status_code == 204
+
+        status = test_client.get("/api/export/google-slides/auth/status")
+        assert status.json()["authorized"] is False
+        assert status.json()["has_credentials"] is True
+
+        db = session_factory()
+        remaining = {
+            row.user_identity
+            for row in db.query(GoogleOAuthToken).all()
+        }
+        db.close()
+        assert remaining == {"other@example.com"}
 
 
 # ---------------------------------------------------------------------------

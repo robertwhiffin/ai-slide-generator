@@ -6,7 +6,7 @@
  * 
  * The workflow covers:
  * 1. Admin page — uploading Google OAuth credentials
- * 2. Per-user authorization — authorizing with Google
+ * 2. Settings — authorizing / disconnecting with Google
  * 3. Exporting a deck — using the export dropdown in the slide panel
  */
 
@@ -122,7 +122,7 @@ test.describe('User Guide: Exporting to Google Slides', () => {
       await capture.capture({
         step: '02',
         name: 'google-slides-tab',
-        description: 'The Google Slides tab shows credential status and authorization controls',
+        description: 'The Google Slides tab is where admins upload app-wide OAuth client credentials',
         highlightSelector: '#google-slides-tab',
       });
 
@@ -158,15 +158,29 @@ test.describe('User Guide: Exporting to Google Slides', () => {
         description: 'After uploading, the status confirms credentials are configured',
       });
 
-      // Step 05: Authorize button
+      console.log('\n=== Generated Markdown for Credentials Uploaded ===\n');
+      console.log(capture.generateMarkdown());
+      console.log('\n=== End of Markdown ===\n');
+    });
+  });
+
+  test.describe('User Settings', () => {
+    test('capture connect Google account', async ({ page }) => {
+      await setupUserGuideMocks(page);
+      await setupGoogleSlidesMocks(page, { credentialsConfigured: true, authorized: false });
+      const capture = new UserGuideCapture(page, '07-exporting-to-google-slides');
+
+      await page.goto('/settings');
+      await page.waitForTimeout(500);
+
       await capture.capture({
         step: '05',
         name: 'authorize-button',
-        description: 'Click "Authorize with Google" to link your Google account',
+        description: 'Open Settings from Configure and click "Authorize with Google" to link your account',
         highlightSelector: 'button:has-text("Authorize")',
       });
 
-      console.log('\n=== Generated Markdown for Credentials Uploaded ===\n');
+      console.log('\n=== Generated Markdown for Connect Google ===\n');
       console.log(capture.generateMarkdown());
       console.log('\n=== End of Markdown ===\n');
     });
@@ -176,18 +190,13 @@ test.describe('User Guide: Exporting to Google Slides', () => {
       await setupGoogleSlidesMocks(page, { credentialsConfigured: true, authorized: true });
       const capture = new UserGuideCapture(page, '07-exporting-to-google-slides');
 
-      await page.goto('/admin');
+      await page.goto('/settings');
       await page.waitForTimeout(500);
 
-      // Switch to Google Slides tab
-      await page.getByRole('tab', { name: 'Google Slides' }).click();
-      await page.waitForTimeout(300);
-
-      // Step 06: Authorized status
       await capture.capture({
         step: '06',
         name: 'authorized-status',
-        description: 'After authorization, the status confirms your Google account is linked',
+        description: 'After authorization, Settings confirms your Google account is linked. Disconnect removes Tellr\'s stored token.',
       });
 
       console.log('\n=== Generated Markdown for Authorized State ===\n');

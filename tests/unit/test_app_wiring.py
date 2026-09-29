@@ -48,6 +48,7 @@ class TestAppRoutes:
         assert "/api/export/google-slides/auth/status" in route_paths
         assert "/api/export/google-slides/auth/url" in route_paths
         assert "/api/export/google-slides/auth/callback" in route_paths
+        assert "/api/export/google-slides/auth" in route_paths
         assert "/api/export/google-slides" in route_paths
 
     def test_admin_google_credentials_routes_registered(self):

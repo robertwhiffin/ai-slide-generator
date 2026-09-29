@@ -26,15 +26,19 @@ Key design decisions:
 ## 2. Architecture
 
 ```
-Frontend (Admin page → GoogleSlidesAuthForm)   ← one-time setup
+Frontend (Admin page → GoogleSlidesAuthForm)   ← one-time admin setup
   │
-  ├─ Upload credentials.json ──► POST /api/admin/google-credentials
-  │                                 └─ validates → encrypts → stores in google_global_credentials
+  └─ Upload credentials.json ──► POST /api/admin/google-credentials
+                                    └─ validates → encrypts → stores in google_global_credentials
+
+Frontend (Configure → Settings → GoogleAccountConnection)   ← per-user
   │
   ├─ Authorize (popup) ────────► GET /api/export/google-slides/auth/url
   │                                 └─ builds Flow from decrypted creds → returns consent URL
   │   Google consent ──────────► GET /api/export/google-slides/auth/callback
   │                                 └─ exchanges code → encrypts token → stores in google_oauth_tokens
+  └─ Disconnect ───────────────► DELETE /api/export/google-slides/auth
+                                    └─ deletes the caller's google_oauth_tokens row
 
 Frontend (SlidePanel → "Export to Google Slides")   ← the export
   │
@@ -56,7 +60,7 @@ Frontend (SlidePanel → "Export to Google Slides")   ← the export
 ### Data Flow
 
 1. **Admin** uploads `credentials.json` via the Google Slides tab on the `/admin` page.
-2. **Each user** clicks "Authorize" to complete the OAuth consent flow in a popup. The resulting token is encrypted and stored per-user (by `user_identity`).
+2. **Each user** opens **Configure → Settings** and clicks "Authorize with Google" to complete the OAuth consent flow in a popup. The resulting token is encrypted and stored per-user (by `user_identity`). **Disconnect** on the same page deletes that token (`DELETE /api/export/google-slides/auth`). Users can also complete consent from the export popup if they are not yet authorized.
 3. **Export** (`exportToGoogleSlides` in `frontend/src/services/api.ts`) POSTs to `/from-huashu`. The backend builds the PPTX server-side and uploads it to Drive in a single synchronous round-trip — there is **no** job/poll cycle on this path.
 4. If the huashu pipeline is unavailable on the deployment (HTTP 503 — e.g. Chromium not bootstrapped), the frontend transparently falls back to `/from-records`, walking the deck DOM client-side and POSTing the extracted records.
 
@@ -146,9 +150,10 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/auth/status` | Returns `{"authorized": bool}`. Gracefully returns `false` on any error. |
+| `GET` | `/auth/status` | Returns `{"authorized": bool, "has_credentials": bool}`. Gracefully returns `authorized: false` on any error. `has_credentials` is a non-secret probe for the Settings UI. |
 | `GET` | `/auth/url` | Generates and returns the Google OAuth consent URL. |
 | `GET` | `/auth/callback?code=...` | Exchanges auth code for tokens, encrypts, stores. Returns HTML that notifies the opener window. |
+| `DELETE` | `/auth` | Deletes the **current user's** `google_oauth_tokens` row. Idempotent 204. Does not call Google's remote revoke API. |
 
 ### Export (`/api/export/google-slides`)
 
@@ -285,13 +290,17 @@ Retained for reference but not on the live export path — see §1.
 
 ### GoogleSlidesAuthForm (`frontend/src/components/config/GoogleSlidesAuthForm.tsx`)
 
-Rendered on the `/admin` page. Provides:
+Rendered on the `/admin` Google Slides tab (**admins only**). Provides:
 - Drag-and-drop file upload for `credentials.json`
 - Status indicators (uploaded / not configured)
 - Upload / replace / remove actions
-- "Authorize with Google" button (opens popup)
-- Authorization status (authorized / not authorized)
 - Help text with instructions for obtaining credentials from Google Cloud Console
+
+Per-user Connect / Re-authorize / Disconnect is **not** on this form.
+
+### GoogleAccountConnection (`frontend/src/components/config/GoogleAccountConnection.tsx`)
+
+Rendered on `/settings` (Configure → Settings) for **every user**. Calls only `/api/export/google-slides/auth*`. If `has_credentials` is false, tells the user to ask an admin. Otherwise: Authorize, Re-authorize, Disconnect.
 
 ### SlidePanel (`frontend/src/components/SlidePanel/SlidePanel.tsx`)
 
@@ -300,7 +309,7 @@ Rendered on the `/admin` page. Provides:
 ### API Services
 
 - `frontend/src/api/config.ts` — `uploadGoogleCredentials()`, `getGoogleCredentialsStatus()`, `deleteGoogleCredentials()` (admin endpoints)
-- `frontend/src/services/api.ts` — `checkGoogleSlidesAuth()`, `getGoogleSlidesAuthUrl()`, `exportToGoogleSlides(sessionId, slideDeck, onProgress)`
+- `frontend/src/services/api.ts` — `checkGoogleSlidesAuth()`, `getGoogleSlidesAuthUrl()`, `revokeGoogleSlidesAuth()`, `exportToGoogleSlides(sessionId, slideDeck, onProgress)`
 - `frontend/src/services/domWalker.ts` — `extractSlideRecordsForExport(deck, fontMode)`, the client-side DOM walker used only for the `/from-records` fallback
 
 ---
@@ -336,7 +345,7 @@ pytest tests/unit/ -v --ignore=tests/unit/test_chart_persistence.py \
 3. Enable the **Google Slides API** and **Google Drive API**.
 4. Go to Credentials → Create OAuth 2.0 Client ID (Desktop app).
 5. Download the `credentials.json` file.
-6. Upload it on the admin page (Google Slides tab).
+6. Upload it on the admin page (Google Slides tab). Users then connect their Google accounts under **Configure → Settings**.
 
 ### Environment Variables
 
