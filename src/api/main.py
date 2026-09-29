@@ -31,7 +31,10 @@ from src.api.routes.settings import (
     identities_router,
     slide_styles_router,
 )
-from src.api.services.export_job_queue import start_export_worker
+from src.api.services.export_job_queue import (
+    start_export_cleanup_worker,
+    start_export_worker,
+)
 from src.api.services.job_queue import recover_stuck_requests, start_worker
 from src.core.database import (
     is_lakebase_environment,
@@ -49,6 +52,7 @@ IS_TESTING = ENVIRONMENT == "test"
 # Worker task references for cleanup
 _worker_task = None
 _export_worker_task = None
+_export_cleanup_task: asyncio.Task | None = None
 _cleanup_task = None
 _timeout_task = None
 _frontend_assets_stack: ExitStack | None = None
@@ -57,7 +61,8 @@ _frontend_assets_stack: ExitStack | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task, _export_worker_task, _cleanup_task, _timeout_task, _frontend_assets_stack
+    global _worker_task, _export_worker_task, _export_cleanup_task
+    global _cleanup_task, _timeout_task, _frontend_assets_stack
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
@@ -124,6 +129,10 @@ async def lifespan(app: FastAPI):
         _export_worker_task = await start_export_worker()
         logger.info("Export job queue worker started")
 
+        # Start the export job TTL cleanup worker
+        _export_cleanup_task = await start_export_cleanup_worker()
+        logger.info("Export job cleanup worker started")
+
         # Start the MCP job timeout sweeper
         from src.api.services.job_queue import mark_timed_out_jobs_loop
         _timeout_task = asyncio.create_task(mark_timed_out_jobs_loop())
@@ -168,6 +177,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("Export job queue worker stopped")
+
+    if _export_cleanup_task:
+        _export_cleanup_task.cancel()
+        try:
+            await _export_cleanup_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Export job cleanup worker stopped")
 
     if _cleanup_task:
         _cleanup_task.cancel()
