@@ -730,3 +730,34 @@ After that decision, re-run Task 9 from step (a).
 Their substance still holds: no tool the analyst can call is bound.
 
 **Other sites in `src/` that still send sampling parameters.** All are out of scope and were not touched: `agent.py:450-452`, `agent_factory.py:71-73`, `evaluation/llm_judge.py:225-227`, `api/services/feedback_service.py:76,295` and `config_validator.py:110-112`. No other in-scope ws2a call site sends `temperature`, `top_p` or `top_k`.
+## Follow-up B
+
+Branch `feat/ws2a-probe-detail` (based on 5efc1b557).
+
+### B1 — `provider_detail` in probe failure
+
+- Added `provider_detail: str | None` to `StructuredOutputProbeFailure.__init__()` (keyword-only, default `None`).
+- Added `_sanitise_provider_detail(raw: str) -> str` — handles Gateway JSON body shape (`{"error_code": ..., "message": "<nested JSON>"}`) and openai-style body (`{"error": {"message": ...}}`), strips URLs, bearer/dapi tokens, hex/base64 runs ≥32 chars, collapses whitespace, caps at 300 chars.
+- Added `_extract_provider_detail(error)` — extracts from `openai.APIStatusError.response.text` or `error.body`, delegates to `_sanitise_provider_detail`.
+- Updated `_failure()` to call `_extract_provider_detail` for `openai.APIStatusError` and `DatabricksError` only.
+- Added `provider_detail: str | None = None` to `StructuredOutputProbeFailureResponse` schema (nullable, Pydantic default).
+- Updated `_probe_result_response()` route to pass `provider_detail=failure.provider_detail`.
+- Updated `test_model_endpoint_probe_route_maps_each_typed_failure_exactly` to include `"provider_detail": null` in the expected body and key list.
+- Added 13 new tests covering: gateway body shape, flat JSON, URL/token/hex sanitisation, cap, attribute, default-None, real-provider HTTP codes carry detail, connection error has no detail.
+
+### B2 — Workbench UI
+
+- Removed Temperature and Top-p inputs from Model tab in `DefinitionEditor.tsx`.
+- Updated `ProbeResultView` to lead with `"The model rejected the test request: <provider_detail>"` when detail present; keep `result.message` as fallback. Moved identity line to secondary "Details —" prefix at smaller opacity.
+- Updated `StructuredOutputProbeFailureResponse` in `agentDefinitions.ts` to include `provider_detail: string | null`.
+- Updated `parseStructuredOutputProbeFailure` to accept optional `provider_detail` key (while still rejecting unknown extra keys like `detail`).
+- Updated `DraftProbeResult` failed branch to include `provider_detail: string | null`.
+- Updated `probeUnsuccessful` reducer case to pass `provider_detail`.
+- Updated `syntheticProbeFailure` fixture to include `provider_detail: null` by default.
+- Updated all tests that asserted Temperature/Top-p spinbuttons to instead assert:
+  - The inputs are not in the DOM
+  - The save body carries stored `temperature: 0.7, top_p: 0.95` values unchanged
+- Updated `PROBE_IDENTITY_TEXT` constant to match new "Details —" prefix.
+- Added new test `'shows provider_detail as the lead line when present'`.
+- Added new parser tests for `provider_detail` acceptance and rejection.
+

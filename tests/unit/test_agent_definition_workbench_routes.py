@@ -4240,6 +4240,7 @@ def test_model_endpoint_probe_route_maps_each_typed_failure_exactly(
         "endpoint_name": _model_node(body, "architect")["draft"]["model"]["endpoint_name"],
         "candidate_hash": _model_node(body, "architect")["draft"]["candidate_hash"],
         "lock_version": 0,
+        "provider_detail": None,
     }
     assert list(response.json()) == [
         "code",
@@ -4248,6 +4249,7 @@ def test_model_endpoint_probe_route_maps_each_typed_failure_exactly(
         "endpoint_name",
         "candidate_hash",
         "lock_version",
+        "provider_detail",
     ]
 
 

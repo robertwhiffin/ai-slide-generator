@@ -151,6 +151,8 @@ export type DraftProbeResult = StructuredOutputProbeIdentity & (
     code: StructuredOutputProbeFailureResponse['code'];
     message: string;
     retryable: boolean;
+    /** Sanitised provider reason from the admin probe route; null when absent. */
+    provider_detail: string | null;
   }
 );
 
@@ -1440,6 +1442,7 @@ function reduceDraftEditor(
         code: action.failure.code,
         message: action.failure.message,
         retryable: action.failure.retryable,
+        provider_detail: action.failure.provider_detail,
         ...identity,
       }));
     case 'testCasesLoadStarted':

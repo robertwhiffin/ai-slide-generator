@@ -508,6 +508,9 @@ class StructuredOutputProbeFailureResponse(BaseModel):
     endpoint_name: str
     candidate_hash: str = Field(pattern=_LOWERCASE_SHA256)
     lock_version: int
+    #: Sanitised provider reason, present only on the probe route (admin workbench only).
+    #: Never included on runtime graph-turn error paths.
+    provider_detail: str | None = None
 
 
 # --- Agent Test Cases (#267) -------------------------------------------------
