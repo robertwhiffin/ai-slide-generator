@@ -222,7 +222,9 @@ class DatabricksModelEndpointCatalog:
                     True,
                 )
             invocable = gateway_invocable_name(name)
-            if invocable is None:
+            # Offer only names the save rule accepts (validate_gateway_model_name),
+            # so the picker never lists a model the save then refuses with a 422.
+            if invocable is None or not _GATEWAY_MODEL_NAME.fullmatch(invocable):
                 continue
             discovered.append(
                 SystemModelEndpoint(name=invocable, display_name=None, description=None, docs=None)
