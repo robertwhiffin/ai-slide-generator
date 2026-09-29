@@ -420,7 +420,7 @@ def test_removed_pinned_endpoint_is_safe_and_is_attempted_exactly_once(
         raise removed
 
     def model_factory(**kwargs):
-        endpoint_attempts.append(kwargs["endpoint"])
+        endpoint_attempts.append(kwargs["model"])
         return Model()
 
     runtime = AgentRuntime(
