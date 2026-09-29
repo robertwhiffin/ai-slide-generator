@@ -1,16 +1,16 @@
 # tests/unit/test_converter_jail.py
 """Unit tests for the converter subprocess jail (SDR-4437 PR-5)."""
 
+import logging
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
 import pytest
 
-from src.services.converter_jail import protocol
-from src.services.converter_jail import ast_guard
+from src.services.converter_jail import ast_guard, jail, protocol
 from src.services.converter_jail.ast_guard import DisallowedImport
-from src.services.converter_jail import jail
 
 
 class TestProgressProtocol:
@@ -86,6 +86,90 @@ class TestScrubbedEnv:
         monkeypatch.setenv("DATABRICKS_CLIENT_ID", "y")
         env = jail.build_scrubbed_env()
         assert not any(k.startswith("DATABRICKS_") for k in env)
+
+
+class TestNetworkIsolationFallback:
+    def test_strip_sensitive_env_removes_credential_patterns(self):
+        env = {
+            "DATABRICKS_TOKEN": "databricks-token",
+            "DATABRICKS_HOST": "https://databricks.example",
+            "GITHUB_TOKEN": "github-token",
+            "CLIENT_SECRET": "client-secret",
+            "FERNET_KEY": "fernet-key",
+            "DB_PASSWORD": "database-password",
+            "GOOGLE_CREDENTIALS": "google-credentials",
+            "OPENAI_API_KEY": "openai-key",
+            "LEGACY_APIKEY": "legacy-api-key",
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+        }
+        scrubbed = jail.strip_sensitive_env(env)
+        assert scrubbed == {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+
+    def test_spawn_strips_credentials_when_netns_is_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(jail, "_netns_cache", False)
+        child_home = tmp_path / "child-home"
+        child_home.mkdir()
+
+        def _unsafe_env():
+            return {
+                "DATABRICKS_TOKEN": "databricks-token",
+                "DATABRICKS_HOST": "https://databricks.example",
+                "GITHUB_TOKEN": "github-token",
+                "CLIENT_SECRET": "client-secret",
+                "FERNET_KEY": "fernet-key",
+                "DB_PASSWORD": "database-password",
+                "OPENAI_API_KEY": "openai-key",
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8",
+                "HOME": str(child_home),
+                "TMPDIR": str(child_home),
+                "PYTHONHASHSEED": "0",
+            }
+
+        monkeypatch.setattr(jail, "build_scrubbed_env", _unsafe_env)
+        env_keys_path = tmp_path / "child-env.txt"
+        runner = tmp_path / "env_dump.py"
+        runner.write_text(
+            "import os, sys\n"
+            "open(sys.argv[2], 'w').write('\\n'.join(sorted(os.environ)))\n"
+        )
+
+        result = jail._spawn(
+            runner_file=str(runner),
+            argv=[str(env_keys_path)],
+            timeout_s=30.0,
+            progress_cb=None,
+        )
+
+        assert result.returncode == 0
+        child_keys = set(env_keys_path.read_text().splitlines())
+        assert "DATABRICKS_TOKEN" not in child_keys
+        assert "DATABRICKS_HOST" not in child_keys
+        assert "GITHUB_TOKEN" not in child_keys
+        assert "CLIENT_SECRET" not in child_keys
+        assert "FERNET_KEY" not in child_keys
+        assert "DB_PASSWORD" not in child_keys
+        assert "OPENAI_API_KEY" not in child_keys
+        assert {"PATH", "HOME", "TMPDIR"} <= child_keys
+
+    def test_netns_failure_logs_explicit_fallback_warning(self, caplog, monkeypatch):
+        monkeypatch.setattr(jail, "_netns_cache", None)
+        monkeypatch.setattr(jail.shutil, "which", lambda _: "/usr/bin/unshare")
+        monkeypatch.setattr(
+            jail.subprocess,
+            "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=jail.logger.name):
+            assert jail.netns_available() is False
+
+        assert "Network isolation failed" in caplog.text
+        assert "credential-free child environment" in caplog.text
+        assert "egress remains possible" in caplog.text
 
 
 class TestNetnsProbe:
@@ -201,7 +285,8 @@ class TestNoInProcessExecAnywhere:
 
     def test_no_exec_module_in_either_service(self):
         import inspect
-        from src.services import html_to_pptx, html_to_google_slides
+
+        from src.services import html_to_google_slides, html_to_pptx
         for mod in (html_to_pptx, html_to_google_slides):
             src = inspect.getsource(mod)
             assert "exec_module" not in src, f"{mod.__name__} still execs in-process"
