@@ -418,7 +418,7 @@ class TestSessionNamingInStreaming:
     def test_build_session_title_model_failure_is_silent(
         self, mock_get_sm, mock_gen_title, caplog
     ):
-        """If build_session_title_model() raises (e.g. UserClientRequiredError),
+        """If build_session_title_model() raises (e.g. an SP auth error),
         the monolith-path turn still completes normally.
 
         This covers spec §8: title failures are swallowed at the model-construction
@@ -621,15 +621,22 @@ class TestDegenerateOverrunTitles:
 
 
 class TestBuildSessionTitleModel:
-    def test_builds_the_gateway_title_model_as_the_user(self, monkeypatch):
+    def test_builds_the_gateway_title_model_as_the_service_principal(self, monkeypatch):
+        """Titles run as the SP: the Gateway refuses the OBO user token (no
+        ``ai-gateway`` user scope). The user client must never be consulted."""
         import databricks_langchain
 
         from src.api.services import session_naming
 
         constructed = []
-        user_client = object()
+        sp_client = object()
         monkeypatch.setattr(databricks_langchain, "ChatDatabricks", lambda **kw: constructed.append(kw) or "model")
-        monkeypatch.setattr("src.core.databricks_client.get_user_client", lambda: user_client)
+        monkeypatch.setattr("src.core.databricks_client.get_system_client", lambda: sp_client)
+
+        def _user_client_forbidden():
+            raise AssertionError("title model must not use the OBO user client")
+
+        monkeypatch.setattr("src.core.databricks_client.get_user_client", _user_client_forbidden)
 
         assert session_naming.build_session_title_model() == "model"
         assert constructed == [{
@@ -637,7 +644,7 @@ class TestBuildSessionTitleModel:
             "use_ai_gateway": True,
             "max_tokens": 50,
             "temperature": 0.3,
-            "workspace_client": user_client,
+            "workspace_client": sp_client,
         }]
 
     def test_both_chat_service_title_sites_use_the_helper(self):

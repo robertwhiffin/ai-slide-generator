@@ -515,3 +515,12 @@ All tests that used `customEndpoint()` or directly referenced the `'Custom endpo
 3. (not listed in the spec) add the `ai-gateway` user API scope in `deploy.py` and redeploy.
 
 After that decision, re-run Task 9 from step (a).
+
+## Final fix wave
+
+### FW-1: session titles run as the service principal (user decision, 2026-09-29)
+
+- Task 9 step (a) proved the Gateway refuses the app's forwarded OBO user token (403 "Provided OAuth token does not have required scopes: ai-gateway"; `user_api_scopes` in `deploy.py` lack `ai-gateway`). The user chose spec §4 fallback 2.
+- `src/api/services/session_naming.py::build_session_title_model` now passes `workspace_client=get_system_client()` (the same SP client as `DatabricksModelAdapter._default_client_factory`). Docstring says why.
+- `tests/unit/test_session_naming.py`: the construction test is renamed `test_builds_the_gateway_title_model_as_the_service_principal`, asserts the SP client, and makes `get_user_client` raise if consulted. Both swallow tests are kept (docstring example changed from `UserClientRequiredError` to an SP auth error). Sabotage: `get_user_client()` restored → construction test red (`AssertionError: title model must not use the OBO user client`); restored → 21 passed.
+- Docs: spec §1.1 item 4, §3 table, §4 step 5, §8 (code block + dated amendment), §10 (new 2b item: per-user identity on Gateway calls, needs the `ai-gateway` user scope + re-consent), §12 risk row; handover §2 T1/T2 identity cell → SP (ws2a); PRD 2b row gains the per-user-identity item (the PRD 2a row never said OBO). `docs/technical/backend-overview.md` does not mention title identity, so it is unchanged.

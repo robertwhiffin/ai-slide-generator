@@ -23,7 +23,8 @@ Everything else in the original workstream 2 moves to a new **workstream 2b** (�
    other name.
 3. PPTX and Google Slides export call the model through the Gateway.
 4. Session-title generation, on both the monolith path and the graph path, calls the
-   model through the Gateway.
+   model through the Gateway. *(Amendment 2026-09-29, user decision after Task 9: titles
+   run as the service principal, not OBO; see §8.)*
 5. Conversations pinned to existing releases, whose roles name `databricks-*` endpoints,
    continue to work unchanged and without republishing.
 6. A graph turn on a model newer than the v1 seed (for example
@@ -84,7 +85,7 @@ facts marked *(Task 0)* across the full model list.
 | G2: #266 saved-candidate probe | Yes | Same factory (§6) |
 | G3: #267 workbench test runs | Yes | Same factory (§6) |
 | X1/X2: PPTX and Google Slides export | Yes | `DatabricksOpenAI` through the Gateway, with a `system.ai` constant (§7) |
-| T1/T2: session titles, monolith and graph paths | Yes | Through the Gateway, with a `system.ai` constant, still OBO (§8) |
+| T1/T2: session titles, monolith and graph paths | Yes | Through the Gateway, with a `system.ai` constant, as the service principal (§8; amended 2026-09-29, was OBO) |
 | Workbench discovery and draft validation | Yes | Gateway list and lookup (§5) |
 | M1, MCP, J1/J2, F1, V1 | No | Moved to 2b |
 
@@ -121,6 +122,12 @@ facts marked *(Task 0)* across the full model list.
    session must produce a generated title, not the fallback. This shows that a
    user-scoped Apps token (`serving.serving-endpoints` scope) is accepted by the Gateway
    route.
+
+   *Amendment (2026-09-29, user decision after Task 9): titles run as the service
+   principal.* Task 9 ran this proof live and it failed: the Gateway returned 403
+   "Provided OAuth token does not have required scopes: ai-gateway", because the app's
+   `user_api_scopes` (`packages/databricks-tellr/databricks_tellr/deploy.py`) have no
+   `ai-gateway` scope. The user chose the service-principal fallback below (§8).
 
 **Stop condition:** if step 3 cannot be made to resolve, or step 5 shows that OBO tokens
 are rejected, stop and return to the user before building further. If OBO fails (no generated
@@ -312,16 +319,24 @@ the graph-path title step) construct:
 
 ```python
 ChatDatabricks(model=SESSION_TITLE_MODEL, use_ai_gateway=True,
-               max_tokens=50, temperature=0.3, workspace_client=get_user_client())
+               max_tokens=50, temperature=0.3, workspace_client=get_system_client())
 ```
 
 `SESSION_TITLE_MODEL = "system.ai.claude-opus-4-6"` is a new constant in
 `src/core/defaults.py`. It keeps current behaviour. Changing it to a cheaper model is a
 one-line follow-up. The two sites share one helper, so the construction exists once.
 
-`DEFAULT_CONFIG["llm"]` is unchanged, because the monolith still reads it. The identity
-stays OBO, and title failures are still swallowed and logged. Task 0 step 5 proves the
-title is actually generated.
+`DEFAULT_CONFIG["llm"]` is unchanged, because the monolith still reads it. Title failures
+are still swallowed and logged.
+
+**Amendment (2026-09-29, user decision after Task 9): titles run as the service principal.** The original design kept the
+identity OBO (`get_user_client()`). Task 9's live run showed the Gateway rejects the app's
+forwarded user token (403 "Provided OAuth token does not have required scopes:
+ai-gateway"; the app's `user_api_scopes` lack `ai-gateway`). The title model is now built
+with `get_system_client()`, the same service-principal client the graph runtime uses
+(`DatabricksModelAdapter._default_client_factory`). The graph already sends the same user
+message to the Gateway as the service principal, so this adds no new exposure. Per-user
+identity on Gateway calls is a 2b item (§10).
 
 ## 9. Testing
 
@@ -377,7 +392,10 @@ original §8.1 and handover §8 that 2a does not deliver:
   is worth investigating);
 - the remaining call sites (monolith, MCP, judge, feedback, validator), and removing the
   last hardcoded endpoints;
-- making the export and title models configurable.
+- making the export and title models configurable;
+- per-user identity on Gateway calls (needs the `ai-gateway` user scope in deploy.py
+  user_api_scopes + user re-consent) — prerequisite for per-user attribution. *(Added
+  2026-09-29, after Task 9.)*
 
 The handover document remains 2b's starting-state reference. 2a updates its §2 table to
 mark the migrated sites.
@@ -426,6 +444,6 @@ Other changes:
 |---|---|
 | The naming rule is undocumented and could change or have exceptions. | Task 0 proves it across the full list. A change would affect only discovery and validation, because runtime passes the stored name through. |
 | The dependency bump breaks the Apps BUILD resolver. | Task 0 gates all other work, and a fallback is recorded. |
-| The Gateway rejects OBO tokens, so titles silently stop. | Task 0 step 5, with a stop condition. |
+| The Gateway rejects OBO tokens, so titles silently stop. | Task 0 step 5, with a stop condition. **Realised in Task 9 (403, no `ai-gateway` user scope); resolved 2026-09-29 by running titles as the service principal (§8).** |
 | The Gateway list omits models, as seen with `gpt-6-sol`. | Accepted by decision. Revisit in 2b if it bites. |
 | `databricks-langchain` 0.9 → 0.20 changes other behaviour used elsewhere (Genie, vector search, `ChatDatabricks` message handling). | The full unit and integration baseline is compared by cause, and the live acceptance covers a full graph turn. |
