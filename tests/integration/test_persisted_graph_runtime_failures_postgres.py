@@ -37,6 +37,7 @@ from src.services.persisted_graph_release import (
     PersistedRuntimeError,
     PinnedInvocationEndpointError,
 )
+from tests.fixtures.tool_call_doubles import replying
 
 pytestmark = pytest.mark.postgres
 
@@ -410,13 +411,13 @@ def test_removed_pinned_endpoint_is_safe_and_is_attempted_exactly_once(
     removed = openai.NotFoundError("removed", response=response, body=None)
     endpoint_attempts = []
 
-    class Structured:
-        def invoke(self, _prompt):
-            raise removed
-
     class Model:
-        def with_structured_output(self, _schema):
-            return Structured()
+        # Follow-up A: the one binding is ``bind_tools([schema], tool_choice="auto")``.
+        def bind_tools(self, _tools, **_kwargs):
+            return replying(_raise_removed)
+
+    def _raise_removed(_prompt):
+        raise removed
 
     def model_factory(**kwargs):
         endpoint_attempts.append(kwargs["endpoint"])

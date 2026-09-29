@@ -20,7 +20,7 @@ import pytest
 import requests
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import InternalError, PermissionDenied, Unauthenticated
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -48,6 +48,11 @@ from src.services.model_endpoint_probe import (
     StructuredOutputProbeCode,
     StructuredOutputProbeFailure,
     _StructuredOutputProbeResponse,
+)
+from tests.fixtures.tool_call_doubles import (
+    no_tool_call_reply,
+    replying,
+    tool_call_reply,
 )
 
 SECRET = "SECRET-provider-text https://leak.example/token=abc"
@@ -105,19 +110,26 @@ class _Recorder:
         self.events.append(("model_factory", kwargs))
         recorder = self
 
-        class _Structured:
-            def invoke(self, prompt: str) -> Any:
-                recorder.events.append(("invoke", prompt))
-                if recorder.invoke_error is not None:
-                    raise recorder.invoke_error
-                return recorder.output
+        def reply(prompt: str) -> Any:
+            # The provider's reply: a model instance becomes a tool call with the
+            # keys it set; anything else (a message, a raw value) reaches the
+            # production parser as-is.
+            recorder.events.append(("invoke", prompt))
+            if recorder.invoke_error is not None:
+                raise recorder.invoke_error
+            if isinstance(recorder.output, BaseModel):
+                return tool_call_reply(_StructuredOutputProbeResponse, recorder.output)
+            return recorder.output
 
         class _Chat:
-            def with_structured_output(self, schema: Any) -> Any:
-                recorder.events.append(("with_structured_output", schema))
+            def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+                recorder.events.append(("bind_tools", list(tools), kwargs))
                 if recorder.bind_error is not None:
                     raise recorder.bind_error
-                return _Structured()
+                return replying(reply)
+
+            def with_structured_output(self, schema: Any) -> Any:  # pragma: no cover
+                raise AssertionError("forced tool choice must not be bound")
 
         return _Chat()
 
@@ -154,16 +166,15 @@ def test_model_endpoint_probe_success_constructs_binds_then_invokes_exactly():
         (
             "model_factory",
             {
+                # Follow-up A: the saved temperature / top_p are never sent.
                 "model": "exact saved endpoint",
-                "temperature": 0.2,
                 "max_tokens": 64,
-                "top_p": 0.9,
                 "workspace_client": recorder.client,
                 "timeout": PROBE_TIMEOUT_SECONDS,
                 "max_retries": PROBE_MAX_RETRIES,
             },
         ),
-        ("with_structured_output", _StructuredOutputProbeResponse),
+        ("bind_tools", [_StructuredOutputProbeResponse], {"tool_choice": "auto"}),
         ("invoke", _PROBE_PROMPT),
     ]
 
@@ -195,7 +206,7 @@ def test_model_endpoint_probe_prompt_is_code_owned_and_identity_free():
 
     recorder.probe().probe(configuration)
 
-    prompts = [value for name, value in recorder.events if name == "invoke"]
+    prompts = [event[1] for event in recorder.events if event[0] == "invoke"]
     assert prompts == [_PROBE_PROMPT]
     assert isinstance(_PROBE_PROMPT, str) and _PROBE_PROMPT.strip()
     lowered = _PROBE_PROMPT.lower()
@@ -226,10 +237,10 @@ def test_model_endpoint_probe_binding_rejection_is_unsupported(error):
         recorder.probe().probe(CONFIGURATION)
 
     _assert_failure(caught, "unsupported_structured_output")
-    assert [name for name, _ in recorder.events] == [
+    assert [event[0] for event in recorder.events] == [
         "client_factory",
         "model_factory",
-        "with_structured_output",
+        "bind_tools",
     ]
 
 
@@ -295,11 +306,16 @@ def test_model_endpoint_probe_other_failures_are_ambiguous_and_sanitized(phase, 
         {"result": "ok"},
         "ok",
         _StructuredOutputProbeResponse.model_construct(result="nope"),
+        no_tool_call_reply("ok"),
     ],
-    ids=["dict", "string", "wrong-literal"],
+    ids=["dict", "string", "wrong-literal", "no-tool-call"],
 )
 def test_model_endpoint_probe_unparsed_output_is_ambiguous_failure(output):
-    """Catches a success claimed without the exact structured ``ok`` result."""
+    """Catches a success claimed without the exact structured ``ok`` result.
+
+    ``no-tool-call`` (follow-up A): under ``tool_choice="auto"`` a model may
+    answer in prose; the binding's parser error is the retryable ``failed``.
+    """
     recorder = _Recorder(output=output)
 
     with pytest.raises(StructuredOutputProbeFailure) as caught:
@@ -612,6 +628,24 @@ class MockTransportWorkspace(WorkspaceClient):
         self.requests.append(request)
         if self.outcome == "connection":
             raise httpx.ConnectError(PROVIDER_SECRET, request=request)
+        if self.outcome == "no_tool_call":
+            # Follow-up A: under tool_choice="auto" the model may answer in prose.
+            return httpx.Response(
+                200,
+                json={
+                    "id": "probe",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "mock",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": PROVIDER_SECRET},
+                        }
+                    ],
+                },
+            )
         if self.outcome == 200:
             return httpx.Response(
                 200,
@@ -700,6 +734,40 @@ def test_model_endpoint_probe_real_provider_success_over_mock_transport(monkeypa
     sent = json.loads(workspace.requests[0].content)
     assert sent["model"] == "exact saved endpoint"
     assert [message["content"] for message in sent["messages"]] == [_PROBE_PROMPT]
+
+
+def test_model_endpoint_probe_real_request_sends_no_sampling_and_auto_tool_choice(monkeypatch):
+    """Follow-up A: the probe's request is the graph's — no sampling, tool_choice auto.
+
+    Newer Claude models reject ``temperature`` and forced tool choice with a 400,
+    which the probe would report as ``unsupported_structured_output``.
+    """
+    workspace = MockTransportWorkspace(200)
+    _install_real_provider(monkeypatch, workspace)
+
+    assert real_provider_probe(workspace).probe(CONFIGURATION) is None
+
+    sent = json.loads(workspace.requests[0].content)
+    assert sent["tool_choice"] == "auto"
+    assert [tool["function"]["name"] for tool in sent["tools"]] == [
+        "_StructuredOutputProbeResponse"
+    ]
+    assert sent["max_tokens"] == 64
+    for sampling in ("temperature", "top_p", "top_k"):
+        assert sampling not in sent
+
+
+def test_model_endpoint_probe_real_reply_without_a_tool_call_is_retryable_failure(monkeypatch):
+    """Follow-up A: a prose reply (no tool call) is the ambiguous retryable ``failed``."""
+    workspace = MockTransportWorkspace("no_tool_call")
+    _install_real_provider(monkeypatch, workspace)
+
+    with pytest.raises(StructuredOutputProbeFailure) as caught:
+        real_provider_probe(workspace).probe(CONFIGURATION)
+
+    _assert_failure(caught, "structured_output_probe_failed")
+    assert PROVIDER_SECRET not in caught.value.message
+    _assert_only_the_mock_was_reached(workspace)
 
 
 @pytest.mark.parametrize(("outcome", "code"), REAL_PROVIDER_CASES, ids=str)

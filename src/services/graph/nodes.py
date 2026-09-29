@@ -716,9 +716,10 @@ def _design_system_library() -> List[dict]:
     """Every live design system with its templates — §M1, delivered as payload.
 
     §M1 asks for "the architect's tool manifest" to carry the design-system
-    library.  **There is no manifest.** ``TOOL_GRANTS`` is ``[]``, ``bind_tools``
-    appears nowhere under ``src/``, and AgentRuntime invokes the architect with
-    structured output and no tools bound at all, so a library wired into
+    library.  **There is no manifest.** ``TOOL_GRANTS`` is ``[]``, the one
+    ``bind_tools`` under ``src/`` binds only the output schema (the structured-
+    output binding in ``agent_runtime``), and AgentRuntime invokes the architect
+    with structured output and no other tool bound, so a library wired into
     ``tool_grants`` would be read by nothing.  The operator ratified delivering
     §M1 through the architect's **payload** instead, beside
     ``available_design_contract`` and ``template_sections`` — the only channel

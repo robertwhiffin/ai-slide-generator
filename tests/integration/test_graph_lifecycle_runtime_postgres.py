@@ -29,8 +29,10 @@ Stages (labelled through Task 6's ``stage()``)
 The only replaced production boundaries are the chat model and the naming
 model.  The model adapter is the real ``DatabricksModelAdapter`` (C8): its model
 factory returns a ``ChatModel`` double that answers from one ordered deque and
-RAISES on ``bind_tools``, so AC5 ("no tools") is asserted on every model call of
-every turn, not vacuously on a recording adapter that has no tool path.
+RAISES on any ``bind_tools`` other than the output schema alone with
+``tool_choice="auto"`` (ws2a follow-up A), so AC5 ("no tools") is asserted on
+every model call of every turn, not vacuously on a recording adapter that has no
+tool path.
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ from src.services.graph_definition_manifest import schema_contract_identity
 from src.services.persisted_graph_release import PersistedGraphReleaseLoader
 from src.services.prompt_assembler import PromptAssembler
 from tests.fixtures.log_records import STANDARD_LOG_RECORD_ATTRS, rendered_record
+from tests.fixtures.tool_call_doubles import replying, tool_call_reply
 from tests.integration.graph_lifecycle_journey import (  # noqa: F401 (fixtures)
     ADMIN,
     ARCHITECT_PROTECTED_ASSEMBLY_V2_DIGEST,
@@ -159,22 +162,16 @@ class ModelCall:
     prompt: str
 
 
-class _StructuredModel:
-    def __init__(self, answer: BaseModel, prompts: list[str]) -> None:
-        self._answer = answer
-        self._prompts = prompts
-
-    def invoke(self, prompt: str) -> BaseModel:
-        self._prompts.append(prompt)
-        return self._answer
-
-
 class _ToolFreeChatModel:
-    """A LangChain ``ChatModel`` double: ``with_structured_output`` only.
+    """A LangChain ``ChatModel`` double: the output-schema binding only.
 
-    ``bind_tools`` (with any tool list, the empty one included) raises and is
-    recorded; so is any other attribute read, so a new binding path cannot slip
-    past as an unrecorded ``MagicMock``-style success.
+    Follow-up A: structured output is ``bind_tools([schema], tool_choice="auto")``
+    — the output schema is the one tool.  That exact binding is recorded and
+    answered with a provider-shaped tool call; ``bind_tools`` with anything else
+    (a legacy tool grant, an extra tool, the empty list, forced tool choice)
+    raises and is recorded, as does ``with_structured_output`` and any other
+    attribute read, so a new binding path cannot slip past as an unrecorded
+    ``MagicMock``-style success.
     """
 
     def __init__(self, adapter: _ToolFreeOrderedAdapter, answer: dict[str, Any]) -> None:
@@ -182,13 +179,27 @@ class _ToolFreeChatModel:
         object.__setattr__(self, "_answer", answer)
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-        self._adapter.tool_bindings.append(repr(tools))
-        raise _ToolBindingAttempted(f"graph runtime bound tools: {tools!r}")
+        tools = list(tools)
+        schema = tools[0] if len(tools) == 1 else None
+        if not (
+            isinstance(schema, type)
+            and issubclass(schema, BaseModel)
+            and kwargs == {"tool_choice": "auto"}
+        ):
+            self._adapter.tool_bindings.append(repr((tools, kwargs)))
+            raise _ToolBindingAttempted(f"graph runtime bound tools: {tools!r} {kwargs!r}")
+        self._adapter.method_calls.append(("bind_tools", schema, kwargs))
+        answer, prompts = self._answer, self._adapter.chat_prompts
+
+        def reply(prompt: str) -> Any:
+            prompts.append(prompt)
+            return tool_call_reply(schema, answer)
+
+        return replying(reply)
 
     def with_structured_output(self, schema: type[BaseModel], **kwargs: Any) -> Any:
         self._adapter.method_calls.append(("with_structured_output", schema, kwargs))
-        # Mirror a real structured-output parser: an instance of the BOUND schema.
-        return _StructuredModel(schema.model_validate(self._answer), self._adapter.chat_prompts)
+        raise _ToolBindingAttempted("forced tool choice must not be bound")
 
     def __getattr__(self, name: str) -> Any:
         self._adapter.method_calls.append((name, None, {}))
@@ -619,7 +630,10 @@ def test_every_pinned_release_drives_its_own_revisions_through_state_fan_out_and
         assert len(adapter.calls) == total_calls
         assert adapter.tool_bindings == []
         assert [name for name, _schema, _kw in adapter.method_calls] == [
-            "with_structured_output"
+            "bind_tools"
+        ] * total_calls
+        assert [kw for _name, _schema, kw in adapter.method_calls] == [
+            {"tool_choice": "auto"}
         ] * total_calls
         assert [schema for _name, schema, _kw in adapter.method_calls] == [
             call.schema for call in adapter.calls

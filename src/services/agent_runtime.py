@@ -121,6 +121,14 @@ class ProtectedPromptIdentity:
 
 @dataclass(frozen=True)
 class AgentModelConfiguration:
+    """One role's saved model configuration.
+
+    ``temperature`` and ``top_p`` are stored, hashed and published as saved, but
+    they are NOT sent to the model (ws2a follow-up A): newer Claude models on
+    Unity AI Gateway reject sampling parameters with a 400.  Only
+    ``endpoint_name`` and ``max_tokens`` reach the provider.
+    """
+
     endpoint_name: str
     temperature: float
     max_tokens: int
@@ -223,6 +231,17 @@ def bind_structured_output_model(
     test-run adapter built by ``get_agent_test_runtime``.  The production
     runtime adapter passes none.
 
+    What is sent (ws2a follow-up A): the model is constructed with the endpoint
+    and ``max_tokens`` only.  The saved ``temperature`` / ``top_p`` are never
+    sent — newer Claude models reject them ("does not support the temperature
+    parameter").  ``schema`` is bound as the one tool with
+    ``tool_choice="auto"``: this is ``ChatDatabricks.with_structured_output``'s
+    function-calling branch, whose forced tool choice (``type "tool"``) newer
+    models also reject.  Under ``auto`` a model may reply without calling the
+    tool; the parser then yields ``None`` and :func:`_require_structured_output`
+    raises ``OutputParserException``, the same parse-error class a malformed
+    tool call raises (see ``_is_provider_parse_error``).
+
     Only while a #267 test run's model call is in flight (its ``RunObservation``
     is the observed run) is the bound model given a callback that records the
     provider's reported token usage onto that observation.  The binding itself
@@ -230,19 +249,39 @@ def bind_structured_output_model(
     production's; production ``run`` observes nothing and gets exactly
     the plain structured-output binding of ``schema``.
     """
+    # Imported lazily, like the chat model itself: the module stays import-light.
+    from langchain_core.output_parsers.openai_tools import PydanticToolsParser
+    from langchain_core.runnables import RunnableLambda
+
     model = model_factory(
         model=configuration.endpoint_name,
-        temperature=configuration.temperature,
         max_tokens=configuration.max_tokens,
-        top_p=configuration.top_p,
         workspace_client=workspace_client,
         **(transport_options or {}),
     )
-    structured_model = model.with_structured_output(schema)
+    structured_model = (
+        model.bind_tools([schema], tool_choice="auto")
+        | PydanticToolsParser(tools=[schema], first_tool_only=True)
+        | RunnableLambda(_require_structured_output)
+    )
     observation = _OBSERVED_TEST_RUN.get()
     if observation is None:
         return structured_model
     return structured_model.with_config(callbacks=[_token_usage_callback(observation)])
+
+
+def _require_structured_output(parsed: Any) -> Any:
+    """Refuse a reply that called no tool (``tool_choice="auto"`` permits one).
+
+    The message is code-owned: provider text never reaches it.
+    """
+    if parsed is None:
+        from langchain_core.exceptions import OutputParserException
+
+        raise OutputParserException(
+            "the model replied without calling the structured-output tool"
+        )
+    return parsed
 
 
 def _token_count(value: Any) -> int | None:
@@ -301,7 +340,7 @@ def _token_usage_callback(observation: RunObservation) -> Any:
 
 
 class DatabricksModelAdapter:
-    """Invoke one structured Databricks model without binding any tools."""
+    """Invoke one structured Databricks model; the output schema is its only tool."""
 
     def __init__(
         self,

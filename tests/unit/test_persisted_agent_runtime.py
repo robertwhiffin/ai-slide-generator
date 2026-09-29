@@ -67,6 +67,7 @@ from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
 from tests.fixtures.log_records import STANDARD_LOG_RECORD_ATTRS as _STANDARD_LOG_RECORD_ATTRS
 from tests.fixtures.log_records import rendered_record
 from tests.fixtures.packaged_release_loader import PackagedGraphV1Loader
+from tests.fixtures.tool_call_doubles import replying, tool_call_reply
 
 EXPECTED_ROLE_NOTICES = {
     "architect": (
@@ -1078,19 +1079,17 @@ def _provider_errors() -> list[Exception]:
 def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
     phase, provider_error, sink_factory, caplog
 ):
-    class Structured:
-        def invoke(self, prompt):
-            if phase == "invoke":
-                raise provider_error
-            return OUTPUT_SCHEMAS["architect"].model_validate(
-                _output_values("architect")
-            )
+    def reply(prompt):
+        if phase == "invoke":
+            raise provider_error
+        return tool_call_reply(OUTPUT_SCHEMAS["architect"], _output_values("architect"))
 
     class Model:
-        def with_structured_output(self, schema):
+        # Follow-up A: the one binding is ``bind_tools([schema], tool_choice="auto")``.
+        def bind_tools(self, tools, **kwargs):
             if phase == "structured":
                 raise provider_error
-            return Structured()
+            return replying(reply)
 
     model_endpoint_attempts: list[str] = []
     client_factory_calls: list[None] = []
@@ -1158,13 +1157,12 @@ def test_removed_endpoint_is_attempted_once_without_a_default_fallback():
     model_endpoint_attempts: list[str] = []
     client_factory_calls: list[None] = []
 
-    class Structured:
-        def invoke(self, prompt):
-            raise original
+    def reply(prompt):
+        raise original
 
     class Model:
-        def with_structured_output(self, schema):
-            return Structured()
+        def bind_tools(self, tools, **kwargs):
+            return replying(reply)
 
     def model_factory(**kwargs):
         model_endpoint_attempts.append(kwargs["model"])
