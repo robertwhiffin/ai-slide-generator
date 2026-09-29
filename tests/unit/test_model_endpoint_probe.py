@@ -864,3 +864,23 @@ def test_provider_detail_probe_failure_defaults_to_none():
         False,
     )
     assert failure.provider_detail is None
+
+
+def test_provider_detail_preserves_dashed_uuid_req_id():
+    """Dashed UUIDs (8-4-4-4-12) are preserved for support diagnostics."""
+    req_id = "3ff8f85b-502c-45d1-b23f-d871afa77d4a"
+    raw = f"Provided OAuth token does not have required scopes: ai-gateway [ReqId: {req_id}]"
+    result = _sanitise_provider_detail(raw)
+    assert req_id in result
+    assert "ai-gateway" in result
+    assert "ReqId" in result
+
+
+def test_provider_detail_strips_undashed_hex_keeps_dashed_uuid():
+    """Long undashed hex is stripped; a dashed UUID next to it is kept."""
+    undashed = "a" * 32
+    req_id = "3ff8f85b-502c-45d1-b23f-d871afa77d4a"
+    raw = f"Error: token={undashed} reqId={req_id}"
+    result = _sanitise_provider_detail(raw)
+    assert undashed not in result
+    assert req_id in result

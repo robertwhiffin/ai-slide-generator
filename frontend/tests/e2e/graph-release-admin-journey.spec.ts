@@ -177,8 +177,8 @@ test.describe.serial('the administrator journey over the recorded lifecycle cont
     await openTab(page, 'Prompt');
     await page.getByRole('textbox', { name: 'Prompt text', exact: true }).fill(architect.candidate.prompt_text);
     await openTab(page, 'Model');
-    await page.getByRole('spinbutton', { name: 'Temperature', exact: true })
-      .fill(String(architect.candidate.model.temperature));
+    // Temperature input removed; the save carries the stored value (now 0.7 in the contract).
+    await expect(page.getByRole('spinbutton', { name: 'Temperature', exact: true })).toHaveCount(0);
     await saveDraft(page);
     await expectLock(page, 1);
     expect(served.requestBody('S03-put-architect')).toEqual(architect);

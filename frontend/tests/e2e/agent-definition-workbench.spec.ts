@@ -209,9 +209,10 @@ async function editArchitectFiveFields(page: Page) {
   await page.getByRole('textbox', { name: 'Prompt text' }).fill('Architect A2');
   await page.getByRole('tab', { name: 'Model' }).click();
   await selectModel(page, 'system.ai.endpoint-a2');
-  await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.4');
   await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('8192');
-  await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.8');
+  // Temperature and Top-p inputs are removed; saves carry stored values (0.7, 0.95) unchanged.
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveCount(0);
 }
 
 async function expectArchitectFiveFields(page: Page) {
@@ -220,9 +221,10 @@ async function expectArchitectFiveFields(page: Page) {
   await page.getByRole('tab', { name: 'Model' }).click();
   await expect(discoveredModel(page, 'system.ai.endpoint-a2')).toBeChecked();
   await expectCurrentModel(page, 'system.ai.endpoint-a2');
-  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.4');
+  // Temperature and Top-p inputs are removed; Maximum tokens remains.
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveCount(0);
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('8192');
-  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.8');
 }
 
 async function expectBuilderFormUnchanged(page: Page) {
@@ -230,9 +232,10 @@ async function expectBuilderFormUnchanged(page: Page) {
   await expect(page.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder retained B2');
   await page.getByRole('tab', { name: 'Model' }).click();
   await expectCurrentModel(page, 'databricks-claude-opus-4-6');
-  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.7');
+  // Temperature and Top-p inputs are removed; Maximum tokens remains unchanged.
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveCount(0);
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
-  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.95');
 }
 
 test('loads lazily once, preserves exact topology, and exposes exact definition tabs', async ({ page }) => {
@@ -256,9 +259,10 @@ test('loads lazily once, preserves exact topology, and exposes exact definition 
 
   await page.getByRole('tab', { name: 'Model' }).click();
   await expectCurrentModel(page, 'databricks-claude-opus-4-6');
-  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.7');
+  // Temperature and Top-p inputs are removed; Maximum tokens remains.
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveCount(0);
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
-  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.95');
 
   await page.getByRole('tab', { name: 'Output Schema' }).click();
   // The OutputSchemaEditor shows field override descriptions (not raw JSON).
@@ -308,7 +312,8 @@ test('explicit Save is the only write and sends the exact five-field candidate w
       lock_version: 0,
       candidate: {
         prompt_text: 'Architect A2',
-        model: { endpoint_name: 'system.ai.endpoint-a2', temperature: 0.4, max_tokens: 8192, top_p: 0.8 },
+        // Temperature and Top-p carry stored values unchanged (0.7, 0.95).
+        model: { endpoint_name: 'system.ai.endpoint-a2', temperature: 0.7, max_tokens: 8192, top_p: 0.95 },
       },
     },
   });
@@ -1165,7 +1170,9 @@ test('while an Upgrade is in flight the prompt is frozen, safe fields stay edita
   const endpoint = discoveredModel(page, SENTINEL_MODELS.localB);
   await expect(endpoint).toBeEnabled();
   await endpoint.check();
-  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toBeEnabled();
+  // Temperature input is removed; Maximum tokens remains and is enabled.
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+  await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toBeEnabled();
 
   // Restoring an alternative mid-flight is a prompt action: it is queued, not applied.
   await retainedAlternative(page, 1).getByRole('button', { name: 'Restore retained values' }).click();
@@ -1264,12 +1271,13 @@ for (const agentKey of AFFECTED_ROLES) {
       const saved = syntheticDraftDefinitions[agentKey].prompt_text;
 
       // A pre-existing retained v1 alternative carrying its own sentinels.
+      // Temperature and Top-p inputs are removed; use endpoint + max_tokens as sentinels.
       await prompt.fill(DIRTY_LEGACY_PROMPT);
       await page.getByRole('tab', { name: 'Model' }).click();
       await selectModel(page, SENTINEL_MODELS.retainedA);
-      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.11');
+      await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+      await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveCount(0);
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('1111');
-      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.11');
       await page.getByRole('tab', { name: 'Assembly' }).click();
       await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
       expect(upgrades).toHaveLength(0);
@@ -1280,9 +1288,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // start an Upgrade from a dirty affected prompt at all.
       await page.getByRole('tab', { name: 'Model' }).click();
       await selectModel(page, SENTINEL_MODELS.localB);
-      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.22');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('2222');
-      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.22');
       await page.getByRole('tab', { name: 'Prompt' }).click();
       if (operation === 'upgrade') {
         await page.getByRole('button', { name: 'Restore saved prompt' }).click();
@@ -1301,7 +1307,9 @@ for (const agentKey of AFFECTED_ROLES) {
       await expect(prompt).toHaveValue(V2_AUTHORED_PROMPT[agentKey]);
       await page.getByRole('tab', { name: 'Model' }).click();
       await expectCurrentModel(page, SENTINEL_MODELS.localB);
-      await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.22');
+      // Temperature input removed; Maximum tokens sentinel (2222) persists unchanged.
+      await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+      await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('2222');
 
       // Reload appends a further alternative rather than overwriting either one.
       const conflict = page.getByRole('region', { name: 'Draft changed on the server' });
@@ -1661,7 +1669,9 @@ test('a safe-field edit hides the published-source recovery until the rejection 
   await expect(restore).toBeVisible();
 
   await page.getByRole('tab', { name: 'Model' }).click();
-  await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.42');
+  // Temperature input removed; use Maximum tokens to make a non-prompt edit.
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+  await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('4096');
   await page.getByRole('tab', { name: 'Prompt' }).click();
   await expect(restore).toHaveCount(0);
   await expect(page.getByRole('region', { name: 'Server rejected this request' })).toHaveCount(0);
@@ -2037,12 +2047,13 @@ for (const agentKey of AFFECTED_ROLES) {
       const saved = syntheticDraftDefinitions[agentKey].prompt_text;
 
       // A pre-existing retained v1 alternative with its own safe sentinels.
+      // Temperature and Top-p inputs are removed; endpoint + max_tokens are the sentinels.
       await prompt.fill(DIRTY_LEGACY_PROMPT);
       await page.getByRole('tab', { name: 'Model' }).click();
       await selectModel(page, SENTINEL_MODELS.keepA);
-      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.33');
+      await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+      await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveCount(0);
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('3333');
-      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.33');
       await page.getByRole('tab', { name: 'Assembly' }).click();
       await assemblyPanel(page).getByRole('button', { name: 'Upgrade protected assembly' }).click();
       expect(upgrades).toHaveLength(0);
@@ -2052,9 +2063,7 @@ for (const agentKey of AFFECTED_ROLES) {
       // permits the operation to start at all.
       await page.getByRole('tab', { name: 'Model' }).click();
       await selectModel(page, SENTINEL_MODELS.keepB);
-      await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.44');
       await page.getByRole('spinbutton', { name: 'Maximum tokens' }).fill('4444');
-      await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.44');
       await page.getByRole('tab', { name: 'Prompt' }).click();
       if (operation === 'upgrade') {
         await page.getByRole('button', { name: 'Restore saved prompt' }).click();
@@ -2145,7 +2154,7 @@ const SEED_MODEL = { temperature: 0.7, max_tokens: 60000, top_p: 0.95 };
 const GATEWAY_NEWER_MODEL = { ...syntheticNewerModelEndpoint, name: 'system.ai.claude-opus-4-7' };
 
 function probeIdentityText(endpoint: string, hash: string, lock: number) {
-  return `Endpoint ${endpoint} · Candidate hash ${hash} · Draft lock ${lock}`;
+  return `Details — Endpoint ${endpoint} · Candidate hash ${hash} · Draft lock ${lock}`;
 }
 
 interface CapturedCatalogRead {
@@ -2387,8 +2396,9 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
   const panel = modelTabPanel(page);
   const endpoint = panel.getByRole('radiogroup', { name: 'Discovered models', exact: true });
   await selectModel(page, missing);
-  await page.getByRole('spinbutton', { name: 'Temperature' }).fill('0.3');
-  await page.getByRole('spinbutton', { name: 'Top-p' }).fill('0.5');
+  // Temperature and Top-p inputs are removed; saves carry stored values (0.7, 0.95) unchanged.
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveCount(0);
   // A DOM marker proves the same element survives: no remount, no reload.
   await endpoint.evaluate((element) => { element.setAttribute('data-remount-marker', 'kept'); });
   await page.getByRole('button', { name: 'Save Draft' }).click();
@@ -2402,9 +2412,10 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
   await expect(page.getByRole('region', { name: 'Server rejected this request' })).toHaveCount(0);
   await expect(discoveredModel(page, missing)).toBeChecked();
   await expectCurrentModel(page, missing);
-  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue('0.3');
+  // Temperature and Top-p inputs are removed; Maximum tokens unchanged (60000).
+  await expect(page.getByRole('spinbutton', { name: 'Temperature' })).toHaveCount(0);
+  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveCount(0);
   await expect(page.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue('60000');
-  await expect(page.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue('0.5');
   await expect(architectNavStatus(page)).toHaveAccessibleDescription('Unsaved');
   await expect(panel.getByRole('button', { name: PROBE_BUTTON })).toBeDisabled();
   await page.getByRole('tab', { name: 'Prompt' }).click();
@@ -2416,11 +2427,12 @@ test('model endpoint manual server-validation failure: a typed endpoint issue ke
   await page.getByRole('button', { name: 'Save Draft' }).click();
   await expect.poll(() => saves.length).toBe(2);
   expect(saves[1].agentKey).toBe('architect');
+  // Temperature and Top-p carry stored values unchanged (0.7, 0.95).
   expect(saves[1].body).toEqual({
     lock_version: 0,
     candidate: {
       prompt_text: 'Architect unsaved prompt',
-      model: { endpoint_name: corrected, temperature: 0.3, max_tokens: 60000, top_p: 0.5 },
+      model: { endpoint_name: corrected, temperature: 0.7, max_tokens: 60000, top_p: 0.95 },
     },
   });
   await expect(architectNavStatus(page)).toHaveAccessibleDescription('Needs test');
