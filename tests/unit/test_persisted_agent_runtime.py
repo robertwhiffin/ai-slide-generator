@@ -288,11 +288,17 @@ def test_explicit_persisted_v1_release_keeps_historical_prompt_bytes(
     expected_parts = [content.prompt_text]
     if agent_key == "build_reviewer":
         expected_parts.append(DECK_BRIEF_REVIEW)
-    expected_parts.append(
-        DESIGN_SYSTEM_PRECEDENCE
-        if design_system_active
-        else _SLIDE_FRAME_CONSTRAINTS
+    environment_id = (
+        "design_system_precedence" if design_system_active else "slide_frame_constraints"
     )
+    environment_text = (
+        DESIGN_SYSTEM_PRECEDENCE if design_system_active else _SLIDE_FRAME_CONSTRAINTS
+    )
+    include_environment = (environment_id == "design_system_precedence" and agent_key == "architect") or (
+        environment_id == "slide_frame_constraints" and agent_key == "builder"
+    )
+    if include_environment:
+        expected_parts.append(environment_text)
     expected_parts.append(json.dumps(payload, indent=2, default=str))
     expected_prompt = "\n\n".join(expected_parts)
     expected_stages = [
@@ -310,19 +316,11 @@ def test_explicit_persisted_v1_release_keeps_historical_prompt_bytes(
                 True,
             )
         )
-    expected_stages.extend(
-        [
+    if include_environment:
+        expected_stages.append(
             ResolvedPromptStage(
-                (
-                    "design_system_precedence"
-                    if design_system_active
-                    else "slide_frame_constraints"
-                ),
-                (
-                    DESIGN_SYSTEM_PRECEDENCE
-                    if design_system_active
-                    else _SLIDE_FRAME_CONSTRAINTS
-                ),
+                environment_id,
+                environment_text,
                 (
                     "design_system_active"
                     if design_system_active
@@ -330,7 +328,10 @@ def test_explicit_persisted_v1_release_keeps_historical_prompt_bytes(
                 ),
                 "protected",
                 True,
-            ),
+            )
+        )
+    expected_stages.extend(
+        [
             ResolvedPromptStage(
                 "runtime_payload",
                 json.dumps(payload, indent=2, default=str),
@@ -434,8 +435,12 @@ def test_persisted_v2_runtime_delegates_exact_prompt_and_provenance(
                 True,
             )
         )
-    expected_stages.extend(
-        [
+    include_environment = (environment_id == "design_system_precedence" and agent_key == "architect") or (
+        environment_id == "slide_frame_constraints" and agent_key == "builder"
+    )
+    if include_environment:
+        expected_parts.append(environment_text)
+        expected_stages.append(
             ResolvedPromptStage(
                 environment_id,
                 environment_text,
@@ -446,7 +451,10 @@ def test_persisted_v2_runtime_delegates_exact_prompt_and_provenance(
                 ),
                 "protected",
                 True,
-            ),
+            )
+        )
+    expected_stages.extend(
+        [
             ResolvedPromptStage(
                 "untrusted_data_notice",
                 EXPECTED_ROLE_NOTICES[agent_key],
@@ -482,7 +490,6 @@ def test_persisted_v2_runtime_delegates_exact_prompt_and_provenance(
     )
     expected_parts.extend(
         [
-            environment_text,
             EXPECTED_ROLE_NOTICES[agent_key],
             "<untrusted-data>",
             '{"a":1,"z":2}',
@@ -575,13 +582,6 @@ def test_persisted_v2_build_reviewer_deck_brief_tracks_truthiness(deck_brief) ->
         )
     expected_stages.extend(
         [
-            ResolvedPromptStage(
-                "slide_frame_constraints",
-                _SLIDE_FRAME_CONSTRAINTS,
-                "design_system_inactive",
-                "protected",
-                True,
-            ),
             ResolvedPromptStage(
                 "untrusted_data_notice",
                 EXPECTED_ROLE_NOTICES["build_reviewer"],

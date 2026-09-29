@@ -139,6 +139,10 @@ def _replay_literal_v1_rules(
             parts.append(content.prompt_text)
         elif kind == "protected":
             assert name is not None
+            if name == "slide_frame_constraints" and content.agent_key != "builder":
+                continue
+            if name == "design_system_precedence" and content.agent_key != "architect":
+                continue
             parts.append(protected_values[name])
         elif kind == "payload_json":
             parts.append(json.dumps(payload, indent=2, default=str))

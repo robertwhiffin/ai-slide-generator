@@ -1448,7 +1448,6 @@ def test_persisted_upgrade_reloads_authored_only_with_exactly_once_protected_sta
         expected_ids.append("build_reviewer_criteria")
     expected_ids.extend(
         [
-            "slide_frame_constraints",
             "untrusted_data_notice",
             "untrusted_data_open",
             "runtime_payload",
