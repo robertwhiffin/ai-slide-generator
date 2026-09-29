@@ -529,3 +529,9 @@ After that decision, re-run Task 9 from step (a).
 
 - `list_system_models` now drops any mapped `system.ai.*` name that fails `_GATEWAY_MODEL_NAME` (the regex behind `validate_gateway_model_name`), so the picker never offers a name the save refuses with `endpoint_not_gateway_model`.
 - New test `test_list_system_models_drops_names_the_save_rule_would_refuse` (`databricks-trailing_`, `databricks-trailing-`, `databricks-Claude-Upper` dropped; `gemma-3-12b` kept; every offered name passes the validator). Sabotage: filter removed → red (3 extra names); restored → 79 passed.
+
+### FW-3: lifecycle contract re-recorded (final-review M-1)
+
+- `frontend/tests/fixtures/graphLifecycleContract.json` re-recorded with `python -m tests.integration.graph_lifecycle_journey --write-contract …` against local Postgres (`TELLR_TEST_POSTGRES_URL=postgresql+psycopg2://localhost:5432/postgres`; `DATABASE_URL` set to a throwaway SQLite file because the module's import path loads `.env` before the conftest guard sees it). `recorded_at_commit` is now 8d68ae534. The diff is ids/timestamps/hashes plus S06's fixer model `databricks-claude-sonnet-4-5` → `system.ai.claude-sonnet-4-5` (10 occurrences, 0 of the old name left). OPUS stays `databricks-claude-opus-4-6` in the discovery list per ruling 3.
+- `frontend/tests/e2e/graph-release-admin-journey.spec.ts:44` `SONNET` → `system.ai.claude-sonnet-4-5`, matching the journey constant.
+- Consumers: `tests/unit/test_graph_lifecycle_playwright_contract.py` 145 passed; `tests/integration/test_graph_lifecycle_acceptance_postgres.py` 2 passed, 0 skipped; Playwright `graph-release-admin-journey.spec.ts` 8 passed and `graph-release-conversation-journey.spec.ts` 6 passed (run locally, see FW-2 for the runner). Sabotage: old `SONNET` constant against the new contract → admin journey test 4 red (`locator.check` timeout); restored → 8 passed.
