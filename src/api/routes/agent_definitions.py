@@ -260,6 +260,7 @@ def _probe_result_response(
         endpoint_name=identity.endpoint_name,
         candidate_hash=identity.candidate_hash,
         lock_version=identity.lock_version,
+        provider_detail=failure.provider_detail,
     )
     return JSONResponse(
         status_code=_PROBE_FAILURE_STATUS[failure.code],
