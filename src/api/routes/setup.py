@@ -6,12 +6,15 @@ Databricks workspace URL.
 """
 
 import logging
+import os
 import re
 from typing import Optional
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 
+from src.api.routes._authz import _is_production, require_admin
 from src.core.databricks_client import (
     get_tellr_config,
     is_tellr_configured,
@@ -21,6 +24,38 @@ from src.core.databricks_client import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/setup", tags=["setup"])
+
+# F-CR-24: permitted workspace domains. A host is accepted only if it is a
+# subdomain of one at a label boundary. "databricks.com" covers the AWS
+# (*.cloud.databricks.com) and GCP (*.gcp.databricks.com) workspace domains.
+_ALLOWED_HOST_SUFFIXES = (
+    "databricks.com",
+    "azuredatabricks.net",  # Azure: adb-123456.18.azuredatabricks.net
+)
+
+_HOSTNAME_RE = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+")
+
+
+def _is_allowed_databricks_host(hostname: str) -> bool:
+    """Return True if ``hostname`` is a boundary subdomain of a permitted domain."""
+    if not _HOSTNAME_RE.fullmatch(hostname):
+        return False
+    return any(hostname.endswith("." + suffix) for suffix in _ALLOWED_HOST_SUFFIXES)
+
+
+def require_setup_access() -> None:
+    """FastAPI dependency gating the mutating setup endpoints (F-CR-24).
+
+    Delegates to ``require_admin``: behind the Databricks Apps proxy the caller
+    must be a workspace admin; in local (Homebrew/dev) mode the app is
+    single-user and ``require_admin`` bypasses, so first-run setup still works.
+    """
+    require_admin()
+
+
+def _is_already_configured() -> bool:
+    """True once a workspace host is set via ~/.tellr/config.yaml or env."""
+    return is_tellr_configured() or bool(os.getenv("DATABRICKS_HOST"))
 
 
 class SetupStatusResponse(BaseModel):
@@ -37,31 +72,40 @@ class ConfigureWorkspaceRequest(BaseModel):
     @classmethod
     def validate_host(cls, v: str) -> str:
         """Validate and normalize the workspace URL."""
-        # Remove trailing slashes
-        v = v.rstrip("/")
+        v = v.strip().rstrip("/")
 
         # Add https:// if not present
         if not v.startswith("http://") and not v.startswith("https://"):
             v = f"https://{v}"
 
-        # Validate it looks like a Databricks URL
-        # Common patterns: *.cloud.databricks.com, *.azuredatabricks.net, etc.
-        databricks_patterns = [
-            r"https://[\w\-]+\.cloud\.databricks\.com",
-            r"https://[\w\-\.]+\.azuredatabricks\.net",  # Azure: adb-123456.18.azuredatabricks.net
-            r"https://[\w\-]+\.gcp\.databricks\.com",
-            r"https://[\w\-]+\.databricks\.com",
-            r"https://[\w\-\.]+\.databricks\.com",
-        ]
+        error = ValueError(
+            "Invalid Databricks workspace URL. "
+            "Expected format: https://your-workspace.cloud.databricks.com"
+        )
 
-        is_valid = any(re.match(pattern, v) for pattern in databricks_patterns)
-        if not is_valid:
-            raise ValueError(
-                "Invalid Databricks workspace URL. "
-                "Expected format: https://your-workspace.cloud.databricks.com"
-            )
+        # F-CR-24: validate the *parsed* hostname, not the raw string. Reject
+        # userinfo ("x.cloud.databricks.com@attacker.example"), ports, paths,
+        # queries and fragments; the host must be a boundary subdomain of a
+        # permitted domain (so "x.cloud.databricks.com.attacker.example" fails).
+        try:
+            parts = urlsplit(v)
+            port = parts.port
+        except ValueError:
+            raise error
+        hostname = parts.hostname or ""
+        if (
+            parts.scheme != "https"
+            or "@" in parts.netloc
+            or port is not None
+            or parts.path
+            or parts.query
+            or parts.fragment
+            or parts.netloc.lower() != hostname
+            or not _is_allowed_databricks_host(hostname)
+        ):
+            raise error
 
-        return v
+        return f"https://{hostname}"
 
 
 class ConfigureWorkspaceResponse(BaseModel):
@@ -95,7 +139,11 @@ async def get_setup_status():
     return SetupStatusResponse(configured=False, host=None)
 
 
-@router.post("/configure", response_model=ConfigureWorkspaceResponse)
+@router.post(
+    "/configure",
+    response_model=ConfigureWorkspaceResponse,
+    dependencies=[Depends(require_setup_access)],
+)
 async def configure_workspace(request: ConfigureWorkspaceRequest):
     """
     Configure the Databricks workspace URL.
@@ -103,7 +151,18 @@ async def configure_workspace(request: ConfigureWorkspaceRequest):
     Saves the workspace URL to ~/.tellr/config.yaml with OAuth browser
     authentication enabled. On the next API call that requires Databricks
     access, the browser will open for SSO login.
+
+    F-CR-24: once the app is configured, re-configuration requires a verified
+    admin. ``require_setup_access`` already enforced admin in production; in
+    local mode there is no verified identity (``require_admin`` bypasses), so
+    overwriting an existing config over the API is refused outright.
     """
+    if _is_already_configured() and not _is_production():
+        raise HTTPException(
+            status_code=409,
+            detail="Workspace is already configured. Edit ~/.tellr/config.yaml to change it.",
+        )
+
     try:
         # Save the configuration
         save_tellr_config(host=request.host, auth_type="external-browser")
@@ -127,7 +186,7 @@ async def configure_workspace(request: ConfigureWorkspaceRequest):
         )
 
 
-@router.post("/test-connection")
+@router.post("/test-connection", dependencies=[Depends(require_setup_access)])
 async def test_connection():
     """
     Test the Databricks connection after configuration.

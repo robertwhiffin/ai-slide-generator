@@ -31,6 +31,43 @@ def setup_app():
 
 
 @pytest.fixture
+def unconfigured():
+    """Simulate a fresh instance: no tellr config file and no DATABRICKS_HOST."""
+    with patch("src.api.routes.setup._is_already_configured", return_value=False):
+        yield
+
+
+@pytest.fixture
+def configured():
+    """Simulate an instance that already has a workspace configured."""
+    with patch("src.api.routes.setup._is_already_configured", return_value=True):
+        yield
+
+
+@pytest.fixture
+def production(monkeypatch):
+    """Databricks Apps mode: require_admin performs a real admin check."""
+    from src.api.routes import _authz, setup
+
+    monkeypatch.setattr(_authz, "_is_production", lambda: True)
+    monkeypatch.setattr(setup, "_is_production", lambda: True)
+    monkeypatch.setattr(_authz, "get_current_user", lambda: "user@test.com")
+    _authz.reset_admin_cache()
+    yield _authz
+    _authz.reset_admin_cache()
+
+
+@pytest.fixture
+def non_admin(production, monkeypatch):
+    monkeypatch.setattr(production, "_admin_acl_probe", lambda user: False)
+
+
+@pytest.fixture
+def admin(production, monkeypatch):
+    monkeypatch.setattr(production, "_admin_acl_probe", lambda user: True)
+
+
+@pytest.fixture
 def client(setup_app):
     """Provide a TestClient for the setup router."""
     with TestClient(setup_app) as c:
@@ -93,6 +130,10 @@ class TestGetSetupStatus:
 
 class TestConfigureWorkspace:
     """Tests for the workspace configuration endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def _unconfigured(self, unconfigured):
+        """These scenarios exercise the first-run (unconfigured) path."""
 
     def test_configure_valid_scenarios(self, client):
         """Test configure with various valid inputs (AWS, Azure, GCP, normalisation)."""
@@ -239,7 +280,106 @@ class TestUrlValidation:
             "https://google.com",
             "https://not-databricks.com",
             "ftp://company.cloud.databricks.com",
+            "http://company.cloud.databricks.com",
+            "https://databricks.com",
+            "https://evildatabricks.com",
         ]
         for url in invalid_urls:
             with pytest.raises(Exception):
                 ConfigureWorkspaceRequest(host=url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # F-CR-24: trailing-domain trick (unanchored regex prefix match)
+            "https://fake.cloud.databricks.com.attacker.example",
+            # F-CR-24: userinfo trick — real host is attacker.example
+            "https://x.cloud.databricks.com@attacker.example",
+            "x.cloud.databricks.com@attacker.example",
+            "https://user:pw@x.cloud.databricks.com",
+            "https://x.cloud.databricks.com:8443",
+            "https://x.cloud.databricks.com/path",
+            "https://x.cloud.databricks.com?next=https://attacker.example",
+            "https://x.cloud.databricks.com#frag",
+            "https://x.cloud.databricks.com\\@attacker.example",
+            "https://x.azuredatabricks.net.attacker.example",
+        ],
+    )
+    def test_host_bypass_strings_rejected(self, url):
+        with pytest.raises(ValueError):
+            ConfigureWorkspaceRequest(host=url)
+
+    def test_legitimate_host_accepted_and_normalized(self):
+        req = ConfigureWorkspaceRequest(host="  https://My-Co.cloud.databricks.com/  ")
+        assert req.host == "https://my-co.cloud.databricks.com"
+
+
+# ---------------------------------------------------------------------------
+# Authorization (F-CR-24)
+# ---------------------------------------------------------------------------
+
+_VALID_BODY = {"host": "https://mycompany.cloud.databricks.com"}
+
+
+class TestSetupAuthorization:
+    """Mutating setup endpoints are admin-only behind the Apps proxy."""
+
+    @pytest.mark.parametrize("configured_state", [False, True])
+    def test_configure_rejects_non_admin(self, client, non_admin, configured_state):
+        with patch(
+            "src.api.routes.setup._is_already_configured", return_value=configured_state
+        ), patch("src.api.routes.setup.save_tellr_config") as save, patch(
+            "src.api.routes.setup.reset_client"
+        ) as reset:
+            response = client.post("/api/setup/configure", json=_VALID_BODY)
+        assert response.status_code == 403
+        save.assert_not_called()
+        reset.assert_not_called()
+
+    def test_test_connection_rejects_non_admin(self, client, non_admin):
+        with patch("src.core.databricks_client.get_system_client") as get_client:
+            response = client.post("/api/setup/test-connection")
+        assert response.status_code == 403
+        get_client.assert_not_called()
+
+    def test_configure_rejects_unauthenticated_caller(self, client, production, monkeypatch):
+        monkeypatch.setattr(production, "get_current_user", lambda: None)
+        with patch("src.api.routes.setup.save_tellr_config") as save:
+            response = client.post("/api/setup/configure", json=_VALID_BODY)
+        assert response.status_code == 403
+        save.assert_not_called()
+
+    def test_admin_can_reconfigure_in_production(self, client, admin, configured):
+        with patch("src.api.routes.setup.save_tellr_config") as save, patch(
+            "src.api.routes.setup.reset_client"
+        ):
+            response = client.post("/api/setup/configure", json=_VALID_BODY)
+        assert response.status_code == 200
+        save.assert_called_once()
+
+    def test_admin_can_test_connection_in_production(self, client, admin):
+        mock_client = MagicMock()
+        mock_client.current_user.me.return_value = MagicMock(
+            user_name="admin@test.com", display_name="Admin"
+        )
+        with patch("src.core.databricks_client.get_system_client", return_value=mock_client):
+            response = client.post("/api/setup/test-connection")
+        assert response.status_code == 200
+
+    def test_local_first_run_still_works(self, client, unconfigured):
+        with patch("src.api.routes.setup.save_tellr_config") as save, patch(
+            "src.api.routes.setup.reset_client"
+        ):
+            response = client.post("/api/setup/configure", json=_VALID_BODY)
+        assert response.status_code == 200
+        save.assert_called_once()
+
+    def test_local_reconfigure_of_configured_instance_refused(self, client, configured):
+        """No verified identity locally, so an existing config can't be overwritten."""
+        with patch("src.api.routes.setup.save_tellr_config") as save, patch(
+            "src.api.routes.setup.reset_client"
+        ) as reset:
+            response = client.post("/api/setup/configure", json=_VALID_BODY)
+        assert response.status_code == 409
+        save.assert_not_called()
+        reset.assert_not_called()
