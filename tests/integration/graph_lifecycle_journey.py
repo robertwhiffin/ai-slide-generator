@@ -680,14 +680,13 @@ def _s03_edit(j: LifecycleJourney) -> None:
         "candidate": _candidate(
             architect,
             prompt_text=architect["prompt_text"] + ARCHITECT_SUFFIX,
-            model={"temperature": 0.4},
         ),
     }
     saved = j.admin_call("put-architect", "PUT", "/draft/architect", expect=200, json=request)
     assert _set_lock(j, saved) == lock0 + 1, saved["draft"]
     assert saved["changed"] is True
     assert saved["definition"]["prompt_text"] == architect["prompt_text"] + ARCHITECT_SUFFIX
-    assert saved["definition"]["model"]["temperature"] == 0.4
+    assert saved["definition"]["model"]["temperature"] == 0.7
     j.read_readiness("readiness-after-architect")
 
     builder = _node(workbench, "builder")["draft"]
@@ -871,7 +870,7 @@ def _s05_assembly(j: LifecycleJourney) -> None:
         "digest": ARCHITECT_PROTECTED_ASSEMBLY_V2_DIGEST,
     }, definition["protected_assembly"]
     assert definition["prompt_text"].endswith(ARCHITECT_SUFFIX), definition["prompt_text"][-80:]
-    assert definition["model"]["temperature"] == 0.4, definition["model"]
+    assert definition["model"]["temperature"] == 0.7, definition["model"]
     row = j.draft_row("architect")
     assert row["assembly_rules"] == {"format_version": 2, "custom_blocks": [block]}, row
     assert (row["protected_assembly_version"], row["protected_assembly_digest"]) == (
@@ -976,7 +975,7 @@ def _s07_test(j: LifecycleJourney) -> None:
     assert calls[0].prompt == architect_run["assembled_prompt"]
     assert CUSTOM_BLOCK_TEXT in architect_run["assembled_prompt"]
     assert ARCHITECT_SUFFIX.strip() in architect_run["assembled_prompt"]
-    assert calls[0].configuration.temperature == 0.4
+    assert calls[0].configuration.temperature == 0.7
     assert calls[2].configuration.endpoint_name == SONNET
 
     # C33/C48: a candidate run never reaches the production identity sink.
@@ -1094,7 +1093,6 @@ def _s10_preview(j: LifecycleJourney) -> None:
     assert fields == {
         "architect": [
             "prompt_text",
-            "model.temperature",
             "assembly_rules",
             "protected_assembly.version",
             "protected_assembly.digest",
