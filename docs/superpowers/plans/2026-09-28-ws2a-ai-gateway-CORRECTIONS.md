@@ -761,3 +761,31 @@ Branch `feat/ws2a-probe-detail` (based on 5efc1b557).
 - Added new test `'shows provider_detail as the lead line when present'`.
 - Added new parser tests for `provider_detail` acceptance and rejection.
 
+
+---
+
+## Follow-up live check 2026-09-29
+
+**Status: BLOCKED at deploy. No live step ran.** (12:32–12:34Z)
+
+- `gh auth status`: `robertwhiffin` active. Local HEAD = `origin/feat/ws2a-ai-gateway` = 324c672e8.
+- `gh workflow run publish-dev.yml --ref feat/ws2a-ai-gateway` → run 36568818980 checked out 324c672e8, `Resolved version: version=0.4.3.dev37`, then **failed in "Build databricks-tellr-app"**: `npm run build` (`tsc -b && vite build`) exited 2 on
+  `src/components/Admin/AgentDefinitionWorkbench/AgentDefinitionWorkbench.test.tsx(3038,11): error TS6133: 'fetchMock' is declared but its value is never read.`
+  (the new test `'shows provider_detail as the lead line when present…'`, added in eb6598e27; `tsconfig.app.json` has `noUnusedLocals: true` and includes `src`, so test files are type-checked by the build).
+- No wheel was uploaded, so 0.4.3.dev37 does not exist on PyPI and `deploy_local update` was not run. devloop `ws2a` still runs the previous deploy (0.4.3.dev35).
+- Note: the follow-up merge entry above records "`tsc --noEmit` clean"; the root `tsconfig.json` is a references-only config, so that check does not type-check `src` the way `tsc -b` does.
+
+| Step | Result |
+|---|---|
+| Deploy | FAIL (build error above) |
+| 1 Legacy conversation L | SKIPPED |
+| 2 Model-endpoints list | SKIPPED |
+| 3 Probe newer Claude models | SKIPPED |
+| 4 Probe expected failure / provider_detail | SKIPPED |
+| 5 Publish newest model + 3 conversations | SKIPPED |
+| 6 Conversation L again | SKIPPED |
+| 7 PPTX export | SKIPPED |
+| 8 Rollback | SKIPPED |
+| 9 Log check (Gateway success, no temperature) | SKIPPED |
+
+Unblock: remove or use the unused `fetchMock` binding at line 3038, push, re-run publish-dev (auto-increment should pick dev37 again since nothing was uploaded).
