@@ -17,7 +17,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Mapping, Optional
 
 from src.services.converter_jail import protocol
 
@@ -32,6 +32,16 @@ _SRC_PARENT = str(Path(__file__).resolve().parents[3])
 _ENV_WHITELIST = ("PATH", "LANG")
 
 _netns_cache: Optional[bool] = None
+
+_SENSITIVE_ENV_SUFFIXES = (
+    "_TOKEN",
+    "_SECRET",
+    "_KEY",
+    "_PASSWORD",
+    "_PASSWD",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+)
 
 
 class JailError(Exception):
@@ -73,6 +83,27 @@ def build_scrubbed_env() -> dict:
     env["TMPDIR"] = home
     env["PYTHONHASHSEED"] = "0"
     return env
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    """Return whether an environment key can identify or authenticate a service."""
+    normalized_key = key.upper()
+    return (
+        normalized_key.startswith("DATABRICKS_")
+        or normalized_key in {"APIKEY", "API_KEY"}
+        or "API_KEY" in normalized_key
+        or "APIKEY" in normalized_key
+        or normalized_key.endswith(_SENSITIVE_ENV_SUFFIXES)
+    )
+
+
+def strip_sensitive_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Remove credential-shaped variables before a child runs without netns."""
+    return {
+        key: value
+        for key, value in env.items()
+        if not _is_sensitive_env_key(key)
+    }
 
 
 def _rlimit_preexec(limits: ResourceLimits) -> Callable[[], None]:
@@ -117,9 +148,9 @@ def netns_available() -> bool:
     _netns_cache = result
     if not result:
         logger.warning(
-            "Network namespace unavailable — converter jail runs without netns. "
-            "Egress is possible but the scrubbed env carries no credentials "
-            "(documented residual risk, SDR-4437 HIGH-5)."
+            "Network isolation failed: unshare --net is unavailable or rejected. "
+            "Falling back to a credential-free child environment; unauthenticated "
+            "egress remains possible (SDR-4437 HIGH-5)."
         )
     return result
 
@@ -146,11 +177,15 @@ def _spawn(
     """
     limits = limits or ResourceLimits()
     cmd: List[str] = []
-    if netns_available():
-        cmd += [shutil.which("unshare"), "--net"]
+    unshare = shutil.which("unshare")
+    network_isolated = netns_available() and unshare is not None
+    if network_isolated and unshare is not None:
+        cmd += [unshare, "--net"]
     cmd += [sys.executable, "-I", runner_file, _SRC_PARENT, *argv]
 
     env = build_scrubbed_env()
+    if not network_isolated:
+        env = strip_sensitive_env(env)
     stderr_lines: List[str] = []
 
     # SDR-4437 PR-5: the per-launch HOME/TMPDIR/cwd temp dir must be removed on
