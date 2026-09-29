@@ -195,6 +195,20 @@ async def stop_token_refresh() -> None:
         logger.info("Background token refresh task stopped")
 
 
+def _with_psycopg2_driver(url: str) -> str:
+    """Pin PostgreSQL URLs to psycopg2, matching the declared dependency.
+
+    SQLAlchemy 2.1 changed bare ``postgresql://`` to mean psycopg (v3). CI
+    installs ``sqlalchemy>=2.0`` via pip, so that default now imports a
+    package we do not ship (``psycopg2-binary`` is the driver). Explicit
+    ``postgresql+psycopg2://`` keeps both 2.0 and 2.1 on the installed driver.
+    URLs that already name a driver, and non-Postgres URLs, are left alone.
+    """
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + url[len("postgresql://") :]
+    return url
+
+
 def _get_database_url() -> str:
     """
     Determine database URL based on environment.
@@ -213,7 +227,7 @@ def _get_database_url() -> str:
     # Check for explicit DATABASE_URL first
     explicit_url = os.getenv("DATABASE_URL")
     if explicit_url and not explicit_url.startswith("jdbc:"):
-        return explicit_url
+        return _with_psycopg2_driver(explicit_url)
 
     # Check for autoscaling Lakebase (env vars set by deployment)
     lakebase_type = _get_lakebase_type()
@@ -237,7 +251,7 @@ def _get_database_url() -> str:
         url = f"postgresql://{pg_user}@{pg_host}:5432/{database}?sslmode=require"
         if schema:
             url += f"&options=-csearch_path%3D{schema}"
-        return url
+        return _with_psycopg2_driver(url)
 
     # Check for provisioned Lakebase (PGHOST auto-set by Databricks Apps)
     pg_host = os.getenv("PGHOST")
@@ -258,10 +272,10 @@ def _get_database_url() -> str:
         if schema:
             url += f"&options=-csearch_path%3D{schema}"
 
-        return url
+        return _with_psycopg2_driver(url)
 
     # Default to local PostgreSQL for development
-    return "postgresql://localhost/ai_slide_generator"
+    return _with_psycopg2_driver("postgresql://localhost/ai_slide_generator")
 
 
 def _create_engine():
@@ -291,14 +305,26 @@ def _create_engine():
 
     logger.info("Configuring database connection")
 
-    # Create engine with connection pooling
-    engine = create_engine(
-        database_url,
-        pool_pre_ping=True,
-        pool_size=80,
-        max_overflow=20,
-        echo=sql_echo,
-    )
+    # sqlite:///:memory: with the default QueuePool gives each checkout a
+    # different empty database. Unit tests use an in-memory URL; StaticPool
+    # keeps one shared connection. Postgres keeps the production pool settings.
+    if database_url.startswith("sqlite"):
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+            echo=sql_echo,
+        )
+    else:
+        engine = create_engine(
+            database_url,
+            pool_pre_ping=True,
+            pool_size=80,
+            max_overflow=20,
+            echo=sql_echo,
+        )
 
     # For Lakebase: register event listener to inject fresh tokens
     if is_lakebase_environment():
