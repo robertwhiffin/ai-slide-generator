@@ -636,3 +636,97 @@ After that decision, re-run Task 9 from step (a).
 - 4 sessions: L, N, plus the two monolith sessions `csvz7Yt6…` (failed) and `1gihSFDN…`.
 - Releases v2–v4; test run 1, approved.
 - One Google Slides file.
+
+## Follow-up A — no sampling parameters; structured output with `tool_choice="auto"` (user-approved, 2026-09-29)
+
+**Code.** `bind_structured_output_model` builds the model with `model`, `max_tokens`, `workspace_client` and the transport options only. It binds `model.bind_tools([schema], tool_choice="auto") | PydanticToolsParser(tools=[schema], first_tool_only=True) | RunnableLambda(_require_structured_output)`. That is `ChatDatabricks.with_structured_output`'s function-calling branch (databricks-langchain 0.20.0, chat_models.py:1339-1345), except that `tool_choice` is `"auto"` instead of the schema name. `_require_structured_output` raises `OutputParserException` when the parser returns `None`, which happens when the model replied without calling the tool. The session title model drops `temperature=0.3`. Both converters' `_call_llm_sync` drop `temperature=0.2`. The stored `temperature` / `top_p` fields, the content hashes and the `"langchain.with_structured_output"` binding label (persisted assembly data) are all unchanged.
+
+**The seam changed from `with_structured_output(schema)` to `bind_tools([schema], tool_choice="auto")`. Every assertion that was edited (old → new):**
+- `tests/unit/test_agent_runtime.py`
+  - `test_databricks_model_adapter_never_binds_legacy_tool_grants`
+    - Old: `bind_tools` raises, and `structured_bindings == [schema]`. New: `bind_tools` is recorded, and `structured_bindings == [([schema], {"tool_choice": "auto"})]`. `with_structured_output` now raises.
+    - Old: `actual is output`. New: `actual == schema.model_validate(output)`, because the result now comes from the real parser.
+    - Added: `prompts == ["assembled prompt"]`.
+    - `constructed`: `temperature` and `top_p` were removed from the expected kwargs.
+  - `test_runtime_and_nodes_have_no_prompt_serialization_or_binding_bypass`
+    - Old: `runtime_source.count("with_structured_output(") == 1`. New: `== 0`, plus `.count(".bind_tools(") == 1`.
+    - Added: `".bind_tools(" not in node_source`.
+  - The AST guard `structured_bindings` (in the Task 6 scope test) now counts `with_structured_output` **or** `bind_tools`. The expected map `{agent_runtime: 1, nodes: 0, prompt_assembler: 0}` is unchanged. Added: `".bind_tools(" not in` nodes / prompt_assembler.
+  - `_RecordingChatModel` / `_RecordingStructuredModel`
+    - The double now implements `bind_tools` (event `("bind_tools", schema, kwargs)`) and answers with a provider-shaped tool call through the production parser. `with_structured_output` raises. `_RecordingStructuredModel` was removed.
+  - `test_structured_output_runtime_adapter_binds_through_the_extracted_helper`
+    - Old: `actual is output`. New: `actual == OUTPUT_SCHEMAS["data_analyst"].model_validate(output)`.
+    - Old: event `("with_structured_output", schema)`. New: `("bind_tools", schema, {"tool_choice": "auto"})`.
+    - `temperature` and `top_p` were removed from the expected `model_factory` kwargs.
+  - `test_structured_output_runtime_and_model_endpoint_probe_share_one_helper`
+    - Old: the `(temperature, max_tokens, top_p) == (0.25, 321, 0.75)` tuple. New: `max_tokens == 321`, and none of `temperature` / `top_p` / `top_k` appears in the kwargs.
+    - The probe event sequence ends `"bind_tools"` and then `"invoke"`. `probe_events[2] == ("bind_tools", _StructuredOutputProbeResponse, {"tool_choice": "auto"})`.
+  - `test_structured_output_binding_has_one_call_site_and_the_probe_has_none`
+    - `binding_calls` now counts `bind_tools`: runtime 1, helper 1, probe 0.
+    - Added: `with_structured_output` calls are 0 in all three. `"bind_tools" not in probe_source`.
+  - `test_structured_output_runtime_adapter_still_collapses_permission_denied`
+    - `DeniedChatModel` now raises from `bind_tools` instead of from `with_structured_output`.
+  - `test_run_candidate_delegates_to_run_resolved_and_never_to_run`
+    - `"bind_tools"` was added to the forbidden names. `with_structured_output` stays forbidden.
+  - `test_no_module_binds_a_structured_model_outside_the_one_helper`
+    - Old: `bindings == {agent_runtime.py: 1}` (with_structured_output). New: `bindings == {(agent_runtime.py, "bind_tools"): 1}`, counted over both names, so any `with_structured_output(` in `src` fails the test.
+    - `"bind_tools"` was added to the workbench's forbidden strings.
+  - `_SAVED_MODEL_KWARGS`
+    - This is used by the transport-options tests. `temperature` and `top_p` were removed.
+  - `test_production_run_binds_exactly_as_before_and_reads_no_usage`
+    - It now records `ChatDatabricks.bind_tools`, not `with_structured_output`.
+    - Old: `kwargs == {}`. New: `kwargs == {"tool_choice": "auto"}`.
+    - Old: `len(args) == 1`. New: `len(args) == 1`, and `args[0]` is a one-element list holding the composed ArchitectOutput subclass.
+    - Old: `helper_returns[0] is bound`. New: `type(helper_returns[0]) is RunnableSequence`, `.first is bound` and `len(.steps) == 3`. There is still no callback wrapper and no `include_raw`.
+- `tests/unit/test_model_endpoint_probe.py`
+  - `_Recorder`
+    - `_Chat.bind_tools` records `("bind_tools", [schema], kwargs)`. A model-instance output becomes a tool call. Any other output (dict, str, message) reaches the real parser unchanged.
+  - `test_model_endpoint_probe_success_constructs_binds_then_invokes_exactly`
+    - `temperature` and `top_p` were removed from the kwargs.
+    - Old: event `("with_structured_output", schema)`. New: `("bind_tools", [schema], {"tool_choice": "auto"})`.
+  - `test_model_endpoint_probe_binding_rejection_is_unsupported`
+    - The event name is now `"bind_tools"`.
+  - `test_model_endpoint_probe_prompt_is_code_owned_and_identity_free`
+    - Only the event unpacking changed (events now have 2 or 3 elements).
+  - `test_model_endpoint_probe_unparsed_output_is_ambiguous_failure`
+    - All three original cases are kept. Added: a `no-tool-call` case.
+- `tests/unit/test_persisted_agent_runtime.py`
+  - `test_provider_errors_cross_adapter_runtime_and_each_identity_sink` and `test_removed_endpoint_is_attempted_once_without_a_default_fallback`
+    - The `Model` doubles bind through `bind_tools`. The `"structured"` phase now raises from `bind_tools`. No assertion changed.
+- `tests/unit/test_session_naming.py`
+  - `test_builds_the_gateway_title_model_as_the_service_principal`
+    - `"temperature": 0.3` was removed from the expected kwargs. Added: an explicit check that none of `temperature` / `top_p` / `top_k` is passed.
+- `tests/integration/test_graph_lifecycle_runtime_postgres.py`
+  - `_ToolFreeChatModel`
+    - `bind_tools([schema], tool_choice="auto")` with one BaseModel schema is recorded as `("bind_tools", schema, kw)` and answered with a tool call.
+    - Any other `bind_tools` (a legacy grant, extra tools, the empty list, forced choice) is still recorded in `tool_bindings` and raises. `with_structured_output` now raises.
+  - AC5 assertion
+    - Old: `method_calls` names `== ["with_structured_output"] * total`. New: `== ["bind_tools"] * total`, plus every kw `== {"tool_choice": "auto"}`.
+    - `tool_bindings == []` is unchanged.
+- `tests/integration/test_persisted_graph_runtime_failures_postgres.py`
+  - `test_removed_pinned_endpoint_is_safe_and_is_attempted_exactly_once`
+    - The `Model` double now binds through `bind_tools`.
+    - **Pre-existing failure, not fixed, not caused by this change:** the double's `model_factory` reads `kwargs["endpoint"]`, but the helper passes `model=`. It raises `KeyError: 'endpoint'` both at HEAD 5efc1b557 and after this change.
+
+**Fixtures.**
+- New: `tests/fixtures/tool_call_doubles.py`, with `tool_call_reply`, `no_tool_call_reply`, `replying` and `tool_name`.
+- `MockChatCompletionsWorkspace` gained `tool_call: bool = True`. `False` returns a prose reply with no tool call.
+- `MockTransportWorkspace` (probe tests) gained the outcome `"no_tool_call"`.
+
+**New tests.**
+- `test_the_graph_request_sends_no_sampling_and_auto_tool_choice`
+- `test_a_real_provider_reply_without_a_tool_call_is_the_typed_invalid_output`, which gives `incomplete` / `invalid_output:OutputParserException`
+- `test_the_binding_raises_the_parser_error_when_no_tool_is_called`
+- `test_model_endpoint_probe_real_request_sends_no_sampling_and_auto_tool_choice`
+- `test_model_endpoint_probe_real_reply_without_a_tool_call_is_retryable_failure`, which gives `structured_output_probe_failed`, retryable. This classification existed before the change: under forced choice a prose reply also parsed to `None` and failed the probe's `isinstance` check. Now it arrives as the parser exception at invoke.
+- `test_codegen_call_sends_no_sampling_parameters` (pptx)
+- `test_google_slides_codegen_call_sends_no_sampling_parameters`
+
+**Prose docstrings updated.** `src/services/graph/nodes.py` `_design_system_library` said "`bind_tools` appears nowhere under `src/`". It now says that the one `bind_tools` binds only the output schema. Three test-side docstrings and skip reasons still say `bind_tools` appears nowhere, and I left them unchanged:
+- `tests/agentic/test_analyst_outcome_shapes.py`
+- `tests/unit/test_architect_design_system_library.py`
+- `tests/integration/test_graph_live_real_model.py`
+
+Their substance still holds: no tool the analyst can call is bound.
+
+**Other sites in `src/` that still send sampling parameters.** All are out of scope and were not touched: `agent.py:450-452`, `agent_factory.py:71-73`, `evaluation/llm_judge.py:225-227`, `api/services/feedback_service.py:76,295` and `config_validator.py:110-112`. No other in-scope ws2a call site sends `temperature`, `top_p` or `top_k`.
