@@ -1014,6 +1014,8 @@ export interface StructuredOutputProbeFailureResponse extends StructuredOutputPr
   code: StructuredOutputProbeFailureCode;
   message: string;
   retryable: boolean;
+  /** Sanitised provider reason from the admin probe route; null when absent. */
+  provider_detail: string | null;
 }
 
 /**
@@ -1060,25 +1062,35 @@ export function parseStructuredOutputProbeSuccess(
   return identity === null ? null : { code: 'structured_output_probe_succeeded', ...identity };
 }
 
+const _PROBE_FAILURE_BASE_KEYS = [
+  'code', 'message', 'retryable', 'endpoint_name', 'candidate_hash', 'lock_version',
+] as const;
+const _PROBE_FAILURE_ALLOWED_KEYS = new Set<string>([..._PROBE_FAILURE_BASE_KEYS, 'provider_detail']);
+
 export function parseStructuredOutputProbeFailure(
   status: number,
   value: unknown,
 ): StructuredOutputProbeApiError | null {
   if (status !== 403 && status !== 422 && status !== 503) return null;
   const contract = PROBE_FAILURE_CONTRACT[status];
-  if (!isPlainRecord(value)
-    || !hasExactKeys(value, [
-      'code', 'message', 'retryable', 'endpoint_name', 'candidate_hash', 'lock_version',
-    ])
-    || value.code !== contract.code
+  if (!isPlainRecord(value)) return null;
+  // Allow exactly the base keys, or base keys plus the optional provider_detail.
+  const hasAllRequired = _PROBE_FAILURE_BASE_KEYS.every((k) => k in value);
+  const hasOnlyAllowed = Object.keys(value).every((k) => _PROBE_FAILURE_ALLOWED_KEYS.has(k));
+  if (!hasAllRequired || !hasOnlyAllowed) return null;
+  if (value.code !== contract.code
     || value.retryable !== contract.retryable
     || typeof value.message !== 'string') return null;
+  if ('provider_detail' in value
+    && value.provider_detail !== null
+    && typeof value.provider_detail !== 'string') return null;
   const identity = probeIdentityFrom(value);
   if (identity === null) return null;
   return new StructuredOutputProbeApiError(status, {
     code: contract.code,
     message: value.message,
     retryable: contract.retryable,
+    provider_detail: (value.provider_detail as string | null | undefined) ?? null,
     ...identity,
   });
 }

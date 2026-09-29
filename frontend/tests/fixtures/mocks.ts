@@ -1684,9 +1684,16 @@ export function syntheticProbeSuccess(identity: Partial<StructuredOutputProbeIde
 export function syntheticProbeFailure(
   code: StructuredOutputProbeFailureFixtureCode,
   identity: Partial<StructuredOutputProbeIdentityFixture> = {},
+  providerDetail: string | null = null,
 ) {
   const failure = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
-  return { code, message: failure.message, retryable: failure.retryable, ...probeIdentity(identity) };
+  return {
+    code,
+    message: failure.message,
+    retryable: failure.retryable,
+    provider_detail: providerDetail,
+    ...probeIdentity(identity),
+  };
 }
 
 // ============================================================

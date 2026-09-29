@@ -2220,6 +2220,7 @@ describe('structured-output probe transport', () => {
       code,
       message,
       retryable,
+      provider_detail: null,
       endpoint_name: SEED_MODEL_ENDPOINT_NAME,
       candidate_hash: SEED_CANDIDATE_HASH,
       lock_version: 3,
@@ -2311,6 +2312,25 @@ describe('structured-output probe transport', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(failure));
     await expect(probeDraftStructuredOutput('architect', { lock_version: 0 })).rejects.toBe(failure);
   });
+
+  it('accepts a typed failure carrying a non-null provider_detail and preserves it in the parsed failure', async () => {
+    const body = syntheticProbeFailure('unsupported_structured_output', {}, 'tool_choice: type "tool" not supported.');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(422, body, 'Unprocessable Entity')));
+    const error = await probeDraftStructuredOutput('architect', { lock_version: 0 }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(StructuredOutputProbeApiError);
+    expect((error as StructuredOutputProbeApiError).failure.provider_detail)
+      .toBe('tool_choice: type "tool" not supported.');
+  });
+
+  it.each([
+    ['a non-string provider_detail', { ...syntheticProbeFailure('unsupported_structured_output'), provider_detail: 42 }],
+    ['an unknown extra key alongside provider_detail',
+      { ...syntheticProbeFailure('unsupported_structured_output'), provider_detail: 'ok', unknown_key: true }],
+  ])('rejects a 422 failure with %s as an invalid response', async (_name, body) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(422, body, 'Unprocessable Entity')));
+    await expect(probeDraftStructuredOutput('architect', { lock_version: 0 }))
+      .rejects.toBeInstanceOf(InvalidDraftSaveResponseError);
+  });
 });
 
 describe('structured-output probe in the one draft gate', () => {
@@ -2398,6 +2418,7 @@ describe('structured-output probe in the one draft gate', () => {
       code,
       message: STRUCTURED_OUTPUT_PROBE_FAILURES[code].message,
       retryable: STRUCTURED_OUTPUT_PROBE_FAILURES[code].retryable,
+      provider_detail: null,
       endpoint_name: SEED_MODEL_ENDPOINT_NAME,
       candidate_hash: SEED_CANDIDATE_HASH,
       lock_version: 0,
