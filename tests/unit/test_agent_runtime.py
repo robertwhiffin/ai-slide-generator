@@ -62,6 +62,11 @@ from tests.fixtures.deterministic_model_adapter import (
     fake_output,
 )
 from tests.fixtures.packaged_release_loader import packaged_v1_runtime
+from tests.fixtures.tool_call_doubles import (
+    no_tool_call_reply,
+    replying,
+    tool_call_reply,
+)
 
 EXPECTED_PROTECTED_PROMPT_DIGEST = (
     "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
@@ -365,22 +370,28 @@ def test_incompatible_schema_contract_fails_before_model_invocation():
 
 
 def test_databricks_model_adapter_never_binds_legacy_tool_grants():
-    output = _output_for("data_analyst")
-    structured_bindings: list[type[BaseModel]] = []
+    """The output schema is the ONLY tool bound (follow-up A): no legacy grant.
 
-    class StructuredModel:
-        def invoke(self, prompt: str) -> BaseModel:
-            assert prompt == "assembled prompt"
-            return output
+    ``data_analyst``'s ``TOOL_GRANTS`` (genie, vector_index) must stay inert:
+    the one ``bind_tools`` call carries exactly the output schema, with
+    ``tool_choice="auto"``, and nothing else.
+    """
+    output = _output_for("data_analyst")
+    schema = OUTPUT_SCHEMAS["data_analyst"]
+    structured_bindings: list[tuple[list[Any], dict[str, Any]]] = []
+    prompts: list[str] = []
+
+    def reply(prompt: str):
+        prompts.append(prompt)
+        return tool_call_reply(schema, output)
 
     class ChatModel:
-        def bind_tools(self, tools):  # pragma: no cover - failure path
-            raise AssertionError(f"legacy tool grants must stay inert: {tools}")
+        def bind_tools(self, tools, **kwargs):
+            structured_bindings.append((list(tools), kwargs))
+            return replying(reply)
 
-        def with_structured_output(self, schema):
-            structured_bindings.append(schema)
-            assert schema is OUTPUT_SCHEMAS["data_analyst"]
-            return StructuredModel()
+        def with_structured_output(self, schema):  # pragma: no cover - failure path
+            raise AssertionError("forced tool choice must not be bound")
 
     constructed: list[dict[str, Any]] = []
 
@@ -405,14 +416,14 @@ def test_databricks_model_adapter_never_binds_legacy_tool_grants():
         prompt="assembled prompt",
     )
 
-    assert actual is output
-    assert structured_bindings == [OUTPUT_SCHEMAS["data_analyst"]]
+    assert actual == schema.model_validate(output)
+    assert structured_bindings == [([schema], {"tool_choice": "auto"})]
+    assert prompts == ["assembled prompt"]
+    # Sampling values are stored but never sent (follow-up A).
     assert constructed == [
         {
             "model": "databricks-claude-opus-4-6",
-            "temperature": 0.7,
             "max_tokens": 60000,
-            "top_p": 0.95,
             "workspace_client": constructed[0]["workspace_client"],
         }
     ]
@@ -438,8 +449,10 @@ def test_runtime_and_nodes_have_no_prompt_serialization_or_binding_bypass():
     node_source = inspect.getsource(nodes)
     assert "json.dumps(payload" not in runtime_source
     assert "json.dumps(payload" not in node_source
-    assert runtime_source.count("with_structured_output(") == 1
+    assert runtime_source.count("with_structured_output(") == 0
+    assert runtime_source.count(".bind_tools(") == 1
     assert "with_structured_output(" not in node_source
+    assert ".bind_tools(" not in node_source
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +547,7 @@ def test_prompt_assembler_is_the_only_payload_serializer_and_adapter_the_only_bi
             for node in ast.walk(ast.parse(source))
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "with_structured_output"
+            and node.func.attr in {"with_structured_output", "bind_tools"}
         )
 
     assert {name: payload_serializations(source) for name, source in sources.items()} == {
@@ -555,6 +568,8 @@ def test_prompt_assembler_is_the_only_payload_serializer_and_adapter_the_only_bi
         assert "json.dumps(payload" not in sources[name]
     assert "with_structured_output(" not in sources["nodes"]
     assert "with_structured_output(" not in sources["prompt_assembler"]
+    assert ".bind_tools(" not in sources["nodes"]
+    assert ".bind_tools(" not in sources["prompt_assembler"]
     # The assembler still declares the binding as data, which is not a call site.
     assert 'langchain.with_structured_output"' in sources["prompt_assembler"]
 
@@ -592,24 +607,29 @@ def test_agent_runtime_construction_still_fails_closed_on_contract_material_drif
 # ---------------------------------------------------------------------------
 
 
-class _RecordingStructuredModel:
-    def __init__(self, events: list[tuple[str, Any]], output: Any) -> None:
-        self._events = events
-        self._output = output
-
-    def invoke(self, prompt: str) -> Any:
-        self._events.append(("invoke", prompt))
-        return self._output
-
-
 class _RecordingChatModel:
+    """Records the one ``bind_tools`` binding, then answers with a tool call.
+
+    ``output`` is the tool call's arguments (a mapping or a model instance); the
+    reply goes through production's ``PydanticToolsParser`` like a provider's.
+    """
+
     def __init__(self, events: list[tuple[str, Any]], output: Any) -> None:
         self._events = events
         self._output = output
 
-    def with_structured_output(self, schema):
-        self._events.append(("with_structured_output", schema))
-        return _RecordingStructuredModel(self._events, self._output)
+    def bind_tools(self, tools, **kwargs):
+        (schema,) = tools
+        self._events.append(("bind_tools", schema, kwargs))
+
+        def reply(prompt: str):
+            self._events.append(("invoke", prompt))
+            return tool_call_reply(schema, self._output)
+
+        return replying(reply)
+
+    def with_structured_output(self, schema):  # pragma: no cover - failure path
+        raise AssertionError("forced tool choice must not be bound")
 
 
 def _recording_factories(output: Any):
@@ -663,23 +683,22 @@ def test_structured_output_runtime_adapter_binds_through_the_extracted_helper(mo
         prompt="assembled prompt",
     )
 
-    assert actual is output
+    assert actual == OUTPUT_SCHEMAS["data_analyst"].model_validate(output)
     assert len(helper_calls) == 1
     assert helper_calls[0]["configuration"] is _SAVED_CONFIGURATION
     assert helper_calls[0]["schema"] is OUTPUT_SCHEMAS["data_analyst"]
+    # Follow-up A: no temperature / top_p sent; schema bound once, tool_choice auto.
     assert events == [
         ("client_factory", None),
         (
             "model_factory",
             {
                 "model": "saved exact endpoint-name",
-                "temperature": 0.25,
                 "max_tokens": 321,
-                "top_p": 0.75,
                 "workspace_client": runtime_client,
             },
         ),
-        ("with_structured_output", OUTPUT_SCHEMAS["data_analyst"]),
+        ("bind_tools", OUTPUT_SCHEMAS["data_analyst"], {"tool_choice": "auto"}),
         ("invoke", "assembled prompt"),
     ]
 
@@ -731,18 +750,20 @@ def test_structured_output_runtime_and_model_endpoint_probe_share_one_helper(mon
     assert probe_kwargs["workspace_client"] is probe_client
     for kwargs in (runtime_kwargs, probe_kwargs):
         assert kwargs["model"] == "saved exact endpoint-name"
-        assert (kwargs["temperature"], kwargs["max_tokens"], kwargs["top_p"]) == (
-            0.25,
-            321,
-            0.75,
-        )
-    assert [name for name, _ in probe_events] == [
+        assert kwargs["max_tokens"] == 321
+        for sampling in ("temperature", "top_p", "top_k"):
+            assert sampling not in kwargs
+    assert [event[0] for event in probe_events] == [
         "client_factory",
         "model_factory",
-        "with_structured_output",
+        "bind_tools",
         "invoke",
     ]
-    assert probe_events[2] == ("with_structured_output", _StructuredOutputProbeResponse)
+    assert probe_events[2] == (
+        "bind_tools",
+        _StructuredOutputProbeResponse,
+        {"tool_choice": "auto"},
+    )
 
 
 def test_structured_output_probe_defaults_are_the_runtime_adapters_factories():
@@ -767,13 +788,13 @@ def test_structured_output_binding_has_one_call_site_and_the_probe_has_none():
     import src.services.agent_runtime as agent_runtime
     import src.services.model_endpoint_probe as model_endpoint_probe
 
-    def binding_calls(source: str) -> int:
+    def binding_calls(source: str, attr: str = "bind_tools") -> int:
         return sum(
             1
             for node in ast.walk(ast.parse(source))
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "with_structured_output"
+            and node.func.attr == attr
         )
 
     runtime_source = inspect.getsource(agent_runtime)
@@ -782,7 +803,10 @@ def test_structured_output_binding_has_one_call_site_and_the_probe_has_none():
     assert binding_calls(runtime_source) == 1
     assert binding_calls(helper_source) == 1
     assert binding_calls(probe_source) == 0
+    for source in (runtime_source, helper_source, probe_source):
+        assert binding_calls(source, "with_structured_output") == 0
     assert "with_structured_output" not in probe_source
+    assert "bind_tools" not in probe_source
     assert "ChatDatabricks" not in probe_source
     assert "agent_runtime.bind_structured_output_model(" in probe_source
 
@@ -822,7 +846,7 @@ def test_structured_output_runtime_adapter_still_collapses_permission_denied():
     from src.services.agent_runtime import ModelProviderUnavailableError
 
     class DeniedChatModel:
-        def with_structured_output(self, schema):
+        def bind_tools(self, tools, **kwargs):
             raise PermissionDenied("denied")
 
     adapter = DatabricksModelAdapter(
@@ -1338,6 +1362,7 @@ def test_run_candidate_delegates_to_run_resolved_and_never_to_run():
         "bind_structured_output_model",
         "saved_model_configuration",
         "with_structured_output",
+        "bind_tools",
         "_write_locked_content",
         "_persisted_release_loader",
     ):
@@ -1395,7 +1420,11 @@ def test_the_bounded_test_runtime_is_reachable_only_from_the_workbench_and_its_r
 
 
 def test_no_module_binds_a_structured_model_outside_the_one_helper():
-    """Correction 12/31: one ``with_structured_output(`` in ``src``, two helper callers."""
+    """Correction 12/31: one ``bind_tools(`` in ``src``, two helper callers.
+
+    Follow-up A: the binding is ``bind_tools([schema], tool_choice="auto")``;
+    ``with_structured_output(`` (forced tool choice) appears nowhere in ``src``.
+    """
     import ast
 
     root, files = _src_python_files()
@@ -1409,18 +1438,23 @@ def test_no_module_binds_a_structured_model_outside_the_one_helper():
                 continue
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-            if name == "with_structured_output":
-                bindings[module] = bindings.get(module, 0) + 1
+            if name in {"with_structured_output", "bind_tools"}:
+                bindings[(module, name)] = bindings.get((module, name), 0) + 1
             if name == "bind_structured_output_model":
                 helper_callers.add(module)
-    assert bindings == {"src/services/agent_runtime.py": 1}
+    assert bindings == {("src/services/agent_runtime.py", "bind_tools"): 1}
     assert helper_callers == {
         "src/services/agent_runtime.py",
         "src/services/model_endpoint_probe.py",
     }
 
     workbench = (root / "src/services/agent_test_workbench.py").read_text(encoding="utf-8")
-    for forbidden in ("with_structured_output", "bind_structured_output_model(", "ChatDatabricks"):
+    for forbidden in (
+        "with_structured_output",
+        "bind_tools",
+        "bind_structured_output_model(",
+        "ChatDatabricks",
+    ):
         assert forbidden not in workbench
 
 
@@ -1440,11 +1474,11 @@ def _drive_adapter_kwargs(adapter: DatabricksModelAdapter) -> dict[str, Any]:
     return kwargs
 
 
+#: What the one binding constructs the model with: the saved temperature and
+#: top_p are stored but never sent (follow-up A).
 _SAVED_MODEL_KWARGS = {
     "model": "saved exact endpoint-name",
-    "temperature": 0.25,
     "max_tokens": 321,
-    "top_p": 0.75,
 }
 
 
@@ -1706,6 +1740,101 @@ def test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route(monk
     assert json.loads(request.content)["model"] == "databricks-claude-opus-4-6"
 
 
+def test_the_graph_request_sends_no_sampling_and_auto_tool_choice(monkeypatch):
+    """Follow-up A: newer Claude models 400 on ``temperature`` and on forced tool choice.
+
+    The real ``ChatDatabricks`` request body carries the output schema as the
+    one tool, ``tool_choice == "auto"``, the saved ``max_tokens`` — and no
+    ``temperature``, ``top_p`` or ``top_k`` although the configuration stores them.
+    """
+    from tests.fixtures.mock_chat_completions import (
+        MockChatCompletionsWorkspace,
+        install_mock_gateway_transport,
+    )
+
+    install_mock_gateway_transport(monkeypatch)
+    workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=None)
+    adapter = DatabricksModelAdapter(client_factory=lambda: workspace)
+
+    actual = adapter.invoke(
+        agent_key="architect",
+        configuration=AgentModelConfiguration(
+            endpoint_name="system.ai.claude-opus-5-5",
+            temperature=0.7,
+            max_tokens=60000,
+            top_p=0.95,
+        ),
+        schema=OUTPUT_SCHEMAS["architect"],
+        prompt="assembled prompt",
+    )
+
+    assert actual == OUTPUT_SCHEMAS["architect"].model_validate(fake_output("architect"))
+    (request,) = workspace.requests
+    sent = json.loads(request.content)
+    assert sent["tool_choice"] == "auto"
+    assert [tool["function"]["name"] for tool in sent["tools"]] == ["ArchitectOutput"]
+    assert sent["max_tokens"] == 60000
+    for sampling in ("temperature", "top_p", "top_k"):
+        assert sampling not in sent
+
+
+def test_a_real_provider_reply_without_a_tool_call_is_the_typed_invalid_output(monkeypatch):
+    """Follow-up A: ``tool_choice="auto"`` lets a model answer in prose instead.
+
+    The parser then yields ``None``; the binding turns that into an
+    ``OutputParserException`` so a candidate run lands in the existing
+    ``incomplete`` / ``invalid_output:`` classification instead of a
+    ``NoneType`` crash further down.
+    """
+    from tests.fixtures.mock_chat_completions import (
+        MockChatCompletionsWorkspace,
+        install_mock_gateway_transport,
+    )
+
+    install_mock_gateway_transport(monkeypatch)
+    workspace = MockChatCompletionsWorkspace(
+        fake_output("architect"), usage=None, tool_call=False
+    )
+    adapter = DatabricksModelAdapter(client_factory=lambda: workspace)
+    runtime, _ = _baseline_runtime(adapter)
+    content, candidate_hash = _candidate("architect")
+
+    outcome = runtime.run_candidate(
+        "architect",
+        content,
+        candidate_hash,
+        {"message": "m"},
+        AgentAssemblyContext(False),
+        observation=RunObservation(),
+    )
+
+    assert len(workspace.requests) == 1
+    assert outcome.status == "incomplete"
+    assert outcome.error_detail == "invalid_output:OutputParserException"
+
+
+def test_the_binding_raises_the_parser_error_when_no_tool_is_called():
+    """The None-guard itself, on the adapter: prose instead of a tool call raises."""
+    from langchain_core.exceptions import OutputParserException
+
+    class ProseChatModel:
+        def bind_tools(self, tools, **kwargs):
+            return replying(lambda prompt: no_tool_call_reply())
+
+    adapter = DatabricksModelAdapter(
+        model_factory=lambda **_kwargs: ProseChatModel(),
+        client_factory=lambda: object(),
+    )
+
+    with pytest.raises(OutputParserException):
+        adapter.invoke(
+            agent_key="architect",
+            configuration=_SAVED_CONFIGURATION,
+            schema=OUTPUT_SCHEMAS["architect"],
+            prompt="p",
+        )
+
+
 def test_an_observed_real_provider_run_records_the_reported_token_usage(monkeypatch):
     """I-1: the counts an endpoint reports reach the observation, for both run kinds."""
     from tests.fixtures.mock_chat_completions import (
@@ -1742,23 +1871,24 @@ def test_production_run_binds_exactly_as_before_and_reads_no_usage(monkeypatch):
     """I-1 guard: usage capture never reaches production ``run``.
 
     Production ``run`` over the real provider, whose endpoint DOES report usage:
-    the helper must return exactly what ``with_structured_output(schema)``
-    returned (no ``include_raw``, no callback wrapper), and the bound model must
-    be invoked with the prompt alone.
+    the helper must return exactly the plain ``bind_tools([schema],
+    tool_choice="auto") | parser | none-guard`` chain (no ``include_raw``, no
+    callback wrapper), and the bound model must be invoked with the prompt alone.
     """
     from databricks_langchain import ChatDatabricks
+    from langchain_core.runnables import RunnableSequence
 
     from tests.fixtures.mock_chat_completions import MOCK_USAGE
 
     bindings: list[tuple[tuple, dict, Any]] = []
-    original_binding = ChatDatabricks.with_structured_output
+    original_binding = ChatDatabricks.bind_tools
 
     def _recording_binding(self, *args, **kwargs):
         bound = original_binding(self, *args, **kwargs)
         bindings.append((args, kwargs, bound))
         return bound
 
-    monkeypatch.setattr(ChatDatabricks, "with_structured_output", _recording_binding)
+    monkeypatch.setattr(ChatDatabricks, "bind_tools", _recording_binding)
     helper_returns: list[Any] = []
     original_helper = runtime_module.bind_structured_output_model
 
@@ -1777,10 +1907,17 @@ def test_production_run_binds_exactly_as_before_and_reads_no_usage(monkeypatch):
     assert len(workspace.requests) == 1
     assert len(bindings) == 1
     args, kwargs, bound = bindings[0]
-    assert kwargs == {}
+    assert kwargs == {"tool_choice": "auto"}
+    # One positional argument: a one-tool list holding the (composed) output schema.
     assert len(args) == 1
-    assert helper_returns == [bound]
-    assert helper_returns[0] is bound
+    (bound_schema,) = args[0]
+    assert issubclass(bound_schema, OUTPUT_SCHEMAS["architect"])
+    assert len(helper_returns) == 1
+    # The plain chain: its first step IS the bound model, and no callback-carrying
+    # ``with_config`` wrapper sits around it.
+    assert type(helper_returns[0]) is RunnableSequence
+    assert helper_returns[0].first is bound
+    assert len(helper_returns[0].steps) == 3
 
 
 def test_a_fake_adapter_reporting_usage_fills_only_an_observed_run():

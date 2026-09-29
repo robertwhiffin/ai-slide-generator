@@ -50,12 +50,21 @@ class MockChatCompletionsWorkspace(WorkspaceClient):
     only reads those two.
     """
 
-    def __init__(self, arguments: dict[str, Any], *, usage: dict[str, int] | None) -> None:
+    def __init__(
+        self,
+        arguments: dict[str, Any],
+        *,
+        usage: dict[str, int] | None,
+        tool_call: bool = True,
+    ) -> None:
         # Do NOT call super().__init__() — it would try to resolve Databricks
         # credentials.  We set only _config (the attribute the .config property
         # reads) and _handle (used by the patched _get_authorized_http_client).
         self.arguments = arguments
         self.usage = usage
+        #: ``False``: the model answers in prose and calls no tool — what a
+        #: ``tool_choice="auto"`` request permits (ws2a follow-up A).
+        self.tool_call = tool_call
         self.requests: list[httpx.Request] = []
         self._config = SimpleNamespace(
             host=f"https://{MOCK_CHAT_HOST}",
@@ -92,6 +101,12 @@ class MockChatCompletionsWorkspace(WorkspaceClient):
                 }
             ],
         }
+        if not self.tool_call:
+            body["choices"][0]["finish_reason"] = "stop"
+            body["choices"][0]["message"] = {
+                "role": "assistant",
+                "content": "Here is my answer in prose, without calling the tool.",
+            }
         if self.usage is not None:
             body["usage"] = dict(self.usage)
         return httpx.Response(200, json=body)
