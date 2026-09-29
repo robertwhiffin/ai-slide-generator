@@ -144,13 +144,13 @@ class TestEphemeralOwnerScoping:
 class TestServiceLookupByToken:
     def test_get_image_base64_by_token(self, db_session):
         img = _make_image(db_session, image_data=b"hello", mime_type="image/png")
-        b64, mime = image_service.get_image_base64(db_session, img.token)
+        b64, mime = image_service.get_image_base64(db_session, img.token, requesting_user="system")
         assert mime == "image/png"
         assert base64.b64decode(b64) == b"hello"
 
     def test_get_image_base64_unknown_token_raises(self, db_session):
         with pytest.raises(ValueError):
-            image_service.get_image_base64(db_session, "not-a-real-token")
+            image_service.get_image_base64(db_session, "not-a-real-token", requesting_user="system")
 
     def test_delete_image_by_token(self, db_session):
         img = _make_image(db_session)
