@@ -48,7 +48,12 @@ export function ConfirmDialog({
       : 'bg-blue-600 hover:bg-blue-700 focus:ring-blue-500 text-white';
 
   return (
-    <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+    <div
+      className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      data-testid="confirm-dialog"
+    >
       <div className="w-full max-w-sm mx-4 rounded-xl bg-white shadow-2xl overflow-hidden">
         <div className="px-6 pt-5 pb-2">
           <h3 className="text-base font-semibold text-gray-900">{title}</h3>

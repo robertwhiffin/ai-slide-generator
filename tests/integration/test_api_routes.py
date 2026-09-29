@@ -816,6 +816,37 @@ class TestSessionEndpoints:
         response = client.delete("/api/sessions/nonexistent")
         assert response.status_code == 404
 
+    def test_delete_session_forbidden(self, client, mock_session_manager):
+        """DELETE /api/sessions/{id} returns 403 without CAN_MANAGE, and deletes nothing.
+
+        The default fixture makes the caller the creator, which bypasses the permission
+        check; point the session at a different owner to actually exercise authz.
+        """
+        mock_session_manager.get_session.return_value = {
+            "id": 2,
+            "session_id": "someone-elses",
+            "created_by": "other@local.dev",
+            "is_contributor_session": False,
+            "parent_session_internal_id": None,
+        }
+
+        response = client.delete("/api/sessions/someone-elses")
+        assert response.status_code == 403
+        mock_session_manager.delete_session.assert_not_called()
+
+    def test_delete_session_already_deleted_returns_404(self, client, mock_session_manager):
+        """A session that vanished before the delete landed reports 404, not 500.
+
+        The bulk-delete UI treats 404 as success (the deck is already gone, which is the
+        user's goal), so this status is a contract the frontend depends on.
+        """
+        from src.api.services.session_manager import SessionNotFoundError
+        mock_session_manager.get_session.side_effect = SessionNotFoundError("test-123")
+
+        response = client.delete("/api/sessions/test-123")
+        assert response.status_code == 404
+        mock_session_manager.delete_session.assert_not_called()
+
     def test_duplicate_session_success(self, client, mock_session_manager):
         """POST /api/sessions/{id}/duplicate creates a new session copy."""
         mock_session_manager.duplicate_session.return_value = {

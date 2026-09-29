@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../services/api';
 import type { Session, SharedPresentation } from '../../services/api';
 import { ConfirmDialog } from '../ConfirmDialog';
@@ -29,9 +29,15 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   const [activeTab, setActiveTab] = useState<TabType>('my');
   const [contributorLoading, setContributorLoading] = useState<string | null>(null);
   const [duplicateLoading, setDuplicateLoading] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  // Selection for bulk delete. `confirm` carries the ids being deleted so one
+  // ConfirmDialog serves both the per-row and the bulk case.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 });
+  const [confirm, setConfirm] = useState<{ ids: string[] } | null>(null);
 
   const isFirstLoad = useRef(true);
+  const selectAllRef = useRef<HTMLInputElement>(null);
 
   const loadSessions = async () => {
     try {
@@ -67,7 +73,53 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
     }
   };
 
-  const sessions = mySessions.filter(s => s.has_slide_deck);
+  const sessions = useMemo(() => mySessions.filter(s => s.has_slide_deck), [mySessions]);
+  const visibleIds = useMemo(() => new Set(sessions.map(s => s.session_id)), [sessions]);
+
+  // Every consumer reads `selectedVisibleIds`, never `selectedIds` directly: a stale id
+  // for an already-deleted deck can sit in the Set and is structurally unable to affect
+  // what gets deleted. The prune below is hygiene only, so it can't race the refresh.
+  const selectedVisibleIds = useMemo(
+    () => sessions.filter(s => selectedIds.has(s.session_id)).map(s => s.session_id),
+    [sessions, selectedIds],
+  );
+
+  useEffect(() => {
+    setSelectedIds(prev => {
+      const next = new Set([...prev].filter(id => visibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleIds]);
+
+  const allVisibleSelected = sessions.length > 0 && selectedVisibleIds.length === sessions.length;
+  const someVisibleSelected = selectedVisibleIds.length > 0 && !allVisibleSelected;
+
+  // `indeterminate` has no React prop — it must be set on the DOM node.
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someVisibleSelected;
+  }, [someVisibleSelected]);
+
+  const toggleSelected = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelectedIds(prev => {
+      if (allVisibleSelected) {
+        const next = new Set(prev);
+        sessions.forEach(s => next.delete(s.session_id));
+        return next;
+      }
+      return new Set([...prev, ...sessions.map(s => s.session_id)]);
+    });
+  };
+
+  const clearSelection = () => setSelectedIds(new Set());
 
   const handleOpenPresentation = async (presentation: SharedPresentation) => {
     try {
@@ -101,19 +153,55 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
   };
 
   const handleDeleteClick = (sessionId: string) => {
-    setDeleteTarget(sessionId);
+    // Per-row Delete always deletes exactly that row, never the current selection.
+    setConfirm({ ids: [sessionId] });
   };
 
-  const handleDeleteConfirm = async () => {
-    if (!deleteTarget) return;
-    const id = deleteTarget;
-    setDeleteTarget(null);
-    try {
-      await api.deleteSession(id);
-      refreshSessions();
-    } catch (err) {
-      console.error('Failed to delete session:', err);
+  /**
+   * Delete one or many sessions, then refresh the list exactly once.
+   *
+   * Runs a bounded number of workers off a shared cursor rather than firing every
+   * DELETE at once: the route wraps its work in asyncio.to_thread, so an unbounded
+   * fan-out would pressure both the DB pool and the anyio threadpool for no gain.
+   */
+  const deleteMany = async (ids: string[]) => {
+    if (bulkDeleting || ids.length === 0) return;
+    setBulkDeleting(true);
+    setError(null);
+    setBulkProgress({ done: 0, total: ids.length });
+    if (editingId && ids.includes(editingId)) setEditingId(null);
+
+    const failures: string[] = [];
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < ids.length) {
+        const id = ids[cursor++];
+        try {
+          await api.deleteSession(id);
+        } catch (err) {
+          // A 404 means the deck is already gone, which is the user's goal.
+          if ((err as { status?: number })?.status !== 404) {
+            console.error('Failed to delete session:', err);
+            failures.push(err instanceof Error ? err.message : 'Delete failed');
+          }
+        } finally {
+          setBulkProgress(p => ({ ...p, done: p.done + 1 }));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
+
+    if (failures.length > 0) {
+      setError(
+        failures.length === ids.length
+          ? `Failed to delete ${ids.length === 1 ? 'this session' : `all ${ids.length} sessions`}: ${failures[0]}`
+          : `Deleted ${ids.length - failures.length} of ${ids.length} sessions. ${failures.length} failed: ${failures[0]}`,
+      );
     }
+    clearSelection();
+    setBulkDeleting(false);
+    setBulkProgress({ done: 0, total: 0 });
+    refreshSessions();
   };
 
   const handleRestore = (sessionId: string) => {
@@ -215,12 +303,17 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
 
   return (
     <div className="max-w-6xl mx-auto">
+      {/* One dialog for both scopes, so two confirmations can never overlap. The ids are
+          snapshotted at click time, so a background refresh can't change the target. */}
       <ConfirmDialog
-        open={!!deleteTarget}
-        title="Delete Session"
-        message="Delete this session? This cannot be undone."
-        onConfirm={handleDeleteConfirm}
-        onCancel={() => setDeleteTarget(null)}
+        open={!!confirm}
+        title={confirm && confirm.ids.length > 1 ? 'Delete Sessions' : 'Delete Session'}
+        message={confirm && confirm.ids.length > 1
+          ? `Delete ${confirm.ids.length} sessions? This cannot be undone.`
+          : 'Delete this session? This cannot be undone.'}
+        confirmLabel={confirm && confirm.ids.length > 1 ? `Delete ${confirm.ids.length}` : 'Delete'}
+        onConfirm={() => { const ids = confirm?.ids ?? []; setConfirm(null); void deleteMany(ids); }}
+        onCancel={() => setConfirm(null)}
       />
       <div className="mb-6">
         <h2 className="text-2xl font-bold text-gray-900">Sessions</h2>
@@ -242,7 +335,7 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
               </span>
             </button>
             <button
-              onClick={() => setActiveTab('shared')}
+              onClick={() => { clearSelection(); setActiveTab('shared'); }}
               className={`py-2 px-1 border-b-2 font-medium text-sm ${
                 activeTab === 'shared'
                   ? 'border-blue-500 text-blue-600'
@@ -278,10 +371,52 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
           </div>
         ) : (
           <div className="bg-white rounded-lg border border-gray-200">
+            {/* Always mounted: a bar that appears on first selection would shift the table
+                down and slide the next row out from under the cursor mid-click. */}
+            <div
+              className="flex items-center justify-between gap-3 border-b border-gray-200 px-3 py-2"
+              data-testid="bulk-action-bar"
+            >
+              <span className="text-xs text-gray-500">
+                {selectedVisibleIds.length > 0
+                  ? `${selectedVisibleIds.length} selected`
+                  : 'Select sessions to delete'}
+              </span>
+              {selectedVisibleIds.length > 0 && (
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={clearSelection}
+                    disabled={bulkDeleting}
+                    className="text-gray-600 hover:text-gray-900 text-xs disabled:opacity-50"
+                  >Clear</button>
+                  <button
+                    onClick={() => setConfirm({ ids: selectedVisibleIds })}
+                    disabled={bulkDeleting}
+                    className="text-red-600 hover:text-red-900 text-xs font-medium disabled:opacity-50"
+                    data-testid="bulk-delete-button"
+                  >
+                    {bulkDeleting
+                      ? `Deleting ${bulkProgress.done}/${bulkProgress.total}...`
+                      : `Delete ${selectedVisibleIds.length} selected`}
+                  </button>
+                </div>
+              )}
+            </div>
             <table className="w-full divide-y divide-gray-200 table-fixed">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="w-[32%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session Name</th>
+                  <th className="w-[5%] px-3 py-3 text-left">
+                    <input
+                      ref={selectAllRef}
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleSelectAll}
+                      aria-label="Select all sessions"
+                      data-testid="select-all-sessions"
+                      className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                  </th>
+                  <th className="w-[27%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Session Name</th>
                   <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
                   <th className="w-[14%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
                   <th className="w-[10%] px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Slides</th>
@@ -291,6 +426,15 @@ export const SessionHistory: React.FC<SessionHistoryProps> = ({
               <tbody className="bg-white divide-y divide-gray-200">
                 {sessions.map((session) => (
                   <tr key={session.session_id} className="hover:bg-gray-50">
+                    <td className="px-3 py-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(session.session_id)}
+                        onChange={() => toggleSelected(session.session_id)}
+                        aria-label={`Select ${session.title}`}
+                        className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                    </td>
                     <td className="px-3 py-3 overflow-hidden max-w-0">
                       {editingId === session.session_id ? (
                         <div className="flex items-center gap-1">

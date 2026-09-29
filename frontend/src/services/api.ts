@@ -538,7 +538,12 @@ export const api = {
     });
 
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to delete session');
+      const detail = response.status === 403
+        ? 'You do not have permission to delete this session'
+        : response.status === 404
+          ? 'Session no longer exists'
+          : 'Failed to delete session';
+      throw new ApiError(response.status, detail);
     }
 
     if (currentSessionId === sessionId) {
