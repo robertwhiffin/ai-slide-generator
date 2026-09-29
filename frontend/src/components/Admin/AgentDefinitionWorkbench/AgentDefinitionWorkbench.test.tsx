@@ -3035,7 +3035,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
 
   it('shows provider_detail as the lead line when present, and falls back to message when absent', async () => {
     const detail = 'tool_choice: type "tool" and "any" are not supported for this model.';
-    const fetchMock = mockWorkbenchWithPuts(
+    mockWorkbenchWithPuts(
       () => apiResponse(500, null),
       syntheticAgentDefinitionWorkbench,
       defaultCatalogResponse,
