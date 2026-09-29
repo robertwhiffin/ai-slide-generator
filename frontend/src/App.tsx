@@ -49,6 +49,7 @@ function AppRoutes() {
       <Route path="/slide-styles" element={<AppLayout key={layoutKey} initialView="slide_styles" />} />
       <Route path="/design-systems" element={<AppLayout key={layoutKey} initialView="design_systems" />} />
       <Route path="/images" element={<AppLayout key={layoutKey} initialView="images" />} />
+      <Route path="/settings" element={<AppLayout key={layoutKey} initialView="settings" />} />
       <Route path="/history" element={<AppLayout key={layoutKey} initialView="history" />} />
       {/* /feedback redirects here, so it inherits this gate for free. */}
       <Route path="/admin" element={<RequireAdmin><AdminPage /></RequireAdmin>} />

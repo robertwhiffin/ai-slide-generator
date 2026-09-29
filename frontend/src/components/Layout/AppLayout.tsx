@@ -13,6 +13,7 @@ import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { ImageLibrary } from '../ImageLibrary/ImageLibrary';
 import { HelpPage } from '../Help';
+import { SettingsPage } from '../config/SettingsPage';
 import { UpdateBanner } from '../UpdateBanner';
 import { SavePointDropdown, PreviewBanner, RevertConfirmModal } from '../SavePoints';
 import type { SavePointVersion } from '../SavePoints';
@@ -35,7 +36,7 @@ import { SimplePageHeader } from './simple-page-header';
 import { GenieDataButton } from './GenieDataButton';
 import { ConfirmDialog } from '../ConfirmDialog';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'design_systems' | 'slide_styles' | 'images' | 'settings' | 'history' | 'help';
 
 interface AppLayoutProps {
   initialView?: ViewMode;
@@ -759,6 +760,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       else if (view === 'design_systems') navigate('/design-systems');
       else if (view === 'slide_styles') navigate('/slide-styles');
       else if (view === 'images') navigate('/images');
+      else if (view === 'settings') navigate('/settings');
       else if (view === 'history') navigate('/history');
     },
     [navigate]
@@ -993,6 +995,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
             <div className="flex-1 overflow-y-auto">
               <div className="mx-auto w-full max-w-4xl px-4 py-8">
                 <ImageLibrary />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {viewMode === 'settings' && (
+          <div className="flex h-full flex-col" data-tour="page-settings">
+            <div className="shrink-0">
+              <SimplePageHeader title="Settings" />
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <div className="mx-auto w-full max-w-4xl px-4 py-8">
+                <SettingsPage />
               </div>
             </div>
           </div>

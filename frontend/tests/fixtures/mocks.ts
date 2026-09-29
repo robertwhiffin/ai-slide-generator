@@ -841,11 +841,18 @@ export const mockGoogleCredentialsStatusEmpty = {
 };
 
 export const mockGoogleAuthStatusAuthorized = {
-  authorized: true
+  authorized: true,
+  has_credentials: true
 };
 
 export const mockGoogleAuthStatusUnauthorized = {
-  authorized: false
+  authorized: false,
+  has_credentials: true
+};
+
+export const mockGoogleAuthStatusUnconfigured = {
+  authorized: false,
+  has_credentials: false
 };
 
 export const mockGoogleSlidesExportResponse = {

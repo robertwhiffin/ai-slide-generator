@@ -1463,14 +1463,32 @@ export const api = {
   /**
    * Check if the current user has a valid Google OAuth token.
    */
-  async checkGoogleSlidesAuth(): Promise<{ authorized: boolean }> {
+  async checkGoogleSlidesAuth(): Promise<{ authorized: boolean; has_credentials: boolean }> {
     const response = await fetch(
       `${API_BASE_URL}/api/export/google-slides/auth/status`
     );
     if (!response.ok) {
-      return { authorized: false };
+      return { authorized: false, has_credentials: false };
     }
-    return response.json();
+    const data = await response.json();
+    return {
+      authorized: Boolean(data.authorized),
+      has_credentials: Boolean(data.has_credentials),
+    };
+  },
+
+  /**
+   * Drop the current user's stored Google OAuth token (Tellr-side disconnect).
+   */
+  async revokeGoogleSlidesAuth(): Promise<void> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/export/google-slides/auth`,
+      { method: 'DELETE' }
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, error.detail || 'Failed to disconnect Google account');
+    }
   },
 
   /**

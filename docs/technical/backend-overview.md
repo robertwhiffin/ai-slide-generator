@@ -213,9 +213,10 @@ All routes live in `routes/settings/design_systems.py`, mounted under `/api/sett
 | `POST` | `/api/export/pptx/async` | **Legacy** — async twin of the above; no caller in this repository's frontend | `routes/export.start_pptx_export_async` |
 | `GET` | `/api/export/pptx/poll/{job_id}` | Poll PPTX export status | `routes/export.poll_pptx_export` |
 | `GET` | `/api/export/pptx/download/{job_id}` | Download completed PPTX | `routes/export.download_pptx_export` |
-| `GET` | `/api/export/google-slides/auth/status` | Check user authorization | `routes/google_slides.auth_status` |
+| `GET` | `/api/export/google-slides/auth/status` | Check user authorization and whether client credentials exist | `routes/google_slides.auth_status` |
 | `GET` | `/api/export/google-slides/auth/url` | Get Google OAuth consent URL | `routes/google_slides.auth_url` |
 | `GET` | `/api/export/google-slides/auth/callback` | OAuth callback (exchanges code for token) | `routes/google_slides.auth_callback` |
+| `DELETE` | `/api/export/google-slides/auth` | Revoke the current user's stored Google token | `routes/google_slides.revoke_auth` |
 | `POST` | `/api/export/google-slides` | Start async Google Slides export | `routes/google_slides.start_google_slides_export` |
 | `GET` | `/api/export/google-slides/poll/{job_id}` | Poll Google Slides export status | `routes/google_slides.poll_google_slides_export` |
 

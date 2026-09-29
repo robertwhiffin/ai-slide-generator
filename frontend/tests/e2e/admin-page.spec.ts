@@ -366,6 +366,7 @@ test.describe('Admin Page', () => {
     await page.getByRole('tab', { name: 'Google Slides' }).click();
     await expect(page.getByRole('heading', { name: 'OAuth Client Credentials' })).toBeVisible();
     await expect(page.getByText(/Drop credentials\.json here or click to browse/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: /Authorize with Google/i })).toHaveCount(0);
   });
 
   test('/feedback redirects to /admin', async ({ page }) => {
