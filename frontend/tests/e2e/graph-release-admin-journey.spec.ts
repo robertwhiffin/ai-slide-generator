@@ -41,7 +41,7 @@ const NODE_ORDER = [
   'Fix Reviewer',
   'Deck Reviewer',
 ];
-const SONNET = 'databricks-claude-sonnet-4-5';
+const SONNET = 'system.ai.claude-sonnet-4-5';
 /** AC5: no control of the workbench offers tools. */
 const TOOLS = /\btools?\b/i;
 
