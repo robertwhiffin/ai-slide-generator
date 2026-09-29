@@ -123,6 +123,19 @@ _LEGAL_ANCHORS: Mapping[AgentKey, tuple[str, ...]] = MappingProxyType(
         for role in GRAPH_V1_AGENT_KEYS
     }
 )
+# Slide-frame constraints are Builder layout rules; design-system precedence is
+# Architect styling. Other roles do not receive either stage. Bundle ``roles``
+# stay graph-wide so the protected-assembly digest is unchanged.
+_SLIDE_FRAME_ROLES: frozenset[AgentKey] = frozenset({"builder"})
+_DESIGN_SYSTEM_ROLES: frozenset[AgentKey] = frozenset({"architect"})
+
+
+def _protected_stage_applies_to_role(stage_id: str, agent_key: AgentKey) -> bool:
+    if stage_id == "slide_frame_constraints":
+        return agent_key in _SLIDE_FRAME_ROLES
+    if stage_id == "design_system_precedence":
+        return agent_key in _DESIGN_SYSTEM_ROLES
+    return True
 
 
 @dataclass(frozen=True)
@@ -677,6 +690,8 @@ class PromptAssembler:
                     )
                 )
             elif block.kind == "protected" and self._applies(block.condition, payload, context):
+                if not _protected_stage_applies_to_role(block.name, definition.agent_key):
+                    continue
                 stages.append(
                     ResolvedPromptStage(
                         block.name, protected[block.name], block.condition, "protected", True
@@ -759,11 +774,12 @@ class PromptAssembler:
         environment_condition: AssemblyCondition = (
             "design_system_active" if context.design_system_active else "design_system_inactive"
         )
-        stages.append(
-            ResolvedPromptStage(
-                environment_id, environment_text, environment_condition, "protected", True
+        if _protected_stage_applies_to_role(environment_id, definition.agent_key):
+            stages.append(
+                ResolvedPromptStage(
+                    environment_id, environment_text, environment_condition, "protected", True
+                )
             )
-        )
         add_custom("after_environment_constraints")
         stages.extend(
             [
@@ -807,6 +823,8 @@ class PromptAssembler:
         rows: list[ResolvedProtectedStage] = []
         for stage in bundle.stages:
             if agent_key not in stage.roles:
+                continue
+            if not _protected_stage_applies_to_role(stage.stage_id, agent_key):
                 continue
             display = (
                 ROLE_UNTRUSTED_DATA_NOTICE[agent_key]

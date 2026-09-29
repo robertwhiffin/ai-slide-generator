@@ -1049,6 +1049,17 @@ export const EMPTY_V2_ASSEMBLY_RULES = {
  * every `display_text` is a synthetic fixture value, which is what proves the
  * client renders server bytes instead of reconstructing protected text.
  */
+function environmentStagesForRole<T extends { stage_id: string }>(
+  agentKey: AgentKey,
+  rows: T[],
+): T[] {
+  return rows.filter((row) => {
+    if (row.stage_id === "slide_frame_constraints") return agentKey === "builder";
+    if (row.stage_id === "design_system_precedence") return agentKey === "architect";
+    return true;
+  });
+}
+
 function v1ProtectedStageView(agentKey: AgentKey): ProtectedStageView[] {
   const locked = { locked: true, bundle_version: 1, bundle_digest: V1_PROTECTED_IDENTITY.digest } as const;
   const rows: ProtectedStageView[] = [];
@@ -1096,7 +1107,7 @@ function v1ProtectedStageView(agentKey: AgentKey): ProtectedStageView[] {
       ...locked,
     },
   );
-  return rows;
+  return environmentStagesForRole(agentKey, rows);
 }
 
 export function v2ProtectedStageView(agentKey: AgentKey): ProtectedStageView[] {
@@ -1180,7 +1191,7 @@ export function v2ProtectedStageView(agentKey: AgentKey): ProtectedStageView[] {
       ...locked,
     },
   );
-  return rows;
+  return environmentStagesForRole(agentKey, rows);
 }
 
 const workbenchAgentNames = [

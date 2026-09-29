@@ -225,7 +225,7 @@ test('loads lazily once, preserves exact topology, and exposes exact definition 
   // Task 5 replaced the read-only assembly JSON with server-derived locked rows, so the
   // stage is asserted by its accessible group name rather than by its raw stage_id.
   await expect(page.getByRole('tabpanel', { name: 'Assembly' })
-    .getByRole('group', { name: 'Protected stage: Slide frame constraints' })).toBeVisible();
+    .getByRole('group', { name: 'Protected stage: Design system precedence' })).toBeVisible();
   await expect(page.getByRole('tabpanel', { name: 'Assembly' })).toContainText('langchain.with_structured_output');
 
   await navigation.getByRole('button', { name: 'Foreman' }).click();
@@ -723,9 +723,8 @@ test('a Graph Version 2 role offers custom blocks at legal anchors, exactly-once
   expect(anchorGroups).toEqual([
     'Custom blocks: After authored prompt',
     'Custom blocks: After deck-brief re-review',
-    'Custom blocks: After environment constraints',
   ]);
-  expect(declared).toEqual(new Set(['after_deck_brief', 'after_environment_constraints']));
+  expect(declared).toEqual(new Set(['after_deck_brief']));
 });
 
 test('custom blocks are added, edited, reordered and deleted locally, and only an explicit Save writes them', async ({ page }) => {

@@ -82,24 +82,22 @@ describe('AssemblyEditor protected rows', () => {
     expect(groupLabels(container)).toEqual([
       'Protected assembly identity',
       'Authored prompt stage',
-      'Protected stage: Slide frame constraints',
       'Protected stage: Design system precedence',
       'Protected stage: Graph Version 1 runtime payload',
       'Protected stage: Structured-output binding',
     ]);
-    expect(displayText('Slide frame constraints')).toBe('Synthetic v1 slide frame constraints text.');
     expect(displayText('Design system precedence')).toBe('Synthetic v1 design system precedence text.');
     expect(displayText('Graph Version 1 runtime payload')).toBe('json.dumps(payload, indent=2, default=str)');
     expect(displayText('Structured-output binding')).toBe('langchain.with_structured_output');
 
-    const row = protectedRow('Slide frame constraints');
-    expect(within(row).getByText('Slide frame constraints')).toBeVisible();
+    const row = protectedRow('Design system precedence');
+    expect(within(row).getByText('Design system precedence')).toBeVisible();
     // A server-owned stage label must not enter the heading tree, where it would
     // collide with the workbench's own "Graph Version 1" heading.
     expect(within(row).queryAllByRole('heading')).toEqual([]);
     expect(screen.queryAllByRole('heading', { name: /Graph Version 1/ })).toEqual([]);
     expect(within(row).getByText('Locked')).toBeVisible();
-    expect(within(row).getByText('Design System inactive')).toBeVisible();
+    expect(within(row).getByText('Design System active')).toBeVisible();
     expect(within(row).getByText('1')).toBeVisible();
     expect(within(row).getByText(V1_PROTECTED_IDENTITY.digest)).toBeVisible();
   });
@@ -118,9 +116,6 @@ describe('AssemblyEditor protected rows', () => {
       'Protected stage: Build Reviewer criteria',
       'Protected stage: Deck-brief re-review',
       'Custom blocks: After deck-brief re-review',
-      'Protected stage: Slide frame constraints',
-      'Protected stage: Design system precedence',
-      'Custom blocks: After environment constraints',
       'Protected stage: Role-specific untrusted-data notice',
       'Protected stage: Untrusted-data opening delimiter',
       'Protected stage: Canonical runtime payload',
@@ -136,7 +131,6 @@ describe('AssemblyEditor protected rows', () => {
       .toBe('json.dumps(payload, indent=2, default=str, sort_keys=True)');
     expect(displayText('Untrusted-data closing delimiter')).toBe('<<<END_UNTRUSTED_DATA>>>');
     expect(within(protectedRow('Deck-brief re-review')).getByText('Payload has a deck brief')).toBeVisible();
-    expect(within(protectedRow('Design system precedence')).getByText('Design System active')).toBeVisible();
   });
 
   it.each([
@@ -197,7 +191,6 @@ describe('AssemblyEditor custom blocks', () => {
     expect(groupLabels(reviewer.container).filter((label) => label.startsWith('Custom blocks:'))).toEqual([
       'Custom blocks: After authored prompt',
       'Custom blocks: After deck-brief re-review',
-      'Custom blocks: After environment constraints',
     ]);
   });
 
@@ -216,7 +209,8 @@ describe('AssemblyEditor custom blocks', () => {
       expect(index).toBeLessThan(payloadIndex);
       expect(index).toBeLessThan(terminalIndex);
     }
-    expect(labels.indexOf('Custom blocks: After environment constraints')).toBe(8);
+    expect(labels.indexOf('Custom blocks: After deck-brief re-review')).toBeGreaterThan(-1);
+    expect(labels.indexOf('Custom blocks: After environment constraints')).toBe(-1);
   });
 
   it('renders siblings per anchor, withholds arrows at the edges, and targets the exact UUID', () => {

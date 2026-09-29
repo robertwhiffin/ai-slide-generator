@@ -126,9 +126,10 @@ def test_v2_stage_order_selects_one_environment_and_role_notice(
     expected = ["authored_prompt"]
     if agent_key == "build_reviewer":
         expected.extend(["build_reviewer_criteria", "build_reviewer_deck_brief"])
+    if prompt_assembler._protected_stage_applies_to_role(environment, agent_key):
+        expected.append(environment)
     expected.extend(
         [
-            environment,
             "untrusted_data_notice",
             "untrusted_data_open",
             "runtime_payload",
@@ -148,7 +149,11 @@ def test_v2_stage_order_selects_one_environment_and_role_notice(
             stage.stage_id in {"slide_frame_constraints", "design_system_precedence"}
             for stage in value.stages
         )
-        == 1
+        == (
+            1
+            if prompt_assembler._protected_stage_applies_to_role(environment, agent_key)
+            else 0
+        )
     )
     assert sum(stage.stage_id == "build_reviewer_criteria" for stage in value.stages) == (
         agent_key == "build_reviewer"
@@ -279,13 +284,11 @@ def test_custom_blocks_preserve_sibling_order_and_anchor_provenance() -> None:
     assert (
         ids.index("build_reviewer_deck_brief")
         < ids.index("custom:00000000-0000-0000-0000-000000000003")
-        < ids.index("design_system_precedence")
-    )
-    assert (
-        ids.index("design_system_precedence")
         < ids.index("custom:00000000-0000-0000-0000-000000000004")
         < ids.index("untrusted_data_notice")
     )
+    assert "design_system_precedence" not in ids
+    assert "slide_frame_constraints" not in ids
 
 
 def test_semantic_multi_error_tuple_is_complete_and_assembly_emits_nothing() -> None:
@@ -445,7 +448,9 @@ def test_v1_assembly_matches_independent_historical_replay(
                 "design_system_active": design_system_active,
                 "design_system_inactive": not design_system_active,
             }[block.condition]
-            if applies:
+            if applies and prompt_assembler._protected_stage_applies_to_role(
+                block.name, agent_key
+            ):
                 parts.append(protected[block.name])
         elif block.kind == "payload_json":
             parts.append(json.dumps(payload, indent=2, default=str))
@@ -462,8 +467,8 @@ def test_protected_stage_view_exposes_locked_exact_display_without_live_payload(
     assert all(row.locked for row in rows)
     assert by_id["build_reviewer_criteria"].display_text == BUILD_REVIEWER_CRITERIA_STAGE
     assert by_id["build_reviewer_deck_brief"].display_text == DECK_BRIEF_REVIEW
-    assert by_id["slide_frame_constraints"].display_text == _SLIDE_FRAME_CONSTRAINTS
-    assert by_id["design_system_precedence"].display_text == DESIGN_SYSTEM_PRECEDENCE
+    assert "slide_frame_constraints" not in by_id
+    assert "design_system_precedence" not in by_id
     assert (
         by_id["untrusted_data_notice"].display_text == ROLE_UNTRUSTED_DATA_NOTICE["build_reviewer"]
     )
@@ -483,7 +488,6 @@ def test_v1_protected_stage_view_is_historical_and_not_custom_editable() -> None
         agent_key="architect", identity=V1_PROTECTED_ASSEMBLY_IDENTITY
     )
     assert [row.stage_id for row in rows] == [
-        "slide_frame_constraints",
         "design_system_precedence",
         "runtime_payload",
         "structured_output_binding",
