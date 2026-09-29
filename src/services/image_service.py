@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Query, Session
 
 from src.database.models.image import ImageAsset
+from src.services.svg_sanitizer import sanitize_svg
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +42,18 @@ def upload_image(
     if len(file_content) > MAX_FILE_SIZE:
         raise ValueError(f"File too large: {len(file_content)} bytes (max {MAX_FILE_SIZE})")
 
+    if mime_type == "image/svg+xml":
+        try:
+            file_content = sanitize_svg(file_content)
+        except ValueError as exc:
+            raise ValueError(f"Invalid SVG upload: {exc}") from exc
+
     # Check for duplicate original_filename among active images (case-insensitive).
     # Ephemeral images (paste-to-chat) skip this check — they use throwaway names
     # and should never block each other.
     if category != "ephemeral":
         existing = db.query(ImageAsset).filter(
-            ImageAsset.is_active == True,
+            ImageAsset.is_active.is_(True),
             ImageAsset.original_filename.ilike(original_filename),
         ).first()
         if existing:
@@ -95,13 +102,13 @@ def get_image_base64(db: Session, token: str) -> tuple[str, str]:
     """
     image = db.query(ImageAsset).filter(
         ImageAsset.token == token,
-        ImageAsset.is_active == True,
+        ImageAsset.is_active.is_(True),
     ).first()
     if not image:
         raise ValueError(f"Image {token} not found")
 
     b64 = base64.b64encode(image.image_data).decode("utf-8")
-    return b64, image.mime_type
+    return b64, str(image.mime_type)
 
 
 def _search_images_query(
@@ -111,8 +118,8 @@ def _search_images_query(
     query: Optional[str] = None,
     uploaded_by: Optional[str] = None,
 ) -> Query[ImageAsset]:
-    """Build the ORM query for search_images (exposed for PostgreSQL SQL compile tests)."""
-    q = db.query(ImageAsset).filter(ImageAsset.is_active == True)
+    """Build the search query for image search (exposed for PostgreSQL SQL compile tests)."""
+    q = db.query(ImageAsset).filter(ImageAsset.is_active.is_(True))
 
     # Exclude ephemeral images from default library view
     if category:
@@ -127,11 +134,12 @@ def _search_images_query(
         q = q.filter(
             (ImageAsset.original_filename.ilike(search))
             | (ImageAsset.description.ilike(search))
-        )
+    )
     # Tag filtering: On PostgreSQL use CAST(... AS jsonb).contains() so SQL uses @>.
     # Sessions may be SQLite in tests while Lakebase is Postgres — the ORM column can
     # still resolve as JSON, and JSON.contains() compiles to invalid/wrong LIKE. Casting
     # forces @>. SQLite: match serialized JSON string elements with LIKE + escapes.
+    # SQLite: match serialized JSON string elements with LIKE + escapes.
     if tags:
         bind = db.get_bind()
         if bind.dialect.name == "postgresql":
@@ -164,7 +172,7 @@ def search_images(
 
     Note: SQLAlchemy loads all columns by default. For list views, the caller
     should use deferred loading or column selection if performance becomes an
-    issue with many large images. For MVP, this is fine.
+    issue with large images. For MVP, this is fine.
     """
     return _search_images_query(
         db,
@@ -181,8 +189,8 @@ def delete_image(db: Session, token: str, user: str) -> None:
     if not image:
         raise ValueError(f"Image {token} not found")
 
-    image.is_active = False
-    image.updated_by = user
+    setattr(image, "is_active", False)
+    setattr(image, "updated_by", user)
     db.commit()
 
     logger.info(f"Soft-deleted image: {image.filename} (id={image.id})")
@@ -199,15 +207,22 @@ def _generate_thumbnail(content: bytes, mime_type: str) -> Optional[str]:
     if mime_type == "image/svg+xml":
         return None
 
-    img = PILImage.open(BytesIO(content))
+    source_image = PILImage.open(BytesIO(content))
 
     # For animated GIFs, use first frame
-    if mime_type == "image/gif" and hasattr(img, "n_frames") and img.n_frames > 1:
-        img.seek(0)
+    if (
+        mime_type == "image/gif"
+        and hasattr(source_image, "n_frames")
+        and source_image.n_frames > 1
+    ):
+        source_image.seek(0)
 
     # Convert palette/CMYK to RGB(A)
-    if img.mode not in ("RGB", "RGBA"):
-        img = img.convert("RGBA" if "A" in (img.mode or "") else "RGB")
+    img: PILImage.Image = source_image
+    if source_image.mode not in ("RGB", "RGBA"):
+        img = source_image.convert(
+            "RGBA" if "A" in (source_image.mode or "") else "RGB"
+        )
 
     # Resize maintaining aspect ratio
     img.thumbnail(THUMBNAIL_SIZE, PILImage.Resampling.LANCZOS)
