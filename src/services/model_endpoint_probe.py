@@ -16,13 +16,15 @@ Ownership boundaries:
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 import openai
-from databricks.sdk.errors import PermissionDenied
+from databricks.sdk.errors import DatabricksError, PermissionDenied
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
@@ -55,11 +57,14 @@ class StructuredOutputProbeFailure(RuntimeError):  # noqa: N818 - stable public 
         code: StructuredOutputProbeCode,
         message: str,
         retryable: bool,
+        *,
+        provider_detail: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        self.provider_detail = provider_detail
 
 
 _UNSUPPORTED = (
@@ -187,6 +192,96 @@ class DatabricksStructuredOutputProbe:
             raise _failure(_FAILED, None)
 
 
+#: Strip URLs, bearer/dapi/JWT-like tokens, and long hex/base64 runs.
+_URL_RE = re.compile(r"https?://\S+")
+_TOKEN_RE = re.compile(r"\b(?:Bearer|dapi)[^\s,;\"']+", re.IGNORECASE)
+_HEX_BASE64_RE = re.compile(r"[A-Za-z0-9+/=_\-]{32,}")
+_WHITESPACE_RE = re.compile(r"\s+")
+_PROVIDER_DETAIL_CAP = 300
+
+
+def _sanitise_provider_detail(raw: str) -> str:
+    """Sanitise a provider error string for safe display.
+
+    Attempts to extract a message string from a JSON body, supporting:
+    - ``{"message": ...}`` (Gateway body; the value may itself be nested JSON)
+    - ``{"error": {"message": ...}}`` (openai-style error body)
+
+    After extraction, strips URLs, bearer/dapi tokens, long hex/base64 runs
+    (≥32 chars), collapses whitespace, and caps at 300 characters.
+    """
+    # Try to parse as JSON and extract the message field.
+    text = raw
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            # Prefer top-level "message" (Gateway body shape).
+            msg: str | None = None
+            if isinstance(obj.get("message"), str):
+                msg = obj["message"]
+            # Fall back to openai-style {"error": {"message": ...}}.
+            elif isinstance(obj.get("error"), dict):
+                err = obj["error"]
+                if isinstance(err.get("message"), str):
+                    msg = err["message"]
+            if msg is not None:
+                # Try one level of nested JSON (Gateway body shape).
+                try:
+                    inner = json.loads(msg)
+                    if isinstance(inner, dict) and isinstance(inner.get("message"), str):
+                        text = inner["message"]
+                    else:
+                        text = msg
+                except (json.JSONDecodeError, ValueError):
+                    text = msg
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strip URLs.
+    text = _URL_RE.sub("", text)
+    # Strip bearer/dapi tokens.
+    text = _TOKEN_RE.sub("", text)
+    # Strip long hex/base64 runs (>= 32 chars).
+    text = _HEX_BASE64_RE.sub("", text)
+    # Collapse whitespace.
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    # Cap at 300 characters.
+    if len(text) > _PROVIDER_DETAIL_CAP:
+        text = text[:_PROVIDER_DETAIL_CAP] + "…"
+    return text
+
+
+def _extract_provider_detail(error: BaseException) -> str | None:
+    """Extract a sanitised provider detail string from an error, if available.
+
+    Tries to find a JSON body (openai errors carry ``response.text`` or
+    ``body``), falling back to ``str(error)``.  Returns ``None`` when the
+    error carries no useful provider text (e.g. connection errors without a
+    body).
+    """
+    # openai errors carry the raw response body.
+    body: str | None = None
+    if isinstance(error, openai.APIStatusError):
+        # openai >= 1.x: .response.text is the raw body; .body is the parsed dict.
+        try:
+            body = error.response.text
+        except Exception:  # noqa: BLE001
+            pass
+        if not body:
+            try:
+                body = json.dumps(error.body) if error.body else None
+            except Exception:  # noqa: BLE001
+                pass
+    elif isinstance(error, DatabricksError):
+        body = str(error) or None
+
+    if not body:
+        return None
+
+    detail = _sanitise_provider_detail(body)
+    return detail if detail else None
+
+
 def _failure(
     outcome: tuple[StructuredOutputProbeCode, str, bool],
     error: BaseException | None,
@@ -198,7 +293,10 @@ def _failure(
         code,
         type(error).__name__ if error is not None else "unexpected_output",
     )
-    return StructuredOutputProbeFailure(code, message, retryable)
+    detail: str | None = None
+    if error is not None and isinstance(error, (openai.APIStatusError, DatabricksError)):
+        detail = _extract_provider_detail(error)
+    return StructuredOutputProbeFailure(code, message, retryable, provider_detail=detail)
 
 
 class FakeStructuredOutputProbe:
@@ -295,4 +393,5 @@ __all__ = [
     "StructuredOutputProbeAdapter",
     "StructuredOutputProbeCode",
     "StructuredOutputProbeFailure",
+    "_sanitise_provider_detail",
 ]

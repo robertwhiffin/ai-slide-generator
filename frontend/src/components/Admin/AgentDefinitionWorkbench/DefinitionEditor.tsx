@@ -157,10 +157,14 @@ function ProbeResultView({
           <p>This result does not change the draft or its status.</p>
         </>
       ) : (
-        <p role="alert">{result.message}</p>
+        <p role="alert">
+          {result.provider_detail
+            ? `The model rejected the test request: ${result.provider_detail}`
+            : result.message}
+        </p>
       )}
-      <p className="mt-1 break-all font-mono">
-        {`Endpoint ${result.endpoint_name} · Candidate hash ${result.candidate_hash} · Draft lock ${result.lock_version}`}
+      <p className="mt-1 break-all text-[0.7rem] opacity-70">
+        {`Details — Endpoint ${result.endpoint_name} · Candidate hash ${result.candidate_hash} · Draft lock ${result.lock_version}`}
       </p>
       {result.outcome === 'failed' && result.retryable && (
         <button type="button" disabled={retryDisabled} onClick={onRetry} className="mt-2">
@@ -553,19 +557,6 @@ export function DefinitionEditor({
           )}
         </div>
         <div>
-          <label htmlFor={`${agentKey}-temperature`} className="block text-sm font-medium text-gray-700">Temperature</label>
-          <input
-            id={`${agentKey}-temperature`}
-            aria-describedby={entry.fieldErrors.temperature ? `${agentKey}-temperature-error` : undefined}
-            type="number"
-            step="any"
-            value={entry.local.temperature}
-            onChange={(event) => onEdit(agentKey, 'temperature', event.currentTarget.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
-          />
-          <FieldError id={`${agentKey}-temperature-error`} message={entry.fieldErrors.temperature} />
-        </div>
-        <div>
           <label htmlFor={`${agentKey}-max-tokens`} className="block text-sm font-medium text-gray-700">Maximum tokens</label>
           <input
             id={`${agentKey}-max-tokens`}
@@ -577,19 +568,6 @@ export function DefinitionEditor({
             className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
           <FieldError id={`${agentKey}-max-tokens-error`} message={entry.fieldErrors.max_tokens} />
-        </div>
-        <div>
-          <label htmlFor={`${agentKey}-top-p`} className="block text-sm font-medium text-gray-700">Top-p</label>
-          <input
-            id={`${agentKey}-top-p`}
-            aria-describedby={entry.fieldErrors.top_p ? `${agentKey}-top-p-error` : undefined}
-            type="number"
-            step="any"
-            value={entry.local.top_p}
-            onChange={(event) => onEdit(agentKey, 'top_p', event.currentTarget.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
-          />
-          <FieldError id={`${agentKey}-top-p-error`} message={entry.fieldErrors.top_p} />
         </div>
       </div>
 

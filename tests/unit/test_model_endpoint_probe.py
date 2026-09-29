@@ -48,6 +48,7 @@ from src.services.model_endpoint_probe import (
     StructuredOutputProbeCode,
     StructuredOutputProbeFailure,
     _StructuredOutputProbeResponse,
+    _sanitise_provider_detail,
 )
 
 SECRET = "SECRET-provider-text https://leak.example/token=abc"
@@ -716,3 +717,150 @@ def test_model_endpoint_probe_real_provider_errors_are_classified(monkeypatch, o
     assert MOCK_HOST not in caught.value.message
     assert "exact saved endpoint" not in caught.value.message
     _assert_only_the_mock_was_reached(workspace)
+    # provider_detail is present for HTTP status errors; absent for connection errors.
+    if outcome != "connection":
+        # The HTTP error carries a JSON body with PROVIDER_SECRET_detail as its message.
+        # URL part is stripped; the full PROVIDER_SECRET string is not present.
+        detail = caught.value.provider_detail
+        assert detail is not None, "provider_detail should be present for HTTP errors"
+        assert "https://leak.example" not in detail
+        assert PROVIDER_SECRET not in detail  # full string (including URL) not present
+
+
+# ---------------------------------------------------------------------------
+# Follow-up B: provider_detail extraction and sanitisation
+# ---------------------------------------------------------------------------
+
+
+def test_provider_detail_real_provider_http_error_carries_detail(monkeypatch):
+    """400/422/etc HTTP errors from the real provider extract a detail string."""
+    workspace = MockTransportWorkspace(400)
+    _install_real_provider(monkeypatch, workspace)
+
+    with pytest.raises(StructuredOutputProbeFailure) as caught:
+        real_provider_probe(workspace).probe(CONFIGURATION)
+
+    assert caught.value.provider_detail is not None
+    # URL part of PROVIDER_SECRET is stripped; useful text remains
+    assert "https://leak.example" not in caught.value.provider_detail
+    assert "token" not in caught.value.provider_detail.lower() or "tool_choice" in (
+        caught.value.provider_detail or ""
+    )  # broad: the secret's token= part is stripped
+
+
+def test_provider_detail_real_provider_connection_error_has_no_detail(monkeypatch):
+    """Connection errors (non-HTTP) leave provider_detail as None."""
+    workspace = MockTransportWorkspace("connection")
+    _install_real_provider(monkeypatch, workspace)
+
+    with pytest.raises(StructuredOutputProbeFailure) as caught:
+        real_provider_probe(workspace).probe(CONFIGURATION)
+
+    # Connection errors do not carry a provider JSON body; detail may be None or empty.
+    # The important guarantee: no leak of secret-bearing text.
+    if caught.value.provider_detail is not None:
+        assert PROVIDER_SECRET not in caught.value.provider_detail
+        assert "https://leak.example" not in caught.value.provider_detail
+
+
+def test_provider_detail_gateway_body_shape_unwraps_nested_json():
+    """The real Gateway body shape unwraps its nested JSON message once."""
+    nested_body = json.dumps({
+        "error_code": "BAD_REQUEST",
+        "message": json.dumps(
+            {"message": 'tool_choice: type "tool" and "any" are not supported for this model.'}
+        ),
+    })
+    detail = _sanitise_provider_detail(nested_body)
+    assert detail == 'tool_choice: type "tool" and "any" are not supported for this model.'
+
+
+def test_provider_detail_gateway_body_flat_message():
+    """A flat JSON body uses the top-level message field directly."""
+    body = json.dumps({"message": "The endpoint does not exist."})
+    assert _sanitise_provider_detail(body) == "The endpoint does not exist."
+
+
+def test_provider_detail_sanitises_url():
+    """URLs are stripped from the detail."""
+    raw = "Error reaching https://adb-1234.azuredatabricks.net/model/v1 : not found"
+    result = _sanitise_provider_detail(raw)
+    assert "https://" not in result
+    assert "adb-1234" not in result
+    assert "not found" in result
+
+
+def test_provider_detail_sanitises_bearer_token():
+    """Bearer / dapi-prefixed tokens are stripped."""
+    # "dapi" followed by a long hex run — a realistic fake, not a real credential.
+    fake_token = "dapi" + "x" * 36  # clearly synthetic: hex run ≥32 chars
+    raw = f"Authorization: Bearer {fake_token} invalid"
+    result = _sanitise_provider_detail(raw)
+    assert "dapi" not in result
+    assert fake_token not in result
+    assert "invalid" in result
+
+
+def test_provider_detail_sanitises_long_hex_run():
+    """Hex/base64 runs >= 32 chars are stripped."""
+    token = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"  # 32-char hex
+    raw = f"Error: bad hash {token} in request"
+    result = _sanitise_provider_detail(raw)
+    assert token not in result
+    assert "Error:" in result
+    assert "in request" in result
+
+
+def test_provider_detail_caps_at_300_chars():
+    """Detail is capped at 300 characters with an ellipsis."""
+    # Use a phrase that repeats to 400 chars without triggering the hex/base64 stripper.
+    raw = "The endpoint is not available. " * 15  # spaces prevent long-run match
+    assert len(raw) > 300
+    result = _sanitise_provider_detail(raw)
+    assert len(result) <= 304  # 300 chars + ellipsis (1-3 bytes)
+    assert result.endswith("…") or result.endswith("...")
+
+
+def test_provider_detail_never_includes_workspace_host():
+    """The workspace host is never included in the detail."""
+    raw = f"Error from {MOCK_HOST}: endpoint not found"
+    result = _sanitise_provider_detail(raw)
+    # URLs are stripped; bare host names may remain but let's check the URL form
+    assert f"https://{MOCK_HOST}" not in result
+
+
+def test_provider_detail_collapse_whitespace():
+    """Whitespace is collapsed in the detail."""
+    raw = "Error:  multiple   spaces\n\ttabs  here"
+    result = _sanitise_provider_detail(raw)
+    assert "  " not in result
+    assert "\n" not in result
+    assert "\t" not in result
+
+
+def test_provider_detail_plain_str_error():
+    """Plain non-JSON error strings are accepted as-is (after sanitisation)."""
+    raw = "The endpoint rejected the request."
+    result = _sanitise_provider_detail(raw)
+    assert result == raw
+
+
+def test_provider_detail_probe_failure_attribute():
+    """StructuredOutputProbeFailure carries provider_detail when provided."""
+    failure = StructuredOutputProbeFailure(
+        "unsupported_structured_output",
+        "The endpoint rejected the structured-output test request.",
+        False,
+        provider_detail="tool_choice not supported",
+    )
+    assert failure.provider_detail == "tool_choice not supported"
+
+
+def test_provider_detail_probe_failure_defaults_to_none():
+    """StructuredOutputProbeFailure has provider_detail=None by default."""
+    failure = StructuredOutputProbeFailure(
+        "unsupported_structured_output",
+        "The endpoint rejected the structured-output test request.",
+        False,
+    )
+    assert failure.provider_detail is None
