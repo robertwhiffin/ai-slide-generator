@@ -100,6 +100,9 @@ def build_session_title_model():
     sends the same user message to the Gateway as the service principal, so
     this adds no new data exposure. Per-user identity on Gateway calls is
     workstream 2b (it needs the ``ai-gateway`` user scope and user re-consent).
+
+    No sampling parameter is sent: newer Claude models on the Gateway reject
+    ``temperature`` with a 400 (ws2a follow-up A).
     """
     from databricks_langchain import ChatDatabricks
 
@@ -110,7 +113,6 @@ def build_session_title_model():
         model=SESSION_TITLE_MODEL,
         use_ai_gateway=True,
         max_tokens=50,
-        temperature=0.3,
         workspace_client=get_system_client(),
     )
 

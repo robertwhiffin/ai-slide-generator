@@ -643,9 +643,11 @@ class TestBuildSessionTitleModel:
             "model": "system.ai.claude-opus-4-6",
             "use_ai_gateway": True,
             "max_tokens": 50,
-            "temperature": 0.3,
             "workspace_client": sp_client,
         }]
+        # ws2a follow-up A: newer Claude models 400 on sampling parameters.
+        for sampling in ("temperature", "top_p", "top_k"):
+            assert sampling not in constructed[0]
 
     def test_both_chat_service_title_sites_use_the_helper(self):
         import inspect

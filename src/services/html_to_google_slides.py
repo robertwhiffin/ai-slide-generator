@@ -834,7 +834,6 @@ class HtmlToGoogleSlidesConverter:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.2,
                 max_tokens=16384,
                 timeout=300,
                 extra_body={"thinking": {"type": "enabled", "budget_tokens": thinking_budget}},
