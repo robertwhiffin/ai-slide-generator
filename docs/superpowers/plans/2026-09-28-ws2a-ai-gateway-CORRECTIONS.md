@@ -551,3 +551,88 @@ After that decision, re-run Task 9 from step (a).
 - Admin vitest (`run-vitest.sh WORKTREE src/components/Admin`): 991/991 with `--testTimeout=30000`. At the default 5 s it showed 2-3 `Test timed out in 5000ms`, and the set of failing tests changed between runs. Machine load average was about 29-39 (other agents were running). No commit in this wave touches `frontend/src`.
 - `tsc --noEmit`: clean for `tsconfig.app.json`, `tsconfig.e2e.json` and `tsconfig.node.json`, checked against the full install.
 - Full local e2e run (context only): the workbench spec had 0 failures. The 103 failures are in backend-integration and export specs that need a live API on :8000 or the export sidecar, none of them ws2a surfaces. The CI matrix entry `agent-definition-workbench` is 77/77.
+
+## Task 9 live acceptance — re-run 2026-09-29
+
+**Status: DONE. All steps a–j ran. Step (c) FAILED for its named target: `system.ai.claude-opus-5-5` does not pass the structured-output probe.** To keep going with d–h, I published the architect on `system.ai.claude-opus-4-6`, which does pass the probe. All other steps PASSED. I drove the app API with the `tellr-dev-oauth` CLI token as Bearer, not a browser.
+
+**Deploy (PASS).**
+- `gh auth status`: `robertwhiffin` was active. The remote `feat/ws2a-ai-gateway` = dab8846a8.
+- Publish run 36548045853 checked out dab8846a8. Run log: `Resolved version: version=0.4.3.dev35`, and `Uploading databricks_tellr_app-0.4.3.dev35-py3-none-any.whl`.
+- `./scripts/deploy_local.sh update --env devloop --instance ws2a --profile tellr-dev --from-pypi 0.4.3.dev35` created deployment 01f1bbe6d048190c916bee93820cecb5. The branch `dev-ws2a` was re-forked from production, so the previous run's sessions are gone.
+- `app_status.state=RUNNING`, compute ACTIVE, active deployment `SUCCEEDED`. The pip lines name `databricks-tellr-app==0.4.3.dev35`.
+- The API returned 502 from 09:20:39Z until 09:27:44Z, then 200.
+
+**(a) Conversation L before publish — PASS (09:28:23Z).**
+- `POST /api/chat/async` with the message "USE AGENT MODE. Make a 2-slide deck on why teams adopt automated testing."
+  - Session `ZXvL8gknCNTXrARRy38Am2e5yIxcZbLqhX1H1nU6tFQ`, request `i_XWmUe_BWCRYbNQu57BMjy3IMlZXhA0`.
+- The turn completed at 09:29:58Z with `engine_mode=graph`, 2 slides, and `graph_version=1` (the seeded release).
+- Title call: at 09:28:27Z, `POST …/ai-gateway/mlflow/v1/chat/completions` returned `200 OK`. It was followed by `Updated session` and `INFO Auto-named graph-mode session from first message` (chat_service.py:2002).
+  - The poll result's `session_title` is **"Why Teams Adopt Automated Testing"** (title case). That value is set only when `generate_session_title` returns a title.
+  - The deck writer then wrote the deck title "Why teams adopt automated testing" (`Wrote deck-level columns`, 09:28:43Z). That lower-case string is what the session row finally shows.
+- No `Failed to generate session title`, `Failed to auto-name` or 403 line appeared in the log windows I pulled after (a) and after (e). The final pull (09:46Z onward) also had 0.
+
+**(b) Model-endpoints list — PASS (09:30:56Z).**
+- `GET /api/admin/agent-definitions/model-endpoints` returned 200 with **43 items, all `system.ai.*`**; 0 other names.
+- `system.ai.claude-opus-5-5` is **not** in the list. `system.ai.bge-large-en` is in it.
+
+**(c) Draft, probe and chat-model refusal — FAIL on the named target.**
+- 09:31:58Z: saved the architect as `system.ai.claude-opus-5-5`. The PUT returned 200 (lock 0→1).
+- The probe returned **422 `unsupported_structured_output`**. The app log shows the Gateway answered `400 Bad Request`.
+- I then called the Gateway directly with the same CLI token to find the cause:
+  - opus-5-5 plain chat: 200.
+  - `response_format` json_schema: 400 "Structured output is not supported for this model because its translation requires forced tool use, which newer Anthropic models reject."
+  - Forced `tool_choice`: 400 "tool_choice: type "tool" and "any" are not supported for this model."
+- 09:34:28Z: tried `system.ai.claude-opus-4-8`. The save returned 200 (lock 2), but the probe returned 422. Directly, the Gateway says "Model us.anthropic.claude-opus-4-8 does not support the temperature parameter." `temperature` is a required draft field.
+- Direct Gateway calls with a forced tool and the seeded sampling (`temperature=0.7, top_p=0.95, max_tokens=60000`):
+  - 200 only for `system.ai.claude-opus-4-1`.
+  - 400 "`temperature` and `top_p` cannot both be specified" for `system.ai.claude-opus-4-6`, `-opus-4-5`, `-sonnet-4-5`, `-sonnet-4-6`, `-haiku-4-5` and `databricks-claude-opus-4-6`.
+  - 400 "does not support the temperature parameter" for `system.ai.claude-opus-5`.
+  - 400 "temperature only default (1)" for `system.ai.gpt-5-5`.
+  - Even so, the app's own probe and graph turns on opus-4-6 succeed with the same saved values, so the app's client does not send exactly what I sent by hand. I did not find out why.
+- 09:36:05Z: saved the architect as `system.ai.claude-opus-4-6` (lock 3). The probe returned **200 `structured_output_probe_succeeded`**.
+- 09:36:22Z: saved the fixer as `system.ai.bge-large-en`. The save returned **422 `endpoint_not_chat_model` "Endpoint is not a chat model."** Afterwards lock was still 3, the fixer was still `databricks-claude-opus-4-6` with `changed=false`, and only the architect was changed.
+
+**(d) Publish — PASS (09:38:19Z).**
+- The release preview showed the architect as the only blocking agent (`architect_required_smoke_v1` = `needs_test`).
+- I ran `POST /draft/architect/test-runs {test_case_id:1, lock_version:3}`. Run 1 completed with `deterministic_checks_passed=true`, in 14.9 s, using 3666 input and 744 output tokens. I approved it.
+- `POST /releases` returned 200: **release 2 (v2)**, `changed_agents=[architect]`, architect revision 8.
+
+**(e) Conversation N — PASS (09:38:32Z).**
+- Session `k0CCTVMshKBdi7ooBokfLJlcLYLNg7SmVg7-yxWyX7U`, request `qv_kmO_IefOQr5RCUZXpqK1tkRSU-_Ri`.
+- The turn completed at 09:41:35Z with `engine_mode=graph`, 2 slides, and `graph_version=2`.
+- Title: Gateway `200 OK` at 09:38:35Z, then `Auto-named graph-mode session from first message`. `session_title` = **"Benefits of Continuous Integration"**. The deck title is "Benefits of continuous integration".
+
+**(f) Conversation L again — PASS (09:42:12Z).**
+- Request `YU3dvx6JWYZarfvSRXbCrlwoCnD2UvGN` ("Make the title of slide 1 shorter.") completed at 09:43:35Z with `engine_mode=graph` and 2 slides.
+- The session still has `graph_version=1` with `active_graph_version=2` and `is_older_than_active=true`.
+
+**(g) Export — PASS (PPTX and Google Slides).**
+- PPTX (09:44:07Z): job `-WV5hgDhlvQW9g8R_AUDmnKhcSVRZtpV` completed with 2/2 slides. The log shows `V3 Converter initialized`, two `LLM call completed` lines after `…/ai-gateway/ml…` requests, and `Export job completed`.
+  - The download returned 200: a 31,861-byte zip (`PK`) containing `ppt/slides/slide1.xml` and `slide2.xml`.
+- Google Slides: `auth/status` returned `authorized: true` (the prod fork carried the stored Google token), so no extra auth was needed.
+  - Job `eNVB8BL6AN0neWgjB2kgjANHtQ3KkhjN` (09:46:07Z → 09:48:25Z) completed with 2/2 slides.
+  - Presentation `1oFJfAbfxOpisnWU5Kjioe89VnNt5dIBDrHoywSrD7Kg`. It is in the connected Google account's Drive and was not deleted.
+
+**(h) Rollback and restore — PASS.**
+- 09:48:45Z: the rollback preview for v1 returned `restorable=true`. `POST /releases/1/rollback` returned 200: **v3**, `restored_from` v1. The architect's published model went back to `databricks-claude-opus-4-6`.
+- 09:49:02Z: the rollback preview for v2 returned `restorable=true`, with no issues or warnings. `POST /releases/2/rollback` returned 200: **v4**, `restored_from` v2. The active release is v4 and the architect is `system.ai.claude-opus-4-6`.
+
+**(i) Monolith engine with a tool call — PASS (09:50:19Z).**
+- First attempt (09:49:41Z): I used the Genie space from the `megacorp` profile (`01f0c533…`). It failed: "Space with id … not found". That space is not in this workspace.
+- Retry: a new session with no agent-mode marker. `agent_config.tools` held the Genie space `01f1812aff971d359fdfea091dfa7354` (Nexus Cloud QBR Intelligence, from `/api/tools/discover/genie`).
+  - Session `1gihSFDNuRGbKG-Vm61cCSKprqUUYvDqDeUM7xYrsG8`, request `RsgV50xJdQzEcfcypnVdiJVW4JbP6YKs`.
+- The turn completed at 09:51:42Z with 1 slide. The metadata has no `engine_mode=graph`, and shows `tool_calls=1`, `mode=generate`.
+- Tool that ran: **`query_genie_space`** ("What is the ARR by region for the latest quarter?"). The log shows `Initialized Genie conversation` and `Genie query completed`.
+- The monolith's model calls went to `…/serving-endpoints/chat/completions` and returned 200. They did not go through the Gateway; the Gateway covers graph, converters and titles only.
+- The monolith title call went to `…/ai-gateway/…` and returned 200. `Auto-named session from first message` (chat_service.py:1455) set the title "Nexus Cloud ARR by Region".
+
+**(j) Verification judge — PASS (09:53:14Z).**
+- `GET /api/admin/judge-backend` returned `direct`.
+- `POST /api/verification/0 {session_id: 1gihSFDN…}` returned 200 with `score=85`, `rating=green`, `error=false`, `issues=[]`, in 3718 ms.
+- The log shows `LLM judge: using direct ChatDatabricks backend`, a `…/serving-endpoints/chat/completions` request that returned 200, then `LLM judge direct fallback completed: rating=green score=85`.
+
+**Data left on devloop ws2a:**
+- 4 sessions: L, N, plus the two monolith sessions `csvz7Yt6…` (failed) and `1gihSFDN…`.
+- Releases v2–v4; test run 1, approved.
+- One Google Slides file.
