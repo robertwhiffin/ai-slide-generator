@@ -15,8 +15,22 @@ from databricks.sdk import WorkspaceClient
 # Set ENVIRONMENT=test before importing app modules to ensure test mode is enabled.
 # This must happen before any app imports that read ENVIRONMENT at module level.
 os.environ.setdefault("ENVIRONMENT", "test")
+# Unit tests have no Postgres service. Bare postgresql:// (SQLAlchemy 2.1 →
+# psycopg v3) made TestClient requests fail while request-logging created an
+# engine. SQLite keeps those requests off a missing driver and missing server.
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
 from src.core.databricks_client import reset_client, reset_user_client
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _warm_sqlite_engine():
+    """Create the process-wide engine before tests so request-logging cannot
+    first-touch a missing Postgres driver mid-test (and pollute caplog).
+    """
+    from src.core.database import get_engine
+
+    get_engine()
 
 
 @pytest.fixture(autouse=True)

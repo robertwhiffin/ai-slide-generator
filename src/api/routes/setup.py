@@ -6,6 +6,7 @@ Databricks workspace URL.
 """
 
 import logging
+import os
 import re
 from typing import Optional
 
@@ -21,6 +22,25 @@ from src.core.databricks_client import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/setup", tags=["setup"])
+
+
+def _is_already_configured() -> bool:
+    """True once a workspace host is set via ~/.tellr/config.yaml or env."""
+    return is_tellr_configured() or bool(os.getenv("DATABRICKS_HOST"))
+
+
+def _refuse_reconfigure() -> None:
+    """Block mutating setup once the app already has a workspace host.
+
+    On Databricks Apps, DATABRICKS_HOST is always set, so configure/test-connection
+    are unreachable. That is the intended production posture: these routes exist
+    only for a true first-run local install.
+    """
+    if _is_already_configured():
+        raise HTTPException(
+            status_code=409,
+            detail="Workspace is already configured.",
+        )
 
 
 class SetupStatusResponse(BaseModel):
@@ -79,8 +99,6 @@ async def get_setup_status():
     Returns configured=True if ~/.tellr/config.yaml exists with a valid host,
     or if DATABRICKS_HOST environment variable is set.
     """
-    import os
-
     # Check tellr config file first
     if is_tellr_configured():
         config = get_tellr_config()
@@ -104,6 +122,7 @@ async def configure_workspace(request: ConfigureWorkspaceRequest):
     authentication enabled. On the next API call that requires Databricks
     access, the browser will open for SSO login.
     """
+    _refuse_reconfigure()
     try:
         # Save the configuration
         save_tellr_config(host=request.host, auth_type="external-browser")
@@ -135,6 +154,7 @@ async def test_connection():
     This will trigger the OAuth browser flow if using external-browser auth.
     Returns user info on success.
     """
+    _refuse_reconfigure()
     try:
         from src.core.databricks_client import get_system_client
 
