@@ -1436,6 +1436,28 @@ class TestFixReviewerNode:
             object_type="slide",
         )
 
+    def test_the_re_review_is_shown_the_slide_as_it_was_before_the_fix(
+        self, graph_env
+    ):
+        # Without the pre-fix slide the reviewer can only judge the fix in
+        # isolation, so a fixer that rewrites content or restyles the whole slide
+        # while clearing the finding is indistinguishable from a minimal fix.
+        seen = {}
+
+        def review(payload):
+            seen.update(payload)
+            return review_out(0)
+
+        graph_env.skills.set("fix_reviewer", review)
+        state = self._state(graph_env)
+        state["fix_map"]["vals"][0]["original_scripts"] = "// Canvas: c0"
+
+        fix_reviewer_node(state)
+
+        assert seen["original_html"] == "<p>original</p>"
+        assert seen["original_scripts"] == "// Canvas: c0"
+        assert seen["html"] == "<p>fixed</p>"
+
     def test_a_clean_re_review_writes_the_fix_and_marks_the_finding_fixed(
         self, graph_env
     ):

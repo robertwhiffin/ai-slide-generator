@@ -1,6 +1,6 @@
 {
   "contract_version": 1,
-  "recorded_at_commit": "4eca9f272d4e17ab22c05dacfea8aa0a65048a16",
+  "recorded_at_commit": "b71473cb846a4943e3ccf0bf77bb9e4e74a25eb5",
   "exchanges": [
     {
       "id": "S01-workbench",
@@ -16,8 +16,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-09-29T13:21:44.074559+01:00",
-          "effective_from": "2026-09-29T13:21:44.074559+01:00",
+          "published_at": "2026-10-02T12:58:05.582970+01:00",
+          "effective_from": "2026-10-02T12:58:05.582970+01:00",
           "effective_to": null
         },
         "draft": {
@@ -26,7 +26,7 @@
           "base_version_number": 1,
           "lock_version": 0,
           "updated_by": "system:bootstrap",
-          "updated_at": "2026-09-29T13:21:44.074559+01:00"
+          "updated_at": "2026-10-02T12:58:05.582970+01:00"
         },
         "nodes": [
           {
@@ -1457,9 +1457,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -1581,9 +1581,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -1947,8 +1947,8 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.242953",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:05.717025",
         "graph_version": 1,
         "active_graph_version": 1,
         "is_older_than_active": false
@@ -1968,8 +1968,8 @@
         "session_id": "control-legacy",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.251965",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:05.723274",
         "graph_version": null,
         "active_graph_version": 1,
         "is_older_than_active": false
@@ -1991,8 +1991,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-09-29T13:21:44.074559+01:00",
-          "effective_from": "2026-09-29T13:21:44.074559+01:00",
+          "published_at": "2026-10-02T12:58:05.582970+01:00",
+          "effective_from": "2026-10-02T12:58:05.582970+01:00",
           "effective_to": null
         },
         "draft": {
@@ -2001,7 +2001,7 @@
           "base_version_number": 1,
           "lock_version": 0,
           "updated_by": "system:bootstrap",
-          "updated_at": "2026-09-29T13:21:44.074559+01:00"
+          "updated_at": "2026-10-02T12:58:05.582970+01:00"
         },
         "nodes": [
           {
@@ -3432,9 +3432,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -3556,9 +3556,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -3933,7 +3933,7 @@
           "base_version_number": 1,
           "lock_version": 1,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.314887+01:00"
+          "updated_at": "2026-10-02T12:58:05.791536+01:00"
         },
         "definition": {
           "base_revision_id": 1,
@@ -4203,7 +4203,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -4270,7 +4270,7 @@
           "base_version_number": 1,
           "lock_version": 2,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.345422+01:00"
+          "updated_at": "2026-10-02T12:58:05.813065+01:00"
         },
         "definition": {
           "base_revision_id": 3,
@@ -4514,7 +4514,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -4596,7 +4596,7 @@
             "base_version_number": 1,
             "lock_version": 2,
             "updated_by": "lifecycle-admin@example.com",
-            "updated_at": "2026-09-29T13:21:44.345422+01:00"
+            "updated_at": "2026-10-02T12:58:05.813065+01:00"
           },
           "definitions": {
             "architect": {
@@ -5286,9 +5286,9 @@
             },
             "fix_reviewer": {
               "base_revision_id": 6,
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -5536,8 +5536,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-09-29T13:21:44.074559+01:00",
-          "effective_from": "2026-09-29T13:21:44.074559+01:00",
+          "published_at": "2026-10-02T12:58:05.582970+01:00",
+          "effective_from": "2026-10-02T12:58:05.582970+01:00",
           "effective_to": null
         },
         "draft": {
@@ -5546,7 +5546,7 @@
           "base_version_number": 1,
           "lock_version": 2,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.345422+01:00"
+          "updated_at": "2026-10-02T12:58:05.813065+01:00"
         },
         "nodes": [
           {
@@ -6977,9 +6977,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -7101,9 +7101,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -7469,7 +7469,7 @@
           "base_version_number": 1,
           "lock_version": 3,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.395328+01:00"
+          "updated_at": "2026-10-02T12:58:05.855433+01:00"
         },
         "definition": {
           "base_revision_id": 3,
@@ -7735,7 +7735,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -7808,7 +7808,7 @@
           "base_version_number": 1,
           "lock_version": 4,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.416227+01:00"
+          "updated_at": "2026-10-02T12:58:05.867626+01:00"
         },
         "definition": {
           "base_revision_id": 3,
@@ -8076,7 +8076,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -8134,7 +8134,7 @@
           "base_version_number": 1,
           "lock_version": 5,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.440797+01:00"
+          "updated_at": "2026-10-02T12:58:05.881589+01:00"
         },
         "definition": {
           "base_revision_id": 1,
@@ -8411,7 +8411,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -8490,7 +8490,7 @@
           "base_version_number": 1,
           "lock_version": 6,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.473646+01:00"
+          "updated_at": "2026-10-02T12:58:05.899709+01:00"
         },
         "definition": {
           "base_revision_id": 1,
@@ -8775,7 +8775,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -8857,8 +8857,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-09-29T13:21:44.074559+01:00",
-          "effective_from": "2026-09-29T13:21:44.074559+01:00",
+          "published_at": "2026-10-02T12:58:05.582970+01:00",
+          "effective_from": "2026-10-02T12:58:05.582970+01:00",
           "effective_to": null
         },
         "draft": {
@@ -8867,7 +8867,7 @@
           "base_version_number": 1,
           "lock_version": 6,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.473646+01:00"
+          "updated_at": "2026-10-02T12:58:05.899709+01:00"
         },
         "nodes": [
           {
@@ -10336,9 +10336,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -10460,9 +10460,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -10837,7 +10837,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.516047+01:00"
+          "updated_at": "2026-10-02T12:58:05.936352+01:00"
         },
         "definition": {
           "base_revision_id": 5,
@@ -11095,7 +11095,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -11152,8 +11152,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-09-29T13:21:44.074559+01:00",
-          "effective_from": "2026-09-29T13:21:44.074559+01:00",
+          "published_at": "2026-10-02T12:58:05.582970+01:00",
+          "effective_from": "2026-10-02T12:58:05.582970+01:00",
           "effective_to": null
         },
         "draft": {
@@ -11162,7 +11162,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.516047+01:00"
+          "updated_at": "2026-10-02T12:58:05.936352+01:00"
         },
         "nodes": [
           {
@@ -12631,9 +12631,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -12755,9 +12755,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -13144,9 +13144,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-09-29T13:21:44.074559+01:00",
+            "created_at": "2026-10-02T12:58:05.582970+01:00",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-09-29T13:21:44.074559+01:00",
+            "updated_at": "2026-10-02T12:58:05.582970+01:00",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13231,11 +13231,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.04729209467768669,
+        "latency_ms": 0.0397910043830052,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-09-29T13:21:44.566001+01:00",
+        "run_at": "2026-10-02T12:58:05.976308+01:00",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -13322,11 +13322,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.04729209467768669,
+            "latency_ms": 0.0397910043830052,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-09-29T13:21:44.566001+01:00",
+            "run_at": "2026-10-02T12:58:05.976308+01:00",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -13457,7 +13457,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -13547,9 +13547,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-09-29T13:21:44.074559+01:00",
+            "created_at": "2026-10-02T12:58:05.582970+01:00",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-09-29T13:21:44.074559+01:00",
+            "updated_at": "2026-10-02T12:58:05.582970+01:00",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13647,11 +13647,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.0338749960064888,
+        "latency_ms": 0.02750000567175448,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-09-29T13:21:44.601205+01:00",
+        "run_at": "2026-10-02T12:58:06.003272+01:00",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -13751,11 +13751,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.0338749960064888,
+            "latency_ms": 0.02750000567175448,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-09-29T13:21:44.601205+01:00",
+            "run_at": "2026-10-02T12:58:06.003272+01:00",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -13886,7 +13886,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -13964,9 +13964,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-09-29T13:21:44.074559+01:00",
+            "created_at": "2026-10-02T12:58:05.582970+01:00",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-09-29T13:21:44.074559+01:00",
+            "updated_at": "2026-10-02T12:58:05.582970+01:00",
             "is_synthetic_data_warning": true
           }
         ]
@@ -14050,11 +14050,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.03766687586903572,
+        "latency_ms": 0.033333999454043806,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-09-29T13:21:44.632595+01:00",
+        "run_at": "2026-10-02T12:58:06.025738+01:00",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -14140,11 +14140,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.03766687586903572,
+            "latency_ms": 0.033333999454043806,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-09-29T13:21:44.632595+01:00",
+            "run_at": "2026-10-02T12:58:06.025738+01:00",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -14275,7 +14275,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -14408,14 +14408,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.0338749960064888,
+        "latency_ms": 0.02750000567175448,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-09-29T13:21:44.601205+01:00",
+        "run_at": "2026-10-02T12:58:06.003272+01:00",
         "verdict": "rejected",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-09-29T13:21:44.655884+01:00",
+        "verdict_at": "2026-10-02T12:58:06.041834+01:00",
         "verdict_notes": "Lifecycle: rerun.",
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14541,7 +14541,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -14661,14 +14661,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.04729209467768669,
+        "latency_ms": 0.0397910043830052,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-09-29T13:21:44.566001+01:00",
+        "run_at": "2026-10-02T12:58:05.976308+01:00",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-09-29T13:21:44.675482+01:00",
+        "verdict_at": "2026-10-02T12:58:06.090000+01:00",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14793,7 +14793,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -14912,14 +14912,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.03766687586903572,
+        "latency_ms": 0.033333999454043806,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-09-29T13:21:44.632595+01:00",
+        "run_at": "2026-10-02T12:58:06.025738+01:00",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-09-29T13:21:44.694600+01:00",
+        "verdict_at": "2026-10-02T12:58:06.103252+01:00",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -15043,7 +15043,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -15176,11 +15176,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.031667063012719154,
+        "latency_ms": 0.03458299033809453,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-09-29T13:21:44.716172+01:00",
+        "run_at": "2026-10-02T12:58:06.128850+01:00",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -15280,11 +15280,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.031667063012719154,
+            "latency_ms": 0.03458299033809453,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-09-29T13:21:44.716172+01:00",
+            "run_at": "2026-10-02T12:58:06.128850+01:00",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -15373,14 +15373,14 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.0338749960064888,
+            "latency_ms": 0.02750000567175448,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-09-29T13:21:44.601205+01:00",
+            "run_at": "2026-10-02T12:58:06.003272+01:00",
             "verdict": "rejected",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-09-29T13:21:44.655884+01:00",
+            "verdict_at": "2026-10-02T12:58:06.041834+01:00",
             "verdict_notes": "Lifecycle: rerun.",
             "candidate_is_current": null,
             "base_release_is_current": null
@@ -15506,7 +15506,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -15639,14 +15639,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.031667063012719154,
+        "latency_ms": 0.03458299033809453,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-09-29T13:21:44.716172+01:00",
+        "run_at": "2026-10-02T12:58:06.128850+01:00",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-09-29T13:21:44.743909+01:00",
+        "verdict_at": "2026-10-02T12:58:06.154722+01:00",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -15768,7 +15768,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -15824,7 +15824,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.516047+01:00"
+          "updated_at": "2026-10-02T12:58:05.936352+01:00"
         },
         "active_release": {
           "release_id": 1,
@@ -15833,8 +15833,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-09-29T13:21:44.074559+01:00",
-          "effective_from": "2026-09-29T13:21:44.074559+01:00",
+          "published_at": "2026-10-02T12:58:05.582970+01:00",
+          "effective_from": "2026-10-02T12:58:05.582970+01:00",
           "effective_to": null
         },
         "next_version_number": 2,
@@ -16067,7 +16067,7 @@
             },
             {
               "agent_key": "fix_reviewer",
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "is_changed_from_base": false,
               "ready": true,
               "missing_required_case": false,
@@ -16126,8 +16126,8 @@
         "session_id": "mid-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.772308",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:06.290287",
         "graph_version": 1,
         "active_graph_version": 1,
         "is_older_than_active": false
@@ -16158,7 +16158,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.516047+01:00"
+          "updated_at": "2026-10-02T12:58:05.936352+01:00"
         }
       },
       "response_model": "src.api.schemas.graph_releases.StalePublicationResponse",
@@ -16181,8 +16181,8 @@
           "restored_from_release_id": null,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-09-29T13:21:44.784255+01:00",
-          "effective_from": "2026-09-29T13:21:44.784255+01:00",
+          "published_at": "2026-10-02T12:58:06.298617+01:00",
+          "effective_from": "2026-10-02T12:58:06.298617+01:00",
           "effective_to": null
         },
         "previous_release_id": 1,
@@ -16219,7 +16219,7 @@
           },
           "fix_reviewer": {
             "agent_definition_revision_id": 6,
-            "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "reused": true
           },
           "deck_reviewer": {
@@ -16257,7 +16257,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.784255+01:00"
+          "updated_at": "2026-10-02T12:58:06.298617+01:00"
         }
       },
       "response_model": "src.api.schemas.graph_releases.PublishReleaseSuccessResponse",
@@ -16277,8 +16277,8 @@
           "restored_from_release_id": null,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-09-29T13:21:44.784255+01:00",
-          "effective_from": "2026-09-29T13:21:44.784255+01:00",
+          "published_at": "2026-10-02T12:58:06.298617+01:00",
+          "effective_from": "2026-10-02T12:58:06.298617+01:00",
           "effective_to": null
         },
         "draft": {
@@ -16287,7 +16287,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.784255+01:00"
+          "updated_at": "2026-10-02T12:58:06.298617+01:00"
         },
         "nodes": [
           {
@@ -17794,9 +17794,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -17918,9 +17918,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -18284,8 +18284,8 @@
         "session_id": "new-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.843818",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:06.343174",
         "graph_version": 2,
         "active_graph_version": 2,
         "is_older_than_active": false
@@ -18300,12 +18300,12 @@
       "request": null,
       "status": 200,
       "body": {
-        "session_id": "85ewKx1dLIameUIX-SbRi3qfabdLmOd-5M48xLU8xpU",
+        "session_id": "-C2nW0NDT_KeJp-Ptc1ZoeJ8dtdVO2EuLZkRDmcAquk",
         "created_by": "contributor@example.com",
-        "title": "Session 2026-09-29 12:21",
+        "title": "Session 2026-10-02 11:58",
         "parent_session_id": "old-root",
         "is_contributor_session": true,
-        "created_at": "2026-09-29T12:21:44.876851",
+        "created_at": "2026-10-02T11:58:06.365679",
         "my_permission": "CAN_VIEW"
       },
       "response_model": null,
@@ -18318,10 +18318,10 @@
       "request": null,
       "status": 201,
       "body": {
-        "session_id": "Nk-M1kt4E3M8L5KKTknWvxnRUV-WIb1GQBvqX3EmzJ4",
-        "title": "Copy of Session 2026-09-29 12:21",
+        "session_id": "eOXfYZRxQdS0O2eIVE6jHicJTqqQnZyKPRvSIwnCBx4",
+        "title": "Copy of Session 2026-10-02 11:58",
         "created_by": "contributor@example.com",
-        "created_at": "2026-09-29T12:21:44.888176",
+        "created_at": "2026-10-02T11:58:06.374196",
         "slide_count": 1,
         "source_session_id": "old-root"
       },
@@ -18339,9 +18339,9 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.242953",
-        "last_activity": "2026-09-29T12:21:44.282043",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:05.717025",
+        "last_activity": "2026-10-02T11:58:05.758979",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -18363,7 +18363,7 @@
             "role": "user",
             "content": "USE AGENT MODE build the lifecycle deck",
             "message_type": null,
-            "created_at": "2026-09-29T12:21:44.254624",
+            "created_at": "2026-10-02T11:58:05.729031",
             "metadata": null
           }
         ],
@@ -18381,17 +18381,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-09-29T12:21:44.272282Z",
+              "created_at": "2026-10-02T11:58:05.752925Z",
               "modified_by": null,
-              "modified_at": "2026-09-29T12:21:44.272282Z",
+              "modified_at": "2026-10-02T11:58:05.752925Z",
               "content_hash": "0861ce3c3874c657",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-09-29T12:21:44.264946Z",
+          "created_at": "2026-10-02T11:58:05.738594Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-09-29T12:21:44.272963Z",
+          "modified_at": "2026-10-02T11:58:05.753489Z",
           "version": 1,
           "deck_spec": null,
           "findings": [],
@@ -18413,9 +18413,9 @@
         "session_id": "mid-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.772308",
-        "last_activity": "2026-09-29T12:21:44.772309",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:06.290287",
+        "last_activity": "2026-10-02T11:58:06.290288",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -18441,17 +18441,17 @@
     {
       "id": "S12-get-contributor",
       "method": "GET",
-      "path": "/api/sessions/85ewKx1dLIameUIX-SbRi3qfabdLmOd-5M48xLU8xpU",
+      "path": "/api/sessions/-C2nW0NDT_KeJp-Ptc1ZoeJ8dtdVO2EuLZkRDmcAquk",
       "request": null,
       "status": 200,
       "body": {
         "id": 5,
-        "session_id": "85ewKx1dLIameUIX-SbRi3qfabdLmOd-5M48xLU8xpU",
+        "session_id": "-C2nW0NDT_KeJp-Ptc1ZoeJ8dtdVO2EuLZkRDmcAquk",
         "user_id": null,
         "created_by": "contributor@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.876851",
-        "last_activity": "2026-09-29T12:21:44.876853",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:06.365679",
+        "last_activity": "2026-10-02T11:58:06.365680",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -18482,17 +18482,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-09-29T12:21:44.272282Z",
+              "created_at": "2026-10-02T11:58:05.752925Z",
               "modified_by": null,
-              "modified_at": "2026-09-29T12:21:44.272282Z",
+              "modified_at": "2026-10-02T11:58:05.752925Z",
               "content_hash": "0861ce3c3874c657",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-09-29T12:21:44.264946Z",
+          "created_at": "2026-10-02T11:58:05.738594Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-09-29T12:21:44.272963Z",
+          "modified_at": "2026-10-02T11:58:05.753489Z",
           "version": 1,
           "deck_spec": null,
           "findings": [],
@@ -18517,13 +18517,13 @@
             "actor_label": "Contributor 1",
             "graph_version": 2,
             "mutation_count": 2,
-            "last_mutation_at": "2026-09-29T12:21:46.332674"
+            "last_mutation_at": "2026-10-02T11:58:07.929357"
           },
           {
             "actor_label": "Contributor 2",
             "graph_version": 1,
             "mutation_count": 4,
-            "last_mutation_at": "2026-09-29T12:21:46.295457"
+            "last_mutation_at": "2026-10-02T11:58:07.907023"
           }
         ]
       },
@@ -18548,8 +18548,8 @@
             "is_active": true,
             "release_note": "Lifecycle Graph Version 2.",
             "published_by": "lifecycle-admin@example.com",
-            "published_at": "2026-09-29T13:21:44.784255+01:00",
-            "effective_from": "2026-09-29T13:21:44.784255+01:00",
+            "published_at": "2026-10-02T12:58:06.298617+01:00",
+            "effective_from": "2026-10-02T12:58:06.298617+01:00",
             "effective_to": null,
             "previous": {
               "release_id": 1,
@@ -18569,9 +18569,9 @@
             "is_active": false,
             "release_note": "Bootstrap Graph Version 1",
             "published_by": "system:bootstrap",
-            "published_at": "2026-09-29T13:21:44.074559+01:00",
-            "effective_from": "2026-09-29T13:21:44.074559+01:00",
-            "effective_to": "2026-09-29T13:21:44.784255+01:00",
+            "published_at": "2026-10-02T12:58:05.582970+01:00",
+            "effective_from": "2026-10-02T12:58:05.582970+01:00",
+            "effective_to": "2026-10-02T12:58:06.298617+01:00",
             "previous": null,
             "restored_from": null,
             "restored_by": [],
@@ -18603,9 +18603,9 @@
           "is_active": false,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-09-29T13:21:44.074559+01:00",
-          "effective_from": "2026-09-29T13:21:44.074559+01:00",
-          "effective_to": "2026-09-29T13:21:44.784255+01:00",
+          "published_at": "2026-10-02T12:58:05.582970+01:00",
+          "effective_from": "2026-10-02T12:58:05.582970+01:00",
+          "effective_to": "2026-10-02T12:58:06.298617+01:00",
           "previous": null,
           "restored_from": null,
           "restored_by": [],
@@ -18922,11 +18922,11 @@
           },
           "fix_reviewer": {
             "agent_definition_revision_id": 6,
-            "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "content": {
               "agent_key": "fix_reviewer",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -19057,8 +19057,8 @@
           "is_active": true,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-09-29T13:21:44.784255+01:00",
-          "effective_from": "2026-09-29T13:21:44.784255+01:00",
+          "published_at": "2026-10-02T12:58:06.298617+01:00",
+          "effective_from": "2026-10-02T12:58:06.298617+01:00",
           "effective_to": null,
           "previous": {
             "release_id": 1,
@@ -19357,11 +19357,11 @@
           },
           "fix_reviewer": {
             "agent_definition_revision_id": 6,
-            "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "content": {
               "agent_key": "fix_reviewer",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -19484,10 +19484,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-09-29T13:21:44.675482+01:00",
+            "verdict_at": "2026-10-02T12:58:06.090000+01:00",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-09-29T13:21:44.566001+01:00"
+            "run_at": "2026-10-02T12:58:05.976308+01:00"
           },
           {
             "agent_test_run_id": 104,
@@ -19498,10 +19498,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-09-29T13:21:44.743909+01:00",
+            "verdict_at": "2026-10-02T12:58:06.154722+01:00",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-09-29T13:21:44.716172+01:00"
+            "run_at": "2026-10-02T12:58:06.128850+01:00"
           },
           {
             "agent_test_run_id": 103,
@@ -19512,10 +19512,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-09-29T13:21:44.694600+01:00",
+            "verdict_at": "2026-10-02T12:58:06.103252+01:00",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-09-29T13:21:44.632595+01:00"
+            "run_at": "2026-10-02T12:58:06.025738+01:00"
           }
         ]
       },
@@ -19910,7 +19910,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:44.784255+01:00"
+          "updated_at": "2026-10-02T12:58:06.298617+01:00"
         }
       },
       "response_model": "src.api.schemas.graph_release_history.StaleRollbackResponse",
@@ -19933,8 +19933,8 @@
           "restored_from_release_id": 1,
           "release_note": "Roll back to Graph Version 1.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-09-29T13:21:46.646868+01:00",
-          "effective_from": "2026-09-29T13:21:46.646868+01:00",
+          "published_at": "2026-10-02T12:58:08.047745+01:00",
+          "effective_from": "2026-10-02T12:58:08.047745+01:00",
           "effective_to": null
         },
         "restored_from": {
@@ -19975,7 +19975,7 @@
           },
           "fix_reviewer": {
             "agent_definition_revision_id": 6,
-            "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+            "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
             "reused": true
           },
           "deck_reviewer": {
@@ -19991,7 +19991,7 @@
           "base_version_number": 3,
           "lock_version": 9,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:46.646868+01:00"
+          "updated_at": "2026-10-02T12:58:08.047745+01:00"
         },
         "draft_effect": {
           "architect": "reset",
@@ -20020,8 +20020,8 @@
           "restored_from_release_id": 1,
           "release_note": "Roll back to Graph Version 1.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-09-29T13:21:46.646868+01:00",
-          "effective_from": "2026-09-29T13:21:46.646868+01:00",
+          "published_at": "2026-10-02T12:58:08.047745+01:00",
+          "effective_from": "2026-10-02T12:58:08.047745+01:00",
           "effective_to": null
         },
         "draft": {
@@ -20030,7 +20030,7 @@
           "base_version_number": 3,
           "lock_version": 9,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-09-29T13:21:46.646868+01:00"
+          "updated_at": "2026-10-02T12:58:08.047745+01:00"
         },
         "nodes": [
           {
@@ -21461,9 +21461,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "content_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -21585,9 +21585,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "e6d4a4801abc7b654f262f905f4b198d4c134d29801d2ecd09ed09cff2ec164f",
+              "candidate_hash": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding  \u2014 the Finding that was reported by the build reviewer\n  html     \u2014 the corrected slide HTML produced by the fixer\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues.\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nUse only criterion names from the registry for any findings you report.\nSet slide_index to the slide's position integer.",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -21951,8 +21951,8 @@
         "session_id": "post-rollback-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:46.709570",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:08.079254",
         "graph_version": 3,
         "active_graph_version": 3,
         "is_older_than_active": false
@@ -21971,9 +21971,9 @@
         "session_id": "new-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.843818",
-        "last_activity": "2026-09-29T12:21:44.843819",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:06.343174",
+        "last_activity": "2026-10-02T11:58:06.343175",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -22007,9 +22007,9 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-09-29 12:21",
-        "created_at": "2026-09-29T12:21:44.242953",
-        "last_activity": "2026-09-29T12:21:46.315118",
+        "title": "Session 2026-10-02 11:58",
+        "created_at": "2026-10-02T11:58:05.717025",
+        "last_activity": "2026-10-02T11:58:07.921691",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -22031,7 +22031,7 @@
             "role": "user",
             "content": "USE AGENT MODE build the lifecycle deck",
             "message_type": null,
-            "created_at": "2026-09-29T12:21:44.254624",
+            "created_at": "2026-10-02T11:58:05.729031",
             "metadata": null
           }
         ],
@@ -22049,17 +22049,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-09-29T12:21:46.306649Z",
+              "created_at": "2026-10-02T11:58:07.914170Z",
               "modified_by": null,
-              "modified_at": "2026-09-29T12:21:46.306649Z",
+              "modified_at": "2026-10-02T11:58:07.914170Z",
               "content_hash": "dfc4a0562849c398",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-09-29T12:21:44.264946Z",
+          "created_at": "2026-10-02T11:58:05.738594Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-09-29T12:21:46.307587Z",
+          "modified_at": "2026-10-02T11:58:07.914926Z",
           "version": 3,
           "deck_spec": null,
           "findings": [],
