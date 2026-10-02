@@ -53,6 +53,10 @@ version of Tellr, and use the results to choose the definitions frozen as
   (no generator since #271). Its content hashes are pinned in two places:
   `tests/unit/test_packaged_release_loader.py:23` and
   `tests/unit/test_graph_definition_manifest.py:695`.
+- The fix reviewer receives the pre-fix slide (`original_html`,
+  `original_scripts`) alongside the fixed one, so it can judge a fix as a
+  change. This landed separately (`cd7d1c3cd`) before the harness, and the
+  fix_reviewer pack is written against it.
 - MLflow 3.14 (`mlflow.genai.evaluate`, `make_judge`) and Playwright are already
   dependencies. `src/services/evaluation/llm_judge.py` is prior art for
   `make_judge`. No new dependencies are needed.
@@ -220,9 +224,10 @@ These numbers are passed to the judge as facts and also drive
 
 ### Judge
 
-- One pinned judge endpoint for every compared configuration
-  (`--judge-endpoint`, with a fixed default in `harness/judge.py`), recorded as
-  a run tag. Scores across different judge endpoints are not comparable and the
+- One pinned judge endpoint for every compared configuration, recorded as a run
+  tag. The default is the workspace's Claude Sonnet serving endpoint, set as a
+  single constant in `harness/judge.py`; `--judge-endpoint` overrides it. Judging
+  is a mid-range task, so Sonnet is the cost/quality default. Scores across different judge endpoints are not comparable and the
   comparison view must not mix them.
 - Prefer a judge from a different model family from the candidates. If all
   candidates are the same family, use its strongest model and tag the run.
