@@ -2646,6 +2646,11 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                 "change_summary": fixed.get("change_summary", ""),
                 "html": fixed_html,
                 "scripts": fixed_scripts,
+                # The slide as it was before the fix: without it the reviewer
+                # judges the fix in isolation and cannot see collateral changes
+                # (rewritten content, a restyle) made while clearing the finding.
+                "original_html": entry.get("original_html", ""),
+                "original_scripts": entry.get("original_scripts", ""),
                 "slide_spec": payload.get("slide_spec"),
                 "resolved_style": payload.get("resolved_style"),
                 "section_css": payload.get("section_css"),
