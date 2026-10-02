@@ -122,6 +122,8 @@ EXPECTED_REQUIRED_SMOKE_PAYLOADS = {
         "change_summary": "Reduced the synthetic title size",
         "html": "<div class='slide'><h1 class='small'>Synthetic roadmap</h1></div>",
         "scripts": "",
+        "original_html": "<div class='slide'><h1>Synthetic roadmap</h1></div>",
+        "original_scripts": "",
         "slide_spec": {
             "position": 1,
             "title": "Synthetic roadmap",
