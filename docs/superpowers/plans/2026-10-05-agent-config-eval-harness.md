@@ -20,6 +20,7 @@
 - **The judge model is pinned and configurable.** Default `databricks-claude-sonnet-5`, set as one constant in `evals/harness/judge.py`, overridable by `--judge-endpoint`. One judge endpoint across all compared configs; the comparison view must not mix endpoints.
 - **Each agent is evaluated in isolation.** No whole-graph combinations. Design-system-on branch (Meridian) only; the default-style branch is out of scope.
 - **Attribution.** End commit messages with `Co-authored-by: Isaac <no-reply@databricks.com>`. Do not push; do not merge to main. Work on branch `feat/eval-harness` off `feat/ws2a-ai-gateway`.
+- **Model tiers (per task `Models:` tag).** Each task declares `test=` and `impl=` tiers; the rest derive — per-task reviewer = impl+1 (capped at Opus) and applies `localised` fixes itself, a `rewrite` verdict escalates to a fresh Opus implementer, and the whole-branch review at the end is Opus regardless. The test author writes the failing tests (red, uncommitted); the implementer makes them green and may not edit a test — on a stuck implementer or a suspected-bad test it STOPS and the task escalates straight to Opus carrying its context. See `executing-plans-tellr` §9 for the full pipeline.
 
 ## Review Focus
 
@@ -82,6 +83,8 @@ tests/unit/evals/
 ---
 
 ## Task 1: Scaffold, pytest path, and Meridian fixtures
+
+**Models:** test=sonnet impl=haiku
 
 **Files:**
 - Create: `evals/__init__.py`, `evals/harness/__init__.py`, `evals/packs/__init__.py`, `evals/fixtures/meridian/__init__.py`
@@ -229,6 +232,8 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 
 ## Task 2: Config loader and v1-baseline
 
+**Models:** test=sonnet impl=sonnet
+
 **Files:**
 - Create: `evals/harness/config.py`, `evals/configs/prices.yaml`, `evals/configs/builder/v1.yaml` (an example override file)
 - Create/Modify: `tests/unit/evals/test_config_loader.py`
@@ -316,6 +321,8 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 ---
 
 ## Task 3: Runner (thread-safe, infra-error retry)
+
+**Models:** test=sonnet impl=sonnet
 
 **Files:**
 - Create: `evals/harness/runner.py`, `tests/unit/evals/test_runner.py`
@@ -410,6 +417,8 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 
 ## Task 4: Renderer and in-page measurements
 
+**Models:** test=sonnet impl=sonnet
+
 **Files:**
 - Create: `evals/harness/render.py`, `tests/unit/evals/test_render.py`
 
@@ -483,6 +492,8 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 ---
 
 ## Task 5: Shared scorers
+
+**Models:** test=sonnet impl=haiku
 
 **Files:**
 - Create: `evals/harness/scorers.py`, `tests/unit/evals/test_scorers.py`
@@ -558,6 +569,8 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 
 ## Task 6: Judge wrapper and calibration helper
 
+**Models:** test=sonnet impl=sonnet
+
 **Files:**
 - Create: `evals/harness/judge.py`, `tests/unit/evals/test_judge.py`
 
@@ -614,6 +627,8 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 ---
 
 ## Task 7: MLflow run assembly and CLI
+
+**Models:** test=opus impl=sonnet
 
 **Files:**
 - Create: `evals/harness/mlflow_run.py`, `evals/run_eval.py`, `tests/unit/evals/test_mlflow_run.py`
@@ -690,6 +705,8 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 ---
 
 ## Task 8: Promotion to Graph Version 1
+
+**Models:** test=opus impl=opus
 
 **Files:**
 - Create: `evals/harness/promote.py`, `tests/unit/evals/test_promote.py`
@@ -777,6 +794,8 @@ Each pack is independent and depends only on the core (Tasks 1-7). Build the sev
 
 ### Task 9: builder pack
 
+**Models:** test=sonnet impl=sonnet
+
 **Files:** Create `evals/packs/builder/{__init__.py,mutations.py,judge_prompt.md}`, generated `cases/**`, `tests/unit/evals/test_pack_builder.py`.
 
 **Cases (payload = builder MODEL_PAYLOAD_KEYS: position, slide_spec, assumes, hands_off, resolved_data, section_html, section_css, resolved_style, design_system_active):**
@@ -818,6 +837,8 @@ Co-authored-by: Isaac <no-reply@databricks.com>"`
 
 ### Task 10: build_reviewer pack
 
+**Models:** test=sonnet impl=sonnet
+
 **Cases (payload = build_reviewer keys: position, slide_spec, resolved_style, section_css, resolved_data, html, scripts, deck_brief):**
 
 | case_id | kind | derivation | expect |
@@ -834,9 +855,13 @@ Steps mirror Task 9 (generate → judge prompt → self-test asserting the mutat
 
 ### Task 11: fixer pack
 
+**Models:** test=sonnet impl=sonnet
+
 Depends on the Task-cd7d1c3cd product change (fixer unaffected; it's the fix_reviewer that gained `original_html`). **Cases (payload = fixer keys: position, slide_spec, resolved_style, section_css, resolved_data, html, scripts, finding, corrective_instruction):** one per fixable fault — `rogue_colour`, `overflow`, `contrast_failure`, `source_contradiction`, `brief_not_delivered`. Each `html` is the correspondingly-broken gold slide; `finding` is the stamped Finding. Reference = the gold slide before mutation. Judge: "Given the FINDING and the REFERENCE (the known-good original), did the CANDIDATE remove the fault while preserving the slide's message, changing only what the finding required? Use render MEASURES. PASS/FAIL then one sentence." Self-test: the broken input really exhibits the fault (render dirty), the reference renders clean. Steps mirror Task 9.
 
 ### Task 12: fix_reviewer pack
+
+**Models:** test=sonnet impl=sonnet
 
 **Cases (payload = fix_reviewer keys incl. the new `original_html`, `original_scripts`, `change_summary`):**
 
@@ -852,6 +877,8 @@ The `content_broken_reject` and `restyle_reject` cases are the ones the product 
 
 ### Task 13: deck_reviewer pack
 
+**Models:** test=sonnet impl=haiku
+
 **Cases (payload = deck_reviewer keys: narrative_arc, call_to_action, slide_count, slides[{position, html}]):** built from all ten gold slides.
 
 | case_id | kind | derivation | expect |
@@ -865,6 +892,8 @@ The `content_broken_reject` and `restyle_reject` cases are the ones the product 
 Deck-level findings use `slide_index = -1`. Steps mirror Task 9 (no render; the self-test asserts slide counts/content changed as planned).
 
 ### Task 14: architect pack
+
+**Models:** test=sonnet impl=sonnet
 
 **Cases (payload = architect keys: conversation, message, current_deck_spec, committed_slide_count, previous_deck_review, available_design_contract, template_sections, resolved_style, design_system_library):**
 
@@ -882,6 +911,8 @@ Judge used only for `build_request` spec quality; others are deterministic on `i
 
 ### Task 15: data_analyst pack
 
+**Models:** test=sonnet impl=haiku
+
 **Cases (payload = data_analyst keys: data_request, deck_purpose):**
 
 | case_id | kind | data_request | expect |
@@ -897,6 +928,8 @@ Note: the runtime binds no tools, so `needs_tool`/`missing_data` are the realist
 ---
 
 ## Task 16: Baseline sweep, calibration, and README
+
+**Models:** test=n/a impl=sonnet
 
 **Files:** Create `evals/README.md`. No code.
 
