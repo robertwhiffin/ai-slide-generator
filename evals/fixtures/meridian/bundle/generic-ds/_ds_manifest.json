@@ -1,0 +1,16 @@
+{
+  "name": "Meridian Test Design System",
+  "description": "Synthetic brand-neutral design system for tests. Teal primary, violet/amber/sky accents, Inter type, 1280x720 slides.",
+  "version": "1.0.0",
+  "namespace": "meridian",
+  "tokens": [],
+  "templates": [
+    {
+      "name": "Meridian Standard",
+      "description": "Cover, bullet content with callout, three-stat cards, chart plus commentary.",
+      "folder": "templates/standard",
+      "entryPath": "templates/standard/index.html"
+    }
+  ],
+  "globalCssPaths": ["colors_and_type.css"]
+}
