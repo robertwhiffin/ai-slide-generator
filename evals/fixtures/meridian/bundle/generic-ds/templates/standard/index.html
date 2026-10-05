@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+.slide {
+  position: relative;
+  width: 1280px;
+  height: 720px;
+  box-sizing: border-box;
+  padding: var(--slide-pad-y) var(--slide-pad-x);
+  background: var(--brand-core-background);
+  color: var(--brand-core-text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.slide.cover {
+  background: var(--brand-core-primary);
+  color: var(--brand-core-background);
+  justify-content: center;
+}
+.slide.cover .slide-title,
+.slide.cover .slide-subtitle { color: var(--brand-core-background); }
+.eyebrow {
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brand-core-primary);
+  margin: 0;
+}
+.slide.cover .eyebrow { color: var(--brand-core-surface); }
+.slide-title {
+  font-size: var(--fs-title);
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--brand-core-ink);
+  margin: 0;
+}
+.slide-subtitle {
+  font-size: var(--fs-subtitle);
+  font-weight: 400;
+  color: var(--brand-core-muted);
+  margin: 0;
+}
+.content { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--space-md); }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-lg); flex: 1; min-height: 0; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-md); }
+.card {
+  background: var(--brand-core-surface);
+  border: 1px solid var(--brand-core-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-md);
+}
+.stat-value {
+  font-size: var(--fs-stat);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--brand-core-primary);
+}
+.stat-label { font-size: var(--fs-caption); color: var(--brand-core-muted); margin-top: var(--space-sm); }
+.stat-delta.positive { color: var(--brand-accents-positive); }
+.stat-delta.negative { color: var(--brand-accents-negative); }
+.bullets { margin: 0; padding-left: 1.2em; }
+.bullets li { margin-bottom: var(--space-sm); }
+.bullets li::marker { color: var(--brand-core-primary); }
+.chart-container { position: relative; height: 320px; }
+.callout {
+  border-left: 4px solid var(--brand-accents-violet);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--brand-core-surface);
+  color: var(--brand-core-ink);
+}
+.slide-footer {
+  position: absolute;
+  left: var(--slide-pad-x);
+  right: var(--slide-pad-x);
+  bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--fs-caption);
+  color: var(--brand-core-muted);
+}
+</style>
+</head>
+<body>
+<section class="slide cover">
+  <p class="eyebrow">Quarterly review</p>
+  <h1 class="slide-title">Cover title that states the headline</h1>
+  <p class="slide-subtitle">Supporting context line</p>
+</section>
+
+<section class="slide">
+  <p class="eyebrow">Section</p>
+  <h2 class="slide-title">Content slide title as a sentence</h2>
+  <div class="content">
+    <ul class="bullets">
+      <li>First supporting point</li>
+      <li>Second supporting point</li>
+      <li>Third supporting point</li>
+    </ul>
+    <div class="callout">Key takeaway in one line.</div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>1</span></div>
+</section>
+
+<section class="slide">
+  <h2 class="slide-title">Three numbers tell the story</h2>
+  <div class="grid-3">
+    <div class="card"><div class="stat-value">42%</div><div class="stat-label">Metric one <span class="stat-delta positive">+4pt</span></div></div>
+    <div class="card"><div class="stat-value">1.3M</div><div class="stat-label">Metric two</div></div>
+    <div class="card"><div class="stat-value">18</div><div class="stat-label">Metric three <span class="stat-delta negative">-2</span></div></div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>2</span></div>
+</section>
+
+<section class="slide">
+  <h2 class="slide-title">Chart with commentary</h2>
+  <div class="grid-2">
+    <div class="chart-container"><canvas id="exampleChart"></canvas></div>
+    <div class="content">
+      <ul class="bullets">
+        <li>What the chart shows</li>
+        <li>Why it matters</li>
+      </ul>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>3</span></div>
+</section>
+</body>
+</html>
