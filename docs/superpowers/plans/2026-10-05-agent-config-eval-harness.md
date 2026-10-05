@@ -251,7 +251,8 @@ from evals.harness import config
 def test_v1_baseline_matches_the_frozen_manifest():
     from src.services.graph_definition_manifest import load_graph_v1_manifest
     man = {d.agent_key: d for d in load_graph_v1_manifest().definitions}
-    for key in ("architect", "builder", "fix_reviewer"):
+    from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
+    for key in GRAPH_V1_AGENT_KEYS:
         cfg = config.v1_baseline(key)
         assert cfg.name == "v1-baseline"
         assert cfg.content == man[key]
@@ -417,7 +418,7 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 - Produces: `evals/harness/render.py`
   - `@dataclass(frozen=True) class RenderMeasures: overflow_px: float; min_contrast: float; off_palette: tuple[str, ...]; console_errors: tuple[str, ...]; rendered: bool`
   - `def palette_hexes(section_css: str) -> set[str]` — parse every `#rrggbb`/`#rgb` and `rgb(...)` from the token CSS, normalise to lowercase 6-digit hex; include `#ffffff`, `#000000`, and treat `transparent`/`rgba(...,0)` as allowed.
-  - `def render_slide(html: str, scripts: str = "", *, section_css: str, width: int = 1280, height: int = 720, chart_timeout_ms: int = 4000) -> RenderMeasures` — build a full HTML doc: `<style>` = `section_css`; a `.slide` sized `width`x`height`; inject the fragment; add the Chart.js CDN `<script>` then the slide `scripts`. Launch chromium headless, set viewport, `wait_for_load_state("networkidle")`, then **if the fragment contains `<canvas`, wait until every canvas has non-zero `width`/`height` or `chart_timeout_ms` elapses** before measuring. Collect `console` error events. Evaluate in-page JS returning:
+  - `def render_slide(html: str, scripts: str = "", *, section_css: str, width: int = 1280, height: int = 720, chart_timeout_ms: int = 4000) -> RenderMeasures` — build a full HTML doc: `<style>` = `section_css`; a `.slide` sized `width`x`height`; inject the fragment; add the Chart.js CDN `<script>` then the slide `scripts`. Launch chromium headless, set viewport, `wait_for_load_state("networkidle")`, then **if the fragment contains `<canvas`, poll until for every `<canvas>` `canvas.width > 0 AND canvas.height > 0` AND `window.Chart` is defined, OR `chart_timeout_ms` elapses. On timeout, measure as-is and append `"chart-init-timeout"` to `console_errors`, so a never-initialised chart surfaces as a failure rather than passing silently.** Collect `console` error events. Evaluate in-page JS returning:
     - `overflow_px`: `max(0, scrollHeight - height, scrollWidth - width)` measured on the `.slide` element.
     - `min_contrast`: minimum WCAG contrast ratio over text-bearing elements (computed from `getComputedStyle` color vs effective background; standard luminance formula).
     - `off_palette`: computed `color`/`background-color` values (as hex) used by elements that are not in `palette_hexes(section_css)`.
@@ -528,6 +529,8 @@ def test_render_measures_rejects_style_tag_and_overflow():
     assert scorers.render_measures_score(clean, "<style>x</style>")[0] is False
     dirty = render.RenderMeasures(120, 7.0, (), (), True)
     assert scorers.render_measures_score(dirty, "<section></section>")[0] is False
+    nil_render = render.RenderMeasures(0, 7.0, (), (), False)
+    assert scorers.render_measures_score(nil_render, "<section class='slide'></section>")[0] is False
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -564,7 +567,7 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
   - `JUDGE_ENDPOINT = "databricks-claude-sonnet-5"` — the single pinned default.
   - `def judge_prompt(agent_key: str) -> str` — reads `evals/packs/<agent_key>/judge_prompt.md`.
   - `def build_judge(agent_key: str, *, model: str = JUDGE_ENDPOINT)` — `make_judge(name=f"{agent_key}_equivalence", instructions=judge_prompt(agent_key), model=f"databricks:/{model}", feedback_value_type=...)`. The judge instructions template references `{{ outputs }}` and `{{ expectations }}` (MLflow judge template vars); the harness supplies `expectations` = reference + render measures and `outputs` = candidate output.
-  - `def judge_payload(case, result, measures) -> dict` — assembles the dict passed to the judge: `{"candidate": result.structured, "reference": case.reference, "brief_or_finding": case.payload-derived context, "measures": measures-as-dict}`.
+  - `def judge_payload(case, result, measures) -> dict` — assembles the dict passed to the judge: `{"candidate": result.structured, "reference": case.reference, "brief_or_finding": case.payload-derived context, "measures": measures-as-dict}`. `brief_or_finding` by role: builder → the `slide_spec` dict; fixer / build_reviewer / fix_reviewer → the `finding` dict; architect → the user `message` plus `current_deck_spec`; data_analyst → the `data_request`; deck_reviewer → `narrative_arc` plus `call_to_action`.
   - `def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT) -> list[dict]` — for each case in the pack, run the judge twice: once with the **reference as the candidate** (must pass) and once with the **mutated/unfixed input as the candidate** (must fail). Returns per-case `{case_id, reference_passed: bool, mutation_failed: bool, trusted: bool}`. A pack is trusted iff every case's `trusted` is True.
 
 **Testing note:** the judge itself needs a model, so the unit test mocks `make_judge`. The real calibration runs via `run_eval.py --calibrate` (Task 7/8), not in CI.
@@ -619,12 +622,12 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
 - Consumes: everything above; `mlflow`, `mlflow.genai.evaluate`, `mlflow.genai.scorers.scorer`, `mlflow.entities.Feedback`; `MLFLOW_GENAI_EVAL_MAX_WORKERS`.
 - Produces: `evals/harness/mlflow_run.py`
   - `def build_dataset(cases: list[Case], repeats: int) -> list[dict]` — `repeats` rows per case: `{"inputs": {"agent_key", "case_id", "repeat"}, "expectations": {"expect": case.expect, "reference": case.reference, "design_system_active": case.design_system_active}}`.
-  - `def make_predict_fn(config, runner, *, render_enabled: bool) -> Callable` — closure `predict_fn(agent_key, case_id, repeat)`: load the case, run `runner.run(config, case.payload, design_system_active=...)`, render if `render_enabled` and the role emits HTML (builder/fixer), return `{"structured", "raw", "render", "latency_ms", "input_tokens", "output_tokens", "status", "infra_error"}`.
-  - Scorers (MLflow `@scorer`): `contract`, `expected_category` (deterministic roles), `render_measures` (builder/fixer), `judge` (via Task 6). Each reads `outputs` + `expectations`, returns `Feedback(value="pass"/"fail"/"skip", rationale=...)`. An `infra_error` prediction scores `"skip"` on every scorer.
-  - `def run_sweep(config, *, agent_key, repeats, max_workers, judge_endpoint, case_filter=None, render_enabled=True) -> str` — set `MLFLOW_GENAI_EVAL_MAX_WORKERS`, tracking URI `sqlite:///mlflow.db`, start a run tagged `agent_key`, `config_name`, `content_hash`, `judge_endpoint`, `repeats`, `case_filter`; call `genai.evaluate(data=..., scorers=..., predict_fn=...)`; log aggregate metrics: overall pass rate (over non-skip rows), per-case pass rate, repeat stddev, infra_error / judge_error counts, mean/p95 latency, mean tokens, estimated cost from `prices()`. Tag `not_comparable` if infra rate > 10%. Returns the MLflow run id.
+  - `def make_predict_fn(config, runner, *, render_enabled: bool) -> Callable` — closure `predict_fn(agent_key, case_id, repeat)`: load the case, run `runner.run(config, case.payload, design_system_active=...)`, render if `render_enabled` and the role emits HTML (builder/fixer), return `{"structured", "raw", "render", "latency_ms", "input_tokens", "output_tokens", "status", "infra_error"}`. `render` is a `RenderMeasures`-as-dict for builder/fixer and `None` for architect, data_analyst, build_reviewer, fix_reviewer, deck_reviewer (no HTML to render); the `render_measures` scorer runs only for builder/fixer and skips a `None` render.
+  - Scorers (MLflow `@scorer`): `contract`, `expected_category` (deterministic roles), `render_measures` (builder/fixer), `judge` (via Task 6). Each reads `outputs` + `expectations`, returns `Feedback(value="pass"/"fail"/"skip", rationale=...)`. An `infra_error` prediction scores `"skip"` on every scorer. The `judge` scorer: a judge-model call that fails or returns an unparseable verdict is a `judge_error` → the scorer returns `Feedback(value="skip", ...)`; it is NOT retried (unlike the runner's infra retry) and is NOT counted as pass or fail. A judge endpoint unavailable for the whole sweep surfaces as every judge row = skip, and `run_sweep` tags the run `judge_unavailable`.
+  - `def run_sweep(config, *, agent_key, repeats, max_workers, judge_endpoint, case_filter=None, render_enabled=True) -> str` — set `MLFLOW_GENAI_EVAL_MAX_WORKERS`, tracking URI `sqlite:///mlflow.db`, start a run tagged `agent_key`, `config_name`, `content_hash`, `judge_endpoint`, `repeats`, `case_filter`; call `genai.evaluate(data=..., scorers=..., predict_fn=...)`; log aggregate metrics: overall pass rate (over non-skip rows), per-case pass rate, repeat stddev, infra_error / judge_error counts, mean/p95 latency, mean tokens, estimated cost from `prices()`. Aggregates are logged as MLflow metrics via `mlflow.log_metric` (`pass_rate`, per-case `pass_rate`, `repeat_stddev`, `infra_error_count`, `judge_error_count`, `mean_latency_ms`, `p95_latency_ms`, `mean_input_tokens`, `mean_output_tokens`, `est_cost_usd`); config identity (`config_name`, `content_hash`, `judge_endpoint`, `repeats`) is logged as tags. Tag `not_comparable` if infra rate > 10%. Returns the MLflow run id.
 - Produces: `evals/run_eval.py` — argparse CLI: `--agent {all,<key>}`, `--config <path|v1-baseline>`, `--repeats 3`, `--max-workers 8`, `--judge-endpoint`, `--cases 2,4`, `--calibrate`, `--no-render`. `--agent all` sweeps every pack. `--calibrate` calls `judge.calibrate` per pack and prints a trust table instead of sweeping.
   - `def _endpoint_reachable(endpoint_name: str) -> bool` — a reachability probe mirroring `tests/agentic/gates.py` (query the serving endpoint; True if it resolves).
-  - `def validate_endpoint(config: AgentEvalConfig) -> None` — **called before any sweep.** If `config.content.model.endpoint_name` is not in `prices()` emit a warning (not fatal). If `not _endpoint_reachable(...)`, `raise SystemExit("endpoint_name ... is not reachable")`. This is the fail-fast gate from Review Focus.
+  - `def validate_endpoint(config: AgentEvalConfig) -> None` — Called once per config immediately after loading it and BEFORE `run_sweep` (before any worker pool or model call). If `config.content.model.endpoint_name` is not in `prices()` emit a warning (not fatal). If `not _endpoint_reachable(...)`, `raise SystemExit("endpoint_name ... is not reachable")`. This is the fail-fast gate from Review Focus.
 
 - [ ] **Step 1: Write the failing test** `tests/unit/evals/test_mlflow_run.py` (no model; stub predict + judge)
 
@@ -697,7 +700,7 @@ Co-authored-by: Isaac <no-reply@databricks.com>"
   - `def promote(chosen: dict[str, AgentEvalConfig], *, dry_run: bool = False) -> dict` — for every role in `GRAPH_V1_AGENT_KEYS`, take `chosen[role].content` if present else the current v1 definition; build a `GraphV1Manifest`; call `assert_complete(GRAPH_V1_AGENT_KEYS)`; serialise exactly as the frozen file does and rewrite `GRAPH_VERSION_1_MANIFEST_JSON`; recompute each role's `definition_content_hash` and rewrite both pinned tables. Returns `{role: new_hash}`.
   - **Serialisation (verified byte-exact):** the manifest literal is `json.dumps(json.loads(J), indent=2, ensure_ascii=False)` and the file body is exactly `'"""Generated Graph Version 1 Agent Definition snapshot. Do not edit by hand."""\n\nGRAPH_VERSION_1_MANIFEST_JSON = ' + repr(new_json) + '\n'`.
   - **Pinned-hash sites** (update the `PACKAGED_V1_CONTENT_HASHES` dict in both): `tests/unit/test_packaged_release_loader.py` and `tests/unit/test_graph_definition_manifest.py`. Do NOT touch `V1_SCHEMA_CONTRACT_DIGESTS` / `V2_SCHEMA_CONTRACT_DIGESTS` (the output schema is unchanged).
-  - **Transition guard:** if `chosen` changes `prompt_text` for `data_analyst` or `build_reviewer`, their current v1 prompt is the `source_composite_prompt` of a `LegacyV1PromptTransition`. `promote` must raise `PromoteBlocked` naming the role, unless `--allow-transition-break` is passed, in which case it also updates the matching `source_composite_prompt` in `src/services/prompt_assembler.py` (via `src/core/skills/<role>.py` `INSTRUCTIONS`, which the transition imports). Default is fail-closed.
+  - **Transition guard:** promote ALWAYS raises `PromoteBlocked` naming the role when `chosen` changes `prompt_text` for `data_analyst` or `build_reviewer`. Their v1 prompt is the `source_composite_prompt` of a `LegacyV1PromptTransition` wired to the live `src/core/skills/<role>.py` INSTRUCTIONS import; changing it would move the migration's source text and silently stop existing installs that hold the genuine old prompt from migrating. Changing those two roles' prompts is a separate, deliberate migration (as the fix-reviewer change was done by hand) and is out of this harness's scope.
   - `class PromoteBlocked(RuntimeError)`.
   - **Bootstrap-guard note (no action, confirm only):** the `graph_configuration_bootstrap` integrity guard runs only on *first* install (it inserts the complete v1 and compares; it is skipped when a release already exists). So promoting a new manifest does not retroactively break an already-bootstrapped database. A *fresh* bootstrap after promote seeds the new definitions and compares their hashes against the same manifest, so they match; `REQUIRED_SMOKE_PAYLOADS` are test cases unaffected by a prompt change. Devloop forks re-fork from prod on each deploy. No guard change is needed; confirm this still holds when running Step 4.
 
@@ -739,7 +742,7 @@ Expected: FAIL (module not found).
 
 Run: `python -m pytest tests/unit/evals/test_promote.py -v`
 Then prove a real promote-to-self leaves the pinned-hash suite green:
-Run: `python -c "import src.core.database; from evals.harness import promote; promote.promote({})" && python -m pytest tests/unit/test_packaged_release_loader.py tests/unit/test_graph_definition_manifest.py -q && git diff --stat`
+Run: `python -c "import src.core.database; from evals.harness import promote; promote.promote({})" && python -m pytest tests/unit/test_packaged_release_loader.py tests/unit/test_graph_definition_manifest.py tests/unit/test_graph_configuration_bootstrap.py -q && git diff --stat`
 Expected: both suites PASS and `git diff --stat` shows no changes (promote-to-self is byte-identical). Discard any change with `git checkout -- .` if the diff is non-empty — a non-empty diff is a serialisation bug to fix before proceeding.
 
 - [ ] **Step 5: Commit**
@@ -763,6 +766,12 @@ Each pack is independent and depends only on the core (Tasks 1-7). Build the sev
 - `judge_prompt.md` — judge instructions with `{{ outputs }}` and `{{ expectations }}` template vars; must instruct a pass/fail verdict BEFORE rationale; always references the reference and (for builder/fixer) the render measures.
 - `cases/**` — generated, committed.
 - Self-test `tests/unit/evals/test_pack_<agent>.py` — asserts each mutation planted exactly its fault (by diffing against the gold or by render, no model), and that `expected_category_score` of the reference against its own `expect` passes (the reference is a valid positive).
+
+**Positions are 0-indexed throughout**, matching `gold/<pos>.html` and `SlideSpec.position`. Where this plan writes 'gold slide N' it means position N (0-indexed); the deck-spec text's 'Slide 1..10' is 1-indexed, mapping as position = spec_number − 1 (so deck-spec 'Slide 9' = position 8 = objections; 'Slide 10' = position 9 = verdict).
+
+**`reference.json` schema by role:** builder/fixer → `{\"html\": str, \"scripts\": str}`; build_reviewer/fix_reviewer → `{\"findings\": [Finding], \"verdict\": str}`; deck_reviewer → `{\"findings\": [Finding]}`; architect → `{\"intent\": str, \"deck_spec\": object|null, \"target_positions\": [int]}`; data_analyst → `{\"outcome\": str, \"synthesis\": str|null}`.
+
+**Payloads carry only the keys a case exercises.** `model_payload_for` (called inside `run_candidate`) projects the payload onto the role's `MODEL_PAYLOAD_KEYS` and drops the rest, so e.g. a builder payload may omit `corrective_instruction` (a retry-only key) without error.
 
 **Payload construction:** build each role's payload with the exact keys the role is shown, taken from `MODEL_PAYLOAD_KEYS[<role>]` in `src.services.agent_model_payload`, filling `section_css`/`resolved_style` from `case.meridian_section_css()`/`meridian_resolved_style()` and `design_system_active=True`.
 
@@ -867,7 +876,9 @@ Deck-level findings use `slide_index = -1`. Steps mirror Task 9 (no render; the 
 | `confirm_design` | mutation | "Switch to the Acme design system" | `{intent: confirm_design_contract}` — must NOT set deck_spec |
 | `discuss` | positive | "What's the difference between Reveal.js and Slidev?" | `{intent: discuss}` |
 
-Judge used only for `build_request` spec quality; others are deterministic on `intent`. `design_system_library` carries a synthetic second system so `confirm_design` has something to switch to. Steps mirror Task 9.
+**Payload construction:** `message` = the case message; `conversation` = `[{\"role\":\"user\",\"content\": message}]`; `current_deck_spec` = `gold_deck_spec()` for the edit case else `None`; `committed_slide_count` = 10 for edit else 0; `previous_deck_review` = `None`; `available_design_contract` = the Meridian contract `{\"design_system_id\": <meridian>, \"template_id\": <standard>}`; `template_sections` = `[]`; `resolved_style` = `meridian_resolved_style()`; `design_system_library` = `[Meridian, a synthetic second system \"Acme\"]` so `confirm_design` has a switch target.
+
+Judge used only for `build_request` spec quality; others are deterministic on `intent`. Steps mirror Task 9.
 
 ### Task 15: data_analyst pack
 
@@ -899,7 +910,7 @@ Expected: a trust table; every pack `trusted = True`. If any pack is untrusted, 
 Run: `python evals/run_eval.py --agent all --config v1-baseline --repeats 3`
 Expected: one MLflow run per agent, visible in `mlflow ui --backend-store-uri sqlite:///mlflow.db`, each with overall + per-case pass rate, latency, tokens, cost, and `infra_error` count 0 (or < 10%).
 
-- [ ] **Step 3: Write `evals/README.md`** documenting: the loop (`run_eval.py` flags), how to add a config (`evals/configs/<agent>/<name>.yaml`), how to read the MLflow comparison, calibration, and promotion (`promote.py`), and the "judge must be one pinned endpoint across compared configs" rule. Note that `evals/` real-model runs are not collected by CI and that harness self-tests live in `tests/unit/evals/`.
+- [ ] **Step 3: Write `evals/README.md`** documenting: the loop (`run_eval.py` flags), how to add a config (`evals/configs/<agent>/<name>.yaml`), how to read the MLflow comparison, calibration, and promotion (`promote.py`), how to regenerate the gold fixtures (`python evals/fixtures/split_gold.py`), and the "judge must be one pinned endpoint across compared configs" rule. Note that `evals/` real-model runs are not collected by CI and that harness self-tests live in `tests/unit/evals/`.
 
 - [ ] **Step 4: Commit**
 
