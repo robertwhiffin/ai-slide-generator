@@ -5,7 +5,7 @@
       "slide_index": -1,
       "category": "narrative",
       "criterion": "arc_gap",
-      "message": "Slides 2 and 7 are out of order, disrupting the narrative arc and confusing the presentation flow.",
+      "message": "The slide introducing HTML slides as the alternative (\"Your browser is already a presentation engine\") comes late, after the evidence beats, while the collaboration and distribution evidence (\"HTML decks live in Git, ship as a URL, and weigh 10× less\") comes before the alternative has been introduced. The two are out of order, disrupting the narrative arc and confusing the presentation flow.",
       "objective": false,
       "status": "open",
       "seen": false
