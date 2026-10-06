@@ -133,6 +133,7 @@ def test_clean_is_the_gold_slide():
     assert _html("clean") == case.gold_slide(1)
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_rogue_colour_plants_the_off_palette_hex():
     html = _html("rogue_colour")
     assert "#e11d48" in html.lower()
@@ -143,6 +144,7 @@ def test_rogue_colour_plants_the_off_palette_hex():
     assert any("e11d48" in str(x).lower() for x in m.off_palette), m.off_palette
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_overflow_plants_overflow():
     assert _gold_measure(1).overflow_px == 0
     m = _measure("overflow")
@@ -151,6 +153,7 @@ def test_overflow_plants_overflow():
     assert _html("overflow") != case.gold_slide(1)
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_broken_handoff_changes_content_only():
     html = _html("broken_handoff")
     gold = case.gold_slide(1)
@@ -169,6 +172,7 @@ def test_broken_handoff_changes_content_only():
     assert m.console_errors == ()
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_source_contradiction_changes_a_sourced_figure():
     c = case.load_case(AGENT, "source_contradiction")
     gold = case.gold_slide(3)

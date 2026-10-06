@@ -99,6 +99,7 @@ def test_gold_chart_carries_figures():
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
+@pytest.mark.usefixtures("requires_chromium")
 def test_reference_renders_clean(cid):
     c = case.load_case(AGENT, cid)
     m = _measure(c.reference)
@@ -147,6 +148,7 @@ def test_calibration_should_fail_shape_and_differs(cid):
 
 
 @pytest.mark.parametrize("cid", list(POSITIVES))
+@pytest.mark.usefixtures("requires_chromium")
 def test_positive_calibration_is_measurably_bad(cid):
     m = _measure(_cal(cid)["should_fail"])
     assert (
@@ -158,6 +160,7 @@ def test_positive_calibration_is_measurably_bad(cid):
     ), m
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_too_much_content_calibration_overflows():
     assert _measure(_cal("too_much_content")["should_fail"]).overflow_px > 0
 

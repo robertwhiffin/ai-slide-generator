@@ -157,6 +157,7 @@ def test_expect_matches_table(cid):
 
 
 @pytest.mark.parametrize("cid", ACCEPTS)
+@pytest.mark.usefixtures("requires_chromium")
 def test_accept_cases_fix_is_the_gold_and_renders_clean(cid):
     p = case.load_case(AGENT, cid).payload
     assert p["html"] == case.gold_slide(POS)
@@ -164,18 +165,21 @@ def test_accept_cases_fix_is_the_gold_and_renders_clean(cid):
     _assert_clean(_after(cid))
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_good_fix_accept_original_overflows():
     assert case.load_case(AGENT, "good_fix_accept").payload["finding"]["criterion"] == "overflow"
     m = _before("good_fix_accept")
     assert m.rendered and m.overflow_px > 0
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_good_contrast_fix_accept_original_has_low_contrast():
     assert case.load_case(AGENT, "good_contrast_fix_accept").payload["finding"]["criterion"] == "contrast_failure"
     m = _before("good_contrast_fix_accept")
     assert m.rendered and m.min_contrast < 4.5
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_fault_left_html_still_overflows_but_less():
     p = case.load_case(AGENT, "fault_left_reject").payload
     assert p["finding"]["criterion"] == "overflow"
@@ -190,6 +194,7 @@ def test_fault_left_html_still_overflows_but_less():
     assert after.console_errors == ()
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_content_broken_html_is_clean_but_changes_meaning():
     p = case.load_case(AGENT, "content_broken_reject").payload
     assert p["html"] != case.gold_slide(POS)
@@ -198,6 +203,7 @@ def test_content_broken_html_is_clean_but_changes_meaning():
     _assert_clean(_after("content_broken_reject"))
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_restyle_html_fixes_overflow_but_is_off_palette():
     p = case.load_case(AGENT, "restyle_reject").payload
     assert p["html"] != case.gold_slide(POS)

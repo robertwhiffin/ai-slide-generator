@@ -1,6 +1,8 @@
 """Headless render of a slide fragment with in-page overflow/contrast/palette measurements."""
 from __future__ import annotations
 
+import functools
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -15,6 +17,26 @@ class RenderMeasures:
     off_palette: tuple[str, ...] = ()
     console_errors: tuple[str, ...] = ()
     rendered: bool = False
+
+
+@functools.lru_cache(maxsize=1)
+def chromium_available() -> bool:
+    """True when a Playwright chromium can actually be launched here (checked once, cached).
+
+    ``render_slide`` swallows a launch failure into ``rendered=False``, so callers that need a real
+    render (the self-tests) use this to skip honestly rather than fail where no browser is installed.
+    ``EVALS_FORCE_NO_CHROMIUM=1`` forces False, to prove those tests skip on a browserless machine.
+    """
+    if os.environ.get("EVALS_FORCE_NO_CHROMIUM") == "1":
+        return False
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            p.chromium.launch(headless=True).close()
+        return True
+    except Exception:
+        return False
 
 
 def _norm_hex(h: str) -> str:
