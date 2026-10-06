@@ -18,7 +18,7 @@ BRAND COLOR TOKENS:
   - background: #FFFFFF
   - border: #E2E8F0
   - ink: #111827
-  - muted: #6B7280
+  - muted: #4B5563
   - primary: #0F766E
   - primary-dark: #115E59
   - surface: #F1F5F9
@@ -35,7 +35,7 @@ Define these brand colors as CSS custom properties on :root and reference them w
   --brand-core-background: #FFFFFF;
   --brand-core-border: #E2E8F0;
   --brand-core-ink: #111827;
-  --brand-core-muted: #6B7280;
+  --brand-core-muted: #4B5563;
   --brand-core-primary: #0F766E;
   --brand-core-primary-dark: #115E59;
   --brand-core-surface: #F1F5F9;
@@ -50,7 +50,7 @@ Define these brand colors as CSS custom properties on :root and reference them w
 BRAND TEXT CONTRAST (REQUIRED — computed from this design system's own color tokens):
 - Every text/background pair must meet WCAG AA: at least 4.5:1 for normal text, and at least 3:1 for large text (24px and above, or bold from 19px). Choose the background first, then the text color, then check that pair.
 - The two safest text colors in this system are its extremes: #FFFFFF (the lightest) and #111827 (the darkest).
-- Use #FFFFFF as the text color on these backgrounds: #111827, #374151, #115E59, #6D28D9, #B91C1C, #0369A1, #0F766E, #B45309, #15803D, #6B7280
+- Use #FFFFFF as the text color on these backgrounds: #111827, #374151, #115E59, #4B5563, #6D28D9, #B91C1C, #0369A1, #0F766E, #B45309, #15803D
 - Use #111827 as the text color on these backgrounds: #E2E8F0, #F1F5F9, #FFFFFF
 - For any other pair of these colors, work out the ratio before you use it: two mid-tone brand colors together almost never reach 4.5:1. If a pair falls short, change the background or the text color — never lower the requirement.
 
