@@ -109,6 +109,7 @@ def render_measures_score(measures: RenderMeasures, html: str) -> tuple[bool, st
     - min_contrast >= 4.5
     - off_palette == ()
     - console_errors == ()
+    - safe_area_px == 0 (no text/media past Tellr's 88px-side / 56px-vertical safe area)
     - no "<style" tag in HTML (case-insensitive)
     """
     reasons = []
@@ -127,6 +128,9 @@ def render_measures_score(measures: RenderMeasures, html: str) -> tuple[bool, st
 
     if measures.console_errors:
         reasons.append(f"Console errors: {measures.console_errors}")
+
+    if measures.safe_area_px > 0:
+        reasons.append(f"Safe area intrusion: {measures.safe_area_px}px past the 88px/56px safe area")
 
     if "<style" in html.lower():
         reasons.append("Inline style tag found in HTML")

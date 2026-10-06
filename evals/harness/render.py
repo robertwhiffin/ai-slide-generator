@@ -9,6 +9,9 @@ from dataclasses import dataclass
 
 CHARTJS_CDN = "https://cdn.jsdelivr.net/npm/chart.js"
 
+# Tellr's SLIDE FRAME CONSTRAINTS (resolved_style): 88px side clearance, never below 56px vertically.
+SAFE_AREA = {"left": 88, "right": 1192, "top": 56, "bottom": 664}
+
 
 @dataclass(frozen=True)
 class RenderMeasures:
@@ -17,6 +20,10 @@ class RenderMeasures:
     off_palette: tuple[str, ...] = ()
     console_errors: tuple[str, ...] = ()
     rendered: bool = False
+    # Max px any text / img / canvas / svg box intrudes past Tellr's safe area inside the 1280x720
+    # frame (x < 88, x > 1192, y < 56, y > 664 — SLIDE FRAME CONSTRAINTS). 0 = clean. Last field,
+    # defaulted, so positional constructions stay valid.
+    safe_area_px: float = 0.0
 
 
 @functools.lru_cache(maxsize=1)
@@ -59,7 +66,10 @@ def palette_hexes(section_css: str) -> set[str]:
 _MEASURE_JS = r"""
 (args) => {
   const palette = new Set(args.palette);
-  const slide = document.querySelector('.slide');
+  // The slide root: `.slide`, else the body's first element (Tellr's frame rules allow any wrapper).
+  let slide = document.querySelector('.slide') || document.body.firstElementChild;
+  if (slide && slide.tagName === 'SCRIPT') slide = null;
+  if (!slide) return {noRoot: true};
   const parse = (c) => {
     const m = c.match(/rgba?\(([^)]+)\)/);
     if (!m) return null;
@@ -86,7 +96,7 @@ _MEASURE_JS = r"""
   };
   const off = new Set();
   let minC = Infinity;
-  const els = slide ? [slide, ...slide.querySelectorAll('*')] : [];
+  const els = [slide, ...slide.querySelectorAll('*')];
   for (const el of els) {
     const cs = getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden') continue;
@@ -103,11 +113,42 @@ _MEASURE_JS = r"""
       if (ratio < minC) minC = ratio;
     }
   }
-  const sh = slide ? slide.scrollHeight : 0, sw = slide ? slide.scrollWidth : 0;
+  // Safe area: max intrusion of any text box or img/canvas/svg box into the edge band, in frame
+  // coordinates. The root's own box is never counted; a media box covering the whole frame is a
+  // full-bleed background and is exempt.
+  const sa = args.safe, origin = slide.getBoundingClientRect();
+  let intrude = 0;
+  const measure = (r) => {
+    if (r.width <= 0 || r.height <= 0) return;
+    const x0 = r.left - origin.left, x1 = r.right - origin.left;
+    const y0 = r.top - origin.top, y1 = r.bottom - origin.top;
+    intrude = Math.max(intrude, sa.left - x0, x1 - sa.right, sa.top - y0, y1 - sa.bottom);
+  };
+  const walker = document.createTreeWalker(slide, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (!n.textContent.trim()) continue;
+    const pe = n.parentElement;
+    if (!pe || ['SCRIPT', 'STYLE'].includes(pe.tagName)) continue;
+    if (getComputedStyle(pe).visibility === 'hidden') continue;
+    const range = document.createRange();
+    range.selectNodeContents(n);
+    for (const r of range.getClientRects()) measure(r);
+  }
+  for (const el of slide.querySelectorAll('img, canvas, svg')) {
+    if (el.parentElement && el.parentElement.closest('svg')) continue;  // nested svg: outer box counts
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    const r = el.getBoundingClientRect();
+    const fullBleed = r.left - origin.left <= 0 && r.top - origin.top <= 0 &&
+      r.right - origin.left >= args.width && r.bottom - origin.top >= args.height;
+    if (!fullBleed) measure(r);
+  }
+  const sh = slide.scrollHeight, sw = slide.scrollWidth;
   return {
     overflow: Math.max(0, sh - args.height, sw - args.width),
     minContrast: minC === Infinity ? 21 : minC,
     offPalette: [...off].sort(),
+    safeArea: Math.round(Math.max(0, intrude) * 10) / 10,
   };
 }
 """
@@ -168,12 +209,16 @@ def render_slide(
                     if not ready:
                         errors.append("chart-init-timeout")
                 r = page.evaluate(_MEASURE_JS, {"palette": sorted(palette_hexes(section_css)),
-                                                "width": width, "height": height})
+                                                "width": width, "height": height,
+                                                "safe": SAFE_AREA})
             finally:
                 browser.close()
     except Exception as e:  # launch/crash/load failure
         return RenderMeasures(rendered=False, console_errors=tuple(errors) + (f"render-failure: {e}",))
+    if r.get("noRoot"):
+        return RenderMeasures(rendered=False, console_errors=tuple(errors) + ("no-slide-root",))
     return RenderMeasures(
+        safe_area_px=float(r["safeArea"]),
         overflow_px=float(r["overflow"]),
         min_contrast=float(r["minContrast"]),
         off_palette=tuple(r["offPalette"]),
