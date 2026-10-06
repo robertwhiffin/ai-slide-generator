@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
@@ -23,6 +24,12 @@ _PRICES_PATH = Path(__file__).parent.parent / "configs" / "prices.yaml"
 
 class ConfigError(ValueError):
     """Raised for invalid or unrecognised eval-config fields."""
+
+
+_KNOWN_KEYS = frozenset({
+    "agent_key", "name", "base", "prompt_text", "prompt_file",
+    "endpoint_name", "temperature", "max_tokens", "top_p",
+})
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,17 @@ def load_config(path: str | Path) -> AgentEvalConfig:
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
 
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: config must be a YAML mapping")
+    unknown = sorted(set(raw) - _KNOWN_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"{path}: unknown config key(s) {unknown}; valid keys are {sorted(_KNOWN_KEYS)}"
+        )
+    base = raw.get("base", "v1")
+    if base != "v1":
+        raise ConfigError(f"{path}: base {base!r} is not supported; only base: v1 exists")
+
     agent_key = raw.get("agent_key")
     if agent_key not in GRAPH_V1_AGENT_KEYS:
         raise ConfigError(
@@ -95,6 +113,14 @@ def load_config(path: str | Path) -> AgentEvalConfig:
     elif "prompt_file" in raw:
         prompt_path = path.parent / raw["prompt_file"]
         content = content.model_copy(update={"prompt_text": prompt_path.read_text()})
+
+    # model_copy skips validation, so re-validate the rebuilt content: an out-of-range override
+    # (max_tokens: -5, temperature: 9) must fail here, naming the field, not reach a model call.
+    try:
+        content = DefinitionContent.model_validate(content.model_dump())
+    except ValidationError as e:
+        fields = sorted({".".join(str(x) for x in err["loc"]) for err in e.errors()})
+        raise ConfigError(f"{path}: invalid value for {fields}: {e}") from e
 
     return AgentEvalConfig(
         agent_key=agent_key,
