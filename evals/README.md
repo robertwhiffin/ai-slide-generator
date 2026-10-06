@@ -160,22 +160,25 @@ fakes. Real-model runs (`evals.run_eval`) are not collected by CI.
 
 ## Baseline: v1-baseline, 2026-10-06
 
-`git_sha` 904b4153d10098e5bb1a3b5b137ab57b5d447151. Agent endpoint `databricks-claude-opus-4-6`,
+`git_sha` 904b4153d10098e5bb1a3b5b137ab57b5d447151 for architect, data_analyst, deck_reviewer and
+fix_reviewer. builder, build_reviewer and fixer were re-swept at `git_sha`
+3d5848dd1dd60e455762d44b5087b0a4a0e43b3a after the gold chart fix (`gold/3.js` and `gold/6.js` still
+hard-coded the old muted colour `#6B7280`; it is now `#4B5563`). Agent endpoint `databricks-claude-opus-4-6`,
 judge `databricks-claude-sonnet-5`, 3 repeats, 5 cases per agent (15 rows each), 35 of 35 cases
 trusted at calibration (one `fix_reviewer` case needed a re-run after a malformed judge response).
-Total estimated cost **USD 16.98**. 0 infra errors in every agent. Each run carries `cases_digest`
+Total estimated cost **USD 16.81**. 0 infra errors in every agent. Each run carries `cases_digest`
 and `git_sha` tags, and the judge rationale is stored on each row.
 
 | Agent | Pass rate | Infra errors | Judge errors | Mean latency (s) | Est. cost (USD) |
 |---|---|---|---|---|---|
-| fixer | 1.00 | 0 | 0 | 13.7 | 2.27 |
+| fixer | 1.00 | 0 | 0 | 14.0 | 2.27 |
+| build_reviewer | 1.00 | 0 | 1 | 21.2 | 2.56 |
 | deck_reviewer | 0.93 | 0 | 0 | 21.6 | 3.08 |
-| build_reviewer | 0.79 | 0 | 1 | 21.7 | 2.62 |
 | architect | 0.71 | 0 | 1 | 13.9 | 2.36 |
+| builder | 0.47 | 0 | 0 | 23.6 | 3.43 |
 | data_analyst | 0.40 | 0 | 0 | 10.4 | 0.78 |
-| builder | 0.27 | 0 | 0 | 24.7 | 3.54 |
 | fix_reviewer | 0.07 | 0 | 0 | 14.8 | 2.33 |
-| **Total** | | | | | **16.98** |
+| **Total** | | | | | **16.81** |
 
 A judge error is a row whose judge reply could not be parsed (`MlflowException: Failed to parse
 response from judge model`); the row is skipped, so the pass rate is over 14 rows, not 15.
@@ -199,33 +202,34 @@ Failing cases (pass rate below 1.0), with the attribution and the stored rationa
 - **data_analyst/conflicting_figures (2/3), AGENT.** The agent averages the two surveys. Judge: it
   "computes/invents a 'reasonable central estimate' of approximately 11-12 MB ... effectively
   resolving the conflict".
-- **builder/gold_bullets (0/3), gold_chart (1/3), too_much_content (1/3), gold_stats (2/3), AGENT.**
-  The slide intrudes into the 88px/56px safe area (4 to 131px past it), overflows, or has contrast
-  below 4.5 (4.13 on `gold_stats`). `render_measures`: "Safe area intrusion: 4.0px past the 88px/56px
-  safe area". Judge: "safe_area_px is 4.0 (above 0), which per the hard-evidence rules is an
-  automatic fail".
 - **builder/chart_no_data (0/3), AGENT.** The agent invents a chart with specific scores when
-  `resolved_data.figures` is empty. Judge: "The candidate invents a specific device-by-device
-  fidelity chart (with precise fabricated scores ...) despite resolved_data.figures being empty".
-- **build_reviewer/source_contradiction (0/3), HARNESS.** The reviewer finds the planted 64% vs 98%
-  contradiction (judge passes it), but the fixture's chart script also sets a y-axis colour of
-  `#6B7280`, which is not a brand token. The reviewer reports `rogue_colour` and the scorer fails it:
-  "Unplanted objective criteria found: {'rogue_colour'}". The finding is real; the fixture carries an
-  unplanted fault.
+  `resolved_data.figures` is empty. Judge: "the candidate invents a specific device-by-device
+  fidelity chart ... despite figures being empty" (Laptop 98/85, Tablet 95/52, and so on).
+- **builder/gold_chart (1/3), too_much_content (1/3), gold_bullets (2/3), AGENT.** The slide
+  overflows or intrudes into the 88px/56px safe area (10 to 85px past it). `render_measures`:
+  "Overflow: 43.0px; Safe area intrusion: 84.0px past the 88px/56px safe area". Judge: "safe_area_px of
+  10.0 ... explicit hard-evidence grounds for failure". `gold_stats` passes 3/3. One `gold_bullets`
+  judge rationale also faults on-palette hard-coded hexes (`#4B5563`, `#374151`) in the chart script;
+  that is secondary to the safe-area failure.
+- **build_reviewer:** 1.00 (14 of 15 rows counted). The `source_contradiction` case now passes 3/3:
+  the earlier unplanted `rogue_colour` finding is gone with the fixture fix. The one judge error is a
+  `rogue_colour` row whose judge reply was unparseable.
 - **fix_reviewer/restyle_reject, content_broken_reject (0/3 each), fault_left_reject (1/3),
   AGENT.** The reviewer invents criterion names and the output schema rejects the reply, so
   `structured` is null. Reproduced once: "Unknown criterion 'brand-color'. Valid criteria: ['arc_gap',
   ...]". Judge: "no candidate output to judge".
-- **fix_reviewer/good_fix_accept, good_contrast_fix_accept (0/3 each), HARNESS.** The reviewer
-  accepts the fix (verdict `fixed`) and records the original finding with `status: fixed`. The
-  `expected_category` scorer ignores status: "Unplanted objective criteria found: {'overflow'}". The
-  judge passes `good_fix_accept` ("its status is 'fixed' (not an open objective issue)") but fails
-  `good_contrast_fix_accept` for the same shape ("includes an objective finding (status 'fixed' but
-  objective: true)"), so the judge prompt is also inconsistent here.
+- **fix_reviewer/good_fix_accept, good_contrast_fix_accept (0/3 each), AGENT.** The reviewer
+  accepts the fix (verdict `fixed`) but echoes the original finding with `status: fixed`.
+  Production `fix_reviewer_node` computes `still_open = [f for f in re_findings if f.criterion ==
+  criterion]` (`src/services/graph/nodes.py:2675`), which ignores `status`, so this reply would block
+  a good fix in production. The scorer matches production semantics: "Unplanted objective criteria
+  found: {'overflow'}". This is a fix_reviewer prompt ambiguity. Separately, the judge was
+  inconsistent between the two identical-shape cases (it passed `good_fix_accept`, failed
+  `good_contrast_fix_accept`).
 - **deck_reviewer/out_of_order (2/3), AGENT (variance).** One repeat did not place the `arc_gap`
   finding where the case expects it: "Missing expected findings: {('arc_gap', -1)}".
 
-Earlier runs in the `tellr-agent-eval` experiment are tagged `superseded`: they predate the Meridian
+Earlier runs in the `tellr-agent-eval` experiment are tagged `superseded`, including the builder, build_reviewer and fixer runs from the first `904b4153d` sweep (gold chart colour): they predate the Meridian
 frame-rule fix (88px/72px padding, footer at 56px), the safe-area check in `render_measures`, the
 `slide_spec`/`resolved_data` judge inputs, the required architect edit `deck_spec`, the fixer's
 `resolved_data` input and its prompt change, and stored judge rationales.
