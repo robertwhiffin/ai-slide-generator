@@ -92,7 +92,10 @@ _MEASURE_JS = r"""
 
 _CHART_READY_JS = """
 () => typeof window.Chart !== 'undefined' &&
-  [...document.querySelectorAll('canvas')].every(c => c.width > 0 && c.height > 0)
+  [...document.querySelectorAll('canvas')].every(c =>
+    c.width > 0 && c.height > 0 &&
+    // A bare <canvas> is 300x150 by default, so size alone does not prove init.
+    (typeof window.Chart.getChart !== 'function' || !!window.Chart.getChart(c)))
 """
 
 
