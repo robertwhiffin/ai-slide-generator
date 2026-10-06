@@ -106,8 +106,9 @@ def test_case_contract(cid):
     assert c.fault
     assert c.expect == {}
     assert set(c.payload) <= set(MODEL_PAYLOAD_KEYS[AGENT])
-    # Production fixer payload has neither of these.
-    assert "resolved_data" not in c.payload
+    # Production's first fixer call sends the deck's resolved_data (the builder
+    # branch payload's; here the gold deck spec's) but no corrective_instruction.
+    assert c.payload["resolved_data"] == case.gold_deck_spec()["resolved_data"]
     assert "corrective_instruction" not in c.payload
     assert {"position", "finding", "html", "scripts", "slide_spec",
             "resolved_style", "section_css"} <= set(c.payload)

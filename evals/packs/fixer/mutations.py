@@ -70,6 +70,8 @@ def _payload(criterion, position, html, scripts):
         "slide_spec": copy.deepcopy(deck["slides"][position]),
         "resolved_style": case.meridian_resolved_style(),
         "section_css": case.meridian_section_css(),
+        # fixer_node passes the builder branch payload's resolved_data.
+        "resolved_data": copy.deepcopy(deck["resolved_data"]),
     })
 
 

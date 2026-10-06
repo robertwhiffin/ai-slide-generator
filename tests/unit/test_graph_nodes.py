@@ -1277,6 +1277,28 @@ class TestFixerNode:
             object_type="slide",
         )
 
+    def test_the_fixer_is_given_the_deck_s_resolved_data(self, graph_env):
+        # A source_contradiction finding names a figure that disagrees with its
+        # source; without the sourced figures the fixer cannot correct it.
+        seen = {}
+
+        def fix(payload):
+            seen.update(payload)
+            return fixer_out(payload)
+
+        graph_env.skills.set("fixer", fix)
+        resolved_data = {
+            "synthesis": "Revenue grew in Q3.",
+            "figures": [{"key": "q3_revenue", "value": "$4.2M", "source": "finance"}],
+            "gaps": [],
+        }
+        entry = _fix_entry(0)
+        entry["payload"]["resolved_data"] = resolved_data
+
+        fixer_node(_fix_state(graph_env, {0: entry}))
+
+        assert seen["resolved_data"] == resolved_data
+
     def test_picks_the_lowest_candidate_and_marks_it_in_flight(self, graph_env):
         graph_env.skills.set("fixer", fixer_out)
         state = _fix_state(graph_env, {2: _fix_entry(2), 0: _fix_entry(0)})
