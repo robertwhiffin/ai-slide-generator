@@ -63,14 +63,24 @@ def load_calibration(agent_key: str, case_id: str) -> dict | None:
     return json.loads(path.read_text())
 
 
-def _verdict(judge, case: Case, candidate) -> str:
+def _verdict(judge, case: Case, candidate) -> tuple[str, str]:
+    """Return ("pass"|"fail"|"error", detail). Errors are never pass or fail."""
     expectations = {
         "reference": case.reference,
         "brief_or_finding": _brief_or_finding(case),
         "measures": None,
     }
-    fb = judge(outputs=candidate, expectations=expectations)
-    return str(getattr(fb, "value", fb)).lower()
+    try:
+        fb = judge(outputs=candidate, expectations=expectations)
+    except Exception as e:  # noqa: BLE001 - a judge error is neither pass nor fail
+        return "error", f"{type(e).__name__}: {e}"
+    if getattr(fb, "error", None) is not None:
+        return "error", str(fb.error)
+    value = getattr(fb, "value", None)
+    v = value.strip().lower() if isinstance(value, str) else None
+    if v in ("pass", "fail"):
+        return v, ""
+    return "error", f"unrecognised judge value {value!r}"
 
 
 def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT) -> list[dict]:
@@ -85,12 +95,18 @@ def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT) -> list[dict]:
                 "reason": "missing calibration.json (no should_fail output)",
             })
             continue
-        ref_ok = _verdict(judge, case, case.reference) == "pass"
-        mut_fail = _verdict(judge, case, cal["should_fail"]) == "fail"
+        ref_v, ref_detail = _verdict(judge, case, case.reference)
+        mut_v, mut_detail = _verdict(judge, case, cal["should_fail"])
+        ref_ok = ref_v == "pass"
+        mut_fail = mut_v == "fail"
         reasons = []
-        if not ref_ok:
+        if ref_v == "error":
+            reasons.append(f"judge error on reference ({ref_detail})")
+        elif not ref_ok:
             reasons.append("judge failed the reference")
-        if not mut_fail:
+        if mut_v == "error":
+            reasons.append(f"judge error on should_fail ({mut_detail})")
+        elif not mut_fail:
             reasons.append("judge passed the should_fail output")
         rows.append({
             "case_id": case.case_id, "reference_passed": ref_ok,
