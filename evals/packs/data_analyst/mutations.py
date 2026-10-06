@@ -50,7 +50,8 @@ def _write(cid, kind, fault, expect, reference, should_fail):
     _dump(d / "payload.json", _payload(reference["_data_request"]))
     ref = {k: v for k, v in reference.items() if k != "_data_request"}
     _dump(d / "reference.json", ref)
-    _dump(d / "calibration.json", {"should_fail": should_fail})
+    bad = {k: v for k, v in should_fail.items() if k != "_data_request"}
+    _dump(d / "calibration.json", {"should_fail": bad})
 
 
 def generate():
@@ -60,7 +61,7 @@ def generate():
     _write(
         "figures_inline", "positive", "", {"outcome": "success"},
         _out("success",
-             synthesis="Device render stats show 98% support across major browsers (StatCounter data).",
+             synthesis="Browser support for device rendering is 98%, as cited from StatCounter in the request.",
              sources=["StatCounter"],
              _data_request="What browser support do we have for device rendering? I've seen 98% on StatCounter."),
         _out("missing_data",
@@ -72,8 +73,8 @@ def generate():
     _write(
         "two_sources", "positive", "", {"outcome": "success"},
         _out("success",
-             synthesis="Memory usage varies significantly: 8–15 MB on some platforms (source A), under 1 MB on optimized builds (source B).",
-             sources=["Platform analysis", "Build optimization report"],
+             synthesis="Two reported figures differ: 8–15 MB is described as typical, while under 1 MB is reported for some configurations.",
+             sources=["Reported figure: 8–15 MB typical", "Reported figure: under 1 MB in some configurations"],
              _data_request="How much memory does the application use? I've heard 8–15 MB typical, but also under 1 MB in some configurations."),
         _out("missing_data",
              gap="Memory requirements not documented",

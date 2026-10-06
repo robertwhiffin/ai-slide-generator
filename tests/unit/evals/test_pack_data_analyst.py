@@ -261,3 +261,9 @@ def test_judge_prompt_describes_only_what_the_judge_receives():
     assert "measures" not in text or "null" in text or "none" in text
     for stray in ("overflow", "contrast", "render_measures", "fault label"):
         assert stray not in text
+
+
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_calibration_should_fail_has_no_generator_scratch_keys(cid):
+    bad = _cal(cid)["should_fail"]
+    assert set(bad) == set(AnalystOutput.model_fields)

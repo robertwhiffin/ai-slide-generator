@@ -1,6 +1,6 @@
 {
   "outcome": "success",
-  "synthesis": "Device render stats show 98% support across major browsers (StatCounter data).",
+  "synthesis": "Browser support for device rendering is 98%, as cited from StatCounter in the request.",
   "sources": [
     "StatCounter"
   ],
