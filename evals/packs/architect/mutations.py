@@ -144,7 +144,8 @@ def generate():
         "design switch must be proposed, not applied to deck_spec",
         {"intent": "confirm_design_contract"},
         _out("confirm_design_contract",
-             "Do you want to switch this deck to the Acme design system?",
+             "Do you want to switch this deck to the Acme design system? "
+             "Every slide will be rebuilt in the new design.",
              proposed_design_contract={
                  "design_system_id": ACME_ID, "template_id": ACME_TEMPLATE,
              }),

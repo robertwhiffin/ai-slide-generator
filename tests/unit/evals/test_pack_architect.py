@@ -255,3 +255,31 @@ def test_judge_prompt_does_not_require_a_planted_fault():
     text = _prompt().lower()
     assert "pass" in text and "fail" in text
     assert "no deck_spec" in text or "no payload" in text
+
+
+def test_confirm_design_reference_warns_every_slide_is_rebuilt():
+    # src/core/skills/architect.py: a design-contract proposal must "say plainly
+    # that every slide will be rebuilt" — the known-good output must do so too.
+    msg = case.load_case(AGENT, "confirm_design").reference["message"].lower()
+    assert "every slide" in msg and "rebuilt" in msg
+
+
+def test_edit_slide_is_a_bullet_list_in_the_gold():
+    # The edit case is fair only if gold position 1 really is a bullet-list slide.
+    assert '<ul class="bullets">' in case.gold_slide(1)
+    assert "bullet" in case.gold_deck_spec()["slides"][1]["content_brief"].lower()
+
+
+def test_judge_prompt_allows_a_revised_deck_spec_on_edit():
+    # The builder sees only slide_spec, so an edit that revises the target brief
+    # is the better answer; the judge must not fail it as a payload mismatch.
+    text = _prompt().lower()
+    edit_line = next(l for l in text.splitlines() if l.startswith("- edit:"))
+    assert "deck_spec" in edit_line and "acceptable" in edit_line
+
+
+def test_judge_prompt_fails_a_build_that_misses_the_request():
+    text = _prompt().lower()
+    build_line = next(l for l in text.splitlines() if l.startswith("- build:"))
+    assert "purpose" in build_line and "argument" in build_line
+    assert "contradicts the user's request" in build_line
