@@ -2,6 +2,7 @@
 import dataclasses
 import json
 import pathlib
+import types
 from typing import Literal
 
 from mlflow.genai import make_judge
@@ -62,13 +63,11 @@ def load_calibration(agent_key: str, case_id: str) -> dict | None:
     return json.loads(path.read_text())
 
 
-def _verdict(judge, case: Case, candidate) -> tuple[str, str]:
+def _verdict(judge, case: Case, candidate, measures=None) -> tuple[str, str]:
     """Return ("pass"|"fail"|"error", detail). Errors are never pass or fail."""
-    expectations = {
-        "reference": case.reference,
-        "brief_or_finding": _brief_or_finding(case),
-        "measures": None,
-    }
+    payload = judge_payload(case, types.SimpleNamespace(structured=candidate), measures)
+    payload.pop("candidate")
+    expectations = payload
     try:
         fb = judge(outputs=candidate, expectations=expectations)
     except Exception as e:  # noqa: BLE001 - a judge error is neither pass nor fail
@@ -82,7 +81,7 @@ def _verdict(judge, case: Case, candidate) -> tuple[str, str]:
     return "error", f"unrecognised judge value {value!r}"
 
 
-def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT) -> list[dict]:
+def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT, render_fn=None) -> list[dict]:
     judge = build_judge(agent_key, model=model)
     rows = []
     for case in load_cases(agent_key):
@@ -94,8 +93,10 @@ def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT) -> list[dict]:
                 "reason": "missing calibration.json (no should_fail output)",
             })
             continue
-        ref_v, ref_detail = _verdict(judge, case, case.reference)
-        mut_v, mut_detail = _verdict(judge, case, cal["should_fail"])
+        ref_m = render_fn(case, case.reference) if render_fn else None
+        mut_m = render_fn(case, cal["should_fail"]) if render_fn else None
+        ref_v, ref_detail = _verdict(judge, case, case.reference, ref_m)
+        mut_v, mut_detail = _verdict(judge, case, cal["should_fail"], mut_m)
         ref_ok = ref_v == "pass"
         mut_fail = mut_v == "fail"
         reasons = []
