@@ -11,7 +11,45 @@
   "assumes": "The audience has absorbed the evidence from the preceding slides",
   "hands_off": "HTML slides are the future of presentations — start using them now",
   "resolved_data": {
-    "figures": []
+    "synthesis": "HTML slides outperform PowerPoint on responsiveness, typography, file size and accessibility: they render consistently across devices, load web fonts without embedding, stay small, and meet WCAG 2.1 AA natively, while .pptx files are large, fixed-canvas and retrofit accessibility.",
+    "figures": [
+      {
+        "key": "device_render_comparison",
+        "value": "Rendering fidelity by device — HTML Slides: Laptop 100%, Tablet 100%, Phone 100%, Projector 100%; PowerPoint (.pptx): Laptop 95%, Tablet 60%, Phone 35%, Projector 70%",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "wcag_support_comparison",
+        "value": "Native WCAG 2.1 AA coverage — HTML Slides: Semantic Structure 95%, ARIA Support 98%, Keyboard Nav 92%, Screen-Reader Compat 95%, Auto Color-Contrast 85%; PowerPoint: Semantic Structure 40%, ARIA Support 15%, Keyboard Nav 50%, Screen-Reader Compat 55%, Auto Color-Contrast 60%",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "pptx_average_file_size",
+        "value": "the average corporate .pptx weighs 8–15 MB",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "html_deck_file_size",
+        "value": "an equivalent HTML deck fits under 1 MB",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "modern_browser_device_share",
+        "value": "98% of devices worldwide run a modern browser",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "pptx_fixed_canvas",
+        "value": "PowerPoint locks every element to a 13.3 × 7.5″ rectangle",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "css_font_availability",
+        "value": "1,700+ fonts via CSS — no embedding needed",
+        "source": "Gold deck fixture"
+      }
+    ],
+    "gaps": []
   },
   "section_html": "",
   "section_css": "/* Meridian — generic test design system. Synthetic; not a real brand. */\n:root {\n  /* Core palette */\n  --brand-core-primary: #0F766E;      /* teal */\n  --brand-core-primary-dark: #115E59;\n  --brand-core-ink: #111827;          /* headings */\n  --brand-core-text: #374151;         /* body */\n  --brand-core-muted: #4B5563;        /* captions, footers */\n  --brand-core-background: #FFFFFF;\n  --brand-core-surface: #F1F5F9;      /* cards */\n  --brand-core-border: #E2E8F0;\n\n  /* Accents (charts, highlights) */\n  --brand-accents-violet: #6D28D9;\n  --brand-accents-amber: #B45309;\n  --brand-accents-sky: #0369A1;\n  --brand-accents-positive: #15803D;\n  --brand-accents-negative: #B91C1C;\n\n  /* Type */\n  --font-sans: \"Inter\", \"Helvetica Neue\", Arial, sans-serif;\n  --fs-eyebrow: 14px;\n  --fs-title: 40px;\n  --fs-subtitle: 22px;\n  --fs-body: 18px;\n  --fs-caption: 13px;\n  --fs-stat: 56px;\n\n  /* Spacing */\n  --space-sm: 12px;\n  --space-md: 24px;\n  --space-lg: 40px;\n  --slide-pad-x: 64px;\n  --slide-pad-y: 48px;\n\n  /* Shape */\n  --radius-md: 12px;\n  --shadow-sm: 0 1px 3px rgba(17, 24, 39, 0.08);\n}\n\n\n\n.slide {\n  position: relative;\n  width: 1280px;\n  height: 720px;\n  box-sizing: border-box;\n  padding: var(--slide-pad-y) var(--slide-pad-x);\n  background: var(--brand-core-background);\n  color: var(--brand-core-text);\n  font-family: var(--font-sans);\n  font-size: var(--fs-body);\n  line-height: 1.5;\n  overflow: hidden;\n  display: flex;\n  flex-direction: column;\n  gap: var(--space-md);\n}\n.slide.cover {\n  background: var(--brand-core-primary);\n  color: var(--brand-core-background);\n  justify-content: center;\n}\n.slide.cover .slide-title, .slide.cover .slide-subtitle { color: var(--brand-core-background); }\n.eyebrow {\n  font-size: var(--fs-eyebrow);\n  font-weight: 600;\n  letter-spacing: 0.08em;\n  text-transform: uppercase;\n  color: var(--brand-core-primary);\n  margin: 0;\n}\n.slide.cover .eyebrow { color: var(--brand-core-surface); }\n.slide-title {\n  font-size: var(--fs-title);\n  font-weight: 700;\n  line-height: 1.15;\n  color: var(--brand-core-ink);\n  margin: 0;\n}\n.slide-subtitle {\n  font-size: var(--fs-subtitle);\n  font-weight: 400;\n  color: var(--brand-core-muted);\n  margin: 0;\n}\n.content { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: var(--space-md); }\n.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-lg); flex: 1; min-height: 0; }\n.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-md); }\n.card {\n  background: var(--brand-core-surface);\n  border: 1px solid var(--brand-core-border);\n  border-radius: var(--radius-md);\n  box-shadow: var(--shadow-sm);\n  padding: var(--space-md);\n}\n.stat-value {\n  font-size: var(--fs-stat);\n  font-weight: 700;\n  line-height: 1;\n  color: var(--brand-core-primary);\n}\n.stat-label { font-size: var(--fs-caption); color: var(--brand-core-muted); margin-top: var(--space-sm); }\n.stat-delta.positive { color: var(--brand-accents-positive); }\n.stat-delta.negative { color: var(--brand-accents-negative); }\n.bullets { margin: 0; padding-left: 1.2em; }\n.bullets li { margin-bottom: var(--space-sm); }\n.bullets li::marker { color: var(--brand-core-primary); }\n.chart-container { position: relative; height: 320px; }\n.callout {\n  border-left: 4px solid var(--brand-accents-violet);\n  padding: var(--space-sm) var(--space-md);\n  background: var(--brand-core-surface);\n  color: var(--brand-core-ink);\n}\n.slide-footer {\n  position: absolute;\n  left: var(--slide-pad-x);\n  right: var(--slide-pad-x);\n  bottom: 20px;\n  display: flex;\n  justify-content: space-between;\n  font-size: var(--fs-caption);\n  color: var(--brand-core-muted);\n}\n",

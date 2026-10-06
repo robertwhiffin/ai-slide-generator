@@ -1,4 +1,5 @@
 """Generate the builder pack's cases from the Meridian gold deck. Idempotent."""
+import copy
 import json
 
 import yaml
@@ -107,17 +108,16 @@ def _bad_slide(pos, filler_items=1):
     )
 
 
-def _figures():
-    return [{
-        "name": "device_render_comparison",
-        "description": "Rendering fidelity (%) by device",
-        "labels": ["Laptop", "Tablet", "Phone", "Projector"],
-        "series": [
-            {"label": "HTML Slides", "values": [100, 100, 100, 100]},
-            {"label": "PowerPoint (.pptx)", "values": [95, 60, 35, 70]},
-        ],
-        "source": "StatCounter GlobalStats 2024",
-    }]
+def _gold_resolved_data():
+    """The canonical gold ``resolved_data`` (a ``ResolvedData`` dump), copied fresh per case."""
+    return copy.deepcopy(case.gold_deck_spec()["resolved_data"])
+
+
+def _without_figures(rd):
+    """Per-case mutation: the same gold resolved_data with every figure removed."""
+    out = copy.deepcopy(rd)
+    out["figures"] = []
+    return out
 
 
 def _write(cid, kind, fault, payload, reference, should_fail):
@@ -133,12 +133,12 @@ def _write(cid, kind, fault, payload, reference, should_fail):
 
 def generate():
     slides = case.gold_deck_spec()["slides"]
+    gold_rd = _gold_resolved_data()
 
     for cid, pos in (("gold_bullets", 1), ("gold_chart", 3), ("gold_stats", 9)):
-        rd = {"figures": _figures()} if pos == 3 else {"figures": []}
         ref = {"position": pos, "html": case.gold_slide(pos), "scripts": case.gold_scripts(pos)}
         bad = {"position": pos, "html": _bad_slide(pos), "scripts": ""}
-        _write(cid, "positive", "", _payload(slides[pos], rd), ref, bad)
+        _write(cid, "positive", "", _payload(slides[pos], gold_rd), ref, bad)
 
     # too_much_content: the position-1 brief demanding ~12 dense points.
     s1 = dict(slides[1])
@@ -146,7 +146,7 @@ def generate():
     _write(
         "too_much_content", "mutation",
         "content_brief demands 12 dense points; a faithful build overflows the frame",
-        _payload(s1, {"figures": []}),
+        _payload(s1, gold_rd),
         {"position": 1, "html": CONDENSED_HTML, "scripts": ""},
         {"position": 1, "html": _bad_slide(1, filler_items=14), "scripts": ""},
     )
@@ -156,7 +156,7 @@ def generate():
     _write(
         "chart_no_data", "mutation",
         "resolved_data.figures emptied; a chart would need invented numbers",
-        _payload(slides[3], {"figures": []}),
+        _payload(slides[3], _without_figures(gold_rd)),
         {"position": 3, "html": CHART_NO_DATA_HTML, "scripts": ""},
         {"position": 3, "html": fab, "scripts": case.gold_scripts(3)},
     )
