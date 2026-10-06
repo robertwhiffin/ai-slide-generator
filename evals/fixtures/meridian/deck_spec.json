@@ -11,6 +11,51 @@
     "Address objections and the learning curve honestly",
     "Close with a clear verdict and call to action"
   ],
+  "design_contract": {
+    "design_system_id": 3,
+    "template_id": 5
+  },
+  "resolved_data": {
+    "synthesis": "HTML slides outperform PowerPoint on responsiveness, typography, file size and accessibility: they render consistently across devices, load web fonts without embedding, stay small, and meet WCAG 2.1 AA natively, while .pptx files are large, fixed-canvas and retrofit accessibility.",
+    "figures": [
+      {
+        "key": "device_render_comparison",
+        "value": "Rendering fidelity by device — HTML Slides: Laptop 100%, Tablet 100%, Phone 100%, Projector 100%; PowerPoint (.pptx): Laptop 95%, Tablet 60%, Phone 35%, Projector 70%",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "wcag_support_comparison",
+        "value": "Native WCAG 2.1 AA coverage — HTML Slides: Semantic Structure 95%, ARIA Support 98%, Keyboard Nav 92%, Screen-Reader Compat 95%, Auto Color-Contrast 85%; PowerPoint: Semantic Structure 40%, ARIA Support 15%, Keyboard Nav 50%, Screen-Reader Compat 55%, Auto Color-Contrast 60%",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "pptx_average_file_size",
+        "value": "the average corporate .pptx weighs 8–15 MB",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "html_deck_file_size",
+        "value": "an equivalent HTML deck fits under 1 MB",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "modern_browser_device_share",
+        "value": "98% of devices worldwide run a modern browser",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "pptx_fixed_canvas",
+        "value": "PowerPoint locks every element to a 13.3 × 7.5″ rectangle",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "css_font_availability",
+        "value": "1,700+ fonts via CSS — no embedding needed",
+        "source": "Gold deck fixture"
+      }
+    ],
+    "gaps": []
+  },
   "slides": [
     {
       "position": 0,

@@ -4,6 +4,7 @@ import re
 import pytest
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
+from src.domain.deck_spec import ResolvedData, SlideSpec
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
 
 from evals.harness import case, render
@@ -174,3 +175,19 @@ def test_judge_prompt_placeholders():
     text = (PACK_DIR / "judge_prompt.md").read_text()
     assert "{{ outputs }}" in text
     assert "{{ expectations }}" in text
+
+
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_payload_validates_against_real_models(cid):
+    """packs-facts "Real data models": the agent must see production shapes."""
+    c = case.load_case(AGENT, cid)
+    ResolvedData.model_validate(c.payload["resolved_data"])
+    SlideSpec.model_validate(c.payload["slide_spec"])
+
+
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_resolved_data_comes_from_the_gold_deck_spec(cid):
+    c = case.load_case(AGENT, cid)
+    gold_rd = case.gold_deck_spec()["resolved_data"]
+    expected = {**gold_rd, "figures": []} if cid == "chart_no_data" else gold_rd
+    assert c.payload["resolved_data"] == expected

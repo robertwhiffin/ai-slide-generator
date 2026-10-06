@@ -1,3 +1,6 @@
+import src.core.database  # noqa: F401  (break import cycle before src.*)
+from src.domain.deck_spec import DeckSpec
+
 from evals.harness import case
 
 def test_ten_gold_slides_are_bare_fragments_without_knit_chrome():
@@ -18,3 +21,12 @@ def test_meridian_payload_pieces_are_present():
     assert "SLIDE VISUAL STYLE" in case.meridian_resolved_style()
     spec = case.gold_deck_spec()
     assert len(spec["slides"]) == 10
+
+
+def test_gold_deck_spec_is_a_valid_deck_spec():
+    spec = DeckSpec.model_validate(case.gold_deck_spec())
+    assert spec.design_contract.design_system_id == 3
+    assert spec.design_contract.template_id == 5
+    keys = {f.key for f in spec.resolved_data.figures}
+    for slide in spec.slides:
+        assert set(slide.data_references) <= keys, slide.position
