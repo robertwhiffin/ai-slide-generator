@@ -1,0 +1,11 @@
+{
+  "should_fail": {
+    "outcome": "missing_data",
+    "synthesis": null,
+    "sources": null,
+    "gap": "No device support data available",
+    "tried_tools": [],
+    "reason": null,
+    "_data_request": "What browser support do we have for device rendering? I've seen 98% on StatCounter."
+  }
+}

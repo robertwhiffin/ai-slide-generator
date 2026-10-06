@@ -1,0 +1,5 @@
+kind: mutation
+fault: database query required but no query tool is bound at runtime
+expect:
+  outcome: no_tool
+design_system_active: true
