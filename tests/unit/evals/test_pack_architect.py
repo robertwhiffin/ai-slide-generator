@@ -292,3 +292,43 @@ def test_judge_prompt_fails_a_build_that_misses_the_request():
     build_line = next(l for l in text.splitlines() if l.startswith("- build:"))
     assert "purpose" in build_line and "argument" in build_line
     assert "contradicts the user's request" in build_line
+
+
+# ---- USER RULING: a content-changing edit must carry the updated deck spec ----
+
+def test_edit_reference_revises_only_the_target_slide_brief():
+    ref = case.load_case(AGENT, "edit_request", root=CASES).reference
+    assert ref["intent"] == "edit" and ref["target_positions"] == [1]
+    DeckSpec.model_validate(ref["deck_spec"])
+    gold = case.gold_deck_spec()
+    spec = ref["deck_spec"]
+    # Every field and every other slide is unchanged ...
+    assert {k: v for k, v in spec.items() if k != "slides"} == {k: v for k, v in gold.items() if k != "slides"}
+    assert len(spec["slides"]) == len(gold["slides"])
+    for pos, (got, want) in enumerate(zip(spec["slides"], gold["slides"])):
+        if pos != 1:
+            assert got == want, pos
+    # ... and on position 1 only content_brief changes, now asking for three stat cards.
+    s1, g1 = spec["slides"][1], gold["slides"][1]
+    assert {k: v for k, v in s1.items() if k != "content_brief"} == {k: v for k, v in g1.items() if k != "content_brief"}
+    brief = s1["content_brief"].lower()
+    assert brief != g1["content_brief"].lower()
+    assert "three stat cards" in brief
+    assert "in place of the bullet list" in brief
+    assert "use bullet points" not in brief
+
+
+def test_edit_calibration_still_fails_on_the_off_by_one():
+    c = case.load_case(AGENT, "edit_request", root=CASES)
+    bad = _cal("edit_request")["should_fail"]
+    assert bad["target_positions"] == [2]
+    ok, _ = expected_category_score(AGENT, bad, c.expect)
+    assert not ok
+
+
+def test_judge_prompt_fails_an_edit_without_the_updated_deck_spec():
+    edit_line = next(l for l in _prompt().lower().splitlines() if l.startswith("- edit:"))
+    assert "deck_spec is null" in edit_line and "fail" in edit_line
+    assert "does not reflect the requested change" in edit_line
+    assert "pass" in edit_line and "delivers the request" in edit_line
+    assert "may leave deck_spec null" not in edit_line
