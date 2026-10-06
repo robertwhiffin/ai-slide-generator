@@ -112,6 +112,17 @@ EXPECTED_REQUIRED_SMOKE_PAYLOADS = {
         },
         "resolved_style": "Synthetic demo style",
         "section_css": ".slide { width: 1280px; height: 720px; }",
+        "resolved_data": {
+            "synthesis": "Synthetic revenue grew from 10 to 15.",
+            "figures": [
+                {
+                    "key": "q3_revenue",
+                    "value": "15",
+                    "source": "Synthetic quarterly revenue",
+                }
+            ],
+            "gaps": [],
+        },
     },
     "fix_reviewer": {
         "position": 1,

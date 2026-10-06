@@ -697,7 +697,7 @@ PACKAGED_V1_CONTENT_HASHES = {
     "data_analyst": "1ffb1fb3f31a20b9424007eefdf918620f1058386a2ba81bfd22347510ce6803",
     "builder": "1549a4231b3a4a6221842f3eca6699097199b28d8283b8995af7c90b406fe5c4",
     "build_reviewer": "1a895f4bee426041088635f7fa182200827db14ab35a229def6f8932d1516b18",
-    "fixer": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+    "fixer": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
     "fix_reviewer": "0dfda2e524ed528624bbb68829c738e01e0d9a2fce2e2c1acc2ba4b56ccdb921",
     "deck_reviewer": "8c876db55cddbaa2f9015321117e36adb5b63fb7c47dbb067a432d04c30cf54e",
 }
