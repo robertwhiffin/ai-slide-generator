@@ -1,4 +1,8 @@
+import pytest
+
 from evals.harness import render, case
+
+pytestmark = pytest.mark.usefixtures("requires_chromium")
 
 CSS = case.meridian_section_css()
 

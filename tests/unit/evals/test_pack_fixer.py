@@ -144,18 +144,21 @@ def test_broken_input_matches_build_reviewer_twin(cid):
     assert html == case.load_case("build_reviewer", REVIEWER_TWIN[cid]).payload["html"]
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_rogue_colour_input_is_off_palette():
     m = _input_measure("rogue_colour")
     assert m.rendered
     assert any("e11d48" in str(x).lower() for x in m.off_palette), m.off_palette
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_overflow_input_overflows():
     m = _input_measure("overflow")
     assert m.rendered
     assert m.overflow_px > 0
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_contrast_failure_input_is_contrast_only():
     gold = case.gold_slide(1)
     html = case.load_case(AGENT, "contrast_failure").payload["html"]
@@ -168,6 +171,7 @@ def test_contrast_failure_input_is_contrast_only():
     assert m.overflow_px == 0
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_source_contradiction_input_has_wrong_figure_and_renders_clean():
     html = case.load_case(AGENT, "source_contradiction").payload["html"]
     assert "64%" in html
@@ -175,6 +179,7 @@ def test_source_contradiction_input_has_wrong_figure_and_renders_clean():
     _assert_clean(_input_measure("source_contradiction"))
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_brief_not_delivered_input_differs_from_gold_and_renders_clean():
     html = case.load_case(AGENT, "brief_not_delivered").payload["html"]
     gold = case.gold_slide(1)
@@ -187,6 +192,7 @@ def test_brief_not_delivered_input_differs_from_gold_and_renders_clean():
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
+@pytest.mark.usefixtures("requires_chromium")
 def test_reference_is_fixer_shaped_gold_and_clean(cid):
     pos = POSITION[cid]
     ref = case.load_case(AGENT, cid).reference
@@ -210,17 +216,20 @@ def test_calibration_is_fixer_shaped_and_differs(cid):
     assert bad["html"] != c.reference["html"]
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_rogue_colour_should_fail_is_still_off_palette():
     bad = _cal("rogue_colour")
     m = _measure(bad["html"], bad["scripts"])
     assert any("e11d48" in str(x).lower() for x in m.off_palette), m.off_palette
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_overflow_should_fail_still_overflows():
     bad = _cal("overflow")
     assert _measure(bad["html"], bad["scripts"]).overflow_px > 0
 
 
+@pytest.mark.usefixtures("requires_chromium")
 def test_contrast_failure_should_fail_still_low_contrast():
     bad = _cal("contrast_failure")
     assert _measure(bad["html"], bad["scripts"]).min_contrast < 4.5
