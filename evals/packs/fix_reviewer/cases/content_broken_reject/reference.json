@@ -1,0 +1,16 @@
+{
+  "slide_index": 1,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "brief_not_delivered:1:0",
+      "slide_index": 1,
+      "category": "content",
+      "criterion": "brief_not_delivered",
+      "message": "The overflow is gone, but the fix rewrote the 'Bloated file sizes' bullet: it now says a .pptx weighs under 1 MB and an HTML deck is larger, reversing the original 8–15 MB versus under 1 MB claim, so the brief's point is no longer delivered.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}
