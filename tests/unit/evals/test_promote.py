@@ -533,6 +533,82 @@ def test_config_change_outside_editable_fields_is_refused_by_manifest_hash_guard
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# I7: the CLI, and atomic writes
+# ---------------------------------------------------------------------------
+
+
+def _yaml(tmp_path: Path, name: str, body: str) -> Path:
+    path = tmp_path / name
+    path.write_text(body)
+    return path
+
+
+def test_cli_dry_run_reports_the_new_hash_and_run_ids_and_writes_nothing(tree, tmp_path, capsys):
+    cfg_path = _yaml(tmp_path, "b.yaml",
+                     f"agent_key: builder\nname: cli-dry\nendpoint_name: {NEW_ENDPOINT}\n")
+    expected = config.load_config(cfg_path).content_hash
+    before = _read_all(tree)
+    code = promote.main([
+        "--config", f"builder={cfg_path}", "--run-id", "builder=RUN-SENTINEL-1",
+        "--dry-run", "--repo-root", str(tree),
+    ])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert _read_all(tree) == before
+    assert expected[:12] in out
+    assert "RUN-SENTINEL-1" in out
+
+
+def test_cli_real_run_writes_the_promotion(tree, tmp_path):
+    cfg_path = _yaml(tmp_path, "b.yaml",
+                     f"agent_key: builder\nname: cli-real\nendpoint_name: {NEW_ENDPOINT}\n")
+    expected = config.load_config(cfg_path).content_hash
+    assert promote.main(["--config", f"builder={cfg_path}", "--repo-root", str(tree)]) == 0
+    assert _pinned_table(tree / LOADER_PIN_REL)["builder"] == expected
+
+
+def test_cli_exits_non_zero_on_a_blocked_prompt_change(tree, tmp_path, capsys):
+    cfg_path = _yaml(tmp_path, "d.yaml",
+                     'agent_key: data_analyst\nname: cli-blocked\nprompt_text: "CHANGED"\n')
+    before = _read_all(tree)
+    code = promote.main(["--config", f"data_analyst={cfg_path}", "--repo-root", str(tree)])
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "data_analyst" in err and "prompt" in err
+    assert _read_all(tree) == before
+
+
+def test_cli_rejects_a_malformed_config_argument(tree, capsys):
+    with pytest.raises(SystemExit) as e:
+        promote.main(["--config", "builder-without-equals", "--repo-root", str(tree)])
+    assert e.value.code != 0
+
+
+def test_failure_on_the_second_replace_restores_all_three_files(tree, monkeypatch):
+    import os
+
+    cfg = _changed("builder", endpoint_name=NEW_ENDPOINT)
+    before = _read_all(tree)
+    real_replace = os.replace
+    calls = []
+
+    def flaky_replace(src, dst):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise OSError("simulated disk failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(promote.os, "replace", flaky_replace)
+    with pytest.raises(OSError, match="simulated disk failure"):
+        promote.promote({"builder": cfg}, repo_root=tree)
+    monkeypatch.setattr(promote.os, "replace", real_replace)
+    assert len(calls) == 2
+    assert _read_all(tree) == before
+    leftovers = [p for p in tree.rglob("*.promote.tmp")]
+    assert leftovers == []
+
+
 def test_zz_real_artefacts_unchanged_versus_head():
     for rel in TARGETS:
         head = subprocess.run(

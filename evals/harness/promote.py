@@ -9,14 +9,24 @@
 Promoted definitions are edited IN PLACE in the parsed manifest JSON (only the fields a
 config can change), so unchanged roles stay byte-identical. Every refusal raises
 ``PromoteBlocked`` before anything is written; all new file texts are computed first and
-written only once every check has passed.
+written only once every check has passed, atomically: each new text goes to a temp file beside
+its target, then ``os.replace`` swaps them in; if any swap fails, every target is restored from
+its in-memory original.
+
+CLI::
+
+    python -m evals.harness.promote --config builder=evals/configs/builder/x.yaml \
+        [--config ROLE=PATH ...] [--run-id builder=<mlflow run id> ...] [--dry-run]
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
 import importlib
 import json
+import os
+import sys
 from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
@@ -24,7 +34,7 @@ from pathlib import Path
 import src.core.database  # noqa: F401  (break the src.* import cycle first)
 
 from evals.harness.case import EVALS_DIR
-from evals.harness.config import AgentEvalConfig
+from evals.harness.config import AgentEvalConfig, ConfigError, load_config
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     GraphV1Manifest,
@@ -95,6 +105,32 @@ def _rewrite_pins(text: str, rel: str, changes: dict[str, tuple[str, str]]) -> s
             )
         block = block.replace(old_entry, f'"{role}": "{new}"')
     return text[:start] + block + text[end:]
+
+
+TMP_SUFFIX = ".promote.tmp"
+
+
+def _write_atomically(writes: dict[Path, str]) -> None:
+    """Write every target or none: temp files first, then ``os.replace``; restore on failure."""
+    originals = {path: path.read_bytes() for path in writes}
+    temps = {path: path.with_name(path.name + TMP_SUFFIX) for path in writes}
+    try:
+        for path, text in writes.items():
+            temps[path].write_text(text, encoding="utf-8")
+        for path in writes:
+            os.replace(temps[path], path)
+    except BaseException:
+        for path, data in originals.items():
+            if path.read_bytes() != data:
+                path.write_bytes(data)
+        for tmp in temps.values():
+            tmp.unlink(missing_ok=True)
+        print(
+            "promote: write failed; the original files were restored. If in doubt: git checkout -- "
+            + " ".join(str(p) for p in writes),
+            file=sys.stderr,
+        )
+        raise
 
 
 def promote(
@@ -187,8 +223,7 @@ def promote(
     if dry_run:
         return new_hashes
 
-    for path, text in writes.items():
-        path.write_text(text, encoding="utf-8")
+    _write_atomically(writes)
 
     if changes:
         print("Promoted roles: " + ", ".join(f"{r} {o[:12]} -> {n[:12]}" for r, (o, n) in changes.items()))
@@ -202,3 +237,44 @@ def promote(
                     f"the promoted {role} prompt_text (promote does not edit skill files)."
                 )
     return new_hashes
+
+
+def _pairs(values: list[str], flag: str, parser: argparse.ArgumentParser) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for value in values:
+        role, sep, rest = value.partition("=")
+        if not sep or not role or not rest:
+            parser.error(f"{flag} expects ROLE=VALUE, got {value!r}")
+        out[role] = rest
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m evals.harness.promote",
+        description="Promote evaluated agent configs into the frozen Graph Version 1 manifest.",
+    )
+    parser.add_argument("--config", action="append", default=[], metavar="ROLE=PATH",
+                        help="an eval config YAML to promote for ROLE (repeatable)")
+    parser.add_argument("--run-id", action="append", default=[], metavar="ROLE=ID",
+                        help="the MLflow run id that justified ROLE's promotion (repeatable)")
+    parser.add_argument("--dry-run", action="store_true", help="compute and check, write nothing")
+    parser.add_argument("--repo-root", type=Path, default=None, help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+
+    configs = _pairs(args.config, "--config", parser)
+    run_ids = _pairs(args.run_id, "--run-id", parser)
+    try:
+        chosen = {role: load_config(path) for role, path in configs.items()}
+        hashes = promote(chosen, dry_run=args.dry_run, repo_root=args.repo_root, run_ids=run_ids)
+    except (PromoteBlocked, ConfigError) as e:
+        print(f"promote blocked: {e}", file=sys.stderr)
+        return 1
+    label = "would promote" if args.dry_run else "promoted"
+    for role in chosen:
+        print(f"{label} {role}: {hashes[role]}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
