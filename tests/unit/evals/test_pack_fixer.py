@@ -306,3 +306,16 @@ def test_judge_prompt_verdict_first_and_uses_measures():
     assert "FIRST" in text and text.index("FIRST") < text.index("rationale", text.index("FIRST"))
     assert "measures" in text.lower()
     assert "finding" in text.lower()
+
+
+@pytest.mark.usefixtures("requires_chromium")
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_reference_passes_render_measures_including_safe_area(cid):
+    """I2: a known-good output must pass the scorer itself, safe area included."""
+    from evals.harness import scorers
+
+    ref = case.load_case(AGENT, cid, root=CASES).reference
+    m = render.render_slide(ref["html"], ref.get("scripts", ""), section_css=case.meridian_section_css())
+    assert m.safe_area_px == 0, m
+    ok, why = scorers.render_measures_score(m, ref["html"])
+    assert ok, why

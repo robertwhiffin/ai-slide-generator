@@ -174,6 +174,8 @@ def test_architect_edit_positions_compared_as_set():
     dict(off_palette=("#ff00ff",)),
     dict(console_errors=("boom",)),
     dict(rendered=False),
+    dict(safe_area_px=0.5),
+    dict(safe_area_px=19.0),
 ])
 def test_render_measures_each_failure_alone(kwargs):
     base = dict(overflow_px=0, min_contrast=7.0, off_palette=(), console_errors=(), rendered=True)
@@ -232,3 +234,14 @@ def test_malformed_structured_scores_fail_not_crash(agent, bad):
     ok, why = scorers.expected_category_score(agent, bad, {"intent": "build", "outcome": "success", "criteria": ["overflow"], "positions": [1]})
     assert ok is False
     assert why.strip()
+
+
+def test_render_measures_safe_area_intrusion_is_named():
+    m = render.RenderMeasures(0, 7.0, (), (), True, 19.4)
+    ok, why = scorers.render_measures_score(m, "<section></section>")
+    assert ok is False
+    assert "19.4" in why and "safe area" in why.lower()
+
+
+def test_render_measures_safe_area_defaults_clean():
+    assert render.RenderMeasures(0, 7.0, (), (), True).safe_area_px == 0.0
