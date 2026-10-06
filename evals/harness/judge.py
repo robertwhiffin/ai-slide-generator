@@ -28,16 +28,19 @@ def build_judge(agent_key: str, *, model: str = JUDGE_ENDPOINT):
 def _brief_or_finding(case: Case):
     p = case.payload
     role = case.agent_key
-    if role == "builder":
-        return p.get("slide_spec")
-    if role in ("fixer", "build_reviewer", "fix_reviewer"):
+    if role in ("builder", "build_reviewer"):
+        # The judge needs the sourced data to tell real figures from invented / contradicted ones.
+        return {"slide_spec": p.get("slide_spec"), "resolved_data": p.get("resolved_data")}
+    if role in ("fixer", "fix_reviewer"):
         return p.get("finding")
     if role == "architect":
         return {"message": p.get("message"), "current_deck_spec": p.get("current_deck_spec")}
     if role == "data_analyst":
         return p.get("data_request")
     if role == "deck_reviewer":
-        return {"narrative_arc": p.get("narrative_arc"), "call_to_action": p.get("call_to_action")}
+        # The spotlighted slides string: the judge must see the deck to rule a finding supported.
+        return {"narrative_arc": p.get("narrative_arc"), "call_to_action": p.get("call_to_action"),
+                "slides": p.get("slides")}
     return p
 
 

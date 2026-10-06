@@ -26,11 +26,15 @@ MESSAGES = {
         "without a clear verdict or next steps."
     ),
     "out_of_order": (
-        "Slides 2 and 7 are out of order, disrupting the narrative arc and confusing "
-        "the presentation flow."
+        "The slide introducing HTML slides as the alternative (\"Your browser is already a "
+        "presentation engine\") comes late, after the evidence beats, while the collaboration and "
+        "distribution evidence (\"HTML decks live in Git, ship as a URL, and weigh 10× less\") comes "
+        "before the alternative has been introduced. The two are out of order, disrupting the "
+        "narrative arc and confusing the presentation flow."
     ),
     "repetition": (
-        "Slide 5 repeats a key point from slide 7, using the same bullet list. "
+        "The \"Key Considerations\" slide repeats the bullet list of the collaboration slide "
+        "(\"HTML decks live in Git, ship as a URL, and weigh 10× less\") word for word. "
         "This redundancy weakens the narrative."
     ),
 }

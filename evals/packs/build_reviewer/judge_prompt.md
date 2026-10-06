@@ -5,7 +5,9 @@ The reviewer was shown one built slide. Most cases plant exactly one FAULT in th
 Inputs:
 - The reviewer's output (slide_index, verdict, findings): {{ outputs }}
 - The expectations: {{ expectations }}
-  Its `reference` is the known-good review of this slide (slide_index, verdict, findings). When the reference has findings, their messages describe the planted fault. When the reference has no findings, the slide is clean. Other keys (such as `brief_or_finding` and `measures`) may be null; ignore them.
+  - `reference` is the known-good review of this slide (slide_index, verdict, findings). When the reference has findings, their messages describe the planted fault. When the reference has no findings, the slide is clean.
+  - `brief_or_finding` holds the brief the slide was built from: `slide_spec` (purpose, content_brief, hands_off) and `resolved_data` (the sourced `synthesis`, `figures` and `gaps`). Use resolved_data to check a source_contradiction finding: its message should name the slide's figure that disagrees with a sourced figure.
+  - `measures` is null for this role; ignore it.
 
 Decide:
 - If the reference has findings: PASS only if at least one of the reviewer's finding messages specifically describes the same fault as a reference finding. The message need not match the reference's wording. FAIL if there are no findings, or if every message is vague, off-topic, or describes a different problem.
