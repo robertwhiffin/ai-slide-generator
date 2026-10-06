@@ -6,10 +6,9 @@ from typing import Literal
 
 from mlflow.genai import make_judge
 
-from evals.harness.case import Case, load_cases
+from evals.harness.case import Case, load_cases, PACKS_DIR
 
 JUDGE_ENDPOINT = "databricks-claude-sonnet-5"
-PACKS_DIR = pathlib.Path(__file__).resolve().parent.parent / "packs"
 
 
 def judge_prompt(agent_key: str) -> str:

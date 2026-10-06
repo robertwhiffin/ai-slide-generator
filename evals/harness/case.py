@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Literal
 import yaml
 
+EVALS_DIR = pathlib.Path(__file__).resolve().parents[1]   # .../evals
+PACKS_DIR = EVALS_DIR / "packs"
+MERIDIAN_DIR = EVALS_DIR / "fixtures" / "meridian"
+
 
 @dataclass(frozen=True)
 class Case:
@@ -19,7 +23,7 @@ class Case:
 
 def load_case(agent_key: str, case_id: str) -> Case:
     """Load a case from the packs directory."""
-    case_dir = pathlib.Path(f"evals/packs/{agent_key}/cases/{case_id}")
+    case_dir = PACKS_DIR / agent_key / "cases" / case_id
 
     # Load the three required files
     with open(case_dir / "case.yaml") as f:
@@ -53,7 +57,7 @@ def load_case(agent_key: str, case_id: str) -> Case:
 
 def load_cases(agent_key: str) -> list[Case]:
     """Load all cases for an agent, sorted by case_id."""
-    cases_dir = pathlib.Path(f"evals/packs/{agent_key}/cases")
+    cases_dir = PACKS_DIR / agent_key / "cases"
 
     if not cases_dir.exists():
         return []
@@ -66,13 +70,13 @@ def load_cases(agent_key: str) -> list[Case]:
 
 def gold_slide(position: int) -> str:
     """Load a gold slide HTML by position."""
-    with open(f"evals/fixtures/meridian/gold/{position}.html") as f:
+    with open(MERIDIAN_DIR / "gold" / f"{position}.html") as f:
         return f.read()
 
 
 def gold_scripts(position: int) -> str:
     """Load gold slide scripts by position, or empty string if not present."""
-    script_path = pathlib.Path(f"evals/fixtures/meridian/gold/{position}.js")
+    script_path = MERIDIAN_DIR / "gold" / f"{position}.js"
     if script_path.exists():
         return script_path.read_text()
     return ""
@@ -80,17 +84,17 @@ def gold_scripts(position: int) -> str:
 
 def meridian_section_css() -> str:
     """Load the Meridian section CSS."""
-    with open("evals/fixtures/meridian/section_css.txt") as f:
+    with open(MERIDIAN_DIR / "section_css.txt") as f:
         return f.read()
 
 
 def meridian_resolved_style() -> str:
     """Load the Meridian resolved style."""
-    with open("evals/fixtures/meridian/resolved_style.txt") as f:
+    with open(MERIDIAN_DIR / "resolved_style.txt") as f:
         return f.read()
 
 
 def gold_deck_spec() -> dict:
     """Load the gold deck spec JSON."""
-    with open("evals/fixtures/meridian/deck_spec.json") as f:
+    with open(MERIDIAN_DIR / "deck_spec.json") as f:
         return json.load(f)
