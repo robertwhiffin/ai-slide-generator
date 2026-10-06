@@ -29,6 +29,14 @@ from evals.harness.case import Case
 from evals.harness.render import RenderMeasures
 
 
+@pytest.fixture(autouse=True)
+def profile_calls(monkeypatch):
+    """main() pins a Databricks profile into os.environ; stub it so tests never touch real auth."""
+    calls = []
+    monkeypatch.setattr(cli, "apply_profile", lambda profile: calls.append(profile) or "https://h")
+    return calls
+
+
 def _cfg_with_endpoint(name):
     base = config.v1_baseline("builder")
     content = base.content.model_copy(
@@ -197,3 +205,63 @@ def test_calibrate_render_fn_renders_candidate_with_meridian_css(monkeypatch):
     assert seen[0]["html"] == "<section class='slide'>H-77</section>"
     assert seen[0]["scripts"] == "draw77()"
     assert seen[0]["section_css"] == case_mod.meridian_section_css()
+
+
+# ---- main: --profile pins auth before any model call ------------------------
+
+def test_main_applies_default_profile_before_probe_and_sweep(monkeypatch, profile_calls):
+    events, spy, _ = _wire(monkeypatch)
+    monkeypatch.setattr(cli, "apply_profile", lambda p: events.append(("profile", p)) or "https://h")
+    cli.main(["--agent", "builder", "--config", "v1-baseline"])
+    assert events == [("profile", "tellr-dev"), "probe", "sweep"]
+
+
+def test_main_profile_flag_passes_through_and_precedes_calibrate(monkeypatch, profile_calls):
+    _, _, cal = _wire(monkeypatch)
+    cli.main(["--agent", "architect", "--calibrate", "--profile", "other-prof"])
+    assert profile_calls == ["other-prof"]
+    assert len(cal) == 1
+
+
+def test_main_empty_profile_keeps_ambient_env(monkeypatch, profile_calls):
+    _wire(monkeypatch)
+    cli.main(["--agent", "builder", "--config", "v1-baseline", "--profile", ""])
+    assert profile_calls == []
+
+
+# ---- main: packs with no cases ---------------------------------------------
+
+def test_main_agent_all_skips_empty_packs_and_sweeps_the_rest(monkeypatch, capsys):
+    events, _, _ = _wire(monkeypatch)
+    swept = []
+
+    def sweep(cfg, **kw):
+        if kw["agent_key"] != "builder":
+            raise mlflow_run.NoCasesError(f"no cases for agent {kw['agent_key']!r}")
+        swept.append(kw["agent_key"])
+        return "run-b"
+
+    monkeypatch.setattr(mlflow_run, "run_sweep", sweep)
+    cli.main(["--agent", "all"])
+    out = capsys.readouterr().out
+    assert swept == ["builder"]
+    assert "builder: run_id=run-b" in out
+    assert "architect: skipped - no cases" in out
+
+
+def test_main_agent_all_with_no_cases_anywhere_exits_clearly(monkeypatch):
+    _wire(monkeypatch)
+
+    def sweep(cfg, **kw):
+        raise mlflow_run.NoCasesError("no cases")
+
+    monkeypatch.setattr(mlflow_run, "run_sweep", sweep)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--agent", "all"])
+    assert "no cases" in str(e.value)
+
+
+def test_calibrate_empty_pack_prints_and_does_not_crash(monkeypatch, capsys):
+    _wire(monkeypatch)  # judge.calibrate stub returns []
+    cli.main(["--agent", "deck_reviewer", "--calibrate"])
+    assert "no cases" in capsys.readouterr().out

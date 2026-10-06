@@ -652,6 +652,52 @@ def test_run_sweep_every_judge_row_errors_tags_judge_unavailable(monkeypatch, tr
     assert "judge_unavailable" in run.data.tags
 
 
+class SomeBoomAdapter(EchoAdapter):
+    """Infra-fails only the cases whose slide_spec title marker is in ``boom_ids``."""
+
+    def __init__(self, boom_ids):
+        super().__init__()
+        self.boom_ids = set(boom_ids)
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        from src.services.agent_runtime import ModelProviderUnavailableError
+
+        cm = re.search(r"CASE-MARK-([A-Za-z0-9_]+)", prompt)
+        if cm and cm.group(1) in self.boom_ids:
+            with self._lock:
+                self.calls += 1
+            raise ModelProviderUnavailableError("503 endpoint down")
+        return super().invoke(agent_key=agent_key, configuration=configuration, schema=schema, prompt=prompt)
+
+
+@pytest.mark.parametrize("n_cases, tagged", [(10, False), (8, True)])
+def test_run_sweep_not_comparable_threshold_is_more_than_ten_percent(monkeypatch, tracking, n_cases, tagged):
+    # exactly one infra-error row: 1/10 = 10% (not > 10%) vs 1/8 = 12.5% (> 10%)
+    cases = [_builder_case(f"c{i}") for i in range(n_cases)]
+    adapter = SomeBoomAdapter({"c0"})
+    _, run, _, _, _ = _sweep(monkeypatch, tracking, adapter=adapter, verdict=lambda o, e: "pass",
+                             cases=cases, repeats=1)
+    assert run.data.metrics["infra_error_count"] == 1
+    assert ("not_comparable" in run.data.tags) is tagged
+
+
+def test_run_sweep_no_cases_raises_before_any_run_or_model_call(monkeypatch, tracking):
+    adapter = EchoAdapter()
+    with pytest.raises(mlflow_run.NoCasesError, match="builder"):
+        _sweep(monkeypatch, tracking, adapter=adapter, verdict=lambda o, e: "pass", cases=[])
+    assert adapter.calls == 0
+    mlflow.set_tracking_uri(tracking)
+    exp = mlflow.get_experiment_by_name(mlflow_run.EXPERIMENT_NAME)
+    assert exp is None or mlflow.search_runs([exp.experiment_id]).empty
+
+
+def test_run_sweep_case_filter_matching_nothing_raises_no_cases(monkeypatch, tracking):
+    adapter = EchoAdapter()
+    with pytest.raises(mlflow_run.NoCasesError, match="zz"):
+        _sweep(monkeypatch, tracking, adapter=adapter, verdict=lambda o, e: "pass", case_filter=["zz"])
+    assert adapter.calls == 0
+
+
 # ---------------------------------------------------------------------------
 # judge.calibrate render hook (the one permitted judge.py edit)
 # ---------------------------------------------------------------------------
@@ -710,3 +756,13 @@ def test_calibrate_builds_expectations_through_judge_payload(monkeypatch):
     assert seen == ["a", "a"]
     assert all(c["expectations"]["spy_token"] == "JP-SPY-CAL" for c in stub.calls)
     assert all("candidate" not in c["expectations"] for c in stub.calls)
+
+
+def test_calibrate_empty_pack_returns_no_rows_without_building_a_judge(monkeypatch):
+    monkeypatch.setattr(judge_mod, "load_cases", lambda k: [])
+
+    def no_build(*a, **k):
+        raise AssertionError("must not build a judge (or read judge_prompt.md) for an empty pack")
+
+    monkeypatch.setattr(judge_mod, "build_judge", no_build)
+    assert judge_mod.calibrate("deck_reviewer") == []

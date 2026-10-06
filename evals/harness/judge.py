@@ -82,9 +82,12 @@ def _verdict(judge, case: Case, candidate, measures=None) -> tuple[str, str]:
 
 
 def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT, render_fn=None) -> list[dict]:
+    cases = load_cases(agent_key)
+    if not cases:
+        return []  # empty pack: no judge_prompt.md needed, nothing to calibrate
     judge = build_judge(agent_key, model=model)
     rows = []
-    for case in load_cases(agent_key):
+    for case in cases:
         cal = load_calibration(agent_key, case.case_id)
         if not cal or "should_fail" not in cal:
             rows.append({

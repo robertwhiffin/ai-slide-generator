@@ -15,7 +15,7 @@ from mlflow.genai.scorers import scorer
 
 from evals.harness import judge as judge_mod  # aliased: "judge" is also a scorer name
 from evals.harness import scorers as det
-from evals.harness.case import EVALS_DIR, Case, load_case, load_cases, meridian_section_css
+from evals.harness.case import EVALS_DIR, PACKS_DIR, Case, load_case, load_cases, meridian_section_css
 from evals.harness.config import AgentEvalConfig, prices
 from evals.harness.render import RenderMeasures, render_slide
 from evals.harness.runner import Runner
@@ -23,6 +23,11 @@ from evals.harness.runner import Runner
 HTML_ROLES = ("builder", "fixer")
 DETERMINISTIC_CATEGORY_ROLES = ("architect", "data_analyst", "build_reviewer", "fix_reviewer", "deck_reviewer")
 EXPERIMENT_NAME = "tellr-agent-eval"
+NOT_COMPARABLE_INFRA_RATE = 0.10
+
+
+class NoCasesError(ValueError):
+    """The pack (or the --cases filter) yields no cases; nothing to evaluate."""
 
 
 def default_tracking_uri() -> str:
@@ -177,15 +182,19 @@ def run_sweep(
     runner: Runner | None = None,
     tracking_uri: str | None = None,
 ) -> str:
-    os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(max_workers)
-    os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "True"
-    mlflow.set_tracking_uri(tracking_uri or default_tracking_uri())
-    mlflow.set_experiment(EXPERIMENT_NAME)
-
     cases = load_cases(agent_key)
     if case_filter:
         wanted = {str(c) for c in case_filter}
         cases = [c for c in cases if c.case_id in wanted]
+    if not cases:
+        where = PACKS_DIR / agent_key / "cases"
+        raise NoCasesError(
+            f"no cases for agent {agent_key!r} under {where}"
+            + (f" matching --cases {sorted(wanted)}" if case_filter else ""))
+    os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(max_workers)
+    os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "True"
+    mlflow.set_tracking_uri(tracking_uri or default_tracking_uri())
+    mlflow.set_experiment(EXPERIMENT_NAME)
     data = build_dataset(cases, repeats)
     runner = runner or Runner()
     predict_fn = mlflow.trace(make_predict_fn(config, runner, render_enabled=render_enabled))
@@ -257,7 +266,7 @@ def run_sweep(
         if cost_known:
             mlflow.log_metric("est_cost_usd", cost)
         total = len(outcomes)
-        if total and infra / total > 0.10:
+        if total and infra / total > NOT_COMPARABLE_INFRA_RATE:
             mlflow.set_tag("not_comparable", "true")
         if non_infra and judge_err == non_infra:
             mlflow.set_tag("judge_unavailable", "true")
