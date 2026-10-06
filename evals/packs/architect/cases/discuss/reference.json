@@ -1,0 +1,8 @@
+{
+  "intent": "discuss",
+  "message": "Reveal.js is a general HTML presentation framework; Slidev is Markdown-first and aimed at developers.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

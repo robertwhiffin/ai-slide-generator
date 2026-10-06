@@ -1,0 +1,10 @@
+{
+  "intent": "edit",
+  "message": "I'll replace the bullet list on slide 2 with three stat cards.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [
+    1
+  ],
+  "proposed_design_contract": null
+}
