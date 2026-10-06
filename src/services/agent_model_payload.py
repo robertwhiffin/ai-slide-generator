@@ -81,7 +81,7 @@ MODEL_PAYLOAD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "build_reviewer": _SLIDE_REVIEW_KEYS | {"deck_brief"},
-        "fixer": _FIXER_KEYS | {"corrective_instruction"},
+        "fixer": _FIXER_KEYS | {"corrective_instruction", "resolved_data"},
         "fix_reviewer": _FIXER_KEYS
         | {"change_summary", "original_html", "original_scripts"},
         "deck_reviewer": frozenset(

@@ -1,0 +1,33 @@
+<section class="slide">
+  <p class="eyebrow">Typography &amp; Design Fidelity</p>
+  <h2 class="slide-title">CSS delivers pixel-perfect typography that PowerPoint cannot guarantee</h2>
+  <p class="slide-subtitle">No more "missing font" surprises when you present on a different machine</p>
+  <div class="content">
+    <div class="grid-2">
+      <div>
+        <ul class="bullets">
+          <li><strong>Web fonts load reliably</strong> — CSS <code style="font-size:var(--fs-body);background:var(--brand-core-surface);padding:2px 6px;border-radius:4px;">@font-face</code> guarantees every viewer sees the exact typeface you chose</li>
+          <li><strong>Precise kerning &amp; line-height</strong> — sub-pixel rendering, <code style="font-size:var(--fs-body);background:var(--brand-core-surface);padding:2px 6px;border-radius:4px;">letter-spacing</code>, and <code style="font-size:var(--fs-body);background:var(--brand-core-surface);padding:2px 6px;border-radius:4px;">line-height</code> are enforced by the browser engine</li>
+          <li><strong>No font-substitution problem</strong> — PowerPoint silently swaps missing fonts, breaking layout and brand consistency</li>
+          <li><strong>Font embedding bloat eliminated</strong> — .pptx files embed entire font binaries; HTML links only the weights you use</li>
+        </ul>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:var(--space-md);justify-content:center;">
+        <div class="card" style="text-align:center;padding:var(--space-lg) var(--space-md);">
+          <div class="stat-value">1,700+</div>
+          <div class="stat-label">Open-source font families available via Google Fonts</div>
+          <div style="font-size:var(--fs-caption);color:var(--brand-core-muted);margin-top:8px;">Source: Google Fonts catalog 2024</div>
+        </div>
+        <div class="card" style="display:flex;align-items:flex-start;gap:var(--space-sm);padding:var(--space-md);">
+          <span style="font-size:var(--fs-subtitle);color:var(--brand-accents-negative);font-weight:700;line-height:1.2;">✗</span>
+          <div>
+            <div style="font-weight:600;color:var(--brand-core-ink);font-size:var(--fs-body);">PowerPoint font embedding</div>
+            <div style="font-size:var(--fs-caption);color:var(--brand-core-muted);">Increases file size, still fails across OS versions, and cannot use variable fonts</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="callout">CSS gives presenters typographic control that PowerPoint simply cannot match.</div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>4</span></div>
+</section>

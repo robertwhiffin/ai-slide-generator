@@ -1,0 +1,7 @@
+{
+  "should_fail": {
+    "position": 9,
+    "html": "<section class=\"slide\">\n  <h2 class=\"slide-title\">Overview</h2>\n  <ul class=\"bullets\"><li style=\"color:#E11D48\">Filler point 0: unrelated detail that goes on and on</li></ul>\n  <div style=\"height:900px\"></div>\n</section>\n",
+    "scripts": ""
+  }
+}

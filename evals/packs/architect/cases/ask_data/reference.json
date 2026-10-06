@@ -1,0 +1,14 @@
+{
+  "intent": "ask_data",
+  "message": "I need your Q3 and Q2 revenue by region before I can build this.",
+  "deck_spec": null,
+  "data_request": {
+    "metric": "revenue",
+    "time_bound": "Q3 and Q2",
+    "grouping": "region",
+    "units": null,
+    "tool_preferences": []
+  },
+  "target_positions": [],
+  "proposed_design_contract": null
+}

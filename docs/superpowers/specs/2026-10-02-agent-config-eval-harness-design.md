@@ -244,6 +244,7 @@ These numbers are passed to the judge as facts and also drive
 Overall pass rate; pass rate per case; standard deviation across repeats; count
 of `infra_error` and `judge_error`; mean and p95 latency; mean input and output
 tokens; estimated cost per case run (tokens × `prices.yaml`).
+Pass rate = passing runs / (passing + failing runs); `infra_error` and `judge_error` runs are excluded from both numerator and denominator.
 
 ## 6. Error handling
 

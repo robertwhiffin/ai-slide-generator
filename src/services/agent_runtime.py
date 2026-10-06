@@ -650,8 +650,9 @@ class AgentRuntime:
         — so its prompt bytes equal production's for the same content.  The
         production identity log is bypassed: the run writes one
         ``agent_candidate_run`` record of its own, carrying the role, status,
-        error code and error class only.  Only the #267 test workbench may call
-        this (spec §7.1).
+        error code and error class only.  Only the #267 test workbench and the
+        offline eval harness (``evals/harness/runner.py``) may call this
+        (spec §7.1).
         """
         if agent_key not in _MODEL_DRIVEN_AGENT_KEY_SET:
             raise UnknownAgentKeyError(

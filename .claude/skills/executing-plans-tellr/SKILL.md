@@ -113,5 +113,67 @@ rulings, parked findings, **and your own corrections** — including where the l
 was wrong. Mine carried a wrong baseline attribution for seven tasks; the correction is now
 the most useful entry in it.
 
+## 9. Tier the model to the task
+
+Capability goes where a mistake is silent or expensive; speed goes where the plan has
+already removed the judgment. The reviewer-as-asset logic is unchanged — what moves down is
+the implementer, and partly the per-task reviewer.
+
+**Every task carries a `Models:` tag; an untagged task is not dispatched.** Fold the check
+into the pre-pass (§2): a plan with any untagged task is a correction, not a run. The tag
+sets two tiers; the rest derive.
+
+```
+Models: test=opus impl=haiku
+```
+
+- `test=` — writes the task's failing tests against its declared interface. **test ≥ impl,
+  always:** never write the contract with a weaker model than the thing built against it.
+  Lean Opus. A cheap test that hand-picks keys passes a broken implementation — the exact
+  defect in §1, now moved upstream, so the test author must write BEHAVIOURAL assertions
+  where gaming the test equals solving the problem.
+- `impl=` — makes the tests green. Haiku for mechanical/transcription tasks where the plan
+  gives the actual code; Sonnet where it sketches the approach but the code is real work;
+  Opus for design judgment or a frozen/pinned artifact where a quiet mistake is costly.
+- per-task reviewer = **impl + 1**, capped at Opus — a fast local gate, NOT the
+  silent-defect net. That net is the whole-branch review (§7), which stays **Opus, always**;
+  paying Opus on every per-task review buys little the final sweep won't catch.
+- fixer = the per-task reviewer itself, for a `localised` verdict (it has the context and is
+  already the right tier).
+
+**Tests and implementation are authored by different agents, in that order.** The test
+author writes the failing tests, confirms red, leaves them uncommitted. The orchestrator
+then launches a cheap implementer with exactly this brief:
+
+> "The failing tests are at `<path>`, red confirmed, uncommitted. Make them pass without
+> weakening them. If you hit something you can't resolve, or you think a test is wrong, STOP
+> and report — do not work around it and do not edit the test. A more capable model decides
+> whether the test is actually wrong."
+
+The cheap tier never authors a test, so it cannot write one that passes vacuously — the
+clean fix for the Haiku-writes-its-own-trivial-test risk. The cost moves onto the test
+author's behavioural-completeness job above.
+
+**A stop escalates straight to Opus — not step-by-step — carrying the stopped agent's
+context.** A stop means the cheap tier is out of road; a second cheap attempt is wasted
+time. "The test is wrong" from a cheap tier is a DISTRUSTED claim (§4): it is not believed
+until Opus has attempted the task and either passed it or confirmed the test wrong — the
+cheap agent never rules a test broken. Before relaunching, read the stopped agent's partial
+work (`git status`, the diff, its notes) and carry it forward; it is usually salvageable
+(§5).
+
+**The per-task reviewer emits one of three structured verdicts, never prose:**
+
+- `approved` — no changes; move on.
+- `localised` — a listed set of fixes; the reviewer applies them itself.
+- `rewrite` — structurally wrong; a fresh Opus implementer rebuilds against the (good,
+  already-written) tests. A `rewrite` also means the task's plan under-specified it —
+  re-read it against §2 before the rebuild.
+
+**The downgrade is a bet on plan quality (§2); ledger the rework rate per tier (§8).** A
+cheap implementer that stops often makes you pay escalation + review every time and loses
+the saving. Record rework rate by tier; if a tier's climbs, raise its default in the next
+plan's tags. The rate is the only evidence the tiering is paying off.
+
 Related: [[plan-review-lessons]], [[subagent-delegation-discipline]],
-[[verify-by-cause-not-count]]
+[[verify-by-cause-not-count]], [[model-tiering-for-plan-execution]]

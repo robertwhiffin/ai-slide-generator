@@ -1,0 +1,11 @@
+{
+  "outcome": "success",
+  "synthesis": "Survey A reports 8 MB typical memory usage, while Survey B reports 15 MB. There is a conflict between these measurements that needs investigation.",
+  "sources": [
+    "Survey A",
+    "Survey B"
+  ],
+  "gap": null,
+  "tried_tools": [],
+  "reason": null
+}
