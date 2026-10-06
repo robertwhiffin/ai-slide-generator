@@ -153,7 +153,7 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
         v, detail = judge_mod._verdict(judge_obj, case, structured, _render_from(outputs))
         if v == "error":
             return _skip(f"judge_error: {detail}")  # never retried, never pass/fail
-        return _fb(v == "pass", "judge verdict")
+        return _fb(v == "pass", detail or "judge verdict (no rationale given)")
 
     out = [contract]
     if agent_key in DETERMINISTIC_CATEGORY_ROLES:

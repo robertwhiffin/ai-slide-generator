@@ -452,7 +452,9 @@ def test_judge_scorer_maps_verdict(monkeypatch, verdict, expected):
     assert len(stub.calls) == 1
     assert stub.calls[0]["outputs"] == st
     assert stub.calls[0]["expectations"]["reference"] == c.reference
-    assert stub.calls[0]["expectations"]["brief_or_finding"] == c.payload["slide_spec"]
+    # I3 ruling: the builder judge gets the brief AND the sourced data.
+    assert stub.calls[0]["expectations"]["brief_or_finding"] == {
+        "slide_spec": c.payload["slide_spec"], "resolved_data": c.payload.get("resolved_data")}
     assert any(JUDGE_EP in a or k.get("model") == JUDGE_EP for a, k in built)
 
 
@@ -766,3 +768,21 @@ def test_calibrate_empty_pack_returns_no_rows_without_building_a_judge(monkeypat
 
     monkeypatch.setattr(judge_mod, "build_judge", no_build)
     assert judge_mod.calibrate("deck_reviewer") == []
+
+
+# ---- I5: the judge's own rationale reaches the stored Feedback ----
+
+@pytest.mark.parametrize("verdict", ["pass", "fail"])
+def test_judge_scorer_feedback_carries_the_judge_rationale(monkeypatch, verdict):
+    why = f"RATIONALE-SENTINEL: the candidate {verdict}s because the hand-off is missing"
+    stub = StubJudge(lambda o, e: Feedback(value=verdict, rationale=why))
+    _patch_judge(monkeypatch, stub)
+    c = _builder_case("a")
+    _patch_cases(monkeypatch, [c])
+    row = _row(c)
+    s = _scorer(mlflow_run.build_scorers("builder", judge_endpoint=JUDGE_EP), "judge")
+    st = {"position": 1, "html": "<section>C</section>", "scripts": ""}
+    fb = s.run(inputs=row["inputs"], outputs=_outputs(st, render=dataclasses.asdict(CLEAN)),
+               expectations=row["expectations"])
+    assert fb.value == verdict
+    assert fb.rationale == why

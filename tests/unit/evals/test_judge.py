@@ -346,3 +346,13 @@ def test_calibrate_verdict_case_insensitive(monkeypatch):
         monkeypatch, [_case("a")], lambda is_ref, c: "PASS" if is_ref else " Fail "
     )
     assert res[0]["trusted"] is True
+
+
+# ---- I5: _verdict returns the judge's rationale with pass/fail ----
+
+@pytest.mark.parametrize("value", ["pass", "FAIL"])
+def test_verdict_returns_the_judge_rationale(value):
+    stub = lambda **k: SimpleNamespace(value=value, rationale="WHY-SENTINEL", error=None)
+    v, detail = judge._verdict(stub, _case(), {"html": "C"})
+    assert v == value.lower()
+    assert detail == "WHY-SENTINEL"
