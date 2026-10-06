@@ -1,0 +1,4 @@
+kind: mutation
+fault: resolved_data.figures emptied; a chart would need invented numbers
+expect: {}
+design_system_active: true
