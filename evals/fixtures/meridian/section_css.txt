@@ -30,8 +30,8 @@
   --space-sm: 12px;
   --space-md: 24px;
   --space-lg: 40px;
-  --slide-pad-x: 64px;
-  --slide-pad-y: 48px;
+  --slide-pad-x: 88px;
+  --slide-pad-y: 72px;
 
   /* Shape */
   --radius-md: 12px;
