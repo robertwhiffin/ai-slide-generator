@@ -265,3 +265,17 @@ def test_judge_prompt_placeholders():
     text = (PACK_DIR / "judge_prompt.md").read_text()
     assert "{{ outputs }}" in text
     assert "{{ expectations }}" in text
+
+
+def test_judge_prompt_does_not_fail_the_clean_reference():
+    """The judge runs on every row, including `clean`, whose reference has no findings.
+
+    judge.judge_payload hands the judge only {reference, brief_or_finding, measures} (no fault text, no
+    expect), so the prompt must tell it how to treat an empty reference rather than "fail if there are
+    no findings" unconditionally, which would fail every correct reviewer on the clean case.
+    """
+    text = (PACK_DIR / "judge_prompt.md").read_text()
+    assert "reference has no findings" in text
+    assert "Fail if there are no findings" not in text
+    # Verdict first, then rationale.
+    assert "FIRST" in text and text.index("FIRST") < text.index("rationale", text.index("FIRST"))
