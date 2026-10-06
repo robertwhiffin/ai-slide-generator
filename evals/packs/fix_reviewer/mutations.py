@@ -5,6 +5,7 @@ slide) and AFTER (html), the finding the fixer was given, and the fixer's own ch
 """
 import copy
 import json
+import pathlib
 
 import yaml
 
@@ -120,8 +121,8 @@ def _out(verdict, findings):
     return {"slide_index": POS, "verdict": verdict, "findings": findings}
 
 
-def _write(cid, kind, fault, expect, payload, reference, should_fail):
-    d = CASES_DIR / cid
+def _write(out, cid, kind, fault, expect, payload, reference, should_fail):
+    d = out / cid
     d.mkdir(parents=True, exist_ok=True)
     (d / "case.yaml").write_text(yaml.safe_dump({
         "kind": kind, "fault": fault, "expect": expect, "design_system_active": True,
@@ -131,7 +132,9 @@ def _write(cid, kind, fault, expect, payload, reference, should_fail):
     _dump(d / "calibration.json", {"should_fail": should_fail})
 
 
-def generate():
+def generate(out_dir: pathlib.Path | None = None):
+    """Write the cases into ``out_dir`` (default: the committed ``CASES_DIR``)."""
+    out = pathlib.Path(out_dir) if out_dir is not None else CASES_DIR
     gold = case.gold_slide(POS)
     overflowing = br._mutate_overflow(gold)
     low_contrast = fx._mutate_contrast(gold)
@@ -146,7 +149,7 @@ def generate():
     ]
     for cid, fcrit, original, _note, bad_crit, bad_msg in accepts:
         _write(
-            cid, "positive", "", {"criteria": [], "positions": [], "verdict": "fixed"},
+            out, cid, "positive", "", {"criteria": [], "positions": [], "verdict": "fixed"},
             _payload(fcrit, original, gold, HONEST_SUMMARIES[fcrit]),
             _out("fixed", []),
             _out("surfaced", [_finding(bad_crit, POS, bad_msg)]),
@@ -162,7 +165,7 @@ def generate():
     ]
     for cid, crit, fcrit, html, fault in rejects:
         _write(
-            cid, "mutation", fault,
+            out, cid, "mutation", fault,
             {"criteria": [crit], "positions": [POS], "verdict": "surfaced"},
             _payload(fcrit, overflowing, html, OVERFLOW_SUMMARY),
             _out("surfaced", [_finding(crit, POS, MESSAGES[cid])]),

@@ -1,6 +1,7 @@
 """Generate the build_reviewer pack's cases from the Meridian gold deck. Idempotent."""
 import copy
 import json
+import pathlib
 
 import yaml
 
@@ -101,8 +102,8 @@ def _mutate_source_contradiction(html):
     return html.replace("98%", WRONG_PCT)
 
 
-def _write(cid, kind, fault, expect, payload, reference, should_fail):
-    d = CASES_DIR / cid
+def _write(out, cid, kind, fault, expect, payload, reference, should_fail):
+    d = out / cid
     d.mkdir(parents=True, exist_ok=True)
     (d / "case.yaml").write_text(yaml.safe_dump({
         "kind": kind, "fault": fault, "expect": expect, "design_system_active": True,
@@ -116,11 +117,13 @@ def _out(position, verdict, findings):
     return {"slide_index": position, "verdict": verdict, "findings": findings}
 
 
-def generate():
+def generate(out_dir: pathlib.Path | None = None):
+    """Write the cases into ``out_dir`` (default: the committed ``CASES_DIR``)."""
+    out = pathlib.Path(out_dir) if out_dir is not None else CASES_DIR
     # clean: the gold slide 1, nothing to flag; the wrong answer invents an overflow.
     html = case.gold_slide(1)
     _write(
-        "clean", "positive", "", {"criteria": [], "positions": []},
+        out, "clean", "positive", "", {"criteria": [], "positions": []},
         _payload(1, html, case.gold_scripts(1)),
         _out(1, "clean", []),
         _out(1, "surfaced", [_finding(
@@ -141,7 +144,7 @@ def generate():
     for cid, criterion, pos, mutate, fault in mutations:
         bad_html = mutate(case.gold_slide(pos))
         _write(
-            cid, "mutation", fault, {"criteria": [criterion], "positions": [pos]},
+            out, cid, "mutation", fault, {"criteria": [criterion], "positions": [pos]},
             _payload(pos, bad_html, case.gold_scripts(pos)),
             _out(pos, "surfaced", [_finding(criterion, pos, MESSAGES[cid])]),
             _out(pos, "clean", []),

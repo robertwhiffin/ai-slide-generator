@@ -1,6 +1,7 @@
 """Generate the builder pack's cases from the Meridian gold deck. Idempotent."""
 import copy
 import json
+import pathlib
 
 import yaml
 
@@ -120,8 +121,8 @@ def _without_figures(rd):
     return out
 
 
-def _write(cid, kind, fault, payload, reference, should_fail):
-    d = CASES_DIR / cid
+def _write(out, cid, kind, fault, payload, reference, should_fail):
+    d = out / cid
     d.mkdir(parents=True, exist_ok=True)
     (d / "case.yaml").write_text(yaml.safe_dump({
         "kind": kind, "fault": fault, "expect": {}, "design_system_active": True,
@@ -131,20 +132,22 @@ def _write(cid, kind, fault, payload, reference, should_fail):
     _dump(d / "calibration.json", {"should_fail": should_fail})
 
 
-def generate():
+def generate(out_dir: pathlib.Path | None = None):
+    """Write the cases into ``out_dir`` (default: the committed ``CASES_DIR``)."""
+    out = pathlib.Path(out_dir) if out_dir is not None else CASES_DIR
     slides = case.gold_deck_spec()["slides"]
     gold_rd = _gold_resolved_data()
 
     for cid, pos in (("gold_bullets", 1), ("gold_chart", 3), ("gold_stats", 9)):
         ref = {"position": pos, "html": case.gold_slide(pos), "scripts": case.gold_scripts(pos)}
         bad = {"position": pos, "html": _bad_slide(pos), "scripts": ""}
-        _write(cid, "positive", "", _payload(slides[pos], gold_rd), ref, bad)
+        _write(out, cid, "positive", "", _payload(slides[pos], gold_rd), ref, bad)
 
     # too_much_content: the position-1 brief demanding ~12 dense points.
     s1 = dict(slides[1])
     s1["content_brief"] = s1["content_brief"] + TOO_MUCH_BRIEF_EXTRA
     _write(
-        "too_much_content", "mutation",
+        out, "too_much_content", "mutation",
         "content_brief demands 12 dense points; a faithful build overflows the frame",
         _payload(s1, gold_rd),
         {"position": 1, "html": CONDENSED_HTML, "scripts": ""},
@@ -154,7 +157,7 @@ def generate():
     # chart_no_data: position-3 brief, resolved_data emptied.
     fab = case.gold_slide(3)
     _write(
-        "chart_no_data", "mutation",
+        out, "chart_no_data", "mutation",
         "resolved_data.figures emptied; a chart would need invented numbers",
         _payload(slides[3], _without_figures(gold_rd)),
         {"position": 3, "html": CHART_NO_DATA_HTML, "scripts": ""},
