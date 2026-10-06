@@ -2493,6 +2493,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         "slide_spec": payload.get("slide_spec"),
         "resolved_style": payload.get("resolved_style"),
         "section_css": payload.get("section_css"),
+        "resolved_data": payload.get("resolved_data"),
     }
     design_system_active = bool(
         payload.get("design_system_active")
