@@ -67,7 +67,10 @@ def load_calibration(agent_key: str, case_id: str) -> dict | None:
 
 
 def _verdict(judge, case: Case, candidate, measures=None) -> tuple[str, str]:
-    """Return ("pass"|"fail"|"error", detail). Errors are never pass or fail."""
+    """Return ("pass"|"fail"|"error", detail). Errors are never pass or fail.
+
+    For pass/fail, ``detail`` is the judge's own rationale; for an error it names the error.
+    """
     payload = judge_payload(case, types.SimpleNamespace(structured=candidate), measures)
     payload.pop("candidate")
     expectations = payload
@@ -80,7 +83,7 @@ def _verdict(judge, case: Case, candidate, measures=None) -> tuple[str, str]:
     value = getattr(fb, "value", None)
     v = value.strip().lower() if isinstance(value, str) else None
     if v in ("pass", "fail"):
-        return v, ""
+        return v, str(getattr(fb, "rationale", None) or "")
     return "error", f"unrecognised judge value {value!r}"
 
 
