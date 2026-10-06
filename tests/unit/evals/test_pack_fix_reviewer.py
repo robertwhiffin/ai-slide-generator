@@ -184,6 +184,10 @@ def test_fault_left_html_still_overflows_but_less():
     assert after.rendered and before.rendered
     assert after.overflow_px > 0
     assert after.overflow_px < before.overflow_px
+    # Single-fault: only overflow is planted, so no other objective render fault may appear.
+    assert after.off_palette == ()
+    assert after.min_contrast >= 4.5
+    assert after.console_errors == ()
 
 
 def test_content_broken_html_is_clean_but_changes_meaning():
@@ -201,6 +205,10 @@ def test_restyle_html_fixes_overflow_but_is_off_palette():
     assert m.rendered
     assert m.overflow_px == 0
     assert m.off_palette, "restyle must introduce an off-palette colour"
+    # Single-fault: the recolour must not also drop contrast, or contrast_failure becomes an
+    # unplanted objective finding that a correct reviewer raises and the scorer then FAILS.
+    assert m.min_contrast >= 4.5, f"restyle also trips contrast_failure ({m.min_contrast:.2f})"
+    assert m.console_errors == ()
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
