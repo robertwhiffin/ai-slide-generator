@@ -281,3 +281,47 @@ def test_calibrate_builds_judge_for_agent_with_model(monkeypatch):
     args, kwargs = bj.call_args
     assert "fixer" in args or kwargs.get("agent_key") == "fixer"
     assert kwargs.get("model", args[1] if len(args) > 1 else None) == "other-endpoint"
+
+
+# ---- judge errors are neither pass nor fail (review addition) ---------------
+
+def test_calibrate_judge_value_none_is_error_not_fail(monkeypatch):
+    # A Feedback with value=None (judge error) must not count as "fail" on the
+    # should_fail candidate, and the reason must name a judge error.
+    res, _ = _run_calibrate(
+        monkeypatch, [_case("a")], lambda is_ref, c: "pass" if is_ref else None
+    )
+    assert res[0]["mutation_failed"] is False
+    assert res[0]["trusted"] is False
+    assert "error" in res[0]["reason"].lower()
+
+
+def test_calibrate_judge_raising_is_untrusted_not_crashing(monkeypatch):
+    def verdict(is_ref, cand):
+        if not is_ref:
+            raise RuntimeError("endpoint 503")
+        return "pass"
+    res, _ = _run_calibrate(monkeypatch, [_case("a"), _case("b")], verdict)
+    assert [r["case_id"] for r in res] == ["a", "b"]
+    for r in res:
+        assert r["reference_passed"] is True
+        assert r["mutation_failed"] is False
+        assert r["trusted"] is False
+        assert "error" in r["reason"].lower()
+
+
+def test_calibrate_reference_error_reason_is_not_judge_failed(monkeypatch):
+    res, _ = _run_calibrate(
+        monkeypatch, [_case("a")], lambda is_ref, c: None if is_ref else "fail"
+    )
+    assert res[0]["reference_passed"] is False
+    assert res[0]["trusted"] is False
+    assert "error" in res[0]["reason"].lower()
+    assert "judge failed the reference" not in res[0]["reason"]
+
+
+def test_calibrate_verdict_case_insensitive(monkeypatch):
+    res, _ = _run_calibrate(
+        monkeypatch, [_case("a")], lambda is_ref, c: "PASS" if is_ref else " Fail "
+    )
+    assert res[0]["trusted"] is True
