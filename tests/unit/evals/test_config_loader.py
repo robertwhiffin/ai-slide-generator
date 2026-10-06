@@ -33,3 +33,39 @@ def test_unknown_agent_key_is_rejected_by_field_name(tmp_path):
     with pytest.raises(config.ConfigError) as e:
         config.load_config(p)
     assert "agent_key" in str(e.value)
+
+
+# ---- I6: bad config is rejected, naming the field ----
+
+def _load(tmp_path, body):
+    p = tmp_path / "c.yaml"
+    p.write_text("agent_key: builder\nname: x\n" + body)
+    return config.load_config(p)
+
+
+def test_typod_key_is_rejected_naming_the_key(tmp_path):
+    with pytest.raises(config.ConfigError) as e:
+        _load(tmp_path, "temprature: 0.2\n")
+    assert "temprature" in str(e.value)
+
+
+def test_base_other_than_v1_is_rejected(tmp_path):
+    with pytest.raises(config.ConfigError) as e:
+        _load(tmp_path, "base: v2\n")
+    assert "base" in str(e.value) and "v2" in str(e.value)
+
+
+def test_base_v1_is_accepted(tmp_path):
+    assert _load(tmp_path, "base: v1\n").content == config.v1_baseline("builder").content
+
+
+def test_out_of_range_max_tokens_is_rejected_naming_the_field(tmp_path):
+    with pytest.raises(config.ConfigError) as e:
+        _load(tmp_path, "max_tokens: -5\n")
+    assert "max_tokens" in str(e.value)
+
+
+def test_out_of_range_temperature_is_rejected_naming_the_field(tmp_path):
+    with pytest.raises(config.ConfigError) as e:
+        _load(tmp_path, "temperature: 9\n")
+    assert "temperature" in str(e.value)
