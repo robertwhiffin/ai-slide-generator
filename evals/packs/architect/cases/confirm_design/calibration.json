@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "Restyling the slides in the Acme design system now.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [
+      0
+    ],
+    "proposed_design_contract": null
+  }
+}
