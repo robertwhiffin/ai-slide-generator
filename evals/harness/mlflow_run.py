@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import os
+import pathlib
 import statistics
+import subprocess
 from collections import defaultdict
 from typing import Callable
 
@@ -32,6 +35,51 @@ class NoCasesError(ValueError):
 
 def default_tracking_uri() -> str:
     return f"sqlite:///{EVALS_DIR.parent / 'mlflow.db'}"
+
+
+# --------------------------------------------------------------------------- run identity
+
+def cases_digest(agent_key: str, root: pathlib.Path | None = None) -> str:
+    """sha256 over the agent's committed ``cases/`` tree: each file's relative path and bytes, in
+    sorted relative-path order. Runs are comparable only when their ``cases_digest`` tags match."""
+    base = pathlib.Path(root) if root is not None else PACKS_DIR / agent_key / "cases"
+    h = hashlib.sha256()
+    files = sorted((p.relative_to(base).as_posix(), p) for p in base.rglob("*") if p.is_file())
+    for rel, path in files:
+        h.update(rel.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def git_sha() -> str:
+    """``git rev-parse HEAD`` of the repo, or "unknown"."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=EVALS_DIR.parent,
+                             capture_output=True, text=True, check=True, timeout=10)
+        return out.stdout.strip() or "unknown"
+    except Exception:  # noqa: BLE001 - no git, not a checkout, ...
+        return "unknown"
+
+
+def mark_superseded(tracking_uri: str, experiment_name: str, reason: str) -> int:
+    """Tag every existing run in ``experiment_name`` superseded=true with ``reason``; return the count."""
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=tracking_uri)
+    exp = client.get_experiment_by_name(experiment_name)
+    if exp is None:
+        return 0
+    n = 0
+    token = None
+    while True:
+        page = client.search_runs([exp.experiment_id], run_view_type=mlflow.entities.ViewType.ALL,
+                                  max_results=1000, page_token=token)
+        for run in page:
+            client.set_tag(run.info.run_id, "superseded", "true")
+            client.set_tag(run.info.run_id, "superseded_reason", reason)
+            n += 1
+        token = page.token
+        if not token:
+            return n
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -208,6 +256,8 @@ def run_sweep(
             "judge_endpoint": judge_endpoint,
             "repeats": str(repeats),
             "case_filter": ",".join(case_filter) if case_filter else "all",
+            "cases_digest": cases_digest(agent_key),
+            "git_sha": git_sha(),
         })
         result = mlflow.genai.evaluate(data=data, scorers=scorers, predict_fn=predict_fn)
         df = result.result_df
