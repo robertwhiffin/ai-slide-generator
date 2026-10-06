@@ -11,13 +11,13 @@ from evals.harness import case
 from evals.harness.scorers import expected_category_score
 
 AGENT = "data_analyst"
-CASE_IDS = ["figures_inline", "two_sources", "missing_data", "needs_tool", "conflicting_figures"]
-MUTATIONS = ["missing_data", "needs_tool", "conflicting_figures"]
+CASE_IDS = ["figures_inline", "two_sources", "unsourced_public_stat", "needs_tool", "conflicting_figures"]
+MUTATIONS = ["unsourced_public_stat", "needs_tool", "conflicting_figures"]
 POSITIVES = ["figures_inline", "two_sources"]
 EXPECT = {
     "figures_inline": {"outcome": "success"},
     "two_sources": {"outcome": "success"},
-    "missing_data": {"outcome": "missing_data"},
+    "unsourced_public_stat": {"outcome": "no_tool"},
     "needs_tool": {"outcome": "no_tool"},
     "conflicting_figures": {"outcome": "success"},
 }
@@ -102,8 +102,8 @@ def test_figures_appear_verbatim_in_the_message(cid):
         assert fig in msg, f"{fig!r} missing from {cid} message"
 
 
-def test_missing_data_message_asks_for_figures_it_does_not_contain():
-    msg = _msg("missing_data")
+def test_unsourced_public_stat_message_asks_for_figures_it_does_not_contain():
+    msg = _msg("unsourced_public_stat")
     assert "Reveal.js" in msg and "2023" in msg
     assert "monthly active users" in msg.lower()
     assert not any(ch.isdigit() for ch in msg.replace("2023", ""))
@@ -137,6 +137,9 @@ def test_success_references_have_synthesis_and_sources(cid):
 def test_figures_inline_reference_uses_the_stated_figure():
     ref = case.load_case(AGENT, "figures_inline").reference
     assert "98%" in ref["synthesis"]
+    # One source -> pass it through verbatim: the request's own wording, not a paraphrase.
+    assert ref["synthesis"] in _msg("figures_inline")
+    assert ref["sources"] == ["StatCounter"]
 
 
 def test_two_sources_reference_cites_both():
@@ -154,11 +157,24 @@ def test_conflicting_reference_flags_the_conflict():
     assert any(w in syn.lower() for w in ("conflict", "disagree", "differ"))
 
 
-def test_missing_data_reference_names_the_gap():
-    ref = case.load_case(AGENT, "missing_data").reference
-    assert ref["outcome"] == "missing_data"
-    assert ref["gap"] and ref["gap"].strip()
+def test_unsourced_public_stat_reference_is_no_tool_with_a_reason():
+    # The graph binds the analyst zero tools, so a public statistic it cannot fetch is
+    # "No applicable tool" (no_tool + reason), never missing_data (unreachable here).
+    ref = case.load_case(AGENT, "unsourced_public_stat").reference
+    assert ref["outcome"] == "no_tool"
+    assert ref["reason"] and ref["reason"].strip()
+    assert ref["tried_tools"] == []
     assert not ref.get("synthesis")
+
+
+def test_unsourced_public_stat_should_fail_invents_a_number():
+    # The failure this case tests is hallucination: a success carrying a figure that the
+    # request never stated (a digit absent from the message).
+    msg = _msg("unsourced_public_stat")
+    bad = _cal("unsourced_public_stat")["should_fail"]
+    assert bad["outcome"] == "success"
+    invented = {ch for ch in bad["synthesis"] if ch.isdigit()} - {ch for ch in msg if ch.isdigit()}
+    assert invented, f"should_fail synthesis invents no digit absent from the request: {bad['synthesis']!r}"
 
 
 def test_needs_tool_reference_claims_no_data():
@@ -175,7 +191,7 @@ def test_calibration_should_fail_is_valid_and_different(cid):
     assert bad != c.reference
 
 
-@pytest.mark.parametrize("cid", ["missing_data", "needs_tool"])
+@pytest.mark.parametrize("cid", ["unsourced_public_stat", "needs_tool"])
 def test_mutation_calibration_has_the_wrong_outcome(cid):
     c = case.load_case(AGENT, cid)
     bad = _cal(cid)["should_fail"]
