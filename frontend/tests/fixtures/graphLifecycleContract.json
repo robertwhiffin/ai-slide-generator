@@ -1,6 +1,6 @@
 {
   "contract_version": 1,
-  "recorded_at_commit": "b71473cb846a4943e3ccf0bf77bb9e4e74a25eb5",
+  "recorded_at_commit": "ec28bd95870944028160942b7cabb5d6d1ed4586",
   "exchanges": [
     {
       "id": "S01-workbench",
@@ -16,8 +16,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-02T12:58:05.582970+01:00",
-          "effective_from": "2026-10-02T12:58:05.582970+01:00",
+          "published_at": "2026-10-06T14:44:57.180972+01:00",
+          "effective_from": "2026-10-06T14:44:57.180972+01:00",
           "effective_to": null
         },
         "draft": {
@@ -26,7 +26,7 @@
           "base_version_number": 1,
           "lock_version": 0,
           "updated_by": "system:bootstrap",
-          "updated_at": "2026-10-02T12:58:05.582970+01:00"
+          "updated_at": "2026-10-06T14:44:57.180972+01:00"
         },
         "nodes": [
           {
@@ -1183,9 +1183,9 @@
             "changed": false,
             "published": {
               "revision_id": 5,
-              "content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -1316,9 +1316,9 @@
             },
             "draft": {
               "base_revision_id": 5,
-              "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -1947,8 +1947,8 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:05.717025",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:57.353787",
         "graph_version": 1,
         "active_graph_version": 1,
         "is_older_than_active": false
@@ -1968,8 +1968,8 @@
         "session_id": "control-legacy",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:05.723274",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:57.360834",
         "graph_version": null,
         "active_graph_version": 1,
         "is_older_than_active": false
@@ -1991,8 +1991,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-02T12:58:05.582970+01:00",
-          "effective_from": "2026-10-02T12:58:05.582970+01:00",
+          "published_at": "2026-10-06T14:44:57.180972+01:00",
+          "effective_from": "2026-10-06T14:44:57.180972+01:00",
           "effective_to": null
         },
         "draft": {
@@ -2001,7 +2001,7 @@
           "base_version_number": 1,
           "lock_version": 0,
           "updated_by": "system:bootstrap",
-          "updated_at": "2026-10-02T12:58:05.582970+01:00"
+          "updated_at": "2026-10-06T14:44:57.180972+01:00"
         },
         "nodes": [
           {
@@ -3158,9 +3158,9 @@
             "changed": false,
             "published": {
               "revision_id": 5,
-              "content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -3291,9 +3291,9 @@
             },
             "draft": {
               "base_revision_id": 5,
-              "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -3933,7 +3933,7 @@
           "base_version_number": 1,
           "lock_version": 1,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.791536+01:00"
+          "updated_at": "2026-10-06T14:44:57.450968+01:00"
         },
         "definition": {
           "base_revision_id": 1,
@@ -4183,7 +4183,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+            "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -4270,7 +4270,7 @@
           "base_version_number": 1,
           "lock_version": 2,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.813065+01:00"
+          "updated_at": "2026-10-06T14:44:57.485083+01:00"
         },
         "definition": {
           "base_revision_id": 3,
@@ -4494,7 +4494,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+            "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -4564,7 +4564,7 @@
       "request": {
         "lock_version": 0,
         "candidate": {
-          "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary stale",
+          "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary stale",
           "model": {
             "endpoint_name": "databricks-claude-opus-4-6",
             "temperature": 0.7,
@@ -4579,7 +4579,7 @@
         "expected_lock_version": 0,
         "current_lock_version": 2,
         "client_candidate": {
-          "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary stale",
+          "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary stale",
           "model": {
             "endpoint_name": "databricks-claude-opus-4-6",
             "temperature": 0.7,
@@ -4596,7 +4596,7 @@
             "base_version_number": 1,
             "lock_version": 2,
             "updated_by": "lifecycle-admin@example.com",
-            "updated_at": "2026-10-02T12:58:05.813065+01:00"
+            "updated_at": "2026-10-06T14:44:57.485083+01:00"
           },
           "definitions": {
             "architect": {
@@ -5153,9 +5153,9 @@
             },
             "fixer": {
               "base_revision_id": 5,
-              "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -5536,8 +5536,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-02T12:58:05.582970+01:00",
-          "effective_from": "2026-10-02T12:58:05.582970+01:00",
+          "published_at": "2026-10-06T14:44:57.180972+01:00",
+          "effective_from": "2026-10-06T14:44:57.180972+01:00",
           "effective_to": null
         },
         "draft": {
@@ -5546,7 +5546,7 @@
           "base_version_number": 1,
           "lock_version": 2,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.813065+01:00"
+          "updated_at": "2026-10-06T14:44:57.485083+01:00"
         },
         "nodes": [
           {
@@ -6703,9 +6703,9 @@
             "changed": false,
             "published": {
               "revision_id": 5,
-              "content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -6836,9 +6836,9 @@
             },
             "draft": {
               "base_revision_id": 5,
-              "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -7469,7 +7469,7 @@
           "base_version_number": 1,
           "lock_version": 3,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.855433+01:00"
+          "updated_at": "2026-10-06T14:44:57.538519+01:00"
         },
         "definition": {
           "base_revision_id": 3,
@@ -7715,7 +7715,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+            "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -7808,7 +7808,7 @@
           "base_version_number": 1,
           "lock_version": 4,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.867626+01:00"
+          "updated_at": "2026-10-06T14:44:57.556056+01:00"
         },
         "definition": {
           "base_revision_id": 3,
@@ -8056,7 +8056,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+            "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -8134,7 +8134,7 @@
           "base_version_number": 1,
           "lock_version": 5,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.881589+01:00"
+          "updated_at": "2026-10-06T14:44:57.573873+01:00"
         },
         "definition": {
           "base_revision_id": 1,
@@ -8391,7 +8391,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+            "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -8490,7 +8490,7 @@
           "base_version_number": 1,
           "lock_version": 6,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.899709+01:00"
+          "updated_at": "2026-10-06T14:44:57.593296+01:00"
         },
         "definition": {
           "base_revision_id": 1,
@@ -8755,7 +8755,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+            "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -8857,8 +8857,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-02T12:58:05.582970+01:00",
-          "effective_from": "2026-10-02T12:58:05.582970+01:00",
+          "published_at": "2026-10-06T14:44:57.180972+01:00",
+          "effective_from": "2026-10-06T14:44:57.180972+01:00",
           "effective_to": null
         },
         "draft": {
@@ -8867,7 +8867,7 @@
           "base_version_number": 1,
           "lock_version": 6,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.899709+01:00"
+          "updated_at": "2026-10-06T14:44:57.593296+01:00"
         },
         "nodes": [
           {
@@ -10062,9 +10062,9 @@
             "changed": false,
             "published": {
               "revision_id": 5,
-              "content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -10195,9 +10195,9 @@
             },
             "draft": {
               "base_revision_id": 5,
-              "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -10820,7 +10820,7 @@
       "request": {
         "lock_version": 6,
         "candidate": {
-          "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+          "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
           "model": {
             "endpoint_name": "system.ai.claude-sonnet-4-5",
             "temperature": 0.7,
@@ -10837,13 +10837,13 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.936352+01:00"
+          "updated_at": "2026-10-06T14:44:57.629468+01:00"
         },
         "definition": {
           "base_revision_id": 5,
-          "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+          "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
           "definition_version": 2,
-          "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+          "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
           "model": {
             "endpoint_name": "system.ai.claude-sonnet-4-5",
             "temperature": 0.7,
@@ -11075,7 +11075,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": false,
             "missing_required_case": false,
@@ -11152,8 +11152,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-02T12:58:05.582970+01:00",
-          "effective_from": "2026-10-02T12:58:05.582970+01:00",
+          "published_at": "2026-10-06T14:44:57.180972+01:00",
+          "effective_from": "2026-10-06T14:44:57.180972+01:00",
           "effective_to": null
         },
         "draft": {
@@ -11162,7 +11162,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.936352+01:00"
+          "updated_at": "2026-10-06T14:44:57.629468+01:00"
         },
         "nodes": [
           {
@@ -12357,9 +12357,9 @@
             "changed": true,
             "published": {
               "revision_id": 5,
-              "content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -12490,9 +12490,9 @@
             },
             "draft": {
               "base_revision_id": 5,
-              "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+              "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "system.ai.claude-sonnet-4-5",
                 "temperature": 0.7,
@@ -13144,9 +13144,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-10-02T12:58:05.582970+01:00",
+            "created_at": "2026-10-06T14:44:57.180972+01:00",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-10-02T12:58:05.582970+01:00",
+            "updated_at": "2026-10-06T14:44:57.180972+01:00",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13231,11 +13231,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.0397910043830052,
+        "latency_ms": 0.03766699228435755,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-02T12:58:05.976308+01:00",
+        "run_at": "2026-10-06T14:44:57.673137+01:00",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -13322,11 +13322,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.0397910043830052,
+            "latency_ms": 0.03766699228435755,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-02T12:58:05.976308+01:00",
+            "run_at": "2026-10-06T14:44:57.673137+01:00",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -13437,7 +13437,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": false,
             "missing_required_case": false,
@@ -13547,9 +13547,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-10-02T12:58:05.582970+01:00",
+            "created_at": "2026-10-06T14:44:57.180972+01:00",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-10-02T12:58:05.582970+01:00",
+            "updated_at": "2026-10-06T14:44:57.180972+01:00",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13647,11 +13647,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.02750000567175448,
+        "latency_ms": 0.031499977922067046,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-02T12:58:06.003272+01:00",
+        "run_at": "2026-10-06T14:44:57.703546+01:00",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -13751,11 +13751,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.02750000567175448,
+            "latency_ms": 0.031499977922067046,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-02T12:58:06.003272+01:00",
+            "run_at": "2026-10-06T14:44:57.703546+01:00",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -13866,7 +13866,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": false,
             "missing_required_case": false,
@@ -13958,15 +13958,26 @@
                 "position": 1
               },
               "section_css": ".slide { width: 1280px; height: 720px; }",
+              "resolved_data": {
+                "gaps": [],
+                "figures": [
+                  {
+                    "key": "q3_revenue",
+                    "value": "15",
+                    "source": "Synthetic quarterly revenue"
+                  }
+                ],
+                "synthesis": "Synthetic revenue grew from 10 to 15."
+              },
               "resolved_style": "Synthetic demo style"
             },
             "assembly_context": {
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-10-02T12:58:05.582970+01:00",
+            "created_at": "2026-10-06T14:44:57.180972+01:00",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-10-02T12:58:05.582970+01:00",
+            "updated_at": "2026-10-06T14:44:57.180972+01:00",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13989,7 +14000,7 @@
         "test_case_id": 5,
         "test_case_version": 1,
         "agent_key": "fixer",
-        "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+        "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
         "compared_release_id": 1,
         "compared_definition_revision_id": 5,
         "synthetic_payload": {
@@ -14006,6 +14017,17 @@
             "position": 1
           },
           "section_css": ".slide { width: 1280px; height: 720px; }",
+          "resolved_data": {
+            "gaps": [],
+            "figures": [
+              {
+                "key": "q3_revenue",
+                "value": "15",
+                "source": "Synthetic quarterly revenue"
+              }
+            ],
+            "synthesis": "Synthetic revenue grew from 10 to 15."
+          },
           "resolved_style": "Synthetic demo style"
         },
         "model_payload": {
@@ -14022,9 +14044,20 @@
             "position": 1
           },
           "section_css": ".slide { width: 1280px; height: 720px; }",
+          "resolved_data": {
+            "gaps": [],
+            "figures": [
+              {
+                "key": "q3_revenue",
+                "value": "15",
+                "source": "Synthetic quarterly revenue"
+              }
+            ],
+            "synthesis": "Synthetic revenue grew from 10 to 15."
+          },
           "resolved_style": "Synthetic demo style"
         },
-        "assembled_prompt": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary\n\nSLIDE FRAME CONSTRAINTS:\n- Every slide renders into a FIXED 1280x720px frame (16:9). The frame never grows to fit content.\n- Size each slide's root element to exactly 1280 by 720 pixels and make it clip its own overflow \u2014 do not rely on any particular class name or wrapper structure; whatever the slide's outermost element is, anything past its frame must be CLIPPED on export, never scrolled.\n- One slide per frame: fit ALL of that slide's content inside its single 1280x720 frame, with no in-slide scrolling. If content would overflow, trim it or split it across additional slides until it fits \u2014 NEVER shrink type below the BRAND TYPE SCALE to make room.\n- Safe area: keep primary content (titles, body text, charts, tables) clear of the slide edges. Left and right clearance MUST be at least 88px. Vertically, TARGET 72px of clearance from the top and bottom edges and NEVER go below 56px. Only full-bleed backgrounds or images may reach the slide edges.\n- The slide's root element carries NO outer margin: it starts at the very top-left corner of its frame. Styling the root like a floating print-preview card shifts everything past the frame edge, and the bottom of the slide gets clipped on every surface and in every export.\n- Decorative imagery (cover art, corner motifs, background illustrations) must never overlap text content: keep titles, subtitles, list items, and footers fully clear of any artwork layer.\n\n{\n  \"html\": \"<div class='slide'><h1>Synthetic roadmap title</h1></div>\",\n  \"finding\": {\n    \"message\": \"Synthetic title overflows\",\n    \"criterion\": \"content_overflow\"\n  },\n  \"scripts\": \"\",\n  \"position\": 1,\n  \"slide_spec\": {\n    \"title\": \"Synthetic roadmap\",\n    \"purpose\": \"Show three phases\",\n    \"position\": 1\n  },\n  \"section_css\": \".slide { width: 1280px; height: 720px; }\",\n  \"resolved_style\": \"Synthetic demo style\"\n}",
+        "assembled_prompt": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary\n\nSLIDE FRAME CONSTRAINTS:\n- Every slide renders into a FIXED 1280x720px frame (16:9). The frame never grows to fit content.\n- Size each slide's root element to exactly 1280 by 720 pixels and make it clip its own overflow \u2014 do not rely on any particular class name or wrapper structure; whatever the slide's outermost element is, anything past its frame must be CLIPPED on export, never scrolled.\n- One slide per frame: fit ALL of that slide's content inside its single 1280x720 frame, with no in-slide scrolling. If content would overflow, trim it or split it across additional slides until it fits \u2014 NEVER shrink type below the BRAND TYPE SCALE to make room.\n- Safe area: keep primary content (titles, body text, charts, tables) clear of the slide edges. Left and right clearance MUST be at least 88px. Vertically, TARGET 72px of clearance from the top and bottom edges and NEVER go below 56px. Only full-bleed backgrounds or images may reach the slide edges.\n- The slide's root element carries NO outer margin: it starts at the very top-left corner of its frame. Styling the root like a floating print-preview card shifts everything past the frame edge, and the bottom of the slide gets clipped on every surface and in every export.\n- Decorative imagery (cover art, corner motifs, background illustrations) must never overlap text content: keep titles, subtitles, list items, and footers fully clear of any artwork layer.\n\n{\n  \"html\": \"<div class='slide'><h1>Synthetic roadmap title</h1></div>\",\n  \"finding\": {\n    \"message\": \"Synthetic title overflows\",\n    \"criterion\": \"content_overflow\"\n  },\n  \"scripts\": \"\",\n  \"position\": 1,\n  \"slide_spec\": {\n    \"title\": \"Synthetic roadmap\",\n    \"purpose\": \"Show three phases\",\n    \"position\": 1\n  },\n  \"section_css\": \".slide { width: 1280px; height: 720px; }\",\n  \"resolved_data\": {\n    \"gaps\": [],\n    \"figures\": [\n      {\n        \"key\": \"q3_revenue\",\n        \"value\": \"15\",\n        \"source\": \"Synthetic quarterly revenue\"\n      }\n    ],\n    \"synthesis\": \"Synthetic revenue grew from 10 to 15.\"\n  },\n  \"resolved_style\": \"Synthetic demo style\"\n}",
         "execution_status": "completed",
         "error_detail": null,
         "deterministic_checks_passed": true,
@@ -14050,11 +14083,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.033333999454043806,
+        "latency_ms": 0.036209006793797016,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-02T12:58:06.025738+01:00",
+        "run_at": "2026-10-06T14:44:57.729370+01:00",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -14079,7 +14112,7 @@
             "test_case_id": 5,
             "test_case_version": 1,
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "compared_release_id": 1,
             "compared_definition_revision_id": 5,
             "synthetic_payload": {
@@ -14096,6 +14129,17 @@
                 "position": 1
               },
               "section_css": ".slide { width: 1280px; height: 720px; }",
+              "resolved_data": {
+                "gaps": [],
+                "figures": [
+                  {
+                    "key": "q3_revenue",
+                    "value": "15",
+                    "source": "Synthetic quarterly revenue"
+                  }
+                ],
+                "synthesis": "Synthetic revenue grew from 10 to 15."
+              },
               "resolved_style": "Synthetic demo style"
             },
             "model_payload": {
@@ -14112,9 +14156,20 @@
                 "position": 1
               },
               "section_css": ".slide { width: 1280px; height: 720px; }",
+              "resolved_data": {
+                "gaps": [],
+                "figures": [
+                  {
+                    "key": "q3_revenue",
+                    "value": "15",
+                    "source": "Synthetic quarterly revenue"
+                  }
+                ],
+                "synthesis": "Synthetic revenue grew from 10 to 15."
+              },
               "resolved_style": "Synthetic demo style"
             },
-            "assembled_prompt": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary\n\nSLIDE FRAME CONSTRAINTS:\n- Every slide renders into a FIXED 1280x720px frame (16:9). The frame never grows to fit content.\n- Size each slide's root element to exactly 1280 by 720 pixels and make it clip its own overflow \u2014 do not rely on any particular class name or wrapper structure; whatever the slide's outermost element is, anything past its frame must be CLIPPED on export, never scrolled.\n- One slide per frame: fit ALL of that slide's content inside its single 1280x720 frame, with no in-slide scrolling. If content would overflow, trim it or split it across additional slides until it fits \u2014 NEVER shrink type below the BRAND TYPE SCALE to make room.\n- Safe area: keep primary content (titles, body text, charts, tables) clear of the slide edges. Left and right clearance MUST be at least 88px. Vertically, TARGET 72px of clearance from the top and bottom edges and NEVER go below 56px. Only full-bleed backgrounds or images may reach the slide edges.\n- The slide's root element carries NO outer margin: it starts at the very top-left corner of its frame. Styling the root like a floating print-preview card shifts everything past the frame edge, and the bottom of the slide gets clipped on every surface and in every export.\n- Decorative imagery (cover art, corner motifs, background illustrations) must never overlap text content: keep titles, subtitles, list items, and footers fully clear of any artwork layer.\n\n{\n  \"html\": \"<div class='slide'><h1>Synthetic roadmap title</h1></div>\",\n  \"finding\": {\n    \"message\": \"Synthetic title overflows\",\n    \"criterion\": \"content_overflow\"\n  },\n  \"scripts\": \"\",\n  \"position\": 1,\n  \"slide_spec\": {\n    \"title\": \"Synthetic roadmap\",\n    \"purpose\": \"Show three phases\",\n    \"position\": 1\n  },\n  \"section_css\": \".slide { width: 1280px; height: 720px; }\",\n  \"resolved_style\": \"Synthetic demo style\"\n}",
+            "assembled_prompt": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary\n\nSLIDE FRAME CONSTRAINTS:\n- Every slide renders into a FIXED 1280x720px frame (16:9). The frame never grows to fit content.\n- Size each slide's root element to exactly 1280 by 720 pixels and make it clip its own overflow \u2014 do not rely on any particular class name or wrapper structure; whatever the slide's outermost element is, anything past its frame must be CLIPPED on export, never scrolled.\n- One slide per frame: fit ALL of that slide's content inside its single 1280x720 frame, with no in-slide scrolling. If content would overflow, trim it or split it across additional slides until it fits \u2014 NEVER shrink type below the BRAND TYPE SCALE to make room.\n- Safe area: keep primary content (titles, body text, charts, tables) clear of the slide edges. Left and right clearance MUST be at least 88px. Vertically, TARGET 72px of clearance from the top and bottom edges and NEVER go below 56px. Only full-bleed backgrounds or images may reach the slide edges.\n- The slide's root element carries NO outer margin: it starts at the very top-left corner of its frame. Styling the root like a floating print-preview card shifts everything past the frame edge, and the bottom of the slide gets clipped on every surface and in every export.\n- Decorative imagery (cover art, corner motifs, background illustrations) must never overlap text content: keep titles, subtitles, list items, and footers fully clear of any artwork layer.\n\n{\n  \"html\": \"<div class='slide'><h1>Synthetic roadmap title</h1></div>\",\n  \"finding\": {\n    \"message\": \"Synthetic title overflows\",\n    \"criterion\": \"content_overflow\"\n  },\n  \"scripts\": \"\",\n  \"position\": 1,\n  \"slide_spec\": {\n    \"title\": \"Synthetic roadmap\",\n    \"purpose\": \"Show three phases\",\n    \"position\": 1\n  },\n  \"section_css\": \".slide { width: 1280px; height: 720px; }\",\n  \"resolved_data\": {\n    \"gaps\": [],\n    \"figures\": [\n      {\n        \"key\": \"q3_revenue\",\n        \"value\": \"15\",\n        \"source\": \"Synthetic quarterly revenue\"\n      }\n    ],\n    \"synthesis\": \"Synthetic revenue grew from 10 to 15.\"\n  },\n  \"resolved_style\": \"Synthetic demo style\"\n}",
             "execution_status": "completed",
             "error_detail": null,
             "deterministic_checks_passed": true,
@@ -14140,11 +14195,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.033333999454043806,
+            "latency_ms": 0.036209006793797016,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-02T12:58:06.025738+01:00",
+            "run_at": "2026-10-06T14:44:57.729370+01:00",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -14255,7 +14310,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": false,
             "missing_required_case": false,
@@ -14408,14 +14463,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.02750000567175448,
+        "latency_ms": 0.031499977922067046,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-02T12:58:06.003272+01:00",
+        "run_at": "2026-10-06T14:44:57.703546+01:00",
         "verdict": "rejected",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-10-02T12:58:06.041834+01:00",
+        "verdict_at": "2026-10-06T14:44:57.748172+01:00",
         "verdict_notes": "Lifecycle: rerun.",
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14521,7 +14576,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": false,
             "missing_required_case": false,
@@ -14661,14 +14716,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.0397910043830052,
+        "latency_ms": 0.03766699228435755,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-02T12:58:05.976308+01:00",
+        "run_at": "2026-10-06T14:44:57.673137+01:00",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-10-02T12:58:06.090000+01:00",
+        "verdict_at": "2026-10-06T14:44:57.787144+01:00",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14773,7 +14828,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": false,
             "missing_required_case": false,
@@ -14851,7 +14906,7 @@
         "test_case_id": 5,
         "test_case_version": 1,
         "agent_key": "fixer",
-        "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+        "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
         "compared_release_id": 1,
         "compared_definition_revision_id": 5,
         "synthetic_payload": {
@@ -14868,6 +14923,17 @@
             "position": 1
           },
           "section_css": ".slide { width: 1280px; height: 720px; }",
+          "resolved_data": {
+            "gaps": [],
+            "figures": [
+              {
+                "key": "q3_revenue",
+                "value": "15",
+                "source": "Synthetic quarterly revenue"
+              }
+            ],
+            "synthesis": "Synthetic revenue grew from 10 to 15."
+          },
           "resolved_style": "Synthetic demo style"
         },
         "model_payload": {
@@ -14884,9 +14950,20 @@
             "position": 1
           },
           "section_css": ".slide { width: 1280px; height: 720px; }",
+          "resolved_data": {
+            "gaps": [],
+            "figures": [
+              {
+                "key": "q3_revenue",
+                "value": "15",
+                "source": "Synthetic quarterly revenue"
+              }
+            ],
+            "synthesis": "Synthetic revenue grew from 10 to 15."
+          },
           "resolved_style": "Synthetic demo style"
         },
-        "assembled_prompt": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary\n\nSLIDE FRAME CONSTRAINTS:\n- Every slide renders into a FIXED 1280x720px frame (16:9). The frame never grows to fit content.\n- Size each slide's root element to exactly 1280 by 720 pixels and make it clip its own overflow \u2014 do not rely on any particular class name or wrapper structure; whatever the slide's outermost element is, anything past its frame must be CLIPPED on export, never scrolled.\n- One slide per frame: fit ALL of that slide's content inside its single 1280x720 frame, with no in-slide scrolling. If content would overflow, trim it or split it across additional slides until it fits \u2014 NEVER shrink type below the BRAND TYPE SCALE to make room.\n- Safe area: keep primary content (titles, body text, charts, tables) clear of the slide edges. Left and right clearance MUST be at least 88px. Vertically, TARGET 72px of clearance from the top and bottom edges and NEVER go below 56px. Only full-bleed backgrounds or images may reach the slide edges.\n- The slide's root element carries NO outer margin: it starts at the very top-left corner of its frame. Styling the root like a floating print-preview card shifts everything past the frame edge, and the bottom of the slide gets clipped on every surface and in every export.\n- Decorative imagery (cover art, corner motifs, background illustrations) must never overlap text content: keep titles, subtitles, list items, and footers fully clear of any artwork layer.\n\n{\n  \"html\": \"<div class='slide'><h1>Synthetic roadmap title</h1></div>\",\n  \"finding\": {\n    \"message\": \"Synthetic title overflows\",\n    \"criterion\": \"content_overflow\"\n  },\n  \"scripts\": \"\",\n  \"position\": 1,\n  \"slide_spec\": {\n    \"title\": \"Synthetic roadmap\",\n    \"purpose\": \"Show three phases\",\n    \"position\": 1\n  },\n  \"section_css\": \".slide { width: 1280px; height: 720px; }\",\n  \"resolved_style\": \"Synthetic demo style\"\n}",
+        "assembled_prompt": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary\n\nSLIDE FRAME CONSTRAINTS:\n- Every slide renders into a FIXED 1280x720px frame (16:9). The frame never grows to fit content.\n- Size each slide's root element to exactly 1280 by 720 pixels and make it clip its own overflow \u2014 do not rely on any particular class name or wrapper structure; whatever the slide's outermost element is, anything past its frame must be CLIPPED on export, never scrolled.\n- One slide per frame: fit ALL of that slide's content inside its single 1280x720 frame, with no in-slide scrolling. If content would overflow, trim it or split it across additional slides until it fits \u2014 NEVER shrink type below the BRAND TYPE SCALE to make room.\n- Safe area: keep primary content (titles, body text, charts, tables) clear of the slide edges. Left and right clearance MUST be at least 88px. Vertically, TARGET 72px of clearance from the top and bottom edges and NEVER go below 56px. Only full-bleed backgrounds or images may reach the slide edges.\n- The slide's root element carries NO outer margin: it starts at the very top-left corner of its frame. Styling the root like a floating print-preview card shifts everything past the frame edge, and the bottom of the slide gets clipped on every surface and in every export.\n- Decorative imagery (cover art, corner motifs, background illustrations) must never overlap text content: keep titles, subtitles, list items, and footers fully clear of any artwork layer.\n\n{\n  \"html\": \"<div class='slide'><h1>Synthetic roadmap title</h1></div>\",\n  \"finding\": {\n    \"message\": \"Synthetic title overflows\",\n    \"criterion\": \"content_overflow\"\n  },\n  \"scripts\": \"\",\n  \"position\": 1,\n  \"slide_spec\": {\n    \"title\": \"Synthetic roadmap\",\n    \"purpose\": \"Show three phases\",\n    \"position\": 1\n  },\n  \"section_css\": \".slide { width: 1280px; height: 720px; }\",\n  \"resolved_data\": {\n    \"gaps\": [],\n    \"figures\": [\n      {\n        \"key\": \"q3_revenue\",\n        \"value\": \"15\",\n        \"source\": \"Synthetic quarterly revenue\"\n      }\n    ],\n    \"synthesis\": \"Synthetic revenue grew from 10 to 15.\"\n  },\n  \"resolved_style\": \"Synthetic demo style\"\n}",
         "execution_status": "completed",
         "error_detail": null,
         "deterministic_checks_passed": true,
@@ -14912,14 +14989,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.033333999454043806,
+        "latency_ms": 0.036209006793797016,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-02T12:58:06.025738+01:00",
+        "run_at": "2026-10-06T14:44:57.729370+01:00",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-10-02T12:58:06.103252+01:00",
+        "verdict_at": "2026-10-06T14:44:57.807256+01:00",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -15023,7 +15100,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": true,
             "missing_required_case": false,
@@ -15176,11 +15253,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.03458299033809453,
+        "latency_ms": 0.037416990380734205,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-02T12:58:06.128850+01:00",
+        "run_at": "2026-10-06T14:44:57.828000+01:00",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -15280,11 +15357,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.03458299033809453,
+            "latency_ms": 0.037416990380734205,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-02T12:58:06.128850+01:00",
+            "run_at": "2026-10-06T14:44:57.828000+01:00",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -15373,14 +15450,14 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.02750000567175448,
+            "latency_ms": 0.031499977922067046,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-02T12:58:06.003272+01:00",
+            "run_at": "2026-10-06T14:44:57.703546+01:00",
             "verdict": "rejected",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-10-02T12:58:06.041834+01:00",
+            "verdict_at": "2026-10-06T14:44:57.748172+01:00",
             "verdict_notes": "Lifecycle: rerun.",
             "candidate_is_current": null,
             "base_release_is_current": null
@@ -15486,7 +15563,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": true,
             "missing_required_case": false,
@@ -15639,14 +15716,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.03458299033809453,
+        "latency_ms": 0.037416990380734205,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-02T12:58:06.128850+01:00",
+        "run_at": "2026-10-06T14:44:57.828000+01:00",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-10-02T12:58:06.154722+01:00",
+        "verdict_at": "2026-10-06T14:44:57.844620+01:00",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -15748,7 +15825,7 @@
           },
           {
             "agent_key": "fixer",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "is_changed_from_base": true,
             "ready": true,
             "missing_required_case": false,
@@ -15824,7 +15901,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.936352+01:00"
+          "updated_at": "2026-10-06T14:44:57.629468+01:00"
         },
         "active_release": {
           "release_id": 1,
@@ -15833,8 +15910,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-02T12:58:05.582970+01:00",
-          "effective_from": "2026-10-02T12:58:05.582970+01:00",
+          "published_at": "2026-10-06T14:44:57.180972+01:00",
+          "effective_from": "2026-10-06T14:44:57.180972+01:00",
           "effective_to": null
         },
         "next_version_number": 2,
@@ -15948,8 +16025,8 @@
           {
             "agent_key": "fixer",
             "published_revision_id": 5,
-            "published_content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
-            "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "published_content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
+            "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "field_diffs": [
               {
                 "field": "model.endpoint_name",
@@ -16047,7 +16124,7 @@
             },
             {
               "agent_key": "fixer",
-              "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+              "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
               "is_changed_from_base": true,
               "ready": true,
               "missing_required_case": false,
@@ -16126,8 +16203,8 @@
         "session_id": "mid-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:06.290287",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:58.019689",
         "graph_version": 1,
         "active_graph_version": 1,
         "is_older_than_active": false
@@ -16158,7 +16235,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:05.936352+01:00"
+          "updated_at": "2026-10-06T14:44:57.629468+01:00"
         }
       },
       "response_model": "src.api.schemas.graph_releases.StalePublicationResponse",
@@ -16181,8 +16258,8 @@
           "restored_from_release_id": null,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-02T12:58:06.298617+01:00",
-          "effective_from": "2026-10-02T12:58:06.298617+01:00",
+          "published_at": "2026-10-06T14:44:58.029848+01:00",
+          "effective_from": "2026-10-06T14:44:58.029848+01:00",
           "effective_to": null
         },
         "previous_release_id": 1,
@@ -16214,7 +16291,7 @@
           },
           "fixer": {
             "agent_definition_revision_id": 10,
-            "content_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "content_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "reused": false
           },
           "fix_reviewer": {
@@ -16257,7 +16334,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:06.298617+01:00"
+          "updated_at": "2026-10-06T14:44:58.029848+01:00"
         }
       },
       "response_model": "src.api.schemas.graph_releases.PublishReleaseSuccessResponse",
@@ -16277,8 +16354,8 @@
           "restored_from_release_id": null,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-02T12:58:06.298617+01:00",
-          "effective_from": "2026-10-02T12:58:06.298617+01:00",
+          "published_at": "2026-10-06T14:44:58.029848+01:00",
+          "effective_from": "2026-10-06T14:44:58.029848+01:00",
           "effective_to": null
         },
         "draft": {
@@ -16287,7 +16364,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:06.298617+01:00"
+          "updated_at": "2026-10-06T14:44:58.029848+01:00"
         },
         "nodes": [
           {
@@ -17520,9 +17597,9 @@
             "changed": false,
             "published": {
               "revision_id": 10,
-              "content_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+              "content_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "system.ai.claude-sonnet-4-5",
                 "temperature": 0.7,
@@ -17653,9 +17730,9 @@
             },
             "draft": {
               "base_revision_id": 10,
-              "candidate_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+              "candidate_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "system.ai.claude-sonnet-4-5",
                 "temperature": 0.7,
@@ -18284,8 +18361,8 @@
         "session_id": "new-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:06.343174",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:58.073853",
         "graph_version": 2,
         "active_graph_version": 2,
         "is_older_than_active": false
@@ -18300,12 +18377,12 @@
       "request": null,
       "status": 200,
       "body": {
-        "session_id": "-C2nW0NDT_KeJp-Ptc1ZoeJ8dtdVO2EuLZkRDmcAquk",
+        "session_id": "HqXryHmElOGIPoXWSVJJuAfBN8FGzDf2b9kcAc8IbW0",
         "created_by": "contributor@example.com",
-        "title": "Session 2026-10-02 11:58",
+        "title": "Session 2026-10-06 13:44",
         "parent_session_id": "old-root",
         "is_contributor_session": true,
-        "created_at": "2026-10-02T11:58:06.365679",
+        "created_at": "2026-10-06T13:44:58.111742",
         "my_permission": "CAN_VIEW"
       },
       "response_model": null,
@@ -18318,10 +18395,10 @@
       "request": null,
       "status": 201,
       "body": {
-        "session_id": "eOXfYZRxQdS0O2eIVE6jHicJTqqQnZyKPRvSIwnCBx4",
-        "title": "Copy of Session 2026-10-02 11:58",
+        "session_id": "MelUKHsEkt1cXQz1oeX7QNJd9W1ujAA4zlr3baZSe2E",
+        "title": "Copy of Session 2026-10-06 13:44",
         "created_by": "contributor@example.com",
-        "created_at": "2026-10-02T11:58:06.374196",
+        "created_at": "2026-10-06T13:44:58.121937",
         "slide_count": 1,
         "source_session_id": "old-root"
       },
@@ -18339,9 +18416,9 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:05.717025",
-        "last_activity": "2026-10-02T11:58:05.758979",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:57.353787",
+        "last_activity": "2026-10-06T13:44:57.398768",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -18363,7 +18440,7 @@
             "role": "user",
             "content": "USE AGENT MODE build the lifecycle deck",
             "message_type": null,
-            "created_at": "2026-10-02T11:58:05.729031",
+            "created_at": "2026-10-06T13:44:57.365510",
             "metadata": null
           }
         ],
@@ -18381,17 +18458,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-10-02T11:58:05.752925Z",
+              "created_at": "2026-10-06T13:44:57.390917Z",
               "modified_by": null,
-              "modified_at": "2026-10-02T11:58:05.752925Z",
+              "modified_at": "2026-10-06T13:44:57.390917Z",
               "content_hash": "0861ce3c3874c657",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-10-02T11:58:05.738594Z",
+          "created_at": "2026-10-06T13:44:57.372524Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-10-02T11:58:05.753489Z",
+          "modified_at": "2026-10-06T13:44:57.391600Z",
           "version": 1,
           "deck_spec": null,
           "findings": [],
@@ -18413,9 +18490,9 @@
         "session_id": "mid-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:06.290287",
-        "last_activity": "2026-10-02T11:58:06.290288",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:58.019689",
+        "last_activity": "2026-10-06T13:44:58.019690",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -18441,17 +18518,17 @@
     {
       "id": "S12-get-contributor",
       "method": "GET",
-      "path": "/api/sessions/-C2nW0NDT_KeJp-Ptc1ZoeJ8dtdVO2EuLZkRDmcAquk",
+      "path": "/api/sessions/HqXryHmElOGIPoXWSVJJuAfBN8FGzDf2b9kcAc8IbW0",
       "request": null,
       "status": 200,
       "body": {
         "id": 5,
-        "session_id": "-C2nW0NDT_KeJp-Ptc1ZoeJ8dtdVO2EuLZkRDmcAquk",
+        "session_id": "HqXryHmElOGIPoXWSVJJuAfBN8FGzDf2b9kcAc8IbW0",
         "user_id": null,
         "created_by": "contributor@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:06.365679",
-        "last_activity": "2026-10-02T11:58:06.365680",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:58.111742",
+        "last_activity": "2026-10-06T13:44:58.111744",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -18482,17 +18559,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-10-02T11:58:05.752925Z",
+              "created_at": "2026-10-06T13:44:57.390917Z",
               "modified_by": null,
-              "modified_at": "2026-10-02T11:58:05.752925Z",
+              "modified_at": "2026-10-06T13:44:57.390917Z",
               "content_hash": "0861ce3c3874c657",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-10-02T11:58:05.738594Z",
+          "created_at": "2026-10-06T13:44:57.372524Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-10-02T11:58:05.753489Z",
+          "modified_at": "2026-10-06T13:44:57.391600Z",
           "version": 1,
           "deck_spec": null,
           "findings": [],
@@ -18517,13 +18594,13 @@
             "actor_label": "Contributor 1",
             "graph_version": 2,
             "mutation_count": 2,
-            "last_mutation_at": "2026-10-02T11:58:07.929357"
+            "last_mutation_at": "2026-10-06T13:44:59.551034"
           },
           {
             "actor_label": "Contributor 2",
             "graph_version": 1,
             "mutation_count": 4,
-            "last_mutation_at": "2026-10-02T11:58:07.907023"
+            "last_mutation_at": "2026-10-06T13:44:59.532407"
           }
         ]
       },
@@ -18548,8 +18625,8 @@
             "is_active": true,
             "release_note": "Lifecycle Graph Version 2.",
             "published_by": "lifecycle-admin@example.com",
-            "published_at": "2026-10-02T12:58:06.298617+01:00",
-            "effective_from": "2026-10-02T12:58:06.298617+01:00",
+            "published_at": "2026-10-06T14:44:58.029848+01:00",
+            "effective_from": "2026-10-06T14:44:58.029848+01:00",
             "effective_to": null,
             "previous": {
               "release_id": 1,
@@ -18569,9 +18646,9 @@
             "is_active": false,
             "release_note": "Bootstrap Graph Version 1",
             "published_by": "system:bootstrap",
-            "published_at": "2026-10-02T12:58:05.582970+01:00",
-            "effective_from": "2026-10-02T12:58:05.582970+01:00",
-            "effective_to": "2026-10-02T12:58:06.298617+01:00",
+            "published_at": "2026-10-06T14:44:57.180972+01:00",
+            "effective_from": "2026-10-06T14:44:57.180972+01:00",
+            "effective_to": "2026-10-06T14:44:58.029848+01:00",
             "previous": null,
             "restored_from": null,
             "restored_by": [],
@@ -18603,9 +18680,9 @@
           "is_active": false,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-02T12:58:05.582970+01:00",
-          "effective_from": "2026-10-02T12:58:05.582970+01:00",
-          "effective_to": "2026-10-02T12:58:06.298617+01:00",
+          "published_at": "2026-10-06T14:44:57.180972+01:00",
+          "effective_from": "2026-10-06T14:44:57.180972+01:00",
+          "effective_to": "2026-10-06T14:44:58.029848+01:00",
           "previous": null,
           "restored_from": null,
           "restored_by": [],
@@ -18863,11 +18940,11 @@
           },
           "fixer": {
             "agent_definition_revision_id": 5,
-            "content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+            "content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
             "content": {
               "agent_key": "fixer",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -19057,8 +19134,8 @@
           "is_active": true,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-02T12:58:06.298617+01:00",
-          "effective_from": "2026-10-02T12:58:06.298617+01:00",
+          "published_at": "2026-10-06T14:44:58.029848+01:00",
+          "effective_from": "2026-10-06T14:44:58.029848+01:00",
           "effective_to": null,
           "previous": {
             "release_id": 1,
@@ -19298,11 +19375,11 @@
           },
           "fixer": {
             "agent_definition_revision_id": 10,
-            "content_hash": "4106c2c94d901f1aec74fe7cd4be12bfa1ed37e56b2cd79486a1da84100d9d24",
+            "content_hash": "674473da5938dc28708f1f51513fd2cc506b834f35d9d7c9696b1c7eacede6b9",
             "content": {
               "agent_key": "fixer",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "system.ai.claude-sonnet-4-5",
                 "temperature": 0.7,
@@ -19484,10 +19561,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-10-02T12:58:06.090000+01:00",
+            "verdict_at": "2026-10-06T14:44:57.787144+01:00",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-10-02T12:58:05.976308+01:00"
+            "run_at": "2026-10-06T14:44:57.673137+01:00"
           },
           {
             "agent_test_run_id": 104,
@@ -19498,10 +19575,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-10-02T12:58:06.154722+01:00",
+            "verdict_at": "2026-10-06T14:44:57.844620+01:00",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-10-02T12:58:06.128850+01:00"
+            "run_at": "2026-10-06T14:44:57.828000+01:00"
           },
           {
             "agent_test_run_id": 103,
@@ -19512,10 +19589,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-10-02T12:58:06.103252+01:00",
+            "verdict_at": "2026-10-06T14:44:57.807256+01:00",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-10-02T12:58:06.025738+01:00"
+            "run_at": "2026-10-06T14:44:57.729370+01:00"
           }
         ]
       },
@@ -19910,7 +19987,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:06.298617+01:00"
+          "updated_at": "2026-10-06T14:44:58.029848+01:00"
         }
       },
       "response_model": "src.api.schemas.graph_release_history.StaleRollbackResponse",
@@ -19933,8 +20010,8 @@
           "restored_from_release_id": 1,
           "release_note": "Roll back to Graph Version 1.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-02T12:58:08.047745+01:00",
-          "effective_from": "2026-10-02T12:58:08.047745+01:00",
+          "published_at": "2026-10-06T14:44:59.635215+01:00",
+          "effective_from": "2026-10-06T14:44:59.635215+01:00",
           "effective_to": null
         },
         "restored_from": {
@@ -19970,7 +20047,7 @@
           },
           "fixer": {
             "agent_definition_revision_id": 5,
-            "content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+            "content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
             "reused": true
           },
           "fix_reviewer": {
@@ -19991,7 +20068,7 @@
           "base_version_number": 3,
           "lock_version": 9,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:08.047745+01:00"
+          "updated_at": "2026-10-06T14:44:59.635215+01:00"
         },
         "draft_effect": {
           "architect": "reset",
@@ -20020,8 +20097,8 @@
           "restored_from_release_id": 1,
           "release_note": "Roll back to Graph Version 1.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-02T12:58:08.047745+01:00",
-          "effective_from": "2026-10-02T12:58:08.047745+01:00",
+          "published_at": "2026-10-06T14:44:59.635215+01:00",
+          "effective_from": "2026-10-06T14:44:59.635215+01:00",
           "effective_to": null
         },
         "draft": {
@@ -20030,7 +20107,7 @@
           "base_version_number": 3,
           "lock_version": 9,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-02T12:58:08.047745+01:00"
+          "updated_at": "2026-10-06T14:44:59.635215+01:00"
         },
         "nodes": [
           {
@@ -21187,9 +21264,9 @@
             "changed": false,
             "published": {
               "revision_id": 5,
-              "content_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "content_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -21320,9 +21397,9 @@
             },
             "draft": {
               "base_revision_id": 5,
-              "candidate_hash": "fb9dc5a2bddb783ff2fd2eec54a3809e38cef2d0bc683daec3568005b8643c7b",
+              "candidate_hash": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
               "definition_version": 2,
-              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding \u2014 a single Finding with criterion, message, and slide_index\n  html    \u2014 the current slide HTML (from the builder or a prior fixer)\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
+              "prompt_text": "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\nDISPOSITION: MINIMAL CHANGE.  Correct only what the finding requires.  Do not re-author the slide, do not restyle it, do not reorganise content that was not flagged.  A builder authors; you correct.\n\nINPUT:\n  finding       \u2014 a single Finding with criterion, message, and slide_index\n  html          \u2014 the current slide HTML (from the builder or a prior fixer)\n  resolved_data \u2014 the deck's sourced figures; use them to correct a figure that contradicts its source\n\nOUTPUT: a FixerOutput with:\n  position       \u2014 the slide_index from the finding\n  html           \u2014 the corrected slide HTML (or the original unchanged if nothing was done)\n  scripts        \u2014 updated Chart.js init code if charts changed; otherwise empty string\n  changed        \u2014 True if you made any modification; False otherwise\n  change_summary \u2014 one sentence describing the change (empty if unchanged)\n\nEDITING RULES:\n1. UNDERSTAND THE FINDING:\n   - Read criterion and message to know exactly what to fix\n   - Review the existing HTML structure\n   - Identify the narrowest change that resolves the finding\n\n2. RETURN REPLACEMENT HTML:\n   - Return ONLY the slide div: <div class=\"slide\">...</div>\n   - The slide must be complete and self-contained\n   - If charts changed, update scripts accordingly\n   - One <script data-slide-scripts> block per canvas; add // Canvas: <id> at the top; use unique variable names\n\n3. FOLLOW THESE RULES:\n   - Return ONLY the replacement slide HTML, not the entire deck\n   - Do NOT include explanatory text outside the slide HTML\n   - DO NOT emit a <style> element \u2014 deck CSS has a single writer\n   - Maintain brand colors, typography, and styling from the deck design\n   - For EDIT: return the same number of slides as provided\n\n4. UNSUPPORTED OPERATIONS \u2014 respond with changed=False:\n   - If the finding is not actionable or the criterion is not objective, return the original HTML unchanged\n   - If the HTML cannot be parsed, return changed=False and explain in change_summary",
               "model": {
                 "endpoint_name": "databricks-claude-opus-4-6",
                 "temperature": 0.7,
@@ -21951,8 +22028,8 @@
         "session_id": "post-rollback-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:08.079254",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:59.693410",
         "graph_version": 3,
         "active_graph_version": 3,
         "is_older_than_active": false
@@ -21971,9 +22048,9 @@
         "session_id": "new-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:06.343174",
-        "last_activity": "2026-10-02T11:58:06.343175",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:58.073853",
+        "last_activity": "2026-10-06T13:44:58.073853",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -22007,9 +22084,9 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-02 11:58",
-        "created_at": "2026-10-02T11:58:05.717025",
-        "last_activity": "2026-10-02T11:58:07.921691",
+        "title": "Session 2026-10-06 13:44",
+        "created_at": "2026-10-06T13:44:57.353787",
+        "last_activity": "2026-10-06T13:44:59.541767",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -22031,7 +22108,7 @@
             "role": "user",
             "content": "USE AGENT MODE build the lifecycle deck",
             "message_type": null,
-            "created_at": "2026-10-02T11:58:05.729031",
+            "created_at": "2026-10-06T13:44:57.365510",
             "metadata": null
           }
         ],
@@ -22049,17 +22126,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-10-02T11:58:07.914170Z",
+              "created_at": "2026-10-06T13:44:59.537206Z",
               "modified_by": null,
-              "modified_at": "2026-10-02T11:58:07.914170Z",
+              "modified_at": "2026-10-06T13:44:59.537206Z",
               "content_hash": "dfc4a0562849c398",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-10-02T11:58:05.738594Z",
+          "created_at": "2026-10-06T13:44:57.372524Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-10-02T11:58:07.914926Z",
+          "modified_at": "2026-10-06T13:44:59.537757Z",
           "version": 3,
           "deck_spec": null,
           "findings": [],
