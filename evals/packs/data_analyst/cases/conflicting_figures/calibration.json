@@ -8,7 +8,6 @@
     ],
     "gap": null,
     "tried_tools": [],
-    "reason": null,
-    "_data_request": "What's the typical memory usage? Survey A says 8 MB, but Survey B says 15 MB."
+    "reason": null
   }
 }

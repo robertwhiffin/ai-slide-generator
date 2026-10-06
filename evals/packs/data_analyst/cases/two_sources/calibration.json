@@ -5,7 +5,6 @@
     "sources": null,
     "gap": "Memory requirements not documented",
     "tried_tools": [],
-    "reason": null,
-    "_data_request": "How much memory does the application use? I've heard 8–15 MB typical, but also under 1 MB in some configurations."
+    "reason": null
   }
 }

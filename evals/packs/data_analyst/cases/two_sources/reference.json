@@ -1,9 +1,9 @@
 {
   "outcome": "success",
-  "synthesis": "Memory usage varies significantly: 8–15 MB on some platforms (source A), under 1 MB on optimized builds (source B).",
+  "synthesis": "Two reported figures differ: 8–15 MB is described as typical, while under 1 MB is reported for some configurations.",
   "sources": [
-    "Platform analysis",
-    "Build optimization report"
+    "Reported figure: 8–15 MB typical",
+    "Reported figure: under 1 MB in some configurations"
   ],
   "gap": null,
   "tried_tools": [],
