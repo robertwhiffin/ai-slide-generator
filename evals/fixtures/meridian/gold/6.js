@@ -20,7 +20,7 @@ if (wcagCtx) {
         {
           label: 'PowerPoint',
           data: [40, 15, 50, 55, 60],
-          backgroundColor: '#6B7280',
+          backgroundColor: '#4B5563',
           borderColor: '#374151',
           borderWidth: 1,
           borderRadius: 4,
@@ -40,7 +40,7 @@ if (wcagCtx) {
           ticks: {
             callback: function(value) { return value + '%'; },
             font: { family: '"Inter", "Helvetica Neue", Arial, sans-serif', size: 12 },
-            color: '#6B7280'
+            color: '#4B5563'
           },
           grid: {
             color: '#E2E8F0'
