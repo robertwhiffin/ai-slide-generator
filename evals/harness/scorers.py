@@ -21,6 +21,8 @@ def expected_category_score(agent_key: str, structured: dict, expect: dict) -> t
     - build_reviewer/fix_reviewer/deck_reviewer: checks findings against expected criteria/positions,
       guards unknown criteria, and optionally checks verdict for fix_reviewer
     """
+    if not isinstance(structured, dict):
+        return False, f"Structured output is not a dict: {type(structured).__name__}"
 
     if agent_key == "architect":
         # Check intent match
@@ -44,7 +46,7 @@ def expected_category_score(agent_key: str, structured: dict, expect: dict) -> t
 
     elif agent_key in ["build_reviewer", "fix_reviewer", "deck_reviewer"]:
         # Check findings
-        findings = structured.get("findings", [])
+        findings = structured.get("findings") or []
 
         # First, check for unknown criteria
         for f in findings:
@@ -68,6 +70,12 @@ def expected_category_score(agent_key: str, structured: dict, expect: dict) -> t
 
         # Build expected set: all combinations of (criterion, position)
         expected = {(c, p) for c in expect_criteria for p in expect_positions}
+
+        # A planted criterion with no positions must still appear somewhere
+        if expect_criteria and not expect_positions:
+            absent = expect_criteria - {c for (c, _) in got}
+            if absent:
+                return False, f"Missing expected criteria: {absent}"
 
         # Check 1: every expected (criterion, position) must be present
         if not expected.issubset(got):
