@@ -263,6 +263,28 @@ def test_judge_prompt_placeholders():
     assert "{{ expectations }}" in text
 
 
+def _sentences(text):
+    return [s.strip() for s in re.split(r"(?<=[.!?;])\s+|\n+", text) if s.strip()]
+
+
+def test_judge_prompt_never_passes_an_unchanged_candidate():
+    """Every fixer case is a mutation: an unchanged (still-broken) candidate must FAIL.
+
+    The reference is a clean, fixed slide, so any 'nothing to fix -> PASS unchanged'
+    clause is a loophole a judge could read as licence to pass the broken input.
+    """
+    text = (PACK_DIR / "judge_prompt.md").read_text()
+    for s in _sentences(text):
+        low = s.lower()
+        if "unchanged" in low or "nothing to fix" in low:
+            assert "PASS" not in s, f"judge prompt may pass an unchanged candidate: {s!r}"
+    assert any(
+        "unchanged" in s.lower() and "still exhibits" in s.lower() and "FAIL" in s
+        for s in _sentences(text)
+    ), "judge prompt must say an unchanged or unfixed candidate FAILS"
+    assert "broken" in text.lower()
+
+
 def test_judge_prompt_verdict_first_and_uses_measures():
     text = (PACK_DIR / "judge_prompt.md").read_text()
     assert "FIRST" in text and text.index("FIRST") < text.index("rationale", text.index("FIRST"))

@@ -8,7 +8,7 @@ Inputs:
   - `brief_or_finding` is the FINDING the fixer was given (criterion, slide_index, message).
   - `reference` is the known-good fixed slide (the original before the fault was planted). The candidate need not match its wording or layout.
   - `measures` holds the render measures of the candidate (overflow_px, min_contrast, off_palette, console_errors). Treat them as hard evidence.
-  If the reference is empty or shows nothing to fix, PASS a candidate that leaves the slide unchanged and introduces no render fault.
+Every fixer case starts from a BROKEN slide: the finding always names a real fault in the slide the fixer was given, and the reference always shows that fault removed. There is never a "nothing to fix" case. A candidate that returns the slide unchanged, or that still exhibits the finding's fault, must FAIL, even if it reports changed=false.
 
 PASS only if all of these hold:
 - the fault named in the finding is gone (for example no off-palette colour, overflow_px is 0, min_contrast is at least 4.5, the figure is corrected to the sourced value stated in the finding message, or the brief's point is delivered again);
