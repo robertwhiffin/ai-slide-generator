@@ -1,11 +1,12 @@
 """Generate the architect pack's cases from the Meridian gold deck. Idempotent."""
+import copy
 import json
 import pathlib
 
 import yaml
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
-from src.domain.deck_spec import DesignContractRef
+from src.domain.deck_spec import DeckSpec, DesignContractRef
 from src.domain.skill_io import ArchitectOutput
 from src.services.agent_model_payload import model_payload_for
 from src.services.template_sections import section_inventory
@@ -99,6 +100,23 @@ def _out(intent, message, **kw):
     return out
 
 
+EDIT_BRIEF_1 = (
+    "Explain that presentations are a primary vehicle for persuasion and decision-making, yet most "
+    "are constrained by a 30-year-old format. Present three stat cards in place of the bullet list, "
+    "one per common PowerPoint pain point: bloated file sizes (8–15 MB average), font substitution, "
+    "and fixed-resolution layouts, with a callout noting the version-control headaches"
+)
+
+
+def _edited_deck_spec():
+    """The gold deck spec with ONLY slide position 1's content_brief revised for the edit request."""
+    spec = copy.deepcopy(case.gold_deck_spec())
+    assert spec["slides"][1]["position"] == 1
+    spec["slides"][1]["content_brief"] = EDIT_BRIEF_1
+    DeckSpec.model_validate(spec)  # fail fast
+    return spec
+
+
 def _write(out, cid, kind, fault, expect, reference, should_fail):
     d = out / cid
     d.mkdir(parents=True, exist_ok=True)
@@ -127,7 +145,7 @@ def generate(out_dir: pathlib.Path | None = None):
         "edit of slide 2 (position 1): a 1-based position slips off by one",
         {"intent": "edit", "positions": [1]},
         _out("edit", "I'll replace the bullet list on slide 2 with three stat cards.",
-             target_positions=[1]),
+             target_positions=[1], deck_spec=_edited_deck_spec()),
         _out("edit", "I'll replace the bullet list on slide 2 with three stat cards.",
              target_positions=[2]),
     )
