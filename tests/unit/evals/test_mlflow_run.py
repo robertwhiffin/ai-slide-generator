@@ -46,7 +46,7 @@ from evals.harness import case as case_mod
 from evals.harness import config
 from evals.harness import judge as judge_mod
 from evals.harness import mlflow_run
-from evals.harness.case import Case
+from evals.harness.case import EVALS_DIR, PACKS_DIR, Case
 from evals.harness.render import RenderMeasures
 from evals.harness.runner import Runner
 from src.services.graph_definition_manifest import definition_content_hash
@@ -786,3 +786,71 @@ def test_judge_scorer_feedback_carries_the_judge_rationale(monkeypatch, verdict)
                expectations=row["expectations"])
     assert fb.value == verdict
     assert fb.rationale == why
+
+
+# ---- I8: runs carry case/fixture identity; old runs can be marked superseded ----
+
+def test_run_sweep_tags_cases_digest_and_git_sha(monkeypatch, tracking):
+    import subprocess
+
+    _, run, *_ = _sweep(monkeypatch, tracking, adapter=EchoAdapter(), verdict=lambda o, e: "pass")
+    tags = run.data.tags
+    assert tags["cases_digest"] == mlflow_run.cases_digest("builder")
+    assert len(tags["cases_digest"]) == 64
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=EVALS_DIR.parent,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    assert tags["git_sha"] == head
+
+
+def test_cases_digest_covers_names_and_bytes_in_sorted_order(tmp_path):
+    import hashlib
+
+    root = tmp_path / "cases"
+    (root / "b").mkdir(parents=True)
+    (root / "a").mkdir()
+    (root / "b" / "x.json").write_bytes(b"BX")
+    (root / "a" / "y.json").write_bytes(b"AY")
+    d1 = mlflow_run.cases_digest("builder", root=root)
+    h = hashlib.sha256()
+    for rel, data in (("a/y.json", b"AY"), ("b/x.json", b"BX")):
+        h.update(rel.encode() + b"\0" + data + b"\0")
+    assert d1 == h.hexdigest()
+    (root / "a" / "y.json").write_bytes(b"AY!")
+    assert mlflow_run.cases_digest("builder", root=root) != d1
+    (root / "a" / "y.json").write_bytes(b"AY")
+    (root / "a" / "y.json").rename(root / "a" / "z.json")
+    assert mlflow_run.cases_digest("builder", root=root) != d1
+
+
+def test_cases_digest_differs_per_agent_and_defaults_to_the_committed_tree():
+    assert mlflow_run.cases_digest("builder") == mlflow_run.cases_digest(
+        "builder", root=PACKS_DIR / "builder" / "cases")
+    assert mlflow_run.cases_digest("builder") != mlflow_run.cases_digest("fixer")
+
+
+def test_git_sha_is_unknown_when_git_fails(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(mlflow_run.subprocess, "run", boom)
+    assert mlflow_run.git_sha() == "unknown"
+
+
+def test_mark_superseded_tags_every_run_in_the_experiment_only(tmp_path):
+    from mlflow.tracking import MlflowClient
+
+    uri = f"sqlite:///{tmp_path / 'm.db'}"
+    client = MlflowClient(tracking_uri=uri)
+    exp = client.create_experiment("target-exp")
+    other = client.create_experiment("other-exp")
+    targets = [client.create_run(exp).info.run_id for _ in range(3)]
+    bystander = client.create_run(other).info.run_id
+
+    n = mlflow_run.mark_superseded(uri, "target-exp", "fixture fix; payloads changed")
+    assert n == 3
+    for rid in targets:
+        tags = client.get_run(rid).data.tags
+        assert tags["superseded"] == "true"
+        assert tags["superseded_reason"] == "fixture fix; payloads changed"
+    assert "superseded" not in client.get_run(bystander).data.tags
+    assert mlflow_run.mark_superseded(uri, "no-such-exp", "x") == 0
