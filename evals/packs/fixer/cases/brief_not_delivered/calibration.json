@@ -1,0 +1,9 @@
+{
+  "should_fail": {
+    "position": 1,
+    "html": "<section class=\"slide\">\n  <p class=\"eyebrow\">The Problem</p>\n  <h2 class=\"slide-title\">PowerPoint's 30-year-old format still constrains how we persuade and decide</h2>\n  <p class=\"slide-subtitle\">Presentations are a primary vehicle for decision-making — yet the tooling hasn't kept up</p>\n  <div class=\"content\">\n    <ul class=\"bullets\">\n      <li><strong>Font substitution:</strong> carefully chosen typography breaks the moment a file moves to another machine</li>\n      <li><strong>Fixed-resolution layouts:</strong> slides designed at one size distort on different screens and projectors</li>\n      <li><strong>Bloated file sizes:</strong> the average corporate .pptx weighs 8–15 MB; an equivalent HTML deck fits under 1 MB</li>\n      <li><strong>Version-control headaches:</strong> binary files can't be meaningfully diffed, merged, or tracked in git</li>\n    </ul>\n    <div class=\"callout\">PowerPoint remains a perfectly capable format for modern presentations — any problems come down to how individual authors use it.</div>\n  </div>\n  <div class=\"slide-footer\"><span>Meridian</span><span>1</span></div>\n</section>\n",
+    "scripts": "",
+    "changed": false,
+    "change_summary": "No change needed."
+  }
+}
