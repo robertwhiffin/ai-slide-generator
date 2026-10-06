@@ -28,3 +28,14 @@ def test_low_contrast_text_lowers_min_contrast():
     pale = case.gold_slide(1).replace('class="slide-subtitle"', 'class="slide-subtitle" style="color:#f0f0f0"')
     m = render.render_slide(pale, section_css=CSS)
     assert m.min_contrast < 4.5
+
+def test_chart_that_never_initialises_surfaces_timeout():
+    # Canvas present but no script ever calls `new Chart` on it: must not pass silently.
+    m = render.render_slide(case.gold_slide(3), "", section_css=CSS, chart_timeout_ms=1000)
+    assert "chart-init-timeout" in m.console_errors
+
+def test_chart_initialised_late_is_waited_for():
+    # Chart init deferred past load/networkidle: renderer must wait, not time out.
+    late = "setTimeout(function(){" + case.gold_scripts(3) + "}, 700);"
+    m = render.render_slide(case.gold_slide(3), late, section_css=CSS, chart_timeout_ms=4000)
+    assert m.console_errors == ()
