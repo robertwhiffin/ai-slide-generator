@@ -35,7 +35,7 @@ if (deviceCtx) {
           ticks: {
             callback: function(value) { return value + '%'; },
             font: { family: '"Inter", "Helvetica Neue", Arial, sans-serif', size: 12 },
-            color: '#6B7280'
+            color: '#4B5563'
           },
           title: {
             display: true,

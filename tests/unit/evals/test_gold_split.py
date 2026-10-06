@@ -30,3 +30,19 @@ def test_gold_deck_spec_is_a_valid_deck_spec():
     keys = {f.key for f in spec.resolved_data.figures}
     for slide in spec.slides:
         assert set(slide.data_references) <= keys, slide.position
+
+
+def test_every_hex_in_gold_chart_scripts_is_on_the_meridian_palette():
+    import re
+    from evals.harness.render import palette_hexes
+
+    palette = {h.lower() for h in palette_hexes(case.meridian_section_css())}
+    off = {}
+    for js in sorted((case.MERIDIAN_DIR / "gold").glob("*.js")):
+        for m in re.finditer(r"#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b", js.read_text()):
+            lit = m.group(0).lower()
+            if len(lit) == 4:
+                lit = "#" + "".join(c * 2 for c in lit[1:])
+            if lit not in palette:
+                off.setdefault(js.name, set()).add(m.group(0))
+    assert not off, f"off-palette hex literals in gold chart scripts: {off}"
