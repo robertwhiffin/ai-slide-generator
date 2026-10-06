@@ -1,0 +1,8 @@
+kind: mutation
+fault: slide 9 (verdict) dropped
+expect:
+  criteria:
+  - missing_conclusion
+  positions:
+  - -1
+design_system_active: true

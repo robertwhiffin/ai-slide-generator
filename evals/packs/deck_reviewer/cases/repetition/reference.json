@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "id": "cross_slide_repetition:-1:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "cross_slide_repetition",
+      "message": "Slide 5 repeats a key point from slide 7, using the same bullet list. This redundancy weakens the narrative.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}
