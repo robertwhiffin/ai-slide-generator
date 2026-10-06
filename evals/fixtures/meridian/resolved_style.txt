@@ -58,8 +58,8 @@ TYPOGRAPHY TOKENS:
 - font-sans: "Inter", "Helvetica Neue", Arial, sans-serif
 - radius-md: 12px
 - shadow-sm: 0 1px 3px rgba(17, 24, 39, 0.08)
-- slide-pad-x: 64px
-- slide-pad-y: 48px
+- slide-pad-x: 88px
+- slide-pad-y: 72px
 - space-lg: 40px
 - space-md: 24px
 - space-sm: 12px

@@ -46,28 +46,28 @@ CONDENSED_HTML = """<section class="slide">
     <div class="card">
       <p><strong>Fonts and layout</strong></p>
       <ul class="bullets">
-        <li>Fonts substituted on other machines</li>
-        <li>Text reflows when fonts are missing</li>
-        <li>Fixed layouts distort on projectors</li>
-        <li>4:3 and 16:9 re-crop content</li>
+        <li>Fonts swap on other machines</li>
+        <li>Missing fonts reflow text</li>
+        <li>Layouts distort on projectors</li>
+        <li>4:3 vs 16:9 re-crops</li>
       </ul>
     </div>
     <div class="card">
       <p><strong>File size</strong></p>
       <ul class="bullets">
         <li>Average deck is 8–15 MB</li>
-        <li>Hits email attachment limits</li>
+        <li>Hits email size limits</li>
         <li>Large decks open slowly</li>
-        <li>Master slides drift off-brand</li>
+        <li>Masters drift off-brand</li>
       </ul>
     </div>
     <div class="card">
       <p><strong>Collaboration</strong></p>
       <ul class="bullets">
         <li>Version-control headaches</li>
-        <li>Binary files can't be diffed</li>
+        <li>Binaries can't be diffed</li>
         <li>Co-author merge conflicts</li>
-        <li>Accessibility retrofitted late</li>
+        <li>Accessibility added late</li>
       </ul>
     </div>
   </div>
