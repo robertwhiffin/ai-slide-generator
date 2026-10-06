@@ -25,6 +25,10 @@ def _snapshot():
     }
 
 
+# Capture committed state BEFORE any generate() call in this module (packs-facts rule).
+_initial_snapshot = _snapshot()
+
+
 @pytest.fixture(scope="module", autouse=True)
 def generated():
     """Run the generator once (no-arg generate(), writes the real case tree)."""
@@ -169,6 +173,33 @@ def test_generator_is_idempotent(generated):
     before = dict(generated)
     mutations.generate()
     assert _snapshot() == before
+
+
+def test_committed_cases_are_current():
+    """Committed case files must match generated output (packs-facts rule).
+
+    Catches stale or hand-edited committed case files. The autouse fixture
+    regenerates the tree; this verifies it matches the committed state.
+    """
+    current = _snapshot()
+
+    # Check same set of files exist
+    initial_paths = set(_initial_snapshot.keys())
+    current_paths = set(current.keys())
+
+    missing_files = initial_paths - current_paths
+    extra_files = current_paths - initial_paths
+
+    assert not missing_files and not extra_files, (
+        f"File set mismatch: missing={sorted(missing_files)}, extra={sorted(extra_files)}"
+    )
+
+    # Check identical bytes for each file
+    differing_files = [
+        path for path in current_paths if current[path] != _initial_snapshot[path]
+    ]
+
+    assert not differing_files, f"Committed files differ from generated state: {sorted(differing_files)}"
 
 
 def test_judge_prompt_placeholders():
