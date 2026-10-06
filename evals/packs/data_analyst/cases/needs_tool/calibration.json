@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "outcome": "success",
+    "synthesis": "Regional revenue breakdown shows strong performance in EMEA and APAC.",
+    "sources": [
+      "Data warehouse"
+    ],
+    "gap": null,
+    "tried_tools": [],
+    "reason": null
+  }
+}

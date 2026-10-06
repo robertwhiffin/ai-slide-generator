@@ -1,0 +1,10 @@
+{
+  "should_fail": {
+    "intent": "discuss",
+    "message": "Happy to talk it through; what would you like to know?",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null
+  }
+}

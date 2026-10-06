@@ -1,0 +1,11 @@
+{
+  "outcome": "success",
+  "synthesis": "Two reported figures differ: 8–15 MB is described as typical, while under 1 MB is reported for some configurations.",
+  "sources": [
+    "Reported figure: 8–15 MB typical",
+    "Reported figure: under 1 MB in some configurations"
+  ],
+  "gap": null,
+  "tried_tools": [],
+  "reason": null
+}

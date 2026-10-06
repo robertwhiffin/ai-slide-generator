@@ -1,0 +1,16 @@
+{
+  "should_fail": {
+    "findings": [
+      {
+        "id": "arc_gap:-1:0",
+        "slide_index": -1,
+        "category": "narrative",
+        "criterion": "arc_gap",
+        "message": "The narrative arc has a gap.",
+        "objective": false,
+        "status": "open",
+        "seen": false
+      }
+    ]
+  }
+}

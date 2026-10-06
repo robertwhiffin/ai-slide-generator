@@ -1,0 +1,3 @@
+# USD per 1,000 tokens. Edit to match current Databricks serving prices.
+databricks-claude-opus-4-6:   { input_per_1k: 0.015, output_per_1k: 0.075 }
+databricks-claude-sonnet-5:   { input_per_1k: 0.003, output_per_1k: 0.015 }

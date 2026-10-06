@@ -1,0 +1,11 @@
+{
+  "intent": "confirm_design_contract",
+  "message": "Do you want to switch this deck to the Acme design system? Every slide will be rebuilt in the new design.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": {
+    "design_system_id": 4,
+    "template_id": 7
+  }
+}
