@@ -20,8 +20,9 @@ Documented assumptions (the brief is silent on these):
   ``reason`` mentioning ``calibration.json`` and must not raise.
   Result rows: {case_id, reference_passed, mutation_failed, trusted, reason};
   ``reason`` is truthy when untrusted.
-* ``brief_or_finding`` for builder/fixer is the payload sub-dict itself; for
-  multi-field roles (architect) only the presence of each field's content is asserted.
+* ``brief_or_finding``: builder and build_reviewer get ``{slide_spec, resolved_data}``; fixer and
+  fix_reviewer the payload's ``finding`` itself; deck_reviewer ``{narrative_arc, call_to_action,
+  slides}``; for architect only the presence of each field's content is asserted.
 """
 import json
 from types import SimpleNamespace
@@ -126,14 +127,17 @@ def test_judge_prompt_reads_pack_file(tmp_path, monkeypatch):
 
 # ---- judge_payload ----------------------------------------------------------
 
-def test_payload_builder_uses_slide_spec():
+def test_payload_builder_uses_slide_spec_and_resolved_data():
+    # I3 ruling: the builder judge must see resolved_data to tell sourced figures from invented ones.
     spec = {"title": "Q3", "bullets": ["a"]}
-    case = _case(agent_key="builder", payload={"slide_spec": spec}, reference={"html": "R"})
+    rd = {"synthesis": "S", "figures": [{"key": "k", "value": "98%", "source": "W3C"}], "gaps": []}
+    case = _case(agent_key="builder", payload={"slide_spec": spec, "resolved_data": rd},
+                 reference={"html": "R"})
     out = judge.judge_payload(case, _result({"html": "C"}), None)
     assert set(out) >= {"candidate", "reference", "brief_or_finding", "measures"}
     assert out["candidate"] == {"html": "C"}
     assert out["reference"] == {"html": "R"}
-    assert out["brief_or_finding"] == spec
+    assert out["brief_or_finding"] == {"slide_spec": spec, "resolved_data": rd}
     assert out["measures"] is None
 
 
@@ -149,12 +153,21 @@ def test_payload_fixer_uses_finding_and_measures_dict():
     assert out["measures"]["rendered"] is True
 
 
-@pytest.mark.parametrize("role", ["build_reviewer", "fix_reviewer"])
+@pytest.mark.parametrize("role", ["fix_reviewer"])
 def test_payload_reviewers_use_finding(role):
     finding = {"issue": "contrast"}
     case = _case(agent_key=role, payload={"finding": finding})
     out = judge.judge_payload(case, _result({"verdict": "ok"}), None)
     assert out["brief_or_finding"] == finding
+
+
+def test_payload_build_reviewer_uses_slide_spec_and_resolved_data():
+    # I3 ruling: was None; the judge needs the data to assess a source_contradiction finding.
+    spec, rd = {"position": 3}, {"synthesis": "S", "figures": [], "gaps": []}
+    case = _case(agent_key="build_reviewer",
+                 payload={"slide_spec": spec, "resolved_data": rd, "html": "H"})
+    out = judge.judge_payload(case, _result({"verdict": "clean"}), None)
+    assert out["brief_or_finding"] == {"slide_spec": spec, "resolved_data": rd}
 
 
 def test_payload_architect_has_message_and_deck_spec():
@@ -180,6 +193,14 @@ def test_payload_deck_reviewer_has_arc_and_cta():
     out = judge.judge_payload(case, _result({"x": 1}), None)
     blob = json.dumps(out["brief_or_finding"], default=str)
     assert "ARC-SENT" in blob and "CTA-SENT" in blob
+
+
+def test_payload_deck_reviewer_carries_the_slides():
+    # I4 ruling: the judge must see the deck to rule a finding supported or not.
+    case = _case(agent_key="deck_reviewer",
+                 payload={"narrative_arc": "A", "call_to_action": "C", "slides": "SLIDES-SENT"})
+    out = judge.judge_payload(case, _result({"x": 1}), None)
+    assert out["brief_or_finding"] == {"narrative_arc": "A", "call_to_action": "C", "slides": "SLIDES-SENT"}
 
 
 # ---- load_calibration ------------------------------------------------------

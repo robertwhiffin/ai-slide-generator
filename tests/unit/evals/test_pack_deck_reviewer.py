@@ -289,3 +289,58 @@ def test_judge_prompt_fails_an_invented_finding_on_the_clean_case():
     window = text[max(0, i - 300): i + 600]
     assert "fail" in window and "pass" in window
     assert any(w in window for w in ("invent", "spurious", "unsupported"))
+
+
+# ---- I4: the judge sees the slides and rules on support, not on "any finding" ----
+
+def _judge_text():
+    return (PACK_DIR / "judge_prompt.md").read_text()
+
+
+def test_judge_prompt_describes_the_slides_it_receives():
+    text = _judge_text()
+    assert "`slides`" in text
+    assert "`narrative_arc`" in text and "`call_to_action`" in text
+
+
+def test_judge_prompt_clean_case_passes_supported_findings():
+    text = _judge_text().lower()
+    i = text.index("reference has no findings")
+    window = text[i: i + 900]
+    assert "supported" in window and "pass" in window
+    # The real repetition in the gold must be allowed, not condemned.
+    assert "98%" in window and "8–15 mb" in window
+
+
+def test_judge_prompt_clean_case_fails_unsupported_findings():
+    text = _judge_text().lower()
+    i = text.index("reference has no findings")
+    window = text[i: i + 900]
+    assert "fail" in window and "not support" in window
+
+
+def test_judge_prompt_mutation_passes_a_finding_for_the_planted_fault():
+    lines = _judge_text().lower().splitlines()
+    rule = next(l for l in lines if l.startswith("- if the reference has findings"))
+    assert "pass" in rule and "planted fault" in rule
+
+
+# ---- deferred #13: reference messages name slides by title, never by number ----
+
+@pytest.mark.parametrize("cid", MUTATIONS)
+def test_reference_messages_do_not_number_slides(cid):
+    for f in case.load_case(AGENT, cid, root=CASES).reference["findings"]:
+        assert not re.search(r"\bslides?\s+\d", f["message"], re.I), f["message"]
+
+
+@pytest.mark.parametrize("cid,titles", [
+    ("out_of_order", ["Your browser is already a presentation engine",
+                      "HTML decks live in Git, ship as a URL, and weigh 10× less"]),
+    ("repetition", ["Key Considerations", "HTML decks live in Git, ship as a URL, and weigh 10× less"]),
+])
+def test_reference_messages_name_the_slides_by_title(cid, titles):
+    msgs = " ".join(f["message"] for f in case.load_case(AGENT, cid, root=CASES).reference["findings"])
+    slides = case.load_case(AGENT, cid, root=CASES).payload["slides"]
+    for t in titles:
+        assert t in msgs, (t, msgs)
+        assert t in slides  # the title really is in what the reviewer sees
