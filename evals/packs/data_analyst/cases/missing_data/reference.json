@@ -1,8 +1,0 @@
-{
-  "outcome": "missing_data",
-  "synthesis": null,
-  "sources": null,
-  "gap": "Monthly active users data for presentations built with Reveal.js since 2023 is not available in current data sources.",
-  "tried_tools": [],
-  "reason": null
-}

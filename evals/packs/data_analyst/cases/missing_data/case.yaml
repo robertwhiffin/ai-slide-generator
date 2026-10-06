@@ -1,5 +1,0 @@
-kind: mutation
-fault: request for metrics not in the available data sources
-expect:
-  outcome: missing_data
-design_system_active: true

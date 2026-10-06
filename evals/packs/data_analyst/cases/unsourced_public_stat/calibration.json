@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "outcome": "success",
+    "synthesis": "Reveal.js had approximately 4.7 million monthly active users in 2023, according to the npm Developer Survey.",
+    "sources": [
+      "npm Developer Survey"
+    ],
+    "gap": null,
+    "tried_tools": [],
+    "reason": null
+  }
+}

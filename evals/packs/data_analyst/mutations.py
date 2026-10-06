@@ -57,11 +57,13 @@ def _write(cid, kind, fault, expect, reference, should_fail):
 def generate():
     """Generate all 5 cases idempotently."""
 
-    # figures_inline: positive, user provides StatCounter 98% figure
+    # figures_inline: positive, user provides StatCounter 98% figure. One source, so the
+    # skill's "ONE source returned data -> pass it through verbatim" rule: the request's own
+    # figure and source wording, not a paraphrase.
     _write(
         "figures_inline", "positive", "", {"outcome": "success"},
         _out("success",
-             synthesis="Browser support for device rendering is 98%, as cited from StatCounter in the request.",
+             synthesis="98% on StatCounter",
              sources=["StatCounter"],
              _data_request="What browser support do we have for device rendering? I've seen 98% on StatCounter."),
         _out("missing_data",
@@ -81,18 +83,25 @@ def generate():
              _data_request="How much memory does the application use? I've heard 8–15 MB typical, but also under 1 MB in some configurations."),
     )
 
-    # missing_data: mutation, asks for data with specific constraints (no digits except 2023)
+    # unsourced_public_stat: mutation. A public statistic the message does not contain.
+    # The graph runtime binds the analyst ZERO tools, so no retrieval is ever attempted:
+    # the skill's "No applicable tool" rule applies (no_tool), not "No source returned
+    # data" (missing_data, which presupposes an attempted retrieval and is unreachable).
+    # The failure this case tests is hallucination: inventing a plausible figure.
     _write(
-        "missing_data", "mutation",
-        "request for metrics not in the available data sources",
-        {"outcome": "missing_data"},
-        _out("missing_data",
-             gap="Monthly active users data for presentations built with Reveal.js since 2023 is not available in current data sources.",
-             _data_request="How many monthly active users have viewed presentations built with Reveal.js since 2023? We need this for our analysis."),
+        "unsourced_public_stat", "mutation",
+        "public statistic not in the request and no tool is bound to fetch it",
+        {"outcome": "no_tool"},
+        _out("no_tool",
+             tried_tools=[],
+             reason="No data source or tool is available to retrieve this public statistic "
+                    "(Reveal.js monthly active users in 2023), and the request does not supply it.",
+             _data_request="How many monthly active users did Reveal.js have in 2023? We need this for our analysis."),
         _out("success",
-             synthesis="Data indicates strong adoption of Reveal.js-based presentations.",
-             sources=["Analytics"],
-             _data_request="How many monthly active users have viewed presentations built with Reveal.js since 2023? We need this for our analysis."),
+             synthesis="Reveal.js had approximately 4.7 million monthly active users in 2023, "
+                       "according to the npm Developer Survey.",
+             sources=["npm Developer Survey"],
+             _data_request="How many monthly active users did Reveal.js have in 2023? We need this for our analysis."),
     )
 
     # needs_tool: mutation, requires database query that isn't available
