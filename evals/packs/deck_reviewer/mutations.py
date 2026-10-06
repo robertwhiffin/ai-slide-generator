@@ -1,6 +1,7 @@
 """Generate the deck_reviewer pack's cases from the Meridian gold deck. Idempotent."""
 import copy
 import json
+import pathlib
 import re
 
 import yaml
@@ -64,8 +65,8 @@ def _payload(htmls):
     })
 
 
-def _write(cid, kind, fault, expect, payload, reference, should_fail):
-    d = CASES_DIR / cid
+def _write(out, cid, kind, fault, expect, payload, reference, should_fail):
+    d = out / cid
     d.mkdir(parents=True, exist_ok=True)
     (d / "case.yaml").write_text(yaml.safe_dump({
         "kind": kind, "fault": fault, "expect": expect, "design_system_active": True,
@@ -80,11 +81,13 @@ def _out(findings):
     return {"findings": findings}
 
 
-def generate():
+def generate(out_dir: pathlib.Path | None = None):
+    """Write the cases into ``out_dir`` (default: the committed ``CASES_DIR``)."""
+    out = pathlib.Path(out_dir) if out_dir is not None else CASES_DIR
     # clean: all 10 gold slides, no findings
     htmls_clean = [case.gold_slide(i) for i in range(10)]
     _write(
-        "clean", "positive", "", {"criteria": [], "positions": []},
+        out, "clean", "positive", "", {"criteria": [], "positions": []},
         _payload(htmls_clean),
         _out([]),
         _out([_finding("arc_gap", "The narrative arc has a gap.")]),
@@ -93,7 +96,7 @@ def generate():
     # arc_gap_drop_objections: drop position 8 (objections), should have 9 slides
     htmls_arc_gap = [case.gold_slide(i) for i in range(10) if i != 8]
     _write(
-        "arc_gap_drop_objections", "mutation",
+        out, "arc_gap_drop_objections", "mutation",
         "slide 8 (objections) dropped", {"criteria": ["arc_gap"], "positions": [-1]},
         _payload(htmls_arc_gap),
         _out([_finding("arc_gap", MESSAGES["arc_gap_drop_objections"])]),
@@ -103,7 +106,7 @@ def generate():
     # missing_conclusion: drop position 9 (verdict/CTA), should have 9 slides
     htmls_missing_conclusion = [case.gold_slide(i) for i in range(9)]
     _write(
-        "missing_conclusion", "mutation",
+        out, "missing_conclusion", "mutation",
         "slide 9 (verdict) dropped", {"criteria": ["missing_conclusion"], "positions": [-1]},
         _payload(htmls_missing_conclusion),
         _out([_finding("missing_conclusion", MESSAGES["missing_conclusion"])]),
@@ -114,7 +117,7 @@ def generate():
     htmls_out_of_order = [case.gold_slide(i) for i in range(10)]
     htmls_out_of_order[2], htmls_out_of_order[7] = htmls_out_of_order[7], htmls_out_of_order[2]
     _write(
-        "out_of_order", "mutation",
+        out, "out_of_order", "mutation",
         "slides 2 and 7 swapped", {"criteria": ["arc_gap"], "positions": [-1]},
         _payload(htmls_out_of_order),
         _out([_finding("arc_gap", MESSAGES["out_of_order"])]),
@@ -148,7 +151,7 @@ def generate():
     )
 
     _write(
-        "repetition", "mutation",
+        out, "repetition", "mutation",
         "slide 5 replaced with a slide containing gold 7's bullet list",
         {"criteria": ["cross_slide_repetition"], "positions": [-1]},
         _payload(htmls_repetition),

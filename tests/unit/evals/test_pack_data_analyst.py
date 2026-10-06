@@ -32,53 +32,55 @@ PACK_DIR = case.PACKS_DIR / AGENT
 PAYLOAD_KEYS = {"data_request", "deck_purpose"}
 
 
-def _snapshot():
-    cases = PACK_DIR / "cases"
-    if not cases.exists():
+COMMITTED = PACK_DIR / "cases"
+CASES = None  # set by the autouse fixture: the tmp tree generated for this module (I9)
+
+
+def _snapshot(root):
+    if not root.exists():
         return {}
     return {
-        str(p.relative_to(PACK_DIR)): p.read_bytes()
-        for p in sorted(cases.rglob("*"))
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
         if p.is_file()
     }
 
 
-# Capture committed state BEFORE any generate() call in this module (packs-facts rule).
-_initial_snapshot = _snapshot()
-
-
 @pytest.fixture(scope="module", autouse=True)
-def generated():
+def generated(tmp_path_factory):
+    """Generate the pack once into a tmp tree; tests read from it, never rewriting the committed tree."""
+    global CASES
     from evals.packs.data_analyst import mutations
 
-    mutations.generate()
-    return _snapshot()
+    CASES = tmp_path_factory.mktemp(AGENT) / "cases"
+    mutations.generate(out_dir=CASES)
+    return _snapshot(CASES)
 
 
 def _cal(cid):
-    return json.loads((PACK_DIR / "cases" / cid / "calibration.json").read_text())
+    return json.loads((CASES / cid / "calibration.json").read_text())
 
 
 def _msg(cid):
-    return case.load_case(AGENT, cid).payload["data_request"]
+    return case.load_case(AGENT, cid, root=CASES).payload["data_request"]
 
 
 def test_exactly_the_five_cases():
-    cases = case.load_cases(AGENT)
+    cases = case.load_cases(AGENT, root=CASES)
     assert sorted(c.case_id for c in cases) == sorted(CASE_IDS)
-    dirs = sorted(d.name for d in (PACK_DIR / "cases").iterdir() if d.is_dir())
+    dirs = sorted(d.name for d in CASES.iterdir() if d.is_dir())
     assert dirs == sorted(CASE_IDS)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_has_four_files(cid):
-    d = PACK_DIR / "cases" / cid
+    d = CASES / cid
     assert sorted(p.name for p in d.iterdir()) == sorted(FILES)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_contract(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.design_system_active is True
     assert set(c.payload) <= set(MODEL_PAYLOAD_KEYS[AGENT])
     assert set(c.payload) == PAYLOAD_KEYS
@@ -89,7 +91,7 @@ def test_case_contract(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_payload_is_the_production_shape(cid):
-    p = case.load_case(AGENT, cid).payload
+    p = case.load_case(AGENT, cid, root=CASES).payload
     assert set(p) == PAYLOAD_KEYS
     assert isinstance(p["data_request"], str) and p["data_request"].strip()
     assert p["deck_purpose"] is None
@@ -120,7 +122,7 @@ def test_positive_messages_carry_figures_and_mutations_differ():
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_reference_validates_and_passes(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     out = AnalystOutput.model_validate(c.reference)
     assert out.outcome == EXPECT[cid]["outcome"]
     ok, why = expected_category_score(AGENT, c.reference, c.expect)
@@ -129,13 +131,13 @@ def test_reference_validates_and_passes(cid):
 
 @pytest.mark.parametrize("cid", ["figures_inline", "two_sources", "conflicting_figures"])
 def test_success_references_have_synthesis_and_sources(cid):
-    ref = case.load_case(AGENT, cid).reference
+    ref = case.load_case(AGENT, cid, root=CASES).reference
     assert ref["synthesis"].strip()
     assert ref["sources"] and all(isinstance(s, str) and s for s in ref["sources"])
 
 
 def test_figures_inline_reference_uses_the_stated_figure():
-    ref = case.load_case(AGENT, "figures_inline").reference
+    ref = case.load_case(AGENT, "figures_inline", root=CASES).reference
     assert "98%" in ref["synthesis"]
     # One source -> pass it through verbatim: the request's own wording, not a paraphrase.
     assert ref["synthesis"] in _msg("figures_inline")
@@ -143,7 +145,7 @@ def test_figures_inline_reference_uses_the_stated_figure():
 
 
 def test_two_sources_reference_cites_both():
-    ref = case.load_case(AGENT, "two_sources").reference
+    ref = case.load_case(AGENT, "two_sources", root=CASES).reference
     assert len(ref["sources"]) == 2
     syn = ref["synthesis"]
     assert "8–15 MB" in syn
@@ -151,7 +153,7 @@ def test_two_sources_reference_cites_both():
 
 
 def test_conflicting_reference_flags_the_conflict():
-    ref = case.load_case(AGENT, "conflicting_figures").reference
+    ref = case.load_case(AGENT, "conflicting_figures", root=CASES).reference
     syn = ref["synthesis"]
     assert "8 MB" in syn and "15 MB" in syn
     assert any(w in syn.lower() for w in ("conflict", "disagree", "differ"))
@@ -160,7 +162,7 @@ def test_conflicting_reference_flags_the_conflict():
 def test_unsourced_public_stat_reference_is_no_tool_with_a_reason():
     # The graph binds the analyst zero tools, so a public statistic it cannot fetch is
     # "No applicable tool" (no_tool + reason), never missing_data (unreachable here).
-    ref = case.load_case(AGENT, "unsourced_public_stat").reference
+    ref = case.load_case(AGENT, "unsourced_public_stat", root=CASES).reference
     assert ref["outcome"] == "no_tool"
     assert ref["reason"] and ref["reason"].strip()
     assert ref["tried_tools"] == []
@@ -178,14 +180,14 @@ def test_unsourced_public_stat_should_fail_invents_a_number():
 
 
 def test_needs_tool_reference_claims_no_data():
-    ref = case.load_case(AGENT, "needs_tool").reference
+    ref = case.load_case(AGENT, "needs_tool", root=CASES).reference
     assert ref["outcome"] == "no_tool"
     assert not ref.get("synthesis")
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_calibration_should_fail_is_valid_and_different(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     bad = _cal(cid)["should_fail"]
     AnalystOutput.model_validate(bad)
     assert bad != c.reference
@@ -193,7 +195,7 @@ def test_calibration_should_fail_is_valid_and_different(cid):
 
 @pytest.mark.parametrize("cid", ["unsourced_public_stat", "needs_tool"])
 def test_mutation_calibration_has_the_wrong_outcome(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     bad = _cal(cid)["should_fail"]
     assert bad["outcome"] != EXPECT[cid]["outcome"]
     ok, why = expected_category_score(AGENT, bad, c.expect)
@@ -202,7 +204,7 @@ def test_mutation_calibration_has_the_wrong_outcome(cid):
 
 @pytest.mark.parametrize("cid", POSITIVES)
 def test_positive_calibration_wrongly_claims_missing_data(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     bad = _cal(cid)["should_fail"]
     assert bad["outcome"] == "missing_data"
     ok, _ = expected_category_score(AGENT, bad, c.expect)
@@ -210,7 +212,7 @@ def test_positive_calibration_wrongly_claims_missing_data(cid):
 
 
 def test_conflicting_calibration_passes_the_scorer_but_hides_the_conflict():
-    c = case.load_case(AGENT, "conflicting_figures")
+    c = case.load_case(AGENT, "conflicting_figures", root=CASES)
     bad = _cal("conflicting_figures")["should_fail"]
     assert bad["outcome"] == "success"
     ok, why = expected_category_score(AGENT, bad, c.expect)
@@ -225,16 +227,23 @@ def test_generator_is_idempotent(generated):
     from evals.packs.data_analyst import mutations
 
     before = dict(generated)
-    mutations.generate()
-    assert _snapshot() == before
+    mutations.generate(out_dir=CASES)
+    assert _snapshot(CASES) == before
 
 
 def test_committed_cases_are_current():
-    current = _snapshot()
-    missing = set(_initial_snapshot) - set(current)
-    extra = set(current) - set(_initial_snapshot)
-    assert not missing and not extra, f"File set mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
-    differing = sorted(p for p in current if current[p] != _initial_snapshot[p])
+    """The committed tree is byte-identical to a fresh generation (same file set, same bytes).
+
+    Read-only on the committed tree: the fresh generation lives in the module's tmp tree.
+    """
+    committed = _snapshot(COMMITTED)
+    fresh = _snapshot(CASES)
+    missing = set(fresh) - set(committed)
+    extra = set(committed) - set(fresh)
+    assert not missing and not extra, (
+        f"File set mismatch: not committed={sorted(missing)}, stale committed={sorted(extra)}"
+    )
+    differing = sorted(p for p in fresh if fresh[p] != committed[p])
     assert not differing, f"Committed files differ from generated state: {differing}"
 
 

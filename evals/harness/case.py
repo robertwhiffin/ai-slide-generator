@@ -21,9 +21,14 @@ class Case:
     expect: dict
 
 
-def load_case(agent_key: str, case_id: str) -> Case:
-    """Load a case from the packs directory."""
-    case_dir = PACKS_DIR / agent_key / "cases" / case_id
+def cases_dir(agent_key: str, root: pathlib.Path | None = None) -> pathlib.Path:
+    """The directory holding an agent's case dirs: ``root`` if given, else the committed tree."""
+    return pathlib.Path(root) if root is not None else PACKS_DIR / agent_key / "cases"
+
+
+def load_case(agent_key: str, case_id: str, *, root: pathlib.Path | None = None) -> Case:
+    """Load a case from the packs directory (or from ``root``, a generated ``cases`` dir)."""
+    case_dir = cases_dir(agent_key, root) / case_id
 
     # Load the three required files
     with open(case_dir / "case.yaml") as f:
@@ -55,15 +60,15 @@ def load_case(agent_key: str, case_id: str) -> Case:
     )
 
 
-def load_cases(agent_key: str) -> list[Case]:
-    """Load all cases for an agent, sorted by case_id."""
-    cases_dir = PACKS_DIR / agent_key / "cases"
+def load_cases(agent_key: str, *, root: pathlib.Path | None = None) -> list[Case]:
+    """Load all cases for an agent, sorted by case_id (from ``root`` if given)."""
+    base = cases_dir(agent_key, root)
 
-    if not cases_dir.exists():
+    if not base.exists():
         return []
 
-    case_dirs = sorted([d for d in cases_dir.iterdir() if d.is_dir()])
-    cases = [load_case(agent_key, d.name) for d in case_dirs]
+    case_dirs = sorted([d for d in base.iterdir() if d.is_dir()])
+    cases = [load_case(agent_key, d.name, root=root) for d in case_dirs]
 
     return sorted(cases, key=lambda c: c.case_id)
 

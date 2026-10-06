@@ -1,5 +1,6 @@
 """Generate the architect pack's cases from the Meridian gold deck. Idempotent."""
 import json
+import pathlib
 
 import yaml
 
@@ -98,8 +99,8 @@ def _out(intent, message, **kw):
     return out
 
 
-def _write(cid, kind, fault, expect, reference, should_fail):
-    d = CASES_DIR / cid
+def _write(out, cid, kind, fault, expect, reference, should_fail):
+    d = out / cid
     d.mkdir(parents=True, exist_ok=True)
     (d / "case.yaml").write_text(yaml.safe_dump({
         "kind": kind, "fault": fault, "expect": expect, "design_system_active": True,
@@ -109,18 +110,20 @@ def _write(cid, kind, fault, expect, reference, should_fail):
     _dump(d / "calibration.json", {"should_fail": should_fail})
 
 
-def generate():
+def generate(out_dir: pathlib.Path | None = None):
+    """Write the cases into ``out_dir`` (default: the committed ``CASES_DIR``)."""
+    out = pathlib.Path(out_dir) if out_dir is not None else CASES_DIR
     gold = case.gold_deck_spec()
     discuss = _out("discuss", "Happy to talk it through; what would you like to know?")
 
     _write(
-        "build_request", "positive", "", {"intent": "build"},
+        out, "build_request", "positive", "", {"intent": "build"},
         _out("build", "Here is a 10-slide deck arguing HTML slides beat PowerPoint.",
              deck_spec=gold),
         discuss,
     )
     _write(
-        "edit_request", "mutation",
+        out, "edit_request", "mutation",
         "edit of slide 2 (position 1): a 1-based position slips off by one",
         {"intent": "edit", "positions": [1]},
         _out("edit", "I'll replace the bullet list on slide 2 with three stat cards.",
@@ -129,7 +132,7 @@ def generate():
              target_positions=[2]),
     )
     _write(
-        "ask_data", "mutation",
+        out, "ask_data", "mutation",
         "deck on the user's own Q3 revenue with no data available",
         {"intent": "ask_data"},
         _out("ask_data", "I need your Q3 and Q2 revenue by region before I can build this.",
@@ -140,7 +143,7 @@ def generate():
         _out("build", "Here is a deck on your Q3 revenue.", deck_spec=gold),
     )
     _write(
-        "confirm_design", "mutation",
+        out, "confirm_design", "mutation",
         "design switch must be proposed, not applied to deck_spec",
         {"intent": "confirm_design_contract"},
         _out("confirm_design_contract",
@@ -153,7 +156,7 @@ def generate():
              target_positions=[0]),
     )
     _write(
-        "discuss", "positive", "", {"intent": "discuss"},
+        out, "discuss", "positive", "", {"intent": "discuss"},
         _out("discuss",
              "Reveal.js is a general HTML presentation framework; Slidev is "
              "Markdown-first and aimed at developers."),

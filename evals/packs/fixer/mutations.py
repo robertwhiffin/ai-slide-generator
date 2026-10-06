@@ -1,6 +1,7 @@
 """Generate the fixer pack's cases from the Meridian gold deck. Idempotent."""
 import copy
 import json
+import pathlib
 
 import yaml
 
@@ -77,8 +78,8 @@ def _mutate_contrast(html):
     return html.replace(OLD_CALLOUT_OPEN, BAD_CALLOUT_OPEN, 1)
 
 
-def _write(cid, fault, payload, reference, should_fail):
-    d = CASES_DIR / cid
+def _write(out, cid, fault, payload, reference, should_fail):
+    d = out / cid
     d.mkdir(parents=True, exist_ok=True)
     (d / "case.yaml").write_text(yaml.safe_dump({
         "kind": "mutation", "fault": fault, "expect": {}, "design_system_active": True,
@@ -88,7 +89,9 @@ def _write(cid, fault, payload, reference, should_fail):
     _dump(d / "calibration.json", {"should_fail": should_fail})
 
 
-def generate():
+def generate(out_dir: pathlib.Path | None = None):
+    """Write the cases into ``out_dir`` (default: the committed ``CASES_DIR``)."""
+    out = pathlib.Path(out_dir) if out_dir is not None else CASES_DIR
     mutations = [
         ("rogue_colour", 1, br._mutate_rogue_colour,
          f"slide title recoloured {br.ROGUE_HEX}, off the Meridian palette"),
@@ -113,7 +116,7 @@ def generate():
             "position": pos, "html": bad_html, "scripts": scripts,
             "changed": False, "change_summary": "No change needed.",
         }
-        _write(cid, fault, _payload(cid, pos, bad_html, scripts), reference, should_fail)
+        _write(out, cid, fault, _payload(cid, pos, bad_html, scripts), reference, should_fail)
 
 
 if __name__ == "__main__":

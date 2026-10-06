@@ -27,40 +27,41 @@ FILES = ("case.yaml", "payload.json", "reference.json", "calibration.json")
 PACK_DIR = case.PACKS_DIR / AGENT
 
 
-def _snapshot():
-    cases = PACK_DIR / "cases"
-    if not cases.exists():
+COMMITTED = PACK_DIR / "cases"
+CASES = None  # set by the autouse fixture: the tmp tree generated for this module (I9)
+
+
+def _snapshot(root):
+    if not root.exists():
         return {}
     return {
-        str(p.relative_to(PACK_DIR)): p.read_bytes()
-        for p in sorted(cases.rglob("*"))
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
         if p.is_file()
     }
 
 
-# Capture committed state BEFORE any generate() call in this module (packs-facts rule).
-_initial_snapshot = _snapshot()
-
-
 @pytest.fixture(scope="module", autouse=True)
-def generated():
-    """Run the generator once (no-arg generate(), writes the real case tree)."""
+def generated(tmp_path_factory):
+    """Generate the pack once into a tmp tree; tests read from it, never rewriting the committed tree."""
+    global CASES
     from evals.packs.build_reviewer import mutations
 
-    mutations.generate()
-    return _snapshot()
+    CASES = tmp_path_factory.mktemp(AGENT) / "cases"
+    mutations.generate(out_dir=CASES)
+    return _snapshot(CASES)
 
 
 def _cal(cid):
-    return json.loads((PACK_DIR / "cases" / cid / "calibration.json").read_text())
+    return json.loads((CASES / cid / "calibration.json").read_text())
 
 
 def _html(cid):
-    return case.load_case(AGENT, cid).payload["html"]
+    return case.load_case(AGENT, cid, root=CASES).payload["html"]
 
 
 def _scripts(cid):
-    return case.load_case(AGENT, cid).payload.get("scripts", "")
+    return case.load_case(AGENT, cid, root=CASES).payload.get("scripts", "")
 
 
 def _measure(cid):
@@ -84,21 +85,21 @@ def _pcts(text):
 
 
 def test_exactly_the_five_cases():
-    cases = case.load_cases(AGENT)
+    cases = case.load_cases(AGENT, root=CASES)
     assert sorted(c.case_id for c in cases) == sorted(CASE_IDS)
-    dirs = sorted(d.name for d in (PACK_DIR / "cases").iterdir() if d.is_dir())
+    dirs = sorted(d.name for d in CASES.iterdir() if d.is_dir())
     assert dirs == sorted(CASE_IDS)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_has_four_files(cid):
-    d = PACK_DIR / "cases" / cid
+    d = CASES / cid
     assert sorted(p.name for p in d.iterdir()) == sorted(FILES)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_contract(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.design_system_active is True
     assert set(c.payload) <= set(MODEL_PAYLOAD_KEYS[AGENT])
     assert "deck_brief" not in c.payload
@@ -110,7 +111,7 @@ def test_case_contract(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_payload_validates_against_real_models(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     ResolvedData.model_validate(c.payload["resolved_data"])
     spec = SlideSpec.model_validate(c.payload["slide_spec"])
     assert spec.position == POSITION[cid]
@@ -119,13 +120,13 @@ def test_payload_validates_against_real_models(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_resolved_data_comes_from_the_gold_deck_spec(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.payload["resolved_data"] == case.gold_deck_spec()["resolved_data"]
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_slide_spec_is_the_gold_slide_spec(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.payload["slide_spec"] == case.gold_deck_spec()["slides"][POSITION[cid]]
 
 
@@ -174,7 +175,7 @@ def test_broken_handoff_changes_content_only():
 
 @pytest.mark.usefixtures("requires_chromium")
 def test_source_contradiction_changes_a_sourced_figure():
-    c = case.load_case(AGENT, "source_contradiction")
+    c = case.load_case(AGENT, "source_contradiction", root=CASES)
     gold = case.gold_slide(3)
     html = c.payload["html"]
     assert html != gold
@@ -198,7 +199,7 @@ def test_source_contradiction_changes_a_sourced_figure():
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_expect_matches_brief(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.expect == EXPECT[cid]
     for crit in c.expect["criteria"]:
         assert crit in CRITERIA
@@ -206,7 +207,7 @@ def test_expect_matches_brief(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_reference_shape_and_passes(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     ref = c.reference
     assert set(ref) >= {"slide_index", "verdict", "findings"}
     assert ref["slide_index"] == POSITION[cid]
@@ -223,7 +224,7 @@ def test_reference_shape_and_passes(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_calibration_should_fail_is_reviewer_shaped_and_fails(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     bad = _cal(cid)["should_fail"]
     assert set(bad) >= {"slide_index", "verdict", "findings"}
     assert bad["slide_index"] == POSITION[cid]
@@ -251,17 +252,23 @@ def test_generator_is_idempotent(generated):
     from evals.packs.build_reviewer import mutations
 
     before = dict(generated)
-    mutations.generate()
-    assert _snapshot() == before
+    mutations.generate(out_dir=CASES)
+    assert _snapshot(CASES) == before
 
 
 def test_committed_cases_are_current():
-    """Committed case files must match generated output (packs-facts rule)."""
-    current = _snapshot()
-    missing = set(_initial_snapshot) - set(current)
-    extra = set(current) - set(_initial_snapshot)
-    assert not missing and not extra, f"File set mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
-    differing = sorted(p for p in current if current[p] != _initial_snapshot[p])
+    """The committed tree is byte-identical to a fresh generation (same file set, same bytes).
+
+    Read-only on the committed tree: the fresh generation lives in the module's tmp tree.
+    """
+    committed = _snapshot(COMMITTED)
+    fresh = _snapshot(CASES)
+    missing = set(fresh) - set(committed)
+    extra = set(committed) - set(fresh)
+    assert not missing and not extra, (
+        f"File set mismatch: not committed={sorted(missing)}, stale committed={sorted(extra)}"
+    )
+    differing = sorted(p for p in fresh if fresh[p] != committed[p])
     assert not differing, f"Committed files differ from generated state: {differing}"
 
 

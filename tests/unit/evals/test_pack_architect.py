@@ -33,49 +33,51 @@ PAYLOAD_KEYS = {
 LAYOUT = case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
 
 
-def _snapshot():
-    cases = PACK_DIR / "cases"
-    if not cases.exists():
+COMMITTED = PACK_DIR / "cases"
+CASES = None  # set by the autouse fixture: the tmp tree generated for this module (I9)
+
+
+def _snapshot(root):
+    if not root.exists():
         return {}
     return {
-        str(p.relative_to(PACK_DIR)): p.read_bytes()
-        for p in sorted(cases.rglob("*"))
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
         if p.is_file()
     }
 
 
-# Capture committed state BEFORE any generate() call in this module (packs-facts rule).
-_initial_snapshot = _snapshot()
-
-
 @pytest.fixture(scope="module", autouse=True)
-def generated():
+def generated(tmp_path_factory):
+    """Generate the pack once into a tmp tree; tests read from it, never rewriting the committed tree."""
+    global CASES
     from evals.packs.architect import mutations
 
-    mutations.generate()
-    return _snapshot()
+    CASES = tmp_path_factory.mktemp(AGENT) / "cases"
+    mutations.generate(out_dir=CASES)
+    return _snapshot(CASES)
 
 
 def _cal(cid):
-    return json.loads((PACK_DIR / "cases" / cid / "calibration.json").read_text())
+    return json.loads((CASES / cid / "calibration.json").read_text())
 
 
 def test_exactly_the_five_cases():
-    cases = case.load_cases(AGENT)
+    cases = case.load_cases(AGENT, root=CASES)
     assert sorted(c.case_id for c in cases) == sorted(CASE_IDS)
-    dirs = sorted(d.name for d in (PACK_DIR / "cases").iterdir() if d.is_dir())
+    dirs = sorted(d.name for d in CASES.iterdir() if d.is_dir())
     assert dirs == sorted(CASE_IDS)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_has_four_files(cid):
-    d = PACK_DIR / "cases" / cid
+    d = CASES / cid
     assert sorted(p.name for p in d.iterdir()) == sorted(FILES)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_contract(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.design_system_active is True
     assert set(c.payload) <= set(MODEL_PAYLOAD_KEYS[AGENT])
     assert set(c.payload) == PAYLOAD_KEYS
@@ -86,7 +88,7 @@ def test_case_contract(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_payload_is_the_production_shape(cid):
-    p = case.load_case(AGENT, cid).payload
+    p = case.load_case(AGENT, cid, root=CASES).payload
     gold = case.gold_deck_spec()
     assert isinstance(p["message"], str) and p["message"]
     assert p["previous_deck_review"] is None
@@ -117,7 +119,7 @@ def test_payload_is_the_production_shape(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_design_system_library(cid):
-    lib = case.load_case(AGENT, cid).payload["design_system_library"]
+    lib = case.load_case(AGENT, cid, root=CASES).payload["design_system_library"]
     assert len(lib) == 2
     by_id = {s["design_system_id"]: s for s in lib}
     assert set(by_id) == {3, 4}
@@ -135,7 +137,7 @@ def test_design_system_library(cid):
 
 def test_messages():
     def msg(cid):
-        return case.load_case(AGENT, cid).payload["message"]
+        return case.load_case(AGENT, cid, root=CASES).payload["message"]
 
     assert msg("edit_request") == "On slide 2, replace the bullet list with three stat cards"
     assert msg("confirm_design") == "Switch this deck to the Acme design system"
@@ -147,7 +149,7 @@ def test_messages():
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_reference_validates_and_passes(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     out = ArchitectOutput.model_validate(c.reference)
     assert out.intent == EXPECT[cid]["intent"]
     ok, why = expected_category_score(AGENT, c.reference, c.expect)
@@ -155,31 +157,31 @@ def test_reference_validates_and_passes(cid):
 
 
 def test_build_reference_carries_the_gold_spec():
-    ref = case.load_case(AGENT, "build_request").reference
+    ref = case.load_case(AGENT, "build_request", root=CASES).reference
     DeckSpec.model_validate(ref["deck_spec"])
     assert ref["deck_spec"] == case.gold_deck_spec()
 
 
 def test_edit_reference_targets_one_zero_based_position():
-    ref = case.load_case(AGENT, "edit_request").reference
+    ref = case.load_case(AGENT, "edit_request", root=CASES).reference
     assert ref["target_positions"] == [1]
 
 
 def test_ask_data_reference_has_a_data_request():
-    ref = case.load_case(AGENT, "ask_data").reference
+    ref = case.load_case(AGENT, "ask_data", root=CASES).reference
     assert DataRequest.model_validate(ref["data_request"]).metric
     assert not ref.get("deck_spec")
 
 
 def test_confirm_design_reference_proposes_acme_without_a_deck_spec():
-    ref = case.load_case(AGENT, "confirm_design").reference
+    ref = case.load_case(AGENT, "confirm_design", root=CASES).reference
     assert ref["proposed_design_contract"]["design_system_id"] == 4
     assert ref["proposed_design_contract"]["template_id"] == 7
     assert ref["deck_spec"] is None
 
 
 def test_discuss_reference_has_no_payload():
-    ref = case.load_case(AGENT, "discuss").reference
+    ref = case.load_case(AGENT, "discuss", root=CASES).reference
     assert ref["intent"] == "discuss"
     assert not ref.get("deck_spec")
     assert not ref.get("data_request")
@@ -187,7 +189,7 @@ def test_discuss_reference_has_no_payload():
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_calibration_should_fail_is_wrong_and_valid(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     bad = _cal(cid)["should_fail"]
     ArchitectOutput.model_validate(bad)
     assert bad != c.reference
@@ -211,16 +213,23 @@ def test_generator_is_idempotent(generated):
     from evals.packs.architect import mutations
 
     before = dict(generated)
-    mutations.generate()
-    assert _snapshot() == before
+    mutations.generate(out_dir=CASES)
+    assert _snapshot(CASES) == before
 
 
 def test_committed_cases_are_current():
-    current = _snapshot()
-    missing = set(_initial_snapshot) - set(current)
-    extra = set(current) - set(_initial_snapshot)
-    assert not missing and not extra, f"File set mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
-    differing = sorted(p for p in current if current[p] != _initial_snapshot[p])
+    """The committed tree is byte-identical to a fresh generation (same file set, same bytes).
+
+    Read-only on the committed tree: the fresh generation lives in the module's tmp tree.
+    """
+    committed = _snapshot(COMMITTED)
+    fresh = _snapshot(CASES)
+    missing = set(fresh) - set(committed)
+    extra = set(committed) - set(fresh)
+    assert not missing and not extra, (
+        f"File set mismatch: not committed={sorted(missing)}, stale committed={sorted(extra)}"
+    )
+    differing = sorted(p for p in fresh if fresh[p] != committed[p])
     assert not differing, f"Committed files differ from generated state: {differing}"
 
 
@@ -260,7 +269,7 @@ def test_judge_prompt_does_not_require_a_planted_fault():
 def test_confirm_design_reference_warns_every_slide_is_rebuilt():
     # src/core/skills/architect.py: a design-contract proposal must "say plainly
     # that every slide will be rebuilt" — the known-good output must do so too.
-    msg = case.load_case(AGENT, "confirm_design").reference["message"].lower()
+    msg = case.load_case(AGENT, "confirm_design", root=CASES).reference["message"].lower()
     assert "every slide" in msg and "rebuilt" in msg
 
 

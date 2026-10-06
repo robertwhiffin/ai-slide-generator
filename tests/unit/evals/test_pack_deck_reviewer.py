@@ -27,32 +27,33 @@ PACK_DIR = case.PACKS_DIR / AGENT
 PAYLOAD_KEYS = {"narrative_arc", "call_to_action", "slide_count", "slides"}
 
 
-def _snapshot():
-    cases = PACK_DIR / "cases"
-    if not cases.exists():
+COMMITTED = PACK_DIR / "cases"
+CASES = None  # set by the autouse fixture: the tmp tree generated for this module (I9)
+
+
+def _snapshot(root):
+    if not root.exists():
         return {}
     return {
-        str(p.relative_to(PACK_DIR)): p.read_bytes()
-        for p in sorted(cases.rglob("*"))
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
         if p.is_file()
     }
 
 
-# Capture committed state BEFORE any generate() call in this module (packs-facts rule).
-_initial_snapshot = _snapshot()
-
-
 @pytest.fixture(scope="module", autouse=True)
-def generated():
-    """Run the generator once (no-arg generate(), writes the real case tree)."""
+def generated(tmp_path_factory):
+    """Generate the pack once into a tmp tree; tests read from it, never rewriting the committed tree."""
+    global CASES
     from evals.packs.deck_reviewer import mutations
 
-    mutations.generate()
-    return _snapshot()
+    CASES = tmp_path_factory.mktemp(AGENT) / "cases"
+    mutations.generate(out_dir=CASES)
+    return _snapshot(CASES)
 
 
 def _cal(cid):
-    return json.loads((PACK_DIR / "cases" / cid / "calibration.json").read_text())
+    return json.loads((CASES / cid / "calibration.json").read_text())
 
 
 def _gold(pos):
@@ -64,7 +65,7 @@ def _gold_all():
 
 
 def _slides(cid):
-    return case.load_case(AGENT, cid).payload["slides"]
+    return case.load_case(AGENT, cid, root=CASES).payload["slides"]
 
 
 def _order(slides, *htmls):
@@ -72,21 +73,21 @@ def _order(slides, *htmls):
 
 
 def test_exactly_the_five_cases():
-    cases = case.load_cases(AGENT)
+    cases = case.load_cases(AGENT, root=CASES)
     assert sorted(c.case_id for c in cases) == sorted(CASE_IDS)
-    dirs = sorted(d.name for d in (PACK_DIR / "cases").iterdir() if d.is_dir())
+    dirs = sorted(d.name for d in CASES.iterdir() if d.is_dir())
     assert dirs == sorted(CASE_IDS)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_has_four_files(cid):
-    d = PACK_DIR / "cases" / cid
+    d = CASES / cid
     assert sorted(p.name for p in d.iterdir()) == sorted(FILES)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_contract(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.design_system_active is True
     assert set(c.payload) <= set(MODEL_PAYLOAD_KEYS[AGENT])
     assert set(c.payload) == PAYLOAD_KEYS == set(MODEL_PAYLOAD_KEYS[AGENT])
@@ -97,7 +98,7 @@ def test_case_contract(cid):
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_payload_is_the_production_shape(cid):
     """Production sends `slides` as ONE spotlighted string, not a list of {position, html}."""
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     p = c.payload
     spec = case.gold_deck_spec()
     assert isinstance(p["slides"], str)
@@ -120,28 +121,28 @@ EXPECTED_HTMLS = {
 def test_slides_string_is_spotlight_of_the_planned_slide_order(cid):
     g = _gold_all()
     htmls = EXPECTED_HTMLS[cid](g)
-    p = case.load_case(AGENT, cid).payload
+    p = case.load_case(AGENT, cid, root=CASES).payload
     assert p["slides"] == spotlight_prior_slides(htmls, None)
     assert p["slide_count"] == len(htmls)
 
 
 def test_repetition_slides_string_matches_its_own_slide_count():
-    p = case.load_case(AGENT, "repetition").payload
+    p = case.load_case(AGENT, "repetition", root=CASES).payload
     assert p["slide_count"] == 10
     assert p["slides"] != spotlight_prior_slides(_gold_all(), None)
     # 10 slides spotlighted = same number of spotlight blocks as the clean deck.
-    clean = case.load_case(AGENT, "clean").payload["slides"]
+    clean = case.load_case(AGENT, "clean", root=CASES).payload["slides"]
     assert p["slides"].count("<untrusted-data") == clean.count("<untrusted-data") == 10
 
 
 def test_clean_is_all_ten_gold_slides():
-    p = case.load_case(AGENT, "clean").payload
+    p = case.load_case(AGENT, "clean", root=CASES).payload
     assert p["slide_count"] == 10
     assert p["slides"] == spotlight_prior_slides(_gold_all(), None)
 
 
 def test_arc_gap_drops_the_objections_slide():
-    p = case.load_case(AGENT, "arc_gap_drop_objections").payload
+    p = case.load_case(AGENT, "arc_gap_drop_objections", root=CASES).payload
     assert p["slide_count"] == 9
     assert _gold(8) not in p["slides"]
     for i in (0, 1, 2, 3, 4, 5, 6, 7, 9):
@@ -149,7 +150,7 @@ def test_arc_gap_drops_the_objections_slide():
 
 
 def test_missing_conclusion_drops_the_verdict_slide():
-    p = case.load_case(AGENT, "missing_conclusion").payload
+    p = case.load_case(AGENT, "missing_conclusion", root=CASES).payload
     assert p["slide_count"] == 9
     assert _gold(9) not in p["slides"]
     for i in range(9):
@@ -157,7 +158,7 @@ def test_missing_conclusion_drops_the_verdict_slide():
 
 
 def test_out_of_order_swaps_positions_two_and_seven():
-    p = case.load_case(AGENT, "out_of_order").payload
+    p = case.load_case(AGENT, "out_of_order", root=CASES).payload
     s = p["slides"]
     assert p["slide_count"] == 10
     assert _gold(2) in s and _gold(7) in s
@@ -173,7 +174,7 @@ def test_out_of_order_swaps_positions_two_and_seven():
 
 
 def test_repetition_plants_a_duplicate_point():
-    p = case.load_case(AGENT, "repetition").payload
+    p = case.load_case(AGENT, "repetition", root=CASES).payload
     s = p["slides"]
     assert p["slide_count"] == 10
     # Gold position 5's content is gone...
@@ -190,7 +191,7 @@ def test_repetition_plants_a_duplicate_point():
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_expect_matches_brief(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.expect == EXPECT[cid]
     for crit in c.expect["criteria"]:
         assert crit in CRITERIA
@@ -200,7 +201,7 @@ def test_expect_matches_brief(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_reference_shape_and_passes(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     ref = c.reference
     assert set(ref) == {"findings"}
     for f in ref["findings"]:
@@ -216,7 +217,7 @@ def test_reference_shape_and_passes(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_calibration_should_fail_is_deck_reviewer_shaped(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     bad = _cal(cid)["should_fail"]
     assert set(bad) == {"findings"}
     for f in bad["findings"]:
@@ -226,7 +227,7 @@ def test_calibration_should_fail_is_deck_reviewer_shaped(cid):
 
 @pytest.mark.parametrize("cid", MUTATIONS)
 def test_mutation_calibration_fails_and_misses_the_planted_criterion(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     bad = _cal(cid)["should_fail"]
     ok, why = expected_category_score(AGENT, bad, c.expect)
     assert not ok, f"calibration should_fail unexpectedly passes: {why}"
@@ -236,7 +237,7 @@ def test_mutation_calibration_fails_and_misses_the_planted_criterion(cid):
 
 def test_clean_calibration_invents_a_deck_finding():
     """Deck criteria are subjective, so the scorer passes extras; the JUDGE must fail this."""
-    c = case.load_case(AGENT, "clean")
+    c = case.load_case(AGENT, "clean", root=CASES)
     bad = _cal("clean")["should_fail"]
     assert c.reference["findings"] == []
     assert len(bad["findings"]) >= 1
@@ -247,17 +248,23 @@ def test_generator_is_idempotent(generated):
     from evals.packs.deck_reviewer import mutations
 
     before = dict(generated)
-    mutations.generate()
-    assert _snapshot() == before
+    mutations.generate(out_dir=CASES)
+    assert _snapshot(CASES) == before
 
 
 def test_committed_cases_are_current():
-    """Committed case files must match generated output (packs-facts rule)."""
-    current = _snapshot()
-    missing = set(_initial_snapshot) - set(current)
-    extra = set(current) - set(_initial_snapshot)
-    assert not missing and not extra, f"File set mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
-    differing = sorted(p for p in current if current[p] != _initial_snapshot[p])
+    """The committed tree is byte-identical to a fresh generation (same file set, same bytes).
+
+    Read-only on the committed tree: the fresh generation lives in the module's tmp tree.
+    """
+    committed = _snapshot(COMMITTED)
+    fresh = _snapshot(CASES)
+    missing = set(fresh) - set(committed)
+    extra = set(committed) - set(fresh)
+    assert not missing and not extra, (
+        f"File set mismatch: not committed={sorted(missing)}, stale committed={sorted(extra)}"
+    )
+    differing = sorted(p for p in fresh if fresh[p] != committed[p])
     assert not differing, f"Committed files differ from generated state: {differing}"
 
 

@@ -1,5 +1,6 @@
 """Generate the data_analyst pack's cases. Idempotent."""
 import json
+import pathlib
 
 import yaml
 
@@ -40,9 +41,9 @@ def _out(outcome, **kw):
     return out
 
 
-def _write(cid, kind, fault, expect, reference, should_fail):
+def _write(out, cid, kind, fault, expect, reference, should_fail):
     """Write a case to disk."""
-    d = CASES_DIR / cid
+    d = out / cid
     d.mkdir(parents=True, exist_ok=True)
     (d / "case.yaml").write_text(yaml.safe_dump({
         "kind": kind, "fault": fault, "expect": expect, "design_system_active": True,
@@ -54,14 +55,16 @@ def _write(cid, kind, fault, expect, reference, should_fail):
     _dump(d / "calibration.json", {"should_fail": bad})
 
 
-def generate():
+def generate(out_dir: pathlib.Path | None = None):
+    """Write the cases into ``out_dir`` (default: the committed ``CASES_DIR``)."""
+    out = pathlib.Path(out_dir) if out_dir is not None else CASES_DIR
     """Generate all 5 cases idempotently."""
 
     # figures_inline: positive, user provides StatCounter 98% figure. One source, so the
     # skill's "ONE source returned data -> pass it through verbatim" rule: the request's own
     # figure and source wording, not a paraphrase.
     _write(
-        "figures_inline", "positive", "", {"outcome": "success"},
+        out, "figures_inline", "positive", "", {"outcome": "success"},
         _out("success",
              synthesis="98% on StatCounter",
              sources=["StatCounter"],
@@ -73,7 +76,7 @@ def generate():
 
     # two_sources: positive, cite both sources (8-15 MB and under 1 MB)
     _write(
-        "two_sources", "positive", "", {"outcome": "success"},
+        out, "two_sources", "positive", "", {"outcome": "success"},
         _out("success",
              synthesis="Two reported figures differ: 8–15 MB is described as typical, while under 1 MB is reported for some configurations.",
              sources=["Reported figure: 8–15 MB typical", "Reported figure: under 1 MB in some configurations"],
@@ -89,7 +92,7 @@ def generate():
     # data" (missing_data, which presupposes an attempted retrieval and is unreachable).
     # The failure this case tests is hallucination: inventing a plausible figure.
     _write(
-        "unsourced_public_stat", "mutation",
+        out, "unsourced_public_stat", "mutation",
         "public statistic not in the request and no tool is bound to fetch it",
         {"outcome": "no_tool"},
         _out("no_tool",
@@ -106,7 +109,7 @@ def generate():
 
     # needs_tool: mutation, requires database query that isn't available
     _write(
-        "needs_tool", "mutation",
+        out, "needs_tool", "mutation",
         "database query required but no query tool is bound at runtime",
         {"outcome": "no_tool"},
         _out("no_tool",
@@ -121,7 +124,7 @@ def generate():
 
     # conflicting_figures: mutation, two conflicting figures from different surveys
     _write(
-        "conflicting_figures", "mutation",
+        out, "conflicting_figures", "mutation",
         "two conflicting figures in the request (8 MB vs 15 MB) that should be flagged",
         {"outcome": "success"},
         _out("success",

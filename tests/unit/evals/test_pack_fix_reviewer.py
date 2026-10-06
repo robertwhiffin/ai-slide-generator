@@ -47,31 +47,33 @@ PACK_DIR = case.PACKS_DIR / AGENT
 POS = 1
 
 
-def _snapshot():
-    cases = PACK_DIR / "cases"
-    if not cases.exists():
+COMMITTED = PACK_DIR / "cases"
+CASES = None  # set by the autouse fixture: the tmp tree generated for this module (I9)
+
+
+def _snapshot(root):
+    if not root.exists():
         return {}
     return {
-        str(p.relative_to(PACK_DIR)): p.read_bytes()
-        for p in sorted(cases.rglob("*"))
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
         if p.is_file()
     }
 
 
-# Capture committed state BEFORE any generate() call in this module (packs-facts rule).
-_initial_snapshot = _snapshot()
-
-
 @pytest.fixture(scope="module", autouse=True)
-def generated():
+def generated(tmp_path_factory):
+    """Generate the pack once into a tmp tree; tests read from it, never rewriting the committed tree."""
+    global CASES
     from evals.packs.fix_reviewer import mutations
 
-    mutations.generate()
-    return _snapshot()
+    CASES = tmp_path_factory.mktemp(AGENT) / "cases"
+    mutations.generate(out_dir=CASES)
+    return _snapshot(CASES)
 
 
 def _cal(cid):
-    return json.loads((PACK_DIR / "cases" / cid / "calibration.json").read_text())["should_fail"]
+    return json.loads((CASES / cid / "calibration.json").read_text())["should_fail"]
 
 
 def _measure(html, scripts=""):
@@ -79,12 +81,12 @@ def _measure(html, scripts=""):
 
 
 def _after(cid):
-    p = case.load_case(AGENT, cid).payload
+    p = case.load_case(AGENT, cid, root=CASES).payload
     return _measure(p["html"], p.get("scripts", ""))
 
 
 def _before(cid):
-    p = case.load_case(AGENT, cid).payload
+    p = case.load_case(AGENT, cid, root=CASES).payload
     return _measure(p["original_html"], p.get("original_scripts", ""))
 
 
@@ -101,21 +103,21 @@ def _assert_clean(m):
 
 
 def test_exactly_the_five_cases():
-    cases = case.load_cases(AGENT)
+    cases = case.load_cases(AGENT, root=CASES)
     assert sorted(c.case_id for c in cases) == sorted(CASE_IDS)
-    dirs = sorted(d.name for d in (PACK_DIR / "cases").iterdir() if d.is_dir())
+    dirs = sorted(d.name for d in CASES.iterdir() if d.is_dir())
     assert dirs == sorted(CASE_IDS)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_has_four_files(cid):
-    d = PACK_DIR / "cases" / cid
+    d = CASES / cid
     assert sorted(p.name for p in d.iterdir()) == sorted(FILES)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_case_contract(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.design_system_active is True
     assert c.kind == KIND[cid]
     if c.kind == "mutation":
@@ -132,7 +134,7 @@ def test_case_contract(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_payload_validates_against_real_models(cid):
-    p = case.load_case(AGENT, cid).payload
+    p = case.load_case(AGENT, cid, root=CASES).payload
     spec = SlideSpec.model_validate(p["slide_spec"])
     assert spec.position == POS
     assert p["slide_spec"] == case.gold_deck_spec()["slides"][POS]
@@ -142,7 +144,7 @@ def test_payload_validates_against_real_models(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_reuses_fixer_pack_input_and_finding(cid):
-    p = case.load_case(AGENT, cid).payload
+    p = case.load_case(AGENT, cid, root=CASES).payload
     twin = case.load_case("fixer", FIXER_TWIN[cid]).payload
     assert p["original_html"] == twin["html"]
     assert p["finding"] == twin["finding"]
@@ -150,7 +152,7 @@ def test_reuses_fixer_pack_input_and_finding(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_expect_matches_table(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     assert c.expect == EXPECT[cid]
     for crit in c.expect["criteria"]:
         assert crit in CRITERIA
@@ -159,7 +161,7 @@ def test_expect_matches_table(cid):
 @pytest.mark.parametrize("cid", ACCEPTS)
 @pytest.mark.usefixtures("requires_chromium")
 def test_accept_cases_fix_is_the_gold_and_renders_clean(cid):
-    p = case.load_case(AGENT, cid).payload
+    p = case.load_case(AGENT, cid, root=CASES).payload
     assert p["html"] == case.gold_slide(POS)
     assert p["html"] != p["original_html"]
     _assert_clean(_after(cid))
@@ -167,21 +169,21 @@ def test_accept_cases_fix_is_the_gold_and_renders_clean(cid):
 
 @pytest.mark.usefixtures("requires_chromium")
 def test_good_fix_accept_original_overflows():
-    assert case.load_case(AGENT, "good_fix_accept").payload["finding"]["criterion"] == "overflow"
+    assert case.load_case(AGENT, "good_fix_accept", root=CASES).payload["finding"]["criterion"] == "overflow"
     m = _before("good_fix_accept")
     assert m.rendered and m.overflow_px > 0
 
 
 @pytest.mark.usefixtures("requires_chromium")
 def test_good_contrast_fix_accept_original_has_low_contrast():
-    assert case.load_case(AGENT, "good_contrast_fix_accept").payload["finding"]["criterion"] == "contrast_failure"
+    assert case.load_case(AGENT, "good_contrast_fix_accept", root=CASES).payload["finding"]["criterion"] == "contrast_failure"
     m = _before("good_contrast_fix_accept")
     assert m.rendered and m.min_contrast < 4.5
 
 
 @pytest.mark.usefixtures("requires_chromium")
 def test_fault_left_html_still_overflows_but_less():
-    p = case.load_case(AGENT, "fault_left_reject").payload
+    p = case.load_case(AGENT, "fault_left_reject", root=CASES).payload
     assert p["finding"]["criterion"] == "overflow"
     assert p["html"] != p["original_html"]
     after, before = _after("fault_left_reject"), _before("fault_left_reject")
@@ -196,7 +198,7 @@ def test_fault_left_html_still_overflows_but_less():
 
 @pytest.mark.usefixtures("requires_chromium")
 def test_content_broken_html_is_clean_but_changes_meaning():
-    p = case.load_case(AGENT, "content_broken_reject").payload
+    p = case.load_case(AGENT, "content_broken_reject", root=CASES).payload
     assert p["html"] != case.gold_slide(POS)
     assert _text(p["html"]) != _text(case.gold_slide(POS))
     assert p["html"] != p["original_html"]
@@ -205,7 +207,7 @@ def test_content_broken_html_is_clean_but_changes_meaning():
 
 @pytest.mark.usefixtures("requires_chromium")
 def test_restyle_html_fixes_overflow_but_is_off_palette():
-    p = case.load_case(AGENT, "restyle_reject").payload
+    p = case.load_case(AGENT, "restyle_reject", root=CASES).payload
     assert p["html"] != case.gold_slide(POS)
     m = _after("restyle_reject")
     assert m.rendered
@@ -219,7 +221,7 @@ def test_restyle_html_fixes_overflow_but_is_off_palette():
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_reference_is_reviewer_shaped_and_passes_scorer(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     ref = c.reference
     assert ref["slide_index"] == POS
     assert ref["verdict"] in ("clean", "fixed", "surfaced")
@@ -238,7 +240,7 @@ def test_reference_is_reviewer_shaped_and_passes_scorer(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_calibration_is_reviewer_shaped_differs_and_fails_scorer(cid):
-    c = case.load_case(AGENT, cid)
+    c = case.load_case(AGENT, cid, root=CASES)
     bad = _cal(cid)
     assert bad["slide_index"] == POS
     assert bad["verdict"] in ("clean", "fixed", "surfaced")
@@ -268,16 +270,23 @@ def test_generator_is_idempotent(generated):
     from evals.packs.fix_reviewer import mutations
 
     before = dict(generated)
-    mutations.generate()
-    assert _snapshot() == before
+    mutations.generate(out_dir=CASES)
+    assert _snapshot(CASES) == before
 
 
 def test_committed_cases_are_current():
-    current = _snapshot()
-    missing = set(_initial_snapshot) - set(current)
-    extra = set(current) - set(_initial_snapshot)
-    assert not missing and not extra, f"File set mismatch: missing={sorted(missing)}, extra={sorted(extra)}"
-    differing = sorted(p for p in current if current[p] != _initial_snapshot[p])
+    """The committed tree is byte-identical to a fresh generation (same file set, same bytes).
+
+    Read-only on the committed tree: the fresh generation lives in the module's tmp tree.
+    """
+    committed = _snapshot(COMMITTED)
+    fresh = _snapshot(CASES)
+    missing = set(fresh) - set(committed)
+    extra = set(committed) - set(fresh)
+    assert not missing and not extra, (
+        f"File set mismatch: not committed={sorted(missing)}, stale committed={sorted(extra)}"
+    )
+    differing = sorted(p for p in fresh if fresh[p] != committed[p])
     assert not differing, f"Committed files differ from generated state: {differing}"
 
 
