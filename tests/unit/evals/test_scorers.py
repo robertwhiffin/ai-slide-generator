@@ -210,3 +210,25 @@ def test_all_scorers_return_bool_and_nonempty_rationale():
     ]
     for r in results:
         _assert_result(r)
+
+
+# ---- review additions ----
+
+def test_planted_criterion_without_positions_must_still_appear():
+    expect = {"criteria": ["arc_gap"]}
+    assert scorers.expected_category_score("deck_reviewer", {"findings": []}, expect)[0] is False
+    assert scorers.expected_category_score("deck_reviewer", {"findings": [_f("arc_gap", -1)]}, expect)[0] is True
+
+
+def test_deck_level_position_minus_one():
+    out = {"findings": [_f("arc_gap", -1)]}
+    assert scorers.expected_category_score("deck_reviewer", out, {"criteria": ["arc_gap"], "positions": [-1]})[0] is True
+    assert scorers.expected_category_score("deck_reviewer", out, {"criteria": ["arc_gap"], "positions": [0]})[0] is False
+
+
+@pytest.mark.parametrize("agent", ["architect", "data_analyst"] + REVIEWERS)
+@pytest.mark.parametrize("bad", [None, {}, {"findings": None}])
+def test_malformed_structured_scores_fail_not_crash(agent, bad):
+    ok, why = scorers.expected_category_score(agent, bad, {"intent": "build", "outcome": "success", "criteria": ["overflow"], "positions": [1]})
+    assert ok is False
+    assert why.strip()
