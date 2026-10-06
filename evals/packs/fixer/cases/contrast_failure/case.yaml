@@ -1,0 +1,4 @@
+kind: mutation
+fault: callout set to ink text on the primary-dark background, contrast below 4.5
+expect: {}
+design_system_active: true
