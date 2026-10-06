@@ -1,0 +1,16 @@
+{
+  "slide_index": 1,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "brief_not_delivered:1:0",
+      "slide_index": 1,
+      "category": "content",
+      "criterion": "brief_not_delivered",
+      "message": "The callout concludes that PowerPoint is a capable format and problems are author error, which contradicts the brief's hand-off that PowerPoint's legacy architecture imposes real limits on presentation quality.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

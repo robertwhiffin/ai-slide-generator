@@ -1,0 +1,8 @@
+kind: mutation
+fault: every 98% in the slide changed to 64%, contradicting resolved_data
+expect:
+  criteria:
+  - source_contradiction
+  positions:
+  - 3
+design_system_active: true
