@@ -491,6 +491,43 @@ def test_pin_entry_not_found_exactly_once_aborts_after_compute_and_writes_nothin
     assert _read_all(tree) == before
 
 
+@pytest.mark.parametrize("role", ["build_reviewer", "data_analyst"])
+def test_lock_compares_against_transition_source_not_a_drifted_manifest(tree, role):
+    """If the repo_root manifest's locked prompt has drifted from the transition's
+    source_composite_prompt (e.g. hand-edited), a config carrying that drifted prompt
+    must still be refused: the migration only matches source_composite_prompt."""
+    path = tree / MANIFEST_REL
+    original = path.read_text(encoding="utf-8")
+    drifted_prompt = config.v1_baseline(role).content.prompt_text + "\n\nHAND EDIT."
+    path.write_text(_expected_manifest_file(original, {role: {"prompt_text": drifted_prompt}}),
+                    encoding="utf-8")
+    before = _read_all(tree)
+    content = config.v1_baseline(role).content
+    content = content.model_copy(update={
+        "prompt_text": drifted_prompt,
+        "model": content.model.model_copy(update={"endpoint_name": NEW_ENDPOINT}),
+    })
+    cfg = config.AgentEvalConfig(role, "drifted", content, definition_content_hash(content))
+    with pytest.raises(promote.PromoteBlocked) as e:
+        promote.promote({role: cfg}, repo_root=tree)
+    assert role in str(e.value)
+    assert "prompt" in str(e.value).lower()
+    assert _read_all(tree) == before
+
+
+def test_config_change_outside_editable_fields_is_refused_by_manifest_hash_guard(tree):
+    """A correctly self-hashed config changing a field promote does not carry
+    (definition_version) must fail the manifest-hash == config-hash guard."""
+    before = _read_all(tree)
+    base = config.v1_baseline("builder").content
+    content = base.model_copy(update={"definition_version": base.definition_version + 1})
+    cfg = config.AgentEvalConfig("builder", "uncarried", content, definition_content_hash(content))
+    with pytest.raises(promote.PromoteBlocked) as e:
+        promote.promote({"builder": cfg}, repo_root=tree)
+    assert "builder" in str(e.value)
+    assert _read_all(tree) == before
+
+
 # ---------------------------------------------------------------------------
 # leak guard — keep LAST
 # ---------------------------------------------------------------------------

@@ -115,7 +115,9 @@ def promote(
     old_hashes = {k: definition_content_hash(d) for k, d in current_by_key.items()}
 
     # --- validate every choice before touching anything -------------------
-    locked = {t.agent_key for t in _transition_records()}
+    # The migration matches on the transition's source_composite_prompt, so lock against
+    # that directly -- a manifest that has drifted from it must not launder a change.
+    locked = {t.agent_key: t.source_composite_prompt for t in _transition_records()}
     for role, cfg in chosen.items():
         if role not in GRAPH_V1_AGENT_KEYS:
             raise PromoteBlocked(f"unknown role {role!r}; valid roles: {list(GRAPH_V1_AGENT_KEYS)}")
@@ -127,7 +129,10 @@ def promote(
             raise PromoteBlocked(
                 f"{role}: config content_hash {cfg.content_hash} does not match its content"
             )
-        if role in locked and cfg.content.prompt_text != current_by_key[role].prompt_text:
+        if role in locked and (
+            cfg.content.prompt_text != locked[role]
+            or cfg.content.prompt_text != current_by_key[role].prompt_text
+        ):
             raise PromoteBlocked(
                 f"{role}: prompt_text change is blocked -- its v1 prompt is the source of a "
                 "LegacyV1PromptTransition; changing it needs a deliberate migration"
