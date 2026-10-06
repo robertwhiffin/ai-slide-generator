@@ -1,0 +1,11 @@
+{
+  "outcome": "success",
+  "synthesis": "Memory usage varies significantly: 8–15 MB on some platforms (source A), under 1 MB on optimized builds (source B).",
+  "sources": [
+    "Platform analysis",
+    "Build optimization report"
+  ],
+  "gap": null,
+  "tried_tools": [],
+  "reason": null
+}

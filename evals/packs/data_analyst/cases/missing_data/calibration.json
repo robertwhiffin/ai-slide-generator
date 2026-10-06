@@ -1,0 +1,13 @@
+{
+  "should_fail": {
+    "outcome": "success",
+    "synthesis": "Data indicates strong adoption of Reveal.js-based presentations.",
+    "sources": [
+      "Analytics"
+    ],
+    "gap": null,
+    "tried_tools": [],
+    "reason": null,
+    "_data_request": "How many monthly active users have viewed presentations built with Reveal.js since 2023? We need this for our analysis."
+  }
+}
