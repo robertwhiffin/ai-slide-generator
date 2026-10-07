@@ -274,6 +274,14 @@ def test_generator_is_idempotent(generated):
     assert _snapshot(CASES) == before
 
 
+def test_default_output_is_the_heldout_tree_not_train():
+    """generate() with no out_dir must write cases_heldout, never the train cases tree."""
+    from evals.packs.architect import heldout, mutations
+
+    assert heldout.CASES_DIR == case.cases_dir(AGENT, split="heldout") == COMMITTED
+    assert heldout.CASES_DIR != mutations.CASES_DIR
+
+
 def test_committed_cases_are_current():
     """Committed cases_heldout tree is byte-identical to a fresh tmp generation (read-only on it)."""
     committed = _snapshot(COMMITTED)
