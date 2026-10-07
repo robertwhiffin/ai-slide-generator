@@ -1,0 +1,54 @@
+<section class="slide">
+  <p class="eyebrow">Workflow</p>
+  <h2 class="slide-title">A repeatable evaluate-and-iterate loop drives prompt quality</h2>
+  <p class="slide-subtitle">3–5 cycles typically needed to reach production-grade prompts</p>
+  <div class="grid-2">
+    <!-- Left: Prompt Evaluation Loop Diagram -->
+    <div style="display:flex;align-items:center;justify-content:center;position:relative;">
+      <div style="position:relative;width:380px;height:380px;">
+        <!-- Circular track -->
+        <svg viewBox="0 0 380 380" width="380" height="380" style="position:absolute;top:0;left:0;">
+          <!-- Outer ring path -->
+          <circle cx="190" cy="190" r="155" fill="none" stroke="#E2E8F0" stroke-width="3"/>
+          <!-- Directional arrows on the ring -->
+          <path d="M190 35 A155 155 0 0 1 345 190" fill="none" stroke="#0F766E" stroke-width="3" stroke-dasharray="8 4" marker-end="url(#arrowTeal)"/>
+          <path d="M345 190 A155 155 0 0 1 190 345" fill="none" stroke="#6D28D9" stroke-width="3" stroke-dasharray="8 4" marker-end="url(#arrowViolet)"/>
+          <path d="M190 345 A155 155 0 0 1 35 190" fill="none" stroke="#0369A1" stroke-width="3" stroke-dasharray="8 4" marker-end="url(#arrowSky)"/>
+          <path d="M35 190 A155 155 0 0 1 190 35" fill="none" stroke="#B45309" stroke-width="3" stroke-dasharray="8 4" marker-end="url(#arrowAmber)"/>
+          <defs>
+            <marker id="arrowTeal" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#0F766E"/></marker>
+            <marker id="arrowViolet" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#6D28D9"/></marker>
+            <marker id="arrowSky" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#0369A1"/></marker>
+            <marker id="arrowAmber" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#B45309"/></marker>
+          </defs>
+        </svg>
+        <!-- Step 1: Define Criteria (top) -->
+        <div style="position:absolute;top:0;left:50%;transform:translateX(-50%);background:#0F766E;color:#FFFFFF;border-radius:12px;padding:10px 18px;font-size:14px;font-weight:600;text-align:center;white-space:nowrap;box-shadow:0 1px 3px rgba(17,24,39,0.08);">1 · Define Criteria</div>
+        <!-- Step 2: Build Test Set (right) -->
+        <div style="position:absolute;top:50%;right:0;transform:translateY(-50%);background:#6D28D9;color:#FFFFFF;border-radius:12px;padding:10px 18px;font-size:14px;font-weight:600;text-align:center;white-space:nowrap;box-shadow:0 1px 3px rgba(17,24,39,0.08);">2 · Build Test Set</div>
+        <!-- Step 3: Score Outputs (bottom) -->
+        <div style="position:absolute;bottom:0;left:50%;transform:translateX(-50%);background:#0369A1;color:#FFFFFF;border-radius:12px;padding:10px 18px;font-size:14px;font-weight:600;text-align:center;white-space:nowrap;box-shadow:0 1px 3px rgba(17,24,39,0.08);">3 · Score Outputs</div>
+        <!-- Step 4: Refine Prompt (left) -->
+        <div style="position:absolute;top:50%;left:0;transform:translateY(-50%);background:#B45309;color:#FFFFFF;border-radius:12px;padding:10px 18px;font-size:14px;font-weight:600;text-align:center;white-space:nowrap;box-shadow:0 1px 3px rgba(17,24,39,0.08);">4 · Refine Prompt</div>
+        <!-- Center: Repeat badge -->
+        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#F1F5F9;border:2px solid #0F766E;border-radius:50%;width:80px;height:80px;display:flex;align-items:center;justify-content:center;flex-direction:column;">
+          <span style="font-size:14px;font-weight:700;color:#0F766E;line-height:1;">Repeat</span>
+          <span style="font-size:13px;color:#6B7280;line-height:1.2;">3–5×</span>
+        </div>
+      </div>
+    </div>
+    <!-- Right: Commentary bullets -->
+    <div class="content" style="justify-content:center;">
+      <ul class="bullets" style="font-size:18px;">
+        <li style="margin-bottom:16px;"><strong style="color:#0F766E;">Define criteria</strong> — Decide what "good" looks like before writing a single prompt: accuracy, tone, format, safety</li>
+        <li style="margin-bottom:16px;"><strong style="color:#6D28D9;">Build a test set</strong> — Curate 20–50 representative inputs so you measure real coverage, not cherry-picked wins</li>
+        <li style="margin-bottom:16px;"><strong style="color:#0369A1;">Score outputs</strong> — Rate every response against your criteria; quantified scores reveal blind spots intuition misses</li>
+        <li style="margin-bottom:16px;"><strong style="color:#B45309;">Refine the prompt</strong> — Change one variable at a time so you can attribute each gain to a specific edit</li>
+      </ul>
+      <div class="callout" style="font-size:18px;">
+        Practitioner consensus: <strong>3–5 iteration cycles</strong> are typical to reach production-grade prompt quality.
+      </div>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>4</span></div>
+</section>
