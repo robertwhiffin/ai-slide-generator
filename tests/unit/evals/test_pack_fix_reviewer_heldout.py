@@ -335,6 +335,41 @@ def test_reject_reference_messages_describe_the_planted_fault():
     assert changed != gold_li
 
 
+def _content_broken_bullets():
+    p = _load("content_broken_reject").payload
+    pairs = [(a, b) for a, b in zip(_lis(_gold()), _lis(p["html"])) if a != b]
+    assert len(pairs) == 1
+    return pairs[0]
+
+
+SELF_EVIDENT_WORDS = (
+    "skip", "ignore", "never", "no further", "don't", "do not", "without", "not ", "no need",
+    "unnecessary", "needless",
+)
+
+
+def test_content_broken_bullet_is_plausible_in_isolation_but_a_different_claim():
+    """The reversal must need original_html to spot: no negation/skip wording, but a changed figure."""
+    gold_li, changed_li = _content_broken_bullets()
+    changed, original = _text(changed_li).lower(), _text(gold_li).lower()
+    assert "run your test suite" in changed, "the bold lead-in is kept"
+    for w in SELF_EVIDENT_WORDS:
+        assert w not in changed, f"changed bullet is self-evidently wrong: contains {w!r}"
+    assert "3–5" in original and "3–5" not in changed
+    assert "single" in changed and "single" not in original
+    msg = _load("content_broken_reject").reference["findings"][0]["message"].lower()
+    assert "3–5" in msg and "single" in msg and "iteration cycle" in msg
+
+
+def test_content_broken_original_html_carries_the_original_bullet():
+    """The before/after comparison is possible: original_html holds the gold bullet verbatim."""
+    gold_li, changed_li = _content_broken_bullets()
+    p = _load("content_broken_reject").payload
+    assert gold_li in p["original_html"]
+    assert changed_li not in p["original_html"]
+    assert changed_li in p["html"]
+
+
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_calibration_is_reviewer_shaped_differs_and_fails_scorer(cid):
     c = _load(cid)

@@ -29,8 +29,8 @@ OLD_BULLET = (
     "edge cases across 3–5 iteration cycles to reach production-grade quality</li>"
 )
 NEW_BULLET = (
-    '<li><strong style="color: var(--brand-core-ink);">Run your test suite</strong> — Skip edge cases '
-    "and ship after a single iteration cycle, since production-grade quality needs no further testing</li>"
+    '<li><strong style="color: var(--brand-core-ink);">Run your test suite</strong> — Validate against '
+    "edge cases in a single iteration cycle to reach production-grade quality</li>"
 )
 
 HONEST_SUMMARIES = {
@@ -46,9 +46,9 @@ MESSAGES = {
         "of the slide frame, so the overflow is not fixed."
     ),
     "content_broken_reject": (
-        "The overflow is gone, but the fix changed the 'Run your test suite' bullet: it now says to skip "
-        "edge cases and ship after a single iteration cycle, reversing the original advice to validate "
-        "across 3–5 iteration cycles, so the brief's point is no longer delivered."
+        "The overflow is gone, but the fix changed the claim in the 'Run your test suite' bullet: the "
+        "original says to validate across 3–5 iteration cycles, the fixed slide now says a single "
+        "iteration cycle is enough, so the checklist no longer delivers the slide's original advice."
     ),
     "restyle_reject": (
         f"The overflow is gone, but the fix recoloured the eyebrow and title with {ROGUE}, which is "
@@ -122,7 +122,7 @@ def generate(out_dir: pathlib.Path | None = None):
         ("fault_left_reject", "overflow", _partial_overflow_fix(gold),
          f"fix removed only part of the surplus; {PARTIAL_EXTRA_BULLETS} extra bullets remain and the slide still overflows"),
         ("content_broken_reject", "brief_not_delivered", _break_content(gold),
-         "overflow fixed, but the test-suite bullet's meaning was reversed vs the gold"),
+         "overflow fixed, but the test-suite bullet now says a single iteration cycle instead of 3–5 (vs original_html)"),
         ("restyle_reject", "rogue_colour", _restyle(gold),
          f"overflow fixed, but eyebrow and title recoloured {ROGUE}, off the Meridian palette"),
     ]
