@@ -1,0 +1,5 @@
+kind: mutation
+fault: deck on the team's own prompt success rates with no data available
+expect:
+  intent: ask_data
+design_system_active: true

@@ -1,0 +1,7 @@
+kind: mutation
+fault: 'edit of slide 3 (position 2): a 1-based position slips off by one'
+expect:
+  intent: edit
+  positions:
+  - 2
+design_system_active: true
