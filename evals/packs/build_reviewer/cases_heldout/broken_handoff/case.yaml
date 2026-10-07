@@ -1,9 +1,9 @@
 kind: mutation
-fault: callout claims ad-hoc prompting costs are negligible, contradicting the brief's
-  hand-off
+fault: callout says not to adopt the checklist yet as it needs dedicated tooling,
+  contradicting the hand-off
 expect:
   criteria:
   - brief_not_delivered
   positions:
-  - 1
+  - 5
 design_system_active: true
