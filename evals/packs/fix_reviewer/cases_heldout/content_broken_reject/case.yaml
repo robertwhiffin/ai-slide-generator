@@ -1,5 +1,6 @@
 kind: mutation
-fault: overflow fixed, but the test-suite bullet's meaning was reversed vs the gold
+fault: "overflow fixed, but the test-suite bullet now says a single iteration cycle\
+  \ instead of 3\u20135 (vs original_html)"
 expect:
   criteria:
   - brief_not_delivered
