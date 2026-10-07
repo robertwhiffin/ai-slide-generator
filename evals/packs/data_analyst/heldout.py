@@ -37,7 +37,7 @@ def generate(out_dir: pathlib.Path | None = None):
     m._write(
         out, "two_sources", "positive", "", {"outcome": "success"},
         m._out("success",
-               synthesis="Two independent measurements show varying token costs: 25–35% improvement with structured templates, but also 40–60% in some scenarios.",
+               synthesis="Token Metrics reports a 25–35% improvement, while the Performance Baseline Study reports 40–60% in some configurations; the two figures differ.",
                sources=["Token Metrics", "Performance Baseline Study"],
                _data_request="What's the token efficiency gain? Token Metrics reports 25–35% improvement, but the Performance Baseline Study showed 40–60% in some configurations."),
         m._out("missing_data",

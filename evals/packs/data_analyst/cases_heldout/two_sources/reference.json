@@ -1,6 +1,6 @@
 {
   "outcome": "success",
-  "synthesis": "Two independent measurements show varying token costs: 25–35% improvement with structured templates, but also 40–60% in some scenarios.",
+  "synthesis": "Token Metrics reports a 25–35% improvement, while the Performance Baseline Study reports 40–60% in some configurations; the two figures differ.",
   "sources": [
     "Token Metrics",
     "Performance Baseline Study"
