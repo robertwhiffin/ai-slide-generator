@@ -7,7 +7,7 @@ from typing import Literal
 
 from mlflow.genai import make_judge
 
-from evals.harness.case import Case, load_cases, PACKS_DIR
+from evals.harness.case import Case, load_cases, PACKS_DIR, cases_dirname, split_kwargs
 
 JUDGE_ENDPOINT = "databricks-claude-sonnet-5"
 
@@ -59,8 +59,8 @@ def judge_payload(case: Case, result, measures) -> dict:
     }
 
 
-def load_calibration(agent_key: str, case_id: str) -> dict | None:
-    path = PACKS_DIR / agent_key / "cases" / case_id / "calibration.json"
+def load_calibration(agent_key: str, case_id: str, *, split: str = "train") -> dict | None:
+    path = PACKS_DIR / agent_key / cases_dirname(split) / case_id / "calibration.json"
     if not path.exists():
         return None
     return json.loads(path.read_text())
@@ -87,14 +87,16 @@ def _verdict(judge, case: Case, candidate, measures=None) -> tuple[str, str]:
     return "error", f"unrecognised judge value {value!r}"
 
 
-def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT, render_fn=None) -> list[dict]:
-    cases = load_cases(agent_key)
+def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT, render_fn=None,
+              split: str = "train") -> list[dict]:
+    kw = split_kwargs(split)
+    cases = load_cases(agent_key, **kw)
     if not cases:
         return []  # empty pack: no judge_prompt.md needed, nothing to calibrate
     judge = build_judge(agent_key, model=model)
     rows = []
     for case in cases:
-        cal = load_calibration(agent_key, case.case_id)
+        cal = load_calibration(agent_key, case.case_id, **kw)
         if not cal or "should_fail" not in cal:
             rows.append({
                 "case_id": case.case_id, "reference_passed": False,

@@ -9,7 +9,7 @@ import src.core.database  # noqa: F401 - break import cycle before src.* imports
 
 from evals.harness import auth, judge, mlflow_run
 from evals.harness import render as render_mod
-from evals.harness.case import meridian_section_css
+from evals.harness.case import meridian_section_css, split_kwargs
 from evals.harness.config import AgentEvalConfig, load_config, prices, v1_baseline
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
 
@@ -65,6 +65,18 @@ def _print_trust_table(agent_key: str, rows: list[dict]) -> None:
               f"{str(r['trusted']):<9}{r.get('reason', '')}")
 
 
+def _heldout_summary(agent_key: str, run_id: str) -> str:
+    """One aggregate line read back from the MLflow run: no case ids, rationales, payloads or references."""
+    from mlflow.tracking import MlflowClient
+
+    metrics = MlflowClient(tracking_uri=mlflow_run.default_tracking_uri()).get_run(run_id).data.metrics
+    pr = metrics.get("pass_rate")
+    pr_s = f"{pr:.3f}" if pr is not None else "n/a"
+    return (f"{agent_key}: run_id={run_id} pass_rate={pr_s} "
+            f"infra_error_count={int(metrics.get('infra_error_count', 0))} "
+            f"judge_error_count={int(metrics.get('judge_error_count', 0))}")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="run_eval")
     ap.add_argument("--agent", default="all", help="'all' or an agent key")
@@ -73,6 +85,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--max-workers", type=int, default=8)
     ap.add_argument("--judge-endpoint", default=judge.JUDGE_ENDPOINT)
     ap.add_argument("--cases", default=None, help="comma-separated case ids, e.g. 2,4")
+    ap.add_argument("--split", choices=("train", "heldout"), default="train",
+                    help="case set to evaluate (heldout runs print only aggregate counts)")
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--no-render", action="store_true")
     ap.add_argument("--profile", default=auth.DEFAULT_PROFILE,
@@ -93,7 +107,8 @@ def main(argv: list[str] | None = None) -> None:
         for a in agents:
             rows = judge.calibrate(
                 a, model=args.judge_endpoint,
-                render_fn=_calibration_render_fn if a in HTML_ROLES else None)
+                render_fn=_calibration_render_fn if a in HTML_ROLES else None,
+                **split_kwargs(args.split))
             _print_trust_table(a, rows)
         return
 
@@ -109,12 +124,15 @@ def main(argv: list[str] | None = None) -> None:
                 cfg, agent_key=a, repeats=args.repeats, max_workers=args.max_workers,
                 judge_endpoint=args.judge_endpoint, case_filter=case_filter,
                 render_enabled=not args.no_render,
-                tracking_uri=mlflow_run.default_tracking_uri())
+                tracking_uri=mlflow_run.default_tracking_uri(), **split_kwargs(args.split))
         except mlflow_run.NoCasesError as e:
             print(f"{a}: skipped - {e}")
             continue
         ran += 1
-        print(f"{a}: run_id={run_id}")
+        if args.split == "train":
+            print(f"{a}: run_id={run_id}")
+        else:
+            print(_heldout_summary(a, run_id))
     if not ran:
         raise SystemExit(f"no cases to evaluate for {agents} (packs have no cases yet or --cases matched none)")
 
