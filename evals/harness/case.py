@@ -39,12 +39,23 @@ class Case:
     expect: dict
 
 
+def cases_dirname(split: str = "train") -> str:
+    """Directory name (under a pack) holding the cases for ``split``."""
+    _check_split(split)
+    return "cases" if split == "train" else "cases_heldout"
+
+
+def split_kwargs(split: str = "train") -> dict:
+    """Keyword args to pass a case loader: empty for train (the default), ``{"split": ...}`` otherwise."""
+    return {} if split == "train" else {"split": split}
+
+
 def cases_dir(agent_key: str, root: pathlib.Path | None = None, split: str = "train") -> pathlib.Path:
     """The directory holding an agent's case dirs: ``root`` if given, else the committed tree for ``split``."""
     _check_split(split)
     if root is not None:
         return pathlib.Path(root)
-    return PACKS_DIR / agent_key / ("cases" if split == "train" else "cases_heldout")
+    return PACKS_DIR / agent_key / cases_dirname(split)
 
 
 def load_case(agent_key: str, case_id: str, *, root: pathlib.Path | None = None, split: str = "train") -> Case:

@@ -18,7 +18,9 @@ from mlflow.genai.scorers import scorer
 
 from evals.harness import judge as judge_mod  # aliased: "judge" is also a scorer name
 from evals.harness import scorers as det
-from evals.harness.case import EVALS_DIR, PACKS_DIR, Case, load_case, load_cases, meridian_section_css
+from evals.harness.case import (
+    EVALS_DIR, PACKS_DIR, Case, cases_dirname, load_case, load_cases, meridian_section_css, split_kwargs,
+)
 from evals.harness.config import AgentEvalConfig, prices
 from evals.harness.render import RenderMeasures, render_slide
 from evals.harness.runner import Runner
@@ -26,6 +28,7 @@ from evals.harness.runner import Runner
 HTML_ROLES = ("builder", "fixer")
 DETERMINISTIC_CATEGORY_ROLES = ("architect", "data_analyst", "build_reviewer", "fix_reviewer", "deck_reviewer")
 EXPERIMENT_NAME = "tellr-agent-eval"
+EXPERIMENT_NAMES = {"train": "tellr-agent-eval", "heldout": "tellr-agent-eval-heldout"}
 NOT_COMPARABLE_INFRA_RATE = 0.10
 
 
@@ -39,10 +42,10 @@ def default_tracking_uri() -> str:
 
 # --------------------------------------------------------------------------- run identity
 
-def cases_digest(agent_key: str, root: pathlib.Path | None = None) -> str:
+def cases_digest(agent_key: str, root: pathlib.Path | None = None, *, split: str = "train") -> str:
     """sha256 over the agent's committed ``cases/`` tree: each file's relative path and bytes, in
     sorted relative-path order. Runs are comparable only when their ``cases_digest`` tags match."""
-    base = pathlib.Path(root) if root is not None else PACKS_DIR / agent_key / "cases"
+    base = pathlib.Path(root) if root is not None else PACKS_DIR / agent_key / cases_dirname(split)
     h = hashlib.sha256()
     files = sorted((p.relative_to(base).as_posix(), p) for p in base.rglob("*") if p.is_file())
     for rel, path in files:
@@ -101,12 +104,15 @@ def row_outcome(values: dict[str, str]) -> str:
     return "pass"
 
 
-def build_dataset(cases: list[Case], repeats: int) -> list[dict]:
+def build_dataset(cases: list[Case], repeats: int, split: str = "train") -> list[dict]:
     rows = []
     for c in cases:
         for r in range(repeats):
+            inputs = {"agent_key": c.agent_key, "case_id": c.case_id, "repeat": r}
+            if split != "train":
+                inputs["split"] = split  # train rows omit the key; readers use inputs.get("split", "train")
             rows.append({
-                "inputs": {"agent_key": c.agent_key, "case_id": c.case_id, "repeat": r},
+                "inputs": inputs,
                 "expectations": {
                     "expect": c.expect,
                     "reference": c.reference,
@@ -119,8 +125,8 @@ def build_dataset(cases: list[Case], repeats: int) -> list[dict]:
 # --------------------------------------------------------------------------- predict
 
 def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: bool) -> Callable:
-    def predict_fn(agent_key: str, case_id: str, repeat: int) -> dict:
-        case = load_case(agent_key, case_id)
+    def predict_fn(agent_key: str, case_id: str, repeat: int, split: str = "train") -> dict:
+        case = load_case(agent_key, case_id, **split_kwargs(split))
         result = runner.run(config, case.payload, design_system_active=case.design_system_active)
         render = None
         if (render_enabled and agent_key in HTML_ROLES and not result.infra_error
@@ -197,7 +203,7 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
         structured = outputs.get("structured")
         if structured is None:
             return _fb(False, "no candidate output to judge")
-        case = load_case(inputs["agent_key"], inputs["case_id"])
+        case = load_case(inputs["agent_key"], inputs["case_id"], **split_kwargs(inputs.get("split", "train")))
         v, detail = judge_mod._verdict(judge_obj, case, structured, _render_from(outputs))
         if v == "error":
             return _skip(f"judge_error: {detail}")  # never retried, never pass/fail
@@ -229,21 +235,23 @@ def run_sweep(
     render_enabled: bool = True,
     runner: Runner | None = None,
     tracking_uri: str | None = None,
+    split: str = "train",
 ) -> str:
-    cases = load_cases(agent_key)
+    cases = load_cases(agent_key, **split_kwargs(split))
     if case_filter:
         wanted = {str(c) for c in case_filter}
         cases = [c for c in cases if c.case_id in wanted]
     if not cases:
-        where = PACKS_DIR / agent_key / "cases"
+        where = PACKS_DIR / agent_key / cases_dirname(split)
+        split_note = "" if split == "train" else f" (split {split})"
         raise NoCasesError(
-            f"no cases for agent {agent_key!r} under {where}"
+            f"no cases for agent {agent_key!r}{split_note} under {where}"
             + (f" matching --cases {sorted(wanted)}" if case_filter else ""))
     os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(max_workers)
     os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "True"
     mlflow.set_tracking_uri(tracking_uri or default_tracking_uri())
-    mlflow.set_experiment(EXPERIMENT_NAME)
-    data = build_dataset(cases, repeats)
+    mlflow.set_experiment(EXPERIMENT_NAMES[split])
+    data = build_dataset(cases, repeats, split)
     runner = runner or Runner()
     predict_fn = mlflow.trace(make_predict_fn(config, runner, render_enabled=render_enabled))
     scorers = build_scorers(agent_key, judge_endpoint=judge_endpoint)
@@ -256,7 +264,8 @@ def run_sweep(
             "judge_endpoint": judge_endpoint,
             "repeats": str(repeats),
             "case_filter": ",".join(case_filter) if case_filter else "all",
-            "cases_digest": cases_digest(agent_key),
+            "cases_digest": cases_digest(agent_key, split=split),
+            "split": split,
             "git_sha": git_sha(),
         })
         result = mlflow.genai.evaluate(data=data, scorers=scorers, predict_fn=predict_fn)
