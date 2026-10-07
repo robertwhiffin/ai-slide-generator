@@ -1,0 +1,9 @@
+kind: mutation
+fault: callout claims ad-hoc prompting costs are negligible, contradicting the brief's
+  hand-off
+expect:
+  criteria:
+  - brief_not_delivered
+  positions:
+  - 1
+design_system_active: true
