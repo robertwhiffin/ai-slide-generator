@@ -54,6 +54,7 @@ python -m evals.run_eval --agent all --config v1-baseline --repeats 3
 | `--max-workers` | 8 | Parallelism of `mlflow.genai.evaluate`. |
 | `--cases` | all | Comma-separated case ids, for example `gold_chart,overflow`. |
 | `--judge-endpoint` | `databricks-claude-sonnet-5` | Serving endpoint used as the judge. |
+| `--split` | `train` | `train` or `heldout`. Selects the case set; see Held-out set below. Also applies to `--calibrate`. |
 | `--calibrate` | off | Calibrate the judge instead of sweeping (see below). |
 | `--no-render` | off | Skip rendering for the builder and fixer, which drops `render_measures`. |
 | `--profile` | `tellr-dev` | Databricks CLI profile every live call uses. It overrides `.env` and `DATABRICKS_HOST`. `''` keeps the ambient environment. |
@@ -62,6 +63,36 @@ The agent's endpoint is probed before each sweep; an unreachable endpoint aborts
 
 The harness runs each agent through `AgentRuntime.run_candidate` **without data tools bound**. The
 data_analyst prompt mentions Genie and a vector index, but neither is available in the harness.
+
+## Held-out set
+
+Each agent has a second, separate set of five cases (35 in total) in `evals/packs/<agent>/cases_heldout/`,
+built from a different source deck than the train cases. It has the same four files per case and
+shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
+cases generalises, rather than having been fitted to them.
+
+- **Selecting it.** Pass `--split heldout` (default `train`) to a sweep or to `--calibrate`. Train
+  behaviour is unchanged when the flag is omitted.
+- **Separate experiment.** Held-out sweeps log to the MLflow experiment `tellr-agent-eval-heldout`;
+  train sweeps stay in `tellr-agent-eval`. Held-out runs also carry `split=heldout` and their own
+  `cases_digest`.
+- **Aggregate-only CLI output.** A held-out sweep prints one line per agent: run id, pass rate, infra
+  error count and judge error count. It prints no case ids, rationales, payloads or references.
+  This limits what an operator or an optimiser sees by accident. It is not an access control: the
+  case files are in the repository, and the MLflow run still stores per-case metrics and judge
+  rationales. `--calibrate --split heldout` also prints its per-case trust table.
+- **Discipline, not a lock.** Nothing prevents anyone from reading the held-out cases or running
+  them often. The set is only useful if it stays unseen. An optimiser must tune against train only.
+  Held-out is scored on finalists, once a candidate has been chosen on train, and is not used to pick
+  between candidates iteratively. Every look at it spends some of its independence.
+- **Calibration is still required.** The judge must be shown to separate each held-out reference from
+  its mutation before the pass rates mean anything. Run `python -m evals.run_eval --agent all
+  --calibrate --split heldout` after any change to a judge prompt, the judge endpoint or a held-out
+  case.
+- **Regenerating.** `python -m evals.packs.<agent>.heldout` regenerates that agent's held-out cases.
+  A bare `generate()` writes to `cases_heldout` only.
+  The cross-split tests (`tests/unit/evals/test_cross_split.py`) guard that the split ids are pinned, no
+  held-out payload or reference duplicates a train one, and the generators cannot write to train.
 
 ## Adding a config
 
