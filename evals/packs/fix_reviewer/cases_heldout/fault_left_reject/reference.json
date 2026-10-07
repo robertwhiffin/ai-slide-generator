@@ -1,0 +1,16 @@
+{
+  "slide_index": 5,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "overflow:5:0",
+      "slide_index": 5,
+      "category": "design",
+      "criterion": "overflow",
+      "message": "The fix removed only some of the surplus bullets; the list still runs past the bottom of the slide frame, so the overflow is not fixed.",
+      "objective": true,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

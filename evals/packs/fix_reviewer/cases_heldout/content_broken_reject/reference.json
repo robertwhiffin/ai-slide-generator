@@ -1,0 +1,16 @@
+{
+  "slide_index": 5,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "brief_not_delivered:5:0",
+      "slide_index": 5,
+      "category": "content",
+      "criterion": "brief_not_delivered",
+      "message": "The overflow is gone, but the fix changed the 'Run your test suite' bullet: it now says to skip edge cases and ship after a single iteration cycle, reversing the original advice to validate across 3–5 iteration cycles, so the brief's point is no longer delivered.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}
