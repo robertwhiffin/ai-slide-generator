@@ -1,0 +1,5 @@
+kind: mutation
+fault: public statistic not in the request and no tool is bound to fetch it
+expect:
+  outcome: no_tool
+design_system_active: true

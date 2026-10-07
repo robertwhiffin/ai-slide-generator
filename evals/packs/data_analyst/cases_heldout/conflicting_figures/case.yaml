@@ -1,0 +1,6 @@
+kind: mutation
+fault: two conflicting figures in the request (3 vs 5 revision rounds) that should
+  be flagged as a conflict
+expect:
+  outcome: success
+design_system_active: true

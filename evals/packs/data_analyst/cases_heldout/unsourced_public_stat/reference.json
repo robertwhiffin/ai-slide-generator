@@ -1,0 +1,8 @@
+{
+  "outcome": "no_tool",
+  "synthesis": null,
+  "sources": null,
+  "gap": null,
+  "tried_tools": [],
+  "reason": "No data source or tool is available to retrieve the historical adoption rate of YAML in MLOps pipelines, and the request does not supply it."
+}
