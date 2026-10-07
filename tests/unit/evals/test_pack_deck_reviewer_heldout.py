@@ -295,9 +295,12 @@ def test_missing_conclusion_message_names_the_missing_content():
 def test_out_of_order_message_names_the_slides_by_title():
     m = _msg("out_of_order")
     slides = _load("out_of_order").payload["slides"]
-    for t in (_gold_title(4), _gold_title(3)):
+    for t in (_gold_title(4), _gold_title(3), _gold_title(2)):
         assert t in m, (t, m)
         assert t in slides
+    # The message must describe the real inversion: workflow now precedes patterns and impact.
+    assert m.index(_gold_title(4)) < m.index(_gold_title(2))
+    assert re.search(r"\bbefore\b", m)
 
 
 def test_repetition_message_names_both_slides_by_title():

@@ -27,10 +27,11 @@ MESSAGES = {
         "concrete next steps or a checklist to adopt this sprint."
     ),
     "out_of_order": (
-        "The slides \"A repeatable evaluate-and-iterate loop drives prompt quality\" and "
-        "\"Structured prompts cut costs, boost consistency, and converge fast\" are out of order: "
-        "the impact and results are presented before the workflow for achieving them, disrupting the "
-        "narrative arc."
+        "The slides are out of order: \"A repeatable evaluate-and-iterate loop drives prompt quality\" "
+        "is presented before \"Four composable patterns cover the vast majority of prompt optimisation needs\" "
+        "and \"Structured prompts cut costs, boost consistency, and converge fast\", so the iteration "
+        "workflow appears before the prompt design patterns it refines and the impact it delivers, "
+        "disrupting the narrative arc."
     ),
     "repetition": (
         "The \"Key Considerations\" slide repeats the bullet list from \"Ad-hoc prompting silently drains "
