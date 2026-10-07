@@ -1,0 +1,9 @@
+kind: mutation
+fault: overflow fixed, but the test-suite bullet's meaning was reversed vs the gold
+expect:
+  criteria:
+  - brief_not_delivered
+  positions:
+  - 5
+  verdict: surfaced
+design_system_active: true

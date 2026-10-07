@@ -1,0 +1,10 @@
+kind: mutation
+fault: fix removed only part of the surplus; 12 extra bullets remain and the slide
+  still overflows
+expect:
+  criteria:
+  - overflow
+  positions:
+  - 5
+  verdict: surfaced
+design_system_active: true
