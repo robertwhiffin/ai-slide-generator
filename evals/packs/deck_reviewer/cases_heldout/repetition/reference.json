@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "id": "cross_slide_repetition:-1:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "cross_slide_repetition",
+      "message": "The \"Key Considerations\" slide repeats the bullet list from \"Ad-hoc prompting silently drains budget, quality, and velocity\" word for word, creating cross-slide repetition that weakens the narrative.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}
