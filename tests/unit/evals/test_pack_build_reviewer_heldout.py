@@ -16,12 +16,13 @@ AGENT = "build_reviewer"
 DECK = "heldout"
 CASE_IDS = ["clean", "broken_handoff", "rogue_colour", "overflow", "source_contradiction"]
 MUTATIONS = ["broken_handoff", "rogue_colour", "overflow", "source_contradiction"]
-POSITION = {"clean": 1, "broken_handoff": 1, "rogue_colour": 1, "overflow": 1, "source_contradiction": 3}
+SLIDE = 5  # the Action Plan slide: its figures agree in direction with resolved_data
+POSITION = {"clean": SLIDE, "broken_handoff": SLIDE, "rogue_colour": SLIDE, "overflow": SLIDE, "source_contradiction": 3}
 EXPECT = {
     "clean": {"criteria": [], "positions": []},
-    "broken_handoff": {"criteria": ["brief_not_delivered"], "positions": [1]},
-    "rogue_colour": {"criteria": ["rogue_colour"], "positions": [1]},
-    "overflow": {"criteria": ["overflow"], "positions": [1]},
+    "broken_handoff": {"criteria": ["brief_not_delivered"], "positions": [5]},
+    "rogue_colour": {"criteria": ["rogue_colour"], "positions": [5]},
+    "overflow": {"criteria": ["overflow"], "positions": [5]},
     "source_contradiction": {"criteria": ["source_contradiction"], "positions": [3]},
 }
 PAYLOAD_KEYS = {"position", "slide_spec", "resolved_style", "section_css", "resolved_data", "html", "scripts"}
@@ -149,9 +150,19 @@ def test_slide_spec_is_the_deck2_slide_spec_unchanged(cid):
     assert _load(cid).payload["slide_spec"] == _spec_slide(POSITION[cid])
 
 
+@pytest.mark.parametrize("cid", ["clean", "broken_handoff", "rogue_colour", "overflow"])
+def test_slide_figures_do_not_invert_the_resolved_data_base(cid):
+    """Fairness: position 1's "30–50% MORE tokens" inverts resolved_data's "30–50% fewer tokens", which a
+    numerate reviewer could fairly flag as an unplanted objective source_contradiction."""
+    assert POSITION[cid] != 1
+    html = _html(cid)
+    assert not re.search(r"\d+\s*[–-]\s*\d+%\s*more tokens", html, re.I)
+    assert "30–50%" in html or cid == "broken_handoff"  # the figure still appears, phrased as a cut
+
+
 def test_clean_is_the_deck2_gold_slide():
-    assert _html("clean") == _gold(1)
-    assert _scripts("clean") == case.gold_scripts(1, DECK)
+    assert _html("clean") == _gold(SLIDE)
+    assert _scripts("clean") == case.gold_scripts(SLIDE, DECK)
 
 
 @pytest.mark.parametrize("cid", MUTATIONS)
@@ -162,25 +173,28 @@ def test_mutation_scripts_are_the_gold_scripts(cid):
 # ---- each mutation plants exactly its fault ---------------------------------------------------
 
 def test_broken_handoff_changes_only_the_callout_and_contradicts_the_handoff():
-    html, gold = _html("broken_handoff"), _gold(1)
+    html, gold = _html("broken_handoff"), _gold(SLIDE)
     assert html != gold
     # Only the callout differs.
     assert _without_callout(html) == _without_callout(gold)
     new, old = _callout(html), _callout(gold)
     assert new != old and new.strip()
-    assert "compound" in old
-    # It now claims the costs are negligible / do not compound.
-    assert re.search(r"negligible", new, re.I), new
-    assert re.search(r"(not|n't|never|no)\b[^.]*compound", new, re.I), new
+    assert "no new tooling required" in old
+    assert "no new tooling required" in _spec_slide(SLIDE)["hands_off"]
+    # It now says NOT to adopt the checklist this sprint, because it needs dedicated tooling.
+    assert re.search(r"\b(not|n't|never)\b[^.]*\badopt\b[^.]*\bthis sprint\b", new, re.I), new
+    assert re.search(r"\bneeds?\b[^.]*\btooling\b", new, re.I), new
     # The original claim is gone from the callout.
-    assert "recurring tax" not in new
-    assert "compound with every" not in new
+    assert "no new tooling required" not in new
+    assert "Start this sprint" not in new
+    # A brief_not_delivered fault, not a figure fault: the new callout carries no figures at all.
+    assert not re.search(r"\d", new), new
 
 
 @pytest.mark.usefixtures("requires_chromium")
 def test_rogue_colour_plants_the_off_palette_hex():
     html = _html("rogue_colour")
-    assert ROGUE in html.lower() and ROGUE not in _gold(1).lower()
+    assert ROGUE in html.lower() and ROGUE not in _gold(SLIDE).lower()
     assert html.lower().count(ROGUE) == 1
     # The title carries it.
     assert re.search(r'<h2 class="slide-title"[^>]*#e11d48', html, re.I)
@@ -192,8 +206,8 @@ def test_rogue_colour_plants_the_off_palette_hex():
 
 @pytest.mark.usefixtures("requires_chromium")
 def test_overflow_plants_overflow_with_extra_bullets():
-    html, gold = _html("overflow"), _gold(1)
-    assert _gold_measure(1).overflow_px == 0
+    html, gold = _html("overflow"), _gold(SLIDE)
+    assert _gold_measure(SLIDE).overflow_px == 0
     added = html.count("<li") - gold.count("<li")
     assert 35 <= added <= 45, added
     m = _measure("overflow")
@@ -295,7 +309,7 @@ def test_reference_messages_describe_the_specific_fault():
         return _load(cid).reference["findings"][0]["message"].lower()
 
     assert "e11d48" in msg("rogue_colour")
-    assert "compound" in msg("broken_handoff") or "negligible" in msg("broken_handoff")
+    assert "tooling" in msg("broken_handoff") and "sprint" in msg("broken_handoff")
     assert "30" in msg("source_contradiction") and "fewer" in msg("source_contradiction")
     assert any(w in msg("overflow") for w in ("overflow", "bullet", "frame", "bottom"))
 

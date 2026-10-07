@@ -4,5 +4,5 @@ expect:
   criteria:
   - overflow
   positions:
-  - 1
+  - 5
 design_system_active: true

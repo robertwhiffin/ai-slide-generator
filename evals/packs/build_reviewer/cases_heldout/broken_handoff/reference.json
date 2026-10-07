@@ -1,13 +1,13 @@
 {
-  "slide_index": 1,
+  "slide_index": 5,
   "verdict": "surfaced",
   "findings": [
     {
-      "id": "brief_not_delivered:1:0",
-      "slide_index": 1,
+      "id": "brief_not_delivered:5:0",
+      "slide_index": 5,
       "category": "content",
       "criterion": "brief_not_delivered",
-      "message": "The callout claims the costs of ad-hoc prompting are negligible and do not compound, which contradicts the brief's hand-off that ad-hoc prompting has real, measurable costs that compound over time.",
+      "message": "The callout tells the team not to adopt the checklist this sprint because it first needs dedicated tooling, which contradicts the brief's hand-off to start using the checklist this sprint with no new tooling required.",
       "objective": false,
       "status": "open",
       "seen": false

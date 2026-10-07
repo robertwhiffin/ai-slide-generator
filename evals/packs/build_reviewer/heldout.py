@@ -15,22 +15,27 @@ AGENT = m.AGENT
 DECK = "heldout"
 CASES_DIR = case.PACKS_DIR / AGENT / "cases_heldout"
 
+# Position 5 ("Action Plan") hosts the clean case and the three slide-level mutations: its figures agree
+# in direction with resolved_data. Position 1's "30–50% MORE tokens" bullet inverts the base of
+# resolved_data's "30–50% fewer tokens", so a numerate reviewer could fairly raise an unplanted
+# objective source_contradiction there.
+SLIDE = 5
 OLD_CALLOUT = (
-    "Every unoptimised prompt is a recurring tax — on spend, on consistency, and on time-to-value."
-    " These costs compound with every new use case you ship."
+    "<strong>Start this sprint:</strong> Apply this checklist to your next LLM feature — no new tooling"
+    " required. Structured prompts cut token waste by 30–50% and boost output consistency by up to 40%."
 )
 NEW_CALLOUT = (
-    "The costs of ad-hoc prompting are negligible and do not compound"
-    " — there is no need to optimise prompts as new use cases ship."
+    "<strong>Not yet:</strong> Do not adopt this checklist this sprint — it first needs dedicated"
+    " prompt-management tooling to be built before any team can use it."
 )
 OLD_STAT = '<div class="stat-value">30–50%</div>'
 NEW_STAT = '<div class="stat-value">10–15%</div>'
 
 MESSAGES = {
     "broken_handoff": (
-        "The callout claims the costs of ad-hoc prompting are negligible and do not compound, "
-        "which contradicts the brief's hand-off that ad-hoc prompting has real, measurable "
-        "costs that compound over time."
+        "The callout tells the team not to adopt the checklist this sprint because it first needs "
+        "dedicated tooling, which contradicts the brief's hand-off to start using the checklist "
+        "this sprint with no new tooling required."
     ),
     "rogue_colour": (
         "The slide title is coloured #E11D48, which is not a Meridian palette token; "
@@ -61,7 +66,7 @@ def _payload(position, html, scripts):
 
 
 def _mutate_broken_handoff(html):
-    assert OLD_CALLOUT in html
+    assert html.count(OLD_CALLOUT) == 1
     return html.replace(OLD_CALLOUT, NEW_CALLOUT)
 
 
@@ -81,18 +86,18 @@ def generate(out_dir: pathlib.Path | None = None):
     out = pathlib.Path(out_dir) if out_dir is not None else CASES_DIR
     m._write(
         out, "clean", "positive", "", {"criteria": [], "positions": []},
-        _payload(1, case.gold_slide(1, DECK), case.gold_scripts(1, DECK)),
-        m._out(1, "clean", []),
-        m._out(1, "surfaced", [m._finding(
-            "overflow", 1, "The bullet list overflows the bottom of the slide frame.")]),
+        _payload(SLIDE, case.gold_slide(SLIDE, DECK), case.gold_scripts(SLIDE, DECK)),
+        m._out(SLIDE, "clean", []),
+        m._out(SLIDE, "surfaced", [m._finding(
+            "overflow", SLIDE, "The bullet list overflows the bottom of the slide frame.")]),
     )
 
     mutations = [
-        ("broken_handoff", "brief_not_delivered", 1, _mutate_broken_handoff,
-         "callout claims ad-hoc prompting costs are negligible, contradicting the brief's hand-off"),
-        ("rogue_colour", "rogue_colour", 1, _mutate_rogue_colour,
+        ("broken_handoff", "brief_not_delivered", SLIDE, _mutate_broken_handoff,
+         "callout says not to adopt the checklist yet as it needs dedicated tooling, contradicting the hand-off"),
+        ("rogue_colour", "rogue_colour", SLIDE, _mutate_rogue_colour,
          f"slide title recoloured {m.ROGUE_HEX}, off the Meridian palette"),
-        ("overflow", "overflow", 1, m._mutate_overflow,
+        ("overflow", "overflow", SLIDE, m._mutate_overflow,
          "~40 extra bullets appended so content overflows the frame"),
         ("source_contradiction", "source_contradiction", 3, _mutate_source_contradiction,
          "first stat card changed from 30–50% to 10–15%, contradicting resolved_data"),

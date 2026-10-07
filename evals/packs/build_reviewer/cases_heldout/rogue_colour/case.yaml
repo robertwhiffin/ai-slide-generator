@@ -4,5 +4,5 @@ expect:
   criteria:
   - rogue_colour
   positions:
-  - 1
+  - 5
 design_system_active: true
