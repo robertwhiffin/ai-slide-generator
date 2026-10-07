@@ -48,9 +48,10 @@ def _supplied(c, exp):
     return keys
 
 
+@pytest.mark.parametrize("split", ["train", "heldout"])
 @pytest.mark.parametrize("agent", AGENTS)
-def test_every_field_the_judge_prompt_names_is_supplied(agent):
-    cases = case.load_cases(agent)
+def test_every_field_the_judge_prompt_names_is_supplied(agent, split):
+    cases = case.load_cases(agent, split=split)
     assert cases
     # Candidate OUTPUT fields arrive in {{ outputs }}; a prompt may name those freely.
     output_fields = set().union(*(set(c.reference) for c in cases))
@@ -60,5 +61,5 @@ def test_every_field_the_judge_prompt_names_is_supplied(agent):
         exp.pop("candidate")
         missing = named - _supplied(c, exp)
         assert not missing, (
-            f"{agent}/{c.case_id}: judge_prompt.md names {sorted(missing)} but the judge never receives them"
+            f"{agent}/{split}/{c.case_id}: judge_prompt.md names {sorted(missing)} but the judge never receives them"
         )
