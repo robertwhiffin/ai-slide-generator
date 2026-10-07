@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "id": "arc_gap:-1:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "arc_gap",
+      "message": "The deck lacks a workflow or iteration section describing how teams should evaluate and refine their prompts, creating a gap in the narrative arc where the implementation process is missing.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

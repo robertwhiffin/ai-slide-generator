@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "id": "missing_conclusion:-1:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "missing_conclusion",
+      "message": "The deck has no conclusion slide or call-to-action checklist, leaving the audience without concrete next steps or a checklist to adopt this sprint.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}
