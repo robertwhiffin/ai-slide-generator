@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll show the four patterns on slide 3 as four cards instead of a bullet list.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [
+      3
+    ],
+    "proposed_design_contract": null
+  }
+}

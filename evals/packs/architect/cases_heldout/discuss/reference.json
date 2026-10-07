@@ -1,0 +1,8 @@
+{
+  "intent": "discuss",
+  "message": "Few-shot examples work best when the output format or style is hard to describe; chain-of-thought helps when the task needs multi-step reasoning.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

@@ -1,0 +1,14 @@
+{
+  "intent": "ask_data",
+  "message": "I need your measured prompt success rates by model for the last quarter before I can build this.",
+  "deck_spec": null,
+  "data_request": {
+    "metric": "prompt success rate",
+    "time_bound": "last quarter",
+    "grouping": "model",
+    "units": null,
+    "tool_preferences": []
+  },
+  "target_positions": [],
+  "proposed_design_contract": null
+}
