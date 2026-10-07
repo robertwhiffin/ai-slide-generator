@@ -1,0 +1,4 @@
+kind: mutation
+fault: content_brief demands 12 dense points; a faithful build overflows the frame
+expect: {}
+design_system_active: true

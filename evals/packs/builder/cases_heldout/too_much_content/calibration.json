@@ -1,0 +1,7 @@
+{
+  "should_fail": {
+    "position": 1,
+    "html": "<section class=\"slide\">\n  <h2 class=\"slide-title\">Overview</h2>\n  <ul class=\"bullets\"><li style=\"color:#E11D48\">Filler point 0: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 1: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 2: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 3: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 4: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 5: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 6: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 7: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 8: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 9: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 10: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 11: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 12: unrelated detail that goes on and on</li><li style=\"color:#E11D48\">Filler point 13: unrelated detail that goes on and on</li></ul>\n  <div style=\"height:900px\"></div>\n</section>\n",
+    "scripts": ""
+  }
+}
