@@ -1,0 +1,18 @@
+{
+  "should_fail": {
+    "slide_index": 1,
+    "verdict": "surfaced",
+    "findings": [
+      {
+        "id": "overflow:1:0",
+        "slide_index": 1,
+        "category": "design",
+        "criterion": "overflow",
+        "message": "The bullet list overflows the bottom of the slide frame.",
+        "objective": true,
+        "status": "open",
+        "seen": false
+      }
+    ]
+  }
+}
