@@ -72,12 +72,16 @@ PDF export is client-side and is not a route.
 - `jsPDF`: Generates PDF from canvas images
 
 **Process**:
-1. Each slide is rendered in a hidden iframe (1280×720px)
-2. Waits for Chart.js charts to fully render
-3. Converts slide HTML to canvas using `html2canvas`
-4. Adds canvas as image to PDF page (maintains 16:9 aspect ratio)
-5. Repeats for all slides
+1. Each slide is rendered in a hidden iframe (1280×720px) with `sandbox="allow-scripts"` (no `allow-same-origin`)
+2. A trusted bootstrap inside the frame waits for Chart.js, force-sizes the slide root, and rasterizes the slide
+3. The child returns a JPEG data URL over `postMessage`; the parent authenticates `event.source`, a per-frame channel ID, and the request ID
+
+html2canvas 1.4.1 is still bundled into the export `srcdoc` from the npm package (not a CDN). It cannot clone through a nested iframe here: nested frames inherit `sandbox="allow-scripts"` and become a different unique origin, so the library cannot read the clone document. Full-slide capture therefore inlines computed styles and draws via SVG `foreignObject` in the export frame itself. Chart canvases are still read with `canvas.toDataURL` in that same frame.
+4. Adds the image to a PDF page (maintains 16:9 aspect ratio)
+5. Repeats for all slides, tearing down each frame
 6. Downloads the complete PDF
+
+Persisted slide JavaScript can paint the export document but cannot read the Tellr SPA, call `/api` as the exporter, or fall back to an unsandboxed frame.
 
 **Features**:
 - ✅ No server load (runs entirely in browser)
@@ -173,10 +177,16 @@ PDF export is client-side and is not a route.
 - Error handling with user-friendly messages
 
 **PDF Service** (`frontend/src/services/pdf_client.ts`):
-- Handles iframe rendering and canvas conversion
-- Manages Chart.js rendering wait times
+- Builds the slide document (CSP first, then the trusted export runtime)
+- Asks `runSandboxedExportFrame` for a JPEG; does not read `iframe.contentDocument`
 - Optimizes image quality vs file size
-- Handles edge cases (first slide, canvas sizing)
+- Preserves subtitle spacing and canvas sizing inside the child runtime
+
+**Sandboxed export frame** (`frontend/src/services/sandboxedExportFrame.ts` + `exportFrameRuntime.ts`):
+- Shared controller for PDF, screenshot-PPTX, Chart.js canvas capture, and DOM-record export
+- Opaque origin (`sandbox="allow-scripts"` only)
+- html2canvas 1.4.1 is bundled from the npm package into the `srcdoc`; it is not loaded from a CDN
+- Child CSP remains `SLIDE_CSP` (`connect-src 'none'`, no `unsafe-eval`, no `blob:`)
 
 **API Client** (`frontend/src/services/api.ts`):
 - `startPPTXExport()` - Initiates async export job

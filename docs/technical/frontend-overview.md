@@ -107,7 +107,7 @@ interface Slide {
 }
 ```
 
-Slides are HTML snippets embedded in iframes for preview. The optional `verification` field stores auto-verification checks (**MLflow LLM-as-judge** by default; **Direct** ChatDatabricks optional via Admin) against tool/source data from the session.
+Slides are HTML snippets embedded in iframes for preview. Preview and presentation frames use `sandbox="allow-scripts"` without `allow-same-origin`. Browser-side PDF, screenshot-PPTX, Chart.js canvas capture, and DOM-record export use the same opaque sandbox: capture runs inside the frame and returns over `postMessage` (`frontend/src/services/sandboxedExportFrame.ts`). The optional `verification` field stores auto-verification checks (**MLflow LLM-as-judge** by default; **Direct** ChatDatabricks optional via Admin) against tool/source data from the session.
 
 ### 3. Selection Context (`src/contexts/SelectionContext.tsx`)
 

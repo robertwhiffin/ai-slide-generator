@@ -14,10 +14,8 @@ test('screenshot export document carries the slide CSP', () => {
 });
 
 // Regression: the slide CSP must NOT grant 'unsafe-eval', and the domWalker
-// export path must therefore not depend on eval(). Injecting SLIDE_CSP into
-// domWalker's composite while it still used iframe.contentWindow.eval(...) broke
-// the editable-PPTX / Google-Slides export at runtime (EvalError). The walker now
-// drives extraction via direct same-origin DOM/function calls.
+// export path must therefore not depend on eval(). The walker runs inside the
+// sandboxed export frame and returns records over postMessage.
 test('slide CSP withholds unsafe-eval', () => {
   expect(SLIDE_CSP).not.toContain('unsafe-eval');
 });
