@@ -179,8 +179,8 @@ class SkillRecorder:
         one the previous turn persisted) with each target slide's
         ``content_brief`` revised by :func:`edited_brief`.  That is the real
         shape of an edit turn: the DeckSpec is the deck's source of truth, so an
-        edit returns it revised, and ``ArchitectOutput`` rejects an edit with no
-        ``deck_spec``.  The turn runs with ``target_positions`` AND
+        edit returns it revised, and ``architect_node`` refuses an edit with no
+        ``deck_spec`` (``edit_without_revised_spec``).  The turn runs with ``target_positions`` AND
         ``deck_spec`` both populated, which is what makes the turn-coverage
         precedence observable — neither key alone can distinguish it.  Revising
         ONLY the targets keeps the edit's changed-slide set equal to
@@ -318,8 +318,9 @@ class SkillRecorder:
             # An edit turn returns the spec it was shown, revised at its targets:
             # the deck it edits is the one the previous turn persisted, which
             # architect_node hands the model as ``current_deck_spec``.
-            # ArchitectOutput's own validator rejects intent="edit" with no
-            # deck_spec or with an empty target_positions list.  With no
+            # ArchitectOutput's own validator rejects intent="edit" with an
+            # empty target_positions list; architect_node refuses one with no
+            # deck_spec.  With no
             # persisted spec there is nothing to echo, so the stub revises a
             # fresh one; architect_node must still refuse that turn
             # (edit_without_spec), because the guard is keyed on the PERSISTED
