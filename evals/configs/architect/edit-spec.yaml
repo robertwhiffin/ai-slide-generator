@@ -1,0 +1,5 @@
+# Architect v1 prompt: an edit returns the revised deck_spec.
+agent_key: architect
+name: architect-edit-spec
+base: v1
+prompt_file: edit-spec.md
