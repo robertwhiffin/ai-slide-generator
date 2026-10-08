@@ -1555,10 +1555,18 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # MIDDLE delete rewrites the human's surviving slide against the deleted
     # slide's brief.  See _persisted_spec_describes_these_rows for what this can
     # and cannot see.
+    #
+    # A DESCRIBE-ONLY turn (the arc-review sweeper) is the exception to both
+    # persisted-spec guards and to the position-set guard: it dispatches no
+    # builder, so no stale brief can reach a slide, and it is scheduled precisely
+    # because a delete or duplicate left the persisted spec stale — refusing its
+    # re-description would leave the spec stale for good while the sweeper clears
+    # its marker.  It still needs a spec to persist.
     spec = out.deck_spec
+    describe_only = bool(scoped_vals(state, "describe_only"))
     edit_degrade: Optional[Dict[str, str]] = None
     if intent == "edit":
-        if prior_spec is None:
+        if prior_spec is None and (spec is None or not describe_only):
             edit_degrade = {
                 "code": "edit_without_spec",
                 "message": "intent='edit' with no committed deck_spec",
@@ -1568,7 +1576,9 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     "draft one."
                 ),
             }
-        elif not _persisted_spec_describes_these_rows(prior_spec, committed_positions):
+        elif not describe_only and not _persisted_spec_describes_these_rows(
+            prior_spec, committed_positions
+        ):
             spec_positions = sorted(s.position for s in prior_spec.slides)
             row_positions = sorted(committed_positions)
             logger.warning(
@@ -1609,7 +1619,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     "try asking again."
                 ),
             }
-        elif {s.position for s in spec.slides} != {
+        elif not describe_only and {s.position for s in spec.slides} != {
             s.position for s in prior_spec.slides
         }:
             # An edit revises slides; it never adds or removes one (there is no
@@ -1662,7 +1672,9 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # named: a slide whose brief changed but is not rebuilt is spec/slide drift.
     edit_targets: List[int] = []
     if intent == "edit":
-        prior_by_position = {s.position: s for s in prior_spec.slides}
+        prior_by_position = (
+            {s.position: s for s in prior_spec.slides} if prior_spec else {}
+        )
         changed = {
             s.position
             for s in spec.slides
@@ -1856,7 +1868,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # suppressed by the same flag: leaving it bumped beside an unchanged version
     # token would show "modified just now" against a deck whose lock says nothing
     # changed, and that half-state is worse than either choice made consistently.
-    describe_only = bool(scoped_vals(state, "describe_only"))
+    # (``describe_only`` is read once, above the edit guards.)
 
     deck_write: Dict[str, Any] = {
         "title": spec.title,
