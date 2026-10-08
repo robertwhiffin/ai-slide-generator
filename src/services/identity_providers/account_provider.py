@@ -12,6 +12,8 @@ from typing import List, Optional
 
 import requests
 
+from src.services.identity_providers.scim_filter import escape_scim_filter_string
+
 logger = logging.getLogger(__name__)
 
 
@@ -181,9 +183,10 @@ class AccountIdentityProvider:
             Combined list of matching users and groups
         """
         results = []
+        escaped_query = escape_scim_filter_string(query)
         
         if include_users:
-            user_filter = f'userName co "{query}" or displayName co "{query}"'
+            user_filter = f'userName co "{escaped_query}" or displayName co "{escaped_query}"'
             try:
                 users = self.list_users(filter_query=user_filter, max_results=max_results)
                 results.extend(users)
@@ -191,7 +194,7 @@ class AccountIdentityProvider:
                 logger.warning("Failed to search users in Account API")
         
         if include_groups:
-            group_filter = f'displayName co "{query}"'
+            group_filter = f'displayName co "{escaped_query}"'
             try:
                 groups = self.list_groups(filter_query=group_filter, max_results=max_results)
                 results.extend(groups)
