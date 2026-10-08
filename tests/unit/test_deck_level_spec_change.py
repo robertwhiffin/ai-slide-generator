@@ -877,6 +877,51 @@ def test_an_explicit_edit_target_is_rebuilt_even_when_it_passed_review(graph_env
     assert updates["target_positions"] == [1]
 
 
+def test_a_deck_level_edit_still_rebuilds_an_untargeted_slide_whose_brief_changed(
+    graph_env,
+):
+    """The changed-slide union applies inside the re-review branch too.
+
+    The edit changes the audience (deck-level) AND slide 2's brief, but targets
+    only slide 1, and the re-review fails nothing.  Slide 2's committed HTML was
+    built from a brief the spec no longer holds, so "it still fits the new
+    audience" cannot excuse it: the rebuild set is failing | uncovered | (model
+    targets | changed-slide positions), and slide 2 is in it.
+    """
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1, 2)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+    env.skills.set("build_reviewer", brief_aware_reviewer(set()))
+    edited = _new_spec((0, 1, 2))
+    edited = edited.model_copy(
+        update={
+            "slides": [
+                s.model_copy(update={"content_brief": "revised brief-2"})
+                if s.position == 2
+                else s
+                for s in edited.slides
+            ]
+        }
+    )
+
+    updates = _run_architect(
+        env,
+        ArchitectOutput(
+            intent="edit",
+            message="Retargeting the deck at the CFO and reworking slide 3.",
+            target_positions=[1],
+            deck_spec=edited,
+        ),
+    )
+
+    # The re-review really ran over the committed slides and failed none, so
+    # slide 2 is rebuilt because its brief changed, not because it failed.
+    assert sorted(
+        c["payload"]["position"] for c in env.skills.calls_for("build_reviewer")
+    ) == [0, 1, 2]
+    assert updates["target_positions"] == [1, 2]
+
+
 def test_the_user_is_told_what_was_re_checked_and_what_is_being_rebuilt(graph_env):
     """§4.6: "tell the user first". The emitter is the only user-facing channel —
     nothing persists ``architect_message`` as chat."""

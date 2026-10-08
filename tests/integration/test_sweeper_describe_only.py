@@ -53,6 +53,7 @@ from src.database.models.session import (
 from src.services.graph.builder import invoke_graph
 from src.services.spec_sync import claim_due_marker, mark_dirty, run_arc_review
 from tests.integration.conftest import _make_fake_db
+from tests.integration.conftest_stub_skills import edited_brief
 
 _AUTHOR = "hand-editor@example.com"
 _HAND_EDITED = "<div class='slide'><h1>A HUMAN WROTE THIS BY HAND</h1></div>"
@@ -288,6 +289,43 @@ class TestASweeperTurnDoesNotRebuildTheDeck:
             "the same edit configuration builds nothing on a NORMAL turn either, "
             "so the assertion above says nothing about the flag"
         )
+
+
+    def test_a_describe_only_EDIT_persists_the_edit_spec_and_builds_nothing(
+        self, sweeper_env
+    ):
+        """An edit on a sweeper turn re-describes; it does not rebuild.
+
+        The architect's edit now carries its revised spec, and on a describe-only
+        turn that revision is still what the deck persists — the arc review IS
+        the re-description — while no builder is dispatched for the target (or
+        for any slide the changed-slide union would add on a normal turn).
+        """
+        import json
+
+        env = sweeper_env
+        env.recorder.slide_count = 3
+        env.run()
+        mark_dirty(env.session_id, _AUTHOR)
+        _hand_edit_slide_zero(env)
+
+        env.recorder.edit_target_positions = {0}
+        builders_before = len(_builder_calls(env.recorder))
+        assert run_arc_review(env.session_id, _AUTHOR) is True
+
+        assert len(_builder_calls(env.recorder)) == builders_before, (
+            "a describe-only edit dispatched a builder"
+        )
+        assert _slide_html(env, 0) == _HAND_EDITED
+        briefs = {
+            slide["position"]: slide["content_brief"]
+            for slide in json.loads(env.deck_row().deck_spec_json)["slides"]
+        }
+        assert briefs == {
+            0: edited_brief("brief-0"),
+            1: "brief-1",
+            2: "brief-2",
+        }, "the describe-only edit did not persist the architect's revised spec"
 
 
 class TestTheFlagDoesNotOutliveItsTurn:
