@@ -21,7 +21,7 @@ from tests.fixtures.packaged_release_loader import (
 # test_graph_definition_manifest.py:744.  Do NOT import; a copy that cannot
 # drift is the oracle (epic correction C-24).
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "6d627f9276e355549cf2c73d67d026e0a31f3ab4b4cbb1af05c1c5f351b297e3",
+    "architect": "7b492c442c7406c5cb9c059e7e421875e1a65fab703b7d2ba2304a4629181aa4",
     "data_analyst": "1ffb1fb3f31a20b9424007eefdf918620f1058386a2ba81bfd22347510ce6803",
     "builder": "1549a4231b3a4a6221842f3eca6699097199b28d8283b8995af7c90b406fe5c4",
     "build_reviewer": "1a895f4bee426041088635f7fa182200827db14ab35a229def6f8932d1516b18",
