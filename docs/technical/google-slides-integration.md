@@ -268,7 +268,8 @@ stated product contract. See [Export Features](./export-features.md).
 
 The fallback path. `build_pptx(...)` takes the `SlideExtract[]` records that
 `frontend/src/services/domWalker.ts` produced by walking the deck DOM
-client-side (in a hidden iframe in the user's browser) and emits a PPTX with
+client-side (in a hidden `sandbox="allow-scripts"` iframe; records return via
+`postMessage`) and emits a PPTX with
 pptxgenjs — no server-side Chromium required. Lower fidelity than huashu but
 works on any deployment.
 
