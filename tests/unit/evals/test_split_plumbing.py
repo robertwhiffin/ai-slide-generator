@@ -398,6 +398,7 @@ def test_empty_heldout_tree_raises_no_cases_naming_heldout(monkeypatch, tracking
     msg = str(e.value)
     assert re.search(r"(?<![A-Za-z0-9_])heldout(?![A-Za-z0-9_])", msg), msg  # the split, as a word
     assert "cases_heldout" in msg, msg  # the split's directory
+    mlflow.set_tracking_uri(tracking)
     exp = mlflow.get_experiment_by_name("tellr-agent-eval-heldout")
     assert exp is None or mlflow.search_runs([exp.experiment_id]).empty
 
