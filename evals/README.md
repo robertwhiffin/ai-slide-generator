@@ -306,3 +306,20 @@ Known limits: `evals/packs/deck_reviewer/judge_prompt.md` and the data_analyst j
 train-deck example figures, and eight held-out `calibration.json` negatives are byte-identical to train's.
 Neither changes a held-out payload or reference. `error_detail` is not stored for `incomplete` rows, so
 the exact invalid criterion name in fix_reviewer rejects is inferred from the train reproduction.
+
+## Architect re-baseline: edit returns the revised deck spec, 2026-10-08
+
+`git_sha` b893f5a363ddfabecfadd6e0b1488b764da4acad. The architect v1 prompt now requires an edit to return
+the full `deck_spec` with only the requested slides revised (the deck spec is the source of truth), and the
+graph refuses an edit without one instead of rebuilding from the old brief. Same endpoints, 3 repeats;
+all 10 architect cases trusted at calibration on both splits.
+
+| Split | Pass rate | Before | `edit_request` | `build_request` | Judge errors | Est. cost (USD) |
+|---|---|---|---|---|---|---|
+| train | 0.86 | 0.71 | 3/3 (was 0/3) | 1/3 (was 2/3) | 1 | 2.94 |
+| heldout | 1.00 | 0.77 | 3/3 (was 0/3) | 3/3 | 1 | 2.58 |
+
+The `build_request` failures are the existing cause: the candidate builds a 5-slide deck where the
+reference has 10, and the judge fails the argument as too thin. It is unrelated to the edit change and
+within one repeat of the previous run. This re-baseline changes the architect's prompt, so the architect
+rows in the earlier baseline tables describe the previous v1 prompt.
