@@ -274,7 +274,7 @@ X-Accel-Buffering: no
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/api/chat/async` | Submit for async processing |
-| `GET` | `/api/chat/poll/{request_id}` | Poll for status and events |
+| `GET` | `/api/chat/poll/{request_id}` | Poll for status and events (session creator only; 404 unknown id, 403 otherwise — same privacy rule as `/api/sessions/{id}/messages`) |
 
 **Submit Request:**
 ```json
