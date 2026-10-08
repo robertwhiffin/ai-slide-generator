@@ -893,7 +893,8 @@ def test_predict_output_carries_runner_error_detail_on_contract_failure(monkeypa
     assert out["infra_error"] is False
     # the runtime's own status and detail, passed through unrelabelled
     assert out["status"] == "incomplete"
-    assert out["error_detail"] == "invalid_output:ValidationError"
+    assert out["error_detail"].startswith("invalid_output:ValidationError: ")
+    assert "position\n  Field required" in out["error_detail"]
 
 
 def test_contract_scorer_fail_rationale_has_status_and_detail(monkeypatch):
@@ -962,8 +963,13 @@ def test_run_sweep_contract_assessment_rationale_contains_validation_error(monke
     rationale = contract[0].rationale or ""
     assert contract[0].feedback.value == "fail"
     # the runtime classifies a schema-invalid output as incomplete/invalid_output
-    # (classify_test_run_failure); the rationale carries exactly that, unrelabelled
-    assert rationale == (
+    # (classify_test_run_failure), unrelabelled; the runner appends pydantic's message,
+    # which names each failing field location and the offending input
+    assert rationale.startswith(
         "Contract failed: structured output is None"
-        " (status=incomplete): invalid_output:ValidationError"
+        " (status=incomplete): invalid_output:ValidationError: "
+        "3 validation errors for BuilderOutput"
     )
+    for location in ("\nposition\n  Field required", "\nhtml\n  Field required",
+                     "\nzzz_not_a_field_marker\n  Extra inputs are not permitted"):
+        assert location in rationale

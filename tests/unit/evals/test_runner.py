@@ -112,3 +112,71 @@ def test_persistent_provider_failure_is_marked_infra_error_not_counted():
     res = r.run(config.v1_baseline("builder"), payload, design_system_active=True)
     assert res.infra_error is True
     assert res.status != "completed"
+
+
+# ---------------------------------------------------------------------------
+# A failed run's detail carries the validation message, not just its class
+# ---------------------------------------------------------------------------
+
+_BAD_CRITERION = "invented_criterion_xyz"
+
+
+def _bad_finding_output():
+    return {
+        "slide_index": 1,
+        "verdict": "surfaced",
+        "findings": [{
+            "id": "f1", "slide_index": 1, "category": "design",
+            "criterion": _BAD_CRITERION, "message": "m", "objective": True,
+        }],
+    }
+
+
+class _InventedCriterionAdapter:
+    """The provider's structured parse rejects an invented criterion (raw stays None)."""
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        return schema.model_validate(_bad_finding_output())
+
+
+class _UnvalidatedInventedCriterionAdapter:
+    """Hands back an unvalidated instance, so the runtime's own re-validation rejects it."""
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        return schema.model_construct(**_bad_finding_output())
+
+
+def _fix_reviewer_run(adapter):
+    from evals.harness.case import load_cases
+
+    case = load_cases("fix_reviewer")[0]
+    r = runner.Runner(model_adapter=adapter, max_infra_retries=0)
+    return r.run(config.v1_baseline("fix_reviewer"), case.payload,
+                 design_system_active=case.design_system_active)
+
+
+def test_provider_parse_failure_detail_names_the_field_and_bad_value():
+    res = _fix_reviewer_run(_InventedCriterionAdapter())
+    assert res.status == "incomplete"
+    assert res.infra_error is False
+    assert res.structured is None
+    assert res.error_detail.startswith("invalid_output:ValidationError: ")
+    assert "findings.0" in res.error_detail
+    assert _BAD_CRITERION in res.error_detail
+
+
+def test_runtime_revalidation_failure_detail_carries_the_cause_message():
+    res = _fix_reviewer_run(_UnvalidatedInventedCriterionAdapter())
+    assert res.status == "incomplete"
+    assert res.infra_error is False
+    assert res.error_detail.startswith("invalid_output:AgentOutputValidationError: ")
+    assert "findings.0" in res.error_detail
+    assert _BAD_CRITERION in res.error_detail
+
+
+def test_infra_error_detail_is_the_runtimes_own_code():
+    r = runner.Runner(model_adapter=Boom(), max_infra_retries=0)
+    res = r.run(config.v1_baseline("builder"), _BUILDER_PAYLOAD, design_system_active=True)
+    assert res.infra_error is True
+    assert res.error_detail.startswith("endpoint_unavailable:")
+    assert "429" not in res.error_detail
