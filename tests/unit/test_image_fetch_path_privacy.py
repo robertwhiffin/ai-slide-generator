@@ -7,6 +7,7 @@ stay open-read. A token for another user's ephemeral image must not resolve via
 boundary.
 """
 import base64
+import json
 from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import patch
@@ -184,3 +185,74 @@ class TestRequestContextIdentity:
         assert f"{{{{image:{theirs.token}}}}}" in out_deck["slides"][0]["html"]
         assert _data_uri(mine) in out_deck["slides"][1]["html"]
         assert out_html == raw_html
+
+
+class TestSearchImagesToolPrivacy:
+    """F-CR-27: the agent ``search_images`` tool must never list another user's
+    chat-pasted (ephemeral) images, and is scoped to the caller."""
+
+    @pytest.fixture
+    def prod_env(self, monkeypatch):
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        yield
+        set_current_user(None)
+
+    @pytest.fixture
+    def run_tool(self, db_session):
+        from src.services import image_tools
+
+        @contextmanager
+        def _fake_db():
+            yield db_session
+
+        def _run(**kwargs):
+            with patch("src.services.image_tools.get_db_session", _fake_db):
+                return json.loads(image_tools.search_images(**kwargs))
+
+        return _run
+
+    def test_ephemeral_category_never_lists_other_users_pastes(
+        self, db_session, prod_env, run_tool
+    ):
+        theirs = _make_image(db_session, category="ephemeral", uploaded_by=ALICE)
+        set_current_user(BOB)
+        out = run_tool(category="ephemeral")
+        assert out["images"] == []
+        assert theirs.token not in json.dumps(out)
+
+    def test_ephemeral_category_refused_even_for_owner(
+        self, db_session, prod_env, run_tool
+    ):
+        mine = _make_image(db_session, category="ephemeral", uploaded_by=BOB)
+        set_current_user(BOB)
+        out = run_tool(category="ephemeral")
+        assert out["images"] == []
+        assert mine.token not in json.dumps(out)
+
+    @pytest.mark.parametrize("category", ["Ephemeral", " EPHEMERAL "])
+    def test_ephemeral_category_case_and_whitespace_variants_refused(
+        self, db_session, prod_env, run_tool, category
+    ):
+        theirs = _make_image(db_session, category="ephemeral", uploaded_by=ALICE)
+        set_current_user(BOB)
+        out = run_tool(category=category)
+        assert out["images"] == []
+        assert theirs.token not in json.dumps(out)
+
+    def test_no_category_excludes_ephemeral_and_other_users(
+        self, db_session, prod_env, run_tool
+    ):
+        _make_image(db_session, category="ephemeral", uploaded_by=ALICE)
+        _make_image(db_session, category="ephemeral", uploaded_by=BOB)
+        alice_lib = _make_image(db_session, category="content", uploaded_by=ALICE)
+        bob_lib = _make_image(db_session, category="content", uploaded_by=BOB)
+        set_current_user(BOB)
+        out = run_tool()
+        tokens = {i["id"] for i in out["images"]}
+        assert tokens == {bob_lib.token}
+        assert alice_lib.token not in tokens
+
+    def test_no_identity_fails_closed(self, db_session, prod_env, run_tool):
+        _make_image(db_session, category="content", uploaded_by=ALICE)
+        set_current_user(None)
+        assert run_tool()["images"] == []
