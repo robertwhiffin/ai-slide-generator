@@ -317,9 +317,9 @@ all 10 architect cases trusted at calibration on both splits.
 | Split | Pass rate | Before | `edit_request` | `build_request` | Judge errors | Est. cost (USD) |
 |---|---|---|---|---|---|---|
 | train | 0.86 | 0.71 | 3/3 (was 0/3) | 1/3 (was 2/3) | 1 | 2.94 |
-| heldout | 1.00 | 0.77 | 3/3 (was 0/3) | 3/3 | 1 | 2.58 |
+| heldout | 1.00 | 0.77 | n/a | n/a | 1 | 2.58 |
 
 The `build_request` failures are the existing cause: the candidate builds a 5-slide deck where the
 reference has 10, and the judge fails the argument as too thin. It is unrelated to the edit change and
-within one repeat of the previous run. This re-baseline changes the architect's prompt, so the architect
+within one repeat of the previous run. Held-out per-case results are left out, as for the held-out baseline. This re-baseline changes the architect's prompt, so the architect
 rows in the earlier baseline tables describe the previous v1 prompt.
