@@ -260,7 +260,8 @@ def test_contract_score_single_positional_arg_still_works():
 
 
 def test_contract_score_fail_includes_status_and_detail():
-    ok, why = scorers.contract_score(None, status="incomplete", error_detail="stop_reason=max_tokens")
+    ok, why = scorers.contract_score(
+        None, status="incomplete", error_detail="stop_reason=max_tokens")
     assert ok is False
     assert why.startswith("Contract failed: structured output is None")
     assert "status=incomplete" in why
@@ -268,14 +269,14 @@ def test_contract_score_fail_includes_status_and_detail():
 
 
 def test_contract_score_fail_without_detail_still_names_status():
-    ok, why = scorers.contract_score(None, status="contract", error_detail=None)
+    ok, why = scorers.contract_score(None, status="incomplete", error_detail=None)
     assert ok is False
-    assert "status=contract" in why
+    assert "status=incomplete" in why
 
 
 def test_contract_score_truncates_long_detail_with_marker():
     detail = "A" * 5000
-    ok, why = scorers.contract_score(None, status="contract", error_detail=detail)
+    ok, why = scorers.contract_score(None, status="incomplete", error_detail=detail)
     assert ok is False
     assert "A" * 2000 in why
     assert "A" * 2001 not in why
@@ -285,9 +286,25 @@ def test_contract_score_truncates_long_detail_with_marker():
 
 def test_contract_score_short_detail_not_truncated():
     detail = "B" * 1999
-    ok, why = scorers.contract_score(None, status="contract", error_detail=detail)
+    ok, why = scorers.contract_score(None, status="incomplete", error_detail=detail)
     assert detail in why
     assert not why.endswith("...") and "truncat" not in why.lower()
+
+
+def test_contract_score_detail_at_limit_is_not_truncated():
+    detail = "C" * 2000
+    _, why = scorers.contract_score(None, status="incomplete", error_detail=detail)
+    assert why.endswith(": " + detail)
+
+
+def test_contract_score_detail_one_over_limit_is_truncated():
+    _, why = scorers.contract_score(None, status="incomplete", error_detail="D" * 2001)
+    assert why.endswith(": " + "D" * 2000 + " ... [truncated]")
+
+
+def test_contract_score_empty_detail_adds_nothing():
+    _, why = scorers.contract_score(None, status="incomplete", error_detail="")
+    assert why == "Contract failed: structured output is None (status=incomplete)"
 
 
 def test_contract_score_pass_rationale_unchanged_by_extra_info():

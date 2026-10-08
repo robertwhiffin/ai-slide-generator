@@ -891,7 +891,9 @@ def test_predict_output_carries_runner_error_detail_on_contract_failure(monkeypa
     out = pf(agent_key="builder", case_id="a", repeat=0)
     assert out["structured"] is None
     assert out["infra_error"] is False
-    assert isinstance(out["error_detail"], str) and out["error_detail"].strip()
+    # the runtime's own status and detail, passed through unrelabelled
+    assert out["status"] == "incomplete"
+    assert out["error_detail"] == "invalid_output:ValidationError"
 
 
 def test_contract_scorer_fail_rationale_has_status_and_detail(monkeypatch):
@@ -915,7 +917,7 @@ def test_contract_scorer_truncates_long_detail(monkeypatch):
     _patch_cases(monkeypatch, [c])
     row = _row(c)
     s = _scorer(mlflow_run.build_scorers("builder", judge_endpoint=JUDGE_EP), "contract")
-    outs = _outputs(None, status="contract")
+    outs = _outputs(None, status="incomplete")
     outs["error_detail"] = "Q" * 6000
     bad = s.run(inputs=row["inputs"], outputs=outs, expectations=row["expectations"])
     assert "Q" * 2000 in bad.rationale
@@ -943,7 +945,8 @@ def test_contract_scorer_still_skips_infra_error_with_detail(monkeypatch):
     s = _scorer(mlflow_run.build_scorers("builder", judge_endpoint=JUDGE_EP), "contract")
     outs = _outputs(None, infra=True)
     outs["error_detail"] = "endpoint_unavailable: 503"
-    assert s.run(inputs=row["inputs"], outputs=outs, expectations=row["expectations"]).value == "skip"
+    fb = s.run(inputs=row["inputs"], outputs=outs, expectations=row["expectations"])
+    assert fb.value == "skip"
 
 
 def test_run_sweep_contract_assessment_rationale_contains_validation_error(monkeypatch, tracking):
@@ -958,8 +961,9 @@ def test_run_sweep_contract_assessment_rationale_contains_validation_error(monke
     assert len(contract) == 1
     rationale = contract[0].rationale or ""
     assert contract[0].feedback.value == "fail"
-    assert "Contract failed: structured output is None" in rationale
-    assert "status=contract" in rationale
-    # the pydantic validation text names the missing required field(s)
-    assert "validation" in rationale.lower() or "field required" in rationale.lower() \
-        or "missing" in rationale.lower()
+    # the runtime classifies a schema-invalid output as incomplete/invalid_output
+    # (classify_test_run_failure); the rationale carries exactly that, unrelabelled
+    assert rationale == (
+        "Contract failed: structured output is None"
+        " (status=incomplete): invalid_output:ValidationError"
+    )
