@@ -854,3 +854,112 @@ def test_mark_superseded_tags_every_run_in_the_experiment_only(tmp_path):
         assert tags["superseded_reason"] == "fixture fix; payloads changed"
     assert "superseded" not in client.get_run(bystander).data.tags
     assert mlflow_run.mark_superseded(uri, "no-such-exp", "x") == 0
+
+
+# ---------------------------------------------------------------------------
+# error_detail visibility
+# ---------------------------------------------------------------------------
+
+class BadSchemaAdapter:
+    """Returns output that fails schema validation (builder requires position/html)."""
+
+    def __init__(self):
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        with self._lock:
+            self.calls += 1
+        return schema.model_validate({"zzz_not_a_field_marker": 1})
+
+
+def test_predict_output_carries_error_detail_none_on_success(monkeypatch):
+    _patch_cases(monkeypatch, [_builder_case("a")])
+    monkeypatch.setattr(mlflow_run, "render_slide", RenderSpy())
+    pf = mlflow_run.make_predict_fn(
+        _cfg(), Runner(model_adapter=EchoAdapter(), max_infra_retries=0), render_enabled=True)
+    out = pf(agent_key="builder", case_id="a", repeat=0)
+    assert "error_detail" in out
+    assert out["error_detail"] is None
+
+
+def test_predict_output_carries_runner_error_detail_on_contract_failure(monkeypatch):
+    _patch_cases(monkeypatch, [_builder_case("a")])
+    monkeypatch.setattr(mlflow_run, "render_slide", RenderSpy())
+    pf = mlflow_run.make_predict_fn(
+        _cfg(), Runner(model_adapter=BadSchemaAdapter(), max_infra_retries=0), render_enabled=True)
+    out = pf(agent_key="builder", case_id="a", repeat=0)
+    assert out["structured"] is None
+    assert out["infra_error"] is False
+    assert isinstance(out["error_detail"], str) and out["error_detail"].strip()
+
+
+def test_contract_scorer_fail_rationale_has_status_and_detail(monkeypatch):
+    _patch_judge(monkeypatch, StubJudge(lambda o, e: "pass"))
+    c = _builder_case("a")
+    _patch_cases(monkeypatch, [c])
+    row = _row(c)
+    s = _scorer(mlflow_run.build_scorers("builder", judge_endpoint=JUDGE_EP), "contract")
+    outs = _outputs(None, status="incomplete")
+    outs["error_detail"] = "stop_reason=max_tokens DETAIL-MARK"
+    bad = s.run(inputs=row["inputs"], outputs=outs, expectations=row["expectations"])
+    assert bad.value == "fail"
+    assert "Contract failed: structured output is None" in bad.rationale
+    assert "status=incomplete" in bad.rationale
+    assert "DETAIL-MARK" in bad.rationale
+
+
+def test_contract_scorer_truncates_long_detail(monkeypatch):
+    _patch_judge(monkeypatch, StubJudge(lambda o, e: "pass"))
+    c = _builder_case("a")
+    _patch_cases(monkeypatch, [c])
+    row = _row(c)
+    s = _scorer(mlflow_run.build_scorers("builder", judge_endpoint=JUDGE_EP), "contract")
+    outs = _outputs(None, status="contract")
+    outs["error_detail"] = "Q" * 6000
+    bad = s.run(inputs=row["inputs"], outputs=outs, expectations=row["expectations"])
+    assert "Q" * 2000 in bad.rationale
+    assert "Q" * 2001 not in bad.rationale
+
+
+def test_contract_scorer_pass_rationale_unchanged_with_error_detail_key(monkeypatch):
+    _patch_judge(monkeypatch, StubJudge(lambda o, e: "pass"))
+    c = _builder_case("a")
+    _patch_cases(monkeypatch, [c])
+    row = _row(c)
+    s = _scorer(mlflow_run.build_scorers("builder", judge_endpoint=JUDGE_EP), "contract")
+    outs = _outputs({"position": 1, "html": "<section/>"})
+    outs["error_detail"] = None
+    ok = s.run(inputs=row["inputs"], outputs=outs, expectations=row["expectations"])
+    assert ok.value == "pass"
+    assert ok.rationale == "Contract passed: structured output is present"
+
+
+def test_contract_scorer_still_skips_infra_error_with_detail(monkeypatch):
+    _patch_judge(monkeypatch, StubJudge(lambda o, e: "pass"))
+    c = _builder_case("a")
+    _patch_cases(monkeypatch, [c])
+    row = _row(c)
+    s = _scorer(mlflow_run.build_scorers("builder", judge_endpoint=JUDGE_EP), "contract")
+    outs = _outputs(None, infra=True)
+    outs["error_detail"] = "endpoint_unavailable: 503"
+    assert s.run(inputs=row["inputs"], outputs=outs, expectations=row["expectations"]).value == "skip"
+
+
+def test_run_sweep_contract_assessment_rationale_contains_validation_error(monkeypatch, tracking):
+    adapter = BadSchemaAdapter()
+    run_id, run, stub, _, _ = _sweep(
+        monkeypatch, tracking, adapter=adapter, verdict=lambda o, e: "pass",
+        cases=[_builder_case("a")], repeats=1)
+    mlflow.set_tracking_uri(tracking)
+    traces = mlflow.search_traces(run_id=run_id, return_type="list")
+    assert len(traces) == 1
+    contract = [a for a in traces[0].info.assessments if a.name == "contract"]
+    assert len(contract) == 1
+    rationale = contract[0].rationale or ""
+    assert contract[0].feedback.value == "fail"
+    assert "Contract failed: structured output is None" in rationale
+    assert "status=contract" in rationale
+    # the pydantic validation text names the missing required field(s)
+    assert "validation" in rationale.lower() or "field required" in rationale.lower() \
+        or "missing" in rationale.lower()

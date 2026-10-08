@@ -6,10 +6,30 @@ from evals.harness.render import RenderMeasures
 from src.domain.finding import CRITERIA
 
 
-def contract_score(structured: dict | None) -> tuple[bool, str]:
-    """Pass iff structured is not None (runtime already validated schema)."""
+def contract_score(structured: dict | None, *, status: str | None = None, error_detail: str | None = None) -> tuple[bool, str]:
+    """Pass iff structured is not None (runtime already validated schema).
+
+    When structured is None and failure details are provided, the rationale includes:
+    - The base message: "Contract failed: structured output is None"
+    - The status (if given): " (status=<status>)"
+    - The error detail (if given): ": <detail>", truncated to 2000 characters with a marker if longer
+
+    When structured is not None, status and error_detail are ignored and the pass message is unchanged.
+    """
     if structured is None:
-        return False, "Contract failed: structured output is None"
+        rationale = "Contract failed: structured output is None"
+
+        if status is not None:
+            rationale += f" (status={status})"
+
+        if error_detail is not None:
+            if len(error_detail) > 2000:
+                truncated = error_detail[:2000]
+                rationale += f": {truncated} ... [truncated]"
+            else:
+                rationale += f": {error_detail}"
+
+        return False, rationale
     return True, "Contract passed: structured output is present"
 
 

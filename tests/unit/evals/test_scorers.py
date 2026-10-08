@@ -245,3 +245,52 @@ def test_render_measures_safe_area_intrusion_is_named():
 
 def test_render_measures_safe_area_defaults_clean():
     assert render.RenderMeasures(0, 7.0, (), (), True).safe_area_px == 0.0
+
+
+# ---------------------------------------------------------------------------
+# contract_score: failure reason visibility
+# ---------------------------------------------------------------------------
+
+def test_contract_score_single_positional_arg_still_works():
+    ok, why = scorers.contract_score({"position": 1})
+    assert ok is True
+    bad, why_bad = scorers.contract_score(None)
+    assert bad is False
+    assert "Contract failed: structured output is None" in why_bad
+
+
+def test_contract_score_fail_includes_status_and_detail():
+    ok, why = scorers.contract_score(None, status="incomplete", error_detail="stop_reason=max_tokens")
+    assert ok is False
+    assert why.startswith("Contract failed: structured output is None")
+    assert "status=incomplete" in why
+    assert "stop_reason=max_tokens" in why
+
+
+def test_contract_score_fail_without_detail_still_names_status():
+    ok, why = scorers.contract_score(None, status="contract", error_detail=None)
+    assert ok is False
+    assert "status=contract" in why
+
+
+def test_contract_score_truncates_long_detail_with_marker():
+    detail = "A" * 5000
+    ok, why = scorers.contract_score(None, status="contract", error_detail=detail)
+    assert ok is False
+    assert "A" * 2000 in why
+    assert "A" * 2001 not in why
+    assert len(why) < 2000 + 400
+    assert not why.endswith("A"), "truncated detail must end with a visible marker"
+
+
+def test_contract_score_short_detail_not_truncated():
+    detail = "B" * 1999
+    ok, why = scorers.contract_score(None, status="contract", error_detail=detail)
+    assert detail in why
+    assert not why.endswith("...") and "truncat" not in why.lower()
+
+
+def test_contract_score_pass_rationale_unchanged_by_extra_info():
+    base = scorers.contract_score({"x": 1})
+    assert base == (True, "Contract passed: structured output is present")
+    assert scorers.contract_score({"x": 1}, status="completed", error_detail=None) == base
