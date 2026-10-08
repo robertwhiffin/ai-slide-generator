@@ -282,7 +282,8 @@ async def update_profile(profile_id: int, body: UpdateProfileRequest):
         perm_service.require_edit_profile(db, profile_id)
         profile = _get_profile(db, profile_id)
 
-        if body.is_default is True:
+        if body.is_default is not None:
+            # is_default is workspace-wide; promoting or demoting it is an admin action.
             require_admin()
 
         if body.name is not None:

@@ -440,6 +440,57 @@ class TestUpdateProfile:
         mock_db.execute.assert_not_called()
         assert profile.is_default is False
 
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch(
+        "src.api.routes.profiles.get_permission_service",
+        return_value=_mock_perm_service_allow_all(),
+    )
+    @patch(
+        "src.api.routes.profiles.require_admin",
+        side_effect=HTTPException(status_code=403, detail="Admin access required"),
+    )
+    def test_non_admin_cannot_clear_default(
+        self, mock_require_admin, mock_perm, mock_get_db, client
+    ):
+        """CAN_EDIT alone cannot demote the workspace default profile."""
+        profile = _make_profile(id=3, name="Profile C", is_default=True)
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.first.return_value = profile
+        mock_get_db.return_value = mock_db
+
+        response = client.put("/api/profiles/3", json={"is_default": False})
+
+        assert response.status_code == 403
+        mock_require_admin.assert_called_once_with()
+        assert profile.is_default is True
+
+    @patch("src.api.routes.profiles.get_db_session")
+    @patch(
+        "src.api.routes.profiles.get_permission_service",
+        return_value=_mock_perm_service_allow_all(),
+    )
+    @patch("src.api.routes.profiles.require_admin")
+    def test_admin_can_clear_default(
+        self, mock_require_admin, mock_perm, mock_get_db, client
+    ):
+        """An admin with CAN_EDIT can demote the workspace default profile."""
+        profile = _make_profile(id=3, name="Profile C", is_default=True)
+
+        mock_db = MagicMock()
+        mock_db.__enter__ = MagicMock(return_value=mock_db)
+        mock_db.__exit__ = MagicMock(return_value=False)
+        mock_db.query.return_value.filter.return_value.first.return_value = profile
+        mock_get_db.return_value = mock_db
+
+        response = client.put("/api/profiles/3", json={"is_default": False})
+
+        assert response.status_code == 200
+        assert response.json()["is_default"] is False
+        mock_require_admin.assert_called_once_with()
+
 
 class TestDeleteProfile:
     @patch("src.api.routes.profiles.get_db_session")
