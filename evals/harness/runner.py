@@ -80,6 +80,30 @@ def _is_infra_error(outcome: CandidateRunOutcome) -> bool:
     ) or outcome.error_detail.startswith("unexpected_error:")
 
 
+def _failure_detail(outcome: CandidateRunOutcome) -> str | None:
+    """The runtime's error_detail plus the exception's message, for content failures.
+
+    The runtime keeps only the exception class in ``error_detail`` (``invalid_output:
+    ValidationError``), which cannot tell an optimiser which field was wrong.  For a
+    run that is neither completed nor an infra error, append the exception's message
+    and that of its cause (pydantic lists field locations and offending input values),
+    e.g. ``invalid_output:ValidationError: <message>``.  Infra errors and completed
+    runs keep the runtime's detail unchanged; ``_is_infra_error`` always reads the
+    outcome's own detail, never this string.
+    """
+    detail = outcome.error_detail
+    if outcome.status == "completed" or _is_infra_error(outcome) or outcome.error is None:
+        return detail
+    messages = [str(outcome.error)]
+    cause = outcome.error.__cause__
+    if cause is not None and str(cause) not in messages:
+        messages.append(str(cause))
+    message = "\n".join(m for m in messages if m)
+    if not message:
+        return detail
+    return f"{detail}: {message}" if detail else message
+
+
 class Runner:
     """Thread-safe runner over AgentRuntime.run_candidate with infra-error retry.
 
@@ -170,6 +194,6 @@ class Runner:
             latency_ms=obs.model_latency_ms,
             input_tokens=obs.input_tokens,
             output_tokens=obs.output_tokens,
-            error_detail=outcome.error_detail,
+            error_detail=_failure_detail(outcome),
             infra_error=infra_error,
         )
