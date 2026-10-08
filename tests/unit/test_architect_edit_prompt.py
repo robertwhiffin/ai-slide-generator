@@ -17,6 +17,8 @@ from __future__ import annotations
 import hashlib
 import re
 
+import pytest
+
 import src.core.database  # noqa: F401  (must be imported before other src.* modules)
 from src.core.skills.architect import INSTRUCTIONS
 from src.services.agent_schema_registry import (
@@ -115,6 +117,18 @@ EDITING_RULE_PHRASES = (
     "change deck-level fields only when the user asks",
     "adding or removing slides is not an edit",
 )
+# Review F1/F2 (controller ruling): an edit never silently restyles — the node treats
+# a changed design_contract on an edit as an answered confirmation and rebuilds every
+# slide — and an add/remove request has a named path instead of a dead end.
+EDITING_GUARD_PHRASES = (
+    "keep design_contract unchanged on an edit",
+    # ...but the turn that APPLIES an agreed proposal is itself an edit carrying the new
+    # contract (test_deck_spec_change_turn.py), so the rule must not forbid that turn.
+    "unless the user has agreed to the contract you proposed with confirm_design_contract",
+    "a change of design system or slide style still goes through confirm_design_contract",
+    "keep resolved_data unchanged unless new data has been fetched for this edit",
+    "if the user asks for that, use discuss and explain that it cannot be applied as an edit",
+)
 
 
 def _norm(text: str) -> str:
@@ -129,6 +143,12 @@ def _architect_definition():
 def _payload_rules_block(prompt: str) -> str:
     blocks = [b for b in prompt.split("\n\n") if b.startswith("PAYLOAD RULES")]
     assert len(blocks) == 1, "expected exactly one PAYLOAD RULES block"
+    return blocks[0]
+
+
+def _editing_block(prompt: str) -> str:
+    blocks = [b for b in prompt.split("\n\n") if b.startswith("EDITING")]
+    assert len(blocks) == 1, "expected exactly one EDITING block"
     return blocks[0]
 
 
@@ -179,6 +199,11 @@ def test_prompt_states_the_editing_rule():
     text = _norm(INSTRUCTIONS)
     missing = [p for p in EDITING_RULE_PHRASES if p not in text]
     assert not missing, f"editing rule phrases missing: {missing}"
+
+
+@pytest.mark.parametrize("phrase", EDITING_GUARD_PHRASES)
+def test_editing_rule_keeps_contract_and_names_the_add_remove_path(phrase):
+    assert phrase in _norm(_editing_block(INSTRUCTIONS)), f"EDITING block lacks {phrase!r}"
 
 
 def test_unchanged_parts_of_the_prompt_are_byte_identical():

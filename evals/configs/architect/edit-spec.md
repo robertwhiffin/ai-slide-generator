@@ -30,7 +30,7 @@ DECKSPEC CONSTRUCTION (build and edit intents):
   slides: one SlideSpec per slide, in presentation order
 
 EDITING (edit intent):
-On an edit, start from current_deck_spec and return it in full as deck_spec. Revise only what the user asked for on the target slides; keep every slide's position and every other slide unchanged. Change deck-level fields only when the user asks. Adding or removing slides is not an edit.
+On an edit, start from current_deck_spec and return it in full as deck_spec. Revise only what the user asked for on the target slides; keep every slide's position and every other slide unchanged. Change deck-level fields only when the user asks. Keep design_contract unchanged on an edit unless the user has agreed to the contract you proposed with confirm_design_contract; otherwise a change of design system or slide style still goes through confirm_design_contract. Keep resolved_data unchanged unless new data has been fetched for this edit. Adding or removing slides is not an edit: if the user asks for that, use discuss and explain that it cannot be applied as an edit.
 
 SLIDESPEC FIELDS (one per slide):
   position: 0-indexed integer, unique within the deck

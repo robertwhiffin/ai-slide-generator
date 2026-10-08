@@ -693,7 +693,7 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "6d627f9276e355549cf2c73d67d026e0a31f3ab4b4cbb1af05c1c5f351b297e3",
+    "architect": "7b492c442c7406c5cb9c059e7e421875e1a65fab703b7d2ba2304a4629181aa4",
     "data_analyst": "1ffb1fb3f31a20b9424007eefdf918620f1058386a2ba81bfd22347510ce6803",
     "builder": "1549a4231b3a4a6221842f3eca6699097199b28d8283b8995af7c90b406fe5c4",
     "build_reviewer": "1a895f4bee426041088635f7fa182200827db14ab35a229def6f8932d1516b18",
@@ -1133,7 +1133,7 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
 
     # The string-keyed sibling is unaffected, so no existing hash moves.
     assert definition_content_hash(built({"1": "a"})) == (
-        "e4341335f36779707c02ae0e92f2b8b9b27f31b5f55b8bbe5075bf6821800be5"
+        "b022951de746ea56c9c011a8b28493deb6d052d9f9a3e2c7f22b3ff706643706"
     )
 
 
