@@ -871,6 +871,121 @@ class TestAnEditCarriesItsRevisedSpec:
 
         assert updates["target_positions"] == [1, 3]
 
+    def test_a_purpose_only_change_at_an_untargeted_slide_is_rebuilt(
+        self, graph_env
+    ):
+        """``purpose`` is part of the brief a builder is handed, so a change to
+        it alone at a slide the model did not target still rebuilds that slide.
+        Sabotage: compare only (content_brief, hands_off) and this goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        prior = make_spec((0, 1, 2))
+        edited = prior.model_copy(
+            update={
+                "slides": [
+                    s.model_copy(update={"purpose": "a new purpose"})
+                    if s.position == 2
+                    else s
+                    for s in prior.slides
+                ]
+            }
+        )
+        graph_env.skills.set("architect", _edit_out(edited, [0]))
+
+        _, updates = self._run(graph_env)
+
+        assert updates["target_positions"] == [0, 2]
+
+    # ---- a refused edit is SAID, on both surfaces --------------------------
+    # architect_node emits and persists the model's own line ("Editing slide
+    # 1.") before the edit guards run.  A refusal that only rewrote
+    # architect_message in state would leave the user told an edit is under
+    # way and then shown nothing — the silent lost edit the product rule
+    # forbids.  So the refusal sentence goes to the SSE stream AND the
+    # transcript, after the model's line.
+
+    def _run_and_capture(self, env, state=None):
+        from src.api.services.session_manager import get_session_manager
+
+        before = len(get_session_manager().get_messages(env.session_id))
+        emitter: queue.Queue = queue.Queue()
+        set_event_emitter(emitter)
+        try:
+            updates = architect_node(state if state is not None else env.state())
+        finally:
+            set_event_emitter(None)
+        events = []
+        while not emitter.empty():
+            events.append(emitter.get_nowait())
+        said = [
+            m.get("content")
+            for m in get_session_manager().get_messages(env.session_id)[before:]
+        ]
+        return updates, events, said
+
+    @pytest.mark.parametrize(
+        "case",
+        ["no_persisted_spec", "stale_spec", "null_revised_spec", "positions_changed"],
+    )
+    def test_a_refused_edit_tells_the_user_on_both_surfaces(self, graph_env, case):
+        model_message = "Editing slide 1."
+        expected_code = {
+            "no_persisted_spec": "edit_without_spec",
+            "stale_spec": "spec_positions_stale",
+            "null_revised_spec": "edit_without_revised_spec",
+            "positions_changed": "edit_spec_positions_changed",
+        }[case]
+        if case == "stale_spec":
+            graph_env.seed_slides(self.THREE[:2])
+        elif case != "no_persisted_spec":
+            graph_env.seed_slides(self.THREE)
+        if case != "no_persisted_spec":
+            self._persist(graph_env, make_spec((0, 1, 2)))
+        if case == "positions_changed":
+            out = _edit_out(
+                _revised(make_spec((0, 1)), {1: "revised brief-1"}),
+                [1],
+                message=model_message,
+            )
+        else:
+            out = ArchitectOutput(
+                intent="edit", message=model_message, target_positions=[1]
+            )
+        graph_env.skills.set("architect", out)
+
+        updates, events, said = self._run_and_capture(graph_env)
+
+        assert updates["error_state"]["code"] == expected_code
+        refusal = updates["architect_message"]
+        assert refusal and refusal != model_message
+        architect_lines = [
+            e.content for e in events if (e.metadata or {}).get("node") == "architect"
+        ]
+        assert architect_lines == [model_message, refusal], (
+            "the SSE client was not told the edit could not be applied"
+        )
+        assert events[-1].metadata.get("intent") == "discuss"
+        assert said == [model_message, refusal], (
+            "the transcript (polling client, next turn) does not say the edit "
+            "could not be applied"
+        )
+
+    def test_a_describe_only_refused_edit_adds_no_transcript_row(self, graph_env):
+        """The sweeper's turn is addressed to nobody: a refusal on it stays out
+        of the human's transcript, exactly as the model's own line does."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            ArchitectOutput(intent="edit", message="Editing.", target_positions=[1]),
+        )
+        state = graph_env.state(describe_only=scoped(TURN, True))
+
+        updates, _, said = self._run_and_capture(graph_env, state)
+
+        assert updates["error_state"]["code"] == "edit_without_revised_spec"
+        assert said == []
+
     def test_the_union_is_sorted_and_deduplicated(self, graph_env):
         graph_env.seed_slides(self.THREE + ["<div class='slide'>d</div>"])
         self._persist(graph_env, make_spec((0, 1, 2, 3)))

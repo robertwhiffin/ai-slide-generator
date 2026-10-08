@@ -1645,6 +1645,14 @@ def architect_node(state: dict) -> Dict[str, Any]:
             "code": edit_degrade["code"],
             "message": edit_degrade["message"],
         }
+        # The model's own line ("Editing slide 2.") was already emitted and
+        # persisted above, so the refusal must be SAID too, on the same two
+        # surfaces — otherwise the user is told an edit is under way and then
+        # nothing happens.  A describe-only turn stays silent the same way the
+        # model's line does: _say suppresses it and the sweeper has no emitter.
+        _emit(StreamEventType.ASSISTANT, content=edit_degrade["user"],
+              metadata={"node": "architect", "intent": "discuss"})
+        _say(state, edit_degrade["user"])
         return updates
 
     if _contract_ids(spec.design_contract) != _contract_ids(inbound_contract):
