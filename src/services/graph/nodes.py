@@ -952,8 +952,8 @@ def _persisted_spec_describes_these_rows(
     emitted: a spec with more slides than the deck has rows is exactly how a deck
     GROWS (the first build has no rows at all, and "add a slide" describes one
     before it exists), so the row set cannot constrain model output.  What it can
-    constrain is the FALLBACK — reusing a description written for a deck whose
-    rows have since moved.
+    constrain is an EDIT — the model revises the persisted spec, so an edit of
+    a description written for a deck whose rows have since moved is refused.
 
     ``session_slide_decks.deck_spec_json`` is renumbered on insert and on nothing
     else (final review C1), so after a delete or a duplicate its ``position``
@@ -1542,9 +1542,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
         return updates
 
     # A build uses the architect's own spec.  An EDIT must also carry its spec
-    # (ArchitectOutput's validator requires it: the deck spec is the source of
-    # truth, so every edit returns it revised) and that spec briefs the builder,
-    # which resolves its brief BY POSITION out of it (``build_branch_payload``).
+    # (the deck spec is the source of truth, so every edit returns it revised;
+    # this node enforces that, not ArchitectOutput's validator) and that spec
+    # briefs the builder, which resolves its brief BY POSITION out of it
+    # (``build_branch_payload``).
     #
     # The model edits the PERSISTED spec, so the persisted spec must still
     # describe the deck before an edit is accepted.  Both guards below are decided
@@ -1594,8 +1595,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 ),
             }
         elif spec is None:
-            # The validator requires a spec on an edit, but the frozen schema
-            # contract cannot carry that rule, so it is enforced here.
+            # ArchitectOutput's validator still accepts a spec-less edit: its
+            # source is hashed into the frozen schema-contract digest, so the
+            # rule is enforced here instead.  Never fall back to prior_spec —
+            # that would rebuild the slide from its stale brief.
             edit_degrade = {
                 "code": "edit_without_revised_spec",
                 "message": "intent='edit' returned no deck_spec; the deck spec "
