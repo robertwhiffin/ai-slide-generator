@@ -12,6 +12,7 @@ import logging
 import os
 import secrets
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
@@ -134,7 +135,24 @@ def _build_app_origin(request: Request) -> str:
     returns the internal address (``http://localhost:8000``).  We use the
     ``X-Forwarded-Host`` / ``X-Forwarded-Proto`` headers set by the proxy
     to reconstruct the public URL instead. For localhost, force ``http``.
+
+    ``DATABRICKS_APP_URL`` (platform-injected on Databricks Apps) takes
+    precedence over any request header (F-CR-28): ``X-Forwarded-Host`` is
+    client-influenceable, and this origin feeds both the OAuth
+    ``redirect_uri`` and the callback ``postMessage`` target. This mirrors
+    ``CSRFProtectionMiddleware._expected_origin``. The header-based path
+    remains only as a fallback for local dev where the env var is unset.
     """
+    app_url = os.getenv("DATABRICKS_APP_URL", "").strip()
+    if app_url:
+        if "://" not in app_url:
+            app_url = f"https://{app_url}"
+        parts = urlsplit(app_url)
+        if parts.scheme and parts.netloc:
+            # scheme://host[:port] only; drop any path/query/fragment.
+            return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+        logger.warning("DATABRICKS_APP_URL is set but unparseable; falling back to request headers")
+
     forwarded_host = request.headers.get("x-forwarded-host")
     forwarded_proto = request.headers.get("x-forwarded-proto")
 

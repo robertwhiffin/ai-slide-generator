@@ -125,6 +125,11 @@ def _seed_global_credentials(session_factory) -> None:
 
 class TestHelpers:
 
+    @pytest.fixture(autouse=True)
+    def _no_app_url(self, monkeypatch):
+        """Exercise the local-fallback path unless a test sets the env var."""
+        monkeypatch.delenv("DATABRICKS_APP_URL", raising=False)
+
     def test_get_user_identity_in_test_env(self):
         """In test environment, _get_user_identity returns 'local_dev'."""
         from src.api.routes.google_slides import _get_user_identity
@@ -149,6 +154,38 @@ class TestHelpers:
         }.get(h)
         uri = _build_redirect_uri(mock_proxy)
         assert uri == "https://myapp.databricksapps.com/api/export/google-slides/auth/callback"
+
+    def test_build_app_origin_env_wins_over_poisoned_forwarded_host(self, monkeypatch):
+        """F-CR-28: DATABRICKS_APP_URL beats a client-supplied X-Forwarded-Host."""
+        from src.api.routes.google_slides import _build_app_origin, _build_redirect_uri
+
+        monkeypatch.setenv("DATABRICKS_APP_URL", "https://real-app.databricksapps.com")
+        req = MagicMock()
+        req.headers.get.side_effect = lambda h: {
+            "x-forwarded-host": "evil.example.com",
+            "x-forwarded-proto": "http",
+        }.get(h)
+        req.base_url = "http://localhost:8000/"
+        assert _build_app_origin(req) == "https://real-app.databricksapps.com"
+        assert _build_redirect_uri(req) == (
+            "https://real-app.databricksapps.com/api/export/google-slides/auth/callback"
+        )
+
+    def test_build_app_origin_strips_path_and_trailing_slash(self, monkeypatch):
+        from src.api.routes.google_slides import _build_app_origin
+
+        req = MagicMock()
+        req.headers.get.return_value = None
+        monkeypatch.setenv("DATABRICKS_APP_URL", "https://real-app.databricksapps.com/some/path/")
+        assert _build_app_origin(req) == "https://real-app.databricksapps.com"
+
+    def test_build_app_origin_env_without_scheme_defaults_https(self, monkeypatch):
+        from src.api.routes.google_slides import _build_app_origin
+
+        req = MagicMock()
+        req.headers.get.return_value = None
+        monkeypatch.setenv("DATABRICKS_APP_URL", "real-app.databricksapps.com")
+        assert _build_app_origin(req) == "https://real-app.databricksapps.com"
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +348,10 @@ class TestAuthCallback:
 # ---------------------------------------------------------------------------
 
 class TestOAuthCsrf:
+    @pytest.fixture(autouse=True)
+    def _no_app_url(self, monkeypatch):
+        monkeypatch.delenv("DATABRICKS_APP_URL", raising=False)
+
     def _state_from_url(self, url: str) -> dict:
         import urllib.parse
 
@@ -376,6 +417,36 @@ class TestOAuthCsrf:
         assert "postMessage" in resp.text
         assert "https://myapp.example.com" in resp.text
         assert "'*'" not in resp.text
+
+    def test_callback_postmessage_uses_env_origin_not_spoofed_host(self, test_client, monkeypatch):
+        """F-CR-28: postMessage target is DATABRICKS_APP_URL, not X-Forwarded-Host."""
+        monkeypatch.setenv("DATABRICKS_APP_URL", "https://real-app.databricksapps.com")
+        test_client.cookies.clear()
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "x", "state": json.dumps({"user": "local_dev", "nonce": "z"})},
+            headers={"x-forwarded-host": "evil.example.com", "x-forwarded-proto": "https"},
+        )
+        assert '"https://real-app.databricksapps.com"' in resp.text
+        assert "evil.example.com" not in resp.text
+
+    def test_auth_url_redirect_uri_uses_env_origin(self, test_client, session_factory, monkeypatch):
+        """F-CR-28: redirect_uri sent to Google ignores a poisoned X-Forwarded-Host."""
+        import urllib.parse
+
+        _seed_global_credentials(session_factory)
+        monkeypatch.setenv("DATABRICKS_APP_URL", "https://real-app.databricksapps.com")
+        resp = test_client.get(
+            "/api/export/google-slides/auth/url",
+            headers={"x-forwarded-host": "evil.example.com", "x-forwarded-proto": "https"},
+        )
+        assert resp.status_code == 200
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(resp.json()["url"]).query)
+        assert query["redirect_uri"][0] == (
+            "https://real-app.databricksapps.com/api/export/google-slides/auth/callback"
+        )
+        assert "evil.example.com" not in resp.json()["url"]
+        test_client.cookies.clear()
 
 
 # ---------------------------------------------------------------------------
