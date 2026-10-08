@@ -136,6 +136,12 @@ def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: 
                 section_css=meridian_section_css(),
             )
             render = dataclasses.asdict(m)
+
+        # Map "incomplete" status to "contract" when it's due to invalid output (schema validation failure)
+        status = result.status
+        if status == "incomplete" and result.error_detail and result.error_detail.startswith("invalid_output:"):
+            status = "contract"
+
         return {
             "structured": result.structured,
             "raw": result.raw,
@@ -143,8 +149,9 @@ def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: 
             "latency_ms": result.latency_ms,
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
-            "status": result.status,
+            "status": status,
             "infra_error": result.infra_error,
+            "error_detail": result.error_detail,
         }
 
     return predict_fn
@@ -177,7 +184,11 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
     def contract(inputs, outputs, expectations):
         if outputs.get("infra_error"):
             return _skip("infra error")
-        return _fb(*det.contract_score(outputs.get("structured")))
+        return _fb(*det.contract_score(
+            outputs.get("structured"),
+            status=outputs.get("status"),
+            error_detail=outputs.get("error_detail")
+        ))
 
     @scorer(name="expected_category")
     def expected_category(inputs, outputs, expectations):
