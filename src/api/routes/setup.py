@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
@@ -22,6 +23,42 @@ from src.core.databricks_client import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/setup", tags=["setup"])
+
+# Workspace hosts we accept on first-run configure. Suffixes are matched against
+# the parsed hostname so values like https://x.cloud.databricks.com.attacker.net
+# cannot pass an unanchored regex.
+_DATABRICKS_HOST_SUFFIXES = (
+    ".cloud.databricks.com",
+    ".azuredatabricks.net",
+    ".gcp.databricks.com",
+)
+_DATABRICKS_HOST_PATTERNS = (
+    r"https://[\w\-]+\.cloud\.databricks\.com",
+    r"https://[\w\-\.]+\.azuredatabricks\.net",
+    r"https://[\w\-]+\.gcp\.databricks\.com",
+)
+
+
+def _is_allowed_databricks_host(url: str) -> bool:
+    """True when *url* is an https Databricks workspace with no extra host suffix."""
+    if not any(re.fullmatch(pattern, url) for pattern in _DATABRICKS_HOST_PATTERNS):
+        return False
+
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None:
+        return False
+    if parsed.port is not None:
+        return False
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        return False
+
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if not hostname:
+        return False
+    return any(
+        hostname.endswith(suffix) and len(hostname) > len(suffix)
+        for suffix in _DATABRICKS_HOST_SUFFIXES
+    )
 
 
 def _is_already_configured() -> bool:
@@ -64,18 +101,7 @@ class ConfigureWorkspaceRequest(BaseModel):
         if not v.startswith("http://") and not v.startswith("https://"):
             v = f"https://{v}"
 
-        # Validate it looks like a Databricks URL
-        # Common patterns: *.cloud.databricks.com, *.azuredatabricks.net, etc.
-        databricks_patterns = [
-            r"https://[\w\-]+\.cloud\.databricks\.com",
-            r"https://[\w\-\.]+\.azuredatabricks\.net",  # Azure: adb-123456.18.azuredatabricks.net
-            r"https://[\w\-]+\.gcp\.databricks\.com",
-            r"https://[\w\-]+\.databricks\.com",
-            r"https://[\w\-\.]+\.databricks\.com",
-        ]
-
-        is_valid = any(re.match(pattern, v) for pattern in databricks_patterns)
-        if not is_valid:
+        if not _is_allowed_databricks_host(v):
             raise ValueError(
                 "Invalid Databricks workspace URL. "
                 "Expected format: https://your-workspace.cloud.databricks.com"
