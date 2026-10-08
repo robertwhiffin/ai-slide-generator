@@ -17,6 +17,8 @@ Real-model runs; results are logged to MLflow.
 - **Scorers** (`evals/harness/scorers.py`, `mlflow_run.py`). Every row is scored by:
   - `contract`: the output validated against the agent's schema. An `incomplete` run, such as a model
     inventing a criterion name outside the schema, fails here.
+    Its rationale gives the run status and the reason, including the schema validation message (the
+    invalid field and value), truncated to 2000 characters.
   - `expected_category`, for the architect, data_analyst and the three reviewers: deterministic
     match on intent/outcome, or on expected findings (criterion, position). Any objective criterion
     not listed in `expect.criteria` fails the row. A fix_reviewer also checks `verdict`.
@@ -93,6 +95,13 @@ cases generalises, rather than having been fitted to them.
   A bare `generate()` writes to `cases_heldout` only.
   The cross-split tests (`tests/unit/evals/test_cross_split.py`) guard that the split ids are pinned, no
   held-out payload or reference duplicates a train one, and the generators cannot write to train.
+
+## Prompt optimisation
+
+To run an optimisation pass on one agent, load the `optimise-agent-prompt` project skill
+(`.claude/skills/optimise-agent-prompt/SKILL.md`). It sets the rules: train only during the search,
+held-out once on finalists, a spend cap, no edits to cases, judges or scorers, and no promote or
+commit.
 
 ## Adding a config
 
