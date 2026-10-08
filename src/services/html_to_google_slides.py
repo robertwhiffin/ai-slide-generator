@@ -1355,6 +1355,15 @@ class HtmlToGoogleSlidesConverter:
         import shutil as _shutil
         import tempfile as _tempfile
         from src.services.converter_jail import protocol, run_gslides_jail
+        from src.services.converter_jail.ast_guard import DisallowedImport, check_imports
+
+        # Same host-side AST allowlist as _build_gslides_job_dir (F-CR-30): a
+        # rejected snippet is never written or exec'd; caller falls back.
+        try:
+            check_imports(code)
+        except (DisallowedImport, SyntaxError) as exc:
+            logger.warning("GSlides retry snippet rejected pre-jail: %s", exc)
+            return None
 
         job_dir = _tempfile.mkdtemp(prefix="gslides_retry_")
         try:

@@ -205,3 +205,53 @@ class TestNoInProcessExecAnywhere:
         for mod in (html_to_pptx, html_to_google_slides):
             src = inspect.getsource(mod)
             assert "exec_module" not in src, f"{mod.__name__} still execs in-process"
+
+
+class TestEmitSingleSlideAstGuard:
+    """F-CR-30: the GSlides retry path applies the same AST allowlist as the main path."""
+
+    def _converter(self):
+        from src.services.html_to_google_slides import HtmlToGoogleSlidesConverter
+        return object.__new__(HtmlToGoogleSlidesConverter)
+
+    def test_disallowed_import_is_not_executed(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "src.services.converter_jail.run_gslides_jail",
+            lambda *a, **k: calls.append(a),
+        )
+        result = self._converter()._emit_single_slide(
+            "import subprocess\nsubprocess.run(['id'])\n", "<html></html>", str(tmp_path), "p1",
+        )
+        assert result is None
+        assert calls == []
+
+    def test_syntax_error_is_not_executed(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "src.services.converter_jail.run_gslides_jail",
+            lambda *a, **k: calls.append(a),
+        )
+        result = self._converter()._emit_single_slide(
+            "def (:\n", "<html></html>", str(tmp_path), "p1",
+        )
+        assert result is None
+        assert calls == []
+
+    def test_allowed_snippet_reaches_jail(self, tmp_path, monkeypatch):
+        calls = []
+
+        class _R:
+            timed_out = False
+            returncode = 1
+
+        def fake(job_dir, out):
+            calls.append(job_dir)
+            return _R()
+
+        monkeypatch.setattr("src.services.converter_jail.run_gslides_jail", fake)
+        result = self._converter()._emit_single_slide(
+            "x = 1\n", "<html></html>", str(tmp_path), "p1",
+        )
+        assert result is None
+        assert len(calls) == 1
