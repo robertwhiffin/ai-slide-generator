@@ -28,6 +28,7 @@ import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
 from src.database.models.design_system import DesignSystem
 from src.services.design_system_service import _basename
+from src.services.svg_sanitizer import sanitize_svg
 from tests.unit.conftest_design_system import (
     COLORS_AND_TYPE_CSS,
     MANIFEST_FILENAME,
@@ -2757,8 +2758,9 @@ class TestOnePathClaimedTwiceIsRefusedNotDecidedByZipOrder:
         )
         assert verdict == "stored", detail
         stored = dict(detail)
-        assert stored["assets/mixed.svg"] == COLLIDING_FIRST_BYTES
-        assert stored["assets/sub/mixed.svg"] == COLLIDING_SECOND_BYTES
+        # SVG assets are sanitized on import (F-CR-33), so compare sanitized bytes.
+        assert stored["assets/mixed.svg"] == sanitize_svg(COLLIDING_FIRST_BYTES)
+        assert stored["assets/sub/mixed.svg"] == sanitize_svg(COLLIDING_SECOND_BYTES)
 
 
 def _dot_rooted_members():

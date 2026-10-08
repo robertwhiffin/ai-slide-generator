@@ -27,6 +27,7 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
+from src.services.svg_sanitizer import sanitize_svg
 from tests.unit.conftest_design_system import (
     COLORS_AND_TYPE_CSS,
     REALISTIC_CSS,
@@ -346,7 +347,7 @@ class TestNoDoubleStore:
         assert logo_ref.data is None
         assert logo_ref.asset is not None
         assert logo_ref.asset.filename == "logo.svg"
-        assert logo_ref.asset.data == SVG_LOGO
+        assert logo_ref.asset.data == sanitize_svg(SVG_LOGO)
 
     def test_no_reference_row_stores_bytes(self, session):
         """The core no-double-store invariant: every asset/font file row has NULL

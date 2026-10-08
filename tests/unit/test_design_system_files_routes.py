@@ -27,6 +27,7 @@ from sqlalchemy.pool import StaticPool
 
 from src.api.main import app
 from src.core.database import Base, get_db
+from src.services.svg_sanitizer import sanitize_svg
 from tests.unit.conftest_design_system import (
     COLORS_AND_TYPE_CSS,
     SVG_LOGO,
@@ -214,7 +215,9 @@ class TestServeFile:
         with its bytes resolved through the asset reference row."""
         ds_id = _import(client)
         resp = client.get(f"{BASE}/{ds_id}/files/assets/logo.svg")
-        _assert_safe_text_response(resp, SVG_LOGO)
+        # Import sanitizes SVG (F-CR-33), which re-serializes it with an XML
+        # declaration; the served bytes are the sanitized form.
+        _assert_safe_text_response(resp, sanitize_svg(SVG_LOGO))
 
     def test_json_and_js_sources_served_as_plain_text(self, client, db_session):
         """Stored rows with json/js content types are text sources, never
