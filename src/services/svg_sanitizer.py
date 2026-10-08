@@ -249,7 +249,7 @@ _ANIMATION_ELEMENTS = frozenset({"animate", "animateMotion", "animateTransform",
 _ANIMATION_FORBIDDEN_TARGETS = frozenset({"href", "style"})
 _SAFE_DATA_IMAGE_TYPES = frozenset({"png", "jpeg", "jpg", "gif", "webp"})
 _UNSAFE_URL_PATTERN = re.compile(
-    r"(?:javascript|vbscript|livescript|mocha):|data:image/svg+xml",
+    r"(?:javascript|vbscript|livescript|mocha):|data:image/svg\+xml",
     re.IGNORECASE,
 )
 
@@ -332,6 +332,16 @@ _RASTER_MAGICS = (
     b"GIF89a",
 )
 _SNIFF_WINDOW = 4096
+# An SVG document: optional BOM/whitespace, any XML prolog (declaration, comments,
+# PIs, DOCTYPE with optional internal subset), then ``<svg`` as the ROOT element.
+# Anchoring on the root (not a substring) keeps CSS/HTML/text that merely mentions
+# ``<svg`` (e.g. a ``data:image/svg+xml,<svg ...>`` URI) from being treated as SVG.
+_SVG_ROOT_RE = re.compile(
+    r"\A\ufeff?\s*"
+    r"(?:<\?.*?\?>\s*|<!--.*?-->\s*|<!DOCTYPE(?:[^>\[]|\[.*?\])*>\s*)*"
+    r"<(?:[\w.-]+:)?svg[\s/>]",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def looks_like_svg(content: bytes) -> bool:
@@ -339,8 +349,9 @@ def looks_like_svg(content: bytes) -> bool:
 
     Used so a client-declared MIME type (e.g. ``image/png``) is never trusted
     to decide whether sanitization is needed. Content that starts with a known
-    raster magic number is not SVG; otherwise an ``<svg`` start tag within the
-    first few KB (UTF-8/ASCII or BOM-marked UTF-16) marks it as SVG.
+    raster magic number is not SVG; otherwise it is SVG only if ``<svg`` is the
+    root element (after any XML prolog) within the first few KB (UTF-8/ASCII or
+    BOM-marked UTF-16).
     """
     head = content[:_SNIFF_WINDOW]
     if head.startswith(_RASTER_MAGICS):
@@ -349,7 +360,7 @@ def looks_like_svg(content: bytes) -> bool:
         text = head.decode("utf-16", errors="ignore")
     else:
         text = head.decode("utf-8", errors="ignore")
-    return "<svg" in text.lower()
+    return _SVG_ROOT_RE.match(text) is not None
 
 
 def sanitize_svg(content: bytes) -> bytes:

@@ -250,6 +250,29 @@ def test_looks_like_svg_sniffs_content_not_declared_type():
     # PNG that merely embeds "<svg" text must not be treated as SVG
     assert not looks_like_svg(_png_bytes() + b"<svg>")
     assert not looks_like_svg(b"GIF89a<svg>")
+    # Prolog with DOCTYPE internal subset still resolves to an <svg> root
+    assert looks_like_svg(
+        b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "b">]><svg xmlns="x"/>'
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'.logo{background:url("data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\'/>")}',
+        b"<!doctype html><html><body><svg></svg></body></html>",
+        b"# Notes\nInline icons use <svg> elements.\n",
+        b'{"icon": "<svg/>"}',
+    ],
+)
+def test_looks_like_svg_ignores_non_svg_text_mentioning_svg(content):
+    assert not looks_like_svg(content)
+
+
+def test_unsafe_url_pattern_matches_svg_data_uri():
+    from src.services.svg_sanitizer import _contains_unsafe_url
+
+    assert _contains_unsafe_url("url(data:image/svg+xml;base64,AAA)")
 
 
 @pytest.mark.parametrize("declared", ["image/png", "image/jpeg", "image/gif"])
@@ -286,3 +309,24 @@ def test_design_system_import_rejects_svg_content_with_raster_extension(db_sessi
     )
     with pytest.raises(DesignSystemImportError, match="SVG content"):
         import_bundle(db_session, zip_bytes=bundle, user="tester")
+
+
+def test_design_system_import_keeps_non_svg_assets_mentioning_svg(db_session):
+    css = b'.i{background:url("data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\'/>")}'
+    bundle = make_bundle_zip(
+        files={
+            "assets/icons.css": css,
+            "assets/readme.txt": b"inline <svg> is fine here",
+            "README.md": b"# Acme\n",
+            "SKILL.md": b"---\nname: acme\n---\n",
+        }
+    )
+    design_system = import_bundle(db_session, zip_bytes=bundle, user="tester")
+    assets = {
+        a.filename: a
+        for a in db_session.query(DesignSystemAsset).filter_by(
+            design_system_id=design_system.id
+        )
+    }
+    assert assets["icons.css"].data == css
+    assert assets["readme.txt"].data == b"inline <svg> is fine here"
