@@ -325,6 +325,33 @@ def _sanitize_attributes(root: etree._Element) -> None:
             element.text = None
 
 
+_RASTER_MAGICS = (
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+)
+_SNIFF_WINDOW = 4096
+
+
+def looks_like_svg(content: bytes) -> bool:
+    """Content sniff: True if the bytes look like an SVG document.
+
+    Used so a client-declared MIME type (e.g. ``image/png``) is never trusted
+    to decide whether sanitization is needed. Content that starts with a known
+    raster magic number is not SVG; otherwise an ``<svg`` start tag within the
+    first few KB (UTF-8/ASCII or BOM-marked UTF-16) marks it as SVG.
+    """
+    head = content[:_SNIFF_WINDOW]
+    if head.startswith(_RASTER_MAGICS):
+        return False
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = head.decode("utf-16", errors="ignore")
+    else:
+        text = head.decode("utf-8", errors="ignore")
+    return "<svg" in text.lower()
+
+
 def sanitize_svg(content: bytes) -> bytes:
     """Return a sanitized SVG, rejecting malformed or non-SVG XML input."""
     parser = etree.XMLParser(

@@ -14,8 +14,8 @@ from sqlalchemy.pool import StaticPool
 from src.core.database import Base
 from src.database.models.design_system import DesignSystemAsset
 from src.services import image_service
-from src.services.design_system_service import import_bundle
-from src.services.svg_sanitizer import sanitize_svg
+from src.services.design_system_service import DesignSystemImportError, import_bundle
+from src.services.svg_sanitizer import looks_like_svg, sanitize_svg
 from tests.unit.conftest_design_system import make_bundle_zip
 
 
@@ -234,3 +234,55 @@ def test_design_system_import_sanitizes_svg_and_leaves_raster_unchanged(db_sessi
     }
     assert assets["hero-bg.png"].data == png
     assert assets["hero-bg.png"].size_bytes == len(png)
+
+
+_MALICIOUS_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)">'
+    b"<script>alert(2)</script><rect width=\"1\" height=\"1\"/></svg>"
+)
+
+
+def test_looks_like_svg_sniffs_content_not_declared_type():
+    assert looks_like_svg(_MALICIOUS_SVG)
+    assert looks_like_svg(b'\xef\xbb\xbf<?xml version="1.0"?>\n<!-- c -->\n<SVG/>')
+    assert looks_like_svg("<svg/>".encode("utf-16"))
+    assert not looks_like_svg(_png_bytes())
+    # PNG that merely embeds "<svg" text must not be treated as SVG
+    assert not looks_like_svg(_png_bytes() + b"<svg>")
+    assert not looks_like_svg(b"GIF89a<svg>")
+
+
+@pytest.mark.parametrize("declared", ["image/png", "image/jpeg", "image/gif"])
+def test_image_upload_rejects_svg_content_declared_as_raster(db_session, declared):
+    with pytest.raises(ValueError, match="SVG"):
+        image_service.upload_image(
+            db=db_session,
+            file_content=_MALICIOUS_SVG,
+            original_filename="sneaky.png",
+            mime_type=declared,
+            user="tester",
+        )
+    assert db_session.query(image_service.ImageAsset).count() == 0
+
+
+def test_image_upload_rejects_non_svg_declared_as_svg(db_session):
+    with pytest.raises(ValueError, match="Invalid SVG"):
+        image_service.upload_image(
+            db=db_session,
+            file_content=_png_bytes(),
+            original_filename="fake.svg",
+            mime_type="image/svg+xml",
+            user="tester",
+        )
+
+
+def test_design_system_import_rejects_svg_content_with_raster_extension(db_session):
+    bundle = make_bundle_zip(
+        files={
+            "assets/sneaky.png": _MALICIOUS_SVG,
+            "README.md": b"# Acme\n",
+            "SKILL.md": b"---\nname: acme\n---\n",
+        }
+    )
+    with pytest.raises(DesignSystemImportError, match="SVG content"):
+        import_bundle(db_session, zip_bytes=bundle, user="tester")
