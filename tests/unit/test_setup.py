@@ -193,6 +193,29 @@ class TestConfigureWorkspace:
                 assert response.status_code == 500
                 assert "Failed to save" in response.json()["detail"]
 
+    def test_configure_rejects_attacker_suffix_host(self, client):
+        """Unanchored suffix like .attacker.net must not pass host validation."""
+        with patch("src.api.routes.setup.save_tellr_config") as mock_save:
+            response = client.post(
+                "/api/setup/configure",
+                json={"host": "https://x.cloud.databricks.com.attacker.net"},
+            )
+        assert response.status_code == 422
+        mock_save.assert_not_called()
+
+    def test_configure_refused_when_already_configured(self, client):
+        """Existing host (yaml or DATABRICKS_HOST) keeps configure at 409."""
+        with patch(
+            "src.api.routes.setup._is_already_configured", return_value=True
+        ), patch("src.api.routes.setup.save_tellr_config") as mock_save:
+            response = client.post(
+                "/api/setup/configure",
+                json={"host": "https://mycompany.cloud.databricks.com"},
+            )
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Workspace is already configured."
+        mock_save.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # POST /api/setup/test-connection
@@ -274,5 +297,17 @@ class TestUrlValidation:
             "ftp://company.cloud.databricks.com",
         ]
         for url in invalid_urls:
+            with pytest.raises(Exception):
+                ConfigureWorkspaceRequest(host=url)
+
+    def test_rejects_attacker_suffix_hosts(self):
+        """Hostname must be a Databricks suffix, not merely start with one."""
+        attacker_urls = [
+            "https://x.cloud.databricks.com.attacker.net",
+            "https://adb-123456.18.azuredatabricks.net.evil.com",
+            "https://workspace.gcp.databricks.com.attacker.net",
+            "x.cloud.databricks.com.attacker.net",
+        ]
+        for url in attacker_urls:
             with pytest.raises(Exception):
                 ConfigureWorkspaceRequest(host=url)
