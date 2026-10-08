@@ -264,3 +264,46 @@ Earlier runs in the `tellr-agent-eval` experiment are tagged `superseded`, inclu
 frame-rule fix (88px/72px padding, footer at 56px), the safe-area check in `render_measures`, the
 `slide_spec`/`resolved_data` judge inputs, the required architect edit `deck_spec`, the fixer's
 `resolved_data` input and its prompt change, and stored judge rationales.
+
+## Held-out baseline: v1-baseline, 2026-10-08
+
+`git_sha` fd29eb37f8ff65ce5358409134fbf683292e119a, experiment `tellr-agent-eval-heldout`
+(`--split heldout`). Agent endpoint `databricks-claude-opus-4-6`, judge `databricks-claude-sonnet-5`,
+3 repeats, 5 cases per agent (15 rows each). All 35 held-out cases were trusted at calibration; five
+cases needed a re-run after a malformed judge reply, a network drop or a `KeyError: 'result'`, and none
+was ever misclassified. Total estimated cost **USD 15.66**. 0 infra errors in every agent.
+
+| Agent | Held-out | Train (2026-10-06) | Judge errors (held-out) |
+|---|---|---|---|
+| fixer | 1.00 | 1.00 | 0 |
+| deck_reviewer | 0.93 | 0.93 | 0 |
+| build_reviewer | 0.87 | 1.00 | 0 |
+| architect | 0.77 | 0.71 | 2 |
+| builder | 0.40 | 0.47 | 0 |
+| data_analyst | 0.33 | 0.40 | 0 |
+| fix_reviewer | 0.00 | 0.07 | 0 |
+
+Held-out and train agree on both the pass rates and the causes of failure, so the v1 prompts are not
+overfitted to the train cases; the weak agents are weak on both sets. Differences are within repeat
+variance except `build_reviewer`, where two extra failing rows came from one cause (an invented
+arithmetic `overflow` finding on a slide that renders clean).
+
+Distinct causes of failure, all attributed to the agent rather than the harness:
+
+- **fix_reviewer** rejects: the reply is rejected by the output schema (`structured=None`). The v1 prompt
+  says to use criterion names from the registry but does not list them. Accepts: the reviewer echoes the
+  original finding as `objective: true, status: fixed`, which production's `still_open` ignores `status`
+  for, so a good fix would be blocked in production too.
+- **data_analyst** answers `missing_data` for figures already in the request, and for requests with no
+  applicable tool, because the prompt advertises Genie and a vector index that the harness does not bind.
+- **builder** invents figures when `resolved_data.figures` is empty, produces a cover slide below 4.5
+  contrast, and intrudes into the safe area on an overloaded brief.
+- **architect** edits return `deck_spec: null`: the v1 prompt says DeckSpec construction is build-only,
+  while the judge rubric requires it on edits.
+- **Judge noise**: two architect `discuss` rows hit `KeyError: 'result'` and were skipped; one
+  deck_reviewer `clean` row's verdict contradicts its own rationale.
+
+Known limits: `evals/packs/deck_reviewer/judge_prompt.md` and the data_analyst judge prompt contain
+train-deck example figures, and eight held-out `calibration.json` negatives are byte-identical to train's.
+Neither changes a held-out payload or reference. `error_detail` is not stored for `incomplete` rows, so
+the exact invalid criterion name in fix_reviewer rejects is inferred from the train reproduction.
