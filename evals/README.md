@@ -283,10 +283,9 @@ was ever misclassified. Total estimated cost **USD 15.66**. 0 infra errors in ev
 | data_analyst | 0.33 | 0.40 | 0 |
 | fix_reviewer | 0.00 | 0.07 | 0 |
 
-Held-out and train agree on both the pass rates and the causes of failure, so the v1 prompts are not
-overfitted to the train cases; the weak agents are weak on both sets. Differences are within repeat
-variance except `build_reviewer`, where two extra failing rows came from one cause (an invented
-arithmetic `overflow` finding on a slide that renders clean).
+Held-out and train agree on the pass rates and on the causes of failure listed below, so the v1
+prompts are not overfitted to the train cases; the weak agents are weak on both sets. Differences are
+within repeat variance except `build_reviewer`, which scored lower on held-out.
 
 Distinct causes of failure, all attributed to the agent rather than the harness:
 
@@ -296,8 +295,8 @@ Distinct causes of failure, all attributed to the agent rather than the harness:
   for, so a good fix would be blocked in production too.
 - **data_analyst** answers `missing_data` for figures already in the request, and for requests with no
   applicable tool, because the prompt advertises Genie and a vector index that the harness does not bind.
-- **builder** invents figures when `resolved_data.figures` is empty, produces a cover slide below 4.5
-  contrast, and intrudes into the safe area on an overloaded brief.
+- **builder** invents figures when `resolved_data.figures` is empty, and intrudes into the safe area on
+  an overloaded brief.
 - **architect** edits return `deck_spec: null`: the v1 prompt says DeckSpec construction is build-only,
   while the judge rubric requires it on edits.
 - **Judge noise**: two architect `discuss` rows hit `KeyError: 'result'` and were skipped; one
