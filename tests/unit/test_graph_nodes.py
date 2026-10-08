@@ -744,6 +744,44 @@ class TestAnEditCarriesItsRevisedSpec:
         assert spec_in_state is None or spec_in_state == make_spec((0, 1, 2))
         assert graph_env.deck_row().deck_spec_json == make_spec((0, 1, 2)).to_json()
 
+    def test_a_describe_only_edit_after_a_delete_persists_the_re_description(
+        self, graph_env
+    ):
+        """The sweeper exists to fix a stale spec, so its re-description is kept.
+
+        After a delete the rows are ``[0, 1]`` and the persisted spec still
+        describes ``[0, 1, 2]`` — the exact state the arc-review sweeper is
+        scheduled for.  On a describe-only turn no builder runs, so there is no
+        stale brief to hand to anyone; refusing the architect's edit here (with
+        ``spec_positions_stale`` or ``edit_spec_positions_changed``) would leave
+        the spec stale for good while the sweeper clears its marker.
+        """
+        graph_env.seed_slides(self.THREE[:2])
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        re_described = _revised(make_spec((0, 1)), {1: "re-described brief-1"})
+        graph_env.skills.set("architect", _edit_out(re_described, [1]))
+
+        updates = architect_node(graph_env.state(describe_only=scoped(TURN, True)))
+
+        assert updates["error_state"] is None
+        assert updates["architect_intent"] == "edit"
+        assert graph_env.deck_row().deck_spec_json == re_described.to_json()
+
+    def test_a_describe_only_edit_with_no_persisted_spec_persists_its_spec(
+        self, graph_env
+    ):
+        """A pre-spec deck the sweeper re-describes: the model's spec is the
+        description, and no builder runs, so ``edit_without_spec`` does not
+        apply."""
+        graph_env.seed_slides(self.THREE)
+        described = make_spec((0, 1, 2))
+        graph_env.skills.set("architect", _edit_out(described, [0]))
+
+        updates = architect_node(graph_env.state(describe_only=scoped(TURN, True)))
+
+        assert updates["error_state"] is None
+        assert graph_env.deck_row().deck_spec_json == described.to_json()
+
     def test_the_stale_guard_is_decided_from_the_persisted_spec_not_the_models(
         self, graph_env
     ):
