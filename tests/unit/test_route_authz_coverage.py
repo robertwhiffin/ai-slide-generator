@@ -43,6 +43,7 @@ _PERMISSION_CALL_RE = re.compile(
     r"|_require_slide_permission"
     r"|_require_export_job_access"
     r"|_check_chat_permission"      # chat.py send/stream/async
+    r"|_require_chat_request_owner" # chat.py poll: session creator only (F-CR-31)
     r"|_require_manage"             # deck_contributors.py
     r"|get_deck_permission"         # profiles.py / sessions.py inline checks
     # design_systems.py PUT/DELETE: creator-or-admin (Option C), and ADMIN-ONLY
