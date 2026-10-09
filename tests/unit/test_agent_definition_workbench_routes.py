@@ -113,6 +113,15 @@ EXPECTED_FOREMAN_NODE = {
     ),
 }
 LOWERCASE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+EXPECTED_ENDPOINTS = {
+    "architect": "databricks-claude-opus-4-6",
+    "data_analyst": "databricks-claude-opus-4-6",
+    "builder": "databricks-claude-haiku-5-5",
+    "build_reviewer": "databricks-claude-opus-4-6",
+    "fixer": "databricks-claude-opus-4-6",
+    "fix_reviewer": "databricks-claude-haiku-5-5",
+    "deck_reviewer": "databricks-claude-haiku-5-5",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -345,8 +354,9 @@ def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkey
         assert published["content_hash"] == draft["candidate_hash"]
         assert published["prompt_text"]
         assert draft["prompt_text"] == published["prompt_text"]
+        expected_endpoint = EXPECTED_ENDPOINTS[node["agent_key"]]
         assert published["model"] == {
-            "endpoint_name": "databricks-claude-opus-4-6",
+            "endpoint_name": expected_endpoint,
             "temperature": 0.7,
             "max_tokens": 60000,
             "top_p": 0.95,

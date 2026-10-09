@@ -155,6 +155,17 @@ def _expected_prompt(
     return "\n\n".join(parts)
 
 
+EXPECTED_ENDPOINTS = {
+    "architect": "databricks-claude-opus-4-6",
+    "data_analyst": "databricks-claude-opus-4-6",
+    "builder": "databricks-claude-haiku-5-5",
+    "build_reviewer": "databricks-claude-opus-4-6",
+    "fixer": "databricks-claude-opus-4-6",
+    "fix_reviewer": "databricks-claude-haiku-5-5",
+    "deck_reviewer": "databricks-claude-haiku-5-5",
+}
+
+
 @pytest.mark.parametrize("agent_key", MODEL_DRIVEN_AGENT_KEYS)
 def test_every_model_driven_role_preserves_prompt_model_schema_and_output(agent_key):
     output = _output_for(agent_key)
@@ -177,7 +188,7 @@ def test_every_model_driven_role_preserves_prompt_model_schema_and_output(agent_
     assert len(model.calls) == 1
     call = model.calls[0]
     assert call.configuration == AgentModelConfiguration(
-        endpoint_name="databricks-claude-opus-4-6",
+        endpoint_name=EXPECTED_ENDPOINTS[agent_key],
         temperature=0.7,
         max_tokens=60000,
         top_p=0.95,
