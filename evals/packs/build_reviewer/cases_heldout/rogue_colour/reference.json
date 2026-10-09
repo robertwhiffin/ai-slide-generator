@@ -1,0 +1,16 @@
+{
+  "slide_index": 5,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "rogue_colour:5:0",
+      "slide_index": 5,
+      "category": "design",
+      "criterion": "rogue_colour",
+      "message": "The slide title is coloured #E11D48, which is not a Meridian palette token; it should use a var(--brand-core-*) colour.",
+      "objective": true,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

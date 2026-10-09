@@ -44,6 +44,7 @@ from src.services.model_endpoint_catalog import (
     EndpointValidationFailure,
     ModelEndpointCatalog,
     validate_endpoint_name_policy,
+    validate_gateway_model_name,
 )
 from src.services.prompt_assembler import PromptAssembler, PromptAssemblyRejected
 
@@ -285,6 +286,24 @@ def _endpoint_name_policy_validator(
     return ()
 
 
+def _gateway_model_name_validator(
+    current: DefinitionContent, candidate: DefinitionContent
+) -> tuple[DraftValidationIssue, ...]:
+    """ws2a: a save that CHANGES the model must name a system.ai.* Gateway model.
+
+    Save-only by design.  It is never composed into ``_save_local_validators``,
+    which publication and rollback reuse, because rollback re-validates historical
+    releases whose roles name ``databricks-*`` endpoints (spec §5.2).
+    """
+    if candidate.model.endpoint_name == current.model.endpoint_name:
+        return ()
+    try:
+        validate_gateway_model_name(candidate.model.endpoint_name)
+    except EndpointValidationFailure as failure:
+        return (_endpoint_issue(failure),)
+    return ()
+
+
 class RemoteEndpointDraftValidator(Protocol):
     """Remote exact-endpoint check over one complete reconstructed candidate.
 
@@ -449,6 +468,14 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     client_candidate=candidate,
                     server=self._draft_aggregate_snapshot(locked.snapshot),
                 )
+            # Post-lock (ruling I-1): the locked draft is now the client's own
+            # base, so "changed" means changed by this request, never by a
+            # concurrent save that a stale client has not seen.
+            gateway_issues = _gateway_model_name_validator(
+                locked.selected.draft.content, content
+            )
+            if gateway_issues:
+                raise DraftContentRejected(*gateway_issues)
             self._run_candidate_validators(self.post_stale_validators, content)
             self._validate_remote_endpoint(content)
             return self._write_locked_content(
@@ -508,6 +535,14 @@ class _GraphConfigurationDraft(_GraphConfigurationWorkbench):
                     client_candidate=validated,
                     server=self._draft_aggregate_snapshot(locked.snapshot),
                 )
+            # Post-lock (ruling I-1): the locked draft is now the client's own
+            # base, so "changed" means changed by this request, never by a
+            # concurrent save that a stale client has not seen.
+            gateway_issues = _gateway_model_name_validator(
+                locked.selected.draft.content, validated
+            )
+            if gateway_issues:
+                raise DraftContentRejected(*gateway_issues)
             self._run_candidate_validators(self.post_stale_validators, validated)
             self._validate_remote_endpoint(validated)
             return self._write_locked_content(

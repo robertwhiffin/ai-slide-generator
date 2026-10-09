@@ -1,0 +1,7 @@
+# Example override: builder agent evaluated against Claude Sonnet 5 with a
+# trimmed single-slide prompt.  Serves as documentation for the YAML schema.
+agent_key: builder
+name: builder-sonnet5-single-slide
+endpoint_name: databricks-claude-sonnet-5
+max_tokens: 4096
+prompt_text: "You are a slide builder. Build ONE slide."

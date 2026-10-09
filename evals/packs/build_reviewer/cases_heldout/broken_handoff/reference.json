@@ -1,0 +1,16 @@
+{
+  "slide_index": 5,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "brief_not_delivered:5:0",
+      "slide_index": 5,
+      "category": "content",
+      "criterion": "brief_not_delivered",
+      "message": "The callout tells the team not to adopt the checklist this sprint because it first needs dedicated tooling, which contradicts the brief's hand-off to start using the checklist this sprint with no new tooling required.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

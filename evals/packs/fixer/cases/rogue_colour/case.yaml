@@ -1,0 +1,4 @@
+kind: mutation
+fault: 'slide title recoloured #E11D48, off the Meridian palette'
+expect: {}
+design_system_active: true

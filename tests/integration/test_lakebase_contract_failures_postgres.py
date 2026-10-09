@@ -562,7 +562,7 @@ def test_a_removed_pinned_endpoint_is_attempted_once_and_names_the_exact_pin(
     )
 
     assert type(turn.error) is PinnedInvocationEndpointError, turn.error
-    assert turn.error.endpoint_name == SONNET == "databricks-claude-sonnet-4-5"
+    assert turn.error.endpoint_name == SONNET == "system.ai.claude-sonnet-4-5"
     assert turn.error.graph_release_id == stage.v2_id
     assert turn.error.agent_definition_revision_id == fixer_revision_id
     _assert_one_safe_event(turn)

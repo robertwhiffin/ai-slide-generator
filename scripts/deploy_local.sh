@@ -39,6 +39,8 @@ usage() {
     echo "                               from PyPI (skips the local wheel build/upload)"
     echo "  --instance <id>              Ephemeral instance id for a branching env (e.g. devloop);"
     echo "                               each gets its own app + prod branch"
+    echo "  --encryption-secret-scope <scope>  Store the Fernet key in this Databricks secret scope"
+    echo "  --encryption-secret-key <name>     Secret key name (default: tellr-encryption-key)"
     echo "  -h, --help                   Show this help message"
     echo ""
     echo "Examples:"
@@ -62,6 +64,8 @@ INCLUDE_DB_PROMPTS=""
 SKIP_BUILD=""
 FROM_PYPI=""
 INSTANCE=""
+ENCRYPTION_SECRET_SCOPE=""
+ENCRYPTION_SECRET_KEY=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -95,6 +99,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --instance)
             INSTANCE="$2"
+            shift 2
+            ;;
+        --encryption-secret-scope)
+            ENCRYPTION_SECRET_SCOPE="$2"
+            shift 2
+            ;;
+        --encryption-secret-key)
+            ENCRYPTION_SECRET_KEY="$2"
             shift 2
             ;;
         -h|--help)
@@ -220,6 +232,16 @@ if [ -n "$INSTANCE" ]; then
     INSTANCE_ARG=(--instance "$INSTANCE")
 fi
 
+ENCRYPTION_SECRET_SCOPE_ARG=()
+if [ -n "$ENCRYPTION_SECRET_SCOPE" ]; then
+    ENCRYPTION_SECRET_SCOPE_ARG=(--encryption-secret-scope "$ENCRYPTION_SECRET_SCOPE")
+fi
+
+ENCRYPTION_SECRET_KEY_ARG=()
+if [ -n "$ENCRYPTION_SECRET_KEY" ]; then
+    ENCRYPTION_SECRET_KEY_ARG=(--encryption-secret-key "$ENCRYPTION_SECRET_KEY")
+fi
+
 python -m scripts.deploy_local \
     --$ACTION \
     --env "$ENV" \
@@ -227,7 +249,9 @@ python -m scripts.deploy_local \
     $RESET_DB \
     $INCLUDE_DB_PROMPTS \
     "${FROM_PYPI_ARG[@]}" \
-    "${INSTANCE_ARG[@]}"
+    "${INSTANCE_ARG[@]}" \
+    "${ENCRYPTION_SECRET_SCOPE_ARG[@]}" \
+    "${ENCRYPTION_SECRET_KEY_ARG[@]}"
 
 echo ""
 echo -e "${GREEN}Done!${NC}"

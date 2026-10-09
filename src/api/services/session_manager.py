@@ -3430,6 +3430,7 @@ class SessionManager:
                 suppress_nested_events=True,
             )
 
+
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.
 

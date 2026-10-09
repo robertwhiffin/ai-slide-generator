@@ -657,7 +657,10 @@ def test_preview_runs_the_remote_check_after_the_locked_transaction(factory, mon
 
     result = _preview_with(factory, 2, validator, holder)
 
-    assert validator.calls == [("databricks-claude-opus-4-6", False)]
+    assert validator.calls == [
+        ("databricks-claude-opus-4-6", False),
+        ("databricks-claude-haiku-5-5", False),
+    ]
     assert result.warnings == ()
     assert result.restorable is True
     assert _artifacts(factory) == before
@@ -689,18 +692,19 @@ def test_preview_checks_each_distinct_endpoint_once_and_warns_every_user(
     factory, monkeypatch
 ):
     build_v2_v3_v4(factory, monkeypatch)
-    save_endpoint(factory, "fixer", "databricks-other-endpoint")
+    save_endpoint(factory, "fixer", "system.ai.other-endpoint")
     publish(factory, "v5")
     _save_prompt(factory, "architect", "\n\nTune D.", lock=current_lock(factory))
     publish(factory, "v6")
     holder: dict = {}
-    validator = _RecordingValidator(holder, failing={"databricks-other-endpoint"})
+    validator = _RecordingValidator(holder, failing={"system.ai.other-endpoint"})
 
     result = _preview_with(factory, 5, validator, holder)
 
     assert validator.calls == [
         ("databricks-claude-opus-4-6", False),
-        ("databricks-other-endpoint", False),
+        ("databricks-claude-haiku-5-5", False),
+        ("system.ai.other-endpoint", False),
     ]
     assert result.warnings == (
         DraftValidationIssue(
@@ -1611,3 +1615,57 @@ def test_candidate_hash_writers_are_the_allowlisted_attribute_and_builder_sites(
 def test_candidate_hash_writer_scan_detects_each_write_form(tmp_path, snippet, kind):
     (tmp_path / "rogue.py").write_text(f"def rogue(row, h):\n    {snippet}\n")
     assert _candidate_hash_writers(tmp_path) == [f"rogue.py:rogue:{kind}"]
+
+
+def _save_model(factory, agent_key, endpoint_name, *, lock):
+    service = GraphConfiguration()
+    with factory() as db:
+        snap = service.read_workbench(db)
+        db.rollback()
+    content = next(n for n in snap.nodes if n.agent_key == agent_key).draft.content
+    with factory() as db:
+        out = service.save_editable_model_draft(
+            db,
+            agent_key=agent_key,
+            expected_lock_version=lock,
+            actor="editor@example.com",
+            candidate=EditableModelDraft(
+                prompt_text=content.prompt_text,
+                endpoint_name=endpoint_name,
+                temperature=float(content.model.temperature),
+                max_tokens=content.model.max_tokens,
+                top_p=float(content.model.top_p),
+            ),
+        )
+    assert isinstance(out, DraftSaveResult)
+    return out
+
+
+def test_rollback_to_a_legacy_release_is_not_blocked_by_the_gateway_name_rule(
+    factory, monkeypatch
+):
+    """Review Focus 1: v1 (all seven roles databricks-*) is restorable after a system.ai v2."""
+    offset_release_ids(factory)
+    install_release_clock(monkeypatch, factory)
+    v1_architect = draft_content(factory, "architect").model.endpoint_name
+    assert v1_architect == "databricks-claude-opus-4-6"
+    assert all(
+        draft_content(factory, key).model.endpoint_name.startswith("databricks-")
+        for key in GRAPH_V1_AGENT_KEYS
+    )
+    _save_model(
+        factory, "architect", "system.ai.claude-opus-5-5", lock=current_lock(factory)
+    )
+    publish(factory, "v2")
+    assert draft_content(factory, "architect").model.endpoint_name == (
+        "system.ai.claude-opus-5-5"
+    )
+    lock = current_lock(factory)
+
+    outcome = restore(factory, 1, lock=lock)
+
+    assert isinstance(outcome, RestoredRelease), outcome
+    assert outcome.published.release.version_number == 3
+    assert draft_content(factory, "architect").model.endpoint_name == (
+        "databricks-claude-opus-4-6"
+    )

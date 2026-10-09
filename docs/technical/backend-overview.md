@@ -56,8 +56,11 @@ Frontend fetch -> FastAPI router ->   │ ChatService            │
 | `DELETE` | `/api/sessions/{id}` | Delete session | `routes/sessions.delete_session` |
 | `GET` | `/api/sessions/{id}/slides` | Get slide deck for session | `routes/sessions.get_session_slides` |
 | `POST` | `/api/sessions/{id}/contribute` | Get or create contributor session for shared deck | `routes/sessions.get_or_create_contributor_session` |
-| `POST` | `/api/sessions/cleanup` | Clean up expired sessions | `routes/sessions.cleanup_expired_sessions` |
-| `POST` | `/api/sessions/{id}/export` | Export full session data to JSON for debugging | `routes/sessions.export_session` |
+
+Two session routes were removed by SDR-4437 and are intentionally absent from the
+table above: `POST /api/sessions/cleanup` (F-CR-16 — unauthenticated cascading
+delete of all users' expired sessions) and `POST /api/sessions/{id}/export`
+(F-CR-10 — dumped full session data to disk). Neither had a caller.
 
 ### Session Messages Endpoints
 
@@ -437,6 +440,53 @@ Key helpers in `src/core/databricks_client.py`:
 - `get_service_principal_client_id()` - Returns `DATABRICKS_CLIENT_ID` env var
 - `get_service_principal_folder()` - Returns `/Workspace/Users/{client_id}` or `None` for local dev
 - `get_current_username()` - Gets username from the user client
+
+---
+
+## Workbench Model Selection (ws2a — Unity AI Gateway)
+
+The Agent Definition Workbench (`/admin`) lets administrators configure which model each
+of the seven graph roles uses. Since workstream 2a, model discovery and validation run
+through the Unity AI Gateway rather than the Serving Endpoints API.
+
+### Discovery (`src/services/model_endpoint_catalog.py`)
+
+`DatabricksModelEndpointCatalog.list_system_models` calls
+`GET /api/ai-gateway/v2/endpoints` as the app service principal, using the SDK's generic
+`api_client.do`. For each returned entry whose name begins with `databricks-`, it maps
+`databricks-<model>` → `system.ai.<model>` and surfaces the `system.ai.*` name in the
+picker. Entries without the `databricks-` prefix are dropped, because the naming rule
+gives them no invocable `system.ai` form. The list response carries no
+`supported_api_types`, so discovery does not filter by API type — embedding and other
+non-chat endpoints appear in the list and are refused at save time.
+
+There is no custom-name free-text input field. The workbench offers only models the
+Gateway list returns.
+
+### Save-time validation
+
+**Local name policy.** When a draft save changes the model, `_gateway_model_name_validator`
+checks that the new name matches `^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$`. This
+validator runs after the lock-version comparison (after the `DraftSaveConflict` early
+return) and before the remote check, so a stale save reports 409 Conflict rather than 422.
+A save that leaves the model unchanged is not checked by this rule, which means a role
+still named `databricks-*` continues saving normally until an admin changes its model.
+
+**Remote Gateway lookup.** `validate_custom_endpoint_remote` calls
+`GET /api/ai-gateway/v2/endpoints/<name>` through a bounded catalog client (5 s retry,
+3 s HTTP). It maps `system.ai.<m>` to `databricks-<m>` before the lookup. If the response
+`supported_api_types` does not contain `mlflow/v1/chat/completions`, the save is rejected
+with `endpoint_not_chat_model`.
+
+### Legacy names on stored releases
+
+Conversations pinned to releases created before ws2a store `databricks-*` endpoint names.
+At runtime the name is passed through to the Gateway unchanged. The Gateway accepts both
+`system.ai.*` and `databricks-*` forms: live-probed 2026-09-28 — `databricks-claude-haiku-4-5`
+and `databricks-claude-opus-5-5` both answered on the Gateway route (ws2a spec §2
+platform-facts table). Task 9's live acceptance test re-confirms this for a pinned
+pre-ws2a conversation against the deployed instance. No rewriting or republishing is
+required. The v1 seed manifest is not changed.
 
 ---
 

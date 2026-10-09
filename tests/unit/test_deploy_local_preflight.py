@@ -118,3 +118,41 @@ class TestCheckBranchingPreconditions:
         mock_ws.postgres.create_branch.assert_not_called()
         mock_ws.postgres.delete_branch.assert_not_called()
         mock_ws.postgres.create_role.assert_not_called()
+
+
+def test_fork_inherits_the_source_apps_scope_and_key():
+    """A fork must read the same secret: it inherits the source's ciphertext
+    via copy-on-write but gets no encryption_keys row."""
+    from unittest.mock import MagicMock
+
+    from databricks_tellr import secret_key
+    from scripts import deploy_local
+
+    ws = MagicMock()
+    ws.apps.get.return_value = MagicMock(
+        resources=[secret_key.build_secret_resource("tellr", "tellr-encryption-key")]
+    )
+    assert deploy_local._source_secret_config(ws, "db-tellr-prod") == (
+        "tellr", "tellr-encryption-key",
+    )
+
+
+def test_fork_of_legacy_source_returns_none():
+    from unittest.mock import MagicMock
+
+    from scripts import deploy_local
+
+    ws = MagicMock()
+    ws.apps.get.return_value = MagicMock(resources=[])
+    assert deploy_local._source_secret_config(ws, "db-tellr-prod") is None
+
+
+def test_fork_refuses_when_source_resources_unreadable():
+    from unittest.mock import MagicMock
+
+    from scripts import deploy_local
+
+    ws = MagicMock()
+    ws.apps.get.side_effect = Exception("PERMISSION_DENIED")
+    with pytest.raises(SystemExit):
+        deploy_local._source_secret_config(ws, "db-tellr-prod")

@@ -1,0 +1,8 @@
+kind: mutation
+fault: "first stat card changed from 30\u201350% to 10\u201315%, contradicting resolved_data"
+expect:
+  criteria:
+  - source_contradiction
+  positions:
+  - 3
+design_system_active: true

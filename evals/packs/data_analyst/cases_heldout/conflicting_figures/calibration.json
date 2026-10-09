@@ -1,0 +1,13 @@
+{
+  "should_fail": {
+    "outcome": "success",
+    "synthesis": "Based on the available data, the typical prompt requires approximately 4 revision rounds.",
+    "sources": [
+      "Q2 engineering team survey",
+      "vendor adoption survey"
+    ],
+    "gap": null,
+    "tried_tools": [],
+    "reason": null
+  }
+}

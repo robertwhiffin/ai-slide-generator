@@ -1626,7 +1626,7 @@ def test_stale_endpoint_loser_waits_on_the_lock_and_never_reaches_remote_validat
     )
     loser_candidate = EditableModelDraft(
         prompt_text="stale loser edit",
-        endpoint_name="loser endpoint name",
+        endpoint_name="system.ai.loser-endpoint-name",
         temperature=float(bootstrap_content.model.temperature),
         max_tokens=bootstrap_content.model.max_tokens,
         top_p=float(bootstrap_content.model.top_p),
@@ -1645,7 +1645,7 @@ def test_stale_endpoint_loser_waits_on_the_lock_and_never_reaches_remote_validat
 
     winner_candidate = EditableModelDraft(
         prompt_text="winner edit",
-        endpoint_name="winner endpoint name",
+        endpoint_name="system.ai.winner-endpoint-name",
         temperature=float(bootstrap_content.model.temperature),
         max_tokens=bootstrap_content.model.max_tokens,
         top_p=float(bootstrap_content.model.top_p),
@@ -1663,7 +1663,7 @@ def test_stale_endpoint_loser_waits_on_the_lock_and_never_reaches_remote_validat
             assert winner_pid != loser_pid
             assert _observe_lock_waiter(postgres_engine, loser_pid) is True
             with guard:
-                assert remote_calls == [("endpoint-winner", "winner endpoint name")]
+                assert remote_calls == [("endpoint-winner", "system.ai.winner-endpoint-name")]
             release_winner.set()
             winner.result(timeout=20)
             loser.result(timeout=20)
@@ -1677,7 +1677,7 @@ def test_stale_endpoint_loser_waits_on_the_lock_and_never_reaches_remote_validat
     assert won.draft.updated_by == "endpoint-winner"
     persisted, persisted_hash = _stored_draft(factory, "architect")
     assert persisted.prompt_text == "winner edit"
-    assert persisted.model.endpoint_name == "winner endpoint name"
+    assert persisted.model.endpoint_name == "system.ai.winner-endpoint-name"
     assert persisted_hash == definition_content_hash(persisted)
     assert _draft_meta(factory)[:2] == (1, "endpoint-winner")
 
@@ -1690,7 +1690,7 @@ def test_stale_endpoint_loser_waits_on_the_lock_and_never_reaches_remote_validat
     assert lost.server.definitions["architect"].content.prompt_text == "winner edit"
 
     # The stale loser never reached the remote phase and never wrote.
-    assert remote_calls == [("endpoint-winner", "winner endpoint name")]
+    assert remote_calls == [("endpoint-winner", "system.ai.winner-endpoint-name")]
     assert writes == ["endpoint-winner"]
     assert _immutable_graph_artifacts(factory) == artifacts_before
 
@@ -1757,7 +1757,7 @@ def test_model_endpoint_probe_holds_no_lock_while_the_model_call_is_in_flight(
                 expected_lock_version=0,
                 candidate=EditableModelDraft(
                     prompt_text=bootstrap_content.prompt_text,
-                    endpoint_name="saved while probing",
+                    endpoint_name="system.ai.saved-while-probing",
                     temperature=float(bootstrap_content.model.temperature),
                     max_tokens=bootstrap_content.model.max_tokens,
                     top_p=float(bootstrap_content.model.top_p),
@@ -1803,7 +1803,7 @@ def test_model_endpoint_probe_holds_no_lock_while_the_model_call_is_in_flight(
     assert isinstance(saved, DraftSaveResult)
     assert saved.draft.lock_version == 1
     persisted, persisted_hash = _stored_draft(factory, "architect")
-    assert persisted.model.endpoint_name == "saved while probing"
+    assert persisted.model.endpoint_name == "system.ai.saved-while-probing"
     assert persisted_hash != bootstrap_hash
 
     result = outcomes["probe"]

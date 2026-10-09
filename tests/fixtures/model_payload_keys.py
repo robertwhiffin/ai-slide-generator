@@ -85,9 +85,17 @@ EVERY_MODEL_CALL = (
     ("builder", "builder", BUILDER_MODEL_KEYS),
     ("builder_retry", "builder", BUILDER_RETRY_MODEL_KEYS),
     ("build_reviewer", "build_reviewer", SLIDE_REVIEW_MODEL_KEYS),
-    ("fixer", "fixer", FIXER_MODEL_KEYS),
-    ("fixer_retry", "fixer", FIXER_MODEL_KEYS | {"corrective_instruction"}),
-    ("fix_reviewer", "fix_reviewer", FIXER_MODEL_KEYS | {"change_summary"}),
+    ("fixer", "fixer", FIXER_MODEL_KEYS | {"resolved_data"}),
+    (
+        "fixer_retry",
+        "fixer",
+        FIXER_MODEL_KEYS | {"corrective_instruction", "resolved_data"},
+    ),
+    (
+        "fix_reviewer",
+        "fix_reviewer",
+        FIXER_MODEL_KEYS | {"change_summary", "original_html", "original_scripts"},
+    ),
     (
         "deck_reviewer",
         "deck_reviewer",

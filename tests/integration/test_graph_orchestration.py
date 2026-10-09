@@ -50,7 +50,9 @@ from src.services.graph.state import scoped_vals
 from tests.integration.conftest_stub_skills import (
     OBJECTIVE_CRITERION,
     builder_html,
+    edited_brief,
     fixed_html,
+    revise_briefs,
 )
 
 AUTHOR = "graph-user@example.com"
@@ -670,8 +672,9 @@ def test_an_edit_turn_dispatches_only_its_target_positions(graph_turn_env):
     ``target_positions`` and ``deck_spec`` in an ``elif``, so the two keys can
     never both be set, and the multi-target case is exactly the case where they
     both are.  Here they both are for real — the architect stub returns
-    ``intent="edit"`` with no ``deck_spec``, so ``architect_node`` reads turn 1's
-    persisted spec back and commits it to state alongside ``target_positions``.
+    ``intent="edit"`` carrying turn 1's persisted spec (shown to it as
+    ``current_deck_spec``) revised at slide 1, and ``architect_node`` commits
+    that revision to state alongside ``target_positions``.
 
     Stated as DISPATCH and INVOKED, never as a landed set: turn 1 landed
     ``{0, 1, 2}`` and an inverted turn 2 would land the same three, so a
@@ -689,11 +692,17 @@ def test_an_edit_turn_dispatches_only_its_target_positions(graph_turn_env):
 
     final = env.run()
 
-    # The turn really is an edit over a spec it did not author: both keys are set.
+    # The turn really is an edit of the persisted spec: both keys are set, and
+    # the committed spec is the revision, briefing the one builder it dispatched.
     assert final["architect_intent"] == "edit"
     assert final["target_positions"] == [1]
     assert final["deck_spec"] is not None
     assert [s.position for s in final["deck_spec"].slides] == [0, 1, 2]
+    assert final["deck_spec"].slide_at(1).content_brief == edited_brief("brief-1")
+    assert [
+        call["payload"]["slide_spec"]["content_brief"]
+        for call in env.recorder.calls_for("builder")
+    ] == [edited_brief("brief-1")]
 
     assert env.wakes(final)[0] == [1], (
         "the edit turn dispatched a batch other than its target positions"
@@ -713,6 +722,53 @@ def test_an_edit_turn_dispatches_only_its_target_positions(graph_turn_env):
     assert rows[0].html == turn_one_htmls[0]
     assert rows[2].html == turn_one_htmls[2]
     assert env.deck_row().slide_count == 3
+
+
+def test_an_edit_whose_spec_changes_an_untargeted_slide_rebuilds_that_slide_too(
+    graph_turn_env, monkeypatch
+):
+    """The changed-slide union, through the compiled graph.
+
+    The architect targets slide 2 but its revised spec also changes slide 4's
+    brief.  Leaving slide 4 un-rebuilt would leave a committed slide that no
+    longer matches the spec — the drift the product rule forbids — so the turn
+    dispatches BOTH, each briefed from the revision, and touches nothing else.
+    """
+    env = graph_turn_env
+    env.recorder.configure(slide_count=5)
+    env.run()
+    assert sorted(env.rows_by_position()) == [0, 1, 2, 3, 4]
+    turn_one_htmls = {p: row.html for p, row in env.rows_by_position().items()}
+
+    env.recorder.reset_observations()
+    from src.domain.deck_spec import DeckSpec
+    from src.domain.skill_io import ArchitectOutput
+
+    def _architect(payload):
+        current = DeckSpec.model_validate(payload["current_deck_spec"])
+        return ArchitectOutput(
+            intent="edit",
+            message="Editing slide 2.",
+            target_positions=[2],
+            deck_spec=revise_briefs(current, {2, 4}),
+        )
+
+    monkeypatch.setattr(env.recorder, "_skill_architect", _architect)
+
+    final = env.run(initial={"architect_message": "rework slide 3"})
+
+    assert final["architect_intent"] == "edit"
+    assert final["error_state"] is None
+    assert final["target_positions"] == [2, 4]
+    assert env.recorder.positions("builder") == [2, 4]
+    assert sorted(
+        call["payload"]["slide_spec"]["content_brief"]
+        for call in env.recorder.calls_for("builder")
+    ) == [edited_brief("brief-2"), edited_brief("brief-4")]
+    rows = env.rows_by_position()
+    assert sorted(rows) == [0, 1, 2, 3, 4]
+    for untouched in (0, 1, 3):
+        assert rows[untouched].html == turn_one_htmls[untouched]
 
 
 def test_the_checkpointer_serde_round_trips_deck_spec_and_finding_as_themselves():

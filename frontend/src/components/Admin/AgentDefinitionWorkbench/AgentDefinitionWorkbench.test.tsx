@@ -336,13 +336,14 @@ async function editArchitectFiveFields(assertNoPut?: () => void) {
   assertNoPut?.();
   fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
   assertNoPut?.();
-  fireEvent.change(screen.getByRole('textbox', { name: 'Custom endpoint name' }), { target: { value: 'endpoint-a2' } });
-  assertNoPut?.();
-  fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.4' } });
+  fireEvent.click(await within(modelPanel()).findByRole('radio', { name: 'system.ai.endpoint-a2' }));
   assertNoPut?.();
   fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum tokens' }), { target: { value: '8192' } });
   assertNoPut?.();
-  fireEvent.change(screen.getByRole('spinbutton', { name: 'Top-p' }), { target: { value: '0.8' } });
+  // Temperature and Top-p inputs are not shown (removed from workbench UI).
+  // The save body carries the stored temperature/top_p values unchanged.
+  expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Temperature' })).not.toBeInTheDocument();
+  expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Top-p' })).not.toBeInTheDocument();
   assertNoPut?.();
 }
 
@@ -514,7 +515,7 @@ describe('AgentDefinitionWorkbench', () => {
     fireEvent.keyDown(promptTab, { key: 'ArrowRight' });
     expect(modelTab).toHaveAttribute('aria-selected', 'true');
     await waitFor(() => expect(modelTab).toHaveFocus());
-    expect(screen.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('databricks-claude-opus-4-6');
+    expect(within(modelPanel()).getByText('Current model').parentElement).toHaveTextContent('databricks-claude-opus-4-6');
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(60000);
 
     fireEvent.click(tabs.getByRole('tab', { name: 'Output Schema' }));
@@ -648,11 +649,8 @@ describe('AgentDefinitionWorkbench', () => {
 
     await editArchitectFiveFields(() => expect(putCalls(fetchMock)).toHaveLength(0));
     expect(putCalls(fetchMock)).toHaveLength(0);
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '' } });
-    expect(screen.getByRole('button', { name: 'Save Draft' })).toBeDisabled();
-    expect(putCalls(fetchMock)).toHaveLength(0);
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.4' } });
-    expect(putCalls(fetchMock)).toHaveLength(0);
+    // Temperature input is not shown; blank/invalid temperature cannot be entered.
+    // The save body carries the stored temperature/top_p values unchanged (0.7, 0.95).
     fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
     expect(putCalls(fetchMock)).toHaveLength(0);
     fireEvent.click(screen.getByRole('tab', { name: 'Assembly' }));
@@ -666,10 +664,11 @@ describe('AgentDefinitionWorkbench', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-a2');
-    expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.4);
+    expect(within(modelPanel()).getByRole('radio', { name: 'system.ai.endpoint-a2' })).toBeChecked();
+    // Temperature and Top-p inputs are removed; Maximum tokens remains.
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Temperature' })).not.toBeInTheDocument();
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Top-p' })).not.toBeInTheDocument();
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(8192);
-    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.8);
     expect(within(navigation).getByRole('button', { name: /Architect/ })).toHaveAccessibleDescription('Unsaved');
   });
 
@@ -686,11 +685,12 @@ describe('AgentDefinitionWorkbench', () => {
 
     await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
     const [, init] = putCalls(fetchMock)[0] as [string, RequestInit];
+    // Temperature and Top-p inputs are removed; the save body carries the stored values unchanged (0.7, 0.95).
     expect(JSON.parse(String(init.body))).toEqual({
       lock_version: 0,
       candidate: {
         prompt_text: 'Architect A2',
-        model: { endpoint_name: 'endpoint-a2', temperature: 0.4, max_tokens: 8192, top_p: 0.8 },
+        model: { endpoint_name: 'system.ai.endpoint-a2', temperature: 0.7, max_tokens: 8192, top_p: 0.95 },
       },
     });
     await waitFor(() => expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1'));
@@ -902,11 +902,14 @@ describe('AgentDefinitionWorkbench', () => {
 
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveAccessibleDescription('Prompt rejected.');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveAccessibleDescription('Endpoint rejected.');
-    expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveAccessibleDescription('Temperature rejected.');
+    expect(await within(modelPanel()).findByRole('radiogroup', { name: 'Discovered models' })).toHaveAccessibleDescription('Endpoint rejected.');
+    // Temperature and Top-p inputs are removed; their 422 field errors are not shown inline.
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Temperature' })).not.toBeInTheDocument();
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Top-p' })).not.toBeInTheDocument();
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveAccessibleDescription('Maximum tokens rejected.');
-    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveAccessibleDescription('Top-p rejected.');
-    expect(screen.getAllByRole('alert')).toHaveLength(4);
+    // 2 inline alert spans visible: endpoint (FieldError) + max_tokens (FieldError).
+    // Prompt's FieldError is in the hidden Prompt tab panel; temperature and top_p inputs are gone.
+    expect(screen.getAllByRole('alert')).toHaveLength(2);
     expect(screen.queryByText(/Unable to save draft/)).not.toBeInTheDocument();
     expect(putCalls(fetchMock)).toHaveLength(1);
   });
@@ -952,10 +955,11 @@ describe('AgentDefinitionWorkbench', () => {
     );
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect A2');
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue('endpoint-a2');
-    expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.4);
+    expect(within(modelPanel()).getByRole('radio', { name: 'system.ai.endpoint-a2' })).toBeChecked();
+    // Temperature and Top-p inputs are removed; Maximum tokens remains.
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Temperature' })).not.toBeInTheDocument();
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Top-p' })).not.toBeInTheDocument();
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(8192);
-    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.8);
     fireEvent.click(within(navigation).getByRole('button', { name: /Builder/ }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Builder retained B2');
     fireEvent.click(within(navigation).getByRole('button', { name: /Architect/ }));
@@ -1584,8 +1588,7 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     const navigation = await selectRole('Data Analyst');
     const savedPrompt = String((screen.getByRole('textbox', { name: 'Prompt text' }) as HTMLTextAreaElement).value);
     fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: DIRTY_LEGACY_PROMPT } });
-    fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Top-p' }), { target: { value: '0.55' } });
+    // Top-p input is removed; the save body carries the stored top_p (0.95) unchanged.
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
 
     const conflictRegion = await screen.findByRole('region', { name: 'Draft changed on the server' });
@@ -1604,7 +1607,8 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     expect(screen.getByRole('textbox', { name: 'Prompt text' }))
       .toHaveValue(V2_AUTHORED_PROMPT.data_analyst);
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.55);
+    // Top-p input is removed; the stored value (0.95) carries unchanged.
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Top-p' })).not.toBeInTheDocument();
 
     // Restoring the retained alternative re-sanitizes the prompt against v2.
     fireEvent.click(within(screen.getByRole('region', { name: 'Values retained for recovery' }))
@@ -1829,8 +1833,9 @@ describe('prompt-change backstop reaches the retained-forms controls', () => {
       // Four clicks reach the cell: dirty Upgrade (refused, retains) → Restore saved
       // prompt → Upgrade (now in flight) → Restore retained values.
       fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: DIRTY_LEGACY_PROMPT } });
+      // Top-p input is removed; use Maximum tokens to put a non-prompt field in unsaved state.
       fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-      fireEvent.change(screen.getByRole('spinbutton', { name: 'Top-p' }), { target: { value: '0.66' } });
+      fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum tokens' }), { target: { value: '4096' } });
       fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
       expect(upgradeCalls(fetchMock)).toHaveLength(0);
       expect(promptPanel()).toBeVisible();
@@ -1851,7 +1856,10 @@ describe('prompt-change backstop reaches the retained-forms controls', () => {
       // The savable prompt is still authoritative; the safe field was restored.
       expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue(savedPrompt);
       fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-      expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.66);
+      // Top-p input is removed; the stored value (0.95) carries unchanged.
+      // Maximum tokens was edited to 4096 and is restored to the retained value.
+      expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Top-p' })).not.toBeInTheDocument();
+      expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(4096);
       // The refused prompt is quarantined a second time rather than dropped.
       const recovery = screen.getByRole('region', { name: 'Values retained for recovery' });
       expect(within(recovery).getAllByRole('textbox', { name: 'Manual-only prompt bytes' })
@@ -2263,10 +2271,6 @@ function openModelTab() {
   return modelPanel();
 }
 
-function customEndpoint() {
-  return screen.getByRole('textbox', { name: 'Custom endpoint name' });
-}
-
 function discoveredNames() {
   const group = within(modelPanel()).queryByRole('radiogroup', { name: 'Discovered models' });
   if (!group) return [];
@@ -2331,7 +2335,30 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(putCalls(fetchMock)).toHaveLength(0);
   });
 
-  it('exposes Refresh models, a labelled search, exact-name entries, and a separate custom endpoint field', async () => {
+  it('offers no free-text endpoint field', async () => {
+    mockWorkbenchWithPuts(() => apiResponse(500, null));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    expect(within(panel).queryByRole('textbox', { name: 'Custom endpoint name' })).toBeNull();
+  });
+
+  it('shows the current model when it is not in the discovered list', async () => {
+    // Discovery returns only system.ai names; the seed role is on SEED_MODEL_ENDPOINT_NAME.
+    mockWorkbenchWithPuts(() => apiResponse(500, null), syntheticAgentDefinitionWorkbench, () => catalogResponse(syntheticSystemModelEndpoints.filter((item) => item.name !== SEED_MODEL_ENDPOINT_NAME)));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    const group = await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    expect(within(panel).getByText('Current model')).toBeInTheDocument();
+    expect(within(panel).getByText(SEED_MODEL_ENDPOINT_NAME)).toBeInTheDocument();
+    expect(within(group).queryAllByRole('radio').filter((radio) => (radio as HTMLInputElement).checked)).toHaveLength(0);
+  });
+
+  it('exposes Refresh models, a labelled search, exact-name entries, and the current model paragraph', async () => {
     mockWorkbenchWithPuts(() => apiResponse(500, null));
     render(<AgentDefinitionWorkbench />);
     await loadedNodeNavigation();
@@ -2346,7 +2373,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     }
     expect(within(group).getAllByRole('radio')).toHaveLength(syntheticSystemModelEndpoints.length);
     expect(within(group).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
-    expect(within(panel).getByRole('textbox', { name: 'Custom endpoint name' })).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
     // Display metadata is shown as description, not as the control's name.
     expect(within(group).getByRole('radio', { name: 'databricks-gpt-oss-120b' }))
@@ -2363,12 +2390,13 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
 
     for (const item of [syntheticSystemModelEndpoints[1], syntheticSystemModelEndpoints[2]]) {
       fireEvent.click(within(group).getByRole('radio', { name: item.name }));
-      expect(customEndpoint()).toHaveValue(item.name);
+      expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(item.name);
       expect(within(group).getByRole('radio', { name: item.name })).toBeChecked();
       expect(within(group).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).not.toBeChecked();
-      expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(SEED_NUMERICS.temperature);
+      // Temperature and Top-p inputs are removed; Maximum tokens remains.
+      expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Temperature' })).not.toBeInTheDocument();
+      expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Top-p' })).not.toBeInTheDocument();
       expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(SEED_NUMERICS.max_tokens);
-      expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(SEED_NUMERICS.top_p);
     }
     expect(architectStatus(navigation)).toHaveAccessibleDescription('Unsaved');
     expect(putCalls(fetchMock)).toHaveLength(0);
@@ -2412,7 +2440,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(discoveredNames()).toEqual([]);
     expect(panel).toHaveTextContent(NO_SEARCH_MATCH);
 
-    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(architectStatus(navigation)).not.toHaveAccessibleDescription('Unsaved');
     fireEvent.change(search, { target: { value: '' } });
     expect(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
@@ -2429,7 +2457,33 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(await within(panel).findByText(EMPTY_DISCOVERY)).toBeVisible();
     expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
-    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
+  });
+
+  it('shows the endpoint error and its accessible description even when discovery returns nothing', async () => {
+    const fetchMock = mockWorkbenchWithPuts(
+      () => apiResponse(422, {
+        code: 'invalid_draft',
+        errors: [{ field: 'candidate.model.endpoint_name', code: 'endpoint_unknown', message: 'Endpoint name was not found.' }],
+      }),
+      syntheticAgentDefinitionWorkbench,
+      () => catalogResponse([]),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    expect(await within(panel).findByText(EMPTY_DISCOVERY)).toBeVisible();
+    expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
+    await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
+
+    // FieldError must render outside the visibleModels condition.
+    await waitFor(() => expect(within(panel).getByRole('alert')).toHaveTextContent('Endpoint name was not found.'));
+    // The "Current model" paragraph must carry aria-describedby so the error is
+    // announced even when there is no radiogroup.
+    expect(within(panel).getByText('Current model').parentElement).toHaveAccessibleDescription('Endpoint name was not found.');
   });
 
   it.each([
@@ -2452,7 +2506,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(alert).toHaveTextContent(message);
     expect(within(panel).queryByText(EMPTY_DISCOVERY)).not.toBeInTheDocument();
     expect(within(panel).queryByRole('radiogroup')).not.toBeInTheDocument();
-    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(architectStatus(navigation)).not.toHaveAccessibleDescription('Unsaved');
     const refresh = within(panel).getByRole('button', { name: 'Refresh models' });
     expect(refresh).toBeEnabled();
@@ -2577,7 +2631,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Refresh models' }));
     await within(panel).findByRole('radio', { name: syntheticNewerModelEndpoint.name });
-    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME })).toBeChecked();
     expect(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name })).not.toBeChecked();
     expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
@@ -2595,7 +2649,7 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
       },
     });
     await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
-    expect(customEndpoint()).toHaveValue(syntheticNewerModelEndpoint.name);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(syntheticNewerModelEndpoint.name);
   });
 
   it('keeps same-content Save enabled with the catalog loaded', async () => {
@@ -2615,45 +2669,21 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
       .candidate.model.endpoint_name).toBe(SEED_MODEL_ENDPOINT_NAME);
   });
 
-  it.each([
-    'https://example.cloud.databricks.com/serving-endpoints/x/invocations',
-    'serving-endpoints/../secrets',
-    'x?token=abc',
-  ])('a URL- or path-shaped custom name %j shows the local table message and sends zero PUT', async (value) => {
-    const fetchMock = mockWorkbenchWithPuts(() => apiResponse(500, null));
-    render(<AgentDefinitionWorkbench />);
-    await loadedNodeNavigation();
-    const panel = openModelTab();
-    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
-
-    fireEvent.change(customEndpoint(), { target: { value } });
-    expect(customEndpoint()).toHaveAccessibleDescription(URL_NOT_ALLOWED);
-    expect(within(panel).getByRole('alert')).toHaveTextContent(URL_NOT_ALLOWED);
-    expect(customEndpoint()).toHaveValue(value);
-    const save = screen.getByRole('button', { name: 'Save Draft' });
-    expect(save).toBeDisabled();
-    fireEvent.click(save);
-    await act(async () => { await Promise.resolve(); });
-    expect(putCalls(fetchMock)).toHaveLength(0);
-    expect(within(panel).queryByRole('radio', { checked: true })).not.toBeInTheDocument();
-
-    fireEvent.change(customEndpoint(), { target: { value: 'corrected-endpoint' } });
-    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
-    expect(save).toBeEnabled();
-  });
-
-  it('saves a manual exact name as only the lock plus the five editable leaves and retains it', async () => {
-    const manual = 'Team Exact Endpoint 9';
-    const fetchMock = mockWorkbenchWithPuts((agentKey, request) =>
-      apiResponse(200, saveSuccess(agentKey, request.candidate, 1)));
+  it('saves a selected model as only the lock plus the five editable leaves and retains it', async () => {
+    const manual = 'system.ai.team-exact-endpoint-9';
+    const fetchMock = mockWorkbenchWithPuts(
+      (agentKey, request) => apiResponse(200, saveSuccess(agentKey, request.candidate, 1)),
+      syntheticAgentDefinitionWorkbench,
+      () => catalogResponse([...syntheticSystemModelEndpoints, { name: manual, display_name: null, description: null, docs: null }]),
+    );
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
     const panel = openModelTab();
     await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
-    expect(discoveredNames()).not.toContain(manual);
+    expect(discoveredNames()).toContain(manual);
 
-    fireEvent.change(customEndpoint(), { target: { value: manual } });
-    expect(within(panel).queryByRole('radio', { checked: true })).not.toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole('radio', { name: manual }));
+    expect(within(panel).getByRole('radio', { name: manual })).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
     await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
 
@@ -2680,67 +2710,77 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     }
 
     await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
-    expect(customEndpoint()).toHaveValue(manual);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(manual);
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
     expect(putCalls(fetchMock)).toHaveLength(1);
   });
 
-  it('binds a typed server endpoint issue to the custom field, keeps every unsaved value, and retries without remount', async () => {
-    const missing = 'Team Missing Endpoint';
-    const corrected = 'Team Found Endpoint';
-    const fetchMock = mockWorkbenchWithPuts((agentKey, request, call) => (call === 0
-      ? apiResponse(422, {
-        code: 'invalid_draft',
-        errors: [{
-          field: 'candidate.model.endpoint_name',
-          code: 'endpoint_unknown',
-          message: 'Endpoint name was not found.',
-        }],
-      })
-      : apiResponse(200, saveSuccess(agentKey, request.candidate, 1))));
+  it('binds a server endpoint issue to the radiogroup, keeps every unsaved value, and retries without remount', async () => {
+    const missing = 'system.ai.team-missing-endpoint';
+    const corrected = 'system.ai.team-found-endpoint';
+    const endpointCatalog = () => catalogResponse([
+      ...syntheticSystemModelEndpoints,
+      { name: missing, display_name: null, description: null, docs: null },
+      { name: corrected, display_name: null, description: null, docs: null },
+    ]);
+    const fetchMock = mockWorkbenchWithPuts(
+      (agentKey, request, call) => (call === 0
+        ? apiResponse(422, {
+          code: 'invalid_draft',
+          errors: [{
+            field: 'candidate.model.endpoint_name',
+            code: 'endpoint_unknown',
+            message: 'Endpoint name was not found.',
+          }],
+        })
+        : apiResponse(200, saveSuccess(agentKey, request.candidate, 1))),
+      syntheticAgentDefinitionWorkbench,
+      endpointCatalog,
+    );
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
     fireEvent.change(screen.getByRole('textbox', { name: 'Prompt text' }), { target: { value: 'Architect unsaved prompt' } });
     const panel = openModelTab();
     await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
-    const endpointInput = customEndpoint();
-    fireEvent.change(endpointInput, { target: { value: missing } });
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.3' } });
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Top-p' }), { target: { value: '0.5' } });
+    const endpointGroup = within(panel).getByRole('radiogroup', { name: 'Discovered models' });
+    fireEvent.click(within(panel).getByRole('radio', { name: missing }));
+    // Temperature and Top-p inputs are removed; the save body carries stored values unchanged (0.7, 0.95).
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
     await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(1));
 
-    await waitFor(() => expect(customEndpoint()).toHaveAccessibleDescription('Endpoint name was not found.'));
+    await waitFor(() => expect(within(panel).getByRole('radiogroup', { name: 'Discovered models' })).toHaveAccessibleDescription('Endpoint name was not found.'));
     const alerts = within(panel).getAllByRole('alert');
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toHaveTextContent('Endpoint name was not found.');
     expect(alerts[0].textContent).not.toContain(missing);
     expect(screen.queryByRole('region', { name: 'Server rejected this request' })).not.toBeInTheDocument();
-    expect(customEndpoint()).toBe(endpointInput);
-    expect(customEndpoint()).toHaveValue(missing);
-    expect(screen.getByRole('spinbutton', { name: 'Temperature' })).toHaveValue(0.3);
+    expect(within(panel).getByRole('radiogroup', { name: 'Discovered models' })).toBe(endpointGroup);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(missing);
+    // Temperature and Top-p inputs are removed.
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Temperature' })).not.toBeInTheDocument();
+    expect(within(modelPanel()).queryByRole('spinbutton', { name: 'Top-p' })).not.toBeInTheDocument();
     expect(screen.getByRole('spinbutton', { name: 'Maximum tokens' })).toHaveValue(SEED_NUMERICS.max_tokens);
-    expect(screen.getByRole('spinbutton', { name: 'Top-p' })).toHaveValue(0.5);
     expect(architectStatus(navigation)).toHaveAccessibleDescription('Unsaved');
     fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
     expect(screen.getByRole('textbox', { name: 'Prompt text' })).toHaveValue('Architect unsaved prompt');
     openModelTab();
 
-    fireEvent.change(customEndpoint(), { target: { value: corrected } });
-    expect(customEndpoint()).not.toHaveAccessibleDescription('Endpoint name was not found.');
+    fireEvent.click(within(panel).getByRole('radio', { name: corrected }));
+    expect(within(panel).getByRole('radiogroup', { name: 'Discovered models' })).not.toHaveAccessibleDescription('Endpoint name was not found.');
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
     await waitFor(() => expect(putCalls(fetchMock)).toHaveLength(2));
     const second = JSON.parse(String((putCalls(fetchMock)[1][1] as RequestInit).body)) as DraftSaveRequest;
+    // Temperature and Top-p carry stored values (0.7, 0.95) unchanged.
     expect(second).toEqual({
       lock_version: 0,
       candidate: {
         prompt_text: 'Architect unsaved prompt',
-        model: { endpoint_name: corrected, temperature: 0.3, max_tokens: SEED_NUMERICS.max_tokens, top_p: 0.5 },
+        model: { endpoint_name: corrected, temperature: SEED_NUMERICS.temperature, max_tokens: SEED_NUMERICS.max_tokens, top_p: SEED_NUMERICS.top_p },
       },
     });
     await waitFor(() => expect(architectStatus(navigation)).toHaveAccessibleDescription('Needs test'));
-    expect(customEndpoint()).toBe(endpointInput);
-    expect(customEndpoint()).toHaveValue(corrected);
+    expect(within(panel).getByRole('radiogroup', { name: 'Discovered models' })).toBe(endpointGroup);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(corrected);
     expect(within(panel).queryByRole('alert')).not.toBeInTheDocument();
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(catalogGets(fetchMock)).toHaveLength(1);
@@ -2793,7 +2833,7 @@ const PROBE_SUCCEEDED_TEXT = 'Structured output test succeeded for the saved can
 const PROBE_UNSAVED_HINT = 'Save the endpoint before testing structured output.';
 const PROBE_NETWORK_MESSAGE = 'Unable to test structured output. Check your connection and try again.';
 const PROBE_IDENTITY_TEXT = (endpoint: string, hash: string, lock: number) =>
-  `Endpoint ${endpoint} · Candidate hash ${hash} · Draft lock ${lock}`;
+  `Details — Endpoint ${endpoint} · Candidate hash ${hash} · Draft lock ${lock}`;
 
 function probeButton() {
   return within(modelPanel()).getByRole('button', { name: PROBE_BUTTON });
@@ -2847,7 +2887,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(region.textContent).not.toMatch(/approv|publish|release|ready|verified|passed/i);
     expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
-    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(catalogGets(fetchMock)).toHaveLength(1);
     expect(workbenchGets(fetchMock)).toHaveLength(1);
@@ -2878,7 +2918,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(probeBody(fetchMock, 0)).toBe('{"lock_version":0}');
     expect(probeBody(fetchMock, 0)).not.toContain(syntheticNewerModelEndpoint.name);
     expect(probeResult()).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
-    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(within(panel).getByRole('radio', { name: syntheticNewerModelEndpoint.name })).not.toBeChecked();
     expect(putCalls(fetchMock)).toHaveLength(0);
   });
@@ -2897,15 +2937,16 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
 
     // An unsaved non-endpoint edit does not block it: the probe reads the saved candidate.
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.5' } });
+    // Temperature input is removed; use Maximum tokens to verify non-endpoint edits don't block probe.
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum tokens' }), { target: { value: '1024' } });
     expect(probeButton()).toBeEnabled();
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: String(SEED_NUMERICS.temperature) } });
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum tokens' }), { target: { value: String(SEED_NUMERICS.max_tokens) } });
 
     fireEvent.click(within(panel).getByRole('radio', { name: newer }));
     expect(probeButton()).toBeDisabled();
     expect(panel).toHaveTextContent(PROBE_UNSAVED_HINT);
     fireEvent.click(probeButton());
-    fireEvent.change(customEndpoint(), { target: { value: 'Team Manual Endpoint' } });
+    fireEvent.click(within(panel).getByRole('radio', { name: 'Team Shared Endpoint (EU)' }));
     expect(probeButton()).toBeDisabled();
     fireEvent.click(probeButton());
     await act(async () => { await Promise.resolve(); });
@@ -2939,9 +2980,9 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     fireEvent.click(probeButton());
     await waitFor(() => expect(probeResult()).toBeInTheDocument());
 
-    fireEvent.change(customEndpoint(), { target: { value: 'endpoint-b' } });
+    fireEvent.click(within(panel).getByRole('radio', { name: 'system.ai.endpoint-b' }));
     expect(probeResult()).not.toBeInTheDocument();
-    fireEvent.change(customEndpoint(), { target: { value: SEED_MODEL_ENDPOINT_NAME } });
+    fireEvent.click(within(panel).getByRole('radio', { name: SEED_MODEL_ENDPOINT_NAME }));
     expect(probeResult()).not.toBeInTheDocument();
     expect(probeCalls(fetchMock)).toHaveLength(1);
 
@@ -2979,7 +3020,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(region).not.toHaveTextContent(PROBE_SUCCEEDED_TEXT);
     expect(screen.queryByRole('region', { name: 'Server rejected this request' })).not.toBeInTheDocument();
     expect(navStatus(architectStatus(navigation))).toBe(statusBefore);
-    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(putCalls(fetchMock)).toHaveLength(0);
     expect(probeButton()).toBeEnabled();
     expectNoForbiddenActionNames();
@@ -2998,6 +3039,31 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(probeBody(fetchMock, 1)).toBe('{"lock_version":0}');
     expect(within(probeResult()!).queryByRole('alert')).not.toBeInTheDocument();
     expect(putCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it('shows provider_detail as the lead line when present, and falls back to message when absent', async () => {
+    const detail = 'tool_choice: type "tool" and "any" are not supported for this model.';
+    mockWorkbenchWithPuts(
+      () => apiResponse(500, null),
+      syntheticAgentDefinitionWorkbench,
+      defaultCatalogResponse,
+      () => apiResponse(422, syntheticProbeFailure('unsupported_structured_output', {}, detail)),
+    );
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+
+    fireEvent.click(probeButton());
+    await waitFor(() => expect(probeResult()).toBeInTheDocument());
+    const region = probeResult()!;
+    const alert = within(region).getByRole('alert');
+    // Lead line shows the provider detail, not the generic message.
+    expect(alert).toHaveTextContent(`The model rejected the test request: ${detail}`);
+    expect(alert).not.toHaveTextContent(STRUCTURED_OUTPUT_PROBE_FAILURES.unsupported_structured_output.message);
+    // Identity is in the secondary "Details" line.
+    expect(region).toHaveTextContent(PROBE_IDENTITY_TEXT(SEED_MODEL_ENDPOINT_NAME, SEED_CANDIDATE_HASH, 0));
+    expectNoForbiddenActionNames();
   });
 
   it('a pending probe holds the one gate on every role while the catalog read stays outside it', async () => {
@@ -3085,7 +3151,7 @@ describe('AgentDefinitionWorkbench structured-output probe', () => {
     expect(within(conflict).queryByRole('group', { name: 'Submitted values' })).not.toBeInTheDocument();
     expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1');
     expect(probeResult()).not.toBeInTheDocument();
-    expect(customEndpoint()).toHaveValue(SEED_MODEL_ENDPOINT_NAME);
+    expect(within(panel).getByText('Current model').parentElement).toHaveTextContent(SEED_MODEL_ENDPOINT_NAME);
     expect(probeCalls(fetchMock)).toHaveLength(1);
     expect(putCalls(fetchMock)).toHaveLength(0);
 
@@ -3214,7 +3280,7 @@ function caseList(items = [syntheticAgentTestCase()]) {
 /** #266's accessible names that Playwright resolves by case-insensitive substring (C38). */
 const NAMES_266 = [
   'Test structured output', 'Retry structured output test', 'Structured output test result',
-  'Refresh models', 'Search discovered models', 'Discovered models', 'Custom endpoint name',
+  'Refresh models', 'Search discovered models', 'Discovered models', 'Current model',
   'Schema Upgrade', 'Description override',
 ];
 
@@ -3403,7 +3469,8 @@ describe('AgentDefinitionWorkbench isolated testing', () => {
     await loadedNodeNavigation();
     await loadTestCasesForSelectedRole();
     fireEvent.click(screen.getByRole('tab', { name: 'Model' }));
-    fireEvent.change(screen.getByRole('spinbutton', { name: 'Temperature' }), { target: { value: '0.2' } });
+    // Temperature input is removed; use Maximum tokens to put the role in unsaved state.
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Maximum tokens' }), { target: { value: '512' } });
 
     expect(asideButton(RUN_BUTTON)).toBeDisabled();
     expect(within(testingAside()).getByText(TEST_RUN_UNSAVED_HINT)).toBeInTheDocument();

@@ -1,0 +1,102 @@
+{
+  "intent": "edit",
+  "message": "I'll show the four patterns on slide 3 as four cards instead of a bullet list.",
+  "deck_spec": {
+    "title": "Prompt Optimisation: A Practical Framework",
+    "audience": "Engineers, ML practitioners, and product teams building LLM-powered features",
+    "purpose": "Equip the team with a structured approach to prompt design, evaluation, and iteration so they ship higher-quality LLM outputs faster and at lower cost",
+    "argument": "Systematic prompt optimisation — grounded in clear patterns, measurable evaluation, and disciplined iteration — consistently outperforms ad-hoc prompting in quality, cost, and reliability",
+    "call_to_action": "Adopt the prompt optimisation checklist for every new LLM feature starting this sprint",
+    "narrative_arc": [
+      "Open with the cost of bad prompts — wasted tokens, inconsistent outputs, user frustration",
+      "Introduce the core prompt design patterns that move the needle",
+      "Show the quantitative impact of structured prompting vs. ad-hoc approaches",
+      "Present an evaluation and iteration workflow the team can adopt immediately",
+      "Close with a concrete checklist and next steps"
+    ],
+    "design_contract": {
+      "design_system_id": 3,
+      "template_id": 5
+    },
+    "resolved_data": {
+      "synthesis": "Structured prompting beats ad-hoc prompting on token cost, output consistency and the number of revision rounds needed to reach production quality.",
+      "figures": [
+        {
+          "key": "token_cost_reduction",
+          "value": "30–50% fewer tokens per request vs. naive prompts",
+          "source": "Held-out deck fixture"
+        },
+        {
+          "key": "consistency_gain",
+          "value": "up to 40% output consistency gain with few-shot + chain-of-thought",
+          "source": "Held-out deck fixture"
+        },
+        {
+          "key": "iteration_cycles",
+          "value": "3–5 revision rounds to reach production-grade quality",
+          "source": "Held-out deck fixture"
+        }
+      ],
+      "gaps": []
+    },
+    "slides": [
+      {
+        "position": 0,
+        "purpose": "Set the stage: establish why prompt optimisation deserves deliberate investment",
+        "content_brief": "Cover slide introducing 'Prompt Optimisation: A Practical Framework' with the subtitle framing the business case — better outputs, lower cost, faster shipping",
+        "assumes": "Audience knows what LLMs are and that their team uses them",
+        "hands_off": "Prompt quality is an engineering discipline, not guesswork",
+        "data_references": []
+      },
+      {
+        "position": 1,
+        "purpose": "Define the problem: show the tangible costs of ad-hoc prompting",
+        "content_brief": "Bullet slide listing the three pain points of unoptimised prompts — inconsistent outputs, wasted tokens/cost, and slow iteration — with a callout summarising the opportunity cost",
+        "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
+        "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",
+        "data_references": []
+      },
+      {
+        "position": 2,
+        "purpose": "Introduce the core techniques: give the audience a mental model of prompt design patterns",
+        "content_brief": "Four cards in place of the bullet list covering the four key patterns — system-prompt framing, few-shot examples, chain-of-thought reasoning, and structured output formatting — one pattern per card, with a callout on when to combine them",
+        "assumes": "Audience understands the problem from the previous slide",
+        "hands_off": "Four composable patterns cover the vast majority of prompt optimisation needs",
+        "data_references": []
+      },
+      {
+        "position": 3,
+        "purpose": "Quantify the impact: prove that structured prompting delivers measurable gains",
+        "content_brief": "Three-stat card slide showing token cost reduction (30-50%), output consistency improvement (up to 40%), and typical iteration cycles to production quality (3-5 rounds)",
+        "assumes": "Audience now knows the techniques and wants evidence they work",
+        "hands_off": "The gains from structured prompting are large and well-documented",
+        "data_references": [
+          "token_cost_reduction",
+          "consistency_gain",
+          "iteration_cycles"
+        ]
+      },
+      {
+        "position": 4,
+        "purpose": "Provide the workflow: show how to evaluate and iterate on prompts systematically",
+        "content_brief": "Two-column slide with a prompt evaluation loop (define criteria → build test set → score outputs → refine prompt → repeat) on one side and commentary bullets on the other explaining why each step matters",
+        "assumes": "Audience is convinced of the value and wants to know how to operationalise it",
+        "hands_off": "A repeatable evaluate-and-iterate loop is the engine of prompt quality",
+        "data_references": []
+      },
+      {
+        "position": 5,
+        "purpose": "Close with a concrete checklist and call to action the team can adopt immediately",
+        "content_brief": "Bullet slide presenting a five-item prompt optimisation checklist (define task scope, choose patterns, write eval criteria, run test suite, document winning prompt) with a callout stating the call to action: adopt this checklist for every new LLM feature starting this sprint",
+        "assumes": "Audience has seen the techniques, evidence, and workflow",
+        "hands_off": "Start using the checklist this sprint — no new tooling required",
+        "data_references": []
+      }
+    ]
+  },
+  "data_request": null,
+  "target_positions": [
+    2
+  ],
+  "proposed_design_contract": null
+}
