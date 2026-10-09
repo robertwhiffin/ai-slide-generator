@@ -449,7 +449,7 @@ def test_model_endpoint_probe_service_returns_the_typed_failure_with_identity(
     assert result.failure is failure
     assert result.identity == SavedEndpointProbeIdentity(
         agent_key="architect",
-        endpoint_name="databricks-claude-opus-4-6",
+        endpoint_name="system.ai.claude-opus-5",
         candidate_hash=seed_hash,
         lock_version=0,
     )
@@ -528,7 +528,7 @@ def test_model_endpoint_probe_service_reports_the_copied_identity_after_a_later_
     assert saved_during[0].definition.candidate_hash != seed_hash
     assert result.identity == SavedEndpointProbeIdentity(
         agent_key="architect",
-        endpoint_name="databricks-claude-opus-4-6",
+        endpoint_name="system.ai.claude-opus-5",
         candidate_hash=seed_hash,
         lock_version=0,
     )
@@ -556,7 +556,7 @@ def test_model_endpoint_probe_service_rechecks_the_saved_name_policy(
                 session, agent_key="architect", expected_lock_version=0
             )
 
-    assert checked == ["databricks-claude-opus-4-6"]
+    assert checked == ["system.ai.claude-opus-5"]
     assert adapter.calls == []
     assert [(i.field, i.code) for i in caught.value.issues] == [
         ("candidate.model.endpoint_name", "endpoint_url_not_allowed")

@@ -21,13 +21,13 @@ from tests.fixtures.packaged_release_loader import (
 # test_graph_definition_manifest.py:744.  Do NOT import; a copy that cannot
 # drift is the oracle (epic correction C-24).
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "7b492c442c7406c5cb9c059e7e421875e1a65fab703b7d2ba2304a4629181aa4",
-    "data_analyst": "1ffb1fb3f31a20b9424007eefdf918620f1058386a2ba81bfd22347510ce6803",
-    "builder": "4310de2a987378777c089eddee192d45c7a824ec169457f39aa3b8fe4c0f0f4a",
-    "build_reviewer": "1a895f4bee426041088635f7fa182200827db14ab35a229def6f8932d1516b18",
-    "fixer": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
-    "fix_reviewer": "eed6c4ed4d363e32f4fd612daac03a32ca195bba07a3b7a026b64fcbe35d4558",
-    "deck_reviewer": "ed5df628c3ea4c81091fa9d621a1c1d7a8a1089edf1a4f81f335671ac47c0cb5",
+    "architect": "4a332258160d807513e8e268fdbec7d0b02c4ab71ad089f5f260f53dc4ea5d81",
+    "data_analyst": "287da422d4aeb6c328685ace87be167feac639e4318cff07f147d9cd181be3c3",
+    "builder": "46d7137b5c94c18acac4ebf6d4bebe5206c192852dffcc6e84fb0404be45598a",
+    "build_reviewer": "c5b057097c6f952de7b4984d19ad0c6cceaf68e1641401dcf8ae5c3af707d622",
+    "fixer": "1d42f0d7c437ae1714eacaf09bb7d5047463e20acf581daf136d411ed9b5c825",
+    "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+    "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
 
 

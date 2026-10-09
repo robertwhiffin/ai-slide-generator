@@ -156,13 +156,13 @@ def _expected_prompt(
 
 
 EXPECTED_ENDPOINTS = {
-    "architect": "databricks-claude-opus-4-6",
-    "data_analyst": "databricks-claude-opus-4-6",
-    "builder": "databricks-claude-haiku-5-5",
-    "build_reviewer": "databricks-claude-opus-4-6",
-    "fixer": "databricks-claude-opus-4-6",
-    "fix_reviewer": "databricks-claude-haiku-5-5",
-    "deck_reviewer": "databricks-claude-haiku-5-5",
+    "architect": "system.ai.claude-opus-5",
+    "data_analyst": "system.ai.claude-opus-5",
+    "builder": "system.ai.claude-haiku-4-5",
+    "build_reviewer": "system.ai.claude-opus-5",
+    "fixer": "system.ai.claude-opus-5",
+    "fix_reviewer": "system.ai.claude-haiku-4-5",
+    "deck_reviewer": "system.ai.claude-haiku-4-5",
 }
 
 
@@ -881,13 +881,13 @@ def test_structured_output_runtime_adapter_still_collapses_permission_denied():
 # fails on its own while the feature is absent rather than collapsing the file.
 # ---------------------------------------------------------------------------
 
-_CANDIDATE_ENDPOINT = "databricks-claude-opus-4-6"
-
-
 def _manifest_content(agent_key: str) -> DefinitionContent:
     return next(
         item for item in load_graph_v1_manifest().definitions if item.agent_key == agent_key
     )
+
+
+_CANDIDATE_ENDPOINT = _manifest_content("architect").model.endpoint_name
 
 
 def _candidate(agent_key: str, *, v2_assembly: bool = False, v2_schema: bool = False):

@@ -640,7 +640,7 @@ class TestBuildSessionTitleModel:
 
         assert session_naming.build_session_title_model() == "model"
         assert constructed == [{
-            "model": "system.ai.claude-opus-4-6",
+            "model": "system.ai.claude-opus-5",
             "use_ai_gateway": True,
             "max_tokens": 50,
             "workspace_client": sp_client,
