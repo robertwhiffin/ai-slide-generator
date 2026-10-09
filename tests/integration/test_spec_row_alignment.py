@@ -34,10 +34,12 @@ So: the routes keep the two representations aligned, and the guard is what happe
 when something else pulls them apart.  Both halves are tested here.
 
 This suite is about the CONSUMER, because that is where the first fix went.
-``architect_node`` falls back to the persisted spec whenever the architect emits
-none — the real shape of an edit turn — and both the builder brief and §4.6's
-re-review then resolve slides out of it **by position**.  So a stale spec is not
-an inert inconsistency; it is a brief handed to a builder for the wrong slide.
+An edit turn edits the persisted spec — the architect is shown it as
+``current_deck_spec`` and returns it revised — and both the builder brief and
+§4.6's re-review then resolve slides out of that revision **by position**.  So a
+stale persisted spec is not an inert inconsistency; it is a brief handed to a
+builder for the wrong slide, and the guard is decided from the PERSISTED spec
+and the rows, never from what the model echoed back.
 
 Measured on the tree before the guard, by these tests when they still drove real
 mutations:
@@ -90,7 +92,7 @@ import contextlib
 import pytest
 
 from src.domain.deck_spec import DeckSpec
-from tests.integration.conftest_stub_skills import builder_html
+from tests.integration.conftest_stub_skills import builder_html, edited_brief
 
 pytestmark = pytest.mark.integration
 
@@ -349,8 +351,9 @@ def test_an_edit_turn_after_a_reorder_briefs_the_slide_that_is_actually_there(
 
     After ``[1, 2, 0]`` the slide sitting at position 0 is the one that was built
     from ``brief-1``.  An edit turn aimed at position 0 must brief its builder with
-    ``brief-1``.  Before route renumbering it was briefed with ``brief-0`` — the
-    wrong slide — and the guard could not refuse, because the position sets matched.
+    the revision OF ``brief-1``.  Before route renumbering it was briefed with
+    ``brief-0`` — the wrong slide — and the guard could not refuse, because the
+    position sets matched.
     """
     env = graph_turn_env
     _build_three_slides(env)
@@ -366,8 +369,9 @@ def test_an_edit_turn_after_a_reorder_briefs_the_slide_that_is_actually_there(
     assert [
         call["payload"]["slide_spec"]["content_brief"]
         for call in env.recorder.calls_for("builder")
-    ] == ["brief-1"], (
-        "the builder was briefed with the brief of the slide that USED to sit here"
+    ] == [edited_brief("brief-1")], (
+        "the builder was not briefed with the revision of the brief of the slide "
+        "that is actually there"
     )
 
 
@@ -493,9 +497,10 @@ def test_an_aligned_deck_still_edits_from_the_persisted_spec(
 ):
     """Without this the guard could be "refuse every edit" and stay green.
 
-    Same two turns, no mutation in between: the architect emits no ``deck_spec``,
-    ``architect_node`` reads the persisted one back, and the turn edits exactly
-    its target from the brief that spec carries.  ``monkeypatch`` is requested so
+    Same two turns, no mutation in between: the architect returns the persisted
+    spec revised at its target, and the turn edits exactly that target from the
+    REVISED brief — briefing from the persisted, unrevised one would rebuild the
+    slide unchanged and lose the user's edit.  ``monkeypatch`` is requested so
     the two tests differ in one line — the mutation — and nothing else.
     """
     env = graph_turn_env
@@ -512,5 +517,12 @@ def test_an_aligned_deck_still_edits_from_the_persisted_spec(
     assert [
         call["payload"]["slide_spec"]["content_brief"]
         for call in env.recorder.calls_for("builder")
-    ] == ["brief-1"], "the builder was briefed from something other than the spec"
+    ] == [edited_brief("brief-1")], (
+        "the builder was briefed from something other than the edit's revised spec"
+    )
     assert sorted(env.rows_by_position()) == [0, 1, 2]
+    assert _spec_briefs(env) == {
+        0: "brief-0",
+        1: edited_brief("brief-1"),
+        2: "brief-2",
+    }, "the deck did not persist the edit's revised spec"

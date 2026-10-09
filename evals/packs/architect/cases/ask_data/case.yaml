@@ -1,0 +1,5 @@
+kind: mutation
+fault: deck on the user's own Q3 revenue with no data available
+expect:
+  intent: ask_data
+design_system_active: true

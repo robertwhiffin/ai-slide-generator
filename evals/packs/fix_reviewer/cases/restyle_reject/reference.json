@@ -1,0 +1,16 @@
+{
+  "slide_index": 1,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "rogue_colour:1:0",
+      "slide_index": 1,
+      "category": "design",
+      "criterion": "rogue_colour",
+      "message": "The overflow is gone, but the fix recoloured the slide (title, bullets and callout) with #E11D48, which is not a Meridian palette token; it should use var(--brand-core-*) colours.",
+      "objective": true,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

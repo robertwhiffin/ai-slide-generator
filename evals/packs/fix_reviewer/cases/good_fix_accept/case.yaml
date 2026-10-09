@@ -1,0 +1,7 @@
+kind: positive
+fault: ''
+expect:
+  criteria: []
+  positions: []
+  verdict: fixed
+design_system_active: true

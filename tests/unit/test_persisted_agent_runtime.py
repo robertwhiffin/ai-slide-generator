@@ -67,6 +67,7 @@ from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
 from tests.fixtures.log_records import STANDARD_LOG_RECORD_ATTRS as _STANDARD_LOG_RECORD_ATTRS
 from tests.fixtures.log_records import rendered_record
 from tests.fixtures.packaged_release_loader import PackagedGraphV1Loader
+from tests.fixtures.tool_call_doubles import replying, tool_call_reply
 
 EXPECTED_ROLE_NOTICES = {
     "architect": (
@@ -154,12 +155,24 @@ class _Adapter:
         return schema.model_validate(self.output)
 
 
-EXPECTED_MODEL_CONFIGURATION = AgentModelConfiguration(
-    endpoint_name="databricks-claude-opus-4-6",
-    temperature=0.7,
-    max_tokens=60000,
-    top_p=0.95,
-)
+EXPECTED_ENDPOINTS = {
+    "architect": "databricks-claude-opus-4-6",
+    "data_analyst": "databricks-claude-opus-4-6",
+    "builder": "databricks-claude-haiku-5-5",
+    "build_reviewer": "databricks-claude-opus-4-6",
+    "fixer": "databricks-claude-opus-4-6",
+    "fix_reviewer": "databricks-claude-haiku-5-5",
+    "deck_reviewer": "databricks-claude-haiku-5-5",
+}
+
+
+def _get_expected_model_configuration(agent_key: str) -> AgentModelConfiguration:
+    return AgentModelConfiguration(
+        endpoint_name=EXPECTED_ENDPOINTS[agent_key],
+        temperature=0.7,
+        max_tokens=60000,
+        top_p=0.95,
+    )
 
 
 def _assert_composed_schema(
@@ -189,7 +202,7 @@ def _assert_single_adapter_call(
     call = adapter.calls[0]
     assert set(call) == {"agent_key", "configuration", "schema", "prompt"}
     assert call["agent_key"] == agent_key
-    assert call["configuration"] == EXPECTED_MODEL_CONFIGURATION
+    assert call["configuration"] == _get_expected_model_configuration(agent_key)
     assert call["prompt"] == prompt
     _assert_composed_schema(
         call["schema"], agent_key, schema_version, optional_selected=optional_selected
@@ -1078,25 +1091,23 @@ def _provider_errors() -> list[Exception]:
 def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
     phase, provider_error, sink_factory, caplog
 ):
-    class Structured:
-        def invoke(self, prompt):
-            if phase == "invoke":
-                raise provider_error
-            return OUTPUT_SCHEMAS["architect"].model_validate(
-                _output_values("architect")
-            )
+    def reply(prompt):
+        if phase == "invoke":
+            raise provider_error
+        return tool_call_reply(OUTPUT_SCHEMAS["architect"], _output_values("architect"))
 
     class Model:
-        def with_structured_output(self, schema):
+        # Follow-up A: the one binding is ``bind_tools([schema], tool_choice="auto")``.
+        def bind_tools(self, tools, **kwargs):
             if phase == "structured":
                 raise provider_error
-            return Structured()
+            return replying(reply)
 
     model_endpoint_attempts: list[str] = []
     client_factory_calls: list[None] = []
 
     def model_factory(**kwargs):
-        model_endpoint_attempts.append(kwargs["endpoint"])
+        model_endpoint_attempts.append(kwargs["model"])
         if phase == "model":
             raise provider_error
         return Model()
@@ -1158,16 +1169,15 @@ def test_removed_endpoint_is_attempted_once_without_a_default_fallback():
     model_endpoint_attempts: list[str] = []
     client_factory_calls: list[None] = []
 
-    class Structured:
-        def invoke(self, prompt):
-            raise original
+    def reply(prompt):
+        raise original
 
     class Model:
-        def with_structured_output(self, schema):
-            return Structured()
+        def bind_tools(self, tools, **kwargs):
+            return replying(reply)
 
     def model_factory(**kwargs):
-        model_endpoint_attempts.append(kwargs["endpoint"])
+        model_endpoint_attempts.append(kwargs["model"])
         return Model()
 
     def client_factory():
@@ -1511,7 +1521,7 @@ def test_diagnostics_freeze_a_mutable_mapping_from_any_construction_site() -> No
         agent_key="architect",
         definition_version=1,
         assembled_prompt="p",
-        model_configuration=EXPECTED_MODEL_CONFIGURATION,
+        model_configuration=_get_expected_model_configuration("architect"),
         protected_prompt=ProtectedPromptIdentity(version=1, digest="0" * 64),
         schema_contract=SchemaContractIdentity("architect", 1, "0" * 64),
         assembly_stages=(),
@@ -1527,7 +1537,7 @@ def test_diagnostics_freeze_a_mutable_mapping_from_any_construction_site() -> No
         agent_key="architect",
         definition_version=1,
         assembled_prompt="p",
-        model_configuration=EXPECTED_MODEL_CONFIGURATION,
+        model_configuration=_get_expected_model_configuration("architect"),
         protected_prompt=ProtectedPromptIdentity(version=1, digest="0" * 64),
         schema_contract=SchemaContractIdentity("architect", 1, "0" * 64),
         assembly_stages=(),

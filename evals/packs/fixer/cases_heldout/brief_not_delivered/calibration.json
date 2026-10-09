@@ -1,0 +1,9 @@
+{
+  "should_fail": {
+    "position": 5,
+    "html": "<section class=\"slide\">\n  <p class=\"eyebrow\">Action Plan</p>\n  <h2 class=\"slide-title\">Adopt this five-step checklist for every new LLM feature</h2>\n  <p class=\"slide-subtitle\">A repeatable process your team can start using this sprint</p>\n  <div class=\"content\">\n    <ul class=\"bullets\" style=\"font-size: var(--fs-body); line-height: 1.7;\">\n      <li><strong style=\"color: var(--brand-core-ink);\">Define task scope</strong> — Specify the input, desired output format, and constraints before writing a single token</li>\n      <li><strong style=\"color: var(--brand-core-ink);\">Choose prompt patterns</strong> — Select from few-shot, chain-of-thought, or structured templates based on task complexity</li>\n      <li><strong style=\"color: var(--brand-core-ink);\">Write eval criteria</strong> — Set measurable quality bars (accuracy, consistency, token efficiency) before iterating</li>\n      <li><strong style=\"color: var(--brand-core-ink);\">Run your test suite</strong> — Validate against edge cases across 3–5 iteration cycles to reach production-grade quality</li>\n      <li><strong style=\"color: var(--brand-core-ink);\">Document the winning prompt</strong> — Record the final prompt, rationale, and eval results so the team can reuse and improve it</li>\n    </ul>\n    <div class=\"callout\" style=\"margin-top: auto;\">\n      <strong>Not yet:</strong> Do not adopt this checklist this sprint — it first needs dedicated prompt-management tooling to be built before any team can use it.\n    </div>\n  </div>\n  <div class=\"slide-footer\"><span>Meridian</span><span>5</span></div>\n</section>\n",
+    "scripts": "",
+    "changed": false,
+    "change_summary": "No change needed."
+  }
+}

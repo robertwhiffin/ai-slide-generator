@@ -1,0 +1,9 @@
+kind: mutation
+fault: overflow fixed, but the file-size bullet's meaning was reversed vs original_html
+expect:
+  criteria:
+  - brief_not_delivered
+  positions:
+  - 1
+  verdict: surfaced
+design_system_active: true

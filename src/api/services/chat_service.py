@@ -286,6 +286,25 @@ def resolve_engine_mode_or_unavailable(session_id: Optional[str]) -> str:
         ) from exc
 
 
+#: The one client-facing text for a graph turn that failed for any reason other
+#: than a typed pinned-configuration failure.  Code-owned: the exception's own
+#: text can carry model output (a parser error names the provider-chosen tool,
+#: a ``ValidationError`` echoes the provider's arguments), so it never reaches
+#: the stream event, the re-raised error or a route's error text (ws2a
+#: follow-up A, fix round 1).
+GRAPH_TURN_FAILED_MESSAGE = "The request could not be completed. Please try again."
+
+
+class GraphTurnFailedError(RuntimeError):
+    """A failed graph turn, re-raised with a code-owned message.
+
+    The original exception is kept only as ``__cause__`` (for server logs).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(GRAPH_TURN_FAILED_MESSAGE)
+
+
 def _pinned_graph_configuration_error_event() -> StreamEvent:
     """The one safe, typed event for an unavailable pinned graph configuration."""
     return StreamEvent(
@@ -1445,16 +1464,9 @@ class ChatService:
         def run_title_gen():
             """Generate a session title in parallel with the main agent."""
             try:
-                from databricks_langchain import ChatDatabricks
-                from src.core.databricks_client import get_user_client
+                from src.api.services.session_naming import build_session_title_model
 
-                from src.core.defaults import DEFAULT_CONFIG
-                naming_model = ChatDatabricks(
-                    endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
-                    max_tokens=50,
-                    temperature=0.3,
-                    workspace_client=get_user_client(),
-                )
+                naming_model = build_session_title_model()
                 generated_title = generate_session_title(message, naming_model)
                 if generated_title:
                     session_manager.rename_session(session_id, generated_title)
@@ -1977,14 +1989,24 @@ class ChatService:
                 error_container["error"] = graph_error
                 event_queue.put(_pinned_graph_configuration_error_event())
             except Exception as e:
+                # The traceback (server-side only) keeps the cause; the client
+                # gets the code-owned message, never ``str(e)``.
                 logger.error(
-                    f"Graph turn failed: {e}",
-                    extra={"session_id": session_id},
+                    "Graph turn failed",
+                    extra={"session_id": session_id, "error_class": type(e).__name__},
                     exc_info=True,
                 )
-                error_container["error"] = e
+                if isinstance(e, SessionNotFoundError):
+                    # The routes map this type to their own code-owned text.
+                    error_container["error"] = e
+                else:
+                    failure = GraphTurnFailedError()
+                    failure.__cause__ = e
+                    error_container["error"] = failure
                 event_queue.put(
-                    StreamEvent(type=StreamEventType.ERROR, error=str(e))
+                    StreamEvent(
+                        type=StreamEventType.ERROR, error=GRAPH_TURN_FAILED_MESSAGE
+                    )
                 )
             finally:
                 # Signal completion by putting None
@@ -1999,17 +2021,9 @@ class ChatService:
             session must never fail the turn, so this catches and logs.
             """
             try:
-                from databricks_langchain import ChatDatabricks
+                from src.api.services.session_naming import build_session_title_model
 
-                from src.core.databricks_client import get_user_client
-                from src.core.defaults import DEFAULT_CONFIG
-
-                naming_model = ChatDatabricks(
-                    endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
-                    max_tokens=50,
-                    temperature=0.3,
-                    workspace_client=get_user_client(),
-                )
+                naming_model = build_session_title_model()
                 generated_title = generate_session_title(message, naming_model)
                 if generated_title:
                     session_manager.rename_session(session_id, generated_title)

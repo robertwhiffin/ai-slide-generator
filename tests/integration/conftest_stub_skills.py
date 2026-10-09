@@ -92,6 +92,39 @@ def make_deck_spec(slide_count: int, *, title: str = "Layer-1 Stub Deck") -> Dec
     )
 
 
+def edited_brief(brief: str) -> str:
+    """The ``content_brief`` a stub edit gives a slide it revises.
+
+    Derived FROM the brief it replaces rather than from the position, so an
+    assertion can still tell which slide's brief was revised (after a reorder,
+    position 0's revised brief is ``edited_brief("brief-1")``) and can tell a
+    builder briefed from the model's revised spec apart from one briefed from
+    the persisted, unrevised one.
+    """
+    return f"{brief} [edited]"
+
+
+def revise_briefs(spec: DeckSpec, positions: Iterable[int]) -> DeckSpec:
+    """*spec* with :func:`edited_brief` applied at each of *positions*.
+
+    Positions the spec does not declare are ignored: an edit never adds a
+    slide, so the stub never invents one.
+    """
+    targets = set(positions)
+    return spec.model_copy(
+        update={
+            "slides": [
+                slide.model_copy(
+                    update={"content_brief": edited_brief(slide.content_brief)}
+                )
+                if slide.position in targets
+                else slide
+                for slide in spec.slides
+            ]
+        }
+    )
+
+
 def objective_finding(position: int, message: str = "content overflows the frame") -> Finding:
     """One objective slide finding — the shape that opens a fix round.
 
@@ -142,12 +175,17 @@ class SkillRecorder:
         with the finding surfaced.
     edit_target_positions
         Non-empty makes the architect return ``intent="edit"`` over those
-        positions and **no** ``deck_spec``, which is the real shape of an edit
-        turn: the architect edits the spec the previous turn persisted, so
-        ``architect_node`` reads it back through ``read_deck_spec`` and the turn
-        runs with ``target_positions`` AND ``deck_spec`` both populated.  That
-        combination is what makes the turn-coverage precedence observable —
-        neither key alone can distinguish it.  Empty (the default) means a build
+        positions, carrying the spec it was shown (``current_deck_spec``, the
+        one the previous turn persisted) with each target slide's
+        ``content_brief`` revised by :func:`edited_brief`.  That is the real
+        shape of an edit turn: the DeckSpec is the deck's source of truth, so an
+        edit returns it revised, and ``architect_node`` refuses an edit with no
+        ``deck_spec`` (``edit_without_revised_spec``).  The turn runs with ``target_positions`` AND
+        ``deck_spec`` both populated, which is what makes the turn-coverage
+        precedence observable — neither key alone can distinguish it.  Revising
+        ONLY the targets keeps the edit's changed-slide set equal to
+        ``target_positions``, so a test of "only the target was rebuilt" is not
+        widened by the changed-slide union.  Empty (the default) means a build
         turn.
 
     There is deliberately no deck-findings knob: what the deck reviewer DOES with
@@ -277,14 +315,27 @@ class SkillRecorder:
 
     def _skill_architect(self, payload: dict) -> ArchitectOutput:
         if self.edit_target_positions:
-            # An edit turn carries target_positions and NO deck_spec: the deck it
-            # edits is the one the previous turn persisted, which architect_node
-            # reads back with read_deck_spec.  ArchitectOutput's own validator
-            # rejects intent="edit" with an empty target_positions list.
+            # An edit turn returns the spec it was shown, revised at its targets:
+            # the deck it edits is the one the previous turn persisted, which
+            # architect_node hands the model as ``current_deck_spec``.
+            # ArchitectOutput's own validator rejects intent="edit" with an
+            # empty target_positions list; architect_node refuses one with no
+            # deck_spec.  With no
+            # persisted spec there is nothing to echo, so the stub revises a
+            # fresh one; architect_node must still refuse that turn
+            # (edit_without_spec), because the guard is keyed on the PERSISTED
+            # spec, not on what the model returned.
+            current = payload.get("current_deck_spec")
+            base = (
+                DeckSpec.model_validate(current)
+                if isinstance(current, dict)
+                else make_deck_spec(self.slide_count)
+            )
             return ArchitectOutput(
                 intent="edit",
                 message=f"Editing slide(s) {sorted(self.edit_target_positions)}.",
                 target_positions=sorted(self.edit_target_positions),
+                deck_spec=revise_briefs(base, self.edit_target_positions),
             )
         return ArchitectOutput(
             intent="build",

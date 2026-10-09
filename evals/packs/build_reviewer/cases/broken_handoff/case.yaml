@@ -1,0 +1,8 @@
+kind: mutation
+fault: callout's conclusion contradicts the brief's hand-off
+expect:
+  criteria:
+  - brief_not_delivered
+  positions:
+  - 1
+design_system_active: true

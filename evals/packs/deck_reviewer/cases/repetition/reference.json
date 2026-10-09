@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "id": "cross_slide_repetition:-1:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "cross_slide_repetition",
+      "message": "The \"Key Considerations\" slide repeats the bullet list of the collaboration slide (\"HTML decks live in Git, ship as a URL, and weigh 10× less\") word for word. This redundancy weakens the narrative.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

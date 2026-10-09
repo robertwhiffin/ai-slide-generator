@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from databricks.sdk import WorkspaceClient
 
+from src.services.gateway_openai import gateway_openai_client
 from src.services.pptx_prompts_defaults import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT_TEMPLATE,
@@ -48,7 +49,7 @@ class HtmlToPptxConverterV3:
     """
     
     # Model configuration
-    DEFAULT_MODEL = "databricks-claude-sonnet-4-5"
+    DEFAULT_MODEL = "system.ai.claude-sonnet-4-5"
     
 
     def __init__(
@@ -60,19 +61,19 @@ class HtmlToPptxConverterV3:
         
         Args:
             workspace_client: Databricks client (optional, uses singleton if not provided)
-            model_endpoint: LLM model name (default: databricks-claude-sonnet-4-5)
+            model_endpoint: LLM model name (default: system.ai.claude-sonnet-4-5)
         """
         self.model_endpoint = model_endpoint or self.DEFAULT_MODEL
-        
+
         # Use provided client or get singleton from databricks_client
         if workspace_client:
             self.ws_client = workspace_client
         else:
             from src.core.databricks_client import get_databricks_client
             self.ws_client = get_databricks_client()
-        
-        # Initialize OpenAI-compatible client for LLM calls
-        self.llm_client = self.ws_client.serving_endpoints.get_open_ai_client()
+
+        # Initialize OpenAI-compatible client for LLM calls through Unity AI Gateway
+        self.llm_client = gateway_openai_client(self.ws_client)
         
         # Load default prompts
         self.SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
@@ -526,7 +527,6 @@ class HtmlToPptxConverterV3:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.2,
                 max_tokens=16384,
                 timeout=300,
                 extra_body={

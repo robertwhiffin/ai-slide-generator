@@ -1,4 +1,4 @@
-"""Exact Databricks foundation-model endpoint discovery and validation."""
+"""Unity AI Gateway model discovery and validation for the workbench (ws2a)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,7 @@ from typing import Any, Literal, Protocol
 
 import requests
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import DatabricksError, PermissionDenied, ResourceDoesNotExist
-from databricks.sdk.service.serving import EndpointStateConfigUpdate, EndpointStateReady
+from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied
 
 CatalogFailureCode = Literal["catalog_forbidden", "catalog_unavailable"]
 EndpointValidationCode = Literal[
@@ -23,6 +22,8 @@ EndpointValidationCode = Literal[
     "endpoint_update_in_progress",
     "endpoint_update_failed",
     "endpoint_update_canceled",
+    "endpoint_not_gateway_model",
+    "endpoint_not_chat_model",
 ]
 
 
@@ -72,6 +73,27 @@ _TRANSPORT_FAILURES: tuple[type[BaseException], ...] = (
 )
 
 
+GATEWAY_ENDPOINTS_PATH = "/api/ai-gateway/v2/endpoints"
+GATEWAY_CHAT_API_TYPE = "mlflow/v1/chat/completions"
+_GATEWAY_PREFIX = "databricks-"
+_SYSTEM_AI_PREFIX = "system.ai."
+
+
+def gateway_invocable_name(gateway_endpoint_name: str) -> str | None:
+    """``databricks-<m>`` -> ``system.ai.<m>`` (spec §2 naming rule); otherwise ``None``."""
+    if not gateway_endpoint_name.startswith(_GATEWAY_PREFIX):
+        return None
+    model = gateway_endpoint_name[len(_GATEWAY_PREFIX):]
+    return f"{_SYSTEM_AI_PREFIX}{model}" if model else None
+
+
+def gateway_endpoint_name(model_name: str) -> str:
+    """``system.ai.<m>`` -> ``databricks-<m>``; any other (legacy) name is looked up as-is."""
+    if model_name.startswith(_SYSTEM_AI_PREFIX):
+        return f"{_GATEWAY_PREFIX}{model_name[len(_SYSTEM_AI_PREFIX):]}"
+    return model_name
+
+
 class ModelEndpointCatalog(Protocol):
     def list_system_models(self) -> SystemModelDiscovery: ...
 
@@ -99,6 +121,20 @@ def validate_endpoint_name_policy(name: str) -> None:
         raise EndpointValidationFailure(
             "endpoint_url_not_allowed",
             "Endpoint must be a Databricks endpoint name, not a URL.",
+            False,
+        )
+
+
+_GATEWAY_MODEL_NAME = re.compile(r"^system\.ai\.[a-z0-9][a-z0-9._-]*[a-z0-9]$")
+
+
+def validate_gateway_model_name(name: str) -> None:
+    """A changed draft model must be a ``system.ai.*`` Gateway name (spec §5.2)."""
+    if not _GATEWAY_MODEL_NAME.fullmatch(name):
+        raise EndpointValidationFailure(
+            "endpoint_not_gateway_model",
+            "Model name must start with `system.ai.` and contain only lowercase letters, "
+            "digits, hyphens, underscores and periods.",
             False,
         )
 
@@ -162,7 +198,7 @@ class DatabricksModelEndpointCatalog:
 
     def list_system_models(self) -> SystemModelDiscovery:
         try:
-            endpoints = tuple(self._workspace_client.serving_endpoints.list())
+            listed = self._workspace_client.api_client.do("GET", GATEWAY_ENDPOINTS_PATH)
         except PermissionDenied as error:
             raise ModelEndpointCatalogFailure(
                 "catalog_forbidden",
@@ -177,45 +213,33 @@ class DatabricksModelEndpointCatalog:
             ) from error
 
         discovered: list[SystemModelEndpoint] = []
-        for endpoint in endpoints:
-            served_entities = getattr(endpoint.config, "served_entities", None) or ()
-            foundation_model = next(
-                (
-                    getattr(entity, "foundation_model", None)
-                    for entity in served_entities
-                    if getattr(entity, "foundation_model", None) is not None
-                ),
-                None,
-            )
-            if foundation_model is None:
-                continue
-
-            name = getattr(endpoint, "name", None)
+        for entry in (listed or {}).get("endpoints") or ():
+            name = entry.get("name") if isinstance(entry, dict) else None
             if not isinstance(name, str) or not name.strip():
                 raise ModelEndpointCatalogFailure(
                     "catalog_unavailable",
                     "Model endpoint discovery returned an endpoint without a name.",
                     True,
                 )
-
+            invocable = gateway_invocable_name(name)
+            # Offer only names the save rule accepts (validate_gateway_model_name),
+            # so the picker never lists a model the save then refuses with a 422.
+            if invocable is None or not _GATEWAY_MODEL_NAME.fullmatch(invocable):
+                continue
             discovered.append(
-                SystemModelEndpoint(
-                    name=name,
-                    display_name=getattr(foundation_model, "display_name", None),
-                    description=getattr(foundation_model, "description", None),
-                    docs=getattr(foundation_model, "docs", None),
-                )
+                SystemModelEndpoint(name=invocable, display_name=None, description=None, docs=None)
             )
 
-        discovered.sort(key=lambda item: ((item.display_name or item.name).casefold(), item.name))
+        discovered.sort(key=lambda item: item.name)
         return SystemModelDiscovery(endpoints=tuple(discovered))
 
     def validate_custom_endpoint_remote(self, name: str) -> None:
         # Defensive: never let a path-shaped name reach the interpolated request.
         validate_endpoint_name_policy(name)
+        path = f"{GATEWAY_ENDPOINTS_PATH}/{gateway_endpoint_name(name)}"
         try:
-            detail = self._workspace_client.serving_endpoints.get(name)
-        except ResourceDoesNotExist as error:
+            detail = self._workspace_client.api_client.do("GET", path)
+        except NotFound as error:
             raise _validation_failure(
                 "endpoint_unknown", "Endpoint name was not found.", False
             ) from error
@@ -232,41 +256,10 @@ class DatabricksModelEndpointCatalog:
                 True,
             ) from error
 
-        if getattr(detail, "name", None) != name:
+        api_types = (detail or {}).get("supported_api_types") or ()
+        if GATEWAY_CHAT_API_TYPE not in api_types:
             raise _validation_failure(
-                "endpoint_name_mismatch",
-                "Endpoint validation did not return the exact requested name.",
-                False,
-            )
-
-        state = getattr(detail, "state", None)
-        config_update = getattr(state, "config_update", None)
-        if config_update == EndpointStateConfigUpdate.IN_PROGRESS:
-            raise _validation_failure(
-                "endpoint_update_in_progress",
-                "Endpoint configuration update is in progress.",
-                True,
-            )
-        if config_update == EndpointStateConfigUpdate.UPDATE_FAILED:
-            raise _validation_failure(
-                "endpoint_update_failed",
-                "Endpoint configuration update failed.",
-                False,
-            )
-        if config_update == EndpointStateConfigUpdate.UPDATE_CANCELED:
-            raise _validation_failure(
-                "endpoint_update_canceled",
-                "Endpoint configuration update was canceled.",
-                False,
-            )
-        if (
-            getattr(state, "ready", None) != EndpointStateReady.READY
-            or config_update != EndpointStateConfigUpdate.NOT_UPDATING
-        ):
-            raise _validation_failure(
-                "endpoint_not_ready",
-                "Endpoint is not ready for invocation.",
-                True,
+                "endpoint_not_chat_model", "Endpoint is not a chat model.", False
             )
 
 

@@ -2104,14 +2104,18 @@ def test_the_default_executor_uses_the_bounded_test_runtime(factory, monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def _real_provider_executor(factory: sessionmaker, usage):
+def _real_provider_executor(factory: sessionmaker, monkeypatch, usage):
     from src.services.agent_runtime import (
         TEST_RUN_MAX_RETRIES,
         TEST_RUN_TIMEOUT_SECONDS,
         DatabricksModelAdapter,
     )
-    from tests.fixtures.mock_chat_completions import MockChatCompletionsWorkspace
+    from tests.fixtures.mock_chat_completions import (
+        MockChatCompletionsWorkspace,
+        install_mock_gateway_transport,
+    )
 
+    install_mock_gateway_transport(monkeypatch)
     workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=usage)
     adapter = DatabricksModelAdapter(
         client_factory=lambda: workspace,
@@ -2128,14 +2132,14 @@ def _persisted_tokens(factory: sessionmaker) -> list[tuple[str, int | None, int 
     return [(row.run_kind, row.input_tokens, row.output_tokens) for row in _run_rows(factory)]
 
 
-def test_a_real_provider_candidate_and_baseline_run_persist_the_reported_tokens(factory):
+def test_a_real_provider_candidate_and_baseline_run_persist_the_reported_tokens(factory, monkeypatch):
     from tests.fixtures.mock_chat_completions import (
         MOCK_COMPLETION_TOKENS,
         MOCK_PROMPT_TOKENS,
         MOCK_USAGE,
     )
 
-    workbench, workspace = _real_provider_executor(factory, MOCK_USAGE)
+    workbench, workspace = _real_provider_executor(factory, monkeypatch, MOCK_USAGE)
 
     candidate = _run_candidate(factory, workbench)
     baseline = _run_baseline(factory, workbench)
@@ -2154,8 +2158,8 @@ def test_a_real_provider_candidate_and_baseline_run_persist_the_reported_tokens(
     ]
 
 
-def test_a_real_provider_run_without_usage_persists_null_tokens(factory):
-    workbench, workspace = _real_provider_executor(factory, None)
+def test_a_real_provider_run_without_usage_persists_null_tokens(factory, monkeypatch):
+    workbench, workspace = _real_provider_executor(factory, monkeypatch, None)
 
     candidate = _run_candidate(factory, workbench)
     baseline = _run_baseline(factory, workbench)

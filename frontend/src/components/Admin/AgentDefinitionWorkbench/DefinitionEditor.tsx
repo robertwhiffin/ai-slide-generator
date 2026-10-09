@@ -163,10 +163,14 @@ function ProbeResultView({
           <p>This result does not change the draft or its status.</p>
         </>
       ) : (
-        <p role="alert">{result.message}</p>
+        <p role="alert">
+          {result.provider_detail
+            ? `The model rejected the test request: ${result.provider_detail}`
+            : result.message}
+        </p>
       )}
-      <p className="mt-1 break-all font-mono">
-        {`Endpoint ${result.endpoint_name} · Candidate hash ${result.candidate_hash} · Draft lock ${result.lock_version}`}
+      <p className="mt-1 break-all text-[0.7rem] opacity-70">
+        {`Details — Endpoint ${result.endpoint_name} · Candidate hash ${result.candidate_hash} · Draft lock ${result.lock_version}`}
       </p>
       {result.outcome === 'failed' && result.retryable && (
         <button type="button" disabled={retryDisabled} onClick={onRetry} className="mt-2">
@@ -549,8 +553,20 @@ export function DefinitionEditor({
                 : modelCatalog.errorMessage}
             </div>
           )}
+          <p
+            className="text-xs text-gray-600"
+            aria-describedby={endpointMessage ? `${agentKey}-endpoint-error` : undefined}
+          >
+            <span className="font-semibold">Current model</span>{' '}
+            <span className="break-all font-mono">{entry.local.endpoint_name}</span>
+          </p>
           {visibleModels.length > 0 && (
-            <div role="radiogroup" aria-label="Discovered models" className="max-h-48 space-y-1 overflow-y-auto">
+            <div
+              role="radiogroup"
+              aria-label="Discovered models"
+              aria-describedby={endpointMessage ? `${agentKey}-endpoint-error` : undefined}
+              className="max-h-48 space-y-1 overflow-y-auto"
+            >
               {visibleModels.map((item) => {
                 const optionId = `${agentKey}-discovered-model-${modelCatalog.items.indexOf(item)}`;
                 const details = [item.display_name, item.description].filter((text): text is string => text !== null);
@@ -580,20 +596,6 @@ export function DefinitionEditor({
               })}
             </div>
           )}
-        </div>
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Advanced</p>
-          <label htmlFor={`${agentKey}-endpoint`} className="block text-sm font-medium text-gray-700">
-            Custom endpoint name
-          </label>
-          <input
-            id={`${agentKey}-endpoint`}
-            aria-describedby={endpointMessage ? `${agentKey}-endpoint-error` : undefined}
-            type="text"
-            value={entry.local.endpoint_name}
-            onChange={(event) => onEdit(agentKey, 'endpoint_name', event.currentTarget.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
-          />
           <FieldError id={`${agentKey}-endpoint-error`} message={endpointMessage} />
         </div>
         <div className="space-y-2">
@@ -612,19 +614,6 @@ export function DefinitionEditor({
           )}
         </div>
         <div>
-          <label htmlFor={`${agentKey}-temperature`} className="block text-sm font-medium text-gray-700">Temperature</label>
-          <input
-            id={`${agentKey}-temperature`}
-            aria-describedby={entry.fieldErrors.temperature ? `${agentKey}-temperature-error` : undefined}
-            type="number"
-            step="any"
-            value={entry.local.temperature}
-            onChange={(event) => onEdit(agentKey, 'temperature', event.currentTarget.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
-          />
-          <FieldError id={`${agentKey}-temperature-error`} message={entry.fieldErrors.temperature} />
-        </div>
-        <div>
           <label htmlFor={`${agentKey}-max-tokens`} className="block text-sm font-medium text-gray-700">Maximum tokens</label>
           <input
             id={`${agentKey}-max-tokens`}
@@ -636,19 +625,6 @@ export function DefinitionEditor({
             className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
           <FieldError id={`${agentKey}-max-tokens-error`} message={entry.fieldErrors.max_tokens} />
-        </div>
-        <div>
-          <label htmlFor={`${agentKey}-top-p`} className="block text-sm font-medium text-gray-700">Top-p</label>
-          <input
-            id={`${agentKey}-top-p`}
-            aria-describedby={entry.fieldErrors.top_p ? `${agentKey}-top-p-error` : undefined}
-            type="number"
-            step="any"
-            value={entry.local.top_p}
-            onChange={(event) => onEdit(agentKey, 'top_p', event.currentTarget.value)}
-            className="mt-1 block w-full rounded-md border border-gray-300 p-2 font-normal"
-          />
-          <FieldError id={`${agentKey}-top-p-error`} message={entry.fieldErrors.top_p} />
         </div>
       </div>
 

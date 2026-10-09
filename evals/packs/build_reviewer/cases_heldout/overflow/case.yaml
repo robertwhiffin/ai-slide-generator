@@ -1,0 +1,8 @@
+kind: mutation
+fault: ~40 extra bullets appended so content overflows the frame
+expect:
+  criteria:
+  - overflow
+  positions:
+  - 5
+design_system_active: true

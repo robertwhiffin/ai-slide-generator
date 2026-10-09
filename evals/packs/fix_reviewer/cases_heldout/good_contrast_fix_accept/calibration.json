@@ -1,0 +1,18 @@
+{
+  "should_fail": {
+    "slide_index": 5,
+    "verdict": "surfaced",
+    "findings": [
+      {
+        "id": "contrast_failure:5:0",
+        "slide_index": 5,
+        "category": "design",
+        "criterion": "contrast_failure",
+        "message": "The callout text still has contrast well below 4.5:1.",
+        "objective": true,
+        "status": "open",
+        "seen": false
+      }
+    ]
+  }
+}

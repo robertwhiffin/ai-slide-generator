@@ -1,0 +1,4 @@
+{
+  "data_request": "Do structured prompts really reduce token usage? I've read that structured prompts use 30–50% fewer tokens than naive prompts per PromptBench report.",
+  "deck_purpose": null
+}

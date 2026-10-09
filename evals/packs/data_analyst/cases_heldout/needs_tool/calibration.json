@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "outcome": "success",
+    "synthesis": "Query performance analysis shows PostgreSQL engines averaging 120ms at p95, while DuckDB engines average 85ms at p95.",
+    "sources": [
+      "Analytics backend"
+    ],
+    "gap": null,
+    "tried_tools": [],
+    "reason": null
+  }
+}

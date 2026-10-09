@@ -1,0 +1,141 @@
+{
+  "title": "HTML Slides vs. PowerPoint: A Better Way to Present",
+  "audience": "Professionals, educators, and teams evaluating modern presentation tools and formats",
+  "purpose": "Persuade the audience that HTML-based slides offer superior presentation qualities over traditional PowerPoint across design, interactivity, accessibility, and distribution",
+  "argument": "HTML slides surpass PowerPoint in responsiveness, design fidelity, interactivity, accessibility, version control, and distribution — making them the stronger choice for modern presentations",
+  "call_to_action": "Adopt HTML-based slide tools for your next high-stakes presentation and experience the difference firsthand",
+  "narrative_arc": [
+    "Set the stage: presentations matter, and the tool shapes the outcome",
+    "Expose PowerPoint's limitations across key quality dimensions",
+    "Demonstrate HTML slides' advantages with concrete evidence — responsiveness, typography, interactivity, accessibility, collaboration",
+    "Address objections and the learning curve honestly",
+    "Close with a clear verdict and call to action"
+  ],
+  "design_contract": {
+    "design_system_id": 3,
+    "template_id": 5
+  },
+  "resolved_data": {
+    "synthesis": "HTML slides outperform PowerPoint on responsiveness, typography, file size and accessibility: they render consistently across devices, load web fonts without embedding, stay small, and meet WCAG 2.1 AA natively, while .pptx files are large, fixed-canvas and retrofit accessibility.",
+    "figures": [
+      {
+        "key": "device_render_comparison",
+        "value": "Rendering fidelity by device — HTML Slides: Laptop 100%, Tablet 100%, Phone 100%, Projector 100%; PowerPoint (.pptx): Laptop 95%, Tablet 60%, Phone 35%, Projector 70%",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "wcag_support_comparison",
+        "value": "Native WCAG 2.1 AA coverage — HTML Slides: Semantic Structure 95%, ARIA Support 98%, Keyboard Nav 92%, Screen-Reader Compat 95%, Auto Color-Contrast 85%; PowerPoint: Semantic Structure 40%, ARIA Support 15%, Keyboard Nav 50%, Screen-Reader Compat 55%, Auto Color-Contrast 60%",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "pptx_average_file_size",
+        "value": "the average corporate .pptx weighs 8–15 MB",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "html_deck_file_size",
+        "value": "an equivalent HTML deck fits under 1 MB",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "modern_browser_device_share",
+        "value": "98% of devices worldwide run a modern browser",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "pptx_fixed_canvas",
+        "value": "PowerPoint locks every element to a 13.3 × 7.5″ rectangle",
+        "source": "Gold deck fixture"
+      },
+      {
+        "key": "css_font_availability",
+        "value": "1,700+ fonts via CSS — no embedding needed",
+        "source": "Gold deck fixture"
+      }
+    ],
+    "gaps": []
+  },
+  "slides": [
+    {
+      "position": 0,
+      "purpose": "Establish the topic and set an aspirational, branded tone using the Meridian cover layout",
+      "content_brief": "Title slide with the deck title 'HTML Slides vs. PowerPoint: A Better Way to Present', a subtitle noting the comparison of modern web-based slides against the legacy standard, and a clean visual hook using the teal primary and surface palette",
+      "assumes": "The audience knows what PowerPoint is and has used slide decks before",
+      "hands_off": "This deck will make a rigorous case for why HTML slides are the superior presentation format",
+      "data_references": []
+    },
+    {
+      "position": 1,
+      "purpose": "Frame the problem — why presentation quality matters and where PowerPoint falls short",
+      "content_brief": "Explain that presentations are a primary vehicle for persuasion and decision-making, yet most are constrained by a 30-year-old format. Use bullet points with a callout highlighting common PowerPoint pain points: font substitution, fixed-resolution layouts, bloated file sizes (8–15 MB average), and version-control headaches",
+      "assumes": "The audience has experienced frustration with PowerPoint at least once",
+      "hands_off": "PowerPoint's legacy architecture imposes real limits on presentation quality",
+      "data_references": []
+    },
+    {
+      "position": 2,
+      "purpose": "Introduce HTML slides as the modern alternative",
+      "content_brief": "Define what HTML slides are — presentations built with HTML, CSS, and JavaScript rendered in a browser. Name leading frameworks (Reveal.js, Slidev, Marp, Impress.js). Feature the callout stat that 98% of devices have a modern browser, making every device a presentation engine",
+      "assumes": "The audience understands that websites are built with HTML/CSS/JS",
+      "hands_off": "HTML slides turn the browser into a full-featured, universally available presentation platform",
+      "data_references": []
+    },
+    {
+      "position": 3,
+      "purpose": "Evidence beat 1 — Responsive design and device flexibility",
+      "content_brief": "Show that HTML slides adapt fluidly to any screen size — laptop, tablet, phone, or conference-room projector — while PowerPoint locks content to a fixed canvas. Use a chart-plus-commentary layout with a conceptual visual comparison of responsive rendering vs. cropped/stretched .pptx output across device sizes",
+      "assumes": "The audience knows responsive web design exists but may not have connected it to presentations",
+      "hands_off": "HTML slides look perfect on every screen without manual resizing",
+      "data_references": ["device_render_comparison"]
+    },
+    {
+      "position": 4,
+      "purpose": "Evidence beat 2 — Typography and design fidelity",
+      "content_brief": "Explain that HTML slides use CSS for pixel-perfect typography: web fonts load reliably, kerning and line-height are precise, and there is no font-substitution problem. Bullet points contrasting CSS type control with PowerPoint's font embedding issues, with a callout featuring the 1,700+ Google Fonts available",
+      "assumes": "The audience has seen a PowerPoint deck where fonts broke on a different machine",
+      "hands_off": "CSS gives presenters typographic control that PowerPoint simply cannot match",
+      "data_references": []
+    },
+    {
+      "position": 5,
+      "purpose": "Evidence beat 3 — Interactivity and animation",
+      "content_brief": "Demonstrate that HTML slides support live code demos, embedded videos, interactive charts (D3, Chart.js), scroll-triggered animations, and audience polling — all native to the browser. Bullet list of interactive capabilities with a callout contrasting PowerPoint's limited preset transitions and broken embedded media",
+      "assumes": "The audience values engagement and dynamic content in presentations",
+      "hands_off": "HTML slides can be genuinely interactive, not just animated — a qualitative leap over PowerPoint",
+      "data_references": []
+    },
+    {
+      "position": 6,
+      "purpose": "Evidence beat 4 — Accessibility and semantic structure",
+      "content_brief": "Explain that HTML is the native language of accessibility: semantic tags, ARIA attributes, keyboard navigation, and screen-reader compatibility are built in. Use a chart-plus-commentary layout comparing HTML's native WCAG 2.1 AA support against PowerPoint's bolt-on accessibility checker",
+      "assumes": "The audience recognises accessibility as a professional and legal requirement",
+      "hands_off": "HTML slides are accessible by design; PowerPoint requires extra effort to approach the same standard",
+      "data_references": ["wcag_support_comparison"]
+    },
+    {
+      "position": 7,
+      "purpose": "Evidence beat 5 — Collaboration, version control, and distribution",
+      "content_brief": "Show that HTML slide source is plain text — it lives in Git, supports pull requests, diff reviews, and CI/CD pipelines. Distribution is a URL, not a 15 MB email attachment. Bullet points on collaboration advantages with a callout contrasting file sizes: 8–15 MB .pptx vs. under 1 MB HTML deck",
+      "assumes": "The audience is familiar with collaborative workflows, even if not with Git specifically",
+      "hands_off": "HTML slides integrate into modern development and collaboration workflows; PowerPoint does not",
+      "data_references": []
+    },
+    {
+      "position": 8,
+      "purpose": "Address objections — learning curve and ecosystem maturity",
+      "content_brief": "Acknowledge that HTML slides require some web literacy, that WYSIWYG editing is less mature, and that corporate IT ecosystems are built around Office. Counter each objection: Markdown-based tools lower the barrier, templates exist, and browser-based delivery actually simplifies IT distribution. Use bullet-with-callout layout for objection/counter pairs",
+      "assumes": "The audience may be skeptical about switching costs and tooling maturity",
+      "hands_off": "The learning curve is real but shrinking fast, and the payoff in quality and flexibility is substantial",
+      "data_references": []
+    },
+    {
+      "position": 9,
+      "purpose": "Closing slide — verdict and call to action with a visual scorecard",
+      "content_brief": "Summarise the five advantage dimensions — responsiveness, typography, interactivity, accessibility, collaboration — as three stat cards (grouping related dimensions). Each card shows a dimension label and a concise verdict. Deliver the final claim: HTML slides are the stronger format. End with the call to action: try an HTML slide framework for your next presentation",
+      "assumes": "The audience has absorbed the evidence from the preceding slides",
+      "hands_off": "HTML slides are the future of presentations — start using them now",
+      "data_references": []
+    }
+  ]
+}

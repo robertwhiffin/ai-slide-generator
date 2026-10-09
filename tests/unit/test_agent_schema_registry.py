@@ -1100,7 +1100,7 @@ def test_upgrade_content_to_v2_keeps_the_manifest_identity_carrier_type() -> Non
     }
     assert isinstance(upgraded.schema_overlay, SchemaOverlay)
     assert definition_content_hash(definition) == (
-        "8c876db55cddbaa2f9015321117e36adb5b63fb7c47dbb067a432d04c30cf54e"
+        "ed5df628c3ea4c81091fa9d621a1c1d7a8a1089edf1a4f81f335671ac47c0cb5"
     )
     assert definition_content_hash(upgraded) != definition_content_hash(definition)
     # The #265 assembly identity is not coupled to the schema contract version.

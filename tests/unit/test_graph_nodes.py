@@ -132,6 +132,34 @@ def _branch_payload(env, position=0, html=None, scripts="", spec=None, **extra):
     return payload
 
 
+def _revised(spec, briefs):
+    """*spec* with ``content_brief`` replaced at each position in *briefs*.
+
+    The shape of a correct edit: the architect returns the spec it was shown,
+    revised where the user asked for a change (the DeckSpec is the deck's
+    source of truth, so an edit is a revised spec, never a bare position list).
+    """
+    return spec.model_copy(
+        update={
+            "slides": [
+                slide.model_copy(update={"content_brief": briefs[slide.position]})
+                if slide.position in briefs
+                else slide
+                for slide in spec.slides
+            ]
+        }
+    )
+
+
+def _edit_out(spec, targets, message="Editing."):
+    return ArchitectOutput(
+        intent="edit",
+        message=message,
+        target_positions=list(targets),
+        deck_spec=spec,
+    )
+
+
 def test_write_reviewed_row_preserves_the_exact_mutation_context(monkeypatch):
     """The graph boundary owns provenance; the final writer must not rebuild it."""
     mutation = DeckMutationContext(
@@ -421,15 +449,18 @@ class TestArchitectTurnHygiene:
     def test_an_edit_turn_carries_its_target_positions(self, graph_env):
         """Three seeded rows for a three-position spec, and that is load-bearing.
 
-        The persisted spec is only usable as a fallback while its positions still
-        match the committed rows, so seeding ONE row against a three-slide spec —
-        as this test first did — now exercises the stale-spec refusal rather than
-        the edit path it is named for.
+        An edit is only applied while the persisted spec's positions still match
+        the committed rows, so seeding ONE row against a three-slide spec — as
+        this test first did — exercises the stale-spec refusal rather than the
+        edit path it is named for.  The architect returns the persisted spec
+        revised at slide 2 only, so the changed-slide set is the target set.
         """
         graph_env.skills.set(
             "architect",
-            ArchitectOutput(
-                intent="edit", message="Editing slide 2.", target_positions=[2]
+            _edit_out(
+                _revised(make_spec((0, 1, 2)), {2: "revised brief-2"}),
+                [2],
+                message="Editing slide 2.",
             ),
         )
         graph_env.seed_slides(
@@ -452,15 +483,27 @@ class TestArchitectTurnHygiene:
         assert updates["deck_spec"] is not None
 
     def test_an_edit_with_no_committed_spec_degrades_to_discuss(self, graph_env):
+        """The guard is keyed on the PERSISTED spec, not on the model's.
+
+        The architect now always returns a spec on an edit, so "the model sent
+        a spec" can no longer be what lets an edit through: with nothing
+        persisted there is no deck the spec was edited FROM, and the turn must
+        still refuse rather than build from a spec nobody committed.
+        """
         graph_env.skills.set(
             "architect",
-            ArchitectOutput(intent="edit", message="Editing.", target_positions=[0]),
+            _edit_out(_revised(make_spec((0,)), {0: "revised brief-0"}), [0]),
         )
 
         updates = architect_node(graph_env.state())
 
         assert updates["architect_intent"] == "discuss"
         assert updates["error_state"]["code"] == "edit_without_spec"
+        assert updates["target_positions"] is None
+        # Nothing was committed off the refused turn.
+        assert "deck_spec" not in updates
+        deck = graph_env.deck_row()
+        assert deck is None or not deck.deck_spec_json
 
     def test_a_persisted_spec_that_no_longer_matches_the_rows_is_refused(
         self, graph_env
@@ -474,10 +517,15 @@ class TestArchitectTurnHygiene:
         own sentence, because a user looking at a visible deck must not be told no
         specification could be found.
         """
+        # The model echoes the (stale) persisted spec back, revised at its
+        # target — exactly what it is told to do — so the refusal has to come
+        # from the persisted spec vs the rows, not from the model's output.
         graph_env.skills.set(
             "architect",
-            ArchitectOutput(
-                intent="edit", message="Editing slide 2.", target_positions=[2]
+            _edit_out(
+                _revised(make_spec((0, 1, 2)), {2: "revised brief-2"}),
+                [2],
+                message="Editing slide 2.",
             ),
         )
         graph_env.seed_slides(
@@ -505,14 +553,18 @@ class TestArchitectTurnHygiene:
 
         With no committed rows there is no human slide for a stale brief to
         overwrite and nothing for the spec to disagree with, so a deck described
-        but not yet built must still be buildable from its own description.  A
+        but not yet built must still be editable from its own description.  A
         check written as "the sets are equal" with no empty-row case would refuse
-        every such turn, and this is the only test that can see that.
+        every such turn, and this is the only test that can see that.  The edit
+        is the persisted spec revised at slide 0, and the committed spec is that
+        revision — not the persisted original.
         """
         graph_env.skills.set(
             "architect",
-            ArchitectOutput(
-                intent="edit", message="Editing slide 0.", target_positions=[0]
+            _edit_out(
+                _revised(make_spec((0, 1, 2)), {0: "revised brief-0"}),
+                [0],
+                message="Editing slide 0.",
             ),
         )
         from src.api.services.deck_level_writer import write_deck_level_columns
@@ -526,6 +578,7 @@ class TestArchitectTurnHygiene:
         assert updates["architect_intent"] == "edit"
         assert updates["error_state"] is None
         assert [s.position for s in updates["deck_spec"].slides] == [0, 1, 2]
+        assert updates["deck_spec"].slide_at(0).content_brief == "revised brief-0"
 
     def test_discuss_commits_no_spec(self, graph_env):
         graph_env.skills.set(
@@ -550,6 +603,463 @@ class TestArchitectTurnHygiene:
 
         assert updates["architect_intent"] == "ask_data"
         assert "weekly active users" in updates["architect_message"]
+
+
+class TestAnEditCarriesItsRevisedSpec:
+    """Product rule: the DeckSpec is the deck's source of truth, so an edit
+    returns it revised, and the builder is briefed from THAT revision.
+
+    ``build_branch_payload`` briefs a builder from ``spec.slide_at(position)``
+    alone — the builder never sees the user's message — so a turn that briefs
+    from the persisted spec rebuilds the slide from its OLD brief and the
+    requested change is silently lost.  Every test here distinguishes the
+    model's revised brief from the persisted one by value.
+    """
+
+    THREE = ["<div class='slide'>a</div>", "<div class='slide'>b</div>",
+             "<div class='slide'>c</div>"]
+
+    def _persist(self, env, spec):
+        from src.api.services.deck_level_writer import write_deck_level_columns
+
+        write_deck_level_columns(env.session_id, deck_spec=spec.to_json())
+
+    def _run(self, env):
+        state = env.state()
+        updates = architect_node(state)
+        return {**state, **updates}, updates
+
+    def test_the_builder_is_briefed_from_the_models_revised_spec(self, graph_env):
+        """Sabotage: brief the edit from ``prior_spec`` and this goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(
+                _revised(make_spec((0, 1, 2)), {1: "three stat cards, not bullets"}),
+                [1],
+            ),
+        )
+
+        merged, updates = self._run(graph_env)
+
+        assert updates["architect_intent"] == "edit"
+        assert updates["error_state"] is None
+        assert updates["target_positions"] == [1]
+        payload = build_branch_payload(merged, 1)
+        assert payload["slide_spec"]["content_brief"] == (
+            "three stat cards, not bullets"
+        ), "the builder was briefed from the persisted brief; the edit is lost"
+
+    def test_the_revised_spec_is_what_the_deck_persists(self, graph_env):
+        """The spec is the source of truth only if the revision is what is
+        written — otherwise the next turn reads the old brief back."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(_revised(make_spec((0, 1, 2)), {2: "revised brief-2"}), [2]),
+        )
+
+        self._run(graph_env)
+
+        persisted = json.loads(graph_env.deck_row().deck_spec_json)
+        briefs = {s["position"]: s["content_brief"] for s in persisted["slides"]}
+        assert briefs == {0: "brief-0", 1: "brief-1", 2: "revised brief-2"}
+
+    def test_an_edit_with_no_revised_spec_is_refused_not_briefed_from_the_prior(
+        self, graph_env
+    ):
+        """Product rule at the node: an edit that returns ``deck_spec: null`` is
+        an incorrect edit (the frozen schema still admits it, so the node is
+        where it is caught).
+
+        It must NOT be briefed from the persisted spec — that rebuilds the slide
+        from its OLD brief and silently loses the user's change — so the turn
+        degrades to discuss, covers nothing, commits nothing, and tells the user.
+        """
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        model_message = "Editing slide 1."
+        graph_env.skills.set(
+            "architect",
+            ArchitectOutput(
+                intent="edit", message=model_message, target_positions=[1]
+            ),
+        )
+
+        _, updates = self._run(graph_env)
+
+        assert updates["architect_intent"] == "discuss"
+        assert updates["error_state"]["code"] == "edit_without_revised_spec"
+        assert updates["error_state"]["node"] == "architect"
+        # Nothing for the foreman to dispatch, and no spec in state for
+        # build_branch_payload to brief a builder from.
+        assert updates["target_positions"] is None
+        assert "deck_spec" not in updates
+        assert updates["architect_message"].strip()
+        assert updates["architect_message"] != model_message
+        assert graph_env.deck_row().deck_spec_json == make_spec((0, 1, 2)).to_json()
+
+    def test_the_prior_spec_guards_win_over_the_missing_revised_spec(
+        self, graph_env
+    ):
+        """Ordering: the persisted-spec guards are checked FIRST, so a null-spec
+        edit on a deck with no spec, or a stale one, reports that cause."""
+        graph_env.skills.set(
+            "architect",
+            ArchitectOutput(intent="edit", message="Editing.", target_positions=[0]),
+        )
+        _, updates = self._run(graph_env)
+        assert updates["error_state"]["code"] == "edit_without_spec"
+
+    def test_a_stale_spec_wins_over_the_missing_revised_spec(self, graph_env):
+        graph_env.seed_slides(self.THREE[:2])
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            ArchitectOutput(intent="edit", message="Editing.", target_positions=[1]),
+        )
+        _, updates = self._run(graph_env)
+        assert updates["error_state"]["code"] == "spec_positions_stale"
+
+    def test_a_describe_only_null_spec_edit_leaves_the_persisted_spec_alone(
+        self, graph_env
+    ):
+        """A sweeper turn whose architect returns a null-spec edit has nothing
+        to re-describe with: it builds nothing and the persisted spec stays
+        exactly as it was (no spec overwrites it but itself)."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            ArchitectOutput(intent="edit", message="Editing.", target_positions=[1]),
+        )
+        state = graph_env.state(describe_only=scoped(TURN, True))
+
+        updates = architect_node(state)
+
+        assert updates["target_positions"] is None
+        spec_in_state = updates.get("deck_spec")
+        assert spec_in_state is None or spec_in_state == make_spec((0, 1, 2))
+        assert graph_env.deck_row().deck_spec_json == make_spec((0, 1, 2)).to_json()
+
+    def test_a_describe_only_edit_after_a_delete_persists_the_re_description(
+        self, graph_env
+    ):
+        """The sweeper exists to fix a stale spec, so its re-description is kept.
+
+        After a delete the rows are ``[0, 1]`` and the persisted spec still
+        describes ``[0, 1, 2]`` — the exact state the arc-review sweeper is
+        scheduled for.  On a describe-only turn no builder runs, so there is no
+        stale brief to hand to anyone; refusing the architect's edit here (with
+        ``spec_positions_stale`` or ``edit_spec_positions_changed``) would leave
+        the spec stale for good while the sweeper clears its marker.
+        """
+        graph_env.seed_slides(self.THREE[:2])
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        re_described = _revised(make_spec((0, 1)), {1: "re-described brief-1"})
+        graph_env.skills.set("architect", _edit_out(re_described, [1]))
+
+        updates = architect_node(graph_env.state(describe_only=scoped(TURN, True)))
+
+        assert updates["error_state"] is None
+        assert updates["architect_intent"] == "edit"
+        assert graph_env.deck_row().deck_spec_json == re_described.to_json()
+
+    def test_a_describe_only_edit_with_no_persisted_spec_persists_its_spec(
+        self, graph_env
+    ):
+        """A pre-spec deck the sweeper re-describes: the model's spec is the
+        description, and no builder runs, so ``edit_without_spec`` does not
+        apply."""
+        graph_env.seed_slides(self.THREE)
+        described = make_spec((0, 1, 2))
+        graph_env.skills.set("architect", _edit_out(described, [0]))
+
+        updates = architect_node(graph_env.state(describe_only=scoped(TURN, True)))
+
+        assert updates["error_state"] is None
+        assert graph_env.deck_row().deck_spec_json == described.to_json()
+
+    def test_the_stale_guard_is_decided_from_the_persisted_spec_not_the_models(
+        self, graph_env
+    ):
+        """A model spec that happens to match the rows does not launder a stale
+        persisted one.
+
+        The rows are ``[0, 1]`` and the persisted spec still describes
+        ``[0, 1, 2]``; the model returns a two-slide spec that matches the rows.
+        The model edited a spec that does not describe this deck, so the turn is
+        refused with ``spec_positions_stale`` — decided BEFORE the model's spec
+        is looked at, which is also why the positions-changed refusal (the model
+        dropped slide 2) is not the code reported.
+        """
+        graph_env.seed_slides(self.THREE[:2])
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(_revised(make_spec((0, 1)), {1: "revised brief-1"}), [1]),
+        )
+
+        _, updates = self._run(graph_env)
+
+        assert updates["architect_intent"] == "discuss"
+        assert updates["error_state"]["code"] == "spec_positions_stale"
+        assert updates["target_positions"] is None
+        assert "deck_spec" not in updates
+        assert graph_env.deck_row().deck_spec_json == make_spec((0, 1, 2)).to_json()
+
+    @pytest.mark.parametrize(
+        "edit_positions",
+        [(0, 1, 2, 3), (0, 1), (0, 1, 3)],
+        ids=["adds-a-slide", "drops-a-slide", "renumbers-a-slide"],
+    )
+    def test_an_edit_that_changes_the_position_set_is_refused(
+        self, graph_env, edit_positions
+    ):
+        """Adding or removing slides is not an edit.
+
+        Edits never could add or remove a slide.  A model spec that drops a
+        position would otherwise be persisted with a committed row it no longer
+        describes; one that adds a position would brief nothing for it, or
+        build a slide the user never asked for.
+        """
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        model_message = "Editing slide 1."
+        graph_env.skills.set(
+            "architect",
+            _edit_out(
+                _revised(make_spec(edit_positions), {1: "revised brief-1"}),
+                [1],
+                message=model_message,
+            ),
+        )
+
+        _, updates = self._run(graph_env)
+
+        assert updates["architect_intent"] == "discuss"
+        assert updates["error_state"]["code"] == "edit_spec_positions_changed"
+        assert updates["error_state"]["node"] == "architect"
+        assert updates["target_positions"] is None
+        # The user is told the edit was not applied, not shown the model's
+        # "Editing slide 1." as though it had been.
+        assert updates["architect_message"] != model_message
+        assert updates["architect_message"].strip()
+        # Nothing was committed off the refused spec.
+        assert "deck_spec" not in updates
+        assert graph_env.deck_row().deck_spec_json == make_spec((0, 1, 2)).to_json()
+
+    def test_every_slide_the_spec_changes_is_rebuilt_not_only_the_targets(
+        self, graph_env
+    ):
+        """The union: the spec revises slides 2 AND 4, the model targets only 2.
+
+        A slide whose brief changed but is not rebuilt is exactly the spec/slide
+        drift the product rule forbids, so coverage is the sorted union of the
+        model's targets and every position whose SlideSpec changed — and the
+        builder for position 4 is briefed from the revised brief.
+        """
+        positions = (0, 1, 2, 3, 4)
+        graph_env.seed_slides([f"<div class='slide'>{p}</div>" for p in positions])
+        self._persist(graph_env, make_spec(positions))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(
+                _revised(
+                    make_spec(positions),
+                    {2: "revised brief-2", 4: "revised brief-4"},
+                ),
+                [2],
+            ),
+        )
+
+        merged, updates = self._run(graph_env)
+
+        assert updates["architect_intent"] == "edit"
+        assert updates["error_state"] is None
+        assert updates["target_positions"] == [2, 4]
+        assert build_branch_payload(merged, 4)["slide_spec"]["content_brief"] == (
+            "revised brief-4"
+        )
+
+    def test_any_slide_spec_field_change_counts_and_a_target_is_kept(
+        self, graph_env
+    ):
+        """"Changed" is the whole SlideSpec, not just content_brief, and the
+        model's own target stays even where its slide spec did not change (the
+        user can ask for a rebuild of a slide whose brief is fine)."""
+        graph_env.seed_slides(self.THREE + ["<div class='slide'>d</div>"])
+        self._persist(graph_env, make_spec((0, 1, 2, 3)))
+        prior = make_spec((0, 1, 2, 3))
+        edited = prior.model_copy(
+            update={
+                "slides": [
+                    s.model_copy(update={"hands_off": "a new hand-off"})
+                    if s.position == 3
+                    else s
+                    for s in prior.slides
+                ]
+            }
+        )
+        graph_env.skills.set("architect", _edit_out(edited, [1]))
+
+        _, updates = self._run(graph_env)
+
+        assert updates["target_positions"] == [1, 3]
+
+    def test_a_purpose_only_change_at_an_untargeted_slide_is_rebuilt(
+        self, graph_env
+    ):
+        """``purpose`` is part of the brief a builder is handed, so a change to
+        it alone at a slide the model did not target still rebuilds that slide.
+        Sabotage: compare only (content_brief, hands_off) and this goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        prior = make_spec((0, 1, 2))
+        edited = prior.model_copy(
+            update={
+                "slides": [
+                    s.model_copy(update={"purpose": "a new purpose"})
+                    if s.position == 2
+                    else s
+                    for s in prior.slides
+                ]
+            }
+        )
+        graph_env.skills.set("architect", _edit_out(edited, [0]))
+
+        _, updates = self._run(graph_env)
+
+        assert updates["target_positions"] == [0, 2]
+
+    # ---- a refused edit is SAID, on both surfaces --------------------------
+    # architect_node emits and persists the model's own line ("Editing slide
+    # 1.") before the edit guards run.  A refusal that only rewrote
+    # architect_message in state would leave the user told an edit is under
+    # way and then shown nothing — the silent lost edit the product rule
+    # forbids.  So the refusal sentence goes to the SSE stream AND the
+    # transcript, after the model's line.
+
+    def _run_and_capture(self, env, state=None):
+        from src.api.services.session_manager import get_session_manager
+
+        before = len(get_session_manager().get_messages(env.session_id))
+        emitter: queue.Queue = queue.Queue()
+        set_event_emitter(emitter)
+        try:
+            updates = architect_node(state if state is not None else env.state())
+        finally:
+            set_event_emitter(None)
+        events = []
+        while not emitter.empty():
+            events.append(emitter.get_nowait())
+        said = [
+            m.get("content")
+            for m in get_session_manager().get_messages(env.session_id)[before:]
+        ]
+        return updates, events, said
+
+    @pytest.mark.parametrize(
+        "case",
+        ["no_persisted_spec", "stale_spec", "null_revised_spec", "positions_changed"],
+    )
+    def test_a_refused_edit_tells_the_user_on_both_surfaces(self, graph_env, case):
+        model_message = "Editing slide 1."
+        expected_code = {
+            "no_persisted_spec": "edit_without_spec",
+            "stale_spec": "spec_positions_stale",
+            "null_revised_spec": "edit_without_revised_spec",
+            "positions_changed": "edit_spec_positions_changed",
+        }[case]
+        if case == "stale_spec":
+            graph_env.seed_slides(self.THREE[:2])
+        elif case != "no_persisted_spec":
+            graph_env.seed_slides(self.THREE)
+        if case != "no_persisted_spec":
+            self._persist(graph_env, make_spec((0, 1, 2)))
+        if case == "positions_changed":
+            out = _edit_out(
+                _revised(make_spec((0, 1)), {1: "revised brief-1"}),
+                [1],
+                message=model_message,
+            )
+        else:
+            out = ArchitectOutput(
+                intent="edit", message=model_message, target_positions=[1]
+            )
+        graph_env.skills.set("architect", out)
+
+        updates, events, said = self._run_and_capture(graph_env)
+
+        assert updates["error_state"]["code"] == expected_code
+        refusal = updates["architect_message"]
+        assert refusal and refusal != model_message
+        architect_lines = [
+            e.content for e in events if (e.metadata or {}).get("node") == "architect"
+        ]
+        assert architect_lines == [model_message, refusal], (
+            "the SSE client was not told the edit could not be applied"
+        )
+        assert events[-1].metadata.get("intent") == "discuss"
+        assert said == [model_message, refusal], (
+            "the transcript (polling client, next turn) does not say the edit "
+            "could not be applied"
+        )
+
+    def test_a_describe_only_refused_edit_adds_no_transcript_row(self, graph_env):
+        """The sweeper's turn is addressed to nobody: a refusal on it stays out
+        of the human's transcript, exactly as the model's own line does."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            ArchitectOutput(intent="edit", message="Editing.", target_positions=[1]),
+        )
+        state = graph_env.state(describe_only=scoped(TURN, True))
+
+        updates, _, said = self._run_and_capture(graph_env, state)
+
+        assert updates["error_state"]["code"] == "edit_without_revised_spec"
+        assert said == []
+
+    def test_the_union_is_sorted_and_deduplicated(self, graph_env):
+        graph_env.seed_slides(self.THREE + ["<div class='slide'>d</div>"])
+        self._persist(graph_env, make_spec((0, 1, 2, 3)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(
+                _revised(
+                    make_spec((0, 1, 2, 3)),
+                    {0: "revised brief-0", 3: "revised brief-3"},
+                ),
+                [3, 1],
+            ),
+        )
+
+        _, updates = self._run(graph_env)
+
+        assert updates["target_positions"] == [0, 1, 3]
+
+    def test_a_build_turn_is_neither_refused_nor_narrowed_by_the_edit_rules(
+        self, graph_env
+    ):
+        """The paired direction: a BUILD may grow the deck and re-brief every
+        slide; the position-set refusal and the changed-slide union are edit
+        rules only.  Without this an implementation that applied them to every
+        turn would stay green above."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        grown = _revised(make_spec((0, 1, 2, 3)), {1: "revised brief-1"})
+        graph_env.skills.set("architect", architect_build(grown))
+
+        _, updates = self._run(graph_env)
+
+        assert updates["architect_intent"] == "build"
+        assert updates["error_state"] is None
+        assert updates["target_positions"] is None
+        assert [s.position for s in updates["deck_spec"].slides] == [0, 1, 2, 3]
 
 
 class TestArchitectReadsThePreviousArcVerdict:
@@ -1277,6 +1787,28 @@ class TestFixerNode:
             object_type="slide",
         )
 
+    def test_the_fixer_is_given_the_deck_s_resolved_data(self, graph_env):
+        # A source_contradiction finding names a figure that disagrees with its
+        # source; without the sourced figures the fixer cannot correct it.
+        seen = {}
+
+        def fix(payload):
+            seen.update(payload)
+            return fixer_out(payload)
+
+        graph_env.skills.set("fixer", fix)
+        resolved_data = {
+            "synthesis": "Revenue grew in Q3.",
+            "figures": [{"key": "q3_revenue", "value": "$4.2M", "source": "finance"}],
+            "gaps": [],
+        }
+        entry = _fix_entry(0)
+        entry["payload"]["resolved_data"] = resolved_data
+
+        fixer_node(_fix_state(graph_env, {0: entry}))
+
+        assert seen["resolved_data"] == resolved_data
+
     def test_picks_the_lowest_candidate_and_marks_it_in_flight(self, graph_env):
         graph_env.skills.set("fixer", fixer_out)
         state = _fix_state(graph_env, {2: _fix_entry(2), 0: _fix_entry(0)})
@@ -1435,6 +1967,28 @@ class TestFixReviewerNode:
             operation="write_slide",
             object_type="slide",
         )
+
+    def test_the_re_review_is_shown_the_slide_as_it_was_before_the_fix(
+        self, graph_env
+    ):
+        # Without the pre-fix slide the reviewer can only judge the fix in
+        # isolation, so a fixer that rewrites content or restyles the whole slide
+        # while clearing the finding is indistinguishable from a minimal fix.
+        seen = {}
+
+        def review(payload):
+            seen.update(payload)
+            return review_out(0)
+
+        graph_env.skills.set("fix_reviewer", review)
+        state = self._state(graph_env)
+        state["fix_map"]["vals"][0]["original_scripts"] = "// Canvas: c0"
+
+        fix_reviewer_node(state)
+
+        assert seen["original_html"] == "<p>original</p>"
+        assert seen["original_scripts"] == "// Canvas: c0"
+        assert seen["html"] == "<p>fixed</p>"
 
     def test_a_clean_re_review_writes_the_fix_and_marks_the_finding_fixed(
         self, graph_env

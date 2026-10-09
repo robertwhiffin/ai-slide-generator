@@ -21,7 +21,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { AlertCircle, UploadCloud } from 'lucide-react';
 import { Button } from '@/ui/button';
-import { configApi } from '../../api/config';
+import { configApi, describeConfigError } from '../../api/config';
 import type { DesignSystemDetail } from '../../api/config';
 
 interface DesignSystemUploadDialogProps {
@@ -74,7 +74,9 @@ export const DesignSystemUploadDialog: React.FC<DesignSystemUploadDialogProps> =
       const imported = await configApi.importDesignSystem(file, name);
       onUploaded(imported);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to import design system');
+      // 403 (import is admin-only since SDR-4437 F-CR-17) becomes a plain-English
+      // permissions sentence rather than the backend's "Admin access required".
+      setError(describeConfigError(err, 'Failed to import design system'));
     } finally {
       setUploading(false);
     }

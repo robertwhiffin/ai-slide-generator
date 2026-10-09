@@ -1,0 +1,10 @@
+{
+  "should_fail": {
+    "outcome": "missing_data",
+    "synthesis": null,
+    "sources": null,
+    "gap": "No device support data available",
+    "tried_tools": [],
+    "reason": null
+  }
+}

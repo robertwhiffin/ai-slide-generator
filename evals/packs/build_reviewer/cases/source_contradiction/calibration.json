@@ -1,0 +1,7 @@
+{
+  "should_fail": {
+    "slide_index": 3,
+    "verdict": "clean",
+    "findings": []
+  }
+}

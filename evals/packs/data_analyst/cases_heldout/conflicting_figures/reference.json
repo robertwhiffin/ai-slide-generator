@@ -1,0 +1,11 @@
+{
+  "outcome": "success",
+  "synthesis": "The Q2 engineering team survey reports 3 revision rounds are typical, while the vendor adoption survey reports 5 revision rounds. There is a clear conflict between these measurements that warrants investigation.",
+  "sources": [
+    "Q2 engineering team survey",
+    "vendor adoption survey"
+  ],
+  "gap": null,
+  "tried_tools": [],
+  "reason": null
+}

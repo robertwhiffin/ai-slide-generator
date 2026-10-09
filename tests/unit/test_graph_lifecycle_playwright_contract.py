@@ -203,7 +203,8 @@ def test_the_admin_journey_mutations_carry_the_bodies_the_ui_must_send() -> None
     """The three request bodies the Playwright journey deep-equals (steps 2, 6, 7)."""
     by_id = {exchange["id"]: exchange for exchange in _exchanges()}
     assert by_id["S03-put-architect"]["request"]["lock_version"] == 0
-    assert by_id["S03-put-architect"]["request"]["candidate"]["model"]["temperature"] == 0.4
+    # Temperature input removed from workbench UI: save carries the stored value (0.7).
+    assert by_id["S03-put-architect"]["request"]["candidate"]["model"]["temperature"] == 0.7
     assert by_id["S11-post-release"]["request"] == {
         "lock_version": by_id["S10-get-release-preview"]["body"]["draft"]["lock_version"],
         "release_note": "Lifecycle Graph Version 2.",

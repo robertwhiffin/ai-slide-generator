@@ -686,3 +686,53 @@ class TestSlideOutcomeReportMustBeComplete:
             self._convert(tmp_path, 3, (False, False, False))
 
         assert "no slide rendered" in str(excinfo.value).lower()
+
+
+# -----------------------------------------------------------------------
+# Gateway integration — DEFAULT_MODEL and llm_client factory
+# -----------------------------------------------------------------------
+
+#: The shape recorded through the Gateway on 2026-09-28 (spec §2).
+GATEWAY_THINKING_CONTENT = [
+    {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking...", "signature": "sig"}]},
+    {"type": "text", "text": "```python\nprint(\"hello\")\n```"},
+]
+
+
+def test_extract_text_content_takes_only_the_text_block_of_a_gateway_thinking_reply():
+    assert HtmlToPptxConverterV3._extract_text_content(GATEWAY_THINKING_CONTENT) == '```python\nprint("hello")\n```'
+
+
+def test_converter_defaults_to_the_gateway_model_and_client(monkeypatch):
+    sentinel_client = object()
+    seen = []
+    monkeypatch.setattr("src.services.html_to_pptx.gateway_openai_client",
+                        lambda ws: seen.append(ws) or sentinel_client)
+    workspace = object()
+
+    converter = HtmlToPptxConverterV3(workspace_client=workspace)
+
+    assert converter.model_endpoint == "system.ai.claude-sonnet-4-5"
+    assert converter.llm_client is sentinel_client
+    assert seen == [workspace]
+
+
+def test_codegen_call_sends_no_sampling_parameters():
+    """ws2a follow-up A: newer Claude models 400 on ``temperature``.
+
+    The call keeps its token bound, timeout and thinking budget unchanged.
+    """
+    converter = _make_converter()
+    converter.llm_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="print('x')"))]
+    )
+
+    assert converter._call_llm_sync("system", "user") == "print('x')"
+
+    (call,) = converter.llm_client.chat.completions.create.call_args_list
+    for sampling in ("temperature", "top_p", "top_k"):
+        assert sampling not in call.kwargs
+    assert call.kwargs["model"] == "test-model"
+    assert call.kwargs["max_tokens"] == 16384
+    assert call.kwargs["timeout"] == 300
+    assert call.kwargs["extra_body"] == {"thinking": {"type": "enabled", "budget_tokens": 10240}}

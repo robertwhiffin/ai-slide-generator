@@ -1,0 +1,16 @@
+{
+  "slide_index": 3,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "source_contradiction:3:0",
+      "slide_index": 3,
+      "category": "content",
+      "criterion": "source_contradiction",
+      "message": "The first stat card shows 10–15%, but resolved_data says 30–50% fewer tokens per request versus naive prompts, so the stat value contradicts the source figure.",
+      "objective": true,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

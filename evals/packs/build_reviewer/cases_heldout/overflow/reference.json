@@ -1,0 +1,16 @@
+{
+  "slide_index": 5,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "overflow:5:0",
+      "slide_index": 5,
+      "category": "design",
+      "criterion": "overflow",
+      "message": "The bullet list has around 40 extra items and runs past the bottom of the slide frame, so the content overflows.",
+      "objective": true,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

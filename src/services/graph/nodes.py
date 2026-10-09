@@ -716,9 +716,10 @@ def _design_system_library() -> List[dict]:
     """Every live design system with its templates — §M1, delivered as payload.
 
     §M1 asks for "the architect's tool manifest" to carry the design-system
-    library.  **There is no manifest.** ``TOOL_GRANTS`` is ``[]``, ``bind_tools``
-    appears nowhere under ``src/``, and AgentRuntime invokes the architect with
-    structured output and no tools bound at all, so a library wired into
+    library.  **There is no manifest.** ``TOOL_GRANTS`` is ``[]``, the one
+    ``bind_tools`` under ``src/`` binds only the output schema (the structured-
+    output binding in ``agent_runtime``), and AgentRuntime invokes the architect
+    with structured output and no other tool bound, so a library wired into
     ``tool_grants`` would be read by nothing.  The operator ratified delivering
     §M1 through the architect's **payload** instead, beside
     ``available_design_contract`` and ``template_sections`` — the only channel
@@ -951,8 +952,8 @@ def _persisted_spec_describes_these_rows(
     emitted: a spec with more slides than the deck has rows is exactly how a deck
     GROWS (the first build has no rows at all, and "add a slide" describes one
     before it exists), so the row set cannot constrain model output.  What it can
-    constrain is the FALLBACK — reusing a description written for a deck whose
-    rows have since moved.
+    constrain is an EDIT — the model revises the persisted spec, so an edit of
+    a description written for a deck whose rows have since moved is refused.
 
     ``session_slide_decks.deck_spec_json`` is renumbered on insert and on nothing
     else (final review C1), so after a delete or a duplicate its ``position``
@@ -1540,80 +1541,147 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # proposal stays in proposed_design_contract — never in deck_spec (§M1).
         return updates
 
-    # The architect's own spec wins; the persisted one is a FALLBACK, and it is
-    # only usable while it still describes the rows this deck actually has.
-    # ArchitectOutput's validator requires deck_spec for intent='build', so this
-    # fallback is reached on an EDIT turn — the turn that hands a builder a brief
-    # resolved BY POSITION out of this spec (``build_branch_payload``), which is
-    # why a stale one is destructive rather than untidy: measured, an edit aimed
-    # at a position whose row was deleted rebuilds the row and the deck gains a
-    # slide, and an edit after a MIDDLE delete rewrites the human's surviving
-    # slide against the deleted slide's brief.  See
-    # _persisted_spec_describes_these_rows for what this can and cannot see.
+    # A build uses the architect's own spec.  An EDIT must also carry its spec
+    # (the deck spec is the source of truth, so every edit returns it revised;
+    # this node enforces that, not ArchitectOutput's validator) and that spec
+    # briefs the builder, which resolves its brief BY POSITION out of it
+    # (``build_branch_payload``).
+    #
+    # The model edits the PERSISTED spec, so the persisted spec must still
+    # describe the deck before an edit is accepted.  Both guards below are decided
+    # from ``prior_spec`` and the committed rows, BEFORE the model's spec is used
+    # and whatever it returned: measured, an edit aimed at a position whose row was
+    # deleted rebuilds the row and the deck gains a slide, and an edit after a
+    # MIDDLE delete rewrites the human's surviving slide against the deleted
+    # slide's brief.  See _persisted_spec_describes_these_rows for what this can
+    # and cannot see.
+    #
+    # A DESCRIBE-ONLY turn (the arc-review sweeper) is the exception to both
+    # persisted-spec guards and to the position-set guard: it dispatches no
+    # builder, so no stale brief can reach a slide, and it is scheduled precisely
+    # because a delete or duplicate left the persisted spec stale — refusing its
+    # re-description would leave the spec stale for good while the sweeper clears
+    # its marker.  It still needs a spec to persist.
     spec = out.deck_spec
-    stale_prior_spec: Optional[dict] = None
-    if spec is None and prior_spec is not None:
-        if _persisted_spec_describes_these_rows(prior_spec, committed_positions):
-            spec = prior_spec
-        else:
-            stale_prior_spec = {
-                "spec_positions": sorted(s.position for s in prior_spec.slides),
-                "row_positions": sorted(committed_positions),
+    describe_only = bool(scoped_vals(state, "describe_only"))
+    edit_degrade: Optional[Dict[str, str]] = None
+    if intent == "edit":
+        if prior_spec is None and (spec is None or not describe_only):
+            edit_degrade = {
+                "code": "edit_without_spec",
+                "message": "intent='edit' with no committed deck_spec",
+                "user": (
+                    "I could not find a deck specification to edit for this "
+                    "session. Tell me what you would like to build and I will "
+                    "draft one."
+                ),
             }
+        elif not describe_only and not _persisted_spec_describes_these_rows(
+            prior_spec, committed_positions
+        ):
+            spec_positions = sorted(s.position for s in prior_spec.slides)
+            row_positions = sorted(committed_positions)
             logger.warning(
                 "The persisted deck spec describes positions %s but this deck's "
                 "rows are at %s, so it cannot be used to brief a build; the deck "
                 "was changed outside the chat and the spec has not caught up "
                 "(the arc-review sweeper re-describes it)",
-                stale_prior_spec["spec_positions"],
-                stale_prior_spec["row_positions"],
+                spec_positions,
+                row_positions,
                 extra={"session_id": session_id},
             )
-
-    if spec is None:
-        # An edit with nothing usable to edit. Degrade to a discussion turn rather
-        # than routing to a foreman that would cover no positions and reach deck
-        # review on an unbuilt deck — or, on the stale-spec limb, dispatch a
-        # builder against a brief that describes another slide.  ONE degrade path
-        # for both causes, deliberately: two shapes of the same refusal would be
-        # two things to keep in step.  Only the code and the sentence differ, and
-        # the sentence differs because telling a user with a visible deck that no
-        # specification could be found would be false.
-        if stale_prior_spec is not None:
-            updates["architect_intent"] = "discuss"
-            updates["architect_message"] = (
-                "This deck has changed since I last described it — its slides no "
-                "longer line up with the plan I hold — so I have not rebuilt "
-                "anything. Tell me what this deck should say and I will describe "
-                "it again from what is there now."
-            )
-            updates["error_state"] = {
-                "node": "architect",
+            edit_degrade = {
                 "code": "spec_positions_stale",
                 "message": (
                     "the persisted deck_spec describes positions "
-                    f"{stale_prior_spec['spec_positions']} but the committed rows "
-                    f"are at {stale_prior_spec['row_positions']}"
+                    f"{spec_positions} but the committed rows are at "
+                    f"{row_positions}"
+                ),
+                "user": (
+                    "This deck has changed since I last described it — its slides "
+                    "no longer line up with the plan I hold — so I have not "
+                    "rebuilt anything. Tell me what this deck should say and I "
+                    "will describe it again from what is there now."
                 ),
             }
-            return updates
+        elif spec is None:
+            # ArchitectOutput's validator still accepts a spec-less edit: its
+            # source is hashed into the frozen schema-contract digest, so the
+            # rule is enforced here instead.  Never fall back to prior_spec —
+            # that would rebuild the slide from its stale brief.
+            edit_degrade = {
+                "code": "edit_without_revised_spec",
+                "message": "intent='edit' returned no deck_spec; the deck spec "
+                "is the source of truth so an edit must return it revised",
+                "user": (
+                    "I could not apply that edit: I did not produce an updated "
+                    "plan for the deck, so nothing has been changed. Please "
+                    "try asking again."
+                ),
+            }
+        elif not describe_only and {s.position for s in spec.slides} != {
+            s.position for s in prior_spec.slides
+        }:
+            # An edit revises slides; it never adds or removes one (there is no
+            # insert or delete intent).  A spec with a different position set
+            # would also silently drop a committed row's spec.
+            edit_degrade = {
+                "code": "edit_spec_positions_changed",
+                "message": (
+                    "the edit's deck_spec has slide positions "
+                    f"{sorted(s.position for s in spec.slides)} but the persisted "
+                    f"deck_spec has {sorted(s.position for s in prior_spec.slides)}"
+                ),
+                "user": (
+                    "I could not apply that edit: it would have added or removed "
+                    "slides, and an edit only changes the slides that are already "
+                    "there. Nothing has been changed."
+                ),
+            }
+
+    if edit_degrade is not None:
+        # An edit that cannot be applied.  Degrade to a discussion turn rather
+        # than routing to a foreman that would cover no positions and reach deck
+        # review on an unbuilt deck — or dispatch a builder against a brief that
+        # describes another slide.  ONE degrade path for every cause,
+        # deliberately: several shapes of the same refusal would be several things
+        # to keep in step.  Only the code and the sentence differ, and the
+        # sentence differs because telling a user with a visible deck that no
+        # specification could be found would be false.
         updates["architect_intent"] = "discuss"
-        updates["architect_message"] = (
-            "I could not find a deck specification to edit for this session. "
-            "Tell me what you would like to build and I will draft one."
-        )
+        updates["architect_message"] = edit_degrade["user"]
         updates["error_state"] = {
             "node": "architect",
-            "code": "edit_without_spec",
-            "message": "intent='edit' with no committed deck_spec",
+            "code": edit_degrade["code"],
+            "message": edit_degrade["message"],
         }
+        # The model's own line ("Editing slide 2.") was already emitted and
+        # persisted above, so the refusal must be SAID too, on the same two
+        # surfaces — otherwise the user is told an edit is under way and then
+        # nothing happens.  A describe-only turn stays silent the same way the
+        # model's line does: _say suppresses it and the sweeper has no emitter.
+        _emit(StreamEventType.ASSISTANT, content=edit_degrade["user"],
+              metadata={"node": "architect", "intent": "discuss"})
+        _say(state, edit_degrade["user"])
         return updates
 
     if _contract_ids(spec.design_contract) != _contract_ids(inbound_contract):
         brand = _resolve_brand(spec.design_contract)
 
+    # Every slide the edit's spec changes is rebuilt, not only the ones the model
+    # named: a slide whose brief changed but is not rebuilt is spec/slide drift.
+    edit_targets: List[int] = []
     if intent == "edit":
-        updates["target_positions"] = list(out.target_positions)
+        prior_by_position = (
+            {s.position: s for s in prior_spec.slides} if prior_spec else {}
+        )
+        changed = {
+            s.position
+            for s in spec.slides
+            if s != prior_by_position.get(s.position)
+        }
+        edit_targets = sorted(set(out.target_positions) | changed)
+        updates["target_positions"] = list(edit_targets)
 
     # ---- §4.6: what does this commit change about the DECK, not a slide? ----
     # Classified AFTER the edit turn's target_positions is set, so the
@@ -1680,7 +1748,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
             # An explicit edit request is honoured whatever the review said: the
             # user asked for that slide, so "it still fits the brief" is not a
             # reason to refuse.
-            requested = set(out.target_positions) if intent == "edit" else set()
+            requested = set(edit_targets)
             rebuild = sorted(verdicts["failing"] | uncovered | requested)
             updates["target_positions"] = rebuild
 
@@ -1800,7 +1868,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # suppressed by the same flag: leaving it bumped beside an unchanged version
     # token would show "modified just now" against a deck whose lock says nothing
     # changed, and that half-state is worse than either choice made consistently.
-    describe_only = bool(scoped_vals(state, "describe_only"))
+    # (``describe_only`` is read once, above the edit guards.)
 
     deck_write: Dict[str, Any] = {
         "title": spec.title,
@@ -2492,6 +2560,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         "slide_spec": payload.get("slide_spec"),
         "resolved_style": payload.get("resolved_style"),
         "section_css": payload.get("section_css"),
+        "resolved_data": payload.get("resolved_data"),
     }
     design_system_active = bool(
         payload.get("design_system_active")
@@ -2645,6 +2714,11 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                 "change_summary": fixed.get("change_summary", ""),
                 "html": fixed_html,
                 "scripts": fixed_scripts,
+                # The slide as it was before the fix: without it the reviewer
+                # judges the fix in isolation and cannot see collateral changes
+                # (rewritten content, a restyle) made while clearing the finding.
+                "original_html": entry.get("original_html", ""),
+                "original_scripts": entry.get("original_scripts", ""),
                 "slide_spec": payload.get("slide_spec"),
                 "resolved_style": payload.get("resolved_style"),
                 "section_css": payload.get("section_css"),

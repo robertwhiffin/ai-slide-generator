@@ -1,0 +1,5 @@
+kind: mutation
+fault: design switch must be proposed, not applied to deck_spec
+expect:
+  intent: confirm_design_contract
+design_system_active: true

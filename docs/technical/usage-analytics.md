@@ -291,18 +291,30 @@ yet).
 
 ## Operational Notes
 
-### `user_sessions` is durable history — never schedule session cleanup
+### `user_sessions` is durable history — there is no session-cleanup path
 
 Pre-boundary metrics (and parts of retention, heatmap, top-users, and active-user
-counts) depend on `user_sessions` rows surviving forever. The TTL cleanup
-(`SessionManager.cleanup_expired_sessions`) is intentionally reachable **only** via the
-manual `POST /api/sessions/cleanup` endpoint; nothing schedules it.
+counts) depend on `user_sessions` rows surviving forever. **No TTL cleanup exists
+any more:** both `POST /api/sessions/cleanup` and
+`SessionManager.cleanup_expired_sessions` were removed in SDR-4437 (F-CR-16), so
+nothing in the app deletes session history.
 
-> **Warning:** do **not** wire `POST /api/sessions/cleanup` (or
-> `cleanup_expired_sessions`) to any scheduler or cron. Doing so would permanently
-> destroy the session history that the `/admin` usage dashboard's pre-event-log
-> aggregations rely on. The method's docstring in
-> `src/api/services/session_manager.py` carries the same warning.
+Previously the cleanup was reachable only via that manual endpoint, and the
+endpoint had **no authorization check** — any CAN_USE workspace user could call it
+and permanently delete every user's sessions whose `last_activity` was older than
+`session_ttl_hours` (24 by default), cascading to slide decks, chat messages, deck
+versions, chat requests, deck contributors and child contributor sessions. Nothing
+called it: no frontend caller, no scheduler, no script. It was deleted rather than
+gated, because an endpoint with no callers has nothing to gain from a gate.
+
+> **Warning:** do **not** reintroduce a session-cleanup path — endpoint, method,
+> scheduled job or migration — without an explicit authorization gate and a
+> decision about this dashboard. Doing so would permanently destroy the session
+> history that the `/admin` usage dashboard's pre-event-log aggregations rely on.
+> If a retention requirement ever makes a purge necessary, it belongs behind
+> `require_admin` (or outside the HTTP surface entirely) and should record who
+> triggered it — the removed endpoint logged only a row count, so a deletion would
+> have been unattributable in the very history it destroyed.
 
 ### Write-path guarantees
 

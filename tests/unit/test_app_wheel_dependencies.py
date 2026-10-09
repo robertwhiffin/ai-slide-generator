@@ -174,18 +174,17 @@ def test_the_allowlist_does_not_outlive_its_entries(root_deps):
 def test_the_manifests_declare_openai_within_the_transitive_bounds(
     app_deps, root_deps, req_deps
 ):
-    """agent_runtime.py and model_endpoint_probe.py import openai at module level.
+    """openai is pinned exactly in the app wheel and requirements.txt.
 
-    Declared lower bound must be >=1.99.9 (the verified transitive constraint from
-    databricks-langchain==0.9.0) with no upper cap.  A future cap requires a
-    devloop-deploy proof that the wheel resolves correctly with the cap.
+    ws2a (Task 0b) pinned openai==3.19.2 and openai-agents==0.22.2 in the app
+    pyproject and requirements.txt: these are the versions that databricks-openai
+    0.17.1 and openai-agents 0.22.2 resolve to, proven by the ws2a devloop build
+    (Task 0b Step 7).  Any change to this pin requires a new devloop-deploy proof
+    that the wheel still resolves correctly.
 
-    Note: the local env has openai 1.105.0 via databricks-langchain; the wheel's
-    resolution at build time is a separate closure and may differ from the local env.
-    The test proves only that the declared constraint matches the verified transitive
-    bound, not that the wheel resolves to 1.105.0.
+    The root pyproject keeps the ranged floor (>=1.99.9) because it is not the file
+    that the Databricks Apps BUILD phase resolves.
     """
-    expected = Requirement("openai>=1.99.9").specifier
-    assert Requirement(app_deps["openai"]).specifier == expected
-    assert Requirement(root_deps["openai"]).specifier == expected
-    assert Requirement(req_deps["openai"]).specifier == expected
+    assert Requirement(app_deps["openai"]).specifier == Requirement("openai==3.19.2").specifier
+    assert Requirement(root_deps["openai"]).specifier == Requirement("openai>=1.99.9").specifier
+    assert Requirement(req_deps["openai"]).specifier == Requirement("openai==3.19.2").specifier

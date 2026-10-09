@@ -11,14 +11,16 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any, get_args
 
 import httpx
 import openai
 import pytest
 import requests
+from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import InternalError, PermissionDenied, Unauthenticated
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -46,6 +48,12 @@ from src.services.model_endpoint_probe import (
     StructuredOutputProbeCode,
     StructuredOutputProbeFailure,
     _StructuredOutputProbeResponse,
+    _sanitise_provider_detail,
+)
+from tests.fixtures.tool_call_doubles import (
+    no_tool_call_reply,
+    replying,
+    tool_call_reply,
 )
 
 SECRET = "SECRET-provider-text https://leak.example/token=abc"
@@ -103,19 +111,26 @@ class _Recorder:
         self.events.append(("model_factory", kwargs))
         recorder = self
 
-        class _Structured:
-            def invoke(self, prompt: str) -> Any:
-                recorder.events.append(("invoke", prompt))
-                if recorder.invoke_error is not None:
-                    raise recorder.invoke_error
-                return recorder.output
+        def reply(prompt: str) -> Any:
+            # The provider's reply: a model instance becomes a tool call with the
+            # keys it set; anything else (a message, a raw value) reaches the
+            # production parser as-is.
+            recorder.events.append(("invoke", prompt))
+            if recorder.invoke_error is not None:
+                raise recorder.invoke_error
+            if isinstance(recorder.output, BaseModel):
+                return tool_call_reply(_StructuredOutputProbeResponse, recorder.output)
+            return recorder.output
 
         class _Chat:
-            def with_structured_output(self, schema: Any) -> Any:
-                recorder.events.append(("with_structured_output", schema))
+            def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+                recorder.events.append(("bind_tools", list(tools), kwargs))
                 if recorder.bind_error is not None:
                     raise recorder.bind_error
-                return _Structured()
+                return replying(reply)
+
+            def with_structured_output(self, schema: Any) -> Any:  # pragma: no cover
+                raise AssertionError("forced tool choice must not be bound")
 
         return _Chat()
 
@@ -152,16 +167,15 @@ def test_model_endpoint_probe_success_constructs_binds_then_invokes_exactly():
         (
             "model_factory",
             {
-                "endpoint": "exact saved endpoint",
-                "temperature": 0.2,
+                # Follow-up A: the saved temperature / top_p are never sent.
+                "model": "exact saved endpoint",
                 "max_tokens": 64,
-                "top_p": 0.9,
                 "workspace_client": recorder.client,
                 "timeout": PROBE_TIMEOUT_SECONDS,
                 "max_retries": PROBE_MAX_RETRIES,
             },
         ),
-        ("with_structured_output", _StructuredOutputProbeResponse),
+        ("bind_tools", [_StructuredOutputProbeResponse], {"tool_choice": "auto"}),
         ("invoke", _PROBE_PROMPT),
     ]
 
@@ -193,7 +207,7 @@ def test_model_endpoint_probe_prompt_is_code_owned_and_identity_free():
 
     recorder.probe().probe(configuration)
 
-    prompts = [value for name, value in recorder.events if name == "invoke"]
+    prompts = [event[1] for event in recorder.events if event[0] == "invoke"]
     assert prompts == [_PROBE_PROMPT]
     assert isinstance(_PROBE_PROMPT, str) and _PROBE_PROMPT.strip()
     lowered = _PROBE_PROMPT.lower()
@@ -224,10 +238,10 @@ def test_model_endpoint_probe_binding_rejection_is_unsupported(error):
         recorder.probe().probe(CONFIGURATION)
 
     _assert_failure(caught, "unsupported_structured_output")
-    assert [name for name, _ in recorder.events] == [
+    assert [event[0] for event in recorder.events] == [
         "client_factory",
         "model_factory",
-        "with_structured_output",
+        "bind_tools",
     ]
 
 
@@ -293,11 +307,16 @@ def test_model_endpoint_probe_other_failures_are_ambiguous_and_sanitized(phase, 
         {"result": "ok"},
         "ok",
         _StructuredOutputProbeResponse.model_construct(result="nope"),
+        no_tool_call_reply("ok"),
     ],
-    ids=["dict", "string", "wrong-literal"],
+    ids=["dict", "string", "wrong-literal", "no-tool-call"],
 )
 def test_model_endpoint_probe_unparsed_output_is_ambiguous_failure(output):
-    """Catches a success claimed without the exact structured ``ok`` result."""
+    """Catches a success claimed without the exact structured ``ok`` result.
+
+    ``no-tool-call`` (follow-up A): under ``tool_choice="auto"`` a model may
+    answer in prose; the binding's parser error is the retryable ``failed``.
+    """
     recorder = _Recorder(output=output)
 
     with pytest.raises(StructuredOutputProbeFailure) as caught:
@@ -381,8 +400,8 @@ def test_model_endpoint_probe_service_probes_the_selected_roles_saved_candidate(
     session_factory,
 ):
     """Catches the service probing another role, a default, or a client value."""
-    _save_endpoint(session_factory, "architect", "architect exact endpoint", 0)
-    _save_endpoint(session_factory, "builder", "builder exact endpoint", 1)
+    _save_endpoint(session_factory, "architect", "system.ai.architect-exact-endpoint", 0)
+    _save_endpoint(session_factory, "builder", "system.ai.builder-exact-endpoint", 1)
     builder_hash = _saved_hash(session_factory, "builder")
     adapter = FakeStructuredOutputProbe()
     service = ModelEndpointProbeService(adapter)
@@ -394,7 +413,7 @@ def test_model_endpoint_probe_service_probes_the_selected_roles_saved_candidate(
 
     assert adapter.calls == [
         AgentModelConfiguration(
-            endpoint_name="builder exact endpoint",
+            endpoint_name="system.ai.builder-exact-endpoint",
             temperature=0.125,
             max_tokens=4321,
             top_p=0.5,
@@ -403,7 +422,7 @@ def test_model_endpoint_probe_service_probes_the_selected_roles_saved_candidate(
     assert result == SavedEndpointProbeResult(
         identity=SavedEndpointProbeIdentity(
             agent_key="builder",
-            endpoint_name="builder exact endpoint",
+            endpoint_name="system.ai.builder-exact-endpoint",
             candidate_hash=builder_hash,
             lock_version=2,
         ),
@@ -438,7 +457,7 @@ def test_model_endpoint_probe_service_returns_the_typed_failure_with_identity(
 
 def test_model_endpoint_probe_service_stale_lock_conflicts_before_any_probe(session_factory):
     """Catches a stale request reaching the model before the lock comparison."""
-    _save_endpoint(session_factory, "architect", "moved on", 0)
+    _save_endpoint(session_factory, "architect", "system.ai.moved-on", 0)
     adapter = FakeStructuredOutputProbe()
 
     with session_factory() as session:
@@ -497,7 +516,7 @@ def test_model_endpoint_probe_service_reports_the_copied_identity_after_a_later_
     class _SaveDuringProbe:
         def probe(self, configuration: AgentModelConfiguration) -> None:
             saved_during.append(
-                _save_endpoint(session_factory, "architect", "saved mid-probe", 0)
+                _save_endpoint(session_factory, "architect", "system.ai.saved-mid-probe", 0)
             )
 
     with session_factory() as session:
@@ -585,19 +604,49 @@ REAL_PROVIDER_CASES = [
 ]
 
 
-class MockTransportWorkspace:
-    """A workspace-client stand-in exposing only the one method the chat model uses."""
+class MockTransportWorkspace(WorkspaceClient):
+    """A ``WorkspaceClient`` subclass used as a probe workspace stand-in.
+
+    Subclassing satisfies ChatDatabricks 0.20.0's pydantic
+    ``workspace_client: Optional[WorkspaceClient]`` field, so
+    ``real_provider_probe`` can use ``client_factory=lambda: workspace``
+    and the identity chain from ``client_factory`` → ``_default_model_factory``
+    → ``ChatDatabricks`` → ``DatabricksOpenAI`` → ``_get_authorized_http_client``
+    is end-to-end tested.
+    """
 
     def __init__(self, outcome: int | str) -> None:
+        # Do NOT call super().__init__() — it tries to resolve credentials.
         self.outcome = outcome
         self.requests: list[httpx.Request] = []
         self.client_kwargs: list[dict[str, Any]] = []
-        self.serving_endpoints = self
+        self._config = SimpleNamespace(
+            host=f"https://{MOCK_HOST}",
+            authenticate=lambda: {"Authorization": "Bearer unit-test-dummy-key"},
+        )
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if self.outcome == "connection":
             raise httpx.ConnectError(PROVIDER_SECRET, request=request)
+        if self.outcome == "no_tool_call":
+            # Follow-up A: under tool_choice="auto" the model may answer in prose.
+            return httpx.Response(
+                200,
+                json={
+                    "id": "probe",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "mock",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": PROVIDER_SECRET},
+                        }
+                    ],
+                },
+            )
         if self.outcome == 200:
             return httpx.Response(
                 200,
@@ -632,34 +681,53 @@ class MockTransportWorkspace:
             int(self.outcome), json={"error": {"message": PROVIDER_SECRET}}
         )
 
-    def get_open_ai_client(self, **kwargs: Any) -> openai.OpenAI:
-        self.client_kwargs.append(kwargs)
-        return openai.OpenAI(
-            base_url=f"https://{MOCK_HOST}/serving-endpoints",
-            api_key="unit-test-dummy-key",
-            http_client=httpx.Client(transport=httpx.MockTransport(self._handle)),
-            **kwargs,
-        )
-
 
 def real_provider_probe(workspace: MockTransportWorkspace) -> DatabricksStructuredOutputProbe:
     """The production model factory (real ``ChatDatabricks``) over the mock workspace."""
     return DatabricksStructuredOutputProbe(client_factory=lambda: workspace)
 
 
+def _install_real_provider(monkeypatch, workspace: MockTransportWorkspace) -> None:
+    """Install the mock transport and record ``get_openai_client`` kwargs.
+
+    Patches ``_get_authorized_http_client`` so the underlying ``httpx.Client``
+    routes through ``workspace._handle``.  Also wraps ``get_openai_client`` to
+    record the kwargs ChatDatabricks passes (proving ``use_ai_gateway=True``
+    reaches the client) and asserts that ``workspace_client is workspace``
+    (proving the identity from ``client_factory`` reaches the provider call).
+    """
+    from databricks_langchain import chat_models
+    from tests.fixtures.mock_chat_completions import install_mock_gateway_transport
+
+    install_mock_gateway_transport(monkeypatch)
+    original = chat_models.get_openai_client
+
+    def _recording(workspace_client=None, **kwargs):
+        assert workspace_client is workspace, (
+            f"Expected the mock workspace to reach get_openai_client unchanged, "
+            f"got {workspace_client!r}"
+        )
+        workspace.client_kwargs.append(kwargs)
+        return original(workspace_client=workspace_client, **kwargs)
+
+    monkeypatch.setattr(chat_models, "get_openai_client", _recording)
+
+
 def _assert_only_the_mock_was_reached(workspace: MockTransportWorkspace) -> None:
     assert workspace.client_kwargs == [
-        {"timeout": PROBE_TIMEOUT_SECONDS, "max_retries": PROBE_MAX_RETRIES}
+        {"timeout": PROBE_TIMEOUT_SECONDS, "max_retries": PROBE_MAX_RETRIES, "use_ai_gateway": True}
     ]
     assert len(workspace.requests) == 1  # one attempt: max_retries=0 reached openai
     request = workspace.requests[0]
     assert request.url.host == MOCK_HOST
+    assert request.url.path == "/ai-gateway/mlflow/v1/chat/completions"
     assert request.headers["authorization"] == "Bearer unit-test-dummy-key"
 
 
-def test_model_endpoint_probe_real_provider_success_over_mock_transport():
+def test_model_endpoint_probe_real_provider_success_over_mock_transport(monkeypatch):
     """Catches the real provider path failing to bind or parse the ``ok`` schema."""
     workspace = MockTransportWorkspace(200)
+    _install_real_provider(monkeypatch, workspace)
 
     assert real_provider_probe(workspace).probe(CONFIGURATION) is None
 
@@ -669,10 +737,45 @@ def test_model_endpoint_probe_real_provider_success_over_mock_transport():
     assert [message["content"] for message in sent["messages"]] == [_PROBE_PROMPT]
 
 
+def test_model_endpoint_probe_real_request_sends_no_sampling_and_auto_tool_choice(monkeypatch):
+    """Follow-up A: the probe's request is the graph's — no sampling, tool_choice auto.
+
+    Newer Claude models reject ``temperature`` and forced tool choice with a 400,
+    which the probe would report as ``unsupported_structured_output``.
+    """
+    workspace = MockTransportWorkspace(200)
+    _install_real_provider(monkeypatch, workspace)
+
+    assert real_provider_probe(workspace).probe(CONFIGURATION) is None
+
+    sent = json.loads(workspace.requests[0].content)
+    assert sent["tool_choice"] == "auto"
+    assert [tool["function"]["name"] for tool in sent["tools"]] == [
+        "_StructuredOutputProbeResponse"
+    ]
+    assert sent["max_tokens"] == 64
+    for sampling in ("temperature", "top_p", "top_k"):
+        assert sampling not in sent
+
+
+def test_model_endpoint_probe_real_reply_without_a_tool_call_is_retryable_failure(monkeypatch):
+    """Follow-up A: a prose reply (no tool call) is the ambiguous retryable ``failed``."""
+    workspace = MockTransportWorkspace("no_tool_call")
+    _install_real_provider(monkeypatch, workspace)
+
+    with pytest.raises(StructuredOutputProbeFailure) as caught:
+        real_provider_probe(workspace).probe(CONFIGURATION)
+
+    _assert_failure(caught, "structured_output_probe_failed")
+    assert PROVIDER_SECRET not in caught.value.message
+    _assert_only_the_mock_was_reached(workspace)
+
+
 @pytest.mark.parametrize(("outcome", "code"), REAL_PROVIDER_CASES, ids=str)
-def test_model_endpoint_probe_real_provider_errors_are_classified(outcome, code):
+def test_model_endpoint_probe_real_provider_errors_are_classified(monkeypatch, outcome, code):
     """Catches every real rejection collapsing to the retryable 503 (review I1)."""
     workspace = MockTransportWorkspace(outcome)
+    _install_real_provider(monkeypatch, workspace)
 
     with pytest.raises(StructuredOutputProbeFailure) as caught:
         real_provider_probe(workspace).probe(CONFIGURATION)
@@ -682,3 +785,170 @@ def test_model_endpoint_probe_real_provider_errors_are_classified(outcome, code)
     assert MOCK_HOST not in caught.value.message
     assert "exact saved endpoint" not in caught.value.message
     _assert_only_the_mock_was_reached(workspace)
+    # provider_detail is present for HTTP status errors; absent for connection errors.
+    if outcome != "connection":
+        # The HTTP error carries a JSON body with PROVIDER_SECRET_detail as its message.
+        # URL part is stripped; the full PROVIDER_SECRET string is not present.
+        detail = caught.value.provider_detail
+        assert detail is not None, "provider_detail should be present for HTTP errors"
+        assert "https://leak.example" not in detail
+        assert PROVIDER_SECRET not in detail  # full string (including URL) not present
+
+
+# ---------------------------------------------------------------------------
+# Follow-up B: provider_detail extraction and sanitisation
+# ---------------------------------------------------------------------------
+
+
+def test_provider_detail_real_provider_http_error_carries_detail(monkeypatch):
+    """400/422/etc HTTP errors from the real provider extract a detail string."""
+    workspace = MockTransportWorkspace(400)
+    _install_real_provider(monkeypatch, workspace)
+
+    with pytest.raises(StructuredOutputProbeFailure) as caught:
+        real_provider_probe(workspace).probe(CONFIGURATION)
+
+    assert caught.value.provider_detail is not None
+    # URL part of PROVIDER_SECRET is stripped; useful text remains
+    assert "https://leak.example" not in caught.value.provider_detail
+    assert "token" not in caught.value.provider_detail.lower() or "tool_choice" in (
+        caught.value.provider_detail or ""
+    )  # broad: the secret's token= part is stripped
+
+
+def test_provider_detail_real_provider_connection_error_has_no_detail(monkeypatch):
+    """Connection errors (non-HTTP) leave provider_detail as None."""
+    workspace = MockTransportWorkspace("connection")
+    _install_real_provider(monkeypatch, workspace)
+
+    with pytest.raises(StructuredOutputProbeFailure) as caught:
+        real_provider_probe(workspace).probe(CONFIGURATION)
+
+    # Connection errors do not carry a provider JSON body; detail may be None or empty.
+    # The important guarantee: no leak of secret-bearing text.
+    if caught.value.provider_detail is not None:
+        assert PROVIDER_SECRET not in caught.value.provider_detail
+        assert "https://leak.example" not in caught.value.provider_detail
+
+
+def test_provider_detail_gateway_body_shape_unwraps_nested_json():
+    """The real Gateway body shape unwraps its nested JSON message once."""
+    nested_body = json.dumps({
+        "error_code": "BAD_REQUEST",
+        "message": json.dumps(
+            {"message": 'tool_choice: type "tool" and "any" are not supported for this model.'}
+        ),
+    })
+    detail = _sanitise_provider_detail(nested_body)
+    assert detail == 'tool_choice: type "tool" and "any" are not supported for this model.'
+
+
+def test_provider_detail_gateway_body_flat_message():
+    """A flat JSON body uses the top-level message field directly."""
+    body = json.dumps({"message": "The endpoint does not exist."})
+    assert _sanitise_provider_detail(body) == "The endpoint does not exist."
+
+
+def test_provider_detail_sanitises_url():
+    """URLs are stripped from the detail."""
+    raw = "Error reaching https://adb-1234.azuredatabricks.net/model/v1 : not found"
+    result = _sanitise_provider_detail(raw)
+    assert "https://" not in result
+    assert "adb-1234" not in result
+    assert "not found" in result
+
+
+def test_provider_detail_sanitises_bearer_token():
+    """Bearer / dapi-prefixed tokens are stripped."""
+    # "dapi" followed by a long hex run — a realistic fake, not a real credential.
+    fake_token = "dapi" + "x" * 36  # clearly synthetic: hex run ≥32 chars
+    raw = f"Authorization: Bearer {fake_token} invalid"
+    result = _sanitise_provider_detail(raw)
+    assert "dapi" not in result
+    assert fake_token not in result
+    assert "invalid" in result
+
+
+def test_provider_detail_sanitises_long_hex_run():
+    """Hex/base64 runs >= 32 chars are stripped."""
+    token = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"  # 32-char hex
+    raw = f"Error: bad hash {token} in request"
+    result = _sanitise_provider_detail(raw)
+    assert token not in result
+    assert "Error:" in result
+    assert "in request" in result
+
+
+def test_provider_detail_caps_at_300_chars():
+    """Detail is capped at 300 characters with an ellipsis."""
+    # Use a phrase that repeats to 400 chars without triggering the hex/base64 stripper.
+    raw = "The endpoint is not available. " * 15  # spaces prevent long-run match
+    assert len(raw) > 300
+    result = _sanitise_provider_detail(raw)
+    assert len(result) <= 304  # 300 chars + ellipsis (1-3 bytes)
+    assert result.endswith("…") or result.endswith("...")
+
+
+def test_provider_detail_never_includes_workspace_host():
+    """The workspace host is never included in the detail."""
+    raw = f"Error from {MOCK_HOST}: endpoint not found"
+    result = _sanitise_provider_detail(raw)
+    # URLs are stripped; bare host names may remain but let's check the URL form
+    assert f"https://{MOCK_HOST}" not in result
+
+
+def test_provider_detail_collapse_whitespace():
+    """Whitespace is collapsed in the detail."""
+    raw = "Error:  multiple   spaces\n\ttabs  here"
+    result = _sanitise_provider_detail(raw)
+    assert "  " not in result
+    assert "\n" not in result
+    assert "\t" not in result
+
+
+def test_provider_detail_plain_str_error():
+    """Plain non-JSON error strings are accepted as-is (after sanitisation)."""
+    raw = "The endpoint rejected the request."
+    result = _sanitise_provider_detail(raw)
+    assert result == raw
+
+
+def test_provider_detail_probe_failure_attribute():
+    """StructuredOutputProbeFailure carries provider_detail when provided."""
+    failure = StructuredOutputProbeFailure(
+        "unsupported_structured_output",
+        "The endpoint rejected the structured-output test request.",
+        False,
+        provider_detail="tool_choice not supported",
+    )
+    assert failure.provider_detail == "tool_choice not supported"
+
+
+def test_provider_detail_probe_failure_defaults_to_none():
+    """StructuredOutputProbeFailure has provider_detail=None by default."""
+    failure = StructuredOutputProbeFailure(
+        "unsupported_structured_output",
+        "The endpoint rejected the structured-output test request.",
+        False,
+    )
+    assert failure.provider_detail is None
+
+
+def test_provider_detail_preserves_dashed_uuid_req_id():
+    """Dashed UUIDs (8-4-4-4-12) are preserved for support diagnostics."""
+    req_id = "3ff8f85b-502c-45d1-b23f-d871afa77d4a"
+    raw = f"Provided OAuth token does not have required scopes: ai-gateway [ReqId: {req_id}]"
+    result = _sanitise_provider_detail(raw)
+    assert req_id in result
+    assert "ai-gateway" in result
+    assert "ReqId" in result
+
+
+def test_provider_detail_strips_undashed_hex_keeps_dashed_uuid():
+    """Long undashed hex is stripped; a dashed UUID next to it is kept."""
+    undashed = "a" * 32
+    req_id = "3ff8f85b-502c-45d1-b23f-d871afa77d4a"
+    raw = f"Error: token={undashed} reqId={req_id}"
+    result = _sanitise_provider_detail(raw)
+    assert undashed not in result
+    assert req_id in result

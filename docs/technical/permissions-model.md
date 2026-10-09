@@ -502,7 +502,7 @@ A tier above the per-resource permissions above, used for workspace-wide state r
 
 ## Identity Provider
 
-Users and groups are resolved via the Workspace SCIM API using the app's service principal. The service principal token is automatically provided by the Databricks Apps platform via `system.databricks_token` — no separate admin PATs are required.
+Users and groups are resolved via the Workspace SCIM API using the app's service principal. The service principal authenticates with platform OAuth M2M: the Apps platform injects `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET`, which the SDK's default credential chain resolves. No token env var and no separate admin PATs are required (SDR-4437 F-CR-18).
 
 ### Fallback: Local Table
 

@@ -113,6 +113,15 @@ EXPECTED_FOREMAN_NODE = {
     ),
 }
 LOWERCASE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+EXPECTED_ENDPOINTS = {
+    "architect": "databricks-claude-opus-4-6",
+    "data_analyst": "databricks-claude-opus-4-6",
+    "builder": "databricks-claude-haiku-5-5",
+    "build_reviewer": "databricks-claude-opus-4-6",
+    "fixer": "databricks-claude-opus-4-6",
+    "fix_reviewer": "databricks-claude-haiku-5-5",
+    "deck_reviewer": "databricks-claude-haiku-5-5",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -345,8 +354,9 @@ def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkey
         assert published["content_hash"] == draft["candidate_hash"]
         assert published["prompt_text"]
         assert draft["prompt_text"] == published["prompt_text"]
+        expected_endpoint = EXPECTED_ENDPOINTS[node["agent_key"]]
         assert published["model"] == {
-            "endpoint_name": "databricks-claude-opus-4-6",
+            "endpoint_name": expected_endpoint,
             "temperature": 0.7,
             "max_tokens": 60000,
             "top_p": 0.95,
@@ -678,7 +688,7 @@ def test_put_save_draft_returns_exact_changed_contract_and_preserves_release(
 ):
     _force_admin(monkeypatch, is_admin=True)
     submitted_prompt = "Architect draft changed through the admin route."
-    submitted_endpoint = " custom-endpoint-name "
+    submitted_endpoint = "system.ai.custom-endpoint-name"
     submitted_temperature = 0.25
     submitted_max_tokens = 4096
     submitted_top_p = 0.8
@@ -3493,7 +3503,7 @@ def test_the_overlay_type_error_catch_wraps_only_the_overlay_conversion(
 
 _MODEL_ENDPOINTS_URL = "/api/admin/agent-definitions/model-endpoints"
 _SEED_ENDPOINT = "databricks-claude-opus-4-6"
-_CUSTOM_ENDPOINT = "Custom-Endpoint_266"
+_CUSTOM_ENDPOINT = "system.ai.custom-endpoint_266"
 _CATALOG_FORBIDDEN = ModelEndpointCatalogFailure(
     "catalog_forbidden",
     "Model endpoint discovery is not permitted with this workspace identity.",
@@ -4204,22 +4214,22 @@ def test_model_endpoint_probe_route_probes_each_selected_roles_saved_candidate(
     _force_admin(monkeypatch, is_admin=True)
     probe = FakeStructuredOutputProbe()
     with _app_for(session_factory, probe=probe) as client:
-        _save_role_endpoint(client, "architect", "architect exact endpoint")
-        _save_role_endpoint(client, "builder", "builder exact endpoint")
+        _save_role_endpoint(client, "architect", "system.ai.architect-exact-endpoint")
+        _save_role_endpoint(client, "builder", "system.ai.builder-exact-endpoint")
         body = _workbench(client)
         builder = client.post(_probe_url("builder"), json={"lock_version": 2})
         architect = client.post(_probe_url("architect"), json={"lock_version": 2})
 
     assert [call.endpoint_name for call in probe.calls] == [
-        "builder exact endpoint",
-        "architect exact endpoint",
+        "system.ai.builder-exact-endpoint",
+        "system.ai.architect-exact-endpoint",
     ]
     assert [
         (call.temperature, call.max_tokens, call.top_p) for call in probe.calls
     ] == [(0.125, 777, 0.875), (0.125, 777, 0.875)]
     for response, agent_key, endpoint_name in (
-        (builder, "builder", "builder exact endpoint"),
-        (architect, "architect", "architect exact endpoint"),
+        (builder, "builder", "system.ai.builder-exact-endpoint"),
+        (architect, "architect", "system.ai.architect-exact-endpoint"),
     ):
         assert response.status_code == 200
         assert response.json() == {
@@ -4257,6 +4267,7 @@ def test_model_endpoint_probe_route_maps_each_typed_failure_exactly(
         "endpoint_name": _model_node(body, "architect")["draft"]["model"]["endpoint_name"],
         "candidate_hash": _model_node(body, "architect")["draft"]["candidate_hash"],
         "lock_version": 0,
+        "provider_detail": None,
     }
     assert list(response.json()) == [
         "code",
@@ -4265,6 +4276,7 @@ def test_model_endpoint_probe_route_maps_each_typed_failure_exactly(
         "endpoint_name",
         "candidate_hash",
         "lock_version",
+        "provider_detail",
     ]
 
 
@@ -4370,7 +4382,7 @@ def test_model_endpoint_probe_route_stale_lock_is_the_coherent_null_candidate_40
     _force_admin(monkeypatch, is_admin=True)
     probe = FakeStructuredOutputProbe()
     with _app_for(session_factory, probe=probe) as client:
-        _save_role_endpoint(client, "architect", "moved on")
+        _save_role_endpoint(client, "architect", "system.ai.moved-on")
         after = _workbench(client)
         response = client.post(_probe_url("architect"), json={"lock_version": 0})
 
@@ -4383,7 +4395,7 @@ def test_model_endpoint_probe_route_stale_lock_is_the_coherent_null_candidate_40
     assert body["server"]["draft"] == after["draft"]
     assert set(body["server"]["definitions"]) == set(EXPECTED_TOPOLOGY_ORDER) - {"foreman"}
     assert (
-        body["server"]["definitions"]["architect"]["model"]["endpoint_name"] == "moved on"
+        body["server"]["definitions"]["architect"]["model"]["endpoint_name"] == "system.ai.moved-on"
     )
 
 
@@ -4517,7 +4529,9 @@ def test_model_endpoint_probe_route_later_save_cannot_change_the_reported_identi
                         session,
                         agent_key="architect",
                         expected_lock_version=0,
-                        candidate=_domain_candidate(before, "architect", "saved mid-probe"),
+                        candidate=_domain_candidate(
+                            before, "architect", "system.ai.saved-mid-probe"
+                        ),
                         actor="concurrent-admin@example.com",
                     )
                 saved.append(outcome.draft.lock_version)
@@ -4530,7 +4544,7 @@ def test_model_endpoint_probe_route_later_save_cannot_change_the_reported_identi
 
     assert saved == [1]
     assert _model_node(after, "architect")["draft"]["model"]["endpoint_name"] == (
-        "saved mid-probe"
+        "system.ai.saved-mid-probe"
     )
     assert response.status_code == 200
     assert response.json() == {
@@ -4672,11 +4686,13 @@ def test_model_endpoint_probe_route_maps_real_provider_errors(
         MOCK_HOST,
         PROVIDER_SECRET,
         MockTransportWorkspace,
+        _install_real_provider,
         real_provider_probe,
     )
 
     _force_admin(monkeypatch, is_admin=True)
     workspace = MockTransportWorkspace(outcome)
+    _install_real_provider(monkeypatch, workspace)
     with _app_for(session_factory, probe=real_provider_probe(workspace)) as client:
         body = _workbench(client)
         response = client.post(_probe_url("architect"), json={"lock_version": 0})
