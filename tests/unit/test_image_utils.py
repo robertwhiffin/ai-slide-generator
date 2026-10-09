@@ -54,7 +54,7 @@ class TestSubstituteImagePlaceholders:
     def test_substitutes_multiple_placeholders(self, db_session):
         html = '<img src="{{image:1}}" /><img src="{{image:2}}" />'
         with patch("src.utils.image_utils.image_service") as mock_svc:
-            def side_effect(db, image_id):
+            def side_effect(db, image_id, *, requesting_user):
                 if image_id == "1":
                     return ("DATA_1", "image/png")
                 return ("DATA_2", "image/jpeg")
@@ -94,15 +94,19 @@ class TestSubstituteImagePlaceholders:
         html = '<img src="{{image:aB3_x-9Zq}}" />'
         with patch("src.utils.image_utils.image_service") as mock_svc:
             mock_svc.get_image_base64.return_value = ("DATA", "image/png")
-            result = substitute_image_placeholders(html, db_session)
+            result = substitute_image_placeholders(
+                html, db_session, requesting_user="alice@test.com"
+            )
 
         assert result == '<img src="data:image/png;base64,DATA" />'
-        mock_svc.get_image_base64.assert_called_once_with(db_session, "aB3_x-9Zq")
+        mock_svc.get_image_base64.assert_called_once_with(
+            db_session, "aB3_x-9Zq", requesting_user="alice@test.com"
+        )
 
     def test_mixed_resolved_and_unresolved(self, db_session):
         html = '<img src="{{image:1}}" /><img src="{{image:999}}" />'
         with patch("src.utils.image_utils.image_service") as mock_svc:
-            def side_effect(db, image_id):
+            def side_effect(db, image_id, *, requesting_user):
                 if image_id == "1":
                     return ("OK_DATA", "image/png")
                 raise ValueError("not found")
