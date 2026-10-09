@@ -155,12 +155,24 @@ class _Adapter:
         return schema.model_validate(self.output)
 
 
-EXPECTED_MODEL_CONFIGURATION = AgentModelConfiguration(
-    endpoint_name="databricks-claude-opus-4-6",
-    temperature=0.7,
-    max_tokens=60000,
-    top_p=0.95,
-)
+EXPECTED_ENDPOINTS = {
+    "architect": "databricks-claude-opus-4-6",
+    "data_analyst": "databricks-claude-opus-4-6",
+    "builder": "databricks-claude-haiku-5-5",
+    "build_reviewer": "databricks-claude-opus-4-6",
+    "fixer": "databricks-claude-opus-4-6",
+    "fix_reviewer": "databricks-claude-haiku-5-5",
+    "deck_reviewer": "databricks-claude-haiku-5-5",
+}
+
+
+def _get_expected_model_configuration(agent_key: str) -> AgentModelConfiguration:
+    return AgentModelConfiguration(
+        endpoint_name=EXPECTED_ENDPOINTS[agent_key],
+        temperature=0.7,
+        max_tokens=60000,
+        top_p=0.95,
+    )
 
 
 def _assert_composed_schema(
@@ -190,7 +202,7 @@ def _assert_single_adapter_call(
     call = adapter.calls[0]
     assert set(call) == {"agent_key", "configuration", "schema", "prompt"}
     assert call["agent_key"] == agent_key
-    assert call["configuration"] == EXPECTED_MODEL_CONFIGURATION
+    assert call["configuration"] == _get_expected_model_configuration(agent_key)
     assert call["prompt"] == prompt
     _assert_composed_schema(
         call["schema"], agent_key, schema_version, optional_selected=optional_selected
@@ -1509,7 +1521,7 @@ def test_diagnostics_freeze_a_mutable_mapping_from_any_construction_site() -> No
         agent_key="architect",
         definition_version=1,
         assembled_prompt="p",
-        model_configuration=EXPECTED_MODEL_CONFIGURATION,
+        model_configuration=_get_expected_model_configuration("architect"),
         protected_prompt=ProtectedPromptIdentity(version=1, digest="0" * 64),
         schema_contract=SchemaContractIdentity("architect", 1, "0" * 64),
         assembly_stages=(),
@@ -1525,7 +1537,7 @@ def test_diagnostics_freeze_a_mutable_mapping_from_any_construction_site() -> No
         agent_key="architect",
         definition_version=1,
         assembled_prompt="p",
-        model_configuration=EXPECTED_MODEL_CONFIGURATION,
+        model_configuration=_get_expected_model_configuration("architect"),
         protected_prompt=ProtectedPromptIdentity(version=1, digest="0" * 64),
         schema_contract=SchemaContractIdentity("architect", 1, "0" * 64),
         assembly_stages=(),

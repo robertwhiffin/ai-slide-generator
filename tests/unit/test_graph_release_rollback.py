@@ -657,7 +657,10 @@ def test_preview_runs_the_remote_check_after_the_locked_transaction(factory, mon
 
     result = _preview_with(factory, 2, validator, holder)
 
-    assert validator.calls == [("databricks-claude-opus-4-6", False)]
+    assert validator.calls == [
+        ("databricks-claude-opus-4-6", False),
+        ("databricks-claude-haiku-5-5", False),
+    ]
     assert result.warnings == ()
     assert result.restorable is True
     assert _artifacts(factory) == before
@@ -700,6 +703,7 @@ def test_preview_checks_each_distinct_endpoint_once_and_warns_every_user(
 
     assert validator.calls == [
         ("databricks-claude-opus-4-6", False),
+        ("databricks-claude-haiku-5-5", False),
         ("system.ai.other-endpoint", False),
     ]
     assert result.warnings == (
