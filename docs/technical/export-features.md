@@ -209,7 +209,7 @@ Persisted slide JavaScript can paint the export document but cannot read the Tel
 - Background worker processes jobs in thread pool
 - Thread pool execution prevents blocking event loop during LLM calls
 - Progress tracking per job (slides completed / total) stored in DB
-- Job cleanup after download (deletes DB row + temp file)
+- Job cleanup is TTL-based: `GET /api/export/pptx/download/{job_id}` is idempotent and does not delete anything; a background sweep (`export_cleanup_loop`, every 5 min) removes completed/error jobs older than 30 min (DB row + temp file)
 - Multi-worker safe: any process can read job status from the shared database
 
 **PPTX Converter Service** (`src/services/html_to_pptx.py`):
