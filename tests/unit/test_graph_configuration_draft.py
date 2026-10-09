@@ -59,8 +59,27 @@ from src.services.prompt_assembler import (
 )
 
 
+def _legacy_manifest():
+    """Create a v1 manifest with legacy databricks endpoints for testing."""
+    manifest = load_graph_v1_manifest()
+    definitions = []
+    for d in manifest.definitions:
+        # Replace gateway endpoints with legacy databricks endpoints
+        endpoint_map = {
+            "system.ai.claude-opus-5": "databricks-claude-opus-4-6",
+            "system.ai.claude-haiku-4-5": "databricks-claude-haiku-5-5",
+        }
+        legacy_endpoint = endpoint_map.get(d.model.endpoint_name, d.model.endpoint_name)
+        if legacy_endpoint != d.model.endpoint_name:
+            d = d.model_copy(
+                update={"model": d.model.model_copy(update={"endpoint_name": legacy_endpoint})}
+            )
+        definitions.append(d)
+    return manifest.model_copy(update={"definitions": definitions})
+
+
 @pytest.fixture
-def session_factory() -> Iterator[sessionmaker]:
+def session_factory(monkeypatch) -> Iterator[sessionmaker]:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -73,6 +92,11 @@ def session_factory() -> Iterator[sessionmaker]:
 
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
+    # Patch load_graph_v1_manifest to return legacy endpoints for these tests
+    monkeypatch.setattr(
+        "src.services.graph_definition_manifest.load_graph_v1_manifest",
+        _legacy_manifest,
+    )
     GraphConfiguration().bootstrap_v1(factory)
     try:
         yield factory

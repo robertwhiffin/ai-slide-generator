@@ -156,13 +156,13 @@ class _Adapter:
 
 
 EXPECTED_ENDPOINTS = {
-    "architect": "databricks-claude-opus-4-6",
-    "data_analyst": "databricks-claude-opus-4-6",
-    "builder": "databricks-claude-haiku-5-5",
-    "build_reviewer": "databricks-claude-opus-4-6",
-    "fixer": "databricks-claude-opus-4-6",
-    "fix_reviewer": "databricks-claude-haiku-5-5",
-    "deck_reviewer": "databricks-claude-haiku-5-5",
+    "architect": "system.ai.claude-opus-5",
+    "data_analyst": "system.ai.claude-opus-5",
+    "builder": "system.ai.claude-haiku-4-5",
+    "build_reviewer": "system.ai.claude-opus-5",
+    "fixer": "system.ai.claude-opus-5",
+    "fix_reviewer": "system.ai.claude-haiku-4-5",
+    "deck_reviewer": "system.ai.claude-haiku-4-5",
 }
 
 
@@ -260,6 +260,30 @@ def _v2_resolved(agent_key: str) -> ResolvedDefinition:
         agent_key=agent_key,
         agent_definition_revision_id=101,
         content_hash="b" * 64,
+        content=content,
+    )
+
+
+def _legacy_endpoint_resolved() -> ResolvedDefinition:
+    """Create a v1 resolved definition with a legacy databricks endpoint for testing."""
+
+    content = next(
+        item for item in load_graph_v1_manifest().definitions if item.agent_key == "architect"
+    )
+    # Replace gateway endpoint with legacy endpoint
+    content = content.model_copy(
+        update={
+            "model": content.model.model_copy(
+                update={"endpoint_name": "databricks-claude-opus-4-6"}
+            )
+        }
+    )
+    return ResolvedDefinition(
+        graph_version=7,
+        graph_release_id=41,
+        agent_key="architect",
+        agent_definition_revision_id=23,
+        content_hash="a" * 64,
         content=content,
     )
 
@@ -644,7 +668,7 @@ def test_persisted_v2_build_reviewer_deck_brief_tracks_truthiness(deck_brief) ->
         {
             "agent_key": "build_reviewer",
             "configuration": AgentModelConfiguration(
-                endpoint_name="databricks-claude-opus-4-6",
+                endpoint_name="system.ai.claude-opus-5",
                 temperature=0.7,
                 max_tokens=60000,
                 top_p=0.95,
@@ -829,7 +853,7 @@ def test_persisted_runtime_uses_exact_release_and_records_full_identity():
     ]
     assert adapter.calls[0]["agent_key"] == "architect"
     assert adapter.calls[0]["configuration"] == AgentModelConfiguration(
-        endpoint_name="databricks-claude-opus-4-6",
+        endpoint_name="system.ai.claude-opus-5",
         temperature=0.7,
         max_tokens=60000,
         top_p=0.95,
@@ -856,7 +880,7 @@ def test_provider_failure_is_converted_before_recording_sink_observes_it():
     original = ModelProviderUnavailableError("pinned model provider unavailable")
     sink = RecordingAgentInvocationIdentitySink()
     runtime = AgentRuntime(
-        persisted_release_loader=_Loader(_resolved()),
+        persisted_release_loader=_Loader(_legacy_endpoint_resolved()),
         model_adapter=_Adapter(original),
         identity_sink=sink,
     )
@@ -1120,7 +1144,7 @@ def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
 
     sink = sink_factory()
     runtime = AgentRuntime(
-        persisted_release_loader=_Loader(_resolved()),
+        persisted_release_loader=_Loader(_legacy_endpoint_resolved()),
         model_adapter=DatabricksModelAdapter(
             model_factory=model_factory, client_factory=client_factory
         ),
@@ -1185,7 +1209,7 @@ def test_removed_endpoint_is_attempted_once_without_a_default_fallback():
         return object()
 
     runtime = AgentRuntime(
-        persisted_release_loader=_Loader(_resolved()),
+        persisted_release_loader=_Loader(_legacy_endpoint_resolved()),
         model_adapter=DatabricksModelAdapter(
             model_factory=model_factory, client_factory=client_factory
         ),

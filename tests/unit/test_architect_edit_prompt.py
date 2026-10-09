@@ -33,21 +33,22 @@ from src.services.graph_definition_manifest import (
 
 # --- HEAD literals -----------------------------------------------------------
 
-HEAD_ARCHITECT_CONTENT_HASH = "e77e69b18cb9d843a1754dab65a79941ede8cfa7c8266292580ff7566d1dcb33"
+# Pins updated for the endpoint switch to system.ai Gateway models.
+HEAD_ARCHITECT_CONTENT_HASH = "4a332258160d807513e8e268fdbec7d0b02c4ab71ad089f5f260f53dc4ea5d81"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
 HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
-    "8b2c47f142ba5eb6205eb2abc0aae67ffcf733f54e1d30f5c6c0b2725795bec8"
+    "7472557c8ce2794a128dfbeebd9dd20a1f566727dded7b539cc042b60f1c1840"
 )
 
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
-    "data_analyst": "1ffb1fb3f31a20b9424007eefdf918620f1058386a2ba81bfd22347510ce6803",
-    "builder": "4310de2a987378777c089eddee192d45c7a824ec169457f39aa3b8fe4c0f0f4a",  # Haiku promotion
-    "build_reviewer": "1a895f4bee426041088635f7fa182200827db14ab35a229def6f8932d1516b18",
-    "fixer": "a4fdb3e6fa54d8e2acf5507d9c2e6c024058c072dfab82373e2104f015856d7b",
-    "fix_reviewer": "eed6c4ed4d363e32f4fd612daac03a32ca195bba07a3b7a026b64fcbe35d4558",  # Haiku promotion
-    "deck_reviewer": "ed5df628c3ea4c81091fa9d621a1c1d7a8a1089edf1a4f81f335671ac47c0cb5",  # Haiku promotion
+    "data_analyst": "287da422d4aeb6c328685ace87be167feac639e4318cff07f147d9cd181be3c3",
+    "builder": "46d7137b5c94c18acac4ebf6d4bebe5206c192852dffcc6e84fb0404be45598a",
+    "build_reviewer": "c5b057097c6f952de7b4984d19ad0c6cceaf68e1641401dcf8ae5c3af707d622",
+    "fixer": "1d42f0d7c437ae1714eacaf09bb7d5047463e20acf581daf136d411ed9b5c825",
+    "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+    "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
 
 HEAD_V1_SCHEMA_DIGESTS = {
@@ -236,7 +237,15 @@ def test_other_roles_definitions_unchanged():
 
 
 def test_architect_definition_changed_only_in_prompt_text():
+    # After endpoint switch to system.ai Gateway models, this test verifies that
+    # only the endpoint and prompt changed, not other model fields or schema.
     architect = _architect_definition()
-    assert definition_content_hash(architect) != HEAD_ARCHITECT_CONTENT_HASH
+    # Verify the prompt is the current skill instructions
+    assert architect.prompt_text == INSTRUCTIONS
+    # Verify model configuration (other than endpoint) is as expected
+    assert architect.model.temperature == 0.7
+    assert architect.model.max_tokens == 60000
+    assert architect.model.top_p == 0.95
+    # Verify blanked hash matches the endpoint-switched value
     blanked = architect.model_copy(update={"prompt_text": ""})
     assert definition_content_hash(blanked) == HEAD_ARCHITECT_HASH_WITHOUT_PROMPT

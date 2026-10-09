@@ -114,13 +114,13 @@ EXPECTED_FOREMAN_NODE = {
 }
 LOWERCASE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 EXPECTED_ENDPOINTS = {
-    "architect": "databricks-claude-opus-4-6",
-    "data_analyst": "databricks-claude-opus-4-6",
-    "builder": "databricks-claude-haiku-5-5",
-    "build_reviewer": "databricks-claude-opus-4-6",
-    "fixer": "databricks-claude-opus-4-6",
-    "fix_reviewer": "databricks-claude-haiku-5-5",
-    "deck_reviewer": "databricks-claude-haiku-5-5",
+    "architect": "system.ai.claude-opus-5",
+    "data_analyst": "system.ai.claude-opus-5",
+    "builder": "system.ai.claude-haiku-4-5",
+    "build_reviewer": "system.ai.claude-opus-5",
+    "fixer": "system.ai.claude-opus-5",
+    "fix_reviewer": "system.ai.claude-haiku-4-5",
+    "deck_reviewer": "system.ai.claude-haiku-4-5",
 }
 
 
@@ -4126,8 +4126,10 @@ def test_endpoint_validation_dependency_is_resolved_only_by_the_draft_put(
         client.post(_source_url(), json={"lock_version": before["draft"]["lock_version"]})
         assert resolved == []
         current = _workbench(client)
+        # An unchanged save still resolves the validator; v1 now carries a Gateway name.
+        current_endpoint = _model_node(current, "architect")["draft"]["model"]["endpoint_name"]
         response = client.put(
-            _draft_save_url(), json=_endpoint_save_body(current, _SEED_ENDPOINT)
+            _draft_save_url(), json=_endpoint_save_body(current, current_endpoint)
         )
 
     assert response.status_code == 200

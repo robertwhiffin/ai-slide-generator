@@ -658,8 +658,8 @@ def test_preview_runs_the_remote_check_after_the_locked_transaction(factory, mon
     result = _preview_with(factory, 2, validator, holder)
 
     assert validator.calls == [
-        ("databricks-claude-opus-4-6", False),
-        ("databricks-claude-haiku-5-5", False),
+        ("system.ai.claude-opus-5", False),
+        ("system.ai.claude-haiku-4-5", False),
     ]
     assert result.warnings == ()
     assert result.restorable is True
@@ -702,8 +702,8 @@ def test_preview_checks_each_distinct_endpoint_once_and_warns_every_user(
     result = _preview_with(factory, 5, validator, holder)
 
     assert validator.calls == [
-        ("databricks-claude-opus-4-6", False),
-        ("databricks-claude-haiku-5-5", False),
+        ("system.ai.claude-opus-5", False),
+        ("system.ai.claude-haiku-4-5", False),
         ("system.ai.other-endpoint", False),
     ]
     assert result.warnings == (
@@ -1641,8 +1641,18 @@ def _save_model(factory, agent_key, endpoint_name, *, lock):
     return out
 
 
+@pytest.fixture
+def legacy_v1(monkeypatch):
+    """Seed v1 with databricks-* names, as releases persisted before ws2a carry them."""
+    from tests.unit.test_graph_configuration_draft import _legacy_manifest
+
+    monkeypatch.setattr(
+        "src.services.graph_definition_manifest.load_graph_v1_manifest", _legacy_manifest
+    )
+
+
 def test_rollback_to_a_legacy_release_is_not_blocked_by_the_gateway_name_rule(
-    factory, monkeypatch
+    legacy_v1, factory, monkeypatch
 ):
     """Review Focus 1: v1 (all seven roles databricks-*) is restorable after a system.ai v2."""
     offset_release_ids(factory)
