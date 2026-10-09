@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 from src.api.main import app
 from src.core.database import Base, get_db
+from src.services.svg_sanitizer import sanitize_svg
 from tests.unit.conftest_design_system import (
     make_bundle_zip,
     make_zip64_header_offset_archive,
@@ -1155,7 +1156,7 @@ class TestTemplateSourceEndpoint:
         data = resp.json()
 
         # <img src="{{ds-asset:ID}}"> handles -> byte-exact data: URIs.
-        logo_b64 = base64.b64encode(SVG_LOGO).decode()
+        logo_b64 = base64.b64encode(sanitize_svg(SVG_LOGO)).decode()
         assert f"data:image/svg+xml;base64,{logo_b64}" in data["layout_html"]
         # CSS url() handle (the hero background in the template <style>) too.
         assert 'url("data:image/png;base64,' in data["layout_html"]

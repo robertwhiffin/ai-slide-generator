@@ -12,6 +12,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Query, Session
 
 from src.database.models.image import ImageAsset
+from src.services.svg_sanitizer import looks_like_svg, sanitize_svg
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,20 @@ def upload_image(
         raise ValueError(f"File type not allowed: {mime_type}. Allowed: {ALLOWED_TYPES}")
     if len(file_content) > MAX_FILE_SIZE:
         raise ValueError(f"File too large: {len(file_content)} bytes (max {MAX_FILE_SIZE})")
+
+    # The client-declared MIME type is untrusted: decide on the CONTENT.
+    # SVG can carry script, so it is always sanitized; SVG bytes declared as
+    # any other type are rejected rather than stored under a raster label.
+    if mime_type == "image/svg+xml":
+        try:
+            file_content = sanitize_svg(file_content)
+        except ValueError as exc:
+            raise ValueError(f"Invalid SVG upload: {exc}") from exc
+    elif looks_like_svg(file_content):
+        raise ValueError(
+            f"File content is SVG but was declared as {mime_type}; "
+            "upload it as image/svg+xml."
+        )
 
     # Check for duplicate original_filename among active images (case-insensitive).
     # Ephemeral images (paste-to-chat) skip this check — they use throwaway names

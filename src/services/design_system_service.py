@@ -74,6 +74,7 @@ from src.database.models.design_system import (
     DesignSystemToken,
 )
 from src.services.design_system_compiler import recompute_compiled_style_content
+from src.services.svg_sanitizer import looks_like_svg, sanitize_svg
 
 logger = logging.getLogger(__name__)
 
@@ -2164,6 +2165,20 @@ def _collect_assets_and_files(
                 mime = sniffed
             else:
                 mime = _guess_mime(rel)
+                if mime == "image/svg+xml":
+                    try:
+                        data = sanitize_svg(data)
+                    except ValueError as exc:
+                        raise DesignSystemImportError(
+                            f"Bundle entry '{rel}' is not a valid SVG: {exc}"
+                        ) from exc
+                elif looks_like_svg(data):
+                    # Extension says raster/font/etc. but the bytes are SVG:
+                    # never trust the name to skip sanitization.
+                    raise DesignSystemImportError(
+                        f"Bundle entry '{rel}' contains SVG content but does not "
+                        "have an .svg extension"
+                    )
             width, height = _image_dimensions(data, mime)
             asset = DesignSystemAsset(
                 kind=kind,
