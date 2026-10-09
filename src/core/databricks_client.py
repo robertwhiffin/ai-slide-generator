@@ -429,16 +429,14 @@ def create_user_client(token: str) -> WorkspaceClient:
     if not host:
         raise DatabricksClientError("DATABRICKS_HOST environment variable not set")
 
-    # Diagnostic logging (debug to avoid log spam on every request/poll)
+    # Diagnostic logging: flag SP-vs-user tokens. F-CR-9 (SDR-4437): never log
+    # any part of the bearer token (no prefix, no length) — only derived booleans.
     client_id_env = os.getenv("DATABRICKS_CLIENT_ID", "")
-    token_prefix = token[:20] if len(token) > 20 else token
     is_sp_token = client_id_env and token.startswith(client_id_env)
 
     logger.debug(
         "create_user_client: creating client",
         extra={
-            "token_prefix": token_prefix,
-            "token_length": len(token),
             "is_service_principal": is_sp_token,
             "host": host,
         },
