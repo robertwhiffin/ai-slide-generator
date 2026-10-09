@@ -14,6 +14,8 @@ from enum import Enum
 from functools import lru_cache
 from typing import Dict, List, Optional
 
+from src.services.identity_providers.scim_filter import escape_scim_filter_string
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,8 +35,9 @@ def _resolve_cached(email: str) -> str:
         provider = get_identity_provider()
         from src.services.identity_providers.workspace_provider import WorkspaceIdentityProvider
         if isinstance(provider._provider, WorkspaceIdentityProvider):
+            escaped_email = escape_scim_filter_string(email)
             for u in provider._provider._client.users.list(
-                filter=f'userName eq "{email}"',
+                filter=f'userName eq "{escaped_email}"',
                 attributes="id,userName,displayName",
             ):
                 if u.display_name:
