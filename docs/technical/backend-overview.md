@@ -9,7 +9,7 @@ This guide explains how the FastAPI/LangChain backend works, how it serves the f
 - **Runtime:** Python 3.11+, FastAPI (ASGI) with Uvicorn/Gunicorn, packaged under `src/`.
 - **Core libs:** LangChain (tool-calling agent), Databricks `WorkspaceClient`, MLflow for tracing, BeautifulSoup for HTML parsing.
 - **Entry:** `src/api/main.py` instantiates FastAPI, wires CORS, user auth middleware, request logging middleware, and registers 20+ routers under `/api`.
-- **Process lifecycle:** `lifespan` context starts the chat job queue worker, the export job queue worker, and the request log cleanup task. It also recovers stuck requests on startup, initializes the database, runs profile-to-agent-config migrations, and starts the Lakebase token refresh loop when running in Databricks Apps.
+- **Process lifecycle:** `lifespan` context starts the chat job queue worker, the export job queue worker, the export job TTL cleanup worker, and the request log cleanup task. It also recovers stuck requests on startup, initializes the database, runs profile-to-agent-config migrations, and starts the Lakebase token refresh loop when running in Databricks Apps.
 
 ---
 
