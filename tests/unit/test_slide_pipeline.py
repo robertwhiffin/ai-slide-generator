@@ -271,3 +271,27 @@ class TestTheDraftIsVisibleBeforeReview:
 
         assert "record" in record_at_review, "the reviewer never ran"
         assert record_at_review["record"] in (None, "", "{}", "null")
+
+    def test_a_draft_never_overwrites_a_committed_slide(self, graph_env_threadsafe):
+        """On an edit or rebuild the position already holds the user's slide.  A
+        turn that then dies on a persisted runtime failure must leave that slide,
+        not an unreviewed draft, so the draft only fills an empty position."""
+        env = graph_env_threadsafe
+        _wire(env, (0, 1))
+        env.seed_slides(["<div class='slide'>existing 0</div>"])
+        seen_at_review: Dict[int, Any] = {}
+
+        def reviewer(payload):
+            row = _rows(env).get(payload["position"])
+            seen_at_review[payload["position"]] = row.html if row else None
+            return review_out(payload["position"])
+
+        env.skills.set("build_reviewer", reviewer)
+
+        _run(env)
+
+        assert seen_at_review == {
+            0: "<div class='slide'>existing 0</div>",
+            1: "<div class='slide'>slide 1</div>",
+        }
+        assert _rows(env)[0].html == "<div class='slide'>slide 0</div>"
