@@ -740,8 +740,9 @@ async def submit_chat_async(
 
         # ws4d D2 — resolved AFTER the user message is persisted just above,
         # because resolve_engine_mode reads the deck's EARLIEST role='user'
-        # message: on turn 1 that row has to exist already or the phrase in the
-        # very first message would resolve to monolith.
+        # message: on turn 1 that row has to exist already or a USE LEGACY MODE
+        # opt-out in the very first message would resolve to the default
+        # (graph) engine.
         #
         # FAIL CLOSED (#271 C24/C47): a failure of THIS call (and only this call)
         # becomes `_EngineModeUnresolvedError`, which the clause below turns into a 503

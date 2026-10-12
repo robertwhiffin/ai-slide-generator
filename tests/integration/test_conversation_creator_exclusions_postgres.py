@@ -115,27 +115,44 @@ def test_create_chat_request_cannot_create_an_absent_session(postgres_engine):
         assert db.scalar(select(ChatRequest)) is None
 
 
-def test_tour_spells_false_and_persists_a_null_pin(postgres_engine):
-    """Omitting the tour exclusion makes a later default change silently pin demos."""
+def test_tour_spells_true_and_persists_the_active_pin(postgres_engine):
+    """Since 2026-10-12 the tour is no longer excluded: it is a graph deck.
+
+    Its fixture prompt carries no USE LEGACY MODE opt-out, so the resolver sends
+    the tour deck to the graph; an unpinned tour root would fail its first chat
+    turn with ConversationPinMissingError.  It must spell True (not lean on a
+    default) and persist the exact active release.
+    """
+    from src.api.routes.tour import _load_fixture
+    from src.domain.conversation_engine import selects_graph_engine
+
     factory = _factory_with_active_release(postgres_engine)
     recorder = _RecordingManager(SessionManager())
     with patch(
         "src.api.services.session_manager.get_db_session", _database_context(factory)
     ), patch(
         "src.api.routes.tour.get_session_manager", return_value=recorder
-    ), patch(
-        "src.api.services.session_manager.lock_active_graph_release",
-        side_effect=_lock_tripwire,
     ):
         result = _phase1_create_session("tour@example.com")
 
-    assert recorder.create_kwargs[0]["graph_capable"] is False
-    assert _pin(factory, result["session_id"]) is None
+    assert recorder.create_kwargs[0]["graph_capable"] is True
+    with factory() as db:
+        active_id = db.scalar(
+            select(GraphRelease.id).where(GraphRelease.effective_to.is_(None))
+        )
+    assert _pin(factory, result["session_id"]) == active_id
+    # The pin and the engine agree: the fixture prompt selects the graph.
+    assert selects_graph_engine(_load_fixture()["chat_prompt"]) is True
 
 
 @pytest.mark.asyncio
 async def test_mcp_spells_false_and_persists_a_null_pin(postgres_engine):
-    """Omitting the MCP exclusion makes a later default change silently pin tool decks."""
+    """Omitting the MCP exclusion makes a later default change silently pin tool decks.
+
+    MCP is still excluded after the 2026-10-12 inversion: it stays on the
+    monolith, and its first persisted message carries USE LEGACY MODE (see
+    tests/unit/test_mcp_server.py) so the transcript agrees with the null pin.
+    """
     factory = _factory_with_active_release(postgres_engine)
     recorder = _RecordingManager(SessionManager())
 

@@ -70,6 +70,7 @@ def test_postgres_migrates_and_backfills_conversation_pins_deterministically(
                 "later-marker-root",
                 "empty-root",
                 "historical-pre-pinned-root",
+                "opted-out-historical-root",
             )
         }
         roots["historical-pre-pinned-root"].graph_release_id = v1_id
@@ -167,11 +168,24 @@ def test_postgres_migrates_and_backfills_conversation_pins_deterministically(
                     content="USE AGENT MODE already pinned",
                     created_at=timestamp,
                 ),
+                # Since 2026-10-12 USE LEGACY MODE wins: this deck resolves to
+                # the monolith, so the historical backfill must not pin it.
+                SessionMessage(
+                    id=111,
+                    session_id=roots["opted-out-historical-root"].id,
+                    role="user",
+                    content="USE AGENT MODE -- no, USE LEGACY MODE",
+                    created_at=timestamp,
+                ),
             )
         )
 
     from src.services.conversation_pins import BackfillResult, backfill_conversation_pins
 
+    # The backfill keeps its HISTORICAL meaning after the 2026-10-12 inversion:
+    # plain-first roots ("later-marker-root", "tie-legacy-root") now resolve to
+    # the graph, but pinning them at startup would be a cutover the decision
+    # ruled out, so they stay null.
     assert backfill_conversation_pins(factory) == BackfillResult(v1_id, 1, 3)
     with factory() as db:
         identity_map = dict(
@@ -188,6 +202,7 @@ def test_postgres_migrates_and_backfills_conversation_pins_deterministically(
         "historical-pre-pinned-root": v1_id,
         "later-marker-root": None,
         "legacy-contributor": v1_id,
+        "opted-out-historical-root": None,
         "tie-graph-root": v1_id,
         "tie-legacy-root": None,
     }

@@ -57,7 +57,9 @@ describe('conversation graph-version state', () => {
     fetchMock.mockRestore();
   });
 
-  it('serializes omitted graph capability as false', async () => {
+  // Since 2026-10-12 the graph is the default engine, so an omitted capability
+  // pins the root; only an explicit false opts out.
+  it('serializes omitted graph capability as true', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ session_id: 'default-root' }), { status: 200 }),
     );
@@ -70,7 +72,7 @@ describe('conversation graph-version state', () => {
         body: JSON.stringify({
           session_id: 'default-root',
           title: undefined,
-          graph_capable: false,
+          graph_capable: true,
         }),
       }),
     );

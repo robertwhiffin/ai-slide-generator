@@ -1,8 +1,9 @@
 """`clear_context` (ws4d D1 / spec §7.2): the service, and the route's CAN_EDIT gate.
 
 Real sqlite for the service half — the defect this code exists to prevent (a
-clear that takes the engine-mode marker with it, silently reverting the deck to
-the monolith on the next turn) is invisible to a mock, and so is the one that
+clear that takes the engine-mode marker with it, silently switching the deck's
+engine on the next turn; since 2026-10-12 the marker is the LEGACY opt-out, so
+a lost marker moves a legacy deck onto the graph) is invisible to a mock, and so is the one that
 keeps the spec's row but loses the graph thread.  Every assertion reads rows
 back, and mode is re-derived through `resolve_engine_mode` rather than asserted
 on a string.
@@ -26,7 +27,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.api.services.chat_service import (
-    AGENT_MODE_PHRASE,
+    LEGACY_MODE_PHRASE,
     ChatService,
     resolve_engine_mode,
 )
@@ -41,7 +42,7 @@ _MANAGER_DB = "src.api.services.session_manager.get_db_session"
 _WRITER_DB = "src.api.services.deck_level_writer.get_db_session"
 _CHECKPOINTER = "src.core.checkpointer.get_checkpointer"
 
-_PHRASE_MESSAGE = f"{AGENT_MODE_PHRASE} and build me a deck about puffins"
+_PHRASE_MESSAGE = f"{LEGACY_MODE_PHRASE} and build me a deck about puffins"
 _PLAIN_MESSAGE = "Build me a deck about puffins"
 
 
@@ -174,7 +175,7 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
             assert result["preserved_message_id"] == rows[0].id
 
             # The mode the marker encodes survived with it.
-            assert resolve_engine_mode(sid) == "graph"
+            assert resolve_engine_mode(sid) == "monolith"
 
             # The spec is still there AND still readable.
             assert _deck_spec_column(factory, sid) == spec_before
@@ -184,7 +185,7 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
         # runs the thread under.
         assert saver.deleted == [sid]
 
-    def test_a_monolith_sessions_first_row_is_preserved_too(
+    def test_a_graph_sessions_first_row_is_preserved_too(
         self, session_with_messages, _session_unit_engine
     ):
         """Clearing never CHANGES the mode — in either direction."""
@@ -198,7 +199,7 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
             result = ChatService().clear_context(sid)
             assert [r.content for r in _messages_of(factory, sid)] == [_PLAIN_MESSAGE]
             assert result["deleted_messages"] == 1
-            assert resolve_engine_mode(sid) == "monolith"
+            assert resolve_engine_mode(sid) == "graph"
 
     def test_a_session_with_no_messages_clears_cleanly(
         self, empty_session, _session_unit_engine
@@ -246,7 +247,7 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
             assert [r.content for r in _messages_of(factory, contrib_sid)] == [
                 "my own first ask"
             ]
-            assert resolve_engine_mode(contrib_sid) == "graph"
+            assert resolve_engine_mode(contrib_sid) == "monolith"
         assert saver.deleted == [contrib_sid]
 
     def test_an_unimplemented_saver_rolls_the_prune_back(

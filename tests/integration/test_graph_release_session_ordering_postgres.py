@@ -300,7 +300,8 @@ def _assert_source_keeps_v1(factory, creator, actor, v1_id) -> None:
             copied = db.scalar(
                 select(SessionMessage).where(SessionMessage.session_id == actor.id)
             )
-        assert copied.content == f"{AGENT_MODE_PHRASE} duplicate"
+        # Graph is the default since 2026-10-12: a graph duplicate carries no marker row.
+        assert copied is None
 
 
 # ---------------------------------------------------------------------------
@@ -766,7 +767,8 @@ def _assert_source_keeps_v4(factory, creator, actor, v4_id) -> None:
             copied = db.scalar(
                 select(SessionMessage).where(SessionMessage.session_id == actor.id)
             )
-        assert copied.content == f"{AGENT_MODE_PHRASE} duplicate"
+        # Graph is the default since 2026-10-12: a graph duplicate carries no marker row.
+        assert copied is None
 
 
 # ---------------------------------------------------------------------------

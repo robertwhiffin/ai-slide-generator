@@ -1821,7 +1821,8 @@
       "method": "POST",
       "path": "/api/sessions",
       "request": {
-        "session_id": "control-legacy"
+        "session_id": "control-legacy",
+        "graph_capable": false
       },
       "status": 200,
       "body": {

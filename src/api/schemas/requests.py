@@ -135,7 +135,9 @@ class CreateSessionRequest(BaseModel):
         max_length=255,
     )
     graph_capable: bool = Field(
-        default=False,
+        # True since 2026-10-12: a session created with no message resolves to
+        # the graph engine (the default), and a graph turn needs a pin.
+        default=True,
         description="Whether this explicit root session pins the active graph release",
     )
 

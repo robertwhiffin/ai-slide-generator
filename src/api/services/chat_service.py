@@ -29,6 +29,7 @@ from src.core.databricks_client import (
 )
 from src.domain.conversation_engine import (
     AGENT_MODE_PHRASE as AGENT_MODE_PHRASE,
+    LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
     selects_graph_engine,
 )
 from src.domain.slide import Slide, has_slide_wrapper
@@ -137,16 +138,21 @@ def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Op
 # Engine-mode selection (ws4d D1)
 # ---------------------------------------------------------------------------
 
-# The chat-input trigger that puts a deck on the LangGraph engine.
+# The chat-input trigger that keeps a deck OFF the LangGraph engine.
 #
+# Since 2026-10-12 (agent-mode beta) the graph is the default: a deck runs on
+# the graph unless its first user message contains LEGACY_MODE_PHRASE.
 # Deliberately NOT hardened (plan D0): a loose, case-sensitive substring match
 # anywhere in the deck's first user message, with no authorisation check.  The
-# switch exists so one developer can exercise both engines in one deployment;
-# if it ever outlives testing it needs a strict form (exact prefix, first
-# message only) plus an authorisation check, because a phrase matched anywhere
-# in user text can be tripped by pasted content.  Recorded, not built.
+# switch exists so the legacy monolith stays reachable during the beta; if it
+# ever outlives that it needs a strict form (exact prefix, first message only)
+# plus an authorisation check, because a phrase matched anywhere in user text
+# can be tripped by pasted content.  Recorded, not built.
 def _selects_agent_mode(content: Optional[str]) -> bool:
-    """Whether one message's text selects the graph engine.
+    """Whether a deck whose first user message is ``content`` runs on the graph.
+
+    True unless ``content`` carries :data:`LEGACY_MODE_PHRASE`; ``None`` (no
+    user message yet) and ``""`` are the graph.
 
     The single authority for the match, shared with
     ``SessionManager.duplicate_session``'s marker carry so the two cannot
@@ -165,7 +171,9 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
     checkpointer under a ``thread_id``.  So the answer is a property of the
     deck, read off the **earliest** ``role='user'`` message.  A later message
     carrying the phrase must not switch a monolith deck, and assistant messages
-    are ignored so echoed tool output cannot flip the engine.
+    are ignored so echoed tool output cannot flip the engine.  (Since the
+    2026-10-12 inversion the graph is the default and the phrase is the
+    LEGACY opt-out: a later ``USE LEGACY MODE`` must not switch a graph deck.)
 
     **Resolved on the OWNER DECK's session, not the calling session** (ruling
     W-3).  Decks are shared through ``UserSession.parent_session_id``; mode is
@@ -189,10 +197,15 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
             contributor session, an owner session, or ``None``.
 
     Returns:
-        ``"graph"`` when the owner deck's first user message carries
-        :data:`AGENT_MODE_PHRASE`, else ``"monolith"``.  A missing session, a
-        deck with no user turn yet, and an empty first message all resolve to
-        ``"monolith"``: those are answers.  An unexpected database error is not
+        ``"monolith"`` when the owner deck's first user message carries
+        :data:`LEGACY_MODE_PHRASE`, else ``"graph"``.  A deck with no user turn
+        yet and an empty first message resolve to ``"graph"`` (the default,
+        matching the pin every creator takes for such a deck); a missing
+        session or no session id resolves to ``"monolith"`` -- there is no
+        deck and no pin to run a graph turn on, and on the SSE path the turn-1
+        re-resolve in :meth:`ChatService.send_message_streaming` runs after the
+        auto-create, so it is never the answer a turn actually executes on.
+        Those are answers.  An unexpected database error is not
         an answer and propagates; every call site goes through
         :func:`resolve_engine_mode_or_unavailable`, which fails the turn
         explicitly (#271 C24).
@@ -242,8 +255,8 @@ def resolve_engine_mode_or_unavailable(session_id: Optional[str]) -> str:
     """:func:`resolve_engine_mode`, where a FAILURE to resolve fails the turn closed.
 
     ``resolve_engine_mode`` answers its three "no answer" cases itself (a
-    missing session, a deck with no user turn, an empty first message: all
-    ``"monolith"``); those are answers and pass straight through.  Any other
+    missing session: ``"monolith"``; a deck with no user turn or an empty first
+    message: ``"graph"``); those are answers and pass straight through.  Any other
     exception is a failure to read the database, and it is NOT an answer.
 
     ws4d shipped this wrapper as a fail-OPEN (``resolve_engine_mode_or``, which
@@ -1160,9 +1173,11 @@ class ChatService:
         # `POST /chat/stream` does NOT persist the user message — the block
         # immediately above does it on the route's behalf.  So the streaming
         # route's own resolution necessarily ran BEFORE the deck had any
-        # `role='user'` row, and `resolve_engine_mode` fails closed to monolith
-        # for a deck with no user turn: turn 1 of a new SSE session ran the
-        # monolith however the message read, and turn 2 onward ran the graph.
+        # `role='user'` row, and `resolve_engine_mode` answers the DEFAULT for a
+        # deck with no user turn (graph since 2026-10-12; monolith before):
+        # without this, turn 1 of a new SSE session would run the default
+        # however the message read -- e.g. a `USE LEGACY MODE` first message
+        # would run turn 1 on the graph and turn 2 onward on the monolith.
         # One deck written by both engines is the divergence stickiness exists
         # to prevent.
         #

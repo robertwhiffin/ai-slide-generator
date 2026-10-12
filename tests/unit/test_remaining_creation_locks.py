@@ -27,7 +27,7 @@ from src.database.models.session import (
     SessionSlideDeck,
     UserSession,
 )
-from src.domain.conversation_engine import AGENT_MODE_PHRASE
+from src.domain.conversation_engine import AGENT_MODE_PHRASE, LEGACY_MODE_PHRASE
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 
 
@@ -90,15 +90,18 @@ def _database_context(factory):
 @pytest.mark.parametrize(
     ("message", "expected_capable"),
     [
+        # Since 2026-10-12 the graph is the default; only the opt-out stays unpinned.
+        ("make a deck without the marker", True),
         (f"{AGENT_MODE_PHRASE} make a deck", True),
-        ("make a deck without the marker", False),
+        (f"{LEGACY_MODE_PHRASE} make a deck", False),
     ],
-    ids=["marker", "non-marker"],
+    ids=["non-marker", "old-agent-marker", "legacy-marker"],
 )
 def test_chat_creation_branches_forward_literal_message_capability(
     supplied_id, message, expected_capable
 ):
-    """Dropping either branch's capability argument creates an unpinned graph chat."""
+    """Dropping either branch's capability argument creates an unpinned graph chat
+    (now: every chat without the opt-out) or pins a legacy chat."""
     manager = MagicMock()
     manager.get_session.side_effect = SessionNotFoundError("client-id")
     manager.create_session.return_value = {"session_id": "server-id"}
@@ -125,9 +128,13 @@ class _StopAfterCreation(RuntimeError):
     ("method_name", "message", "expected_capable"),
     [
         ("send_message", f"{AGENT_MODE_PHRASE} sync", True),
-        ("send_message", "plain sync", False),
+        ("send_message", "plain sync", True),
+        ("send_message", f"{LEGACY_MODE_PHRASE} sync", False),
         ("send_message_streaming", f"{AGENT_MODE_PHRASE} stream", True),
-        ("send_message_streaming", "plain stream", False),
+        ("send_message_streaming", "plain stream", True),
+        ("send_message_streaming", f"{LEGACY_MODE_PHRASE} stream", False),
+        # Empty first message: the graph default, so pinned.
+        ("send_message_streaming", "", True),
     ],
 )
 def test_chat_service_fallbacks_forward_literal_message_capability(
@@ -281,12 +288,16 @@ def _seed_duplicate_source(factory, *, session_id: str, message: str):
         db.add(SessionMessage(session_id=source.id, role="user", content=message))
 
 
-def test_graph_marker_duplicate_locks_r2_and_never_copies_or_repins_source(factory):
-    """Copying the source pin would give the new graph actor R1 instead of locked R2."""
+def test_graph_duplicate_locks_r2_and_never_copies_or_repins_source(factory):
+    """Copying the source pin would give the new graph actor R1 instead of locked R2.
+
+    Since 2026-10-12 a graph source has no marker to carry (the graph is the
+    default), so the copy carries no message at all.
+    """
     _seed_duplicate_source(
         factory,
         session_id="marker-source",
-        message=f"{AGENT_MODE_PHRASE} duplicate me",
+        message="ordinary graph request",
     )
     manager = SessionManager()
     with patch(
@@ -301,26 +312,25 @@ def test_graph_marker_duplicate_locks_r2_and_never_copies_or_repins_source(facto
         duplicate = db.scalar(
             select(UserSession).where(UserSession.session_id == result["session_id"])
         )
-        marker = db.scalar(
-            select(SessionMessage).where(SessionMessage.session_id == duplicate.id)
-        )
         assert (source.graph_release_id, duplicate.graph_release_id) == (101, 202)
-        assert marker.content == f"{AGENT_MODE_PHRASE} duplicate me"
+        assert db.scalar(
+            select(SessionMessage).where(SessionMessage.session_id == duplicate.id)
+        ) is None
 
 
-def test_non_marker_duplicate_stays_unpinned_and_never_locks(factory):
-    """Locking every duplicate would classify monolith copies as graph actors."""
+def test_legacy_marker_duplicate_stays_unpinned_and_never_locks(factory):
+    """Locking every duplicate would classify legacy copies as graph actors."""
     _seed_duplicate_source(
         factory,
         session_id="plain-source",
-        message="ordinary monolith request",
+        message=f"{LEGACY_MODE_PHRASE} ordinary monolith request",
     )
     manager = SessionManager()
     with patch(
         "src.api.services.session_manager.get_db_session", _database_context(factory)
     ), patch(
         "src.api.services.session_manager.lock_active_graph_release",
-        side_effect=AssertionError("non-marker duplicate must not lock"),
+        side_effect=AssertionError("legacy-marker duplicate must not lock"),
     ):
         result = manager.duplicate_session("plain-source", "copier@example.com")
 
@@ -332,9 +342,10 @@ def test_non_marker_duplicate_stays_unpinned_and_never_locks(factory):
             select(UserSession).where(UserSession.session_id == result["session_id"])
         )
         assert (source.graph_release_id, duplicate.graph_release_id) == (101, None)
-        assert db.scalar(
+        marker = db.scalar(
             select(SessionMessage).where(SessionMessage.session_id == duplicate.id)
-        ) is None
+        )
+        assert marker.content == f"{LEGACY_MODE_PHRASE} ordinary monolith request"
 
 
 @pytest.mark.parametrize("route_name", ["send_message", "send_message_streaming", "submit_chat_async"])
