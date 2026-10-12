@@ -261,12 +261,17 @@ parent.postMessage({ type: 'tellr-export-frame', channelId: CHANNEL_ID, kind: 'r
 
   test('parent does not fetch, navigate, or write storage for child messages', async ({ page }) => {
     await page.goto('/');
+    // The app shell keeps fetching /api/sessions* on its own while it boots, so
+    // the child asks for a URL nothing else in the app would ever request; the
+    // assertion then pins exactly "the parent acted on the child's request".
+    const probe = `export-frame-probe-${Date.now()}`;
     const srcdoc = protocolSrcdoc(`
+var PROBE = "${probe}";
 window.addEventListener('message', function (e) {
   if (e.source !== window.parent) return;
   if (!e.data || e.data.channelId !== CHANNEL_ID) return;
-  parent.postMessage({ type: 'tellr-export-frame', channelId: CHANNEL_ID, kind: 'fetch', url: '/api/sessions' }, '*');
-  parent.postMessage({ type: 'tellr-export-frame', channelId: CHANNEL_ID, kind: 'navigate', href: '/' }, '*');
+  parent.postMessage({ type: 'tellr-export-frame', channelId: CHANNEL_ID, kind: 'fetch', url: '/api/sessions?' + PROBE }, '*');
+  parent.postMessage({ type: 'tellr-export-frame', channelId: CHANNEL_ID, kind: 'navigate', href: '/?' + PROBE }, '*');
   parent.postMessage({ type: 'tellr-export-frame', channelId: CHANNEL_ID, kind: 'storage', key: 'x', value: 'y' }, '*');
   if (e.data.kind === 'capture-image') {
     parent.postMessage({
@@ -309,7 +314,7 @@ parent.postMessage({ type: 'tellr-export-frame', channelId: CHANNEL_ID, kind: 'r
       };
     }, srcdoc);
 
-    expect(outcome.fetches.filter((u) => u.includes('/api/sessions'))).toEqual([]);
+    expect(outcome.fetches.filter((u) => u.includes(probe))).toEqual([]);
     expect(outcome.hrefUnchanged).toBe(true);
     expect(outcome.storageUnchanged).toBe(true);
 
