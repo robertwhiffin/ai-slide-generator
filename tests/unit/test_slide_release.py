@@ -1093,6 +1093,53 @@ class TestSlideRevisionsSince:
         assert get_session_manager().slide_revisions_since(graph_env.session_id, 1, None) == []
 
 
+    def test_a_row_stamped_just_before_the_mark_is_still_returned(
+        self, graph_env, monkeypatch
+    ):
+        """The overlap window (review finding S5): a write stamped before the
+        mark can commit after the poll that issued it, so it must come back."""
+        _commit(graph_env, 0)
+        mark = time.time() + 600
+        monkeypatch.setattr(
+            "src.api.services.slide_repository.datetime",
+            _FrozenUtc(datetime.utcfromtimestamp(mark - 1)),
+        )
+        _rewrite(graph_env, 0, "<div class='slide'>fixed 0</div>")
+
+        revised = get_session_manager().slide_revisions_since(graph_env.session_id, 1, mark)
+
+        assert [r["html"] for r in revised] == ["<div class='slide'>fixed 0</div>"]
+
+    def test_a_contributor_session_reads_the_owner_s_deck(self, graph_env):
+        """Rows live under the deck owner (review finding S6); a contributor's
+        poll must see the owner's revisions, not an empty deck of its own."""
+        from src.database.models.session import UserSession
+
+        _commit(graph_env, 0, 1)
+        db = graph_env.factory()
+        try:
+            owner = db.query(UserSession).filter(
+                UserSession.session_id == graph_env.session_id
+            ).one()
+            db.add(
+                UserSession(
+                    session_id="contributor-session",
+                    created_by="contributor@example.com",
+                    parent_session_id=owner.id,
+                    graph_release_id=owner.graph_release_id,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        revised = get_session_manager().slide_revisions_since(
+            "contributor-session", 2, time.time() - 60
+        )
+
+        assert [r["position"] for r in revised] == [0, 1]
+
+
 class _FrozenUtc:
     """Stands in for the ``datetime`` module name in ``slide_repository`` so a
     write is stamped at a chosen instant."""
@@ -1147,4 +1194,13 @@ class TestThePollingRouteRevisions:
 
         assert poll_client.get("/api/chat/poll/req-leaked?revisions_after=1").status_code == 403
         manager.slide_revisions_since.assert_not_called()
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-1", "1e20"])
+    def test_an_unusable_mark_is_rejected_not_a_server_error(
+        self, poll_client, poll_manager, bad
+    ):
+        """``datetime.utcfromtimestamp`` raises on these; unvalidated they were a 500."""
+        response = poll_client.get(f"/api/chat/poll/req-1?revisions_after={bad}")
+        assert response.status_code == 422
+        poll_manager.slide_revisions_since.assert_not_called()
 

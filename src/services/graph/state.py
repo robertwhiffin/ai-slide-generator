@@ -197,14 +197,16 @@ class GraphState(TypedDict, total=False):
     # turn, and thread_id IS the actor session.
     #
     # Declared here because the runtime silently DROPS undeclared keys, and
-    # because build_branch_payload and the build-reviewer re-fan both read them
-    # off state to declare them in their Send payloads — a Send-reached node can
+    # because build_branch_payload reads them off state to declare them in the
+    # slide pipeline's Send payload — a Send-reached node can
     # see nothing else.  Neither selects a release: the actor's persisted pin,
     # loaded by invoke_graph into graph_release_id above, does that.
     root_session_id: str
     actor_session_id: str
 
-    # Set by architect_node when a fix turn is triggered.
+    # A slide's own fix target, set by the fixer stage inside its pipeline's
+    # slide-local state, which keeps it there (see fix_map below).  In graph
+    # state only architect_node writes it, resetting it to None each turn.
     fix_target: Optional[int]
 
     # Set by architect_node; updated in-place on each architect pass.

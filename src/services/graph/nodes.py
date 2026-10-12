@@ -527,11 +527,11 @@ def rereview_committed_slides(
 
     §4.6's re-review pass.  It runs inside ``architect_node`` — **Option 2** —
     because the two-pass turn the plan imagined cannot exist on this topology.
-    Measured on the compiled graph, in both directions:
+    Measured on the compiled graph (the earlier four-node topology, whose
+    re-fan router skipped reviewed positions), in both directions:
 
     * A turn that reviews a position before building it puts the position in
-      ``reviewed_positions``, ``build_reviewer_refan_router`` then skips its
-      builder's re-fan, and a three-slide deck came back with **three
+      ``reviewed_positions``, the re-fan then skipped its builder's review, and a three-slide deck came back with **three
       placeholders and ``error_state`` None** — builders paid for, output
       discarded, silently.
     * Landing in the review pass instead makes ``all_positions_committed`` true
@@ -1176,19 +1176,19 @@ def _placehold_failed_position(
 
     **Every path that placeholds a position takes this one function and gets the
     same three surfaces**: the row's error marker, an ``ERROR`` stream event, and
-    a durable ``info`` chat line.  All four of them — the two fanned nodes
-    (``builder``, ``build_reviewer``), ``fix_reviewer``'s undeliverable-row path,
-    and ``placeholder_node``'s stall path.  There is no flag to make one quieter
+    a durable ``info`` chat line.  All four of them — the three pipeline stages
+    (``builder``, ``build_reviewer``, ``fix_reviewer``'s undeliverable-row
+    path) and ``placeholder_node``'s stall path.  There is no flag to make one quieter
     than another, deliberately: the emitter is optional and is ``None`` on the
     sweeper path (and in every layer-1 state test), so an event-only surface
     would let a failed position leave a silently missing slide.  The chat notice
     is the only surface that survives ``emitter=None``, and ``error_state`` is
-    unavailable to the two FANNED paths — it is single-writer with no reducer,
+    unavailable to every FANNED path — it is single-writer with no reducer,
     and two branches failing in one superstep would raise
-    ``InvalidUpdateError`` and kill the turn (measured).  The two edge-reached
-    callers may record it and ``fix_reviewer`` does; that is the only difference
-    between the callers, and it is a difference in what the *caller* returns,
-    never in what this function surfaces.
+    ``InvalidUpdateError`` and kill the turn (measured).  ``fix_reviewer``
+    records it anyway, and ``slide_pipeline_node`` keeps it branch-local
+    (``_PIPELINE_LOCAL_KEYS``); that is a difference in what a *caller*
+    returns, never in what this function surfaces.
 
     ``placeholder_node`` used to carry a hand-written copy of this call and
     diverged three ways — a different ``error_message``, the ``ERROR`` event
@@ -1336,7 +1336,7 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
         "graph_release_id": state["graph_release_id"],
         "turn_id": state["turn_id"],
         # The collaboration trace, DECLARED here because a Send-reached node sees
-        # only its payload: the builder and the re-fanned reviewer cannot read
+        # only its payload: the slide pipeline and every stage in it cannot read
         # state at all, so an omission here is an unattributed mutation rather
         # than an error.  Copied, never re-resolved — invoke_graph resolved the
         # owner once for the whole turn, and a branch that looked it up again
@@ -2046,8 +2046,8 @@ def foreman_node(state: dict) -> Dict[str, Any]:
 
     * ``dispatched_at`` as ``scoped(turn_id, {p: now})`` — the wrapper, never
       ``state["dispatched_at"][p] = now``.  Only the positions **actually
-      dispatched** are stamped: a wake whose decision is ``"fixer"`` or
-      ``"placeholder"`` stamps nothing, or the next wake reads positions that
+      dispatched** are stamped: a wake whose decision is ``"placeholder"``
+      or deck review stamps nothing, or the next wake reads positions that
       never started as dispatched-and-never-completed.
     * ``foreman_wakes`` as ``scoped(turn_id, [batch])`` — a wake on **every**
       entry, ``[]`` included.  ``wakes + [batch]`` returned bare arrives at
@@ -2157,9 +2157,9 @@ def builder_node(payload: dict) -> Dict[str, Any]:
     the gate's ``regenerate`` argument is a zero-arg callable, so the corrective
     instruction travels in the payload the closure captures.
 
-    The whole payload is carried forward in ``slides[position]`` so the re-fan
-    router can rebuild the reviewer's input from it — the reviewer is
-    ``Send``-reached too and can see nothing else.
+    The whole payload is carried forward in ``slides[position]`` so
+    ``slide_pipeline_node`` can build the reviewer's input from it
+    (:func:`build_review_payload`) — the reviewer sees nothing else.
 
     On any exception the position is **placeheld**, never landed:
     ``commit_placeholder`` writes a terminal marker so the reorder buffer and
@@ -2262,8 +2262,8 @@ def builder_node(payload: dict) -> Dict[str, Any]:
 def build_reviewer_node(payload: dict) -> Dict[str, Any]:
     """Review one built slide; either land it or open a fix.
 
-    Reached by the re-fan ``Send``, with the payload the builder carried in
-    ``slides[position]``.
+    A ``slide_pipeline_node`` stage, called with :func:`build_review_payload`
+    of the record the builder carried in ``slides[position]``.
 
     No objective finding -> **write the row**, with an explicit
     ``verification_record`` built by ``build_verification_record``, and record
@@ -2392,8 +2392,8 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             mutation=mutation,
         ):
             return {}
-        # reviewed_positions too: the position is committed as a placeholder, so
-        # a resumed re-fan must not review it again.
+        # reviewed_positions too: the position is committed as a placeholder and
+        # its review has run, whatever the turn does next.
         return {
             "placeheld_positions": scoped(turn_id, {position}),
             "reviewed_positions": scoped(turn_id, {position}),
@@ -2444,16 +2444,14 @@ def _reconcile_stale_fixes(
     exhaustiveness scan can see it.  A helper returning a state dict is
     invisible to that scan.
 
-    Reached only on a resumed checkpoint: within a turn the fixer and the fix
-    reviewer are strictly sequential (``fixer -> fix_reviewer -> foreman``), and
-    the fix reviewer tombstones its entry on every path including its own
-    exception — so an ``in_flight`` entry the fixer can still see is stale by
-    construction.
-
-    Without this the turn LIVELOCKS: ``has_pending_fix`` stays True (an
-    ``in_flight`` entry is not a tombstone), so the foreman routes to the fixer,
-    the fixer finds no fresh candidate, ``fixer_router`` returns to the foreman,
-    and the pair bounce until ``GraphRecursionError`` at 10007 supersteps.
+    **Unreachable from ``slide_pipeline_node``**, which hands the fixer a
+    slide-local state holding one fresh (never ``in_flight``) entry; kept as the
+    fixer stage's own contract for a caller that hands it a stale one.  It was
+    built for the four-node topology, where the fix state was checkpointed
+    between ``fixer`` and ``fix_reviewer`` supersteps: a resumed checkpoint
+    could carry an ``in_flight`` entry, ``has_pending_fix`` stayed True, the
+    foreman routed back to the fixer, the fixer found no fresh candidate, and
+    the pair bounced until ``GraphRecursionError`` at 10007 supersteps.
     Landing the original is the same fallback the fixer's own exception path
     takes: the slide exists and is good, and the fix was only an improvement
     pass.  It costs no model call, so "exactly one fix round per position" still
@@ -2490,7 +2488,10 @@ def _reconcile_stale_fixes(
 
 
 def fixer_node(state: dict) -> Dict[str, Any]:
-    """Dispatch the lowest pending fix, marking it ``in_flight``.
+    """Run the lowest pending fix in *state*, marking it ``in_flight``.
+
+    A ``slide_pipeline_node`` stage: the state it is handed carries exactly one
+    slide's ``fix_map`` entry, so "lowest" is that slide.
 
     Candidates are ``fix_map`` entries that are neither tombstoned (``None`` —
     ``turn_scoped_merge`` cannot delete a key, and ``bool({0: None})`` is
@@ -2498,9 +2499,9 @@ def fixer_node(state: dict) -> Dict[str, Any]:
 
     **``in_flight`` is what makes "exactly one fix round" true rather than
     aspirational.**  Without it ``fix_reviewer_node`` clears only ``fix_target``,
-    so every position above the minimum is re-fixed on the next foreman pass —
-    measured as each position entering the fixer twice and deck review firing
-    twice.
+    so every position above the minimum is re-fixed on the next pass —
+    measured on the four-node topology as each position entering the fixer
+    twice and deck review firing twice.
 
     The slide under edit is **not** given prior-slide framing: it is this turn's
     own builder output, already gated on emission, and wrapping it would

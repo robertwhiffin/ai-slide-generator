@@ -295,3 +295,61 @@ class TestTheDraftIsVisibleBeforeReview:
             1: "<div class='slide'>slide 1</div>",
         }
         assert _rows(env)[0].html == "<div class='slide'>slide 0</div>"
+
+
+class TestThePipelineFoldsLikeTheRuntime:
+    def test_fold_reduces_a_fan_in_key_written_by_two_stages(self):
+        """No two stages write the same key on today's paths, so a fold that
+        overwrote instead of reducing would pass every graph test — pinned here
+        directly (review finding S1)."""
+        from src.services.graph.state import scoped
+
+        acc: Dict[str, Any] = {}
+        nodes._fold(acc, {"landed_positions": scoped("t", {0}), "findings": ["a"]})
+        nodes._fold(acc, {"landed_positions": scoped("t", {1}), "findings": ["b"]})
+        assert acc["landed_positions"] == scoped("t", {0, 1})
+        assert acc["findings"] == ["a", "b"]
+
+    def test_a_failing_draft_write_does_not_cost_the_slide(
+        self, graph_env_threadsafe, monkeypatch
+    ):
+        """The draft is best-effort (review finding S3): an exception while
+        writing it must leave the slide to be reviewed and written as usual."""
+        env = graph_env_threadsafe
+        _wire(env, (0, 1))
+        from src.api.services.slide_repository import SlideWriter
+
+        def broken_get_slide(self, session_id, position):
+            raise RuntimeError("draft read failed")
+
+        monkeypatch.setattr(SlideWriter, "get_slide", broken_get_slide)
+
+        _run(env)
+
+        rows = _rows(env)
+        assert {p: rows[p].html for p in rows} == {
+            p: f"<div class='slide'>slide {p}</div>" for p in (0, 1)
+        }
+        assert len(env.skills.calls_for("build_reviewer")) == 2
+
+    def test_the_fix_stages_carry_this_turn_s_root_and_actor(
+        self, graph_env_threadsafe
+    ):
+        """The fixer and fix reviewer run on a slide-local state the pipeline
+        builds; their trace must still name the turn's root and actor (S12)."""
+        env = graph_env_threadsafe
+        _wire(env, (0,), flagged=(0,))
+        graph = build_graph(checkpointer=False)
+        graph.invoke(
+            env.state(
+                turn_id="turn-trace",
+                root_session_id="owner-of-the-deck",
+                actor_session_id="the-contributor",
+            ),
+            {"max_concurrency": CAP},
+        )
+        for stage in ("fixer", "fix_reviewer"):
+            calls = env.skills.calls_for(stage)
+            assert len(calls) == 1, stage
+            assert calls[0]["root_session_id"] == "owner-of-the-deck", stage
+            assert calls[0]["actor_session_id"] == "the-contributor", stage
