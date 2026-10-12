@@ -772,11 +772,14 @@ test('a Graph Version 2 role offers custom blocks at legal anchors, exactly-once
   const anchorGroups = await assemblyPanel(page)
     .getByRole('group', { name: /^Custom blocks: / })
     .evaluateAll((groups) => groups.map((group) => group.getAttribute('aria-label') ?? ''));
+  // The build reviewer judges layout against the frame numbers, so its view
+  // carries the frame-constraints stage and that stage's anchor.
   expect(anchorGroups).toEqual([
     'Custom blocks: After authored prompt',
     'Custom blocks: After deck-brief re-review',
+    'Custom blocks: After environment constraints',
   ]);
-  expect(declared).toEqual(new Set(['after_deck_brief']));
+  expect(declared).toEqual(new Set(['after_deck_brief', 'after_environment_constraints']));
 });
 
 test('custom blocks are added, edited, reordered and deleted locally, and only an explicit Save writes them', async ({ page }) => {

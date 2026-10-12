@@ -142,6 +142,19 @@ def initialize_database(reset: bool = False):
         conn.commit()
     print("✓ Legacy config_ai_infra table dropped (if existed)")
 
+    # Publish Graph Version 1 if no Graph Release exists yet, exactly as
+    # run.py::init_database does on Databricks Apps.  Since agent mode became the
+    # default every new conversation is pinned to the active Graph Release, so a
+    # database without one answers 503 to every new chat.  Idempotent.
+    from src.core.database import get_session_local
+    from src.services.graph_configuration import bootstrap_graph_configuration
+
+    graph = bootstrap_graph_configuration(get_session_local())
+    print(
+        f"✓ Graph Configuration ready (release {graph.release_id}, "
+        f"version {graph.version_number}, created={graph.created})"
+    )
+
     with get_db_session() as db:
         # Seed global libraries first (they check internally if already seeded)
         seed_deck_prompts(db)
