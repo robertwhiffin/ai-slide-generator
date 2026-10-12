@@ -150,7 +150,7 @@ application policy, not a Databricks alias guarantee. [Supported models][support
 - #263 owns the draft writer and the future shared transactional validation seam;
   the collision audit assigns #266 the isolated catalog/fakes first and serialises
   its route/client/editor integration after the #263 seam. [#263 plan][draft-plan]
-  [Collision audit][collision-audit]
+  Collision audit (a local working note, not in the repository)
 
 ## Recommended implementation boundary
 
@@ -240,9 +240,8 @@ created or changed.
 [structured-output]: https://docs.databricks.com/en/machine-learning/model-serving/structured-outputs.html
 [supported-models]: https://docs.databricks.com/en/machine-learning/foundation-model-apis/supported-models.html
 [sdk-serving]: https://github.com/databricks/databricks-sdk-py/blob/v0.112.0/databricks/sdk/service/serving.py
-[design-spec]: ../superpowers/specs/2026-09-21-agent-definition-workbench-design.md
-[draft-plan]: ../superpowers/plans/2026-09-22-shared-graph-draft-editing.md
-[collision-audit]: /Users/robert.whiffin/Documents/slide-gen-branch-eval/ai-slide-generator/.worktrees/issue-260-bootstrap/.superpowers/wave2-262-264-265-266-collision-audit.md
-[manifest]: ../../src/services/agent_definition_manifest_v1.py
-[runtime-adapter]: ../../src/services/agent_runtime.py
-[existing-discovery]: ../../src/api/routes/tools.py
+[design-spec]: https://github.com/robertwhiffin/ai-slide-generator/blob/main/docs/superpowers/specs/2026-09-21-agent-definition-workbench-design.md
+[draft-plan]: https://github.com/robertwhiffin/ai-slide-generator/blob/main/docs/superpowers/plans/2026-09-22-shared-graph-draft-editing.md
+[manifest]: https://github.com/robertwhiffin/ai-slide-generator/blob/main/src/services/agent_definition_manifest_v1.py
+[runtime-adapter]: https://github.com/robertwhiffin/ai-slide-generator/blob/main/src/services/agent_runtime.py
+[existing-discovery]: https://github.com/robertwhiffin/ai-slide-generator/blob/main/src/api/routes/tools.py
