@@ -1883,8 +1883,9 @@ def test_production_run_binds_exactly_as_before_and_reads_no_usage(monkeypatch):
 
     Production ``run`` over the real provider, whose endpoint DOES report usage:
     the helper must return exactly the plain ``bind_tools([schema],
-    tool_choice="auto") | parser | none-guard`` chain (no ``include_raw``, no
-    callback wrapper), and the bound model must be invoked with the prompt alone.
+    tool_choice="auto") | objective-default | parser | none-guard`` chain (no
+    ``include_raw``, no callback wrapper), and the bound model must be invoked
+    with the prompt alone.
     """
     from databricks_langchain import ChatDatabricks
     from langchain_core.runnables import RunnableSequence
@@ -1928,7 +1929,11 @@ def test_production_run_binds_exactly_as_before_and_reads_no_usage(monkeypatch):
     # ``with_config`` wrapper sits around it.
     assert type(helper_returns[0]) is RunnableSequence
     assert helper_returns[0].first is bound
-    assert len(helper_returns[0].steps) == 3
+    assert len(helper_returns[0].steps) == 4
+    assert (
+        helper_returns[0].steps[1].func
+        is runtime_module._default_omitted_finding_objectives
+    )
 
 
 def test_a_fake_adapter_reporting_usage_fills_only_an_observed_run():

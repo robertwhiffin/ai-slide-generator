@@ -46,7 +46,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Set, get_type_hints
 
 from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
@@ -66,7 +68,11 @@ from src.domain.finding import (
 )
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import SAFETY_RETRY_NOTICE
-from src.services.agent_runtime import AgentAssemblyContext, get_agent_runtime
+from src.services.agent_runtime import (
+    AgentAssemblyContext,
+    get_agent_runtime,
+    is_transient_model_failure,
+)
 from src.services.deck_css_aggregator import aggregate_deck_css
 from src.services.deck_review_store import (
     compute_deck_digest,
@@ -2866,6 +2872,42 @@ _FAN_IN_REDUCERS: Dict[str, Any] = {
 _PIPELINE_LOCAL_KEYS = frozenset({"fix_map", "fix_target", "fixed", "error_state"})
 
 
+#: At most this many slides of one turn run their fix round at once.  The fix
+#: rounds used to run one at a time; running every flagged slide's at once put
+#: up to ``CAP`` fixer and fix-reviewer calls on the endpoint together, and a
+#: rate limit on any of them used to fail the turn.  Five is the user's call
+#: (2026-10-12) between that and the latency the serial queue cost.
+FIX_CONCURRENCY = 5
+
+#: This turn's fix slots.  Set by ``invoke_graph`` on every turn
+#: (:func:`reset_fix_slots`), so concurrent turns do not share a budget.  It
+#: works across the fan-out for the same reason the slide cursor does: LangGraph
+#: copies the context into each task, and a copy shares the semaphore OBJECT.
+_fix_slots_var: ContextVar[Optional[threading.BoundedSemaphore]] = ContextVar(
+    "graph_fix_slots", default=None
+)
+#: The slots a graph invoked without ``invoke_graph`` (tests) draws from.
+_DEFAULT_FIX_SLOTS = threading.BoundedSemaphore(FIX_CONCURRENCY)
+
+
+def reset_fix_slots() -> None:
+    """Give this context's turn a fresh set of ``FIX_CONCURRENCY`` fix slots."""
+    _fix_slots_var.set(threading.BoundedSemaphore(FIX_CONCURRENCY))
+
+
+def _fix_slots() -> threading.BoundedSemaphore:
+    return _fix_slots_var.get() or _DEFAULT_FIX_SLOTS
+
+
+def _transient_failure_notice(session_id: str, position: int, what: str) -> None:
+    """Say in chat which slide could not be finished because a model call failed."""
+    _surface_notice(
+        session_id,
+        f"Slide {position}: the model was briefly unavailable while it was being "
+        f"{what}, so it is shown as built.",
+    )
+
+
 def _fold(acc: Dict[str, Any], update: Dict[str, Any]) -> None:
     """Fold one stage's *update* into *acc* with ``GraphState``'s reducers."""
     for key, value in update.items():
@@ -2876,7 +2918,7 @@ def _fold(acc: Dict[str, Any], update: Dict[str, Any]) -> None:
             acc[key] = value
 
 
-def _write_draft_row(record: dict, mutation: DeckMutationContext) -> None:
+def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
     """Commit the builder's HTML so the slide is visible before it is reviewed.
 
     Product decision (2026-10-12): show the draft, then replace it once the
@@ -2898,13 +2940,16 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> None:
 
     Best-effort: a failed draft write costs only the early preview, so it is
     logged and the slide carries on to review, which writes the row anyway.
+
+    Returns whether the draft was committed — the pipeline may keep it as the
+    slide's final row if review then fails transiently.
     """
     position = record["position"]
     slide_spec = record.get("slide_spec")
     try:
         writer = SlideWriter()
         if writer.get_slide(record["session_id"], position) is not None:
-            return
+            return False
         writer.write_slide(
             session_id=record["session_id"],
             position=position,
@@ -2920,6 +2965,8 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> None:
             position,
             exc_info=True,
         )
+        return False
+    return True
 
 
 def build_review_payload(record: dict, authority: dict) -> Dict[str, Any]:
@@ -2988,23 +3035,45 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
     if record is None:
         return {k: v for k, v in acc.items() if k not in _PIPELINE_LOCAL_KEYS}
 
-    _write_draft_row(
-        record,
-        _deck_mutation_context(
-            payload["session_id"],
-            payload.get("graph_release_id"),
-            operation="write_slide",
-            object_type="slide",
-        ),
+    session_id = payload["session_id"]
+    turn_id = payload["turn_id"]
+    mutation = _deck_mutation_context(
+        session_id,
+        payload.get("graph_release_id"),
+        operation="write_slide",
+        object_type="slide",
     )
+    drafted = _write_draft_row(record, mutation)
 
-    _fold(acc, build_reviewer_node(build_review_payload(record, payload)))
+    try:
+        _fold(acc, build_reviewer_node(build_review_payload(record, payload)))
+    except PersistedRuntimeError as exc:
+        # A transient model fault (rate limit, 5xx, timeout) while reviewing:
+        # the draft is already the committed row, so keep it — unreviewed, no
+        # verdict — rather than fail the deck.  Without a draft (the position
+        # held a slide already) there is nothing safe to keep: re-raise.
+        if not (drafted and is_transient_model_failure(exc)):
+            raise
+        logger.warning(
+            "Build review of slide %s failed transiently; keeping its draft",
+            position,
+            exc_info=True,
+        )
+        _transient_failure_notice(session_id, position, "reviewed")
+        _fold(
+            acc,
+            {
+                "landed_positions": scoped(turn_id, {position}),
+                "reviewed_positions": scoped(turn_id, {position}),
+            },
+        )
+        return {k: v for k, v in acc.items() if k not in _PIPELINE_LOCAL_KEYS}
 
     entry = ((acc.get("fix_map") or {}).get("vals") or {}).get(position)
     if entry is not None:
         fix_state: Dict[str, Any] = {
-            "turn_id": payload["turn_id"],
-            "session_id": payload["session_id"],
+            "turn_id": turn_id,
+            "session_id": session_id,
             "graph_release_id": payload["graph_release_id"],
             "initiated_by": payload.get("initiated_by"),
             "root_session_id": payload.get("root_session_id") or "",
@@ -3012,11 +3081,39 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
             "design_system_active": payload.get("design_system_active"),
             "fix_map": acc["fix_map"],
         }
-        fixer_update = fixer_node(fix_state)
-        _fold(acc, fixer_update)
-        _fold(fix_state, fixer_update)
-        if fix_state.get("fix_target") is not None:
-            _fold(acc, fix_reviewer_node(fix_state))
+        with _fix_slots():
+            try:
+                fixer_update = fixer_node(fix_state)
+                _fold(acc, fixer_update)
+                _fold(fix_state, fixer_update)
+                if fix_state.get("fix_target") is not None:
+                    _fold(acc, fix_reviewer_node(fix_state))
+            except PersistedRuntimeError as exc:
+                # Transient while fixing: the slide was built and reviewed, so
+                # land the original with its findings surfaced — the fixer
+                # stage's own fallback for any other failure.  Nothing was
+                # written by the failed stage (both re-raise before writing).
+                if not is_transient_model_failure(exc):
+                    raise
+                logger.warning(
+                    "Fix round of slide %s failed transiently; landing the original",
+                    position,
+                    exc_info=True,
+                )
+                _transient_failure_notice(session_id, position, "fixed")
+                _fold(
+                    acc,
+                    {
+                        "landed_positions": scoped(turn_id, {position}),
+                        "findings": _land_original(
+                            position,
+                            entry,
+                            session_id=session_id,
+                            initiated_by=payload.get("initiated_by"),
+                            mutation=mutation,
+                        ),
+                    },
+                )
 
     return {k: v for k, v in acc.items() if k not in _PIPELINE_LOCAL_KEYS}
 

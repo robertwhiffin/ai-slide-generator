@@ -261,6 +261,7 @@ def bind_structured_output_model(
     )
     structured_model = (
         model.bind_tools([schema], tool_choice="auto")
+        | RunnableLambda(_default_omitted_finding_objectives)
         | PydanticToolsParser(tools=[schema], first_tool_only=True)
         | RunnableLambda(_require_structured_output)
     )
@@ -268,6 +269,55 @@ def bind_structured_output_model(
     if observation is None:
         return structured_model
     return structured_model.with_config(callbacks=[_token_usage_callback(observation)])
+
+
+def _default_omitted_finding_objectives(message: Any) -> Any:
+    """Fill a finding's omitted ``objective`` from ``CRITERIA`` before parsing.
+
+    Measured on Opus 5 (2026-10-12): the build reviewer sometimes emits a
+    finding without ``objective``, ``Finding`` requires it, and the whole review
+    fails validation — the slide is then placeheld although it was built and
+    reviewed.  ``objective`` is a predicate about the CRITERION, not a judgement
+    the model makes: ``_stamp_findings`` re-derives it from ``CRITERIA`` for
+    every finding anyway, so the registry value is the one that would win.
+
+    Defaulted HERE rather than on ``Finding`` because the output schemas are
+    frozen by digest (``AgentSchemaRegistry``) and published releases pin those
+    digests; a schema default would change the contract.  Only an ABSENT key on
+    a finding naming a KNOWN criterion is filled — a present value, an unknown
+    criterion or a non-dict entry is left for validation to judge as before.
+    Returns a copy; the provider's message is never mutated.
+    """
+    from langchain_core.messages import AIMessage
+
+    from src.domain.finding import CRITERIA
+
+    if not isinstance(message, AIMessage) or not message.tool_calls:
+        return message
+    changed = False
+    tool_calls = []
+    for call in message.tool_calls:
+        args = call.get("args")
+        findings = args.get("findings") if isinstance(args, dict) else None
+        if isinstance(findings, list):
+            filled = []
+            for finding in findings:
+                if (
+                    isinstance(finding, dict)
+                    and "objective" not in finding
+                    and finding.get("criterion") in CRITERIA
+                ):
+                    finding = {
+                        **finding,
+                        "objective": CRITERIA[finding["criterion"]].objective,
+                    }
+                    changed = True
+                filled.append(finding)
+            call = {**call, "args": {**args, "findings": filled}}
+        tool_calls.append(call)
+    if not changed:
+        return message
+    return message.model_copy(update={"tool_calls": tool_calls})
 
 
 def _require_structured_output(parsed: Any) -> Any:
@@ -414,6 +464,54 @@ class DatabricksModelAdapter:
             raise ModelProviderUnavailableError(
                 "pinned model provider unavailable"
             ) from original_error
+
+
+#: HTTP statuses a retry or a later turn can succeed on: request timeout,
+#: conflict, rate limit, and every server-side error.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429})
+
+
+def is_transient_model_failure(error: BaseException) -> bool:
+    """True when *error* was caused by a provider fault that may clear by itself.
+
+    Every provider fault is collapsed into ``ModelProviderUnavailableError`` and
+    then ``PinnedInvocationEndpointError``, which deliberately fails the turn
+    and names the pin — the right outcome for a removed or forbidden endpoint.
+    A rate limit, a 5xx, a timeout or a dropped connection is a different
+    animal: it says nothing about the pin, and with up to ``CAP`` slides in
+    flight one of them on one slide used to kill the whole deck.  So the
+    original cause is read back off the ``raise ... from`` chain.
+
+    An error with no recognisable transient cause (including one raised with no
+    cause at all) is NOT transient, so the pinned-failure contract is unchanged
+    wherever the provider's own error is not a transient one.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            (
+                openai.APITimeoutError,
+                openai.APIConnectionError,
+                httpx.TimeoutException,
+                httpx.TransportError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                TimeoutError,
+                ConnectionError,
+                DeadlineExceeded,
+                Aborted,
+                InternalError,
+            ),
+        ):
+            return True
+        if isinstance(current, openai.APIStatusError):
+            status = current.status_code
+            return status in _TRANSIENT_HTTP_STATUSES or status >= 500
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _supplied_output_keys(provider_output: BaseModel) -> Mapping[str, Any]:
