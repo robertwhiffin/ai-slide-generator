@@ -889,6 +889,12 @@ jobs:
           migrated = migrate_profiles(get_session_local())
           backfill_sessions(get_session_local())
           print(f'Migrated {migrated} profiles to agent_config')
+
+          # Publish Graph Version 1, as run.py::init_database does on Apps. Agent
+          # mode is the default, so every new conversation is pinned to the
+          # active Graph Release; without one, session creation answers 503.
+          from src.services.graph_configuration import bootstrap_graph_configuration
+          print('Graph Configuration:', bootstrap_graph_configuration(get_session_local()))
           "
 
       - name: Verify database seeding
