@@ -157,7 +157,15 @@ def _make_fake_db(factory):
 
 
 def _seed_owner(factory, session_id: Optional[str] = None) -> str:
-    """Create a UserSession row and return its string session_id."""
+    """Create a UserSession row and return its string session_id.
+
+    Bootstraps Graph Version 1 first, as app startup always does: reading a
+    session now resolves its conversation's graph version, which requires an
+    active Graph Release (``get_conversation_graph_version``).  Idempotent.
+    """
+    from src.services.graph_configuration import bootstrap_graph_configuration
+
+    bootstrap_graph_configuration(factory)
     sid = session_id or f"l4-{uuid.uuid4().hex[:12]}"
     db = factory()
     try:
