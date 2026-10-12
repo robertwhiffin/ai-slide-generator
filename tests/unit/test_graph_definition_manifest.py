@@ -139,9 +139,16 @@ def _replay_literal_v1_rules(
             parts.append(content.prompt_text)
         elif kind == "protected":
             assert name is not None
-            if name == "slide_frame_constraints" and content.agent_key != "builder":
+            # Environment-stage scope (pinned here, not imported): frame
+            # constraints to the roles that emit or judge layout, precedence to
+            # the roles that plan or emit styling.
+            if name == "slide_frame_constraints" and content.agent_key not in {
+                "builder", "fixer", "build_reviewer", "fix_reviewer"
+            }:
                 continue
-            if name == "design_system_precedence" and content.agent_key != "architect":
+            if name == "design_system_precedence" and content.agent_key not in {
+                "architect", "builder", "fixer"
+            }:
                 continue
             parts.append(protected_values[name])
         elif kind == "payload_json":

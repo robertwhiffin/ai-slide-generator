@@ -1470,6 +1470,8 @@ def test_persisted_upgrade_reloads_authored_only_with_exactly_once_protected_sta
     expected_ids = ["authored_prompt"]
     if agent_key == "build_reviewer":
         expected_ids.append("build_reviewer_criteria")
+        # Design system inactive: the reviewer judges layout against the frame.
+        expected_ids.append("slide_frame_constraints")
     expected_ids.extend(
         [
             "untrusted_data_notice",
