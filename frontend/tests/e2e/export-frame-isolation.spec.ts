@@ -484,7 +484,7 @@ test.describe('export fidelity contracts', () => {
         const records = await m.extractSlideRecordsForExport(d, mode);
         out[mode] = {
           count: records.length,
-          notes: records.map((r) => r.notes),
+          notes: records.map((r: { notes: string }) => r.notes),
         };
       }
       return out;
@@ -527,7 +527,7 @@ test.describe('export fidelity contracts', () => {
     }, deck);
 
     expect(Object.keys(canvases).length).toBeGreaterThan(0);
-    const first = Object.values(canvases)[0];
+    const first = Object.values(canvases)[0] as string;
     expect(first.startsWith('data:image/png')).toBe(true);
     expect(first.length).toBeGreaterThan(2000);
   });
