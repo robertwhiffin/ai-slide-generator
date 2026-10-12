@@ -86,13 +86,24 @@ function getSessionIdFromUrl(page: Page, trackingArray: string[]): string {
 }
 
 /**
- * Type a message and send it, then wait for the URL to change to a session
- * edit page (indicating the session was created and the SSE session_created
- * event was processed).
+ * Type a message and send it, then wait until the chat request has been
+ * answered AND the URL is a session edit page.
+ *
+ * The URL alone is no longer a sync point: the app now creates the
+ * graph-pinned session and navigates to /sessions/{id}/edit BEFORE it sends
+ * the chat request (AppLayout.ensureGraphCapableRoot), so the URL changes
+ * while the request carrying `agent_config` has not even left the browser.
+ * The chat response is the point at which the backend (here, mockChatStream's
+ * sync of `agent_config`, mirroring chat.py) has persisted the config.
  */
 async function sendMessage(page: Page, message: string): Promise<void> {
   await page.getByRole('textbox').fill(message);
+  const chatAnswered = page.waitForResponse(
+    (res) => res.url().endsWith('/api/chat/stream') && res.request().method() === 'POST',
+    { timeout: 15000 },
+  );
   await page.getByRole('button', { name: 'Send' }).click();
+  await chatAnswered;
   await page.waitForURL(/\/sessions\/[^/]+\/edit/, { timeout: 15000 });
 }
 
