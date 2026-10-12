@@ -782,6 +782,9 @@ async def poll_chat(
     ),
     revisions_after: Optional[float] = Query(
         default=None,
+        ge=0,
+        le=4102444800,  # 2100-01-01: utcfromtimestamp overflows far beyond this
+        allow_inf_nan=False,
         description="The previous response's revision_mark; omit on the first poll",
     ),
 ):

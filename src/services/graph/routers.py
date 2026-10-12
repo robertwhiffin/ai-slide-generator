@@ -11,8 +11,9 @@ Four rules, each measured, and each one has produced a real defect:
    invocations for six builders, every one with the declared state keys and no
    payload key, so ``state["position"]`` raises ``KeyError``.  Each invocation
    sees only its own branch's write (``slides`` keys ``[0]``, then ``[1]``, …
-   never the merged ``[0..5]``), which is precisely what lets the re-fan router
-   rebuild each reviewer's payload from ``slides[position]``.
+   never the merged ``[0..5]``).  (Measured on the earlier four-node topology,
+   where a re-fan router after the builder rebuilt each reviewer's payload
+   from ``slides[position]``; that chain now runs inside ``slide_pipeline``.)
 4. **One conditional-edge set per node.**  A static ``add_edge`` alongside
    conditional edges from the same node gives duplicate conflicting edges and a
    ``GraphRecursionError``.
