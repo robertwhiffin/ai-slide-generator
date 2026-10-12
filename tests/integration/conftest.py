@@ -66,6 +66,61 @@ from src.utils.slide_hash import compute_slide_hash
 
 
 # ---------------------------------------------------------------------------
+# No Databricks workspace in non-live integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_databricks_workspace(request, monkeypatch):
+    """Make ``get_system_client()`` fail fast in every non-``live`` test.
+
+    Several shipped paths reach the workspace as incidental plumbing:
+    ``get_current_username()`` (via ``get_user_client``'s non-production
+    fallback) stamps created_by/modified_by on every ChatService slide
+    mutation, and ``SessionManager.get_slide_deck`` resolves SCIM display
+    names through the identity provider. Both bottom out in
+    ``src.core.databricks_client.get_system_client``.
+
+    Without ``DATABRICKS_HOST`` (a local run) that raises at once, and every
+    test here was written against that. CI sets ``DATABRICKS_HOST`` to the
+    unreachable ``https://test.cloud.databricks.com``: the SDK's host-metadata
+    fetch and every subsequent API call then retry connection errors for up to
+    300s EACH, so a test touching those paths does not fail, it stalls. The
+    "Integration: Graph Orchestration" job sat in
+    test_shared_deck_mutation_attribution's direct-CRUD tests until its
+    15-minute job timeout (PR #322, run 38301357273). Individual fixtures had
+    been stubbing ``resolve_display_names``/``get_current_username`` one at a
+    time; this pins the local behaviour for the whole suite instead.
+
+    A test that needs a client patches ``get_system_client`` (or the name its
+    module imported) itself; its patch runs after this one and wins. ``live``
+    tests are left alone -- they need the real workspace.
+    """
+    if request.node.get_closest_marker("live") is not None:
+        yield
+        return
+
+    def _unreachable_workspace(*args, **kwargs):
+        raise RuntimeError(
+            "non-live integration tests have no Databricks workspace "
+            "(tests/integration/conftest.py::_no_databricks_workspace)"
+        )
+
+    monkeypatch.setattr(
+        "src.core.databricks_client.get_system_client", _unreachable_workspace
+    )
+    # An identity-provider singleton built earlier in the process may already
+    # hold a WORKSPACE-mode client, and the per-email display-name cache may
+    # hold answers from it; neither should leak into, or out of, this test.
+    from src.services import identity_provider
+
+    monkeypatch.setattr(identity_provider, "_identity_provider", None)
+    identity_provider._resolve_cached.cache_clear()
+    yield
+    identity_provider._resolve_cached.cache_clear()
+
+
+# ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
