@@ -1967,9 +1967,16 @@ describe('useDraftEditor shared request gate', () => {
     expect(requestCount(fetchMock)).toBe(1);
 
     release[0](apiResponse(200, syntheticUpgradeSuccess('architect', 1)));
-    await waitFor(() => expect(requestCount(fetchMock)).toBe(1));
-    fireEvent.click(screen.getByRole('button', { name: 'harness save builder' }));
-    await waitFor(() => expect(requestCount(fetchMock)).toBe(2));
+    // The gate is a ref released in the operation's `finally`, after the response
+    // is handled — nothing rendered marks the moment.  A save clicked while it is
+    // still held is dropped by design, so keep clicking until one gets through:
+    // a blocked click sends nothing, so the count can only reach 2 once the gate
+    // is open, and it cannot overshoot (waitFor stops at the first pass).  A
+    // single fixed click raced the release on slow CI runners.
+    await waitFor(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'harness save builder' }));
+      expect(requestCount(fetchMock)).toBe(2);
+    });
     expect(String(fetchMock.mock.calls[1][0])).toMatch(/\/draft\/builder$/);
   });
 });
