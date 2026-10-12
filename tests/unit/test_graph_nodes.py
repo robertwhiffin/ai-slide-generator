@@ -47,7 +47,6 @@ from src.services.graph_definition_manifest import load_graph_v1_manifest
 from src.services.persisted_graph_release import ResolvedDefinition
 from src.services.graph import builder as graph_builder
 from src.services.graph import nodes
-from src.services.graph import routers as graph_routers
 from src.services.graph.event_emitter import set_event_emitter
 from src.services.graph.nodes import (
     architect_node,
@@ -310,14 +309,10 @@ class TestAgentRuntimeSeam:
         )
 
         updates = foreman_node(
-            graph_env.state(
-                turn_id=TURN,
-                deck_spec=make_spec((0,)),
-                fix_map=scoped(TURN, {0: {"original_html": "<p>x</p>"}}),
-            )
+            graph_env.state(turn_id=TURN, deck_spec=make_spec((0,)))
         )
 
-        assert updates["foreman_wakes"] == scoped(TURN, [[]])
+        assert updates["foreman_wakes"] == scoped(TURN, [[0]])
 
 
 # ===========================================================================
@@ -1161,7 +1156,14 @@ class TestDataAnalystNode:
 
 
 class TestForemanDecisionOrder:
-    def test_a_pending_fix_preempts_dispatch_and_stamps_nothing(self, graph_env):
+    def test_a_fix_entry_in_state_no_longer_preempts_dispatch(self, graph_env):
+        """A slide's fix round runs inside its own pipeline, so nothing pending in
+        ``fix_map`` may hold back the next batch.
+
+        The old ladder returned an empty wake here, and with it "a 31-slide deck
+        stops dispatching new builders until every fix completes".  The entry is
+        what an old checkpoint resumed mid-fix would carry.
+        """
         state = graph_env.state(
             turn_id=TURN,
             deck_spec=make_spec((0, 1, 2)),
@@ -1170,8 +1172,8 @@ class TestForemanDecisionOrder:
 
         updates = foreman_node(state)
 
-        assert "dispatched_at" not in updates
-        assert updates["foreman_wakes"] == scoped(TURN, [[]])
+        assert updates["foreman_wakes"] == scoped(TURN, [[0, 1, 2]])
+        assert set(updates["dispatched_at"]["vals"]) == {0, 1, 2}
 
     def test_dispatch_runs_before_the_stall_check(self, graph_env):
         """Position 1 is a leftover; 3 and 4 are unstarted. Real work goes first.
@@ -2890,7 +2892,16 @@ _EXPECTED_NODE_WRITES = {
     },
     "placeholder_node": {"placeheld_positions"},
     "deck_reviewer_node": {"error_state", "knitted_html", "scripts_content"},
+    # Its return is a filtered fold of its four stages' updates, so it names no
+    # key itself; what it can write is pinned by
+    # test_every_key_the_slide_pipeline_can_return_has_a_reducer below.
+    "slide_pipeline_node": set(),
 }
+
+#: The four stage functions ``slide_pipeline_node`` runs, in order.
+_PIPELINE_STAGES = (
+    "builder_node", "build_reviewer_node", "fixer_node", "fix_reviewer_node",
+)
 
 
 def test_the_scan_finds_exactly_the_keys_each_node_writes():
@@ -2934,7 +2945,32 @@ def test_the_exhaustiveness_scan_reaches_every_node():
         "fix_reviewer_node",
         "placeholder_node",
         "deck_reviewer_node",
+        "slide_pipeline_node",
     }
+
+
+def test_every_key_the_slide_pipeline_can_return_has_a_reducer():
+    """The fan-in hazard, pinned where it lives.
+
+    Up to ``CAP`` pipelines return in ONE superstep, so every key one of them can
+    return is written by several branches at once and needs a reducer, or the
+    runtime raises ``InvalidUpdateError`` and the turn dies.  The keys it can
+    return are its four stages' writes minus the ones it keeps branch-local.
+    """
+    writes = _state_write_keys()
+    staged = set().union(*(writes[name] for name in _PIPELINE_STAGES))
+    assert {"fix_map", "fix_target", "fixed", "error_state"} <= staged, (
+        "the stages' writes were not read — the check would be vacuous"
+    )
+    returned = staged - nodes._PIPELINE_LOCAL_KEYS
+    assert returned == {
+        "findings", "landed_positions", "placeheld_positions",
+        "reviewed_positions", "slides",
+    }
+    without_reducer = sorted(returned - set(nodes._FAN_IN_REDUCERS))
+    assert without_reducer == [], (
+        f"a pipeline can return these keys, which carry no reducer: {without_reducer}"
+    )
 
 
 def test_no_node_returns_a_dict_a_helper_built():
@@ -2951,12 +2987,20 @@ def test_no_node_returns_a_dict_a_helper_built():
     """
     offenders = {}
     for func in _node_functions():
+        # The one exception, and it is a filter, not a helper: the pipeline
+        # returns its stages' folded updates minus its local keys, and what that
+        # can contain is pinned by the reducer test above.
+        allowed = (
+            (ast.Dict, ast.Name, ast.DictComp)
+            if func.name == "slide_pipeline_node"
+            else (ast.Dict, ast.Name)
+        )
         bad = [
             type(node.value).__name__
             for node in _own_nodes(func)
             if isinstance(node, ast.Return)
             and node.value is not None
-            and not isinstance(node.value, (ast.Dict, ast.Name))
+            and not isinstance(node.value, allowed)
         ]
         if bad:
             offenders[func.name] = bad
@@ -3632,16 +3676,14 @@ class TestRuntimeRootActorTrace:
             graph_env, collab, slides=scoped(TURN, {0: record})
         )
 
-        sends = graph_routers.build_reviewer_refan_router(state)
-        assert len(sends) == 1
-        build_reviewer_node(sends[0].arg)
+        build_reviewer_node(nodes.build_review_payload(record, state))
 
         _assert_traced(trace.sink, collab, agent_keys=["build_reviewer"])
 
-    def test_the_refan_overwrites_a_hostile_root_actor_and_release_in_the_record(
+    def test_the_review_payload_overwrites_a_hostile_root_actor_and_release_in_the_record(
         self, graph_env
     ):
-        """The record is turn state; the re-fan re-declares provenance from state.
+        """The review payload re-declares provenance from state, not the record.
 
         Every hostile value here is DISTINCT from the value state carries — an
         earlier version left ``session_id`` at the helper's default, which is the
@@ -3659,15 +3701,15 @@ class TestRuntimeRootActorTrace:
         )
         state = _actor_state(graph_env, collab, slides=scoped(TURN, {0: record}))
 
-        sends = graph_routers.build_reviewer_refan_router(state)
+        review = nodes.build_review_payload(record, state)
 
-        assert len(sends) == 1
-        assert sends[0].arg["root_session_id"] == collab.owner_session_id
-        assert sends[0].arg["actor_session_id"] == collab.contributor_session_id
-        assert sends[0].arg["graph_release_id"] == collab.r2_id
+        assert review["html"] == CLEAN_HTML
+        assert review["root_session_id"] == collab.owner_session_id
+        assert review["actor_session_id"] == collab.contributor_session_id
+        assert review["graph_release_id"] == collab.r2_id
         # session_id is the key the mutation event's actor is built from, so it is
         # part of the same hardening, not an adjacent detail.
-        assert sends[0].arg["session_id"] == collab.contributor_session_id
+        assert review["session_id"] == collab.contributor_session_id
 
     def test_the_fixer_and_its_unsafe_output_retry_record_one_identity(
         self, graph_env, monkeypatch
@@ -3834,9 +3876,7 @@ class TestRuntimeRootActorTrace:
         )
         state = _actor_state(graph_env, collab, slides=scoped(TURN, {0: record}))
 
-        sends = graph_routers.build_reviewer_refan_router(state)
-        assert len(sends) == 1
-        build_reviewer_node(sends[0].arg)
+        build_reviewer_node(nodes.build_review_payload(record, state))
 
         _assert_traced(trace.sink, collab, agent_keys=["build_reviewer"])
         db = graph_env.factory()
@@ -3892,9 +3932,10 @@ class TestRuntimeRootActorTrace:
         built = builder_node(payload)
         state["slides"] = built["slides"]
 
-        # the re-fan -> build_reviewer, which opens a fix
-        sends = graph_routers.build_reviewer_refan_router(state)
-        reviewed = build_reviewer_node(sends[0].arg)
+        # the pipeline's review stage, which opens a fix
+        reviewed = build_reviewer_node(
+            nodes.build_review_payload(built["slides"]["vals"][0], state)
+        )
         state["fix_map"] = reviewed["fix_map"]
 
         # fixer -> fix_reviewer
@@ -4180,7 +4221,7 @@ def _full_turn_prompts(env, monkeypatch, case):
     built = builder_node(build_branch_payload(state, 0))
     state["slides"] = built["slides"]
     reviewed = build_reviewer_node(
-        graph_routers.build_reviewer_refan_router(state)[0].arg
+        nodes.build_review_payload(built["slides"]["vals"][0], state)
     )
     state["fix_map"] = reviewed["fix_map"]
     fixed = fixer_node(state)

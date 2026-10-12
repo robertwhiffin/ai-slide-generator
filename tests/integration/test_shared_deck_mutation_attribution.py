@@ -858,24 +858,23 @@ def test_graph_turn_records_deck_rows_deck_with_exact_root_actor_release(graph_t
             select(SessionSlideDeck).where(SessionSlideDeck.session_id == root.id)
         )
 
+    # Two slide events per slide: the builder's draft (committed before review
+    # so a poller sees the slide early) and the reviewed row.  Both are real,
+    # visible changes to the shared deck, so both are evidence.
     assert [event.operation for event in events] == [
         "write_deck_level",
-        "write_slide",
-        "write_slide",
-        "write_slide",
+        *["write_slide"] * 6,
         "write_deck_level",
     ]
     assert [event.object_type for event in events] == [
         "deck",
-        "slide",
-        "slide",
-        "slide",
+        *["slide"] * 6,
         "deck",
     ]
     assert events[0].object_id is None
     assert events[-1].object_id is None
     assert sorted(event.object_id for event in events[1:-1]) == sorted(
-        row.slide_id for row in graph_turn_env.rows()
+        row.slide_id for row in graph_turn_env.rows() for _ in range(2)
     )
     for event in events:
         assert (event.root_session_id, event.root_deck_id, event.actor_session_id) == (
@@ -938,17 +937,22 @@ def test_reviewer_and_fixer_failures_keep_exact_row_attribution(
                 select(SharedDeckMutationEvent).order_by(SharedDeckMutationEvent.id)
             )
         )
+    # The builder succeeded, so its draft is the first slide event; the fallback
+    # row (placeholder or landed original) is the second, and it must carry the
+    # same branch actor context.
     assert [event.operation for event in events] == [
         "write_deck_level",
         "write_slide",
+        "write_slide",
         "write_deck_level",
     ]
-    assert [event.object_type for event in events] == ["deck", "slide", "deck"]
-    assert events[1].object_id == graph_turn_env.rows()[0].slide_id
-    assert (events[1].graph_release_id, events[1].graph_version) == (
-        graph_turn_env.graph_release_id,
-        1,
-    )
+    assert [event.object_type for event in events] == ["deck", "slide", "slide", "deck"]
+    for fallback in events[1:3]:
+        assert fallback.object_id == graph_turn_env.rows()[0].slide_id
+        assert (fallback.graph_release_id, fallback.graph_version) == (
+            graph_turn_env.graph_release_id,
+            1,
+        )
 
 
 def test_stalled_placeholder_records_one_stable_slide_event(graph_turn_env):

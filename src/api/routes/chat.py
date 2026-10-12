@@ -15,6 +15,7 @@ Chat access is controlled by session permissions:
 import asyncio
 import contextvars
 import logging
+import time
 from typing import AsyncGenerator, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -779,6 +780,10 @@ async def poll_chat(
     slide_cursor: int = Query(
         default=0, description="Lowest slide position not yet delivered"
     ),
+    revisions_after: Optional[float] = Query(
+        default=None,
+        description="The previous response's revision_mark; omit on the first poll",
+    ),
 ):
     """Poll for chat request status, new messages, and newly released slides.
 
@@ -802,15 +807,23 @@ async def poll_chat(
             (the default) asks for every released slide.  Positions are 0-based,
             so this is inclusive — unlike ``after_message_id``, whose ids start
             at 1.  Hand back the ``slide_cursor`` from the previous response.
+        revisions_after: The previous response's ``revision_mark``.  A slide's
+            builder draft is committed before its review, so a slide the client
+            already holds can be replaced later in the turn; ``slide_revisions``
+            carries those replacements (positions below ``slide_cursor`` whose
+            row changed since the mark).  The client replaces by position.
 
     Returns:
-        Dictionary with status, events, last_message_id, result, error, slides
-        and slide_cursor
+        Dictionary with status, events, last_message_id, result, error, slides,
+        slide_cursor, slide_revisions and revision_mark
 
     Raises:
         HTTPException: 404 if request not found
     """
     session_manager = get_session_manager()
+    # Taken BEFORE any read, so a row rewritten while this poll runs is newer
+    # than the mark the client hands back and is returned on the next poll.
+    revision_mark = time.time()
 
     # SDR-4437 (chat-poll IDOR): a request_id must not grant access to another
     # user's chat events/result. ChatRequest rows are session-bound — resolve
@@ -867,6 +880,21 @@ async def poll_chat(
         )
     ]
 
+    slide_revisions = [
+        {
+            "position": row["position"],
+            "html": row["html"],
+            "scripts": row["scripts"],
+            "agent": row["agent"],
+        }
+        for row in await asyncio.to_thread(
+            session_manager.slide_revisions_since,
+            session_id,
+            slide_cursor,
+            revisions_after,
+        )
+    ]
+
     return {
         "status": chat_request["status"],
         "events": events,
@@ -880,4 +908,6 @@ async def poll_chat(
         "slide_cursor": (
             released_slides[-1]["position"] + 1 if released_slides else slide_cursor
         ),
+        "slide_revisions": slide_revisions,
+        "revision_mark": revision_mark,
     }

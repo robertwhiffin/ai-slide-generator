@@ -2307,6 +2307,67 @@ class SessionManager:
                 )
             return released
 
+    #: How far before the client's mark a revision is still returned.  The mark
+    #: is taken before this poll's reads, but a row stamped just before the mark
+    #: may commit just after it; returning a revision twice is harmless (the
+    #: client replaces a slide by position), missing one is not.
+    REVISION_OVERLAP_S = 2.0
+
+    def slide_revisions_since(
+        self, session_id: str, cursor: int, since: Optional[float]
+    ) -> List[Dict[str, Any]]:
+        """Already-delivered slides whose row was rewritten after *since*.
+
+        The reorder buffer (:meth:`slides_since_cursor`) releases each position
+        ONCE.  Since a slide's builder draft is committed before its review
+        (``slide_pipeline_node``), the row a client received may later be
+        replaced by its reviewed or fixed version within the same turn; this is
+        how a polling client learns of that.
+
+        Only positions BELOW *cursor* are considered — anything at or above it
+        is still the reorder buffer's to release, with its latest content.
+        *since* is the ``revision_mark`` the previous poll returned (epoch
+        seconds, naive UTC like ``modified_at``); ``None`` means the client has
+        no mark yet, so it has received nothing that could have been revised.
+
+        Args:
+            session_id: Session (a contributor session resolves to the deck owner).
+            cursor: Lowest position not yet delivered to this caller.
+            since: The previous poll's ``revision_mark``, or ``None``.
+
+        Returns:
+            Ascending list shaped exactly like :meth:`slides_since_cursor`'s.
+
+        Raises:
+            SessionNotFoundError: if session_id does not match any session.
+        """
+        ceiling = max(0, int(cursor))
+        if since is None or ceiling == 0:
+            return []
+        threshold = datetime.utcfromtimestamp(float(since) - self.REVISION_OVERLAP_S)
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+            rows = (
+                db.query(SessionSlide)
+                .filter(
+                    SessionSlide.session_id == deck_owner.id,
+                    SessionSlide.position < ceiling,
+                    SessionSlide.modified_at > threshold,
+                )
+                .order_by(SessionSlide.position)
+                .all()
+            )
+            return [
+                {
+                    "position": row.position,
+                    "html": row.html or "",
+                    "scripts": row.scripts or "",
+                    "agent": row.modified_by or row.created_by,
+                }
+                for row in rows
+            ]
+
     def get_verification_map(self, session_id: str) -> Dict[str, Any]:
         """Aggregate the verification map from per-row session_slides records.
 

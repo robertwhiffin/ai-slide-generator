@@ -30,6 +30,8 @@ import contextvars
 import json
 import queue
 import re
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import get_type_hints
 from unittest.mock import MagicMock
@@ -929,6 +931,7 @@ def poll_manager(monkeypatch):
         "error_message": None,
     }
     manager.get_messages_for_request.return_value = []
+    manager.slide_revisions_since.return_value = []
     monkeypatch.setattr("src.api.routes.chat.get_session_manager", lambda: manager)
     monkeypatch.setattr(
         "src.api.routes.chat._check_deck_permission_for_session", MagicMock()
@@ -967,6 +970,8 @@ class TestThePollingRoute:
             "error",
             "slides",
             "slide_cursor",
+            "slide_revisions",
+            "revision_mark",
         }
 
     def test_it_passes_the_client_cursor_through_to_the_release_query(
@@ -1026,3 +1031,120 @@ class TestThePollingRoute:
 
         assert poll_client.get("/api/chat/poll/req-leaked").status_code == 403
         manager.slides_since_cursor.assert_not_called()
+
+
+# ===========================================================================
+# Revisions: a delivered draft replaced later in the same turn
+# ===========================================================================
+
+
+def _rewrite(env, position: int, html: str) -> None:
+    SlideWriter().write_slide(
+        session_id=env.session_id, position=position, html=html, modified_by="fix_reviewer"
+    )
+
+
+class TestSlideRevisionsSince:
+    """``slide_pipeline_node`` commits a builder draft before review, so a slide a
+    poller already holds is later rewritten; the reorder buffer releases each
+    position once, so this query is the only way the poller learns of it."""
+
+    def test_a_delivered_slide_rewritten_after_the_mark_is_returned(
+        self, graph_env, monkeypatch
+    ):
+        _commit(graph_env, 0, 1)
+        manager = get_session_manager()
+        # ENTRY: the first poll released both drafts.
+        assert [r["position"] for r in manager.slides_since_cursor(graph_env.session_id, 0)] == [0, 1]
+        mark = time.time() + 60  # every existing row predates this mark by > overlap
+
+        monkeypatch.setattr(
+            "src.api.services.slide_repository.datetime",
+            _FrozenUtc(datetime.utcfromtimestamp(mark + 1)),
+        )
+        _rewrite(graph_env, 1, "<div class='slide'>fixed 1</div>")
+
+        revised = manager.slide_revisions_since(graph_env.session_id, 2, mark)
+
+        assert [r["position"] for r in revised] == [1]
+        assert revised[0]["html"] == "<div class='slide'>fixed 1</div>"
+        assert revised[0]["agent"] == "fix_reviewer"
+
+    def test_rows_older_than_the_mark_are_not_resent(self, graph_env):
+        _commit(graph_env, 0, 1)
+        manager = get_session_manager()
+        later = time.time() + 60
+        assert manager.slide_revisions_since(graph_env.session_id, 2, later) == []
+        # ...but the same rows ARE returned against an older mark, so the empty
+        # result above is the mark's doing, not a query that returns nothing.
+        earlier = time.time() - 60
+        assert [r["position"] for r in manager.slide_revisions_since(graph_env.session_id, 2, earlier)] == [0, 1]
+
+    def test_positions_at_or_above_the_cursor_are_left_to_the_reorder_buffer(
+        self, graph_env
+    ):
+        _commit(graph_env, 0, 1, 2)
+        earlier = time.time() - 60
+        revised = get_session_manager().slide_revisions_since(graph_env.session_id, 1, earlier)
+        assert [r["position"] for r in revised] == [0]
+
+    def test_no_mark_means_nothing_has_been_delivered_to_revise(self, graph_env):
+        _commit(graph_env, 0)
+        assert get_session_manager().slide_revisions_since(graph_env.session_id, 1, None) == []
+
+
+class _FrozenUtc:
+    """Stands in for the ``datetime`` module name in ``slide_repository`` so a
+    write is stamped at a chosen instant."""
+
+    def __init__(self, instant):
+        self._instant = instant
+
+    def utcnow(self):
+        return self._instant
+
+    def __getattr__(self, name):
+        return getattr(datetime, name)
+
+
+class TestThePollingRouteRevisions:
+    def test_it_returns_revisions_below_the_cursor_and_a_fresh_mark(
+        self, poll_client, poll_manager
+    ):
+        poll_manager.slides_since_cursor.return_value = []
+        poll_manager.slide_revisions_since.return_value = [_row(0)]
+        before = time.time()
+
+        body = poll_client.get(
+            "/api/chat/poll/req-1?slide_cursor=3&revisions_after=1700000000.5"
+        ).json()
+
+        assert poll_manager.slide_revisions_since.call_args.args == (
+            "sess-poll",
+            3,
+            1700000000.5,
+        )
+        assert body["slide_revisions"] == [_row(0)]
+        assert before <= body["revision_mark"] <= time.time()
+
+    def test_a_first_poll_passes_no_mark(self, poll_client, poll_manager):
+        poll_client.get("/api/chat/poll/req-1")
+        assert poll_manager.slide_revisions_since.call_args.args == ("sess-poll", 0, None)
+
+    def test_the_revisions_read_happens_after_the_permission_gate(
+        self, poll_client, monkeypatch
+    ):
+        manager = MagicMock()
+        manager.get_session_id_for_request.return_value = "sess-poll"
+        monkeypatch.setattr("src.api.routes.chat.get_session_manager", lambda: manager)
+
+        def gate(session_id, min_permission=PermissionLevel.CAN_VIEW):
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=403, detail="denied")
+
+        monkeypatch.setattr("src.api.routes.chat._check_deck_permission_for_session", gate)
+
+        assert poll_client.get("/api/chat/poll/req-leaked?revisions_after=1").status_code == 403
+        manager.slide_revisions_since.assert_not_called()
+

@@ -304,6 +304,10 @@ class GraphState(TypedDict, total=False):
     # as {key: None}.  See the tombstone hazard note in the module docstring.
     slides: Annotated[Any, turn_scoped_merge]
     dispatched_at: Annotated[Any, turn_scoped_merge]
+    # fix_map, fixed and fix_target are a slide's OWN fix state.  They are
+    # declared because the fixer and fix-reviewer stage functions read and
+    # return them, but they live in the slide-local state slide_pipeline_node
+    # builds and never reach graph state (nodes._PIPELINE_LOCAL_KEYS).
     fix_map: Annotated[Any, turn_scoped_merge]
     fixed: Annotated[Any, turn_scoped_merge]
 
@@ -322,10 +326,12 @@ def has_pending_fix(state: dict) -> bool:
     """Return True iff fix_map contains at least one non-tombstone entry.
 
     NEVER test ``bool(state.get("fix_map"))`` here.  ``turn_scoped_merge``
-    cannot delete keys — a completed fix is tombstoned as ``{position: None}``.
-    ``bool({0: None})`` is ``True``, which routes to the fixer forever, causing
-    ``min()`` to raise ``ValueError`` on an empty candidate set and the graph
-    to loop to ``GraphRecursionError``.
+    cannot delete keys — a completed fix is tombstoned as ``{position: None}``,
+    and ``bool({0: None})`` is ``True``.  When the foreman routed to a fixer
+    node on this predicate, the truthiness test looped the graph to
+    ``GraphRecursionError``; fixes now run inside each slide's pipeline, and
+    this remains the stage-level statement that a fix stage tombstoned its
+    entry on every path.
     """
     fix_map = scoped_vals(state, "fix_map")
     return any(v is not None for v in fix_map.values())

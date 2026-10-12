@@ -17,8 +17,9 @@ Four rules, each measured, and each one has produced a real defect:
    conditional edges from the same node gives duplicate conflicting edges and a
    ``GraphRecursionError``.
 
-There is deliberately **no ``reviewer_router``**: ``build_reviewer -> foreman``
-is a static edge, measured clean.  See ``builder.py`` for the measurements.
+There is deliberately **no router after a slide**: ``slide_pipeline ->
+foreman`` is a static edge, so every pipeline in a batch reaches the foreman in
+one superstep and it wakes once.  See ``builder.py``.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from langgraph.types import Send
 
 from src.services.foreman_service import all_positions_committed, stalled_positions
 from src.services.graph.nodes import build_branch_payload
-from src.services.graph.state import has_pending_fix, scoped_vals
+from src.services.graph.state import scoped_vals
 
 logger = logging.getLogger(__name__)
 
@@ -120,115 +121,10 @@ def foreman_router(state: dict) -> Union[str, List[Send]]:
     wakes = scoped_vals(state, "foreman_wakes")
     batch = wakes[-1] if wakes else []
     if batch:
-        return [Send("builder", build_branch_payload(state, p)) for p in batch]
+        return [Send("slide_pipeline", build_branch_payload(state, p)) for p in batch]
 
-    if has_pending_fix(state):
-        return "fixer"
     if stalled_positions(state, time.time()):
         return "placeholder"
     if all_positions_committed(state):
         return "deck_reviewer"
     return END
-
-
-def build_reviewer_refan_router(state: dict) -> Union[str, List[Send]]:
-    """Re-fan one ``build_reviewer`` per built-but-unreviewed position.
-
-    ``builder -> build_reviewer`` **must** be a conditional edge that re-fans.  A
-    static edge collapses N branches into ONE invocation receiving plain state
-    with no payload — measured: 3 builders produced 1 reviewer invocation — so
-    ``payload["position"]`` raises ``KeyError``, there is one review per *batch*
-    rather than per slide (breaking both the one-reviewer-writes-one-row
-    invariant and the n-not-3n cost model), and the per-slide fix path never
-    fires.
-
-    Each invocation sees only its own branch's ``slides`` write, so this returns
-    one ``Send`` per invocation and N invocations produce N reviewers.  The
-    payload is the record the builder carried forward, which is the only way a
-    ``Send``-reached reviewer can see anything at all.
-
-    Positions already in ``reviewed_positions`` are skipped, so a resumed
-    checkpoint cannot review the same slide twice.
-
-    **A branch with nothing to review goes to ``placeholder``, NOT to
-    ``foreman`` — this is a measured correction to the plan's edge list.**  The
-    only way a builder branch has nothing to review is that it placeheld, and
-    routing that branch straight to the foreman wakes the foreman **in the same
-    superstep as its siblings' reviewers** — i.e. mid-batch, before those
-    reviewers' writes land.  Measured on a three-slide turn with position 1's
-    builder failing::
-
-        SS3  builder x3                     (1 raises -> placeheld)
-        SS4  build_reviewer(0), build_reviewer(2), foreman   <- mid-batch wake
-        SS5  foreman (from the reviewers) -> deck_reviewer
-             placeholder (from SS4's foreman) -> foreman
-        SS6  deck_reviewer  #1   and  foreman -> deck_reviewer
-        SS7  deck_reviewer  #2
-
-    **The deck reviewer ran twice** — two deck-level writes, two ``deck_reviews``
-    rows and two ``info`` messages for one turn.  Worse in principle: that
-    mid-batch foreman appends an EMPTY wake, which erases the exclusion set
-    ``stalled_positions``' limb 1 relies on, so it routes to the placeholder for
-    positions whose reviewers are still running.  (No live slide is actually
-    placeheld, because ``placeholder_node`` re-evaluates ``stalled_positions``
-    one superstep later, when those writes have landed — which is exactly why
-    the predicate lives in the node and not in the router's decision.)
-
-    Routing to ``placeholder`` fixes both: the placeholder node runs in the
-    reviewers' superstep, no-ops when nothing is stalled (the real wake list
-    still excludes the live batch), and reaches the foreman through its own
-    static edge — so the foreman wakes ONCE, after the barrier, however the
-    branches split.  It also keeps the all-builders-failed case reaching deck
-    review, which routing to ``END`` would not: the post-commit ``slide_count`` /
-    ``html_content`` / ``scripts_content`` write would never happen and the deck
-    would read as ``0 slides``, silently.
-    """
-    slides = scoped_vals(state, "slides")
-    reviewed = scoped_vals(state, "reviewed_positions")
-    sends = [
-        Send(
-            "build_reviewer",
-            {
-                **dict(record),
-                # Provenance is RE-DECLARED from state, never inherited from the
-                # record.  The record is turn state: it round-trips the
-                # checkpointer and a resumed or hand-forced one can carry any
-                # release, root or actor at all, and the reviewer it reaches is
-                # the writer of the row — so the one authority is the state
-                # invoke_graph resolved this turn.  Measured: a record carrying
-                # a hostile root/actor/release is corrected here (see
-                # ``test_the_refan_overwrites_a_hostile_root_actor_and_release_in_the_record``).
-                # session_id belongs in this list and its omission was a real hole.
-                # The reviewer is the WRITER of the row, and the mutation event's
-                # actor is built from THIS key (nodes._deck_mutation_context), not
-                # from actor_session_id — so hardening root/actor/release while
-                # letting a hostile record's session_id through made the trace and
-                # the evidence row name different actors under the very threat
-                # model this docstring invokes.
-                #
-                # Falls back to the record's own value rather than to None: state
-                # always carries session_id in production (invoke_graph writes it
-                # before any node runs, and it IS the thread_id), so the fallback is
-                # unreachable there, and writing it this way means this line can
-                # only ever HARDEN a value — never replace a usable one with a blank
-                # and break a row write in a router.
-                "session_id": state.get("session_id") or record.get("session_id"),
-                "graph_release_id": state["graph_release_id"],
-                "root_session_id": state.get("root_session_id") or "",
-                "actor_session_id": state.get("actor_session_id") or "",
-            },
-        )
-        for position, record in sorted(slides.items())
-        if record is not None and position not in reviewed
-    ]
-    return sends or "placeholder"
-
-
-def fixer_router(state: dict) -> str:
-    """Route the fixer's output to its reviewer, or back to the foreman.
-
-    ``fix_target`` is the fixer's record of what it dispatched; ``None`` means it
-    found no candidate (or its own fallback already landed the original), so
-    there is nothing to review.
-    """
-    return "fix_reviewer" if state.get("fix_target") is not None else "foreman"

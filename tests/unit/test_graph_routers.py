@@ -29,8 +29,6 @@ from src.services.graph import routers
 from src.services.graph.nodes import build_branch_payload
 from src.services.graph.routers import (
     architect_router,
-    build_reviewer_refan_router,
-    fixer_router,
     foreman_router,
 )
 from src.services.graph.state import scoped
@@ -176,7 +174,7 @@ class TestForemanRouterTakesTheBatchFromTheLastWake:
         result = foreman_router(state)
 
         assert isinstance(result, list)
-        assert [s.node for s in result] == ["builder"] * 3
+        assert [s.node for s in result] == ["slide_pipeline"] * 3
         assert [s.arg["position"] for s in result] == [0, 1, 2]
         assert [s.arg["graph_release_id"] for s in result] == [41, 41, 41]
 
@@ -225,19 +223,14 @@ class TestForemanRouterLadderOnAnEmptyWake:
         state.update(overrides)
         return state
 
-    def test_pending_fix_routes_to_the_fixer(self):
-        spec = make_spec((0,))
-        state = self._empty_wake_state(
-            spec, fix_map=scoped(TURN, {0: {"original_html": "<p>x</p>"}})
-        )
-        assert foreman_router(state) == "fixer"
-
-    def test_tombstoned_fix_map_is_not_a_pending_fix(self):
-        """``bool({0: None})`` is True; routing on it loops to GraphRecursionError."""
+    def test_a_fix_entry_in_state_is_not_a_route(self):
+        """Fix rounds run inside each slide's pipeline; there is no fixer node to
+        route to, so even a live (non-tombstoned) entry an old checkpoint carries
+        must fall through to the ladder."""
         spec = make_spec((0,))
         state = self._empty_wake_state(
             spec,
-            fix_map=scoped(TURN, {0: None}),
+            fix_map=scoped(TURN, {0: {"original_html": "<p>x</p>"}}),
             landed_positions=scoped(TURN, {0}),
         )
         assert foreman_router(state) == "deck_reviewer"
@@ -276,81 +269,16 @@ class TestForemanRouterLadderOnAnEmptyWake:
 
 
 # ---------------------------------------------------------------------------
-# The re-fan
+# The routers that must not exist
 # ---------------------------------------------------------------------------
 
 
-class TestBuildReviewerRefan:
-    def _branch_state(self, positions, reviewed=()):
-        return {
-            "turn_id": TURN,
-            "graph_release_id": 41,
-            "slides": scoped(
-                TURN,
-                {
-                    p: {
-                        "position": p,
-                        "graph_release_id": 999,
-                        "html": f"<p>{p}</p>",
-                        "scripts": "",
-                    }
-                    for p in positions
-                },
-            ),
-            "reviewed_positions": scoped(TURN, set(reviewed)),
-        }
-
-    def test_one_send_per_unreviewed_position_with_the_builder_s_own_record(self):
-        result = build_reviewer_refan_router(self._branch_state([3]))
-        assert [s.node for s in result] == ["build_reviewer"]
-        assert result[0].arg["position"] == 3
-        assert result[0].arg["html"] == "<p>3</p>"
-        assert result[0].arg["graph_release_id"] == 41
-
-    def test_a_merged_view_still_produces_one_send_per_position(self):
-        """Guards the one-reviewer-writes-one-row invariant and the n-not-3n cost."""
-        result = build_reviewer_refan_router(self._branch_state([0, 1, 2]))
-        assert [s.arg["position"] for s in result] == [0, 1, 2]
-
-    def test_reviewed_positions_are_skipped(self):
-        result = build_reviewer_refan_router(
-            self._branch_state([0, 1], reviewed=[0])
-        )
-        assert [s.arg["position"] for s in result] == [1]
-
-    def test_nothing_to_review_goes_to_the_placeholder_not_the_foreman(self):
-        """Measured: routing a placeheld branch to the foreman wakes it MID-BATCH,
-        in the same superstep as its siblings' reviewers, and the deck reviewer
-        then runs twice. See the router's docstring for the superstep trace."""
-        assert build_reviewer_refan_router(self._branch_state([])) == "placeholder"
-        assert (
-            build_reviewer_refan_router(self._branch_state([0], reviewed=[0]))
-            == "placeholder"
-        )
-
-    def test_router_never_reads_a_payload_key_off_state(self):
-        """``state["position"]`` raises KeyError — a router sees plain state only."""
-        state = self._branch_state([1])
-        assert "position" not in state
-        assert build_reviewer_refan_router(state)[0].arg["position"] == 1
-
-
-# ---------------------------------------------------------------------------
-# fixer_router, and the router that must not exist
-# ---------------------------------------------------------------------------
-
-
-class TestFixerRouter:
-    def test_a_dispatched_fix_goes_to_its_reviewer(self):
-        assert fixer_router({"fix_target": 2}) == "fix_reviewer"
-
-    def test_position_zero_is_a_real_target(self):
-        """``if state.get("fix_target"):`` would send position 0 to the foreman."""
-        assert fixer_router({"fix_target": 0}) == "fix_reviewer"
-
-    def test_no_candidate_returns_to_the_foreman(self):
-        assert fixer_router({"fix_target": None}) == "foreman"
-        assert fixer_router({}) == "foreman"
+def test_no_per_slide_router_is_defined():
+    """A slide's build, review and fix run inside ``slide_pipeline_node``; the
+    re-fan and fixer routers that stitched them across supersteps are gone, and
+    a router reintroduced after a slide would bring the barriers back."""
+    for name in ("build_reviewer_refan_router", "fixer_router"):
+        assert not hasattr(routers, name), name
 
 
 def test_no_reviewer_router_is_defined():
@@ -360,7 +288,7 @@ def test_no_reviewer_router_is_defined():
 
 @pytest.mark.parametrize(
     "router",
-    [architect_router, foreman_router, build_reviewer_refan_router, fixer_router],
+    [architect_router, foreman_router],
 )
 def test_router_signature_is_state_or_state_config(router):
     """An extra positional parameter raises TypeError; the second must be ``config``."""
