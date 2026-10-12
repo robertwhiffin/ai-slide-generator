@@ -1060,9 +1060,14 @@ function environmentStagesForRole<T extends { stage_id: string }>(
   agentKey: AgentKey,
   rows: T[],
 ): T[] {
+  // Mirrors src/services/prompt_assembler.py's role scoping: frame constraints
+  // go to the roles that emit or judge layout, design-system precedence to the
+  // roles that plan or emit styling.
+  const frameRoles: AgentKey[] = ["builder", "fixer", "build_reviewer", "fix_reviewer"];
+  const precedenceRoles: AgentKey[] = ["architect", "builder", "fixer"];
   return rows.filter((row) => {
-    if (row.stage_id === "slide_frame_constraints") return agentKey === "builder";
-    if (row.stage_id === "design_system_precedence") return agentKey === "architect";
+    if (row.stage_id === "slide_frame_constraints") return frameRoles.includes(agentKey);
+    if (row.stage_id === "design_system_precedence") return precedenceRoles.includes(agentKey);
     return true;
   });
 }

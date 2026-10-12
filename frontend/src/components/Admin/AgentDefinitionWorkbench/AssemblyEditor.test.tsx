@@ -116,6 +116,11 @@ describe('AssemblyEditor protected rows', () => {
       'Protected stage: Build Reviewer criteria',
       'Protected stage: Deck-brief re-review',
       'Custom blocks: After deck-brief re-review',
+      // The build reviewer judges layout against the frame numbers, so it carries
+      // the frame-constraints stage and its custom anchor (prompt_assembler role
+      // scoping).
+      'Protected stage: Slide frame constraints',
+      'Custom blocks: After environment constraints',
       'Protected stage: Role-specific untrusted-data notice',
       'Protected stage: Untrusted-data opening delimiter',
       'Protected stage: Canonical runtime payload',
@@ -191,6 +196,7 @@ describe('AssemblyEditor custom blocks', () => {
     expect(groupLabels(reviewer.container).filter((label) => label.startsWith('Custom blocks:'))).toEqual([
       'Custom blocks: After authored prompt',
       'Custom blocks: After deck-brief re-review',
+      'Custom blocks: After environment constraints',
     ]);
   });
 
@@ -210,7 +216,9 @@ describe('AssemblyEditor custom blocks', () => {
       expect(index).toBeLessThan(terminalIndex);
     }
     expect(labels.indexOf('Custom blocks: After deck-brief re-review')).toBeGreaterThan(-1);
-    expect(labels.indexOf('Custom blocks: After environment constraints')).toBe(-1);
+    expect(labels.indexOf('Custom blocks: After environment constraints')).toBeGreaterThan(
+      labels.indexOf('Custom blocks: After deck-brief re-review'),
+    );
   });
 
   it('renders siblings per anchor, withholds arrows at the edges, and targets the exact UUID', () => {
