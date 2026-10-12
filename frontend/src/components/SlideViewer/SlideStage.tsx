@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '@/ui/button';
 import type { Slide } from '../../types/slide';
 import { useViewer } from '../../contexts/ViewerContext';
-import { buildSlideDocument } from '../../services/slideDocument';
+import { buildSlideDocument, SLIDE_PREVIEW_RESET_STYLE } from '../../services/slideDocument';
 
 interface SlideStageProps {
   slides: Slide[];
@@ -78,6 +78,12 @@ export const SlideStage: React.FC<SlideStageProps> = ({ slides, css, externalScr
       css,
       externalScripts,
       scripts: slide.scripts || '',
+      // The stage is the fixed 1280x720 clipping surface SlideTile used to be,
+      // so it takes the same shared reset: no UA body margin, a slide root
+      // pinned to the frame origin and flattened (dsv2 F3 / cross-review F2),
+      // and the shared frame contract. Without it an authored
+      // `.slide { margin: 32px auto }` silently truncated the slide's bottom.
+      extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE,
     });
   }, [slide, css, externalScripts]);
 

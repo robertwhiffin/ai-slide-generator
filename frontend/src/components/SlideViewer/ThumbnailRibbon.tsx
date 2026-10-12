@@ -17,7 +17,11 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import type { SlideDeck } from '../../types/slide';
 import { useViewer } from '../../contexts/ViewerContext';
-import { buildSlideDocument } from '../../services/slideDocument';
+import {
+  buildSlideDocument,
+  slideHostFrameStyle,
+  SLIDE_ROOT_RESET_STYLE,
+} from '../../services/slideDocument';
 
 // Thumbnail scale: ribbon is w-40 (160px). The clip boundary for the iframe
 // is 160 − 16 (ribbon p-2, 8px each side) − 2 (button border, 1px each side)
@@ -169,15 +173,22 @@ export const ThumbnailRibbon: React.FC<ThumbnailRibbonProps> = ({
       }`
       : '';
 
+    // Layout-only reset — the filmstrip half of dsv2 F2/F3, carried over from
+    // the retired SlideSelection.tsx (main's fix 8579392b2 / 43fb847a4 landed
+    // on that component, which this branch had already replaced with this
+    // ribbon, so the merge dropped it). Deliberately NO background/font-family:
+    // those repainted deck-level brand backgrounds white and forced Inter on
+    // every thumbnail. The shared root reset pins/flattens the slide root like
+    // every other surface (SLIDE_ROOT_RESET_STYLE), and the shared frame
+    // contract supplies the 1280x720 frame and stretches a background-carrying
+    // wrapper to fill it (slideHostFrameStyle). Deliberately no universal
+    // box-sizing reset either — see SLIDE_PREVIEW_RESET_STYLE for why.
     const resetStyle = `
-      * { box-sizing: border-box; }
       body {
         margin: 0;
-        width: 1280px;
-        height: 720px;
-        background: #ffffff;
-        font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
-      }`;
+      }
+      ${SLIDE_ROOT_RESET_STYLE}
+      ${slideHostFrameStyle('body')}`;
 
     return (slideHtml: string) =>
       buildSlideDocument(slideHtml, {
