@@ -1791,7 +1791,9 @@ def exchange_models(
     elif name in _MANUAL_REQUEST_MODELS:
         request_model = _MANUAL_REQUEST_MODELS[name]
     elif route.body_field is not None:
-        request_model = _dotted(route.body_field.type_)
+        # ``field_info.annotation``, not ``ModelField.type_``: FastAPI 0.136 dropped
+        # the ``type_`` property (it was only ever ``field_info.annotation``).
+        request_model = _dotted(route.body_field.field_info.annotation)
     else:
         request_model = None
 

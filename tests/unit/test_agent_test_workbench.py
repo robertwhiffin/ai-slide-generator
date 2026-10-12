@@ -13,7 +13,7 @@ from collections.abc import Iterator
 
 import pytest
 from sqlalchemy import create_engine, event, select
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects.postgresql import psycopg2 as pg_psycopg2
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -31,6 +31,19 @@ from src.services.agent_test_workbench import (
 )
 from src.services.graph_configuration import BootstrapResult, GraphConfiguration
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
+
+
+def _pg_dialect():
+    """The PostgreSQL dialect production runs on, named explicitly.
+
+    ``postgresql.dialect()`` is the *default* driver, which SQLAlchemy 2.1 changed
+    from psycopg2 to psycopg (v3); psycopg renders bind casts
+    (``%(x)s::VARCHAR``) that psycopg2 does not.  Production pins psycopg2
+    (``src.core.database._with_psycopg2_driver``), so the compiled-SQL pins below
+    compile against psycopg2 and read the same under SQLAlchemy 2.0 and 2.1.
+    """
+    return pg_psycopg2.dialect()
+
 
 ACTOR = "admin@example.com"
 CONTEXT = {"design_system_active": False}
@@ -571,7 +584,7 @@ def test_the_role_lock_statement_is_for_update_over_every_row_of_the_role():
     compiled = " ".join(
         str(
             statement.compile(
-                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+                dialect=_pg_dialect(), compile_kwargs={"literal_binds": True}
             )
         ).split()
     )
@@ -2390,7 +2403,7 @@ def test_the_verdict_writer_reads_no_parent_or_case_lock_statement(factory):
 
 
 def test_the_verdict_lock_statement_is_for_update_of_the_run_row_only():
-    compiled = str(verdict_lock_statement(7).compile(dialect=postgresql.dialect()))
+    compiled = str(verdict_lock_statement(7).compile(dialect=_pg_dialect()))
 
     assert compiled.rstrip().endswith("FOR UPDATE"), compiled
     assert " OF " not in compiled
@@ -3351,7 +3364,7 @@ def test_the_eligibility_clause_carries_every_term_including_the_ddl_backed_ones
     clause = workbench_module.eligible_approval_clause(
         AgentTestRun, AgentTestCase, GraphDraftAgent
     )
-    compiled = str(clause.compile(dialect=postgresql.dialect()))
+    compiled = str(clause.compile(dialect=_pg_dialect()))
 
     terms = [term.strip() for term in compiled.split(" AND ")]
     assert terms == [
@@ -3370,7 +3383,7 @@ def test_the_eligibility_clause_carries_every_term_including_the_ddl_backed_ones
 def test_both_run_lookups_break_run_at_ties_by_id_and_cases_are_in_id_order():
     """C13: ``run_at DESC, id DESC``.  Tie behaviour without the id term follows
     the index scan direction on both engines, so the order is pinned here."""
-    compiled = str(workbench_module._readiness_statement().compile(dialect=postgresql.dialect()))
+    compiled = str(workbench_module._readiness_statement().compile(dialect=_pg_dialect()))
 
     orders = re.findall(r"ORDER BY (\S+)\.run_at DESC, (\S+)\.id DESC", compiled)
     assert len(orders) == 2, compiled
@@ -3468,7 +3481,7 @@ def test_the_cleanup_statements_carry_every_protection_on_both_sides():
     candidate term, the linked exclusion and the shared eligibility clause
     plus ``is_active``/``is_required``; the window breaks ``run_at`` ties by
     id; the targets are locked FOR UPDATE in id order."""
-    dialect = postgresql.dialect()
+    dialect = _pg_dialect()
     targets = str(workbench_module._cleanup_targets_statement(20).compile(dialect=dialect))
     deleting = str(workbench_module._cleanup_delete_statement([1]).compile(dialect=dialect))
     clause = str(
