@@ -17,7 +17,7 @@ PostgreSQL factory, and the tripwire from Task 6 still armed.
 Stages (labelled through Task 6's ``stage()``)
 ----------------------------------------------
 * ``S13`` ``[#261]``: each turn's final checkpoint, every ``Send`` payload to
-  ``builder`` and ``build_reviewer``, and every production
+  ``slide_pipeline``, and every production
   ``persisted_agent_invocation`` log record carry exactly the conversation's pin,
   and the (revision id, content hash) the database maps for that role.  The log
   records carry exactly the allow-list and no prose or session id.  No prompt
@@ -573,10 +573,11 @@ def test_every_pinned_release_drives_its_own_revisions_through_state_fan_out_and
             turn_id = turn.checkpoint["turn_id"]
             assert isinstance(turn_id, str) and turn_id, where
 
-            # (fan-out) every Send carries the pin.
-            assert set(turn.sends) == {"builder", "build_reviewer"}, (where, sorted(turn.sends))
-            assert [p["graph_release_id"] for p in turn.sends["builder"]] == [pin], where
-            assert [p["graph_release_id"] for p in turn.sends["build_reviewer"]] == [pin], where
+            # (fan-out) every Send carries the pin.  One Send per slide now: the
+            # build reviewer runs inside the slide's pipeline, on a payload built
+            # from this one, and its release is pinned per model call below.
+            assert set(turn.sends) == {"slide_pipeline"}, (where, sorted(turn.sends))
+            assert [p["graph_release_id"] for p in turn.sends["slide_pipeline"]] == [pin], where
 
             # The model saw exactly A1, in order, through the real adapter.
             assert [call.agent_key for call in turn.calls] == list(A1_ROLES), where

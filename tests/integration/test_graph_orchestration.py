@@ -829,39 +829,32 @@ def test_the_checkpointer_serde_round_trips_deck_spec_and_finding_as_themselves(
     assert finding.criterion == OBJECTIVE_CRITERION
 
 
-def test_a_resumed_turn_reconciles_an_in_flight_fix_instead_of_re_fixing_it(
+def test_a_turn_re_entered_after_a_worker_died_mid_fix_still_completes(
     graph_turn_env, monkeypatch
 ):
-    """The ``in_flight`` marker, driven through a REAL crash and a real resume.
+    """A worker dying mid-fix, driven through a REAL crash and a same-turn re-entry.
 
-    ``in_flight`` is what makes "exactly one fix round per position" true rather
-    than aspirational, and within one turn nothing can reproduce it: the clean
-    wiring serialises ``fixer -> fix_reviewer -> foreman``, and the fix reviewer
-    tombstones its entry on every path including its own exception.  So this
-    drives the case the marker actually exists for.
+    Since a slide's build, review and fix run inside ONE ``slide_pipeline``
+    task, there is no superstep between the fixer and the fix reviewer for a
+    checkpoint to land in, so no fix can be left ``in_flight`` in graph state —
+    the case ``_reconcile_stale_fixes`` was built for no longer arises.
 
-    Turn 1 dies mid-fix — the process goes away in the fix reviewer, after the
-    fixer has already marked the entry ``in_flight`` and the superstep was
-    checkpointed.  The same turn is then re-entered on the same thread, so
-    ``scoped_vals`` reads that entry back (a FRESH turn id would discard it by
-    design, which is why ``invoke_graph``'s per-turn id makes this reachable only
-    for a caller resuming the same turn).  ``_reconcile_stale_fixes`` must then
-    land the ORIGINAL slide, tombstone the entry and let the turn finish —
-    costing NO model call, which is what keeps "one fix round" true.
+    Measured, and stated because it is a degradation from the four-node
+    topology: re-entering the SAME turn (a new ``invoke`` with input restarts
+    from the architect) discards the interrupted superstep's pending writes, so
+    the slides whose pipelines HAD finished read as dispatched-and-uncommitted
+    and the stall rule placeholds them alongside the one that died.  This is
+    unreachable through ``invoke_graph`` — it mints a fresh ``turn_id`` per
+    call, so the user's next turn after a crash starts clean — which is why it
+    is accepted rather than engineered around.  What must still hold on this
+    path is what made it worth testing: no livelock, every slide committed to a
+    row, deck review once, and no model call repeated.
 
-    **Why a ``BaseException`` and not a ``RuntimeError``.**  This used to fail the
-    fix reviewer's row write with a ``RuntimeError``, which killed the turn — the
-    F1a defect: rows committed, ``slide_count = 0``, nothing in chat.  That is now
-    guarded, so an ordinary write failure placeholds the position and the turn
-    finishes, and it can no longer leave a fix ``in_flight``.  What still can is
-    the process going away between the fixer's superstep landing and the fix
-    reviewer finishing — a SIGTERM'd worker, an OOM kill, a redeploy — and from
-    inside a node that looks like a ``BaseException``, which no ``except
-    Exception`` handler catches.  So the scenario is unchanged and the mechanism
-    is now the one that actually produces it in production.
-
-    Without ``in_flight`` the resumed fixer sees a fresh candidate and re-fixes
-    the position: ``counts("fixer") == 0`` is the assertion that catches it.
+    **Why a ``BaseException`` and not a ``RuntimeError``.**  An ordinary write
+    failure is caught and placeholds the position; what leaves a task
+    unfinished is the process going away — a SIGTERM'd worker, an OOM kill, a
+    redeploy — which from inside a node looks like a ``BaseException`` no
+    ``except Exception`` handler catches.
     """
     env = graph_turn_env
     env.recorder.configure(slide_count=3, objective_findings_at={0})
@@ -880,31 +873,21 @@ def test_a_resumed_turn_reconciles_an_in_flight_fix_instead_of_re_fixing_it(
     turn_id = "turn-that-dies-mid-fix"
     with pytest.raises(_ProcessDied, match="died mid-fix"):
         env.run(turn_id=turn_id)
+    # ENTRY: the crash happened inside slide 0's fix review, after its fixer ran.
+    assert env.recorder.counts("fixer") == 1
 
-    # The checkpoint really holds an in-flight fix for this turn.
-    checkpointed = env.graph.get_state(
-        {"configurable": {"thread_id": env.session_id}}
-    ).values
-    assert checkpointed["turn_id"] == turn_id
-    stalled_entry = scoped_vals(checkpointed, "fix_map")[0]
-    assert stalled_entry["in_flight"] is True
-    assert scoped_vals(checkpointed, "landed_positions") == {1, 2}
-
-    # Resume the SAME turn with a working writer.
     monkeypatch.setattr(SlideWriter, "write_slide", real_write_slide)
     env.recorder.reset_observations()
 
     final = env.run(turn_id=turn_id)
 
-    assert env.recorder.counts("fixer") == 0, (
-        "the resumed turn re-dispatched the fix: the in_flight marker was not "
-        "honoured, so 'exactly one fix round per position' is false"
+    for stage in ("builder", "build_reviewer", "fixer", "fix_reviewer"):
+        assert env.recorder.counts(stage) == 0, f"the re-entry re-ran {stage}"
+    committed = scoped_vals(final, "landed_positions") | scoped_vals(
+        final, "placeheld_positions"
     )
-    assert env.recorder.counts("fix_reviewer") == 0
-    assert scoped_vals(final, "fix_map")[0] is None, "the entry was not tombstoned"
-    assert scoped_vals(final, "landed_positions") == {0, 1, 2}
-    assert env.rows_by_position()[0].html == builder_html(0)
-    assert env.verdict_for(0)["verdict"] == "surfaced"
+    assert committed == {0, 1, 2}
+    assert sorted(env.rows_by_position()) == [0, 1, 2]
     assert env.recorder.counts("deck_reviewer") == 1
 
 

@@ -1,20 +1,26 @@
-"""The nine nodes of the deck-generation graph.
+"""The nodes of the deck-generation graph.
 
-``architect``, ``data_analyst``, ``foreman``, ``builder``, ``build_reviewer``,
-``fixer``, ``fix_reviewer``, ``placeholder``, ``deck_reviewer``.  Nine — there is
-no tenth, and there is no ``reviewer_router`` (``build_reviewer -> foreman`` is a
-static edge; see ``routers.py``).
+Six graph nodes: ``architect``, ``data_analyst``, ``foreman``,
+``slide_pipeline``, ``placeholder``, ``deck_reviewer``.
+
+``slide_pipeline`` runs four STAGE functions in sequence for one slide:
+``builder_node``, ``build_reviewer_node``, ``fixer_node`` and
+``fix_reviewer_node``.  They were graph nodes until the superstep barrier was
+measured to serialise every deck behind its slowest slide and run fixes one at a
+time (see :func:`slide_pipeline_node`); they keep their own contracts and
+tests, and the pipeline folds their updates with ``GraphState``'s reducers.
 
 Two node kinds, and the difference decides everything
 -----------------------------------------------------
-*Edge-reached* nodes (``architect``, ``data_analyst``, ``foreman``, ``fixer``,
-``fix_reviewer``, ``placeholder``, ``deck_reviewer``) receive ``GraphState``.
+*Edge-reached* nodes (``architect``, ``data_analyst``, ``foreman``,
+``placeholder``, ``deck_reviewer``) receive ``GraphState``.
 
-*``Send``-reached* nodes (``builder``, ``build_reviewer``) receive **only their
-payload** — measured: the node saw ``['batch', 'position']`` and no state key at
+The *``Send``-reached* node (``slide_pipeline``) receives **only its payload** —
+measured: a Send-reached node saw ``['batch', 'position']`` and no state key at
 all.  That is why :func:`build_branch_payload` pre-copies everything a branch
-needs, and why the builder carries its payload forward in ``slides[position]``
-so the re-fan can rebuild the reviewer's input from it.
+needs.  Within the pipeline, ``builder_node`` and ``build_reviewer_node`` take
+payload-shaped input, and ``fixer_node`` / ``fix_reviewer_node`` take a
+slide-local state the pipeline assembles from that payload.
 
 What each node may return
 -------------------------
@@ -41,7 +47,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, get_type_hints
 
 from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
@@ -82,7 +88,7 @@ from src.services.graph.event_emitter import (
     get_event_emitter,
     get_slide_cursor,
 )
-from src.services.graph.state import has_pending_fix, scoped, scoped_vals
+from src.services.graph.state import GraphState, scoped, scoped_vals
 from src.services.persisted_graph_release import PersistedRuntimeError
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
@@ -2009,9 +2015,11 @@ def _with_wake_appended(state: dict, turn_id: str, batch: List[int]) -> dict:
 def foreman_node(state: dict) -> Dict[str, Any]:
     """Decide what happens next, and record the decision for the router.
 
-    **The decision order is ``fix -> dispatch -> stall -> all-committed ->
-    END``** (Ruling C-2), not the plan's ``fix -> stall -> dispatch``.  Those two
-    are mutually unsatisfiable: after the superstep barrier, a position left
+    **The decision order is ``dispatch -> stall -> all-committed -> END``**
+    (Ruling C-2, with its leading ``fix`` limb removed: a slide's fix round now
+    runs inside its own ``slide_pipeline_node``, so no fix is ever pending at a
+    wake and nothing preempts dispatch).  Stall must come AFTER dispatch, not
+    before as the plan had it.  The two orders are mutually unsatisfiable: after the superstep barrier, a position left
     uncommitted by a completed batch is **always in** the most recent
     ``foreman_wakes`` batch, so ``stalled_positions``' limb 1 — which excludes
     that batch — would exclude exactly the case it exists for, and the turn
@@ -2052,15 +2060,9 @@ def foreman_node(state: dict) -> Dict[str, Any]:
     # 0. ws4d D3 — release committed slides BEFORE the ladder, so every wake
     #    delivers what the previous superstep committed no matter which limb this
     #    wake then takes.  Inside the ladder it would sit on one branch and miss
-    #    the others: the pending-fix limb returns immediately, and the
-    #    all-committed limb is the wake that carries the LAST slide of the deck.
+    #    the others: the all-committed limb is the wake that carries the LAST
+    #    slide of the deck.
     _release_slides(state)
-
-    # 1. A pending fix preempts dispatch entirely. A 31-slide deck stops
-    #    dispatching new builders until every fix completes; fix rounds
-    #    serialise one position per superstep.
-    if has_pending_fix(state):
-        return {"foreman_wakes": scoped(turn_id, [[]])}
 
     # 2/3. Compute the batch ONCE. The router reads it back out of the last
     #      wake and never recomputes it (Ruling C-1).
@@ -2805,10 +2807,11 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
         updates: Dict[str, Any] = {
             "fix_map": scoped(turn_id, {position: None}),
             "fix_target": None,
-            # Unlike the two FANNED failure paths this node may write
-            # `error_state`: `fixer -> fix_reviewer -> foreman` is strictly
-            # sequential, so no second writer can share its superstep and
-            # `InvalidUpdateError` is unreachable here.
+            # Unlike the build-stage failure paths this stage may write
+            # `error_state`: it runs strictly after its own fixer inside one
+            # slide's pipeline.  The pipeline keeps the key branch-local
+            # (`_PIPELINE_LOCAL_KEYS`), because two pipelines returning it in
+            # one superstep WOULD raise `InvalidUpdateError`.
             "error_state": {
                 "node": "fix_reviewer",
                 "code": "fix_review_delivery_failed",
@@ -2837,6 +2840,175 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
         "landed_positions": scoped(turn_id, {position}),
         "findings": findings,
     }
+
+
+# ---------------------------------------------------------------------------
+# slide_pipeline_node
+# ---------------------------------------------------------------------------
+
+
+#: The reducer of every fan-in key, read off ``GraphState`` itself so the
+#: pipeline folds its stages' updates exactly as the runtime would fold them
+#: across supersteps — never a hand-copied second definition of the merge.
+_FAN_IN_REDUCERS: Dict[str, Any] = {
+    name: hint.__metadata__[0]
+    for name, hint in get_type_hints(GraphState, include_extras=True).items()
+    if getattr(hint, "__metadata__", None)
+}
+
+#: Keys a slide's own fix round reads and writes, and which therefore never
+#: leave its pipeline.  ``fix_map``/``fix_target``/``fixed`` describe ONE
+#: slide's fix and are meaningless to its siblings; ``error_state`` is
+#: single-writer with no reducer, so two pipelines returning it in one superstep
+#: would raise ``InvalidUpdateError`` and kill the turn — the very failure the
+#: fanned failure paths already avoid by surfacing an ``info`` notice instead.
+_PIPELINE_LOCAL_KEYS = frozenset({"fix_map", "fix_target", "fixed", "error_state"})
+
+
+def _fold(acc: Dict[str, Any], update: Dict[str, Any]) -> None:
+    """Fold one stage's *update* into *acc* with ``GraphState``'s reducers."""
+    for key, value in update.items():
+        reducer = _FAN_IN_REDUCERS.get(key)
+        if key in acc and reducer is not None:
+            acc[key] = reducer(acc[key], value)
+        else:
+            acc[key] = value
+
+
+def _write_draft_row(record: dict, mutation: DeckMutationContext) -> None:
+    """Commit the builder's HTML so the slide is visible before it is reviewed.
+
+    Product decision (2026-10-12): show the draft, then replace it once the
+    slide's own review — and fix, if any — lands.  The polling transport
+    releases committed rows, so this write is what makes the slide visible;
+    the reviewed write later overwrites it in place.
+
+    **No ``verification_record``**: ``write_slide`` preserves the row's existing
+    record when given ``None``, and that record is keyed by content hash, so
+    the draft's own hash carries no verdict and reads as unreviewed rather than
+    clean.  The HTML has already been through ``gate_emitted_html`` in the
+    builder.
+
+    Best-effort: a failed draft write costs only the early preview, so it is
+    logged and the slide carries on to review, which writes the row anyway.
+    """
+    position = record["position"]
+    slide_spec = record.get("slide_spec")
+    try:
+        SlideWriter().write_slide(
+            session_id=record["session_id"],
+            position=position,
+            html=record["html"],
+            scripts=record.get("scripts") or "",
+            deck_spec_slide=slide_spec if isinstance(slide_spec, dict) else None,
+            modified_by=record.get("initiated_by"),
+            mutation=mutation,
+        )
+    except Exception:
+        logger.warning(
+            "Could not commit the draft of slide %s; it will appear once reviewed",
+            position,
+            exc_info=True,
+        )
+
+
+def build_review_payload(record: dict, authority: dict) -> Dict[str, Any]:
+    """The build reviewer's input: the builder's *record*, provenance re-declared.
+
+    *authority* is the branch payload ``build_branch_payload`` built from state
+    (or state itself).  Provenance is RE-DECLARED from it, never inherited from
+    the record: the reviewer is the WRITER of the row, and the mutation event's
+    actor is built from ``session_id`` (``_deck_mutation_context``), so a record
+    carrying a different root, actor, release or session would make the trace
+    and the evidence row name different actors.  Pinned by
+    ``test_the_review_payload_overwrites_a_hostile_root_actor_and_release_in_the_record``.
+
+    ``session_id`` falls back to the record's own value rather than to ``None``:
+    the authority always carries it in production, so the fallback is
+    unreachable there, and this line can only ever HARDEN a value.
+    """
+    return {
+        **dict(record),
+        "session_id": authority.get("session_id") or record.get("session_id"),
+        "graph_release_id": authority["graph_release_id"],
+        "root_session_id": authority.get("root_session_id") or "",
+        "actor_session_id": authority.get("actor_session_id") or "",
+    }
+
+
+def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
+    """Carry ONE slide from build to its final reviewed row, without its siblings.
+
+    ``builder -> draft row -> build_reviewer -> [fixer -> fix_reviewer]``, run
+    in sequence inside one ``Send``-reached task.  This replaces the
+    ``builder``, ``build_reviewer``, ``fixer`` and ``fix_reviewer`` graph nodes,
+    and the reason is the runtime's superstep barrier, measured on a real
+    10-slide deck: every slide waited for the slowest builder and then the
+    slowest reviewer, and the flagged slides' fixes then ran ONE AT A TIME
+    (``fixer`` took the lowest pending position per superstep) — 186s of a 308s
+    turn.  Fanning the fixers out with ``Send`` would have removed the queue but
+    not the barriers; folding the chain into one task removes both, so a slide
+    is done when ITS chain is done and the batch's only barrier is the foreman's
+    wake after the slowest whole chain.
+
+    The four stages are the shipped node functions, called unchanged, and their
+    updates are folded with ``GraphState``'s own reducers (``_fold``):
+
+    * a builder that placeholds ends the chain — nothing to review;
+    * the builder's HTML is committed as a draft (``_write_draft_row``) before
+      review, so the slide is visible while it is reviewed;
+    * the review payload is the builder's record with provenance re-declared
+      from this payload, which ``build_branch_payload`` built from state
+      (:func:`build_review_payload`);
+    * a review that opens a fix hands the fixer and fix reviewer a slide-local
+      state carrying only this slide's ``fix_map`` entry, so "exactly one fix
+      round per slide" holds by construction and ``in_flight`` stays the
+      fixer's own guard against a re-entry.
+
+    Only fan-in keys reach graph state; ``_PIPELINE_LOCAL_KEYS`` stay here.
+    Every stage's failure path is the one its node already had (placehold on a
+    failed build or review, land the original on a failed fix, placehold on a
+    fix review that cannot deliver), so the turn continues to deck review.
+    """
+    position = payload["position"]
+    acc: Dict[str, Any] = {}
+
+    _fold(acc, builder_node(payload))
+    record = ((acc.get("slides") or {}).get("vals") or {}).get(position)
+    if record is None:
+        return {k: v for k, v in acc.items() if k not in _PIPELINE_LOCAL_KEYS}
+
+    _write_draft_row(
+        record,
+        _deck_mutation_context(
+            payload["session_id"],
+            payload.get("graph_release_id"),
+            operation="write_slide",
+            object_type="slide",
+        ),
+    )
+
+    _fold(acc, build_reviewer_node(build_review_payload(record, payload)))
+
+    entry = ((acc.get("fix_map") or {}).get("vals") or {}).get(position)
+    if entry is not None:
+        fix_state: Dict[str, Any] = {
+            "turn_id": payload["turn_id"],
+            "session_id": payload["session_id"],
+            "graph_release_id": payload["graph_release_id"],
+            "initiated_by": payload.get("initiated_by"),
+            "root_session_id": payload.get("root_session_id") or "",
+            "actor_session_id": payload.get("actor_session_id") or "",
+            "design_system_active": payload.get("design_system_active"),
+            "fix_map": acc["fix_map"],
+        }
+        fixer_update = fixer_node(fix_state)
+        _fold(acc, fixer_update)
+        _fold(fix_state, fixer_update)
+        if fix_state.get("fix_target") is not None:
+            _fold(acc, fix_reviewer_node(fix_state))
+
+    return {k: v for k, v in acc.items() if k not in _PIPELINE_LOCAL_KEYS}
 
 
 # ---------------------------------------------------------------------------

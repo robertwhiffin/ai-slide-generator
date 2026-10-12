@@ -9,48 +9,59 @@ The topology, which IS the product
                                      build: foreman, edit: foreman,
                                      confirm_design_contract: END}
     data_analyst    --static------> architect
-    foreman         --conditional-> [builder(Send), fixer, placeholder,
+    foreman         --conditional-> [slide_pipeline(Send), placeholder,
                                      deck_reviewer, END]
-    builder         --conditional-> [build_reviewer(Send re-fan), placeholder]
-    build_reviewer  --static------> foreman      # measured clean; NO router here
-    fixer           --conditional-> [fix_reviewer, foreman]
-    fix_reviewer    --static------> foreman
+    slide_pipeline  --static------> foreman
     placeholder     --static------> foreman
     deck_reviewer   --static------> END
 
-Nine nodes.  ``START``/``END`` are the imported sentinels, never the strings.
+Six nodes.  ``START``/``END`` are the imported sentinels, never the strings.
 
-Why ``build_reviewer -> foreman`` is STATIC — measured, both variants built and
-run with 6 builders (positions 0 and 1 needing a fix):
+Why one ``slide_pipeline`` per slide, not four fanned nodes — measured
+----------------------------------------------------------------------
+LangGraph runs in supersteps, and a superstep ends only when its slowest task
+does.  With ``builder``, ``build_reviewer``, ``fixer`` and ``fix_reviewer`` as
+separate nodes, a real 10-slide deck (local, real Gateway models, 2026-10-12)
+spent its time like this::
 
-===============================================  =================  =============
-Approach                                         fixer invocations  foreman wakes
-===============================================  =================  =============
-wiring a ``reviewer_router`` ("fix"/"land")      **3**              **5**
-static ``add_edge("build_reviewer", "foreman")``  **2**              **4**
-===============================================  =================  =============
+    SS1      0- 55s  architect
+    SS3     55- 67s  builder x10          slide 0 done at 62s, waited to 67s
+    SS4     67-115s  build_reviewer x10   slide 0 done at 91s, waited to 115s
+    SS5-32 115-301s  foreman -> fixer -> fix_reviewer, x9, ONE AT A TIME
+    SS33   301-308s  deck_reviewer
 
-Cause: reviewers split their return between ``"fix"`` and ``"land"``, so
-``fixer`` and ``foreman`` land in the **same superstep**; the foreman then
-independently routes to the fixer on ``has_pending_fix``, creating an invocation
-whose candidate set is already empty.  Re-measured while porting the decision:
-because ``fix_target`` is single-writer with **no** reducer, the wired variant
-puts ``fixer`` and ``fix_reviewer`` in one superstep and the runtime raises
-``InvalidUpdateError: At key 'fix_target': Can receive only one value per step``
-— **the turn dies rather than degrading.**  So the router is not defined at all;
-a tested-but-unreachable router misleads about the topology.
+9 of 10 slides were flagged, and the fixer took the lowest pending position per
+superstep, so 186s of the 308s turn was a queue.  Fanning the fixers out with
+``Send`` removes the queue but not the barriers: every slide would still wait
+for the slowest builder, the slowest reviewer and the slowest fixer before it
+could land.  Folding each slide's whole chain into one task removes both; the
+only barrier left is the foreman's wake after the slowest whole chain, and a
+slide is committed (and visible to a polling client) the moment its own chain
+writes the row.
 
-**One deviation from the plan's edge list, measured here.**  The plan draws
-``builder -> foreman`` for a branch with nothing to review; that wakes the foreman
-in the same superstep as its siblings' reviewers, and the deck reviewer then runs
-TWICE on any turn where one builder fails.  The destination is ``placeholder``
-instead — the full trace is in ``build_reviewer_refan_router``'s docstring.
+Hazards this topology must keep closed, each pinned in
+``tests/unit/test_slide_pipeline.py``:
 
-Two adjacent facts that wiring revealed, worth knowing before tuning anything:
-with the clean wiring fix rounds **serialise** one position per superstep (15
-objective findings = 15 sequential rounds), and ``has_pending_fix`` preempts
-dispatch entirely, so a 31-slide deck stops dispatching new builders until every
-fix completes.
+* **Fan-in keys.**  A slide's fix state (``fix_map``, ``fix_target``,
+  ``fixed``) and the single-writer ``error_state`` never leave its pipeline;
+  every key a pipeline does return carries a reducer.
+* **The deck reviewer ran twice** when a branch with nothing to review woke the
+  foreman in the same superstep as its siblings' reviewers (measured on a
+  three-slide turn with one failed builder: SS4 held ``build_reviewer(0)``,
+  ``build_reviewer(2)`` AND ``foreman``, and deck review then fired in SS6 and
+  SS7).  Every pipeline now ends on the same static edge, so all of a batch's
+  branches reach the foreman together however they split, and it wakes once.
+* **Empty wakes** are unchanged: the foreman still records a wake on every
+  entry and the router still never recomputes the batch (see
+  ``foreman_router``).
+* **Exactly one fix round per slide** holds by construction — a pipeline runs
+  its fixer at most once — and ``in_flight`` remains the fixer's own guard.
+
+What still waits: a deck over ``CAP`` slides dispatches its next batch only when
+the whole previous batch's pipelines have finished, and the SSE transport (dev
+only — production polls) releases slides at the foreman's wakes, i.e. after the
+batch.  The polling transport reads committed rows, so it sees each slide as
+soon as its draft, and then its reviewed row, is written.
 
 Configuration
 -------------
@@ -87,19 +98,14 @@ from src.services.graph.event_emitter import (
 )
 from src.services.graph.nodes import (
     architect_node,
-    build_reviewer_node,
-    builder_node,
     data_analyst_node,
     deck_reviewer_node,
-    fix_reviewer_node,
-    fixer_node,
     foreman_node,
     placeholder_node,
+    slide_pipeline_node,
 )
 from src.services.graph.routers import (
     architect_router,
-    build_reviewer_refan_router,
-    fixer_router,
     foreman_router,
 )
 from src.services.graph.state import GraphState, scoped
@@ -128,10 +134,7 @@ def build_graph(checkpointer: Any = None):
     graph.add_node("architect", architect_node)
     graph.add_node("data_analyst", data_analyst_node)
     graph.add_node("foreman", foreman_node)
-    graph.add_node("builder", builder_node)
-    graph.add_node("build_reviewer", build_reviewer_node)
-    graph.add_node("fixer", fixer_node)
-    graph.add_node("fix_reviewer", fix_reviewer_node)
+    graph.add_node("slide_pipeline", slide_pipeline_node)
     graph.add_node("placeholder", placeholder_node)
     graph.add_node("deck_reviewer", deck_reviewer_node)
 
@@ -149,31 +152,17 @@ def build_graph(checkpointer: Any = None):
         "foreman",
         foreman_router,
         {
-            "builder": "builder",
-            "fixer": "fixer",
+            "slide_pipeline": "slide_pipeline",
             "placeholder": "placeholder",
             "deck_reviewer": "deck_reviewer",
             END: END,
         },
     )
-    graph.add_conditional_edges(
-        "builder",
-        build_reviewer_refan_router,
-        # "placeholder", not "foreman", for a branch with nothing to review — see
-        # build_reviewer_refan_router's docstring for the measured trace. Routing
-        # a placeheld branch to the foreman wakes it in the reviewers' superstep
-        # and the deck reviewer then runs TWICE.
-        {"build_reviewer": "build_reviewer", "placeholder": "placeholder"},
-    )
-    graph.add_conditional_edges(
-        "fixer",
-        fixer_router,
-        {"fix_reviewer": "fix_reviewer", "foreman": "foreman"},
-    )
 
     graph.add_edge("data_analyst", "architect")
-    graph.add_edge("build_reviewer", "foreman")
-    graph.add_edge("fix_reviewer", "foreman")
+    # Static, so every pipeline in a batch reaches the foreman in ONE superstep
+    # and it wakes once — see the module docstring.
+    graph.add_edge("slide_pipeline", "foreman")
     graph.add_edge("placeholder", "foreman")
     graph.add_edge("deck_reviewer", END)
 

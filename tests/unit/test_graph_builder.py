@@ -46,10 +46,7 @@ NODE_NAMES = {
     "architect",
     "data_analyst",
     "foreman",
-    "builder",
-    "build_reviewer",
-    "fixer",
-    "fix_reviewer",
+    "slide_pipeline",
     "placeholder",
     "deck_reviewer",
 }
@@ -67,30 +64,29 @@ def assembled():
 
 
 class TestTopology:
-    def test_exactly_nine_nodes_and_no_tenth(self, assembled):
+    def test_exactly_six_nodes_and_no_seventh(self, assembled):
         assert set(assembled.nodes) == NODE_NAMES
 
-    def test_the_static_edges_are_exactly_these_six(self, assembled):
+    def test_the_static_edges_are_exactly_these_five(self, assembled):
         assert set(assembled.edges) == {
             (START, "architect"),
             ("data_analyst", "architect"),
-            ("build_reviewer", "foreman"),
-            ("fix_reviewer", "foreman"),
+            ("slide_pipeline", "foreman"),
             ("placeholder", "foreman"),
             ("deck_reviewer", END),
         }
 
-    def test_build_reviewer_to_foreman_is_static(self, assembled):
-        """Measured: wiring a router here raises InvalidUpdateError on fix_target."""
-        assert ("build_reviewer", "foreman") in assembled.edges
-        assert "build_reviewer" not in assembled.branches
+    def test_slide_pipeline_to_foreman_is_static(self, assembled):
+        """Every pipeline in a batch must reach the foreman in ONE superstep, so it
+        wakes once; a router here could split them and wake it mid-batch (the
+        measured deck-reviewer-ran-twice shape — see ``builder.py``)."""
+        assert ("slide_pipeline", "foreman") in assembled.edges
+        assert "slide_pipeline" not in assembled.branches
 
-    def test_the_four_conditionally_routed_nodes(self, assembled):
-        assert set(assembled.branches) == {"architect", "foreman", "builder", "fixer"}
+    def test_the_two_conditionally_routed_nodes(self, assembled):
+        assert set(assembled.branches) == {"architect", "foreman"}
 
-    @pytest.mark.parametrize(
-        "node", ["architect", "foreman", "builder", "fixer"]
-    )
+    @pytest.mark.parametrize("node", ["architect", "foreman"])
     def test_no_static_edge_leaves_a_conditionally_routed_node(self, assembled, node):
         """One conditional-edge set per node.
 
@@ -136,15 +132,9 @@ class TestTopology:
 
         assert first is second
 
-    def test_no_reviewer_router_is_defined_or_imported(self):
+    def test_only_the_architect_and_foreman_routers_are_imported(self):
         names = [name for name in dir(builder_module) if name.endswith("_router")]
-        assert "reviewer_router" not in names
-        assert sorted(names) == [
-            "architect_router",
-            "build_reviewer_refan_router",
-            "fixer_router",
-            "foreman_router",
-        ]
+        assert sorted(names) == ["architect_router", "foreman_router"]
 
 
 # ---------------------------------------------------------------------------
@@ -198,22 +188,16 @@ class TestNothingNewMayReachTheForeman:
     fall-through to the foreman once woke it mid-batch and made the deck reviewer
     run twice.
 
-    A MEASURED CORRECTION to how C-2 is usually stated.  C-2 is quoted as "the
-    foreman's only inbound edges are static ones from build_reviewer, fix_reviewer
-    and placeholder, plus the conditional set out of itself".  Read off the
-    compiled graph, that is incomplete: `architect` and `fixer` BOTH have
-    conditional edges into the foreman.  `architect -> foreman` is the very edge
-    the describe-only gate guards, and `fixer -> foreman` is `fixer_router`'s
-    fall-through.  So the invariant this asserts is the measured five, not the
-    quoted three, and it is asserted as set EQUALITY.
+    Read off the compiled graph, the foreman's inbound edges are exactly three:
+    `architect -> foreman` (conditional — the very edge the describe-only gate
+    guards) and the static edges from `slide_pipeline` and `placeholder`, both
+    after the superstep barrier.  Asserted as set EQUALITY.
     """
 
     #: (source, conditional) for every edge into the foreman, measured.
     _INBOUND = {
         ("architect", True),        # architect_router — the describe-only gate
-        ("fixer", True),            # fixer_router's fall-through
-        ("build_reviewer", False),  # static, after a barrier (C-2)
-        ("fix_reviewer", False),    # static, after a barrier (C-2)
+        ("slide_pipeline", False),  # static, after the batch's barrier
         ("placeholder", False),     # static, after a barrier (C-2)
     }
 
@@ -230,9 +214,9 @@ class TestNothingNewMayReachTheForeman:
         """Entry assertion: an empty edge list would make the equality vacuous."""
         compiled = build_graph(checkpointer=False)
         edges = compiled.get_graph().edges
-        assert len(edges) >= 15, f"only {len(edges)} edges found; the read failed"
+        assert len(edges) >= 10, f"only {len(edges)} edges found; the read failed"
 
-    def test_exactly_five_edges_reach_the_foreman_and_no_sixth(self):
+    def test_exactly_three_edges_reach_the_foreman_and_no_fourth(self):
         """Set EQUALITY, not containment.
 
         Containment is the same class of hole as asserting a field equals its own
@@ -247,9 +231,9 @@ class TestNothingNewMayReachTheForeman:
             "reviewer runs twice"
         )
 
-    def test_the_only_conditional_inbound_edges_are_the_two_routers_we_know(self):
+    def test_the_only_conditional_inbound_edge_is_the_architect_router(self):
         conditional = {src for src, cond in self._inbound_to_foreman() if cond}
-        assert conditional == {"architect", "fixer"}
+        assert conditional == {"architect"}
 
 
 class TestNoSendMayTargetTheForeman:
@@ -290,7 +274,7 @@ class TestNoSendMayTargetTheForeman:
     def test_the_scan_finds_the_sends_that_do_exist(self):
         """Entry assertion. An absence over a scan that finds nothing is free."""
         found = {name for _, name in self._send_targets()}
-        assert found == {"builder", "build_reviewer"}, (
+        assert found == {"slide_pipeline"}, (
             f"the Send targets under src/services/graph are {sorted(found)}; "
             "update this test deliberately rather than letting it drift"
         )

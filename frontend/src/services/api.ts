@@ -211,6 +211,13 @@ interface PollResponse {
   slides?: Array<{ position: number; html: string; scripts: string; agent?: string }>;
   /** E10: next slide position not yet released; advance slidesCursor from this */
   slide_cursor?: number;
+  /**
+   * Already-delivered slides rewritten since the last poll's revision_mark — a
+   * builder draft replaced by its reviewed or fixed version.  Replace by position.
+   */
+  slide_revisions?: Array<{ position: number; html: string; scripts: string; agent?: string }>;
+  /** Hand back as `revisions_after` on the next poll. */
+  revision_mark?: number;
   result?: {
     slides?: SlideDeck;
     raw_html?: string;
@@ -1021,13 +1028,21 @@ export const api = {
    * @param afterMessageId - Return messages after this ID
    * @returns Promise with poll response
    */
-  async pollChat(requestId: string, afterMessageId: number = 0, slideCursor?: number): Promise<PollResponse> {
+  async pollChat(
+    requestId: string,
+    afterMessageId: number = 0,
+    slideCursor?: number,
+    revisionsAfter?: number,
+  ): Promise<PollResponse> {
     // E0: hand slide_cursor back when polling so the backend delivers only
     // the slides not yet seen by the client.  Only appended when > 0 to
     // avoid changing the URL shape for requests that carry no cursor.
     const cursorParam = slideCursor != null && slideCursor > 0 ? `&slide_cursor=${slideCursor}` : '';
+    // The previous response's revision_mark, so the backend returns only the
+    // delivered slides rewritten since then.  Absent on the first poll.
+    const revisionsParam = revisionsAfter != null ? `&revisions_after=${revisionsAfter}` : '';
     const response = await fetch(
-      `${API_BASE_URL}/api/chat/poll/${requestId}?after_message_id=${afterMessageId}${cursorParam}`,
+      `${API_BASE_URL}/api/chat/poll/${requestId}?after_message_id=${afterMessageId}${cursorParam}${revisionsParam}`,
     );
 
     if (!response.ok) {
@@ -1068,6 +1083,8 @@ export const api = {
         // E0: track the next-slide cursor so we hand it back on each poll,
         // letting the backend deliver only slides not yet released to this client.
         let slidesCursor = 0;
+        // The server's revision_mark from the last poll; undefined until one arrives.
+        let revisionMark: number | undefined;
 
         pollInterval = setInterval(async () => {
           if (cancelled) {
@@ -1076,7 +1093,12 @@ export const api = {
           }
 
           try {
-            const response = await this.pollChat(request_id, lastMessageId, slidesCursor > 0 ? slidesCursor : undefined);
+            const response = await this.pollChat(
+              request_id,
+              lastMessageId,
+              slidesCursor > 0 ? slidesCursor : undefined,
+              revisionMark,
+            );
 
             // Process new events (streaming path emits real slide_ready events here)
             for (const event of response.events) {
@@ -1108,6 +1130,23 @@ export const api = {
             // whichever path fired last wins and we never go backwards.
             if (response.slide_cursor != null && response.slide_cursor > slidesCursor) {
               slidesCursor = response.slide_cursor;
+            }
+
+            // A delivered draft replaced by its reviewed or fixed version.  These
+            // positions are all below the cursor, so they reach the same
+            // slide_ready handler, which replaces a slide that already exists.
+            for (const slide of response.slide_revisions ?? []) {
+              onEvent({
+                type: 'slide_ready',
+                position: slide.position,
+                html: slide.html,
+                scripts: slide.scripts,
+                agent: slide.agent,
+                slide_cursor: slidesCursor,
+              });
+            }
+            if (response.revision_mark != null) {
+              revisionMark = response.revision_mark;
             }
 
             lastMessageId = response.last_message_id;
