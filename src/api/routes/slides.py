@@ -42,7 +42,11 @@ from src.api.routes._authz import (
     _require_slide_permission,
 )
 from src.api.services.chat_service import get_chat_service
-from src.api.services.session_manager import VersionConflictError, get_session_manager
+from src.api.services.session_manager import (
+    SessionNotFoundError,
+    VersionConflictError,
+    get_session_manager,
+)
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context  # noqa: F401 — patched by integration-test fixtures
