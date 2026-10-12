@@ -1481,6 +1481,10 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     const navigation = await selectRole('Build Reviewer');
     fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
     await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(1));
+    // The POST is issued synchronously on click; custom-block controls exist only once
+    // its response is applied, so wait for the settled v2 panel, not the request.
+    await within(assemblyPanel())
+      .findByRole('button', { name: 'Add custom block After deck-brief re-review' });
 
     const panel = assemblyPanel();
     fireEvent.click(within(panel).getByRole('button', { name: 'Add custom block After deck-brief re-review' }));
@@ -1558,7 +1562,12 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     await selectRole('Architect');
     fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
     await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(1));
-    fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Add custom block After authored prompt' }));
+    // The POST is issued synchronously on click, so `upgradeCalls` proves only that the
+    // request left — not that its response was applied. Until it is, the panel is still
+    // v1 (Upgrade disabled, no custom-block controls); on a loaded CI runner the old
+    // getByRole here raced the response. Wait for the settled v2 control instead.
+    fireEvent.click(await within(assemblyPanel())
+      .findByRole('button', { name: 'Add custom block After authored prompt' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save Draft' }));
 
     const issues = await screen.findByRole('region', { name: 'Server rejected this request' });

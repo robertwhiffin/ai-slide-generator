@@ -1226,9 +1226,13 @@ describe('discriminated draft operations', () => {
     expect(succeeded.byAgent.data_analyst.local.max_tokens).toBe(4096);
     expect(succeeded.byAgent.data_analyst.local.assembly_rules).toEqual({ format_version: 2, custom_blocks: [] });
     expect(succeeded.byAgent.data_analyst.saved.protected_assembly).toEqual({ version: 2, digest: 'e'.repeat(64) });
+    // The stage view is the server's, adopted verbatim. Since #291 the environment
+    // stages are role-scoped (slide-frame constraints: Builder only; design-system
+    // precedence: Architect only — `_protected_stage_applies_to_role` in
+    // src/services/prompt_assembler.py), so the Data Analyst's v2 view carries neither.
     expect(succeeded.byAgent.data_analyst.saved.protected_stage_view.map((row) => row.stage_id)).toEqual([
-      'slide_frame_constraints', 'design_system_precedence', 'untrusted_data_notice',
-      'untrusted_data_open', 'runtime_payload', 'untrusted_data_close', 'structured_output_binding',
+      'untrusted_data_notice', 'untrusted_data_open', 'runtime_payload',
+      'untrusted_data_close', 'structured_output_binding',
     ]);
 
     // Every retained form is sanitized against the new authoritative version and
