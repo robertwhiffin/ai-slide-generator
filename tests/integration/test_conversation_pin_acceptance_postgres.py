@@ -357,12 +357,12 @@ def _actual_identities(observed_envelope, calls):
 
 
 def _assert_send_segment(sent, starts, release_id):
-    builder_segment = sent["builder"][starts["builder"] :]
-    reviewer_segment = sent["build_reviewer"][starts["build_reviewer"] :]
-    assert len(builder_segment) == 1
-    assert len(reviewer_segment) == 1
-    assert [payload["graph_release_id"] for payload in builder_segment] == [release_id]
-    assert [payload["graph_release_id"] for payload in reviewer_segment] == [release_id]
+    # One Send per slide: the build reviewer runs inside the slide's pipeline on a
+    # payload built from this one, and its release is pinned per model call by
+    # the identity-sink assertions.
+    segment = sent["slide_pipeline"][starts["slide_pipeline"] :]
+    assert len(segment) == 1
+    assert [payload["graph_release_id"] for payload in segment] == [release_id]
 
 
 def test_persisted_conversation_pins_drive_three_real_compiled_graph_turns(
@@ -422,7 +422,7 @@ def test_persisted_conversation_pins_drive_three_real_compiled_graph_turns(
     )
     monkeypatch.setattr("src.services.graph.nodes.get_agent_runtime", lambda: runtime)
 
-    sent = {"builder": [], "build_reviewer": []}
+    sent = {"slide_pipeline": []}
     saved_send = routers.Send
 
     def recording_send(node, arg):

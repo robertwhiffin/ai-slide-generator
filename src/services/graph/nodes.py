@@ -2883,6 +2883,12 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> None:
     releases committed rows, so this write is what makes the slide visible;
     the reviewed write later overwrites it in place.
 
+    **A draft only ever fills an EMPTY position.**  On an edit or a rebuild the
+    position already holds a committed slide, and a turn that then dies on a
+    persisted runtime failure (a removed pinned endpoint, say) would leave the
+    user's good slide replaced by an unreviewed draft and report an error.  So
+    a position with a row keeps it until the reviewed write replaces it.
+
     **No ``verification_record``**: ``write_slide`` preserves the row's existing
     record when given ``None``, and that record is keyed by content hash, so
     the draft's own hash carries no verdict and reads as unreviewed rather than
@@ -2895,7 +2901,10 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> None:
     position = record["position"]
     slide_spec = record.get("slide_spec")
     try:
-        SlideWriter().write_slide(
+        writer = SlideWriter()
+        if writer.get_slide(record["session_id"], position) is not None:
+            return
+        writer.write_slide(
             session_id=record["session_id"],
             position=position,
             html=record["html"],
