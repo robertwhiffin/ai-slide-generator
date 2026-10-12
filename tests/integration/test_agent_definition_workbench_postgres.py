@@ -597,6 +597,8 @@ def _assert_authored_only_persisted_v2(
     expected_ids = ["authored_prompt"]
     if agent_key == "build_reviewer":
         expected_ids.append("build_reviewer_criteria")
+        # Design system inactive: the reviewer judges layout against the frame.
+        expected_ids.append("slide_frame_constraints")
     expected_ids.extend(
         [
             "untrusted_data_notice",
@@ -1199,8 +1201,14 @@ def _expected_v1_rows(agent_key: str, digest: str) -> list[dict[str, object]]:
         row
         for row in rows
         if not (
-            (row["stage_id"] == "slide_frame_constraints" and agent_key != "builder")
-            or (row["stage_id"] == "design_system_precedence" and agent_key != "architect")
+            (
+                row["stage_id"] == "slide_frame_constraints"
+                and agent_key not in {"builder", "fixer", "build_reviewer", "fix_reviewer"}
+            )
+            or (
+                row["stage_id"] == "design_system_precedence"
+                and agent_key not in {"architect", "builder", "fixer"}
+            )
         )
     ]
     for row in rows:
@@ -1286,8 +1294,14 @@ def _expected_v2_rows(agent_key: str, digest: str) -> list[dict[str, object]]:
         row
         for row in rows
         if not (
-            (row["stage_id"] == "slide_frame_constraints" and agent_key != "builder")
-            or (row["stage_id"] == "design_system_precedence" and agent_key != "architect")
+            (
+                row["stage_id"] == "slide_frame_constraints"
+                and agent_key not in {"builder", "fixer", "build_reviewer", "fix_reviewer"}
+            )
+            or (
+                row["stage_id"] == "design_system_precedence"
+                and agent_key not in {"architect", "builder", "fixer"}
+            )
         )
     ]
     for row in rows:
