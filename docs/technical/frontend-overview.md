@@ -103,7 +103,7 @@ interface Slide {
 }
 ```
 
-Slides are HTML snippets embedded in iframes for preview. The optional `verification` field stores auto-verification checks (**MLflow LLM-as-judge** by default; **Direct** ChatDatabricks optional via Admin) against tool/source data from the session.
+Slides are HTML snippets embedded in iframes for preview. Preview and presentation frames use `sandbox="allow-scripts"` without `allow-same-origin`. Browser-side PDF, screenshot-PPTX, Chart.js canvas capture, and DOM-record export use the same opaque sandbox: capture runs inside the frame and returns over `postMessage` (`frontend/src/services/sandboxedExportFrame.ts`). The optional `verification` field stores auto-verification checks (**MLflow LLM-as-judge** by default; **Direct** ChatDatabricks optional via Admin) against tool/source data from the session.
 
 ### 3. Viewer Context (`src/contexts/ViewerContext.tsx`)
 
@@ -356,11 +356,14 @@ interface SlideStyle {
 | `src/components/SavePoints/PreviewBanner.tsx` | Indigo banner during preview with revert/cancel actions | None (props only) |
 | `src/components/SavePoints/RevertConfirmModal.tsx` | Confirmation dialog before restore (warns about version deletion) | `api.restoreVersion` |
 | `src/components/Setup/WelcomeSetup.tsx` | Initial setup screen; collects workspace URL, triggers authentication, verifies configuration | `POST /api/setup/status` |
-| `src/components/Admin/AdminPage.tsx` | Admin page with tabs for feedback dashboard and Google Slides OAuth configuration | None (delegates to child components) |
+| `src/components/Admin/AdminPage.tsx` | Admin page with tabs including app-wide Google Slides OAuth **client** credentials | None (delegates to child components) |
 | `src/components/ChatPanel/PromptEditorModal.tsx` | Expanded modal editor for composing longer prompts with save and send actions | None (callback props) |
 | `src/components/ChatPanel/ErrorDisplay.tsx` | Inline error banner with dismiss button, shown below chat input on API errors | None (props only) |
 | `src/components/ChatPanel/LoadingIndicator.tsx` | Animated loading indicator with rotating message, shown during slide edits | None (props only) |
-| `src/components/config/GoogleSlidesAuthForm.tsx` | Google OAuth credentials upload and user authorization flow for Google Slides export | `configApi.uploadGoogleCredentials`, `configApi.getGoogleCredentialsStatus`, `configApi.deleteGoogleCredentials`, `api.getGoogleSlidesAuthUrl` |
+| `src/components/ChatPanel/SelectionBadge.tsx` | Badge in ChatInput showing the current slide selection range with a clear button | None (props only) |
+| `src/components/config/GoogleSlidesAuthForm.tsx` | Admin-only Google OAuth client credentials upload/remove | `configApi.uploadGoogleCredentials`, `configApi.getGoogleCredentialsStatus`, `configApi.deleteGoogleCredentials` |
+| `src/components/config/GoogleAccountConnection.tsx` | Per-user Google connect / disconnect on Settings | `api.checkGoogleSlidesAuth`, `api.getGoogleSlidesAuthUrl`, `api.revokeGoogleSlidesAuth` |
+| `src/components/config/SettingsPage.tsx` | User settings (`/settings`); Google account section | Delegates to `GoogleAccountConnection` |
 | `src/components/config/ConfirmDialog.tsx` | Reusable confirmation dialog for destructive actions (deleting profiles, changing defaults) | None (props only) |
 | `src/components/config/ContributorsManager.tsx` | Profile sharing UI; add/update/remove contributors (users/groups) with permission levels | `configApi.listContributors`, `configApi.addContributor`, `configApi.updateContributor`, `configApi.removeContributor`, `configApi.searchIdentities` |
 | `src/components/DeckContributorsManager.tsx` | Deck (session) sharing UI; add/update/remove contributors with CAN_VIEW/CAN_EDIT/CAN_MANAGE permissions | `configApi.listDeckContributors`, `configApi.addDeckContributor`, `configApi.updateDeckContributor`, `configApi.removeDeckContributor` |

@@ -3,6 +3,7 @@
 import io
 import zipfile
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -597,6 +598,77 @@ class TestAsyncPPTXExport:
 
             assert response.status_code == 400
             assert "not ready" in response.json()["detail"].lower()
+
+    def test_download_export_job_serves_file_without_cleanup(
+        self, client, tmp_path
+    ):
+        """GET download serves the file and leaves the completed job intact."""
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        TestSession = sessionmaker(bind=engine)
+
+        @contextmanager
+        def mock_get_db_session():
+            db = TestSession()
+            try:
+                yield db
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        output_path = tmp_path / "export.pptx"
+        output_path.write_bytes(b"pptx bytes")
+        completed_at = datetime.utcnow() - timedelta(minutes=1)
+
+        with patch(
+            "src.api.services.export_job_queue.get_db_session",
+            mock_get_db_session,
+        ):
+            with TestSession() as db:
+                db.add(
+                    ExportJob(
+                        job_id="test-job-123",
+                        session_id="test-123",
+                        status="completed",
+                        progress=3,
+                        total_slides=3,
+                        title="Test Presentation",
+                        output_path=str(output_path),
+                        completed_at=completed_at,
+                    )
+                )
+                db.commit()
+
+            first_response = client.get("/api/export/pptx/download/test-job-123")
+            second_response = client.get("/api/export/pptx/download/test-job-123")
+
+            with TestSession() as db:
+                row = (
+                    db.query(ExportJob)
+                    .filter(ExportJob.job_id == "test-job-123")
+                    .first()
+                )
+
+        assert first_response.status_code == 200
+        assert first_response.content == b"pptx bytes"
+        assert (
+            first_response.headers["content-type"]
+            == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
+        assert first_response.headers["content-disposition"].endswith(
+            'filename="Test_Presentation.pptx"'
+        )
+        assert second_response.status_code == 200
+        assert second_response.content == b"pptx bytes"
+        assert output_path.exists()
+        assert row is not None
 
     def test_poll_finds_job_after_inmemory_state_cleared(
         self, client, mock_chat_service

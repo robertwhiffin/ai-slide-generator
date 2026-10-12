@@ -1,18 +1,13 @@
 /**
- * Google Slides OAuth configuration form.
+ * Admin-only Google OAuth client credentials form.
  *
- * Two sections:
- *   A) Credentials Upload — upload / view / delete the Google OAuth
- *      credentials.json stored (encrypted) on the profile.
- *   B) User Authorization — trigger the Google OAuth consent flow and
- *      display the current authorization status.
+ * Upload / view / delete the app-wide credentials.json. Per-user Google
+ * account connect/disconnect lives on Settings (`GoogleAccountConnection`).
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FiUploadCloud, FiCheck, FiX, FiTrash2, FiExternalLink, FiShield, FiCopy } from 'react-icons/fi';
+import { FiUploadCloud, FiCheck, FiX, FiTrash2, FiShield, FiCopy } from 'react-icons/fi';
 import { configApi, ConfigApiError } from '../../api/config';
-import { api } from '../../services/api';
-import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 
 const CALLBACK_PATH = '/api/export/google-slides/auth/callback';
 
@@ -79,7 +74,6 @@ const RedirectUriCopyBox: React.FC = () => {
 };
 
 export const GoogleSlidesAuthForm: React.FC = () => {
-  // --- Credentials state ---
   const [hasCredentials, setHasCredentials] = useState<boolean | null>(null);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -87,35 +81,14 @@ export const GoogleSlidesAuthForm: React.FC = () => {
   const [credError, setCredError] = useState<string | null>(null);
   const [credSuccess, setCredSuccess] = useState<string | null>(null);
 
-  // --- Auth state ---
-  const [authorized, setAuthorized] = useState<boolean | null>(null);
-  const [checkingAuth, setCheckingAuth] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [authorizing, setAuthorizing] = useState(false);
-
-  // --- Drag & drop ---
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { openOAuthPopup } = useGoogleOAuthPopup();
-
-  // ---------------------------------------------------------------
-  // Load initial statuses
-  // ---------------------------------------------------------------
 
   const loadStatuses = useCallback(async () => {
     setLoadingStatus(true);
     try {
       const { has_credentials } = await configApi.getGoogleCredentialsStatus();
       setHasCredentials(has_credentials);
-
-      if (has_credentials) {
-        setCheckingAuth(true);
-        const { authorized: auth } = await api.checkGoogleSlidesAuth();
-        setAuthorized(auth);
-        setCheckingAuth(false);
-      } else {
-        setAuthorized(null);
-      }
     } catch {
       setCredError('Failed to load status');
     } finally {
@@ -126,10 +99,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
   useEffect(() => {
     loadStatuses();
   }, [loadStatuses]);
-
-  // ---------------------------------------------------------------
-  // Credentials upload
-  // ---------------------------------------------------------------
 
   const handleFileUpload = async (file: File) => {
     if (!file.name.endsWith('.json')) {
@@ -145,11 +114,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
       await configApi.uploadGoogleCredentials(file);
       setHasCredentials(true);
       setCredSuccess('Credentials uploaded and encrypted successfully');
-      // Re-check auth status (token may already exist from previous upload)
-      setCheckingAuth(true);
-      const { authorized: auth } = await api.checkGoogleSlidesAuth();
-      setAuthorized(auth);
-      setCheckingAuth(false);
     } catch (err) {
       const msg = err instanceof ConfigApiError ? err.message : 'Upload failed';
       setCredError(msg);
@@ -161,7 +125,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) handleFileUpload(file);
-    // Reset so re-selecting the same file triggers onChange
     e.target.value = '';
   };
 
@@ -174,7 +137,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
     try {
       await configApi.deleteGoogleCredentials();
       setHasCredentials(false);
-      setAuthorized(null);
       setCredSuccess('Credentials removed');
     } catch (err) {
       const msg = err instanceof ConfigApiError ? err.message : 'Delete failed';
@@ -183,10 +145,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
       setDeleting(false);
     }
   };
-
-  // ---------------------------------------------------------------
-  // Drag & Drop handlers
-  // ---------------------------------------------------------------
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -204,32 +162,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
     if (file) handleFileUpload(file);
   };
 
-  // ---------------------------------------------------------------
-  // OAuth authorization
-  // ---------------------------------------------------------------
-
-  const handleAuthorize = async () => {
-    setAuthorizing(true);
-    setAuthError(null);
-
-    try {
-      const authResult = await openOAuthPopup();
-      setAuthorized(authResult);
-      if (!authResult) {
-        setAuthError('Authorization was not completed');
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Authorization failed';
-      setAuthError(msg);
-    } finally {
-      setAuthorizing(false);
-    }
-  };
-
-  // ---------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------
-
   if (loadingStatus) {
     return (
       <div className="flex items-center justify-center h-48">
@@ -240,15 +172,14 @@ export const GoogleSlidesAuthForm: React.FC = () => {
 
   return (
     <div className="space-y-8">
-      {/* Section A: Credentials Upload */}
       <section>
         <h3 className="text-lg font-semibold text-gray-900 mb-1">OAuth Client Credentials</h3>
         <p className="text-sm text-gray-500 mb-4">
           Upload the <code className="px-1 py-0.5 bg-gray-100 rounded text-xs">credentials.json</code> file
-          from your Google Cloud project. It will be stored encrypted.
+          from your Google Cloud project. It will be stored encrypted. Users connect their own
+          Google accounts under Settings.
         </p>
 
-        {/* Status messages */}
         {credError && (
           <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm flex items-center gap-2">
             <FiX className="flex-shrink-0" /> {credError}
@@ -261,7 +192,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
         )}
 
         {hasCredentials ? (
-          /* Credentials already uploaded */
           <div className="flex items-center justify-between bg-green-50 border border-green-200 rounded-lg p-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
@@ -291,7 +221,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
             </div>
           </div>
         ) : (
-          /* Upload zone */
           <div
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -322,80 +251,6 @@ export const GoogleSlidesAuthForm: React.FC = () => {
         />
       </section>
 
-      {/* Section B: User Authorization */}
-      {hasCredentials && (
-        <section>
-          <h3 className="text-lg font-semibold text-gray-900 mb-1">Google Account Authorization</h3>
-          <p className="text-sm text-gray-500 mb-4">
-            Authorize your Google account to allow slide export. Each user authorizes independently.
-          </p>
-
-          {authError && (
-            <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm flex items-center gap-2">
-              <FiX className="flex-shrink-0" /> {authError}
-            </div>
-          )}
-
-          <div className="flex items-center justify-between bg-gray-50 border border-gray-200 rounded-lg p-4">
-            <div className="flex items-center gap-3">
-              <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-                authorized ? 'bg-green-100' : 'bg-gray-200'
-              }`}>
-                {checkingAuth ? (
-                  <span className="w-5 h-5 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
-                ) : authorized ? (
-                  <FiCheck className="text-green-600" size={20} />
-                ) : (
-                  <FiExternalLink className="text-gray-500" size={20} />
-                )}
-              </div>
-              <div>
-                <p className={`font-medium ${authorized ? 'text-green-900' : 'text-gray-700'}`}>
-                  {checkingAuth
-                    ? 'Checking...'
-                    : authorized
-                      ? 'Authorized'
-                      : 'Not authorized'}
-                </p>
-                <p className="text-xs text-gray-500">
-                  {authorized
-                    ? 'Your Google account is connected for slide export'
-                    : 'Click to connect your Google account'}
-                </p>
-              </div>
-            </div>
-
-            <button
-              onClick={handleAuthorize}
-              disabled={authorizing || checkingAuth}
-              className={`px-4 py-2 text-sm rounded transition-colors flex items-center gap-2 ${
-                authorized
-                  ? 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
-                  : 'bg-blue-600 text-white hover:bg-blue-700'
-              } disabled:opacity-50`}
-            >
-              {authorizing ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                  Authorizing...
-                </>
-              ) : authorized ? (
-                <>
-                  <FiExternalLink size={14} />
-                  Re-authorize
-                </>
-              ) : (
-                <>
-                  <FiExternalLink size={14} />
-                  Authorize with Google
-                </>
-              )}
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* Setup instructions */}
       <section className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-4">
         <h4 className="text-sm font-semibold text-blue-900 mb-2">Setup: Google Cloud OAuth Credentials</h4>
         <ol className="text-sm text-blue-800 space-y-1.5 list-decimal list-inside">

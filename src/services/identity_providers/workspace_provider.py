@@ -12,6 +12,8 @@ from typing import List, Optional
 
 from databricks.sdk import WorkspaceClient
 
+from src.services.identity_providers.scim_filter import escape_scim_filter_string
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,8 +52,9 @@ class WorkspaceIdentityProvider:
         try:
             kwargs: dict = {"attributes": "id,userName,displayName"}
             if filter_query:
+                escaped_query = escape_scim_filter_string(filter_query)
                 kwargs["filter"] = (
-                    f'userName co "{filter_query}" or displayName co "{filter_query}"'
+                    f'userName co "{escaped_query}" or displayName co "{escaped_query}"'
                 )
 
             users: List[dict] = []
@@ -90,7 +93,8 @@ class WorkspaceIdentityProvider:
         try:
             kwargs: dict = {"attributes": "id,displayName"}
             if filter_query:
-                kwargs["filter"] = f'displayName co "{filter_query}"'
+                escaped_query = escape_scim_filter_string(filter_query)
+                kwargs["filter"] = f'displayName co "{escaped_query}"'
 
             groups: List[dict] = []
             for g in self._client.groups.list(**kwargs):

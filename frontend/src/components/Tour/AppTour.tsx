@@ -150,6 +150,15 @@ const TOUR_STEPS: Step[] = [
     skipBeacon: true,
     before: clickNav('nav-images'),
   },
+  {
+    target: '[data-tour="page-settings"]',
+    title: 'Settings',
+    content:
+      'Connect or disconnect your Google account here for Google Slides export. Admins still upload the app-wide OAuth client credentials on the Admin page.',
+    placement: 'center',
+    skipBeacon: true,
+    before: clickNav('nav-settings'),
+  },
   // ── Main workspace: Overview (navigate back) ─────────────────────
   {
     target: '[data-tour="chat-panel"]',

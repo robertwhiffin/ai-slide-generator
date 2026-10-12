@@ -934,7 +934,7 @@ def poll_manager(monkeypatch):
     manager.slide_revisions_since.return_value = []
     monkeypatch.setattr("src.api.routes.chat.get_session_manager", lambda: manager)
     monkeypatch.setattr(
-        "src.api.routes.chat._check_deck_permission_for_session", MagicMock()
+        "src.api.routes.chat._require_chat_request_owner", MagicMock()
     )
     return manager
 
@@ -1013,21 +1013,20 @@ class TestThePollingRoute:
         self, poll_client, monkeypatch
     ):
         """SDR-4437's gate must still come first: a leaked request_id must not
-        reach slide HTML."""
+        reach slide HTML.  Since F-CR-31 the gate is creator-only
+        (``_require_chat_request_owner``), not deck CAN_VIEW."""
         manager = MagicMock()
         manager.get_session_id_for_request.return_value = "sess-poll"
         monkeypatch.setattr(
             "src.api.routes.chat.get_session_manager", lambda: manager
         )
 
-        def gate(session_id, min_permission=PermissionLevel.CAN_VIEW):
+        def gate(session_id):
             from fastapi import HTTPException
 
             raise HTTPException(status_code=403, detail="denied")
 
-        monkeypatch.setattr(
-            "src.api.routes.chat._check_deck_permission_for_session", gate
-        )
+        monkeypatch.setattr("src.api.routes.chat._require_chat_request_owner", gate)
 
         assert poll_client.get("/api/chat/poll/req-leaked").status_code == 403
         manager.slides_since_cursor.assert_not_called()
@@ -1185,12 +1184,12 @@ class TestThePollingRouteRevisions:
         manager.get_session_id_for_request.return_value = "sess-poll"
         monkeypatch.setattr("src.api.routes.chat.get_session_manager", lambda: manager)
 
-        def gate(session_id, min_permission=PermissionLevel.CAN_VIEW):
+        def gate(session_id):
             from fastapi import HTTPException
 
             raise HTTPException(status_code=403, detail="denied")
 
-        monkeypatch.setattr("src.api.routes.chat._check_deck_permission_for_session", gate)
+        monkeypatch.setattr("src.api.routes.chat._require_chat_request_owner", gate)
 
         assert poll_client.get("/api/chat/poll/req-leaked?revisions_after=1").status_code == 403
         manager.slide_revisions_since.assert_not_called()

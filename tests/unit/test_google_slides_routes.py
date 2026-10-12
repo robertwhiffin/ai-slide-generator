@@ -7,18 +7,18 @@ Covers:
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from fastapi.testclient import TestClient
 
 from src.core.database import Base, get_db
 from src.core.encryption import encrypt_data
 from src.database.models import GoogleGlobalCredentials
-
+from src.database.models.google_oauth_token import GoogleOAuthToken
 
 # Sample credentials.json — must include auth_uri/token_uri for Flow.from_client_config
 VALID_CREDENTIALS = json.dumps({
@@ -125,6 +125,11 @@ def _seed_global_credentials(session_factory) -> None:
 
 class TestHelpers:
 
+    @pytest.fixture(autouse=True)
+    def _no_app_url(self, monkeypatch):
+        """Exercise the local-fallback path unless a test sets the env var."""
+        monkeypatch.delenv("DATABRICKS_APP_URL", raising=False)
+
     def test_get_user_identity_in_test_env(self):
         """In test environment, _get_user_identity returns 'local_dev'."""
         from src.api.routes.google_slides import _get_user_identity
@@ -150,6 +155,38 @@ class TestHelpers:
         uri = _build_redirect_uri(mock_proxy)
         assert uri == "https://myapp.databricksapps.com/api/export/google-slides/auth/callback"
 
+    def test_build_app_origin_env_wins_over_poisoned_forwarded_host(self, monkeypatch):
+        """F-CR-28: DATABRICKS_APP_URL beats a client-supplied X-Forwarded-Host."""
+        from src.api.routes.google_slides import _build_app_origin, _build_redirect_uri
+
+        monkeypatch.setenv("DATABRICKS_APP_URL", "https://real-app.databricksapps.com")
+        req = MagicMock()
+        req.headers.get.side_effect = lambda h: {
+            "x-forwarded-host": "evil.example.com",
+            "x-forwarded-proto": "http",
+        }.get(h)
+        req.base_url = "http://localhost:8000/"
+        assert _build_app_origin(req) == "https://real-app.databricksapps.com"
+        assert _build_redirect_uri(req) == (
+            "https://real-app.databricksapps.com/api/export/google-slides/auth/callback"
+        )
+
+    def test_build_app_origin_strips_path_and_trailing_slash(self, monkeypatch):
+        from src.api.routes.google_slides import _build_app_origin
+
+        req = MagicMock()
+        req.headers.get.return_value = None
+        monkeypatch.setenv("DATABRICKS_APP_URL", "https://real-app.databricksapps.com/some/path/")
+        assert _build_app_origin(req) == "https://real-app.databricksapps.com"
+
+    def test_build_app_origin_env_without_scheme_defaults_https(self, monkeypatch):
+        from src.api.routes.google_slides import _build_app_origin
+
+        req = MagicMock()
+        req.headers.get.return_value = None
+        monkeypatch.setenv("DATABRICKS_APP_URL", "real-app.databricksapps.com")
+        assert _build_app_origin(req) == "https://real-app.databricksapps.com"
+
 
 # ---------------------------------------------------------------------------
 # Auth status endpoint (extended)
@@ -158,17 +195,69 @@ class TestHelpers:
 class TestAuthStatus:
 
     def test_returns_false_for_no_creds(self, test_client):
-        """No global credentials → authorized=false."""
+        """No global credentials → authorized=false, has_credentials=false."""
         resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
-        assert resp.json()["authorized"] is False
+        body = resp.json()
+        assert body["authorized"] is False
+        assert body["has_credentials"] is False
 
     def test_returns_false_with_creds_but_no_token(self, test_client, session_factory):
         """Global credentials exist but user hasn't authorized yet."""
         _seed_global_credentials(session_factory)
         resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
-        assert resp.json()["authorized"] is False
+        body = resp.json()
+        assert body["authorized"] is False
+        assert body["has_credentials"] is True
+
+
+def _seed_user_token(session_factory, user_identity: str) -> None:
+    db = session_factory()
+    token_json = json.dumps({
+        "token": "ya29.test",
+        "refresh_token": "1//test",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "test-id.apps.googleusercontent.com",
+        "client_secret": "test-secret",
+        "scopes": ["https://www.googleapis.com/auth/presentations"],
+        "expiry": None,
+    })
+    db.add(GoogleOAuthToken(
+        user_identity=user_identity,
+        token_encrypted=encrypt_data(token_json),
+    ))
+    db.commit()
+    db.close()
+
+
+class TestRevokeAuth:
+
+    def test_revoke_is_idempotent_when_no_token(self, test_client):
+        resp = test_client.delete("/api/export/google-slides/auth")
+        assert resp.status_code == 204
+        status = test_client.get("/api/export/google-slides/auth/status")
+        assert status.json()["authorized"] is False
+
+    def test_revoke_deletes_only_current_user_token(self, test_client, session_factory):
+        _seed_global_credentials(session_factory)
+        _seed_user_token(session_factory, "local_dev")
+        _seed_user_token(session_factory, "other@example.com")
+
+        resp = test_client.delete("/api/export/google-slides/auth")
+        assert resp.status_code == 204
+
+        status = test_client.get("/api/export/google-slides/auth/status")
+        assert status.json()["authorized"] is False
+        assert status.json()["has_credentials"] is True
+
+        db = session_factory()
+        remaining = {
+            row.user_identity
+            for row in db.query(GoogleOAuthToken).all()
+        }
+        db.close()
+        assert remaining == {"other@example.com"}
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +348,10 @@ class TestAuthCallback:
 # ---------------------------------------------------------------------------
 
 class TestOAuthCsrf:
+    @pytest.fixture(autouse=True)
+    def _no_app_url(self, monkeypatch):
+        monkeypatch.delenv("DATABRICKS_APP_URL", raising=False)
+
     def _state_from_url(self, url: str) -> dict:
         import urllib.parse
 
@@ -324,6 +417,36 @@ class TestOAuthCsrf:
         assert "postMessage" in resp.text
         assert "https://myapp.example.com" in resp.text
         assert "'*'" not in resp.text
+
+    def test_callback_postmessage_uses_env_origin_not_spoofed_host(self, test_client, monkeypatch):
+        """F-CR-28: postMessage target is DATABRICKS_APP_URL, not X-Forwarded-Host."""
+        monkeypatch.setenv("DATABRICKS_APP_URL", "https://real-app.databricksapps.com")
+        test_client.cookies.clear()
+        resp = test_client.get(
+            "/api/export/google-slides/auth/callback",
+            params={"code": "x", "state": json.dumps({"user": "local_dev", "nonce": "z"})},
+            headers={"x-forwarded-host": "evil.example.com", "x-forwarded-proto": "https"},
+        )
+        assert '"https://real-app.databricksapps.com"' in resp.text
+        assert "evil.example.com" not in resp.text
+
+    def test_auth_url_redirect_uri_uses_env_origin(self, test_client, session_factory, monkeypatch):
+        """F-CR-28: redirect_uri sent to Google ignores a poisoned X-Forwarded-Host."""
+        import urllib.parse
+
+        _seed_global_credentials(session_factory)
+        monkeypatch.setenv("DATABRICKS_APP_URL", "https://real-app.databricksapps.com")
+        resp = test_client.get(
+            "/api/export/google-slides/auth/url",
+            headers={"x-forwarded-host": "evil.example.com", "x-forwarded-proto": "https"},
+        )
+        assert resp.status_code == 200
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(resp.json()["url"]).query)
+        assert query["redirect_uri"][0] == (
+            "https://real-app.databricksapps.com/api/export/google-slides/auth/callback"
+        )
+        assert "evil.example.com" not in resp.json()["url"]
+        test_client.cookies.clear()
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,13 @@ def client(setup_app):
         yield c
 
 
+@pytest.fixture
+def unconfigured():
+    """Simulate a fresh instance: no tellr config and no DATABRICKS_HOST."""
+    with patch("src.api.routes.setup._is_already_configured", return_value=False):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # GET /api/setup/status
 # ---------------------------------------------------------------------------
@@ -93,6 +100,10 @@ class TestGetSetupStatus:
 
 class TestConfigureWorkspace:
     """Tests for the workspace configuration endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def _unconfigured(self, unconfigured):
+        """Happy-path configure tests exercise first-run only."""
 
     def test_configure_valid_scenarios(self, client):
         """Test configure with various valid inputs (AWS, Azure, GCP, normalisation)."""
@@ -159,6 +170,16 @@ class TestConfigureWorkspace:
         )
         assert response.status_code == 422
 
+        with patch(
+            "src.api.routes.setup._is_already_configured", return_value=True
+        ), patch("src.api.routes.setup.save_tellr_config") as mock_save:
+            response = client.post(
+                "/api/setup/configure",
+                json={"host": "https://mycompany.cloud.databricks.com"},
+            )
+            assert response.status_code == 409
+            mock_save.assert_not_called()
+
         # Save failure returns 500
         with patch(
             "src.api.routes.setup.save_tellr_config",
@@ -172,6 +193,29 @@ class TestConfigureWorkspace:
                 assert response.status_code == 500
                 assert "Failed to save" in response.json()["detail"]
 
+    def test_configure_rejects_attacker_suffix_host(self, client):
+        """Unanchored suffix like .attacker.net must not pass host validation."""
+        with patch("src.api.routes.setup.save_tellr_config") as mock_save:
+            response = client.post(
+                "/api/setup/configure",
+                json={"host": "https://x.cloud.databricks.com.attacker.net"},
+            )
+        assert response.status_code == 422
+        mock_save.assert_not_called()
+
+    def test_configure_refused_when_already_configured(self, client):
+        """Existing host (yaml or DATABRICKS_HOST) keeps configure at 409."""
+        with patch(
+            "src.api.routes.setup._is_already_configured", return_value=True
+        ), patch("src.api.routes.setup.save_tellr_config") as mock_save:
+            response = client.post(
+                "/api/setup/configure",
+                json={"host": "https://mycompany.cloud.databricks.com"},
+            )
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Workspace is already configured."
+        mock_save.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # POST /api/setup/test-connection
@@ -180,6 +224,10 @@ class TestConfigureWorkspace:
 
 class TestTestConnection:
     """Tests for the connection test endpoint."""
+
+    @pytest.fixture(autouse=True)
+    def _unconfigured(self, unconfigured):
+        """Connection tests assume first-run local setup."""
 
     def test_connection_valid_scenarios(self, client):
         """Test successful connection returns user info."""
@@ -211,6 +259,14 @@ class TestTestConnection:
             assert response.status_code == 400
             assert "Connection failed" in response.json()["detail"]
 
+    def test_connection_refused_when_already_configured(self, client):
+        with patch(
+            "src.api.routes.setup._is_already_configured", return_value=True
+        ), patch("src.core.databricks_client.get_system_client") as get_client:
+            response = client.post("/api/setup/test-connection")
+        assert response.status_code == 409
+        get_client.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # URL Validation
@@ -241,5 +297,17 @@ class TestUrlValidation:
             "ftp://company.cloud.databricks.com",
         ]
         for url in invalid_urls:
+            with pytest.raises(Exception):
+                ConfigureWorkspaceRequest(host=url)
+
+    def test_rejects_attacker_suffix_hosts(self):
+        """Hostname must be a Databricks suffix, not merely start with one."""
+        attacker_urls = [
+            "https://x.cloud.databricks.com.attacker.net",
+            "https://adb-123456.18.azuredatabricks.net.evil.com",
+            "https://workspace.gcp.databricks.com.attacker.net",
+            "x.cloud.databricks.com.attacker.net",
+        ]
+        for url in attacker_urls:
             with pytest.raises(Exception):
                 ConfigureWorkspaceRequest(host=url)

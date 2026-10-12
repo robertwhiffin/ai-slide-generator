@@ -57,6 +57,34 @@ into `tellr_app_owners`, so migrations always run as the owner.
    Without `--ref`, the workflow builds the default branch, not your code.
    Capture the resolved version from the run log (`version=0.4.3.dev28`).
 
+   **Confirm the version exists from the workflow's upload log — never from a
+   package index listing:**
+
+   ```bash
+   gh run view <run-id> --log | grep -E '200 OK|View at:'
+   ```
+
+   You want `200 OK` plus `View at: https://pypi.org/project/databricks-tellr-app/<version>/`.
+   That is the authoritative signal, and it is available the moment the run finishes.
+
+   **DO NOT gate the deploy on a package-index listing — go straight to step 3.**
+   `pip index versions databricks-tellr-app --pre` looks like a readiness probe for the
+   BUILD phase, because local pip is configured with
+   `index-url = https://pypi-proxy.dev.databricks.com/simple` — the *same proxy host* the
+   BUILD phase resolves against. It is not one. The proxy caches the `/simple/` **listing**
+   separately from its ability to fetch an **exact pinned version**. Measured 2026-09-21:
+   `0.4.3.dev27` published, the BUILD phase installed it first try — and the listing still
+   stopped at `.dev26` **1h15m later**, more than an hour after that successful install. A
+   stale listing is not evidence the build will fail, and waiting for it can wait forever.
+   (`curl https://pypi.org/...` from the laptop returns `503` — egress is proxied, so real
+   PyPI cannot be checked directly either.)
+
+   | Tempting thought | Reality |
+   |---|---|
+   | "The index doesn't list it yet, so the build will fail" | The listing and the pinned fetch are different caches. Measured: listing stale 1h15m *after* a successful install. |
+   | "Better to wait than burn a Lakebase fork on a doomed deploy" | The fork is cheap and re-forked every deploy anyway. An indefinite wait costs more. |
+   | "My pip hits the same proxy, so it's the same answer" | Same host, different cache. Same host is exactly what makes this trap convincing. |
+
 3. Deploy that exact version to a devloop instance:
 
    ```bash
@@ -69,14 +97,28 @@ into `tellr_app_owners`, so migrations always run as the owner.
    To check whether an instance exists, run
    `databricks apps get db-tellr-dev-<id> --profile tellr-dev`.
 
-4. Verify the app is actually running. `Deployment complete!` only means the
-   deploy was submitted; the app can still crash on startup:
+4. Verify the deploy — `deploy_local` exiting 0 (`Deployment complete!`) only means
+   the app was *submitted*; it can still crash on startup:
 
    ```bash
-   databricks apps get db-tellr-dev-<id> --profile tellr-dev -o json   # app_status.state must be RUNNING
+   # want app_status.state=RUNNING and active_deployment.status.state=SUCCEEDED
+   databricks apps get db-tellr-dev-<id> --profile tellr-dev -o json
    ```
 
-   If it shows `CRASHED`, read the logs (see below).
+   If it shows `CRASHED`, read the logs (see below). Expect `/health` to return
+   **502 for a while after** that, while startup migrations and data backfills run
+   in the FastAPI lifespan (on a fresh devloop fork the pre-fork backfill can take
+   ~10 minutes). That is normal, not a failed deploy.
+
+   To prove a **frontend-only** change is actually live, grep the served bundle for a
+   distinctive minified string from the diff, and run the same grep against
+   `db-tellr-prod`'s bundle as a control — a 0-vs-N result is what makes the check
+   non-vacuous:
+
+   ```bash
+   curl -sH "Authorization: Bearer $TOK" "$APP_URL/" | grep -oE '/assets/[^"]+\.js'
+   # then fetch that asset from BOTH the dev app and db-tellr-prod and compare hit counts
+   ```
 
 ## Upgrade path & the encryption key (SDR-4437) — use the tool, not the UI button
 
@@ -142,8 +184,10 @@ databricks apps logs db-tellr-dev-<id> -p tellr-dev-oauth
 ```
 
 If the token is expired: `databricks auth login --host <workspace-host> -p tellr-dev-oauth`.
-A failed BUILD-phase `Could not find a version ...` right after publishing usually
-means proxy mirror lag. Wait a few minutes and re-run the deploy step. If it keeps
+A BUILD-phase `Could not find a version that satisfies the requirement ...` that has
+**actually occurred** can mean proxy mirror lag — wait and re-run the deploy step. Only
+react to that failure once you have seen it. Never pre-empt it by polling a package-index
+listing, which can stay stale indefinitely (see step 2 of the loop). If it keeps
 failing, see the next section.
 
 ## When the PyPI index is stale (`Could not find a version` that persists)

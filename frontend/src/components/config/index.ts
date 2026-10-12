@@ -13,3 +13,5 @@ export { DesignSystemDetailPanel } from './DesignSystemDetailPanel';
 export { DesignSystemFileBrowser } from './DesignSystemFileBrowser';
 export { DesignSystemUploadDialog } from './DesignSystemUploadDialog';
 export { GoogleSlidesAuthForm } from './GoogleSlidesAuthForm';
+export { GoogleAccountConnection } from './GoogleAccountConnection';
+export { SettingsPage } from './SettingsPage';
