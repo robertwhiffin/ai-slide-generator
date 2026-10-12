@@ -64,6 +64,12 @@ _PREVIEW_DOC = _FRONTEND / "components" / "config" / "templatePreviewDoc.ts"
 # deleted the component. THREE surfaces remain; the invariant is unchanged, and
 # every surviving surface is still asserted individually below.
 _PRESENTATION = _FRONTEND / "components" / "PresentationMode" / "PresentationMode.tsx"
+# ...but its filmstrip role passed to the viewer's ThumbnailRibbon, which was
+# written with the PRE-dsv2 SlideSelection reset (universal box-sizing, forced
+# white background + Inter) and went unasserted here, so merging main's dsv2
+# fixes (which landed on SlideSelection) silently dropped them. It is a preview
+# surface and is asserted like every other.
+_RIBBON = _FRONTEND / "components" / "SlideViewer" / "ThumbnailRibbon.tsx"
 
 #: A universal-selector rule, captured with its declaration list. Matching the
 #: BLOCK rather than one spelling of one declaration is deliberate: it catches
@@ -127,6 +133,7 @@ def _four_preview_resets(slide_document: str) -> dict[str, str]:
         "SlideTile+VisualEditorPanel": _preview_reset_block(slide_document),
         "template pop-out": _popout_reset_block(),
         "PresentationMode": _inline_reset_literal(_PRESENTATION, "extraHeadStyle"),
+        "ThumbnailRibbon": _inline_reset_literal(_RIBBON, "resetStyle"),
     }
 
 
@@ -146,7 +153,7 @@ def test_all_four_preview_surfaces_agree(slide_document):
 
 @pytest.mark.parametrize(
     "surface",
-    ["SlideTile+VisualEditorPanel", "template pop-out", "PresentationMode"],
+    ["SlideTile+VisualEditorPanel", "template pop-out", "PresentationMode", "ThumbnailRibbon"],
 )
 def test_and_they_agree_on_the_ground_truth_box_model(slide_document, surface):
     """THE PART THAT ACTUALLY MATTERS. Ground truth — not inter-surface
@@ -190,6 +197,7 @@ def test_every_preview_surface_routes_its_frame_through_the_shared_contract(slid
     assert "${slideHostFrameStyle('.slide-container')}" in _PRESENTATION.read_text(
         encoding="utf-8"
     )
+    assert "${slideHostFrameStyle('body')}" in _inline_reset_literal(_RIBBON, "resetStyle")
 
 
 def test_the_preview_reset_has_exactly_two_consumers(slide_document):
@@ -201,7 +209,13 @@ def test_the_preview_reset_has_exactly_two_consumers(slide_document):
         if "SLIDE_PREVIEW_RESET_STYLE" in p.read_text(encoding="utf-8")
         and "extraHeadStyle: SLIDE_PREVIEW_RESET_STYLE" in p.read_text(encoding="utf-8")
     ]
-    assert {p.name for p in consumers} == {"SlideTile.tsx", "VisualEditorPanel.tsx"}
+    # SlideStage is the viewer's main 1280x720 clipping surface (it replaced the
+    # SlideTile list), so it takes the same reset.
+    assert {p.name for p in consumers} == {
+        "SlideTile.tsx",
+        "VisualEditorPanel.tsx",
+        "SlideStage.tsx",
+    }
 
     wrapper_start = slide_document.index("const wrapperStyle = `")
     wrapper = slide_document[wrapper_start : slide_document.index("`;", wrapper_start)]
