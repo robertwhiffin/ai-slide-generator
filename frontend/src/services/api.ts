@@ -442,7 +442,9 @@ export const api = {
       body: JSON.stringify({
         session_id: options?.sessionId,
         title: options?.title,
-        graph_capable: options?.graphCapable ?? false,
+        // Graph is the default engine (2026-10-12), so a root is pinned unless
+        // a caller explicitly opts out.
+        graph_capable: options?.graphCapable ?? true,
       }),
     });
 

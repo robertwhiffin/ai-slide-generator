@@ -229,7 +229,8 @@ def _assert_final(factory, creator, actor_id, expected_actor_pin, r1_id, r2_id):
                 copied = db.scalar(
                     select(SessionMessage).where(SessionMessage.session_id == actor.id)
                 )
-                assert copied.content == f"{AGENT_MODE_PHRASE} duplicate"
+                # Graph is the default since 2026-10-12: a graph duplicate carries no marker row.
+                assert copied is None
 
 
 @pytest.mark.parametrize("creator", CREATORS)

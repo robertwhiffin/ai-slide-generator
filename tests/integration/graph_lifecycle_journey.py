@@ -649,15 +649,16 @@ def _s02_old_conversation(j: LifecycleJourney) -> None:
     ) == ("old-root", OWNER, 1, 1, False), body
     assert j.pin_of("old-root") == j.state["v1_id"]
 
-    # C37: one control conversation with the DEFAULT body persists a null pin
-    # (Task 8's legacy case consumes this exchange).
+    # C37: one control conversation that persists a null pin (Task 8's legacy
+    # case consumes this exchange).  Since 2026-10-12 the DEFAULT body pins (the
+    # graph is the default engine), so the control opts out explicitly.
     control = j.call(
         "post-control-default-body",
         "POST",
         "/api/sessions",
         principal=OWNER,
         expect=200,
-        json={"session_id": "control-legacy"},
+        json={"session_id": "control-legacy", "graph_capable": False},
     )
     assert (control["graph_version"], control["is_older_than_active"]) == (None, False), control
     assert j.pin_of("control-legacy") is None

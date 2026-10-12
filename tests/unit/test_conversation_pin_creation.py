@@ -86,9 +86,13 @@ def _seed_active_release(factory, release_id: int = 41, version: int = 7) -> Non
         )
 
 
-def test_request_defaults_graph_capable_to_false():
-    """Changing the request default would accidentally pin non-browser callers."""
-    assert CreateSessionRequest().graph_capable is False
+def test_request_defaults_graph_capable_to_true():
+    """Since 2026-10-12 a message-less root resolves to the graph engine.
+
+    A ``False`` default would create unpinned roots that the resolver then sends
+    to the graph, where the first turn raises ConversationPinMissingError.
+    """
+    assert CreateSessionRequest().graph_capable is True
 
 
 def test_non_graph_capable_root_stays_unpinned(factory):
@@ -229,19 +233,22 @@ def test_lock_active_graph_release_returns_the_exact_active_release(factory):
 
 
 @pytest.mark.parametrize(
-    ("body", "session_id"),
+    ("body", "session_id", "expected_pin"),
     [
-        ({"session_id": "route-omitted"}, "route-omitted"),
+        # Omitted: the graph-default root is pinned (2026-10-12).
+        ({"session_id": "route-omitted"}, "route-omitted", 41),
+        # An explicit opt-out is still honoured.
         (
             {"session_id": "route-explicit-false", "graph_capable": False},
             "route-explicit-false",
+            None,
         ),
     ],
 )
-def test_explicit_sessions_post_omitted_or_false_capability_stays_unpinned(
-    factory, body, session_id
+def test_explicit_sessions_post_omitted_pins_and_false_stays_unpinned(
+    factory, body, session_id, expected_pin
 ):
-    """A route default that turns false/omitted into true would pin browser roots."""
+    """The route must default to the pinned graph root, yet honour an explicit false."""
     from src.api.routes.sessions import router
 
     _seed_active_release(factory)
@@ -262,8 +269,11 @@ def test_explicit_sessions_post_omitted_or_false_capability_stays_unpinned(
 
     assert response.status_code == 200
     assert response.json()["session_id"] == session_id
-    assert _session_pin(factory, session_id) is None
-    lock_active.assert_not_called()
+    assert _session_pin(factory, session_id) == expected_pin
+    if expected_pin is None:
+        lock_active.assert_not_called()
+    else:
+        lock_active.assert_called_once()
 
 
 def test_explicit_sessions_route_forwards_only_graph_capability():

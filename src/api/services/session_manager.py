@@ -1239,9 +1239,18 @@ class SessionManager:
                 .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
                 .first()
             )
-            carried_marker = marker is not None and _selects_agent_mode(marker.content)
+            # The duplicate keeps its SOURCE deck's engine.  Since 2026-10-12
+            # the graph is the default and the marker is the LEGACY opt-out:
+            # a graph source (no first user message, or one without
+            # LEGACY_MODE_PHRASE) gives a duplicate with NO user message --
+            # which itself resolves to the graph -- so it must be pinned; a
+            # legacy source gives an unpinned duplicate carrying the opt-out.
+            source_is_graph = _selects_agent_mode(
+                marker.content if marker is not None else None
+            )
+            carried_marker = not source_is_graph
             graph_release_id = None
-            if carried_marker:
+            if source_is_graph:
                 graph_release_id = lock_active_graph_release(db).release_id
 
             new_session = UserSession(
@@ -1285,16 +1294,17 @@ class SessionManager:
             #
             # Engine mode is derived from the deck's earliest role='user'
             # message, and no SessionMessage row is copied by a duplicate — so
-            # without this a duplicate of a graph-mode deck silently reverts to
-            # the monolith.  Only a marker that actually selects the graph is
-            # carried: copying the first message of every monolith duplicate
-            # would change the monolith path (message_count is a live COUNT, so
-            # a copy makes is_first_message False and suppresses title
-            # generation on the duplicate's first real turn) and would break
-            # the standing guarantee that a duplicate carries no chat history.
-            # For a graph-mode duplicate that title suppression is accepted:
-            # the carried row is metadata, not conversation, and the title
-            # should come from the new conversation.
+            # without this a duplicate of a LEGACY deck silently moves to the
+            # graph (the default since 2026-10-12).  Only a marker that
+            # actually selects the legacy engine is carried: copying the first
+            # message of every graph duplicate would change the graph path
+            # (message_count is a live COUNT, so a copy makes is_first_message
+            # False and suppresses title generation on the duplicate's first
+            # real turn) and would break the standing guarantee that a
+            # duplicate carries no chat history.  For a legacy duplicate that
+            # title suppression is accepted: the carried row is metadata, not
+            # conversation, and the title should come from the new
+            # conversation.
             if carried_marker:
                 db.add(
                     SessionMessage(

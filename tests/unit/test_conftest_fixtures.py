@@ -204,6 +204,28 @@ class TestDeckWithThreeRows:
         assert deck_with_three_rows.version_count() == 1
 
     def test_duplicate_returns_new_session_id(self, deck_with_three_rows):
+        # The fixture deck has no user message, which since 2026-10-12 is a
+        # graph deck, so its duplicate locks the active Graph Release: seed one.
+        from datetime import datetime, timezone
+
+        from src.database.models.graph_configuration import GraphRelease
+
+        now = datetime.now(timezone.utc)
+        db = deck_with_three_rows._factory()
+        try:
+            db.add(
+                GraphRelease(
+                    version_number=1,
+                    release_note="fixture active release",
+                    published_by="fixture@example.com",
+                    published_at=now,
+                    effective_from=now,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
         result = deck_with_three_rows.duplicate()
         assert isinstance(result, dict)
         assert "session_id" in result

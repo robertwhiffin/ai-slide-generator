@@ -254,8 +254,15 @@ class TestTheFixtureSpecReachesTheColumn:
         finally:
             db.close()
 
-    def test_tour_writers_record_null_provenance_without_principal(self, tour_db):
-        """Tour is legacy/monolith content, not an unattributed writer exclusion."""
+    def test_tour_writers_record_the_tour_roots_pin_without_principal(self, tour_db):
+        """Since 2026-10-12 the tour deck is a pinned graph root.
+
+        Its fixture prompt carries no USE LEGACY MODE opt-out, so it resolves to
+        the graph like any other deck; it is therefore created pinned to the
+        active release, and its writers attribute that exact pin (never NULL,
+        never inferred from "latest").
+        """
+        from src.database.models.graph_configuration import GraphRelease
         from src.database.models.session import SharedDeckMutationEvent, UserSession
 
         session_id = _run_the_tour(tour_db)
@@ -263,6 +270,11 @@ class TestTheFixtureSpecReachesTheColumn:
         db = tour_db()
         try:
             root = db.query(UserSession).filter_by(session_id=session_id).one()
+            assert isinstance(root.graph_release_id, int)
+            active = (
+                db.query(GraphRelease).filter(GraphRelease.effective_to.is_(None)).one()
+            )
+            assert root.graph_release_id == active.id
             events = db.query(SharedDeckMutationEvent).order_by(
                 SharedDeckMutationEvent.id
             ).all()
@@ -275,8 +287,10 @@ class TestTheFixtureSpecReachesTheColumn:
             assert [event.object_id for event in events] == [None, None, None]
             assert all(event.root_session_id == root.id for event in events)
             assert all(event.actor_session_id == root.id for event in events)
-            assert all(event.graph_release_id is None for event in events)
-            assert all(event.graph_version is None for event in events)
+            assert all(event.graph_release_id == active.id for event in events)
+            assert all(
+                event.graph_version == active.version_number for event in events
+            )
         finally:
             db.close()
 
