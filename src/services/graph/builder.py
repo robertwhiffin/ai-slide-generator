@@ -102,6 +102,7 @@ from src.services.graph.nodes import (
     deck_reviewer_node,
     foreman_node,
     placeholder_node,
+    reset_fix_slots,
     slide_pipeline_node,
 )
 from src.services.graph.routers import (
@@ -338,6 +339,9 @@ def invoke_graph(
 
     set_event_emitter(emitter)
     set_chat_request_id(request_id)
+    # Per turn, like the emitter: concurrent turns must not share one budget of
+    # FIX_CONCURRENCY fix rounds.
+    reset_fix_slots()
 
     state: Dict[str, Any] = dict(initial or {})
     state.update(

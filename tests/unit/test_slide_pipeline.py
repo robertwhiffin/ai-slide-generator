@@ -353,3 +353,167 @@ class TestThePipelineFoldsLikeTheRuntime:
             assert len(calls) == 1, stage
             assert calls[0]["root_session_id"] == "owner-of-the-deck", stage
             assert calls[0]["actor_session_id"] == "the-contributor", stage
+
+
+class TestFixConcurrencyIsCapped:
+    def test_no_more_than_five_fix_rounds_run_at_once(self, graph_env_threadsafe):
+        """User decision (2026-10-12): at most ``FIX_CONCURRENCY`` = 5 fix rounds
+        of one turn in flight, however many slides are flagged."""
+        env = graph_env_threadsafe
+        positions = tuple(range(8))
+        _wire(env, positions, flagged=positions)
+        lock = threading.Lock()
+        active = {"now": 0, "max": 0}
+
+        def fixer(payload):
+            with lock:
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
+            try:
+                import time
+
+                time.sleep(0.3)
+                return fixer_out(payload)
+            finally:
+                with lock:
+                    active["now"] -= 1
+
+        env.skills.set("fixer", fixer)
+
+        _run(env)
+
+        assert nodes.FIX_CONCURRENCY == 5
+        assert active["max"] == 5, active
+        assert {p: r.html for p, r in _rows(env).items()} == {
+            p: f"<div class='slide'>fixed {p}</div>" for p in positions
+        }
+
+    def test_each_turn_gets_its_own_fix_slots(self):
+        """``invoke_graph`` resets them per turn, so two users' decks do not share
+        one budget — and a slot leaked by one turn cannot starve the next."""
+        import contextvars
+
+        def slots_after_reset():
+            nodes.reset_fix_slots()
+            return nodes._fix_slots()
+
+        first = contextvars.copy_context().run(slots_after_reset)
+        second = contextvars.copy_context().run(slots_after_reset)
+        assert first is not second
+        assert first is not nodes._DEFAULT_FIX_SLOTS
+
+
+def _transient(agent: str):
+    """A PinnedInvocationEndpointError caused by a 429, chained as the runtime does."""
+    import httpx
+    import openai
+
+    from src.services.agent_runtime import ModelProviderUnavailableError
+    from src.services.persisted_graph_release import PinnedInvocationEndpointError
+
+    def raise_it(payload):
+        try:
+            try:
+                raise openai.RateLimitError(
+                    "rate limited",
+                    response=httpx.Response(429, request=httpx.Request("POST", "http://x")),
+                    body=None,
+                )
+            except openai.RateLimitError as cause:
+                raise ModelProviderUnavailableError("unavailable") from cause
+        except ModelProviderUnavailableError as exc:
+            raise PinnedInvocationEndpointError(
+                endpoint_name=f"system.ai.{agent}", graph_release_id=1,
+                agent_definition_revision_id=1,
+            ) from exc
+
+    return raise_it
+
+
+def _permanent(agent: str):
+    """The same error with no transient cause — a removed or forbidden endpoint."""
+    from src.services.persisted_graph_release import PinnedInvocationEndpointError
+
+    def raise_it(payload):
+        raise PinnedInvocationEndpointError(
+            endpoint_name=f"system.ai.{agent}", graph_release_id=1,
+            agent_definition_revision_id=1,
+        )
+
+    return raise_it
+
+
+class TestATransientModelFaultKeepsTheDraft:
+    """User decision (2026-10-12): a rate limit or 5xx on one slide must not fail
+    the deck once that slide's draft exists — keep it."""
+
+    def test_a_transient_review_failure_keeps_the_draft_and_the_turn_finishes(
+        self, graph_env_threadsafe
+    ):
+        env = graph_env_threadsafe
+        _wire(env, (0, 1))
+        clean = env.skills._handlers["build_reviewer"]
+        env.skills.set(
+            "build_reviewer",
+            lambda p: _transient("opus")(p) if p["position"] == 1 else clean(p),
+        )
+
+        _run(env)
+
+        rows = _rows(env)
+        assert rows[1].html == "<div class='slide'>slide 1</div>"
+        assert rows[1].verification_record in (None, "", "{}", "null")
+        assert len(env.skills.calls_for("deck_reviewer")) == 1
+        info = [m for m in env.messages() if m["message_type"] == "info"]
+        assert any("Slide 1" in m["content"] for m in info)
+
+    def test_a_transient_fix_failure_lands_the_original_with_its_findings(
+        self, graph_env_threadsafe
+    ):
+        env = graph_env_threadsafe
+        _wire(env, (0, 1), flagged=(0, 1))
+        env.skills.set(
+            "fixer",
+            lambda p: _transient("opus")(p) if p["position"] == 0 else fixer_out(p),
+        )
+
+        _run(env)
+
+        rows = _rows(env)
+        assert rows[0].html == "<div class='slide'>slide 0</div>"
+        verdict = json.loads(rows[0].verification_record)[
+            compute_slide_hash(rows[0].html)
+        ][VERDICT_KEY]
+        assert verdict["verdict"] == "surfaced"
+        assert rows[1].html == "<div class='slide'>fixed 1</div>"
+        assert len(env.skills.calls_for("deck_reviewer")) == 1
+
+    def test_a_permanent_endpoint_failure_still_fails_the_turn(
+        self, graph_env_threadsafe
+    ):
+        """A removed or forbidden pinned endpoint keeps its contract: the turn
+        fails and names the pin."""
+        from src.services.persisted_graph_release import PinnedInvocationEndpointError
+
+        env = graph_env_threadsafe
+        _wire(env, (0,))
+        env.skills.set("build_reviewer", _permanent("opus"))
+
+        with pytest.raises(PinnedInvocationEndpointError):
+            _run(env)
+
+    def test_without_a_draft_a_transient_review_failure_still_fails_the_turn(
+        self, graph_env_threadsafe
+    ):
+        """On an edit or rebuild there is no draft (the user's slide is kept), so
+        there is nothing safe to keep in its place."""
+        from src.services.persisted_graph_release import PinnedInvocationEndpointError
+
+        env = graph_env_threadsafe
+        _wire(env, (0,))
+        env.seed_slides(["<div class='slide'>existing 0</div>"])
+        env.skills.set("build_reviewer", _transient("opus"))
+
+        with pytest.raises(PinnedInvocationEndpointError):
+            _run(env)
+        assert _rows(env)[0].html == "<div class='slide'>existing 0</div>"
