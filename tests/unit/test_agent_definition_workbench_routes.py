@@ -1325,11 +1325,18 @@ def _edit_prompt_by_one_code_point(
 
 
 def _environment_stage_ids(agent_key: str) -> list[str]:
-    if agent_key == "builder":
-        return ["slide_frame_constraints"]
-    if agent_key == "architect":
-        return ["design_system_precedence"]
-    return []
+    """The environment stages a role's protected view shows, in bundle order.
+
+    Pinned here rather than imported: frame constraints go to the roles that
+    emit or judge layout, design-system precedence to those that plan or emit
+    styling.
+    """
+    ids = []
+    if agent_key in {"builder", "fixer", "build_reviewer", "fix_reviewer"}:
+        ids.append("slide_frame_constraints")
+    if agent_key in {"architect", "builder", "fixer"}:
+        ids.append("design_system_precedence")
+    return ids
 
 
 def test_workbench_get_exposes_the_exact_server_derived_v1_protected_stage_view(
