@@ -1698,8 +1698,10 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
     fireEvent.click(within(navigation).getByRole('button', { name: /Data Analyst/ }));
     fireEvent.click(within(assemblyPanel()).getByRole('button', { name: 'Upgrade protected assembly' }));
     await waitFor(() => expect(upgradeCalls(fetchMock)).toHaveLength(1));
-    fireEvent.click(within(assemblyPanel())
-      .getByRole('button', { name: 'Add custom block After authored prompt' }));
+    // The request is out the moment Upgrade is clicked; the custom-block anchor
+    // appears only once the response is applied, so wait for it (slow CI raced it).
+    fireEvent.click(await within(assemblyPanel())
+      .findByRole('button', { name: 'Add custom block After authored prompt' }));
 
     fireEvent.click(screen.getByRole('tab', { name: 'Usage' }));
     fireEvent.click(screen.getByRole('tab', { name: 'Agent Definitions' }));
