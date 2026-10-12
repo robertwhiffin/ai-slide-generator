@@ -123,11 +123,19 @@ _LEGAL_ANCHORS: Mapping[AgentKey, tuple[str, ...]] = MappingProxyType(
         for role in GRAPH_V1_AGENT_KEYS
     }
 )
-# Slide-frame constraints are Builder layout rules; design-system precedence is
-# Architect styling. Other roles do not receive either stage. Bundle ``roles``
-# stay graph-wide so the protected-assembly digest is unchanged.
-_SLIDE_FRAME_ROLES: frozenset[AgentKey] = frozenset({"builder"})
-_DESIGN_SYSTEM_ROLES: frozenset[AgentKey] = frozenset({"architect"})
+# Each environment stage goes to the roles that act on it (#291 scoped them,
+# 2026-10-12 corrected the scope).  Slide-frame constraints are layout rules:
+# the builder and fixer emit slide HTML against them, and the build and fix
+# reviewers judge that HTML against the same numbers.  Design-system precedence
+# is styling authority: the architect plans the deck's look, and the builder
+# and fixer emit the styled HTML.  #291 gave precedence to the architect only,
+# so with a design system active the builder received NEITHER stage.  The
+# data analyst and deck reviewer need neither.  Bundle ``roles`` stay
+# graph-wide so the protected-assembly digest is unchanged.
+_SLIDE_FRAME_ROLES: frozenset[AgentKey] = frozenset(
+    {"builder", "fixer", "build_reviewer", "fix_reviewer"}
+)
+_DESIGN_SYSTEM_ROLES: frozenset[AgentKey] = frozenset({"architect", "builder", "fixer"})
 
 
 def _protected_stage_applies_to_role(stage_id: str, agent_key: AgentKey) -> bool:

@@ -1136,9 +1136,10 @@ def test_the_build_paths_assembled_prompt_is_unchanged_by_this_feature():
             AgentAssemblyContext(design_system_active),
         )
         parts = [skill.instructions]
-        if design_system_active:
-            parts.append(DESIGN_SYSTEM_PRECEDENCE)
-        else:
+        # The build reviewer judges layout, so it receives the frame constraints
+        # when no design system is active and no design-system precedence
+        # (styling authority) when one is.
+        if not design_system_active:
             parts.append(_SLIDE_FRAME_CONSTRAINTS)
         parts.append(json.dumps(payload, indent=2, default=str))
         untouched = "\n\n".join(parts)

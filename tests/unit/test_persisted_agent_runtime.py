@@ -43,6 +43,12 @@ from src.services.agent_schema_types import (
     ValidatedAgentOutput,
 )
 from src.services.design_system_compiler import _SLIDE_FRAME_CONSTRAINTS
+
+#: Environment-stage scope, pinned here rather than imported (see the same
+#: table in test_agent_runtime.py): frame constraints go to the roles that emit
+#: or judge layout, design-system precedence to those that plan or emit styling.
+FRAME_CONSTRAINT_ROLES = frozenset({"builder", "fixer", "build_reviewer", "fix_reviewer"})
+DESIGN_SYSTEM_PRECEDENCE_ROLES = frozenset({"architect", "builder", "fixer"})
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
     AssemblyRulesV1,
@@ -331,8 +337,11 @@ def test_explicit_persisted_v1_release_keeps_historical_prompt_bytes(
     environment_text = (
         DESIGN_SYSTEM_PRECEDENCE if design_system_active else _SLIDE_FRAME_CONSTRAINTS
     )
-    include_environment = (environment_id == "design_system_precedence" and agent_key == "architect") or (
-        environment_id == "slide_frame_constraints" and agent_key == "builder"
+    include_environment = (
+        environment_id == "design_system_precedence"
+        and agent_key in DESIGN_SYSTEM_PRECEDENCE_ROLES
+    ) or (
+        environment_id == "slide_frame_constraints" and agent_key in FRAME_CONSTRAINT_ROLES
     )
     if include_environment:
         expected_parts.append(environment_text)
@@ -472,8 +481,11 @@ def test_persisted_v2_runtime_delegates_exact_prompt_and_provenance(
                 True,
             )
         )
-    include_environment = (environment_id == "design_system_precedence" and agent_key == "architect") or (
-        environment_id == "slide_frame_constraints" and agent_key == "builder"
+    include_environment = (
+        environment_id == "design_system_precedence"
+        and agent_key in DESIGN_SYSTEM_PRECEDENCE_ROLES
+    ) or (
+        environment_id == "slide_frame_constraints" and agent_key in FRAME_CONSTRAINT_ROLES
     )
     if include_environment:
         expected_parts.append(environment_text)
@@ -619,6 +631,15 @@ def test_persisted_v2_build_reviewer_deck_brief_tracks_truthiness(deck_brief) ->
         )
     expected_stages.extend(
         [
+            # The reviewer judges overflow against these numbers (its criteria
+            # say so), so it receives them when no design system is active.
+            ResolvedPromptStage(
+                "slide_frame_constraints",
+                _SLIDE_FRAME_CONSTRAINTS,
+                "design_system_inactive",
+                "protected",
+                True,
+            ),
             ResolvedPromptStage(
                 "untrusted_data_notice",
                 EXPECTED_ROLE_NOTICES["build_reviewer"],

@@ -467,7 +467,9 @@ def test_protected_stage_view_exposes_locked_exact_display_without_live_payload(
     assert all(row.locked for row in rows)
     assert by_id["build_reviewer_criteria"].display_text == BUILD_REVIEWER_CRITERIA_STAGE
     assert by_id["build_reviewer_deck_brief"].display_text == DECK_BRIEF_REVIEW
-    assert "slide_frame_constraints" not in by_id
+    # The build reviewer judges slides against the frame numbers, so it shows the
+    # frame stage; design-system precedence is styling authority it does not use.
+    assert by_id["slide_frame_constraints"].display_text == _SLIDE_FRAME_CONSTRAINTS
     assert "design_system_precedence" not in by_id
     assert (
         by_id["untrusted_data_notice"].display_text == ROLE_UNTRUSTED_DATA_NOTICE["build_reviewer"]

@@ -140,6 +140,15 @@ def _payload_for(agent_key: str) -> dict[str, Any]:
     return {"agent_key": agent_key, "sequence": 7, "optional": None}
 
 
+#: Which roles receive each environment stage — pinned here, NOT imported from
+#: ``prompt_assembler``, so a change to the production table is a visible test
+#: change.  Frame constraints: the roles that emit or judge slide layout.
+#: Design-system precedence: the roles that plan or emit styling (#291 gave it
+#: to the architect alone, which left the builder with neither stage).
+FRAME_CONSTRAINT_ROLES = frozenset({"builder", "fixer", "build_reviewer", "fix_reviewer"})
+DESIGN_SYSTEM_PRECEDENCE_ROLES = frozenset({"architect", "builder", "fixer"})
+
+
 def _expected_prompt(
     agent_key: str,
     payload: dict[str, Any],
@@ -147,9 +156,9 @@ def _expected_prompt(
     design_system_active: bool,
 ) -> str:
     parts = [load_skill(agent_key).instructions]
-    if not design_system_active:
+    if not design_system_active and agent_key in FRAME_CONSTRAINT_ROLES:
         parts.append(_SLIDE_FRAME_CONSTRAINTS)
-    if design_system_active:
+    if design_system_active and agent_key in DESIGN_SYSTEM_PRECEDENCE_ROLES:
         parts.append(DESIGN_SYSTEM_PRECEDENCE)
     parts.append(json.dumps(payload, indent=2, default=str))
     return "\n\n".join(parts)
@@ -230,6 +239,32 @@ def test_design_system_prompt_preserves_precedence_and_omits_frame_constraints()
     )
     assert DESIGN_SYSTEM_PRECEDENCE in model.calls[0].prompt
     assert _SLIDE_FRAME_CONSTRAINTS not in model.calls[0].prompt
+
+
+@pytest.mark.parametrize("agent_key", MODEL_DRIVEN_AGENT_KEYS)
+@pytest.mark.parametrize("design_system_active", [False, True])
+def test_each_role_receives_exactly_the_environment_stage_it_acts_on(
+    agent_key, design_system_active
+):
+    """The environment-stage table, asserted on the assembled prompt per role.
+
+    The regression this pins: with a design system active the BUILDER — the role
+    that writes the styled HTML — received neither stage (#291).
+    """
+    model = RecordingModelAdapter(_output_for(agent_key))
+    runtime = packaged_v1_runtime(model_adapter=model)
+
+    runtime.run(
+        agent_key, 1, {"position": 1}, AgentAssemblyContext(design_system_active)
+    )
+
+    prompt = model.calls[0].prompt
+    expects_frame = not design_system_active and agent_key in FRAME_CONSTRAINT_ROLES
+    expects_precedence = (
+        design_system_active and agent_key in DESIGN_SYSTEM_PRECEDENCE_ROLES
+    )
+    assert (_SLIDE_FRAME_CONSTRAINTS in prompt) is expects_frame
+    assert (DESIGN_SYSTEM_PRECEDENCE in prompt) is expects_precedence
 
 
 def test_build_reviewer_deck_brief_preserves_conditional_instruction_order():
