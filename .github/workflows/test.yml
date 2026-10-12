@@ -485,7 +485,8 @@ jobs:
             tests/integration/test_graph_lifecycle_acceptance_postgres.py \
             tests/integration/test_graph_lifecycle_runtime_postgres.py \
             tests/integration/test_lakebase_contract_failures_postgres.py \
-            -v --tb=short --junitxml=test-results/graph-results.xml -m "not live"
+            -v --tb=short --junitxml=test-results/graph-results.xml -m "not live" \
+            -o faulthandler_timeout=120
       - uses: actions/upload-artifact@v4
         if: always()
         with:
