@@ -1,6 +1,7 @@
 """Image upload, thumbnail generation, and retrieval service."""
 import base64
 import logging
+import os
 import uuid
 from io import BytesIO
 from typing import List, Optional
@@ -11,6 +12,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Query, Session
 
 from src.database.models.image import ImageAsset
+from src.services.svg_sanitizer import looks_like_svg, sanitize_svg
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,20 @@ def upload_image(
         raise ValueError(f"File type not allowed: {mime_type}. Allowed: {ALLOWED_TYPES}")
     if len(file_content) > MAX_FILE_SIZE:
         raise ValueError(f"File too large: {len(file_content)} bytes (max {MAX_FILE_SIZE})")
+
+    # The client-declared MIME type is untrusted: decide on the CONTENT.
+    # SVG can carry script, so it is always sanitized; SVG bytes declared as
+    # any other type are rejected rather than stored under a raster label.
+    if mime_type == "image/svg+xml":
+        try:
+            file_content = sanitize_svg(file_content)
+        except ValueError as exc:
+            raise ValueError(f"Invalid SVG upload: {exc}") from exc
+    elif looks_like_svg(file_content):
+        raise ValueError(
+            f"File content is SVG but was declared as {mime_type}; "
+            "upload it as image/svg+xml."
+        )
 
     # Check for duplicate original_filename among active images (case-insensitive).
     # Ephemeral images (paste-to-chat) skip this check — they use throwaway names
@@ -86,9 +102,34 @@ def upload_image(
     return image
 
 
-def get_image_base64(db: Session, token: str) -> tuple[str, str]:
+def resolve_requesting_user() -> Optional[str]:
+    """Identity to check image ownership against on non-route fetch paths.
+
+    Mirrors ``routes.images._get_current_user`` (the identity ``upload_image``
+    stamps into ``uploaded_by``) without an extra API call: the dev/test
+    ``"system"`` fallback, otherwise the request-scoped username set by the auth
+    middleware / MCP auth. ``None`` when no identity is bound (fail-closed for
+    ephemeral images).
+    """
+    if os.getenv("ENVIRONMENT") in ("development", "test"):
+        return "system"
+    from src.core.user_context import get_current_user
+
+    return get_current_user()
+
+
+def get_image_base64(
+    db: Session, token: str, *, requesting_user: Optional[str]
+) -> tuple[str, str]:
     """
     Get full image as base64 string, keyed by the opaque token (SDR-4437 F-TM-7).
+
+    Applies the same privacy guard as the ``GET /api/images/{token}`` routes
+    (F-CR-27): chat-pasted ("ephemeral") images are private to their uploader,
+    so a token for another user's ephemeral image is reported not-found. Library
+    images stay open-read. ``requesting_user`` is mandatory and keyword-only so
+    every caller makes the acting identity explicit; ``None`` fails closed for
+    ephemeral images.
 
     Returns:
         Tuple of (base64_data, mime_type)
@@ -97,7 +138,10 @@ def get_image_base64(db: Session, token: str) -> tuple[str, str]:
         ImageAsset.token == token,
         ImageAsset.is_active == True,
     ).first()
-    if not image:
+    if not image or (
+        image.category == "ephemeral"
+        and (requesting_user is None or image.uploaded_by != requesting_user)
+    ):
         raise ValueError(f"Image {token} not found")
 
     b64 = base64.b64encode(image.image_data).decode("utf-8")

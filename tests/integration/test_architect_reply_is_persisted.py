@@ -272,6 +272,16 @@ def async_turn_env(graph_turn_env, monkeypatch):
     )
 
     from src.core.user_context import set_current_user
+    from src.database.models.session import UserSession
+
+    # The poll route is creator-only since F-CR-31 (conversations are private),
+    # so the author polling this turn must be the session's creator — as the
+    # user chatting in the app always is.
+    with env.factory() as db:
+        db.query(UserSession).filter(
+            UserSession.session_id == env.session_id
+        ).update({"created_by": AUTHOR})
+        db.commit()
 
     set_current_user(AUTHOR)
     try:

@@ -23,6 +23,9 @@ os.environ.setdefault("ENVIRONMENT", "test")
 # writes to whatever that resolves to. So: refuse a URL that names the dev
 # database, and when none is set supply a throwaway SQLite file. CI leaves
 # DATABASE_URL unset on purpose (.github/workflows/test.yml, unit-tests job).
+# The SQLite default also keeps TestClient requests off a missing Postgres
+# driver: bare postgresql:// (SQLAlchemy 2.1 -> psycopg v3) made them fail while
+# request-logging created an engine (main's F-CR fix, merged into this block).
 #
 # One file per xdist worker AND per run: workers inherit the controller's
 # environment, so a worker that sees the controller's defaulted URL (flag set)
@@ -49,6 +52,16 @@ if (
     os.environ["TELLR_TESTS_DATABASE_URL_DEFAULTED"] = "1"
 
 from src.core.databricks_client import reset_client, reset_user_client
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _warm_sqlite_engine():
+    """Create the process-wide engine before tests so request-logging cannot
+    first-touch a missing Postgres driver mid-test (and pollute caplog).
+    """
+    from src.core.database import get_engine
+
+    get_engine()
 
 
 @pytest.fixture(autouse=True)

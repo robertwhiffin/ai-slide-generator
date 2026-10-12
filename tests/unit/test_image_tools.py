@@ -93,6 +93,7 @@ class TestSearchImagesTool:
             mock_ctx.return_value.__enter__ = MagicMock(return_value=mock_db)
             mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
             mock_svc.search_images.return_value = []
+            mock_svc.resolve_requesting_user.return_value = "system"
 
             search_images(query="logo", category="branding", tags=["logo"])
 
@@ -101,4 +102,5 @@ class TestSearchImagesTool:
             query="logo",
             category="branding",
             tags=["logo"],
+            uploaded_by="system",  # ENVIRONMENT=test identity (F-CR-27)
         )

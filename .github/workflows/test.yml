@@ -733,6 +733,7 @@ jobs:
           - design-system-selector
           - design-systems-ui
           - export-csp
+          - export-frame-isolation
           - export-ui
           - findings-drawer
           - graph-release-admin-journey

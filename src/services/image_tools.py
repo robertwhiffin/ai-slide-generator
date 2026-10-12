@@ -10,6 +10,8 @@ from src.services import image_service
 
 logger = logging.getLogger(__name__)
 
+_NO_IMAGES_MESSAGE = "No images found matching your criteria."
+
 
 class SearchImagesInput(BaseModel):
     """Input schema for image search tool."""
@@ -41,12 +43,27 @@ def search_images(
     Returns:
         JSON list of matching images with id, filename, description, and tags
     """
+    # F-CR-27: chat-pasted ("ephemeral") images are private to their uploader and
+    # are never discoverable through the agent tool. The user's own pastes reach
+    # the agent via their message, not via search.
+    if category is not None and category.strip().lower() == "ephemeral":
+        logger.warning("search_images: refusing category='ephemeral' (private images)")
+        return json.dumps({"message": _NO_IMAGES_MESSAGE, "images": []})
+
+    # Scope the listing to the caller (same as GET /api/images). Fail closed when
+    # no identity is bound rather than listing every user's images.
+    requesting_user = image_service.resolve_requesting_user()
+    if requesting_user is None:
+        logger.warning("search_images: no requesting user bound; returning no images")
+        return json.dumps({"message": _NO_IMAGES_MESSAGE, "images": []})
+
     with get_db_session() as db:
         images = image_service.search_images(
             db=db,
             query=query,
             category=category,
             tags=tags,
+            uploaded_by=requesting_user,
         )
 
         # Return metadata only - NEVER base64
@@ -65,6 +82,6 @@ def search_images(
         ]
 
     if not results:
-        return json.dumps({"message": "No images found matching your criteria.", "images": []})
+        return json.dumps({"message": _NO_IMAGES_MESSAGE, "images": []})
 
     return json.dumps({"message": f"Found {len(results)} image(s).", "images": results})

@@ -377,6 +377,7 @@ class TestGoogleSlidesAuthStatusEndpoint:
         resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
         assert resp.json()["authorized"] is False
+        assert resp.json()["has_credentials"] is False
 
     def test_auth_status_with_global_creds_but_no_token(self, test_client, session_factory):
         """Returns authorized=false when global creds exist but user has no token."""
@@ -392,3 +393,4 @@ class TestGoogleSlidesAuthStatusEndpoint:
         resp = test_client.get("/api/export/google-slides/auth/status")
         assert resp.status_code == 200
         assert resp.json()["authorized"] is False
+        assert resp.json()["has_credentials"] is True

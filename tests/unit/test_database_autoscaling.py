@@ -79,7 +79,15 @@ class TestGetDatabaseUrl:
 
     def test_returns_explicit_database_url(self):
         with patch.dict(os.environ, {"DATABASE_URL": "postgresql://custom/db"}, clear=True):
-            assert _get_database_url() == "postgresql://custom/db"
+            assert _get_database_url() == "postgresql+psycopg2://custom/db"
+
+    def test_leaves_explicit_driver_urls_alone(self):
+        with patch.dict(
+            os.environ, {"DATABASE_URL": "postgresql+psycopg2://custom/db"}, clear=True
+        ):
+            assert _get_database_url() == "postgresql+psycopg2://custom/db"
+        with patch.dict(os.environ, {"DATABASE_URL": "sqlite:///:memory:"}, clear=True):
+            assert _get_database_url() == "sqlite:///:memory:"
 
     def test_ignores_jdbc_database_url(self):
         with patch.dict(os.environ, {"DATABASE_URL": "jdbc:postgresql://host/db"}, clear=True):
@@ -94,6 +102,7 @@ class TestGetDatabaseUrl:
         }
         with patch.dict(os.environ, env, clear=True):
             url = _get_database_url()
+        assert "postgresql+psycopg2://" in url
         assert "auto.host.com" in url
         assert "testuser" in url
         assert "sslmode=require" in url
@@ -153,4 +162,4 @@ class TestGetDatabaseUrl:
     def test_local_fallback_url(self):
         with patch.dict(os.environ, {}, clear=True):
             url = _get_database_url()
-        assert url == "postgresql://localhost/ai_slide_generator"
+        assert url == "postgresql+psycopg2://localhost/ai_slide_generator"

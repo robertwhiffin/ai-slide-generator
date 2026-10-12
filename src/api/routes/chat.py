@@ -152,6 +152,32 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
     )
 
 
+def _require_chat_request_owner(session_id: str) -> None:
+    """Allow polling only for the session that owns the chat request.
+
+    ChatRequest rows are bound to a session, and conversations are private
+    (same rule as ``GET /api/sessions/{id}/messages``): only the session
+    creator may read them. A viewer's contributor session is a different
+    session with a different creator, so deck-level CAN_VIEW is not enough.
+
+    Raises:
+        HTTPException 404: Session no longer exists.
+        HTTPException 403: Caller is not the session creator.
+    """
+    session_manager = get_session_manager()
+    try:
+        session_info = session_manager.get_session(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    current_user = get_current_user()
+    if not current_user or session_info.get("created_by") != current_user:
+        raise HTTPException(
+            status_code=403,
+            detail="Conversations are private. Only the session creator can view chat events.",
+        )
+
+
 def _apply_org_default_style_source(
     agent_config_data: dict,
     *,
@@ -821,7 +847,8 @@ async def poll_chat(
         slide_cursor, slide_revisions and revision_mark
 
     Raises:
-        HTTPException: 404 if request not found
+        HTTPException: 404 if request not found, 403 if caller is not the
+            session creator
     """
     session_manager = get_session_manager()
     # Taken BEFORE any read, so a row rewritten while this poll runs is newer
@@ -830,15 +857,14 @@ async def poll_chat(
 
     # SDR-4437 (chat-poll IDOR): a request_id must not grant access to another
     # user's chat events/result. ChatRequest rows are session-bound — resolve
-    # the session and require CAN_VIEW on the deck.
+    # the session and require the caller to be its creator (F-CR-31: same
+    # privacy rule as /messages; deck CAN_VIEW must not expose chat events).
     session_id = await asyncio.to_thread(
         session_manager.get_session_id_for_request, request_id
     )
     if session_id is None:
         raise HTTPException(status_code=404, detail="Request not found")
-    await asyncio.to_thread(
-        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_VIEW
-    )
+    await asyncio.to_thread(_require_chat_request_owner, session_id)
 
     chat_request = await asyncio.to_thread(
         session_manager.get_chat_request, request_id

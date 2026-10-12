@@ -702,6 +702,7 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
         enqueue_export_job,
         generate_job_id,
     )
+    from src.services.image_service import resolve_requesting_user
 
     import time
     start_time = time.time()
@@ -759,6 +760,9 @@ async def start_pptx_export_async(request: ExportPPTXRequest):
             job_id,
             {
                 "session_id": request.session_id,
+                # Acting user for {{image:ID}} ownership checks (F-CR-27): the
+                # worker runs outside this request's user context.
+                "user_identity": resolve_requesting_user(),
                 "chart_images_per_slide": chart_images_per_slide,
                 "title": slide_deck.get("title", "slides"),
                 "total_slides": total_slides,
@@ -807,13 +811,11 @@ async def poll_pptx_export(job_id: str):
 
 
 @router.get("/pptx/download/{job_id}")
-async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
+async def download_pptx_export(job_id: str):
     """Download completed PPTX export.
 
     Args:
         job_id: Job ID from start_pptx_export_async
-        background_tasks: FastAPI background tasks for cleanup
-
     Returns:
         FileResponse with PPTX file
 
@@ -824,7 +826,6 @@ async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
     _require_export_job_access(job_id)
     from src.api.services.export_job_queue import (
         get_export_job_status,
-        cleanup_export_job,
     )
 
     job = get_export_job_status(job_id)
@@ -851,9 +852,6 @@ async def download_pptx_export(job_id: str, background_tasks: BackgroundTasks):
         "Serving PPTX download",
         extra={"job_id": job_id, "pptx_filename": filename},
     )
-
-    # Schedule cleanup after download
-    background_tasks.add_task(cleanup_export_job, job_id)
 
     return FileResponse(
         path=output_path,

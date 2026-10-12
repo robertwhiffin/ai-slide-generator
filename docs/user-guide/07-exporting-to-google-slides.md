@@ -27,7 +27,7 @@ Navigate to the `/admin` URL or click **Admin** in the navigation. The admin pag
 
 ### Step 02: Go to the Google Slides Tab
 
-Click the **Google Slides** tab to see the credentials and authorization configuration.
+Click the **Google Slides** tab to upload app-wide OAuth client credentials. Users connect their own Google accounts under **Configure → Settings**.
 
 ![Google Slides tab](images/07-exporting-to-google-slides/02-google-slides-tab.png)
 
@@ -55,17 +55,17 @@ Once uploaded, the status indicator changes to confirm the credentials are confi
 
 ## Part 2: Per-User Authorization
 
-Each user must authorize once to link their Google account. Tokens are stored per-user and auto-refresh.
+Each user must authorize once to link their Google account. Open **Configure → Settings** in the sidebar (not the Admin page). Tokens are stored per-user and auto-refresh. Use **Disconnect** on the same page to remove Tellr's stored token.
 
 ### Step 05: Authorize with Google
 
-Click the **Authorize with Google** button. A popup opens with the Google OAuth consent screen.
+On Settings, click **Authorize with Google**. A popup opens with the Google OAuth consent screen.
 
 ![Authorize button](images/07-exporting-to-google-slides/05-authorize-button.png)
 
 ### Step 06: Complete Authorization
 
-After granting consent in the popup, the authorization status updates to confirm your account is linked.
+After granting consent in the popup, the authorization status updates to confirm your account is linked. **Disconnect** removes the stored token without changing the admin-uploaded client credentials.
 
 ![Authorized status](images/07-exporting-to-google-slides/06-authorized-status.png)
 
@@ -104,7 +104,7 @@ The backend creates a blank Google Slides presentation, then converts each slide
 
 | Problem | Cause | Solution |
 |---------|-------|----------|
-| "Not authorized" after previously working | Token expired or encryption key changed | Click **Authorize with Google** again |
+| "Not authorized" after previously working | Token expired or encryption key changed | Open **Settings** and click **Authorize with Google** again |
 | Export fails for a single slide | LLM-generated code error | The slide gets a placeholder; other slides are unaffected |
 | "Credentials not configured" | Admin hasn't uploaded `credentials.json` | Ask an admin to upload credentials on the `/admin` page |
 | App won't start in production | Encryption key missing or mis-configured | Verify the deployment used `tellr.update` / `deploy_local` (not the Databricks Apps UI button); check app logs for a key-resolution error |
