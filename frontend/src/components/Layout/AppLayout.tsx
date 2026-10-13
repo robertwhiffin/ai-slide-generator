@@ -429,18 +429,6 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     return () => window.removeEventListener('tour:load-demo-deck', handler);
   }, [navigate]);
 
-  // After tour phase 2 adds slides+messages, re-navigate to reload everything
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const { sessionId: sid } = (e as CustomEvent).detail;
-      if (!sid) return;
-      navigate('/', { replace: true });
-      setTimeout(() => navigate(`/sessions/${sid}/edit`, { replace: true }), 50);
-    };
-    window.addEventListener('tour:refresh-session', handler);
-    return () => window.removeEventListener('tour:refresh-session', handler);
-  }, [navigate]);
-
   // Tour finished: leave the demo session in the UI, then the tour deletes it in the background
   useEffect(() => {
     const handler = (e: Event) => {
@@ -480,6 +468,56 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     return () => window.removeEventListener('tour:sessions-list-refresh', handler);
   }, []);
 
+  // Fetch a session and apply its deck to the workspace. Shared by the URL-restore effect and the
+  // explicit tour refresh below, so both yield the same deck shape (findings, deck_spec, verification).
+  const loadSessionFromServer = useCallback(async (id: string, isCancelled: () => boolean) => {
+    // Fetch session info first so we can pass it to switchSession as existingSessionInfo
+    // to avoid a second getSession call.
+    const sessionInfo = await api.getSession(id);
+    if (isCancelled()) return;
+
+    const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(
+      id,
+      {
+        title: sessionInfo.title,
+        has_slide_deck: sessionInfo.has_slide_deck,
+        experiment_url: sessionInfo.experiment_url,
+        graph_version: sessionInfo.graph_version,
+        active_graph_version: sessionInfo.active_graph_version,
+        is_older_than_active: sessionInfo.is_older_than_active,
+      },
+      isCancelled,
+    );
+    if (!isCancelled()) {
+      if (restoredDeck) {
+        setSlideDeckGated(restoredDeck, (restoredDeck as SlideDeck)?.version, true);
+      } else {
+        setSlideDeck(null);
+      }
+      setRawHtml(restoredRawHtml);
+      setLastSavedTime(new Date());
+      setViewMode('main');
+    }
+  }, [switchSession, setSlideDeckGated]);
+
+  // After a tour stage adds slides+messages, reload the deck (and ChatPanel reloads its messages)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId: sid } = (e as CustomEvent).detail;
+      if (!sid) return;
+      if (sid !== sessionIdRef.current) {
+        navigate(`/sessions/${sid}/edit`, { replace: true });
+        return;
+      }
+      // Same session: reload its deck in place. A route bounce would not re-fetch (the restore
+      // effect's guard skips a loaded deck). ChatPanel reloads its own messages on this event.
+      loadSessionFromServer(sid, () => false).catch(err =>
+        console.error('Failed to refresh tour session:', err));
+    };
+    window.addEventListener('tour:refresh-session', handler);
+    return () => window.removeEventListener('tour:refresh-session', handler);
+  }, [navigate, loadSessionFromServer]);
+
   // When URL has sessionId, restore that session (load deck if we don't have it yet).
   // sessionId is intentionally NOT in deps — we use sessionIdRef.current in the guard instead.
   // This prevents the effect from re-firing when switchSession internally calls setSessionId,
@@ -490,33 +528,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     let cancelled = false;
     (async () => {
       try {
-        // Fetch session info first so we can pass it to switchSession as existingSessionInfo
-        // to avoid a second getSession call.
-        const sessionInfo = await api.getSession(urlSessionId);
-        if (cancelled) return;
-
-        const { slideDeck: restoredDeck, rawHtml: restoredRawHtml } = await switchSession(
-          urlSessionId,
-          {
-            title: sessionInfo.title,
-            has_slide_deck: sessionInfo.has_slide_deck,
-            experiment_url: sessionInfo.experiment_url,
-            graph_version: sessionInfo.graph_version,
-            active_graph_version: sessionInfo.active_graph_version,
-            is_older_than_active: sessionInfo.is_older_than_active,
-          },
-          () => cancelled,
-        );
-        if (!cancelled) {
-          if (restoredDeck) {
-            setSlideDeckGated(restoredDeck, (restoredDeck as SlideDeck)?.version, true);
-          } else {
-            setSlideDeck(null);
-          }
-          setRawHtml(restoredRawHtml);
-          setLastSavedTime(new Date());
-          setViewMode('main');
-        }
+        await loadSessionFromServer(urlSessionId, () => cancelled);
       } catch (err: unknown) {
         if (!cancelled && err && typeof err === 'object' && 'status' in err) {
           const status = (err as { status: number }).status;
@@ -537,7 +549,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
     })();
     return () => { cancelled = true; };
-  }, [urlSessionId, showToast, navigate, switchSession]);
+  }, [urlSessionId, showToast, navigate, loadSessionFromServer]);
 
   // Load save point versions when session or deck changes
   const loadVersions = useCallback(async () => {

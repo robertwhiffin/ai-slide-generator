@@ -93,40 +93,53 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     };
   }, [sessionId, setIsGenerating]);
 
+  // Fetch the persisted message history for the current session into the chat.
+  const loadSessionMessages = async (id: string) => {
+    try {
+      const session = await api.getSession(id);
+      if (session.messages && session.messages.length > 0) {
+        // Convert database messages to UI Message format
+        const uiMessages: Message[] = session.messages.map(msg => ({
+          role: msg.role as 'user' | 'assistant' | 'tool',
+          content: msg.content,
+          timestamp: msg.created_at,
+          tool_call: msg.metadata?.tool_name ? {
+            name: msg.metadata.tool_name,
+            arguments: msg.metadata.tool_input || {},
+          } : undefined,
+        }));
+        setMessages(uiMessages);
+      } else {
+        setMessages([]);
+      }
+    } catch (err: any) {
+      // Session might not exist yet (new session with local UUID), which is fine
+      // 404 is expected for new sessions that haven't sent their first message
+      if (err?.status !== 404) {
+        console.warn('Could not load session messages:', err);
+      }
+      setMessages([]);
+    }
+  };
+
   // Load messages when session changes (for restored sessions)
   // Messages are already cleared synchronously in the render body above.
   useEffect(() => {
     if (!sessionId) return;
+    loadSessionMessages(sessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
-    const loadSessionMessages = async () => {
-      try {
-        const session = await api.getSession(sessionId);
-        if (session.messages && session.messages.length > 0) {
-          // Convert database messages to UI Message format
-          const uiMessages: Message[] = session.messages.map(msg => ({
-            role: msg.role as 'user' | 'assistant' | 'tool',
-            content: msg.content,
-            timestamp: msg.created_at,
-            tool_call: msg.metadata?.tool_name ? {
-              name: msg.metadata.tool_name,
-              arguments: msg.metadata.tool_input || {},
-            } : undefined,
-          }));
-          setMessages(uiMessages);
-        } else {
-          setMessages([]);
-        }
-      } catch (err: any) {
-        // Session might not exist yet (new session with local UUID), which is fine
-        // 404 is expected for new sessions that haven't sent their first message
-        if (err?.status !== 404) {
-          console.warn('Could not load session messages:', err);
-        }
-        setMessages([]);
-      }
+  // Tour: a demo stage wrote new messages server-side for this same session, so sessionId does not
+  // change and the effect above does not re-run. Reload explicitly when the event targets us.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const sid = (e as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+      if (sid && sid === sessionId) loadSessionMessages(sid);
     };
-
-    loadSessionMessages();
+    window.addEventListener('tour:refresh-session', handler);
+    return () => window.removeEventListener('tour:refresh-session', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   const stopLoadingMessages = () => {
