@@ -10,6 +10,10 @@ const BRIDGE_MS = 300;
 
 let demoSessionId: string | null = null;
 const applied = new Set<DemoStage>();
+// Stage calls still awaiting the server. react-joyride's beforeTimeout (5 s)
+// does not cancel a slow hook, so Back/Next can re-enter a step while its stage
+// is in flight: the second call must join the first, not POST again.
+const inflight = new Map<DemoStage, Promise<void>>();
 
 const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const emit = (type: string, detail?: unknown) =>
@@ -30,13 +34,28 @@ export async function startDemo(): Promise<void> {
 }
 
 /** Advance the demo by one scripted stage. Idempotent: react-joyride re-runs
- *  `before` hooks on Back, and the server also no-ops a repeated stage. */
-export async function runStage(stage: DemoStage): Promise<void> {
-  if (!demoSessionId || applied.has(stage)) return;
+ *  `before` hooks on Back, and the server also no-ops a repeated stage. A call
+ *  made while the same stage is still in flight returns that call's promise. */
+export function runStage(stage: DemoStage): Promise<void> {
+  if (!demoSessionId || applied.has(stage)) return Promise.resolve();
+  const pending = inflight.get(stage);
+  if (pending) return pending;
+  const run: Promise<void> = postStage(demoSessionId, stage).finally(() => {
+    // endDemo may have cleared the map and a new demo started this stage.
+    if (inflight.get(stage) === run) inflight.delete(stage);
+  });
+  inflight.set(stage, run);
+  return run;
+}
+
+async function postStage(sid: string, stage: DemoStage): Promise<void> {
   try {
-    await api.runTourDemoStage(demoSessionId, stage);
+    await api.runTourDemoStage(sid, stage);
+    // endDemo ran (Skip) while the call was in flight: this result belongs to
+    // a deleted demo, so it must not mark the stage applied for the next one.
+    if (demoSessionId !== sid) return;
     applied.add(stage);
-    emit('tour:refresh-session', { sessionId: demoSessionId });
+    emit('tour:refresh-session', { sessionId: sid });
     await wait(REFRESH_MS);
   } catch (err) {
     console.error(`Failed to run tour demo stage ${stage}:`, err);
@@ -59,6 +78,7 @@ export function endDemo(): void {
   const sid = demoSessionId;
   demoSessionId = null;
   applied.clear();
+  inflight.clear();
   if (!sid) return;
   emit('tour:demo-session-deleted', { sessionId: sid });
   void api
@@ -70,4 +90,5 @@ export function endDemo(): void {
 export function _resetDemoForTests(): void {
   demoSessionId = null;
   applied.clear();
+  inflight.clear();
 }

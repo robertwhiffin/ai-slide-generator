@@ -169,6 +169,44 @@ describe('tourDemo', () => {
     expect(api.runTourDemoStage).toHaveBeenLastCalledWith('demo-2', 'plan');
   });
 
+  it('two concurrent runStage calls for one stage (Back/Next mid-flight) post once and both resolve', async () => {
+    await settle(startDemo());
+    events.length = 0;
+    let release!: () => void;
+    vi.mocked(api.runTourDemoStage).mockImplementationOnce(
+      () => new Promise(r => { release = () => r({ session_id: 'demo-1', stage: 'plan', applied: true, slide_count: 0 }); }),
+    );
+    const first = runStage('plan');
+    const second = runStage('plan');
+    expect(second).toBe(first);
+    release();
+    await settle(Promise.all([first, second]).then(() => undefined));
+    expect(api.runTourDemoStage).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([{ type: 'tour:refresh-session', detail: { sessionId: 'demo-1' } }]);
+  });
+
+  it('endDemo while a stage is in flight: the late result neither refreshes nor marks the stage for the next demo', async () => {
+    await settle(startDemo());
+    let release!: () => void;
+    vi.mocked(api.runTourDemoStage).mockImplementationOnce(
+      () => new Promise(r => { release = () => r({ session_id: 'demo-1', stage: 'build', applied: true, slide_count: 3 }); }),
+    );
+    const inFlight = runStage('build');
+    endDemo();
+    await vi.runAllTimersAsync();
+    events.length = 0;
+    release();
+    await settle(inFlight);
+    expect(events).toEqual([]);
+
+    vi.mocked(api.createTourDemoDeck).mockResolvedValueOnce({ session_id: 'demo-2', title: 'Demo' });
+    await settle(startDemo());
+    events.length = 0;
+    await settle(runStage('build'));
+    expect(vi.mocked(api.runTourDemoStage).mock.calls).toEqual([['demo-1', 'build'], ['demo-2', 'build']]);
+    expect(events).toEqual([{ type: 'tour:refresh-session', detail: { sessionId: 'demo-2' } }]);
+  });
+
   it('endDemo with no demo does nothing', () => {
     endDemo();
     expect(events).toEqual([]);
