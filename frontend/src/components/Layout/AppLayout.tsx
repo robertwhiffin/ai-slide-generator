@@ -511,7 +511,9 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       }
       // Same session: reload its deck in place. A route bounce would not re-fetch (the restore
       // effect's guard skips a loaded deck). ChatPanel reloads its own messages on this event.
-      loadSessionFromServer(sid, () => false).catch(err =>
+      // Cancelled if the session changes mid-load (endDemo -> createNewSession on Skip/finish), so a
+      // slow refresh cannot re-commit the deleted demo session over the fresh workspace.
+      loadSessionFromServer(sid, () => api.getCurrentSessionId() !== sid).catch(err =>
         console.error('Failed to refresh tour session:', err));
     };
     window.addEventListener('tour:refresh-session', handler);

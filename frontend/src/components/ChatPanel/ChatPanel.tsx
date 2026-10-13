@@ -94,9 +94,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   }, [sessionId, setIsGenerating]);
 
   // Fetch the persisted message history for the current session into the chat.
-  const loadSessionMessages = async (id: string) => {
+  const loadSessionMessages = async (id: string, isStale: () => boolean = () => false) => {
     try {
       const session = await api.getSession(id);
+      if (isStale()) return;
       if (session.messages && session.messages.length > 0) {
         // Convert database messages to UI Message format
         const uiMessages: Message[] = session.messages.map(msg => ({
@@ -118,9 +119,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       if (err?.status !== 404) {
         console.warn('Could not load session messages:', err);
       }
+      if (isStale()) return;
       setMessages([]);
     }
   };
+  const currentSessionIdRef = useRef(sessionId);
+  currentSessionIdRef.current = sessionId;
 
   // Load messages when session changes (for restored sessions)
   // Messages are already cleared synchronously in the render body above.
@@ -135,7 +139,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   useEffect(() => {
     const handler = (e: Event) => {
       const sid = (e as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
-      if (sid && sid === sessionId) loadSessionMessages(sid);
+      if (sid && sid === sessionId) loadSessionMessages(sid, () => currentSessionIdRef.current !== sid);
     };
     window.addEventListener('tour:refresh-session', handler);
     return () => window.removeEventListener('tour:refresh-session', handler);

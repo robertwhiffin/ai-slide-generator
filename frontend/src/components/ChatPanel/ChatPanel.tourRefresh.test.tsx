@@ -7,13 +7,14 @@ import { render, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const getSession = vi.fn();
+let currentSessionId = 'tour-demo';
 
 vi.mock('../../services/api', () => ({
   api: { getSession: (...a: unknown[]) => getSession(...a) },
 }));
 vi.mock('../../contexts/SessionContext', () => ({
   useSession: () => ({
-    sessionId: 'tour-demo',
+    sessionId: currentSessionId,
     isSessionPersisted: true,
     isInitializing: false,
     error: null,
@@ -52,6 +53,7 @@ function refresh(sessionId: string) {
 describe('ChatPanel tour:refresh-session', () => {
   beforeEach(() => {
     getSession.mockReset();
+    currentSessionId = 'tour-demo';
     getSession.mockResolvedValue({ messages: [msg('message A')] });
   });
 
@@ -80,5 +82,25 @@ describe('ChatPanel tour:refresh-session', () => {
     await new Promise(r => setTimeout(r, 30));
     await waitFor(() => expect(getSession).toHaveBeenCalledTimes(1));
     expect(screen.queryByText('message B')).toBeNull();
+  });
+
+  it('drops a refresh response that lands after the session changed (tour ended mid-load)', async () => {
+    const view = mount();
+    await screen.findByText('message A');
+    let resolveLate: (v: unknown) => void = () => {};
+    getSession.mockImplementationOnce(() => new Promise(r => { resolveLate = r; }));
+    refresh('tour-demo');
+    // endDemo -> createNewSession: the workspace moves to a fresh session before the refresh lands.
+    getSession.mockResolvedValue({ messages: [] });
+    currentSessionId = 'fresh-session';
+    view.rerender(
+      <MemoryRouter>
+        <ChatPanel rawHtml={null} onSlidesGenerated={vi.fn()} ensureGraphCapableRoot={async () => true} />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(getSession).toHaveBeenCalledWith('fresh-session'));
+    await act(async () => { resolveLate({ messages: [msg('demo line')] }); });
+    await new Promise(r => setTimeout(r, 30));
+    expect(screen.queryByText('demo line')).toBeNull();
   });
 });
