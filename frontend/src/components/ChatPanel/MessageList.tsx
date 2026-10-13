@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import type { Message as MessageType } from '../../types/message';
 import { Message } from './Message';
+import { ChatWelcome } from './ChatWelcome';
 
 interface MessageListProps {
   messages: MessageType[];
@@ -17,6 +18,8 @@ export const MessageList: React.FC<MessageListProps> = ({ messages, isLoading })
 
   return (
     <div className="p-4 space-y-4">
+      {messages.length === 0 && !isLoading && <ChatWelcome />}
+
       {messages.map((message, index) => (
         <Message key={index} message={message} />
       ))}
