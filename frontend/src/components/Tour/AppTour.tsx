@@ -37,12 +37,8 @@ async function loadDemoPrompt(): Promise<void> {
 async function loadDemoSlides(): Promise<void> {
   if (!_demoSessionId) return;
   try {
-    await api.addTourDemoSlides(_demoSessionId);
-    await new Promise(r => setTimeout(r, 2000));
-    window.dispatchEvent(
-      new CustomEvent('tour:refresh-session', { detail: { sessionId: _demoSessionId } })
-    );
-    await new Promise(r => setTimeout(r, 1200));
+    await api.runTourDemoStage(_demoSessionId, 'plan');
+    await api.runTourDemoStage(_demoSessionId, 'build');
   } catch (err) {
     console.error('Failed to load tour demo slides:', err);
   }
