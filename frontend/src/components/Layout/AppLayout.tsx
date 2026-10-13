@@ -1020,6 +1020,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   //     is open.  Nothing about this flag may reach a request body.
   const [showSpec, setShowSpec] = useState(false);
 
+  // App tour bridge: switch the main panel between Slides and Spec.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { view } = (e as CustomEvent<{ view?: 'slides' | 'spec' }>).detail ?? {};
+      if (view === 'spec' || view === 'slides') setShowSpec(view === 'spec');
+    };
+    window.addEventListener('tour:show-view', handler);
+    return () => window.removeEventListener('tour:show-view', handler);
+  }, []);
+
   // The spec is read-only; every edit to it is conversational, so Discuss hands
   // the user to the conversation rather than opening an editor.  It expands the
   // chat if it is collapsed and does nothing else — in particular it sends no
