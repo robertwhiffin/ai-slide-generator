@@ -24,9 +24,13 @@ Sabotage targets (run results in task-C9-report.md):
   S3: put search_images into builder's body → test_builder_no_tool_call goes red
 """
 
+import re
+
 import pytest
 
 from src.core.skills import load_skill
+from src.core.skills.fixer import INSTRUCTIONS as FIXER_INSTRUCTIONS
+from src.services.graph_definition_manifest import load_graph_v1_manifest
 
 
 # ---------------------------------------------------------------------------
@@ -38,10 +42,15 @@ class TestBuildReviewerProse:
     """The build_reviewer's criteria block is generated, not hand-written."""
 
     def test_build_reviewer_all_criterion_names_in_instructions(self):
-        """Every CRITERIA name appears in the assembled instructions."""
+        """Every CRITERIA name appears in the generated v2 criteria stage.
+
+        ``load_skill(...).instructions`` is the frozen Graph Version 1 composite,
+        so it cannot carry criteria added after v1 shipped.
+        """
+        from src.core.skills.build_reviewer import BUILD_REVIEWER_CRITERIA_STAGE
         from src.domain.finding import CRITERIA
 
-        instructions = load_skill("build_reviewer").instructions
+        instructions = BUILD_REVIEWER_CRITERIA_STAGE
         for name in CRITERIA:
             assert name in instructions, (
                 f"Criterion {name!r} not found in build_reviewer instructions. "
@@ -78,6 +87,73 @@ class TestBuildReviewerProse:
             )
         finally:
             del CRITERIA[probe_name]
+
+
+class TestBuildReviewerAuthoredPrefix:
+    """The authored prefix tells the reviewer how to judge a bound slide.
+
+    Each rule must be stated in ONE sentence, so a prefix that mentions the
+    words in unrelated places does not pass.  The criteria lines are not part
+    of the prefix; they stay generated from ``CRITERIA``.
+    """
+
+    @staticmethod
+    def _sentences():
+        import re
+
+        from src.core.skills.build_reviewer import BUILD_REVIEWER_AUTHORED_PREFIX
+
+        return [
+            s.lower()
+            for s in re.split(r"(?<=[.!?])\s+|\n+", BUILD_REVIEWER_AUTHORED_PREFIX)
+            if s.strip()
+        ]
+
+    def _one_sentence_with(self, *patterns):
+        import re
+
+        return any(
+            all(re.search(p, sentence) for p in patterns)
+            for sentence in self._sentences()
+        )
+
+    def test_judge_the_cascade_not_class_names(self):
+        assert self._one_sentence_with(
+            r"\bcascade\b",
+            r"class[ -]?names?",
+            r"\b(not|never|rather than|instead of)\b",
+        ), "prefix must say: judge the computed cascade, not class names"
+
+    def test_compare_built_html_to_section_html_and_slide_type(self):
+        assert self._one_sentence_with(
+            r"compar",
+            r"section_html",
+            r"slide_type",
+            r"\bhtml\b|built",
+        ), (
+            "prefix must tell the reviewer to compare the built HTML with "
+            "section_html and slide_spec.slide_type"
+        )
+
+    def test_never_propose_a_replacement_colour_or_layout(self):
+        assert self._one_sentence_with(
+            r"\bnever\b",
+            r"propos",
+            r"replacement",
+            r"colou?r",
+            r"layout",
+        ), "prefix must forbid proposing a replacement colour or layout"
+        assert self._one_sentence_with(r"\bnever\b", r"propos", r"message"), (
+            "the prohibition must be about the finding message"
+        )
+
+    def test_the_prefix_does_not_hand_write_criteria_lines(self):
+        from src.core.skills.build_reviewer import BUILD_REVIEWER_AUTHORED_PREFIX
+        from src.domain.finding import CRITERIA
+
+        assert "CRITERIA:" not in BUILD_REVIEWER_AUTHORED_PREFIX
+        for name in CRITERIA:
+            assert f"{name} (" not in BUILD_REVIEWER_AUTHORED_PREFIX, name
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +200,22 @@ class TestFixerProse:
             "without it the model may re-author the slide, undoing prior review work"
         )
 
+    def test_fixer_does_not_require_a_div_slide_outer_root(self):
+        """A bound template slide may be a <section> wrapping div.slide.
+
+        Requiring an outer <div class="slide"> unwraps the bound section and
+        drops the treatment the deck CSS paints.
+        """
+        body = re.sub(r"\s+", " ", FIXER_INSTRUCTIONS.replace("`", "")).strip().lower()
+        assert re.search(
+            r"<section>|outer root|keep (the |its )?(same |original )?(outer |root )",
+            body,
+        ), "fixer must allow a <section> outer root, not only <div class=\"slide\">"
+        assert not re.search(
+            r"return only the slide div:\s*<div class=.slide.>",
+            body,
+        ), "fixer still requires the outer root to be exactly <div class=\"slide\">"
+
     def test_fixer_no_dimension_literal(self):
         """1280x720 must not appear in the fixer body.
 
@@ -135,6 +227,11 @@ class TestFixerProse:
             "fixer instructions must not contain '1280x720'; "
             "safe-area numbers are owned by _SLIDE_FRAME_CONSTRAINTS"
         )
+
+    def test_manifest_fixer_prompt_is_the_skill_instructions(self):
+        manifest = load_graph_v1_manifest()
+        fixer = next(d for d in manifest.definitions if d.agent_key == "fixer")
+        assert fixer.prompt_text == FIXER_INSTRUCTIONS
 
 
 # ---------------------------------------------------------------------------

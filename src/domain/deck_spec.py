@@ -85,7 +85,24 @@ class SlideSpec(BaseModel):
     assumes: str
     hands_off: str
     data_references: list[str]
+    slide_type: Optional[str] = None
     template_section_index: Optional[int] = None
+
+    @field_validator("slide_type")
+    @classmethod
+    def _slide_type_stripped_and_non_blank(cls, v: Optional[str]) -> Optional[str]:
+        """Strip ``slide_type``; reject whitespace-only. ``None`` stays ``None``.
+
+        Free text from the design system's slide-type vocabulary, so it is
+        deliberately not a Literal. Pairing with ``template_section_index`` is
+        validated where the template inventory is available, not here.
+        """
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("slide_type must not be whitespace-only")
+        return stripped
 
 
 class DeckSpec(BaseModel):

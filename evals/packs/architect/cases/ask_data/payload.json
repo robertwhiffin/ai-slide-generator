@@ -17,20 +17,24 @@
   "template_sections": [
     {
       "index": 0,
+      "label": null,
       "tag": "section",
       "classes": [
         "slide",
         "cover"
       ],
+      "inner_classes": [],
       "text_snippet": "Quarterly review Cover title that states the headline Supporting context line",
       "affordances": []
     },
     {
       "index": 1,
+      "label": null,
       "tag": "section",
       "classes": [
         "slide"
       ],
+      "inner_classes": [],
       "text_snippet": "Section Content slide title as a sentence First supporting point Second supporti…",
       "affordances": [
         "list"
@@ -38,19 +42,23 @@
     },
     {
       "index": 2,
+      "label": null,
       "tag": "section",
       "classes": [
         "slide"
       ],
+      "inner_classes": [],
       "text_snippet": "Three numbers tell the story 42% Metric one +4pt 1.3M Metric two 18 Metric three…",
       "affordances": []
     },
     {
       "index": 3,
+      "label": null,
       "tag": "section",
       "classes": [
         "slide"
       ],
+      "inner_classes": [],
       "text_snippet": "Chart with commentary What the chart shows Why it matters Meridian 3",
       "affordances": [
         "canvas",

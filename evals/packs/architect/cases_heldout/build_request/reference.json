@@ -46,7 +46,8 @@
         "content_brief": "Cover slide introducing 'Prompt Optimisation: A Practical Framework' with the subtitle framing the business case — better outputs, lower cost, faster shipping",
         "assumes": "Audience knows what LLMs are and that their team uses them",
         "hands_off": "Prompt quality is an engineering discipline, not guesswork",
-        "data_references": []
+        "data_references": [],
+        "slide_type": null
       },
       {
         "position": 1,
@@ -54,7 +55,8 @@
         "content_brief": "Bullet slide listing the three pain points of unoptimised prompts — inconsistent outputs, wasted tokens/cost, and slow iteration — with a callout summarising the opportunity cost",
         "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
         "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",
-        "data_references": []
+        "data_references": [],
+        "slide_type": null
       },
       {
         "position": 2,
@@ -62,7 +64,8 @@
         "content_brief": "Bullet slide covering the four key patterns — system-prompt framing, few-shot examples, chain-of-thought reasoning, and structured output formatting — with a callout on when to combine them",
         "assumes": "Audience understands the problem from the previous slide",
         "hands_off": "Four composable patterns cover the vast majority of prompt optimisation needs",
-        "data_references": []
+        "data_references": [],
+        "slide_type": null
       },
       {
         "position": 3,
@@ -74,7 +77,8 @@
           "token_cost_reduction",
           "consistency_gain",
           "iteration_cycles"
-        ]
+        ],
+        "slide_type": null
       },
       {
         "position": 4,
@@ -82,7 +86,8 @@
         "content_brief": "Two-column slide with a prompt evaluation loop (define criteria → build test set → score outputs → refine prompt → repeat) on one side and commentary bullets on the other explaining why each step matters",
         "assumes": "Audience is convinced of the value and wants to know how to operationalise it",
         "hands_off": "A repeatable evaluate-and-iterate loop is the engine of prompt quality",
-        "data_references": []
+        "data_references": [],
+        "slide_type": null
       },
       {
         "position": 5,
@@ -90,7 +95,8 @@
         "content_brief": "Bullet slide presenting a five-item prompt optimisation checklist (define task scope, choose patterns, write eval criteria, run test suite, document winning prompt) with a callout stating the call to action: adopt this checklist for every new LLM feature starting this sprint",
         "assumes": "Audience has seen the techniques, evidence, and workflow",
         "hands_off": "Start using the checklist this sprint — no new tooling required",
-        "data_references": []
+        "data_references": [],
+        "slide_type": null
       }
     ]
   },

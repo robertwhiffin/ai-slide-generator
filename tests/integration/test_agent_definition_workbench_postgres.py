@@ -27,11 +27,10 @@ from src.api.schemas.agent_definitions import (
 from src.core.database import get_db
 from src.core.prompt_modules import DESIGN_SYSTEM_PRECEDENCE, UNTRUSTED_DATA_NOTICE
 from src.core.skills.build_reviewer import (
-    BUILD_REVIEWER_AUTHORED_PREFIX,
+    BUILD_REVIEWER_AUTHORED_INSTRUCTIONS,
     BUILD_REVIEWER_CRITERIA_STAGE,
-    BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
-    BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
     DECK_BRIEF_REVIEW,
+    INSTRUCTIONS as BUILD_REVIEWER_V1_PROMPT,
 )
 from src.core.skills.data_analyst import ANALYST_AUTHORED_INSTRUCTIONS
 from src.core.user_context import set_current_user
@@ -483,12 +482,8 @@ INDEPENDENT_TRANSITION_LITERALS = {
         ANALYST_AUTHORED_INSTRUCTIONS,
     ),
     "build_reviewer": (
-        BUILD_REVIEWER_AUTHORED_PREFIX
-        + "\n\n"
-        + BUILD_REVIEWER_CRITERIA_STAGE
-        + "\n\n"
-        + BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
-        BUILD_REVIEWER_AUTHORED_PREFIX + "\n\n" + BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
+        BUILD_REVIEWER_V1_PROMPT,
+        BUILD_REVIEWER_AUTHORED_INSTRUCTIONS,
     ),
 }
 MANUAL_RESOLUTION_TUPLE = (

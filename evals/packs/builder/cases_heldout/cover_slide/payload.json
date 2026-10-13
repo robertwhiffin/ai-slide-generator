@@ -6,7 +6,8 @@
     "content_brief": "Cover slide introducing 'Prompt Optimisation: A Practical Framework' with the subtitle framing the business case — better outputs, lower cost, faster shipping",
     "assumes": "Audience knows what LLMs are and that their team uses them",
     "hands_off": "Prompt quality is an engineering discipline, not guesswork",
-    "data_references": []
+    "data_references": [],
+    "slide_type": null
   },
   "assumes": "Audience knows what LLMs are and that their team uses them",
   "hands_off": "Prompt quality is an engineering discipline, not guesswork",

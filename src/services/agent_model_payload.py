@@ -33,6 +33,7 @@ _SLIDE_REVIEW_KEYS = frozenset(
         "resolved_style",
         "section_css",
         "resolved_data",
+        "section_html",
         "html",
         "scripts",
     }

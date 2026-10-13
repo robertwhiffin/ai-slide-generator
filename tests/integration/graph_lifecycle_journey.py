@@ -130,7 +130,7 @@ BUILDER_SCHEMA_CONTRACT_V2_DIGEST = (
     "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad"
 )
 ARCHITECT_PROTECTED_ASSEMBLY_V2_DIGEST = (
-    "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
+    "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
 )
 #: ``GraphConfiguration.bootstrap_v1``'s default actor: v1's ``published_by``.
 BOOTSTRAP_ACTOR = "system:bootstrap"

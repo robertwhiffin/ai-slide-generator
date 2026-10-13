@@ -3,7 +3,14 @@
 Coverage:
   section_inventory   — deck skeleton, single-slide, affordances, no-markup
                         (all values in every dict), size guard, zero-roots named
-                        outcome
+                        outcome, exact key set, data-label → label (trimmed,
+                        None when missing/blank, duplicates allowed, read from
+                        the promoted root), inner_classes (innermost .slide
+                        descendant, [] when the root is the .slide)
+  invalid_slide_bindings — both-null valid, matching pair valid, duplicate
+                        labels bound by index, half-null, out-of-range
+                        (incl. negative), null-label row, exact case-preserving
+                        label match, empty inventory, one error per bad slide
   extract_section     — verbatim (byte-for-byte), out-of-range, re-parenting
                         (<main>, sibling stripping, verbatim inside wrapper,
                         promoting ancestors not re-added)
@@ -88,6 +95,53 @@ MAIN_SINGLE_QUOTE_HTML = (
     "<main>"
     "<section class='slide cover'><h1>Title</h1></section>"
     "</main>"
+)
+
+# Labelled layout (synthetic). Root 0: a <section> wrapper (class token
+# "slide-root" is NOT the "slide" token) promoted around a sole div.slide.
+# Root 1: the root itself carries the "slide" token.
+LABELLED_HTML = (
+    '<section class="slide-root" data-label="Cover">'
+    '<div class="slide cover dark">Cover title</div>'
+    "</section>"
+    '<section class="slide" data-label="Content">'
+    "<h2>Body</h2>"
+    "</section>"
+)
+
+# Unlabelled roots: one with no data-label, one with a whitespace-only label.
+UNLABELLED_HTML = (
+    "<section class='slide'><h2>No label</h2></section>"
+    "<section class='slide' data-label='   '><h2>Blank label</h2></section>"
+)
+
+# Surrounding whitespace in the label is trimmed.
+PADDED_LABEL_HTML = (
+    "<section class='slide' data-label='  Agenda \n'><h2>A</h2></section>"
+)
+
+# Two roots sharing a label — valid; order and count preserved.
+DUPLICATE_LABEL_HTML = (
+    "<section class='slide' data-label='Stats'><p>One</p></section>"
+    "<section class='slide' data-label='Stats'><p>Two</p></section>"
+)
+
+# data-label on the INNER div.slide only; the promoted <section> root has none.
+# The label must come from the inventoried (promoted) root → None.
+INNER_ONLY_LABEL_HTML = (
+    "<section>"
+    "<div class='slide white' data-label='Inner'>Body</div>"
+    "</section>"
+)
+
+# Nested .slide descendants: inner_classes must be the INNERMOST one, not the
+# first .slide descendant encountered.
+NESTED_SLIDE_HTML = (
+    "<section data-label='Nested'>"
+    "<div class='slide outer'>"
+    "<div class='slide innermost event'>Deep</div>"
+    "</div>"
+    "</section>"
 )
 
 # Layout with a <style> block for the resolve_template_bytes tests
@@ -200,15 +254,125 @@ class TestSectionInventory:
         assert len(inv) == 1
 
     def test_inventory_fields_present(self):
+        """Every entry has EXACTLY the seven documented keys.
+
+        Exact set, not ``in`` checks: an inventory that omits ``label`` or
+        ``inner_classes`` (or smuggles in an extra key) must fail here.
+        """
         from src.services.template_sections import section_inventory
 
-        inv = section_inventory(SINGLE_SLIDE_HTML)
-        entry = inv[0]
-        assert "index" in entry
-        assert "tag" in entry
-        assert "classes" in entry
-        assert "text_snippet" in entry
-        assert "affordances" in entry
+        expected = {
+            "index",
+            "label",
+            "tag",
+            "classes",
+            "inner_classes",
+            "text_snippet",
+            "affordances",
+        }
+        for layout in (SINGLE_SLIDE_HTML, DECK_HTML, LABELLED_HTML):
+            for entry in section_inventory(layout):
+                assert set(entry) == expected, (
+                    f"Inventory keys {sorted(entry)} != {sorted(expected)}"
+                )
+
+    def test_labelled_wrapper_and_slide_root(self):
+        """Promoted wrapper exposes its data-label and the inner .slide classes;
+        a root that IS the .slide exposes its label and inner_classes == []."""
+        from src.services.template_sections import section_inventory
+
+        inv = section_inventory(LABELLED_HTML)
+        assert len(inv) == 2
+
+        assert inv[0]["label"] == "Cover"
+        assert inv[0]["tag"] == "section"
+        assert inv[0]["classes"] == ["slide-root"]
+        assert inv[0]["inner_classes"] == ["slide", "cover", "dark"]
+
+        assert inv[1]["label"] == "Content"
+        assert inv[1]["classes"] == ["slide"]
+        assert inv[1]["inner_classes"] == []
+
+    def test_missing_or_blank_label_is_none(self):
+        """No data-label, or a whitespace-only one, yields label=None and the
+        root stays in the inventory (order/count unchanged)."""
+        from src.services.template_sections import section_inventory
+
+        inv = section_inventory(UNLABELLED_HTML)
+        assert len(inv) == 2
+        assert [e["index"] for e in inv] == [0, 1]
+        assert "label" in inv[0] and inv[0]["label"] is None
+        assert "label" in inv[1] and inv[1]["label"] is None
+
+    def test_missing_label_logs_warning(self, caplog):
+        """A root without a usable label emits a WARNING (row stays loadable)."""
+        from src.services.template_sections import section_inventory
+
+        with caplog.at_level(logging.WARNING, logger="src.services.template_sections"):
+            inv = section_inventory(UNLABELLED_HTML)
+
+        assert len(inv) == 2
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "label" in r.getMessage().lower()
+        ]
+        assert warnings, "Expected a WARNING mentioning the missing label"
+
+    def test_labelled_layout_logs_no_label_warning(self, caplog):
+        """Fully labelled layouts must not emit the missing-label warning."""
+        from src.services.template_sections import section_inventory
+
+        with caplog.at_level(logging.WARNING, logger="src.services.template_sections"):
+            inv = section_inventory(LABELLED_HTML)
+
+        assert [e["label"] for e in inv] == ["Cover", "Content"]
+        assert not [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "label" in r.getMessage().lower()
+        ]
+
+    def test_label_is_trimmed(self):
+        from src.services.template_sections import section_inventory
+
+        inv = section_inventory(PADDED_LABEL_HTML)
+        assert inv[0]["label"] == "Agenda"
+
+    def test_duplicate_labels_are_valid(self):
+        from src.services.template_sections import section_inventory
+
+        inv = section_inventory(DUPLICATE_LABEL_HTML)
+        assert [e["index"] for e in inv] == [0, 1]
+        assert [e["label"] for e in inv] == ["Stats", "Stats"]
+
+    def test_label_read_from_promoted_root_not_inner_slide(self):
+        """data-label lives on the inventoried (promoted) root. A label only on
+        the inner div.slide does not count."""
+        from src.services.template_sections import section_inventory
+
+        inv = section_inventory(INNER_ONLY_LABEL_HTML)
+        assert len(inv) == 1
+        assert inv[0]["tag"] == "section"
+        assert "label" in inv[0] and inv[0]["label"] is None
+        assert inv[0]["inner_classes"] == ["slide", "white"]
+
+    def test_inner_classes_uses_innermost_slide_descendant(self):
+        """With nested .slide descendants, inner_classes comes from the
+        innermost one — not the first .slide descendant (C1)."""
+        from src.services.template_sections import section_inventory
+
+        inv = section_inventory(NESTED_SLIDE_HTML)
+        assert len(inv) == 1
+        assert inv[0]["label"] == "Nested"
+        assert inv[0]["inner_classes"] == ["slide", "innermost", "event"]
+
+    def test_inner_classes_empty_when_root_is_the_slide(self):
+        """Unwrapped .slide roots (no promotion) report inner_classes == []."""
+        from src.services.template_sections import section_inventory
+
+        for layout in (DECK_HTML, SINGLE_SLIDE_HTML):
+            for entry in section_inventory(layout):
+                assert "inner_classes" in entry
+                assert entry["inner_classes"] == []
 
     def test_index_is_zero_based(self):
         from src.services.template_sections import section_inventory
@@ -330,6 +494,222 @@ class TestSectionInventory:
 
         inv = section_inventory(layout)
         assert len(inv[0]["text_snippet"]) <= 81  # 80 chars + ellipsis char
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# invalid_slide_bindings
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Inventory under test (vocabulary chosen by this fixture, not a product enum):
+#   0 "Cover", 1 "Content", 2 <no label>, 3 "Content" (duplicate label).
+BINDING_HTML = (
+    "<section class='slide' data-label='Cover'><h1>T</h1></section>"
+    "<section class='slide' data-label='Content'><p>A</p></section>"
+    "<section class='slide'><p>Unlabelled</p></section>"
+    "<section class='slide' data-label='Content'><p>B</p></section>"
+)
+
+
+def _binding_spec(pairs):
+    """A DeckSpec with one slide per ``(slide_type, template_section_index)``.
+
+    Slide positions are 0..n-1 in the order given.
+    """
+    import src.core.database  # noqa: F401 — import before other src.* modules
+    from src.domain.deck_spec import DeckSpec
+
+    return DeckSpec(
+        title="Binding Deck",
+        audience="a",
+        purpose="p",
+        argument="arg",
+        call_to_action="cta",
+        narrative_arc=["open", "close"],
+        design_contract={
+            "design_system_id": 7,
+            "template_id": 3,
+            "slide_style_id": None,
+        },
+        resolved_data={"synthesis": "s", "figures": [], "gaps": []},
+        slides=[
+            {
+                "position": p,
+                "purpose": f"purpose-{p}",
+                "content_brief": f"brief-{p}",
+                "assumes": f"assumes-{p}",
+                "hands_off": f"hands-off-{p}",
+                "data_references": [],
+                "slide_type": slide_type,
+                "template_section_index": index,
+            }
+            for p, (slide_type, index) in enumerate(pairs)
+        ],
+    )
+
+
+class TestInvalidSlideBindings:
+    """Pair validation against the pinned template's current inventory.
+
+    Each rule is asserted on a one-slide spec so that a returned error can only
+    come from that slide's pair.
+    """
+
+    @pytest.fixture
+    def inventory(self):
+        from src.services.template_sections import section_inventory
+
+        inv = section_inventory(BINDING_HTML)
+        # Guard the fixture itself: the rules below assume exactly this shape.
+        assert [e["label"] for e in inv] == ["Cover", "Content", None, "Content"]
+        return inv
+
+    def test_returns_a_list_of_strings(self, inventory):
+        from src.services.template_sections import invalid_slide_bindings
+
+        errors = invalid_slide_bindings(_binding_spec([("Cover", 99)]), inventory)
+        assert isinstance(errors, list)
+        assert errors and all(isinstance(e, str) and e.strip() for e in errors)
+
+    def test_both_null_is_valid(self, inventory):
+        from src.services.template_sections import invalid_slide_bindings
+
+        assert invalid_slide_bindings(_binding_spec([(None, None)]), inventory) == []
+
+    def test_matching_pairs_are_valid(self, inventory):
+        from src.services.template_sections import invalid_slide_bindings
+
+        spec = _binding_spec([("Cover", 0), ("Content", 1), (None, None)])
+        assert invalid_slide_bindings(spec, inventory) == []
+
+    def test_duplicate_label_bound_by_its_second_index_is_valid(self, inventory):
+        """Two entries share ``Content``; the index picks which one. Binding the
+        second by its own index is valid — a 'first entry with this label'
+        lookup would reject it."""
+        from src.services.template_sections import invalid_slide_bindings
+
+        assert invalid_slide_bindings(_binding_spec([("Content", 3)]), inventory) == []
+        assert invalid_slide_bindings(_binding_spec([("Content", 1)]), inventory) == []
+
+    @pytest.mark.parametrize(
+        "pair",
+        [("Cover", None), (None, 0)],
+        ids=["slide_type-only", "index-only"],
+    )
+    def test_half_null_pair_is_invalid(self, inventory, pair):
+        from src.services.template_sections import invalid_slide_bindings
+
+        assert len(invalid_slide_bindings(_binding_spec([pair]), inventory)) == 1
+
+    @pytest.mark.parametrize("index", [4, 99, -1], ids=["len", "far", "negative"])
+    def test_out_of_range_index_is_invalid(self, inventory, index):
+        """``-1`` matters: Python indexing would wrap to entry 3 (``Content``),
+        so a bare ``inventory[index]`` lookup would accept ``("Content", -1)``."""
+        from src.services.template_sections import invalid_slide_bindings
+
+        spec = _binding_spec([("Content", index)])
+        assert len(invalid_slide_bindings(spec, inventory)) == 1
+
+    def test_index_whose_label_is_null_is_invalid(self, inventory):
+        """An existing unlabelled row stays in the inventory but cannot be bound,
+        whatever ``slide_type`` the model supplies."""
+        from src.services.template_sections import invalid_slide_bindings
+
+        assert len(
+            invalid_slide_bindings(_binding_spec([("Unlabelled", 2)]), inventory)
+        ) == 1
+
+    @pytest.mark.parametrize(
+        "pair",
+        [("Content", 0), ("Cover", 1), ("cover", 0), ("COVER", 0), ("Agenda", 0)],
+        ids=["label-of-other-index", "swapped", "lowercase", "uppercase", "invented"],
+    )
+    def test_slide_type_must_equal_that_entrys_label_exactly(self, inventory, pair):
+        from src.services.template_sections import invalid_slide_bindings
+
+        assert len(invalid_slide_bindings(_binding_spec([pair]), inventory)) == 1
+
+    @pytest.mark.parametrize(
+        "pair,valid",
+        [((None, None), True), (("Cover", 0), False), (("Cover", None), False),
+         ((None, 0), False)],
+        ids=["both-null", "full-pair", "slide_type-only", "index-only"],
+    )
+    def test_empty_inventory_admits_only_the_null_pair(self, pair, valid):
+        """No template (or a template with no slide roots) means there is no
+        vocabulary, so any non-null field is invalid."""
+        from src.services.template_sections import invalid_slide_bindings
+
+        errors = invalid_slide_bindings(_binding_spec([pair]), [])
+        assert (errors == []) is valid
+
+    def test_one_error_per_bad_slide(self, inventory):
+        """Valid slides add nothing; each bad slide adds exactly one error."""
+        from src.services.template_sections import invalid_slide_bindings
+
+        spec = _binding_spec(
+            [
+                ("Cover", 0),       # valid
+                ("Cover", None),    # half-null
+                ("Content", 1),     # valid
+                ("Content", 99),    # out of range
+                ("Unlabelled", 2),  # null label
+                ("cover", 0),       # case mismatch
+                (None, None),       # valid
+            ]
+        )
+        assert len(invalid_slide_bindings(spec, inventory)) == 4
+
+    def test_error_names_the_supplied_pair(self, inventory):
+        from src.services.template_sections import invalid_slide_bindings
+
+        errors = invalid_slide_bindings(
+            _binding_spec([("Agenda Wide", 1)]), inventory
+        )
+        assert len(errors) == 1
+        assert "Agenda Wide" in errors[0]
+        assert "1" in errors[0]
+
+
+class TestCompleteIndexOnlyBindings:
+    """Index-only pairs get slide_type from the labelled inventory entry."""
+
+    @pytest.fixture
+    def inventory(self):
+        from src.services.template_sections import section_inventory
+
+        return section_inventory(BINDING_HTML)
+
+    def test_fills_slide_type_from_the_labelled_entry(self, inventory):
+        from src.services.template_sections import complete_index_only_bindings
+
+        spec = _binding_spec([(None, 0)])
+        complete_index_only_bindings(spec, inventory)
+        assert spec.slides[0].slide_type == "Cover"
+        assert spec.slides[0].template_section_index == 0
+
+    def test_fills_the_duplicate_label_at_its_own_index(self, inventory):
+        from src.services.template_sections import complete_index_only_bindings
+
+        spec = _binding_spec([(None, 3)])
+        complete_index_only_bindings(spec, inventory)
+        assert spec.slides[0].slide_type == "Content"
+        assert spec.slides[0].template_section_index == 3
+
+    def test_does_not_fill_slide_type_only(self, inventory):
+        from src.services.template_sections import complete_index_only_bindings
+
+        spec = _binding_spec([("Cover", None)])
+        complete_index_only_bindings(spec, inventory)
+        assert spec.slides[0].slide_type == "Cover"
+        assert spec.slides[0].template_section_index is None
+
+    def test_does_not_fill_an_unlabelled_or_out_of_range_index(self, inventory):
+        from src.services.template_sections import complete_index_only_bindings
+
+        spec = _binding_spec([(None, 2), (None, 99)])
+        complete_index_only_bindings(spec, inventory)
+        assert spec.slides[0].slide_type is None
+        assert spec.slides[1].slide_type is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -303,3 +303,104 @@ class TestReviewCriteriaAbsent:
         assert "quality_bar" not in DeckSpec.model_fields, (
             "quality_bar must not be a field on DeckSpec"
         )
+
+
+# ---------------------------------------------------------------------------
+# SlideSpec.slide_type — design-system slide-type binding
+# ---------------------------------------------------------------------------
+
+class TestSlideSpecSlideType:
+    """slide_type is optional uncapped text; pair validation is NOT on the model."""
+
+    def test_field_declared_on_model(self):
+        assert "slide_type" in SlideSpec.model_fields
+
+    def test_defaults_to_none(self):
+        slide = SlideSpec(**_minimal_slide(0))
+        assert slide.slide_type is None
+
+    def test_explicit_none_stays_none(self):
+        slide = SlideSpec(**{**_minimal_slide(0), "slide_type": None})
+        assert slide.slide_type is None
+
+    def test_value_is_kept(self):
+        slide = SlideSpec(**{**_minimal_slide(0), "slide_type": "Title"})
+        assert slide.slide_type == "Title"
+
+    def test_surrounding_whitespace_is_stripped(self):
+        slide = SlideSpec(**{**_minimal_slide(0), "slide_type": "  Two Column \n"})
+        assert slide.slide_type == "Two Column"
+
+    def test_interior_whitespace_is_preserved(self):
+        slide = SlideSpec(**{**_minimal_slide(0), "slide_type": "Big  Number"})
+        assert slide.slide_type == "Big  Number"
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t\n "])
+    def test_blank_or_whitespace_only_rejected(self, blank):
+        with pytest.raises(ValidationError):
+            SlideSpec(**{**_minimal_slide(0), "slide_type": blank})
+
+    def test_arbitrary_text_accepted_not_a_literal(self):
+        # Uncapped design-system text: no enum / inventory check on the model.
+        slide = SlideSpec(
+            **{**_minimal_slide(0), "slide_type": "Totally Custom Layout (v2) – ünï"}
+        )
+        assert slide.slide_type == "Totally Custom Layout (v2) – ünï"
+
+    def test_pairing_with_template_section_index_not_validated_on_model(self):
+        # Pair-vs-inventory validation belongs to the architect node, not here.
+        slide = SlideSpec(
+            **{
+                **_minimal_slide(0),
+                "slide_type": "Title",
+                "template_section_index": 99,
+            }
+        )
+        assert slide.slide_type == "Title"
+        assert slide.template_section_index == 99
+
+    def test_slide_type_without_template_section_index_accepted(self):
+        slide = SlideSpec(
+            **{**_minimal_slide(0), "slide_type": "Title", "template_section_index": None}
+        )
+        assert slide.slide_type == "Title"
+        assert slide.template_section_index is None
+
+    def test_deck_spec_old_json_without_slide_type_loads_as_none(self):
+        raw = _valid_deck()
+        assert all("slide_type" not in s for s in raw["slides"])
+        deck = DeckSpec.from_json(json.dumps(raw))
+        assert deck is not None
+        assert deck.slide_at(0) is not None
+        assert deck.slide_at(0).slide_type is None
+        assert deck.slide_at(1).slide_type is None
+
+    def test_to_json_includes_slide_type_key(self):
+        slides = [{**_minimal_slide(0), "slide_type": "Title"}, _minimal_slide(1)]
+        deck = DeckSpec(**_valid_deck(slides=slides))
+        parsed = json.loads(deck.to_json())
+        assert parsed["slides"][0]["slide_type"] == "Title"
+        assert "slide_type" in parsed["slides"][1]
+        assert parsed["slides"][1]["slide_type"] is None
+
+    def test_json_round_trip_preserves_slide_type(self):
+        slides = [
+            {**_minimal_slide(0), "slide_type": "Title"},
+            {**_minimal_slide(1), "slide_type": None},
+        ]
+        deck = DeckSpec(**_valid_deck(slides=slides))
+        restored = DeckSpec.from_json(deck.to_json())
+        assert restored is not None
+        assert restored == deck
+        assert restored.slide_at(0).slide_type == "Title"
+        assert restored.slide_at(1).slide_type is None
+
+    def test_from_json_strips_slide_type(self):
+        raw = _valid_deck(slides=[{**_minimal_slide(0), "slide_type": "  Title  "}])
+        deck = DeckSpec.from_json(json.dumps(raw))
+        assert deck is not None
+        assert deck.slide_at(0).slide_type == "Title"
+
+    def test_from_json_whitespace_only_slide_type_returns_none(self):
+        raw = _valid_deck(slides=[{**_minimal_slide(0), "slide_type": "   "}])
+        assert DeckSpec.from_json(json.dumps(raw)) is None

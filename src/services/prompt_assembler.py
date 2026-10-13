@@ -395,7 +395,7 @@ def protected_assembly_v2_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
-_V2_DIGEST = "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
+_V2_DIGEST = "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
 _CALCULATED_V2_DIGEST = protected_assembly_v2_digest()
 if _CALCULATED_V2_DIGEST != _V2_DIGEST:
     raise RuntimeError(
@@ -403,6 +403,11 @@ if _CALCULATED_V2_DIGEST != _V2_DIGEST:
         f"expected {_V2_DIGEST}, calculated {_CALCULATED_V2_DIGEST}"
     )
 V2_PROTECTED_ASSEMBLY_IDENTITY = ContentIdentity(version=2, digest=_V2_DIGEST)
+# Earlier v2 identities named by persisted releases.  They resolve to the current
+# v2 stages; removing one strands every release that names it.
+_HISTORICAL_V2_DIGESTS: tuple[str, ...] = (
+    "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a",
+)
 
 
 def _default_bundles() -> dict[tuple[int, str], ProtectedAssemblyBundle]:
@@ -411,13 +416,16 @@ def _default_bundles() -> dict[tuple[int, str], ProtectedAssemblyBundle]:
         assembly_rules_format_version=1,
         stages=_v1_stages(),
     )
-    v2 = ProtectedAssemblyBundle(
-        identity=V2_PROTECTED_ASSEMBLY_IDENTITY,
-        assembly_rules_format_version=2,
-        stages=_v2_stages(),
-        transitions=_transition_records(),
-    )
-    return {v1.identity_key: v1, v2.identity_key: v2}
+    v2_bundles = [
+        ProtectedAssemblyBundle(
+            identity=ContentIdentity(version=2, digest=digest),
+            assembly_rules_format_version=2,
+            stages=_v2_stages(),
+            transitions=_transition_records(),
+        )
+        for digest in (_V2_DIGEST, *_HISTORICAL_V2_DIGESTS)
+    ]
+    return {bundle.identity_key: bundle for bundle in (v1, *v2_bundles)}
 
 
 class PromptAssembler:
@@ -862,7 +870,7 @@ class PromptAssembler:
 
     def upgrade_definition_to_v2(self, *, definition: DefinitionContent) -> DefinitionContent:
         self.validate(definition=definition)
-        if definition.protected_assembly == V2_PROTECTED_ASSEMBLY_IDENTITY:
+        if definition.protected_assembly.version == 2:
             raise PromptAssemblyRejected(
                 (
                     PromptAssemblyIssue(

@@ -4,6 +4,8 @@ Each test maps to an assertion in the B1.1 brief's test-intent table.
 The inline comments name the row in that table so the correspondence is clear.
 """
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -74,18 +76,31 @@ class TestCriteriaRegistry:
         "arc_gap":               ("narrative", "deck",  False),
         "cross_slide_repetition": ("narrative", "deck", False),
         "missing_conclusion":    ("narrative", "deck",  False),
+        "off_template_treatment":  ("design",  "slide", True),
+        "layout_binding_mismatch": ("design",  "slide", True),
     }
 
-    def test_registry_has_exactly_the_a2_criteria(self):
-        """CRITERIA contains exactly the nine criteria from §A2 — no more, no fewer."""
+    def test_registry_has_exactly_the_expected_criteria(self):
+        """CRITERIA contains exactly the eleven expected criteria — no more, no fewer."""
+        assert len(self._EXPECTED) == 11
         assert set(CRITERIA.keys()) == set(self._EXPECTED.keys()), (
             f"Registry keys mismatch.\n"
             f"  Extra:   {set(CRITERIA.keys()) - set(self._EXPECTED.keys())}\n"
             f"  Missing: {set(self._EXPECTED.keys()) - set(CRITERIA.keys())}"
         )
+        for forbidden in ("inconsistent_treatment", "unassessable_criterion"):
+            assert forbidden not in CRITERIA, f"{forbidden!r} must not be a criterion"
+
+    def test_finding_category_is_unchanged(self):
+        """FindingCategory stays content | design | narrative."""
+        from typing import get_args
+
+        from src.domain.finding import FindingCategory
+
+        assert set(get_args(FindingCategory)) == {"content", "design", "narrative"}
 
     def test_each_criterion_has_correct_attributes(self):
-        """Every criterion's category, level, and objective match §A2 verbatim."""
+        """Every criterion's category, level, and objective match the expected table."""
         for name, (cat, level, obj) in self._EXPECTED.items():
             c = CRITERIA[name]
             assert c.category == cat,   f"{name}: expected category {cat!r}, got {c.category!r}"
@@ -113,6 +128,32 @@ class TestCriteriaRegistry:
             f"Expected more objective slide criteria than subjective, "
             f"got {objective_count} objective, {subjective_count} subjective"
         )
+
+    def test_contrast_failure_description_judges_painted_background(self):
+        """contrast_failure measures the effective text colour against the colour
+        actually painted behind it, not palette membership."""
+        desc = CRITERIA["contrast_failure"].description.lower()
+        assert "effective" in desc and re.search(r"text colou?r", desc), desc
+        assert "painted" in desc and "behind" in desc, desc
+        assert "ancestor" in desc and "inline" in desc, desc
+        assert "palette" in desc and re.search(r"defen[cs]e", desc), (
+            f"Must say palette membership is not a defence: {desc}"
+        )
+        assert re.search(r"design[- ]system", desc) and "table" in desc, desc
+        assert "4.5:1" in desc and "3:1" in desc, desc
+        assert "every text run" in desc, desc
+
+    def test_off_template_treatment_description(self):
+        desc = CRITERIA["off_template_treatment"].description.lower()
+        assert "treatment" in desc, desc
+        assert "ground" in desc, desc
+        assert "inline" in desc, desc
+
+    def test_layout_binding_mismatch_description(self):
+        desc = CRITERIA["layout_binding_mismatch"].description
+        assert "slide_type" in desc, desc
+        assert "template_section_index" in desc, desc
+        assert "brief_not_delivered" in desc, desc
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +280,36 @@ class TestFindingRegistryValidation:
         )
         assert f.criterion == "overflow"
         assert f.category == "design"
+
+    @pytest.mark.parametrize(
+        "criterion", ["off_template_treatment", "layout_binding_mismatch"]
+    )
+    def test_new_design_criteria_validate(self, criterion):
+        h = compute_slide_hash("<div class='slide'>bound section</div>")
+        f = Finding(
+            id=make_finding_id(criterion, h, 0),
+            slide_index=0,
+            category="design",
+            criterion=criterion,
+            message="bound section rendered off template",
+            objective=True,
+        )
+        assert f.criterion == criterion
+        assert f.category == "design"
+
+    def test_off_template_treatment_wrong_category_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            Finding(
+                id="x:hash:0",
+                slide_index=0,
+                category="content",
+                criterion="off_template_treatment",
+                message="wrong category",
+                objective=True,
+            )
+        assert "Unknown criterion" not in str(exc_info.value), (
+            "Must be rejected for category mismatch, not as an unknown criterion"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,21 @@ def test_each_role_key_set_is_the_union_of_its_production_calls(role):
     assert MODEL_PAYLOAD_KEYS[role] == _production_union(role)
 
 
+def test_the_build_reviewer_sees_section_html_on_both_of_its_calls():
+    """The reviewer is shown the bound section the builder filled; the fixer
+    and fix reviewer are not widened by this."""
+    from tests.fixtures.model_payload_keys import (
+        FIXER_MODEL_KEYS,
+        SLIDE_REVIEW_MODEL_KEYS,
+    )
+
+    assert "section_html" in SLIDE_REVIEW_MODEL_KEYS
+    assert "section_html" in MODEL_PAYLOAD_KEYS["build_reviewer"]
+    assert "section_html" not in FIXER_MODEL_KEYS
+    assert "section_html" not in MODEL_PAYLOAD_KEYS["fixer"]
+    assert "section_html" not in MODEL_PAYLOAD_KEYS["fix_reviewer"]
+
+
 def test_the_builder_set_is_the_production_allowlist_plus_the_retry_instruction():
     from src.services.graph import nodes
 

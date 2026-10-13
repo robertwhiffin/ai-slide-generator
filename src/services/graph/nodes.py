@@ -103,7 +103,9 @@ from src.services.shared_deck_attribution import (
     MutationOperation,
 )
 from src.services.template_sections import (
+    complete_index_only_bindings,
     extract_section,
+    invalid_slide_bindings,
     resolve_template_bytes,
     section_inventory,
 )
@@ -624,6 +626,7 @@ def rereview_committed_slides(
 
     resolved_style = brand.get("resolved_style") or ""
     section_css = brand.get("deterministic_css") or ""
+    layout_html = brand.get("template_layout_html") or ""
     design_system_active = bool(brand.get("design_system_active"))
     deck_brief = {field: getattr(spec, field) for field in _DECK_LEVEL_FIELDS}
 
@@ -648,6 +651,21 @@ def rereview_committed_slides(
             continue
 
         html = row.get("html") or ""
+        # Same extraction build_branch_payload does; "" when unbound, no layout,
+        # or the index is out of range (the slide is still reviewed).
+        section_html = ""
+        if layout_html and slide_spec.template_section_index is not None:
+            try:
+                section_html = extract_section(
+                    layout_html, slide_spec.template_section_index
+                )
+            except IndexError:
+                logger.warning(
+                    "template_section_index %s is out of range for this layout; "
+                    "re-reviewing position %s with no section markup",
+                    slide_spec.template_section_index,
+                    position,
+                )
         # The SAME payload shape build_reviewer_node builds, key for key, so the
         # skill is judged on the input it was written against.
         review_payload = {
@@ -656,6 +674,7 @@ def rereview_committed_slides(
             "resolved_style": resolved_style,
             "section_css": section_css,
             "resolved_data": spec.resolved_data.model_dump(),
+            "section_html": section_html,
             "html": html,
             "scripts": row.get("scripts") or "",
             # The five deck-level fields, WITHOUT WHICH THIS PASS CANNOT WORK.
@@ -1651,6 +1670,34 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 ),
             }
 
+    # The spec's pinned template, not the inbound payload's: a turn that pins or
+    # changes the contract binds against the template it will actually use.
+    # Resolved here, before the degrade decision, so an invalid pair is refused
+    # before anything is persisted or dispatched.
+    if (
+        edit_degrade is None
+        and spec is not None
+        and _contract_ids(spec.design_contract) != _contract_ids(inbound_contract)
+    ):
+        brand = _resolve_brand(spec.design_contract)
+
+    if edit_degrade is None and intent in ("build", "edit") and spec is not None:
+        complete_index_only_bindings(spec, brand["section_inventory"])
+        binding_errors = invalid_slide_bindings(spec, brand["section_inventory"])
+        if binding_errors:
+            # Never coerce the pair to None: erasing the bind would generate an
+            # unrelated slide.  Same single degrade path as an unusable edit.
+            edit_degrade = {
+                "code": "invalid_slide_type_binding",
+                "message": "; ".join(binding_errors),
+                "user": (
+                    "I could not use that plan because a slide is bound to a "
+                    "template section that does not match: "
+                    + "; ".join(binding_errors)
+                    + ". Nothing has been changed."
+                ),
+            }
+
     if edit_degrade is not None:
         # An edit that cannot be applied.  Degrade to a discussion turn rather
         # than routing to a foreman that would cover no positions and reach deck
@@ -1676,9 +1723,6 @@ def architect_node(state: dict) -> Dict[str, Any]:
               metadata={"node": "architect", "intent": "discuss"})
         _say(state, edit_degrade["user"])
         return updates
-
-    if _contract_ids(spec.design_contract) != _contract_ids(inbound_contract):
-        brand = _resolve_brand(spec.design_contract)
 
     # Every slide the edit's spec changes is rebuilt, not only the ones the model
     # named: a slide whose brief changed but is not rebuilt is spec/slide drift.
@@ -2328,6 +2372,9 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             "resolved_style": payload.get("resolved_style"),
             "section_css": payload.get("section_css"),
             "resolved_data": payload.get("resolved_data"),
+            # The section the slide was built from, verbatim from the record, so
+            # the reviewer can compare the built html to its source section.
+            "section_html": payload.get("section_html") or "",
             "html": html,
             "scripts": scripts,
         }

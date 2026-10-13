@@ -704,17 +704,17 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "4a332258160d807513e8e268fdbec7d0b02c4ab71ad089f5f260f53dc4ea5d81",
+    "architect": "009eced7c65b0b85a3f241d81d6ba3c40b134e0177e4bd4b8b43fc526694a7d5",
     "data_analyst": "287da422d4aeb6c328685ace87be167feac639e4318cff07f147d9cd181be3c3",
-    "builder": "46d7137b5c94c18acac4ebf6d4bebe5206c192852dffcc6e84fb0404be45598a",
+    "builder": "bb7d6bfa5b655b78e16a4cf13a204c4da63690207159d419aebf856d9187a2e8",
     "build_reviewer": "c5b057097c6f952de7b4984d19ad0c6cceaf68e1641401dcf8ae5c3af707d622",
-    "fixer": "1d42f0d7c437ae1714eacaf09bb7d5047463e20acf581daf136d411ed9b5c825",
+    "fixer": "2da73326e228d16889a9b21f31a7d22bf124db9feee728aeafdaade7d7a39bbc",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
 
 V1_SCHEMA_CONTRACT_DIGESTS = {
-    "architect": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+    "architect": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -724,7 +724,7 @@ V1_SCHEMA_CONTRACT_DIGESTS = {
 }
 
 V2_SCHEMA_CONTRACT_DIGESTS = {
-    "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+    "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -930,11 +930,11 @@ def test_assembly_upgrade_leaves_the_schema_contract_untouched() -> None:
 
     assert upgraded.protected_assembly.model_dump() == {
         "version": 2,
-        "digest": "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a",
+        "digest": "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d",
     }
     assert upgraded.schema_contract.model_dump() == {
         "version": 1,
-        "digest": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+        "digest": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
     }
     assert upgraded.schema_overlay == original.schema_overlay
 
@@ -978,13 +978,13 @@ def test_stored_identity_resolves_the_exact_role_and_version_bundle(
         (
             "not_a_role",
             1,
-            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
             "unknown role",
         ),
         (
             "architect",
             3,
-            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
             "unknown version",
         ),
         (
@@ -996,20 +996,32 @@ def test_stored_identity_resolves_the_exact_role_and_version_bundle(
         (
             "builder",
             1,
-            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
             "another role's digest",
         ),
         (
             "architect",
             2,
-            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
             "v1 digest under v2",
         ),
         (
             "architect",
             1,
-            "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+            "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
             "v2 digest under v1",
+        ),
+        (
+            "architect",
+            2,
+            "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+            "historical v1 digest under v2",
+        ),
+        (
+            "builder",
+            2,
+            "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+            "another role's historical digest",
         ),
     ],
 )
@@ -1144,7 +1156,7 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
 
     # The string-keyed sibling is unaffected, so no existing hash moves.
     assert definition_content_hash(built({"1": "a"})) == (
-        "cfa22bd3da5ed2bbd7f6a04b28736599167f8126e856655190899d04df2b5ad8"
+        "5c77f8d314bbd26afc4c53458b5c2c14b0d8e0f8c7f6fa8c1552c4e5fdd0ed98"
     )
 
 

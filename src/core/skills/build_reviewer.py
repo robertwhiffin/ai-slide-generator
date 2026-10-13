@@ -20,7 +20,14 @@ def _criteria_stage() -> str:
 
 BUILD_REVIEWER_AUTHORED_PREFIX: str = (
     "You are a build reviewer.  Inspect the built slide against every criterion "
-    "below and return a SlideReviewOutput."
+    "below and return a SlideReviewOutput.  "
+    "Judge colours, fonts and spacing by the computed cascade the slide renders "
+    "with, not by the class names on its elements.  "
+    "When the payload carries a non-empty section_html, compare the built HTML "
+    "with section_html and with slide_spec.slide_type to decide whether the slide "
+    "uses the bound layout section.  "
+    "Never propose a replacement colour or layout in a finding message; state "
+    "what is wrong and leave the remedy to the fixer."
 )
 BUILD_REVIEWER_CRITERIA_STAGE: str = _criteria_stage()
 BUILD_REVIEWER_V1_AUTHORED_SUFFIX: str = (
@@ -47,7 +54,10 @@ BUILD_REVIEWER_AUTHORED_INSTRUCTIONS: str = (
 
 
 def build_instructions() -> str:
-    """Generate the byte-compatible Graph Version 1 composite instructions."""
+    """Generate a composite from the live prefix and ``CRITERIA``.
+
+    This is not the shipped Graph Version 1 prompt; see ``INSTRUCTIONS``.
+    """
     return (
         BUILD_REVIEWER_AUTHORED_PREFIX
         + "\n\n"
@@ -57,7 +67,40 @@ def build_instructions() -> str:
     )
 
 
-INSTRUCTIONS: str = build_instructions()
+#: Frozen Graph Version 1 composite.  It must stay byte-identical to the packaged
+#: v1 ``prompt_text`` and is the ``source_composite_prompt`` of the v1→v2
+#: transition: persisted v1 definitions only auto-upgrade on an exact match.
+#: New review rules and criteria reach v2 through ``BUILD_REVIEWER_AUTHORED_INSTRUCTIONS``
+#: and ``BUILD_REVIEWER_CRITERIA_STAGE``, never through this literal.
+_V1_PREFIX: str = (
+    "You are a build reviewer.  Inspect the built slide against every criterion "
+    "below and return a SlideReviewOutput."
+)
+_V1_CRITERIA_STAGE: str = (
+    "CRITERIA:\n"
+    "  overflow (design, slide, objective=True): Slide content overflows the frame.  "
+    "Judge against _SLIDE_FRAME_CONSTRAINTS numbers, never reviewer-invented numbers.\n"
+    "  contrast_failure (design, slide, objective=True): Text/background contrast "
+    "fails WCAG AA minimum.\n"
+    "  rogue_colour (design, slide, objective=True): Colour is outside the resolved "
+    "contract — compiled artifact tokens, or the resolved style on the legacy branch.\n"
+    "  distorted_image (design, slide, objective=True): Image aspect ratio is distorted.\n"
+    "  source_contradiction (content, slide, objective=True): A figure contradicts "
+    "resolved_data.  Only assertable against resolved_data; a figure with no cited "
+    "source is not this finding.\n"
+    "  brief_not_delivered (content, slide, objective=False): The slide does not "
+    "deliver what the brief asked for.  The one subjective slide criterion; exercises "
+    "the drawer's actionable path with real data rather than only fixtures.\n"
+    "  arc_gap (narrative, deck, objective=False): The narrative arc has a gap or "
+    "unexplained jump.\n"
+    "  cross_slide_repetition (narrative, deck, objective=False): The same point is "
+    "made verbatim or near-verbatim on multiple slides.\n"
+    "  missing_conclusion (narrative, deck, objective=False): The deck has no "
+    "conclusion or call-to-action."
+)
+INSTRUCTIONS: str = (
+    _V1_PREFIX + "\n\n" + _V1_CRITERIA_STAGE + "\n\n" + BUILD_REVIEWER_V1_AUTHORED_SUFFIX
+)
 
 
 #: Appended to the build reviewer's instructions **only** when the payload carries

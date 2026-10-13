@@ -34,25 +34,25 @@ from src.services.graph_definition_manifest import (
 # --- HEAD literals -----------------------------------------------------------
 
 # Pins updated for the endpoint switch to system.ai Gateway models.
-HEAD_ARCHITECT_CONTENT_HASH = "4a332258160d807513e8e268fdbec7d0b02c4ab71ad089f5f260f53dc4ea5d81"
+HEAD_ARCHITECT_CONTENT_HASH = "009eced7c65b0b85a3f241d81d6ba3c40b134e0177e4bd4b8b43fc526694a7d5"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
 HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
-    "7472557c8ce2794a128dfbeebd9dd20a1f566727dded7b539cc042b60f1c1840"
+    "66c5a7e697144bb37093dede0a4604c92af2849da2e103ecc18aa23b539f89ba"
 )
 
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
     "data_analyst": "287da422d4aeb6c328685ace87be167feac639e4318cff07f147d9cd181be3c3",
-    "builder": "46d7137b5c94c18acac4ebf6d4bebe5206c192852dffcc6e84fb0404be45598a",
+    "builder": "bb7d6bfa5b655b78e16a4cf13a204c4da63690207159d419aebf856d9187a2e8",
     "build_reviewer": "c5b057097c6f952de7b4984d19ad0c6cceaf68e1641401dcf8ae5c3af707d622",
-    "fixer": "1d42f0d7c437ae1714eacaf09bb7d5047463e20acf581daf136d411ed9b5c825",
+    "fixer": "2da73326e228d16889a9b21f31a7d22bf124db9feee728aeafdaade7d7a39bbc",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
 
 HEAD_V1_SCHEMA_DIGESTS = {
-    "architect": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+    "architect": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -62,7 +62,7 @@ HEAD_V1_SCHEMA_DIGESTS = {
 }
 
 HEAD_V2_SCHEMA_DIGESTS = {
-    "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+    "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -73,14 +73,32 @@ HEAD_V2_SCHEMA_DIGESTS = {
 
 # sha256 of the "\n\n"-separated INSTRUCTIONS blocks that must stay byte-identical:
 # opening line, INTENT CLASSIFICATION, DESIGN SYSTEMS (the contract-switch rule),
-# SLIDESPEC FIELDS, closing line.  Recompute from `git show d3f150799:src/core/skills/architect.py`.
+# closing line.  Recompute from `git show d3f150799:src/core/skills/architect.py`.
+# SLIDESPEC FIELDS is deliberately NOT here any more: Task 5 adds `slide_type` and
+# `template_section_index` to it, so its block hash changes.  It is pinned instead by
+# HEAD_SLIDESPEC_FIELD_LINES (old lines survive) + HEAD_SLIDESPEC_FIELDS_BLOCK_HASH (retired).
 HEAD_UNCHANGED_BLOCK_HASHES = {
     "opening": "345a85e933fd76a597e00695029c5098e9de1534574c258d01689bcf36532034",
     "intent_classification": "dccff17eb03ebe5c411b07ec48cc8594aba6a617fc16288f1c9229550cd7d500",
     "design_systems": "10d09b732446c3e369f99a664e999a4af69018b3e47becf5fa5d0e190dc15345",
-    "slidespec_fields": "5f488349a428a8ac5cf4adbd9b8df18cea77d5b5c010c237d0f853b1c5537653",
     "closing": "4b4000313dfac2e346b4b524a6dab465eca1d9316b227e0374c17d1517e54d7b",
 }
+
+# The pre-Task-5 SLIDESPEC FIELDS block.  It must no longer appear verbatim.
+HEAD_SLIDESPEC_FIELDS_BLOCK_HASH = (
+    "5f488349a428a8ac5cf4adbd9b8df18cea77d5b5c010c237d0f853b1c5537653"
+)
+
+# The pre-Task-5 field lines; each must survive inside the (changed) block.
+HEAD_SLIDESPEC_FIELD_LINES = (
+    "  position: 0-indexed integer, unique within the deck",
+    "  purpose: what this slide contributes to the narrative arc",
+    "  content_brief: one sentence — what the slide must show",
+    "  assumes: what the audience already knows when they reach this slide",
+    "  hands_off: the single takeaway the audience should leave with",
+    "  data_references: metric names or identifiers this slide depends on "
+    "(empty list if the slide needs no data)",
+)
 
 # PAYLOAD RULES lines for the other intents, unchanged.
 HEAD_UNCHANGED_PAYLOAD_LINES = (
@@ -249,3 +267,156 @@ def test_architect_definition_changed_only_in_prompt_text():
     # Verify blanked hash matches the endpoint-switched value
     blanked = architect.model_copy(update={"prompt_text": ""})
     assert definition_content_hash(blanked) == HEAD_ARCHITECT_HASH_WITHOUT_PROMPT
+
+
+# --- Task 5: slide-type binding (template_sections, the pair, 1-indexed message) ----
+#
+# Spec: docs/superpowers/specs/2026-10-13-architect-slide-type-design.md
+# These pin phrases, not exact wording: each check is a regex over the whitespace-,
+# case- and backtick-normalised block, so the implementer may reword freely as long as
+# the instruction is still there.
+
+BINDING_HEADING = "VISUAL / TEMPLATE BINDING"
+PAYLOAD_KEY = "template_sections"
+
+
+def _plain(text: str) -> str:
+    """Normalised text with markdown backticks removed."""
+    return _norm(text.replace("`", ""))
+
+
+def _slidespec_fields_block(prompt: str) -> str:
+    blocks = [b for b in prompt.split("\n\n") if b.startswith("SLIDESPEC FIELDS")]
+    assert len(blocks) == 1, "expected exactly one SLIDESPEC FIELDS block"
+    return blocks[0]
+
+
+def _binding_block(prompt: str) -> str:
+    blocks = [b for b in prompt.split("\n\n") if b.startswith(BINDING_HEADING)]
+    assert len(blocks) == 1, f"expected exactly one {BINDING_HEADING!r} block, found {len(blocks)}"
+    return blocks[0]
+
+
+def _field_line(block: str, name: str) -> str:
+    lines = [ln for ln in block.splitlines() if re.match(rf"^\s*{name}:", ln)]
+    assert len(lines) == 1, f"expected exactly one `{name}:` line in SLIDESPEC FIELDS"
+    return lines[0]
+
+
+def test_slidespec_fields_block_changed_but_keeps_every_existing_field_line():
+    block_hashes = {hashlib.sha256(b.encode()).hexdigest() for b in INSTRUCTIONS.split("\n\n")}
+    assert HEAD_SLIDESPEC_FIELDS_BLOCK_HASH not in block_hashes, (
+        "SLIDESPEC FIELDS is still the pre-Task-5 block: it must now list the pair"
+    )
+    block = _slidespec_fields_block(INSTRUCTIONS)
+    for line in HEAD_SLIDESPEC_FIELD_LINES:
+        assert line in block, f"existing SLIDESPEC field line lost or reworded: {line!r}"
+
+
+def test_slidespec_fields_list_slide_type_and_template_section_index():
+    block = _slidespec_fields_block(INSTRUCTIONS)
+    slide_type = _plain(_field_line(block, "slide_type"))
+    index = _plain(_field_line(block, "template_section_index"))
+    # slide_type: exact data-label copied from one template_sections entry, or null
+    assert "data-label" in slide_type, slide_type
+    assert PAYLOAD_KEY in slide_type, slide_type
+    assert "null" in slide_type, slide_type
+    # template_section_index: that entry's index, or null
+    assert re.search(r"entry'?s? `?index|index of", index), index
+    assert "null" in index, index
+
+
+def test_prompt_names_the_template_sections_payload_key():
+    assert PAYLOAD_KEY in INSTRUCTIONS
+    block = _plain(_binding_block(INSTRUCTIONS))
+    assert re.search(rf"payload[^.]{{0,40}}{PAYLOAD_KEY}", block), (
+        "binding block must say the payload carries template_sections"
+    )
+
+
+# Each entry: (description, regex over the plain binding block).
+BINDING_RULES = (
+    ("choose only from the supplied entries", r"choose only from"),
+    ("copy label into slide_type", r"label[^.]{0,80}slide_type"),
+    ("copy index into template_section_index", r"index[^.]{0,80}template_section_index"),
+    (
+        "no fit => both fields null",
+        r"(no (supplied )?(entry|section|type)[^.]{0,30}fits?|none (of them )?fits?|if none fit)"
+        r"[^.]{0,80}both[^.]{0,30}null",
+    ),
+    (
+        "empty or absent list => both null",
+        r"(empty[^.]{0,30}absent|absent[^.]{0,30}empty)[^.]{0,80}both[^.]{0,30}null",
+    ),
+    ("never invent a type", r"(never|do not|don't) invent"),
+    (
+        "never complain the list was not supplied when the key is present",
+        r"(never|do not|don't) (complain|claim|say|state)[^.]{0,80}not supplied",
+    ),
+    (
+        "committing a design system picks a template_id from the library",
+        r"template_id[^.]{0,120}library|library[^.]{0,120}template_id",
+    ),
+    ("empty template => empty list", r"(empty|unset|no) template[^.]{0,60}empty"),
+    ("content_brief names the exhibit", r"content_brief[^.]{0,80}exhibit"),
+    (
+        "brand furniture comes from the selected section's markup",
+        r"furniture[^.]{0,120}(selected|bound|chosen) section|"
+        r"(selected|bound|chosen) section[^.]{0,120}furniture",
+    ),
+    ("style assets are identity, not evidence", r"identity,? not evidence"),
+    (
+        "do not plan exhibits onto missing data; prefer ask_data",
+        r"(never|do not|don't) plan exhibits[^.]{0,80}missing data[^.]{0,80}ask_data|"
+        r"ask_data[^.]{0,80}missing data|missing data[^.]{0,120}ask_data",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("description", "pattern"), BINDING_RULES, ids=[d for d, _ in BINDING_RULES]
+)
+def test_binding_block_states_rule(description, pattern):
+    block = _plain(_binding_block(INSTRUCTIONS))
+    assert re.search(pattern, block), f"VISUAL / TEMPLATE BINDING lacks: {description}"
+
+
+def test_message_is_one_indexed_but_positions_stay_zero_indexed():
+    text = _plain(INSTRUCTIONS)
+    assert re.search(r"\bmessage\b[^.]{0,80}\b1-indexed|\b1-indexed[^.]{0,80}\bmessage\b", text), (
+        "prompt must tell the architect to speak 1-indexed in `message`"
+    )
+    assert re.search(
+        r"target_positions[^.]{0,80}\b0-indexed|\b0-indexed[^.]{0,80}target_positions", text
+    ), "prompt must say position / target_positions stay 0-indexed"
+    assert re.search(r"\bonly\b[^.]{0,40}\bmessage\b|\bmessage\b[^.]{0,40}\bonly\b", text), (
+        "the 1-indexed convention applies in `message` only"
+    )
+
+
+# Every one of these is the defect the spec drops: a rule that forces a binding on each
+# slide of a templated deck, or that tells the model to complain when it has no list.
+FORBIDDEN_BINDING_PATTERNS = (
+    r"every\b[^.]{0,60}template_section_index[^.]{0,40}(must|non-null|not null|set|populated)",
+    r"template_section_index[^.]{0,40}must (be )?(non-null|not null|set|populated)",
+    r"every (templated )?slide (must|should|needs? to) (have|carry|be bound|bind)",
+    r"\bnon-null\b",
+    r"complain in `?message",
+    r"complain in message",
+)
+
+
+@pytest.mark.parametrize("pattern", FORBIDDEN_BINDING_PATTERNS)
+def test_prompt_does_not_require_every_templated_slide_to_be_bound(pattern):
+    # Anchor to the new block first so this cannot pass vacuously on the pre-Task-5 prompt.
+    _binding_block(INSTRUCTIONS)
+    assert not re.search(pattern, _plain(INSTRUCTIONS)), (
+        f"prompt forces a binding / complaint (spec drops this): /{pattern}/"
+    )
+
+
+def test_binding_block_allows_a_slide_to_stay_unbound():
+    block = _plain(_binding_block(INSTRUCTIONS))
+    assert re.search(r"both[^.]{0,30}null", block), (
+        "binding block must state the pair is either fully populated or fully null"
+    )

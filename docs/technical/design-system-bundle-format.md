@@ -36,11 +36,19 @@ See [Design System Library](./design-system-library.md) for what happens to a bu
 | `_ds_manifest.json` | parsed into `manifest_json`; drives tokens, templates and cards |
 | CSS in `globalCssPaths`, plus root `colors_and_type.css` | token sources, plus retained as `design_system_file` |
 | `README.md`, `SKILL.md` | retained as `design_system_file` — the authoring/brand-manual layer |
-| `templates/<slug>/index.html` | retained as `design_system_file` — the template's layout source |
+| `templates/<slug>/index.html` | retained as `design_system_file` — the template's layout source (see **Labelled slide roots** below) |
 | `templates/<slug>/.thumbnail` or `preview*` | a `design_system_asset`, referenced by the template row |
 | anything else | ignored |
 
 **The README is not decoration.** Its first `# Heading` is read as a fallback for the design system's name, and its content reaches the model as brand context.
+
+### Labelled slide roots
+
+`templates/<slug>/index.html` is not only retained source: it is the authority for which slide-type vocabulary the product can bind at generation time. After `find_slide_roots` runs on that HTML, **every** slide root it returns must carry a non-empty `data-label` attribute (trimmed whitespace counts as empty). The label is free text authored by the design system — there is no product-wide enum of allowed values. Duplicate `data-label` values on different roots are valid; the 0-based section index remains the exact selector when disambiguating.
+
+**New imports:** when a declared template is materialised, an unlabeled slide root causes the import to fail. The error names the template path (for example `templates/<slug>/index.html`) and the **0-based** index of each offending root in document order.
+
+**Existing rows:** templates already stored before this contract shipped are not rewritten at startup. Their `layout_html` is loaded as-is; if a root lacks `data-label`, `section_inventory` still lists that section with `label: null` and logs a warning, and the architect must not bind `slide_type` / `template_section_index` to it.
 
 ---
 

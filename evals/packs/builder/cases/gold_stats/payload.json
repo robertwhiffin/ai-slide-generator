@@ -6,7 +6,8 @@
     "content_brief": "Summarise the five advantage dimensions — responsiveness, typography, interactivity, accessibility, collaboration — as three stat cards (grouping related dimensions). Each card shows a dimension label and a concise verdict. Deliver the final claim: HTML slides are the stronger format. End with the call to action: try an HTML slide framework for your next presentation",
     "assumes": "The audience has absorbed the evidence from the preceding slides",
     "hands_off": "HTML slides are the future of presentations — start using them now",
-    "data_references": []
+    "data_references": [],
+    "slide_type": null
   },
   "assumes": "The audience has absorbed the evidence from the preceding slides",
   "hands_off": "HTML slides are the future of presentations — start using them now",
