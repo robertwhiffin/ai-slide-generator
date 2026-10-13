@@ -66,7 +66,11 @@ def _expected_url(job: dict) -> str:
     )
     env = svc.get("env") or {}
     user = env["POSTGRES_USER"]
-    password = env["POSTGRES_PASSWORD"]
+    # The URL carries no password: the CI service trusts connections, so a
+    # credential-shaped connection string never has to appear in the workflow.
+    assert env.get("POSTGRES_HOST_AUTH_METHOD") == "trust", (
+        f"the postgres service must set POSTGRES_HOST_AUTH_METHOD: trust: {svc!r}"
+    )
     database = env["POSTGRES_DB"]
 
     # ports entries are "<host>:<container>"; the tests reach the service on the
@@ -75,7 +79,7 @@ def _expected_url(job: dict) -> str:
     assert ports, f"the postgres service declares no ports mapping: {svc!r}"
     host_port = ports[0].split(":")[0]
 
-    return f"postgresql+psycopg2://{user}:{password}@localhost:{host_port}/{database}"
+    return f"postgresql+psycopg2://{user}@localhost:{host_port}/{database}"
 
 
 def _visible_values(job: dict) -> dict:

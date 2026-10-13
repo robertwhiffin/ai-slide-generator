@@ -108,6 +108,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -136,7 +137,7 @@ jobs:
 
       - name: Run unit tests
         env:
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
         run: |
           pytest tests/unit -v --tb=short -n auto \
             --junitxml=test-results/unit-results.xml \
@@ -172,6 +173,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -190,7 +192,7 @@ jobs:
       - name: Run API routes tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -219,6 +221,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -237,7 +240,7 @@ jobs:
       - name: Run config API tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -271,6 +274,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -289,7 +293,7 @@ jobs:
       - name: Run export tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -318,6 +322,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -336,7 +341,7 @@ jobs:
       - name: Run streaming tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -365,6 +370,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -383,7 +389,7 @@ jobs:
       - name: Run slide tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -426,6 +432,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -444,7 +451,7 @@ jobs:
       - name: Run graph orchestration tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -509,6 +516,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -527,7 +535,7 @@ jobs:
       - name: Run Genie tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
@@ -712,7 +720,7 @@ jobs:
     # that provisions a database and hides it from the test harness is how the
     # postgres suites came to skip in CI in the first place.
     env:
-      TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+      TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
 
     strategy:
       fail-fast: false
@@ -774,6 +782,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         ports:
           - 5432:5432
@@ -1136,6 +1145,7 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: test_db
         options: >-
           --health-cmd pg_isready
@@ -1154,7 +1164,7 @@ jobs:
       - name: Run layer-4 concurrency tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
-          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test:test@localhost:5432/test_db
+          TELLR_TEST_POSTGRES_URL: postgresql+psycopg2://test@localhost:5432/test_db
           ENVIRONMENT: test
           DATABRICKS_HOST: https://test.cloud.databricks.com
           DATABRICKS_TOKEN: test-token
