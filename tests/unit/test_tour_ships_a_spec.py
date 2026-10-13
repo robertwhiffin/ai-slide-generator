@@ -1,7 +1,7 @@
 """The tour ships a hand-authored arc instead of firing the trigger.
 
-`_phase2_add_slides` loads a canned fixture and saves it.  It is deck CREATION
-from fixed bytes, identical on every tour, so firing `mark_dirty` there would
+The tour's `build` stage (`_save_deck`) saves a canned fixture.  It is deck
+CREATION from fixed bytes, identical on every tour, so firing `mark_dirty` there would
 schedule an LLM arc re-description of the same demo deck for every user who takes
 the tour, for no value.  The arc is therefore authored once, by hand, in
 `src/api/fixtures/tour_demo_deck.json` — which is strictly better than excluding
@@ -35,7 +35,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch
 
-from src.api.routes.tour import _load_fixture, _phase1_create_session, _phase2_add_slides
+from src.api.routes.tour import STAGES, _load_fixture, _phase1_create_session, _run_stage
 from src.api.services.deck_level_writer import read_deck_spec
 from src.domain.deck_spec import DeckSpec
 from tests.unit.conftest import _make_fake_db, _make_factory, _make_in_memory_engine
@@ -87,7 +87,8 @@ def _run_the_tour(factory) -> str:
     with _patched(factory):
         created = _phase1_create_session(_TOUR_USER)
         session_id = created["session_id"]
-        _phase2_add_slides(session_id, _TOUR_USER)
+        for s in ("plan", "build"):
+            _run_stage(session_id, s, _TOUR_USER)
     return session_id
 
 
@@ -108,20 +109,30 @@ class TestTourDoesNotFireTheTrigger:
     def test_phase2_calls_the_deck_level_writer_not_the_trigger(self):
         """What tour.py does instead, pinned in the AST of the function itself."""
         tree = ast.parse(_TOUR.read_text())
-        phase2 = next(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "_phase2_add_slides"
-        )
-        called = {
-            n.id for n in ast.walk(phase2) if isinstance(n, ast.Name)
-        } | {
-            n.attr for n in ast.walk(phase2) if isinstance(n, ast.Attribute)
-        }
+
+        def names_in(fn_name: str) -> set:
+            fn = next(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == fn_name
+            )
+            return {
+                n.id for n in ast.walk(fn) if isinstance(n, ast.Name)
+            } | {
+                n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)
+            }
+
+        # The deck writes live in _save_deck (PLAN-CORRECTIONS C4).
+        called = names_in("_save_deck")
         assert "write_deck_level_columns" in called
         assert "save_slide_deck" in called
         assert "mark_dirty" not in called
+
+        # The stage runner reaches the deck only through _save_deck, and never
+        # fires the trigger itself.
+        runner = names_in("_run_stage")
+        assert "_save_deck" in runner
+        assert "mark_dirty" not in runner
 
 
 class TestTheFixtureShipsAHandAuthoredArc:
