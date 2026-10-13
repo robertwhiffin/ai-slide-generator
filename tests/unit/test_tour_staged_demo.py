@@ -307,6 +307,33 @@ def test_skipping_a_middle_stage_is_rejected_and_writes_nothing(db):
     assert read_deck_spec(sid) == _on_disk_fixture()["deck_spec"]
 
 
+@pytest.mark.parametrize("stage", ["build", "edit"])
+def test_a_stage_whose_deck_write_fails_can_be_retried(db, stage):
+    # The stage marker IS the first tour_stage-tagged row.  If it were written
+    # before the deck writes and seeding then raised, a retry would see the
+    # marker and no-op, leaving unverified slides (an LLM judge call) for good.
+    from src.api.services.session_manager import SessionManager
+
+    sid = _start()
+    _run_through(sid, STAGES[STAGES.index(stage) - 1])
+    real = SessionManager.write_slide_verification
+    with patch.object(
+        SessionManager,
+        "write_slide_verification",
+        side_effect=RuntimeError("transient DB error"),
+        autospec=True,
+    ):
+        with pytest.raises(RuntimeError):
+            _run_stage(sid, stage, _USER)
+    assert SessionManager.write_slide_verification is real
+    assert _run_stage(sid, stage, _USER)["applied"] is True
+    for slide in get_session_manager().get_slide_deck(sid)["slides"]:
+        assert slide.get("verification"), slide["index"]
+    tags = [m["metadata"]["tour_stage"] for m in get_session_manager().get_messages(sid)]
+    n_rows = {"build": 1 + len(_load_fixture()["stages"]["build"]["review_lines"]), "edit": 3}
+    assert tags.count(stage) == n_rows[stage]
+
+
 def test_unknown_stage_raises_value_error(db):
     with pytest.raises(ValueError):
         _run_stage(_start(), "bogus", _USER)

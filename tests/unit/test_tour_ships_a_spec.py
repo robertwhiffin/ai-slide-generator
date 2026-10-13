@@ -1,7 +1,7 @@
 """The tour ships a hand-authored arc instead of firing the trigger.
 
-`_phase2_add_slides` loads a canned fixture and saves it.  It is deck CREATION
-from fixed bytes, identical on every tour, so firing `mark_dirty` there would
+The tour's `build` stage (`_save_deck`) saves a canned fixture.  It is deck
+CREATION from fixed bytes, identical on every tour, so firing `mark_dirty` there would
 schedule an LLM arc re-description of the same demo deck for every user who takes
 the tour, for no value.  The arc is therefore authored once, by hand, in
 `src/api/fixtures/tour_demo_deck.json` — which is strictly better than excluding

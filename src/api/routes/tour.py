@@ -225,13 +225,17 @@ def _run_stage(session_id: str, stage: str, created_by: str) -> dict:
     # JSON object keys are strings; positions are ints.
     findings = {int(k): v for k, v in script["build"]["findings"].items()}
 
+    # Deck writes come BEFORE the stage's first tagged row: that row is the
+    # idempotency marker, so writing it first would turn a failed save or seed
+    # into a permanent no-op (unverified slides -> an LLM judge call).  Deck
+    # writes are convergent on retry (rows replaced, verification merged).
     if stage == "plan":
         _say(sm, session_id, stage, "architect", script["plan"]["architect_reply"], "llm_response")
     elif stage == "build":
         slides = copy.deepcopy(fixture["slides"])
-        _say(sm, session_id, stage, "foreman", script["build"]["foreman_line"], "info")
         _save_deck(sm, session_id, slides, copy.deepcopy(fixture["deck_spec"]), created_by)
         _seed_verification(sm, session_id, slides, findings)
+        _say(sm, session_id, stage, "foreman", script["build"]["foreman_line"], "info")
         for line in script["build"]["review_lines"]:
             _say(sm, session_id, stage, "build_reviewer", line, "info")
     elif stage == "review":
@@ -242,10 +246,10 @@ def _run_stage(session_id: str, stage: str, created_by: str) -> dict:
         slides[edit["position"]] = copy.deepcopy(edit["slide"])
         spec = copy.deepcopy(fixture["deck_spec"])
         spec["slides"][edit["position"]]["content_brief"] = edit["content_brief"]
-        _say(sm, session_id, stage, "user", edit["user_prompt"], "chat", role="user")
-        _say(sm, session_id, stage, "architect", edit["architect_reply"], "llm_response")
         _save_deck(sm, session_id, slides, spec, created_by)
         _seed_verification(sm, session_id, slides, findings)
+        _say(sm, session_id, stage, "user", edit["user_prompt"], "chat", role="user")
+        _say(sm, session_id, stage, "architect", edit["architect_reply"], "llm_response")
         _say(sm, session_id, stage, "build_reviewer", edit["review_line"], "info")
 
     return {"session_id": session_id, "stage": stage, "applied": True, "slide_count": slide_count()}
