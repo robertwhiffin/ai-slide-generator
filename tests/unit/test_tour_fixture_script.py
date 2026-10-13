@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 from src.domain.finding import CRITERIA, Finding
@@ -113,6 +114,30 @@ def test_edit_targets_slide_two_by_its_human_number_and_changes_only_its_html():
     assert 'class="slide' in edit["slide"]["html"] or "class='slide" in edit["slide"]["html"]
     assert edit["review_line"] == "Slide 1 reviewed: clean."
     assert edit["content_brief"] != fx["deck_spec"]["slides"][1]["content_brief"]
+
+
+def _skeleton(html: str) -> list[tuple]:
+    """Start/end tags with their attributes, text dropped."""
+    out: list[tuple] = []
+
+    class _P(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            out.append(("start", tag, tuple(attrs)))
+
+        def handle_endtag(self, tag):
+            out.append(("end", tag))
+
+    _P().feed(html)
+    return out
+
+
+def test_edit_keeps_every_element_and_class_and_only_shortens_text():
+    fx = _fx()
+    original = fx["slides"][1]["html"]
+    edited = fx["stages"]["edit"]["slide"]["html"]
+    assert _skeleton(edited) == _skeleton(original)
+    labels = re.compile(r"<strong>(.*?)</strong>")
+    assert labels.findall(edited) == labels.findall(original)
 
 
 def test_every_slide_html_is_distinct_so_verification_hashes_do_not_collide():
