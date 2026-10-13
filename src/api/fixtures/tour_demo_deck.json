@@ -80,12 +80,6 @@
       "architect_reply": "This deck is for a first-time Tellr user, a general business reader with no clinical or machine-learning background. It argues that AI already delivers concrete benefits in healthcare and that its near-term path points to prevention and wider access. I will build 3 slides: a title, four present-day advantages, and a forward look."
     },
     "build": {
-      "foreman_line": "Building 3 slide(s).",
-      "review_lines": [
-        "Slide 0 reviewed: clean.",
-        "Slide 1 reviewed: clean.",
-        "Slide 2 reviewed: surfaced."
-      ],
       "findings": {
         "2": [
           {
@@ -115,8 +109,7 @@
         "html": "<div class=\"slide content-slide\">\n  <h2>Key Advantages</h2>\n  <ul>\n    <li><strong>Early Disease Detection</strong> — spotting disease on scans sooner</li>\n    <li><strong>Personalized Treatment Plans</strong> — care tailored to each patient</li>\n    <li><strong>Operational Efficiency</strong> — less admin, more patient time</li>\n    <li><strong>Drug Discovery Acceleration</strong> — faster molecular testing, shorter R&amp;D</li>\n  </ul>\n</div>",
         "scripts": ""
       },
-      "content_brief": "Four bolded items, each with a short phrase: early disease detection, personalized treatment plans, operational efficiency, drug discovery acceleration.",
-      "review_line": "Slide 1 reviewed: clean."
+      "content_brief": "Four bolded items, each with a short phrase: early disease detection, personalized treatment plans, operational efficiency, drug discovery acceleration."
     }
   }
 }

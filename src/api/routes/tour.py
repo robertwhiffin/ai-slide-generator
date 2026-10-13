@@ -9,15 +9,18 @@ Phase 1 -- POST /api/tour/demo-deck
 
 Stages -- POST /api/tour/demo-deck/{session_id}/stages/{stage}
   ``plan``   architect reply.
-  ``build``  foreman line, the three slides, the deck spec, per-slide build
-             review lines, and a seeded verification record (with the scripted
-             finding) for every slide.
+  ``build``  the three slides, the deck spec, and a seeded verification
+             record (with the scripted finding) for every slide.  No chat row:
+             the graph's foreman and per-slide review lines are emit-only, and
+             production polls, so a deployed user never sees them.
   ``review`` deck reviewer advisory.
   ``edit``   a follow-up user request, the architect reply, one rewritten slide
              and its brief, and verification re-seeded for every slide.
 
 Every chat row is tagged ``metadata.tour_stage``; re-running a stage is a no-op
 and a stage whose predecessor has not run is rejected (409) before any write.
+``build`` writes no chat row, so its marker is the deck itself (see
+``_build_applied``).
 """
 
 import asyncio
@@ -93,11 +96,32 @@ class StageOrderError(Exception):
     """A stage was requested before the stage it follows has run."""
 
 
+def _build_applied(sm, session_id: str) -> bool:
+    """``build`` has run iff the deck has slides, a spec, and EVERY slide is verified.
+
+    The build stage writes no chat row (production never shows the foreman or
+    per-slide review lines), so its idempotency marker is derived from the deck.
+    "Has slides" alone is not enough: build writes slides, then the spec, then
+    the per-slide verification records, and a failure after the slide save
+    would leave slides present but unverified -- a permanent no-op on retry and
+    an LLM judge call from useAutoVerification.  Requiring the LAST write
+    (verification on every slide) keeps a failed build retryable.
+    """
+    deck = sm.get_slide_deck(session_id) or {}
+    slides = deck.get("slides") or []
+    return bool(slides) and bool(deck.get("deck_spec")) and all(
+        s.get("verification") for s in slides
+    )
+
+
 def _applied_stages(sm, session_id: str) -> set[str]:
-    return {
+    applied = {
         (m.get("metadata") or {}).get("tour_stage")
         for m in sm.get_messages(session_id)
     } - {None}
+    if _build_applied(sm, session_id):
+        applied.add("build")
+    return applied
 
 
 def _say(sm, session_id, stage, node, content, message_type, role="assistant"):
@@ -229,15 +253,14 @@ def _run_stage(session_id: str, stage: str, created_by: str) -> dict:
     # idempotency marker, so writing it first would turn a failed save or seed
     # into a permanent no-op (unverified slides -> an LLM judge call).  Deck
     # writes are convergent on retry (rows replaced, verification merged).
+    # ``build`` has no row; its marker is the fully verified deck, whose last
+    # write is the final slide's verification record (``_build_applied``).
     if stage == "plan":
         _say(sm, session_id, stage, "architect", script["plan"]["architect_reply"], "llm_response")
     elif stage == "build":
         slides = copy.deepcopy(fixture["slides"])
         _save_deck(sm, session_id, slides, copy.deepcopy(fixture["deck_spec"]), created_by)
         _seed_verification(sm, session_id, slides, findings)
-        _say(sm, session_id, stage, "foreman", script["build"]["foreman_line"], "info")
-        for line in script["build"]["review_lines"]:
-            _say(sm, session_id, stage, "build_reviewer", line, "info")
     elif stage == "review":
         _say(sm, session_id, stage, "deck_reviewer", script["review"]["advisory"], "info")
     else:  # edit
@@ -250,7 +273,6 @@ def _run_stage(session_id: str, stage: str, created_by: str) -> dict:
         _seed_verification(sm, session_id, slides, findings)
         _say(sm, session_id, stage, "user", edit["user_prompt"], "chat", role="user")
         _say(sm, session_id, stage, "architect", edit["architect_reply"], "llm_response")
-        _say(sm, session_id, stage, "build_reviewer", edit["review_line"], "info")
 
     return {"session_id": session_id, "stage": stage, "applied": True, "slide_count": slide_count()}
 

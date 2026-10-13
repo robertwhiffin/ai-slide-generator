@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import re
 
 import pytest
 from fastapi import HTTPException
@@ -84,13 +85,27 @@ def test_full_run_leaves_the_chat_a_real_graph_turn_would_show(db):
     assert _chat(sid) == [
         ("user", _load_fixture()["chat_prompt"]),
         ("assistant", fx["plan"]["architect_reply"]),
-        ("assistant", fx["build"]["foreman_line"]),
-        *[("assistant", line) for line in fx["build"]["review_lines"]],
         ("assistant", fx["review"]["advisory"]),
         ("user", fx["edit"]["user_prompt"]),
         ("assistant", fx["edit"]["architect_reply"]),
-        ("assistant", fx["edit"]["review_line"]),
     ]
+
+
+_EMIT_ONLY_LINES = (
+    re.compile(r"^Building \d+ slide\(s\)\.$"),
+    re.compile(r"^Slide \d+ (fix )?reviewed:"),
+)
+
+
+def test_no_persisted_row_is_an_emit_only_progress_line(db):
+    # The graph's foreman ("Building N slide(s).") and build-reviewer
+    # ("Slide N reviewed: ...") lines are _emit-only, and production polls, so a
+    # deployed user never sees them.  The tour must not teach them.
+    sid = _start()
+    _run_through(sid, "edit")
+    for _role, content in _chat(sid):
+        for pattern in _EMIT_ONLY_LINES:
+            assert not pattern.search(content), content
 
 
 def test_message_types_and_nodes_mirror_the_graph(db):
@@ -103,8 +118,6 @@ def test_message_types_and_nodes_mirror_the_graph(db):
             by_node.setdefault(m["metadata"]["node"], set()).add(m["message_type"])
     assert by_node == {
         "architect": {"llm_response"},
-        "foreman": {"info"},
-        "build_reviewer": {"info"},
         "deck_reviewer": {"info"},
     }
     assert {m["message_type"] for m in rows if m["role"] == "user"} == {"chat"}
@@ -112,28 +125,22 @@ def test_message_types_and_nodes_mirror_the_graph(db):
 
 def test_every_row_is_tagged_with_the_stage_that_wrote_it(db):
     # The idempotency gate reads these tags; an untagged or mis-tagged row
-    # would let a re-entered step write its lines a second time.
-    n_review_lines = len(_load_fixture()["stages"]["build"]["review_lines"])
+    # would let a re-entered step write its lines a second time.  ``build``
+    # writes no row: its marker is the fully verified deck.
     sid = _start()
     _run_through(sid, "edit")
     rows = get_session_manager().get_messages(sid)
     assert [m["metadata"]["tour_stage"] for m in rows] == [
         "prompt",
         "plan",
-        "build",
-        *["build"] * n_review_lines,
         "review",
-        "edit",
         "edit",
         "edit",
     ]
     assert [m["metadata"]["node"] for m in rows if m["role"] == "assistant"] == [
         "architect",
-        "foreman",
-        *["build_reviewer"] * n_review_lines,
         "deck_reviewer",
         "architect",
-        "build_reviewer",
     ]
 
 
@@ -268,9 +275,13 @@ def test_rerunning_a_stage_is_a_noop(db):
     sid = _start()
     _run_through(sid, "build")
     snapshot = _chat(sid)
+    version = get_session_manager().get_slide_deck(sid)["version"]
     result = _run_stage(sid, "build", _USER)
     assert result["applied"] is False
     assert _chat(sid) == snapshot
+    # build writes no chat row, so the chat alone cannot show a rerun: the deck
+    # must not be re-saved either.
+    assert get_session_manager().get_slide_deck(sid)["version"] == version
     assert _run_stage(sid, "plan", _USER)["applied"] is False  # Back past an earlier stage
     assert _chat(sid) == snapshot
 
@@ -330,8 +341,69 @@ def test_a_stage_whose_deck_write_fails_can_be_retried(db, stage):
     for slide in get_session_manager().get_slide_deck(sid)["slides"]:
         assert slide.get("verification"), slide["index"]
     tags = [m["metadata"]["tour_stage"] for m in get_session_manager().get_messages(sid)]
-    n_rows = {"build": 1 + len(_load_fixture()["stages"]["build"]["review_lines"]), "edit": 3}
+    n_rows = {"build": 0, "edit": 2}
     assert tags.count(stage) == n_rows[stage]
+
+
+def _fail_on_call(n: int):
+    """A write_slide_verification stand-in that raises on its n-th call only."""
+    from src.api.services.session_manager import SessionManager
+
+    real = SessionManager.write_slide_verification
+    calls = {"n": 0}
+
+    def wrapper(self, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == n:
+            raise RuntimeError("transient DB error")
+        return real(self, *args, **kwargs)
+
+    return wrapper
+
+
+def test_a_build_that_fails_after_some_slides_are_verified_can_be_retried(db):
+    # build's marker is "every slide verified", not "slides exist": a failure
+    # part-way through seeding leaves slides present, and a slides-only marker
+    # would freeze the last slide unverified (an LLM judge call) for good.
+    from src.api.services.session_manager import SessionManager
+
+    sid = _start()
+    _run_through(sid, "plan")
+    with patch.object(SessionManager, "write_slide_verification", _fail_on_call(3)):
+        with pytest.raises(RuntimeError):
+            _run_stage(sid, "build", _USER)
+    assert get_session_manager().get_slide_deck(sid)["slides"]  # slides did land
+    with pytest.raises(StageOrderError):
+        _run_stage(sid, "review", _USER)  # a half-built deck is not "build applied"
+    assert _run_stage(sid, "build", _USER)["applied"] is True
+    for slide in get_session_manager().get_slide_deck(sid)["slides"]:
+        assert slide.get("verification"), slide["index"]
+    assert _run_stage(sid, "build", _USER)["applied"] is False
+
+
+def test_a_build_whose_spec_write_fails_can_be_retried(db):
+    sid = _start()
+    _run_through(sid, "plan")
+    with patch(
+        "src.api.routes.tour.write_deck_level_columns",
+        side_effect=RuntimeError("transient DB error"),
+    ):
+        with pytest.raises(RuntimeError):
+            _run_stage(sid, "build", _USER)
+    assert _run_stage(sid, "build", _USER)["applied"] is True
+    assert read_deck_spec(sid) == _on_disk_fixture()["deck_spec"]
+    for slide in get_session_manager().get_slide_deck(sid)["slides"]:
+        assert slide.get("verification"), slide["index"]
+
+
+def test_review_before_build_is_409_and_writes_nothing(db):
+    sid = _start()
+    _run_through(sid, "plan")
+    snapshot = _chat(sid)
+    with pytest.raises(StageOrderError):
+        _run_stage(sid, "review", _USER)
+    assert _chat(sid) == snapshot
+    assert not (get_session_manager().get_slide_deck(sid) or {}).get("slides")
 
 
 def test_unknown_stage_raises_value_error(db):

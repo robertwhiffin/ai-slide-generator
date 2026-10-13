@@ -1,9 +1,11 @@
 """Contract for the tour demo's staged script (src/api/fixtures/tour_demo_deck.json).
 
 The tour shows what a real graph turn produces, so every chat line the fixture
-plays must be the graph's own wording.  Formats are copied from
-src/services/graph/nodes.py (foreman :2080, build reviewer :2365 — 0-indexed
-position — deck reviewer _advisory_text :1251-1269).  If those formats change,
+plays must be the graph's own wording, and only lines a deployed user actually
+sees.  The deck reviewer advisory is copied from src/services/graph/nodes.py
+(_advisory_text :1251-1269).  The foreman ("Building N slide(s).") and
+build-reviewer ("Slide N reviewed: ...") lines are _emit-only and never reach a
+polling client, so the fixture must not carry them.  If those formats change,
 this test is the reminder to change the fixture.
 """
 from __future__ import annotations
@@ -27,12 +29,9 @@ def _all_chat_lines(fx: dict) -> list[str]:
     s = fx["stages"]
     return [
         s["plan"]["architect_reply"],
-        s["build"]["foreman_line"],
-        *s["build"]["review_lines"],
         s["review"]["advisory"],
         s["edit"]["user_prompt"],
         s["edit"]["architect_reply"],
-        s["edit"]["review_line"],
     ]
 
 
@@ -44,28 +43,15 @@ def test_chat_prompt_is_kept_for_the_engine_selection_test():
     assert _fx()["chat_prompt"].startswith("Create 3 slides about the benefits of AI")
 
 
-def test_foreman_line_is_the_real_format_for_the_real_slide_count():
-    fx = _fx()
-    assert fx["stages"]["build"]["foreman_line"] == f"Building {len(fx['slides'])} slide(s)."
+def test_emit_only_progress_lines_are_not_in_the_script():
+    s = _fx()["stages"]
+    assert "foreman_line" not in s["build"]
+    assert "review_lines" not in s["build"]
+    assert "review_line" not in s["edit"]
 
 
-def test_one_review_line_per_slide_in_position_order_with_real_verdicts():
-    fx = _fx()
-    lines = fx["stages"]["build"]["review_lines"]
-    assert len(lines) == len(fx["slides"])
-    for position, line in enumerate(lines):
-        m = re.fullmatch(r"Slide (\d+) reviewed: (clean|surfaced)\.", line)
-        assert m, line
-        assert int(m.group(1)) == position  # 0-indexed, as nodes.py:2365 emits
-
-
-def test_surfaced_verdict_iff_the_slide_has_findings():
-    fx = _fx()
-    findings = fx["stages"]["build"]["findings"]
-    for position, line in enumerate(fx["stages"]["build"]["review_lines"]):
-        has = bool(findings.get(str(position)))
-        assert line.endswith("surfaced.") == has, (position, line)
-    assert any(findings.values()), "the demo must surface at least one finding for the drawer step"
+def test_the_demo_surfaces_at_least_one_finding_for_the_drawer_step():
+    assert any(_fx()["stages"]["build"]["findings"].values())
 
 
 def test_findings_are_keyed_by_real_slide_positions():
@@ -112,7 +98,6 @@ def test_edit_targets_slide_two_by_its_human_number_and_changes_only_its_html():
     assert edit["slide"]["html"] != original["html"]
     assert len(edit["slide"]["html"]) < len(original["html"])
     assert 'class="slide' in edit["slide"]["html"] or "class='slide" in edit["slide"]["html"]
-    assert edit["review_line"] == "Slide 1 reviewed: clean."
     assert edit["content_brief"] != fx["deck_spec"]["slides"][1]["content_brief"]
 
 
