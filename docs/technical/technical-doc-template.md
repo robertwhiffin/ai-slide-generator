@@ -41,7 +41,7 @@ Feel free to reorder or collapse sections if a subsystem is tiny; the goal is cl
 - **Lead with outcomes:** explain what the system does before diving into internals.
 - **Use tables for mappings** (modules → responsibilities, endpoints → usage) to keep scanning fast.
 - **Include small code snippets** only when they clarify contracts (e.g., TypeScript interfaces, JSON payloads).
-- **Call out invariants** (contiguous selection, `.slide` wrapper requirement, etc.) so readers know what must never break.
+- **Call out invariants** (`.slide` wrapper requirement, CSP routing through `buildSlideDocument`, wheel-over-ribbon must not page slides, etc.) so readers know what must never break.
 - **Highlight integration points** (frontend ↔ backend APIs, script synchronization, MLflow tracing) to anchor cross-component reasoning.
 - **Reference current files/paths** using backticks (`src/api/...`) so readers can jump into the repo quickly.
 

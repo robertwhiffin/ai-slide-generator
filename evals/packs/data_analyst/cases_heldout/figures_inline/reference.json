@@ -1,0 +1,10 @@
+{
+  "outcome": "success",
+  "synthesis": "Structured prompts use 30–50% fewer tokens than naive prompts according to PromptBench report.",
+  "sources": [
+    "PromptBench report"
+  ],
+  "gap": null,
+  "tried_tools": [],
+  "reason": null
+}

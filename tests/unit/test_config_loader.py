@@ -135,30 +135,11 @@ class TestLoadPrompts:
                 result = load_prompts()
                 assert result == sample_prompts
 
-    def test_load_prompts_missing_required_prompts(self, tmp_path: Path):
-        """Test error when required prompts are missing."""
-        incomplete_prompts = {"other_key": "test"}  # Missing system_prompt
-        mock_path = tmp_path / "prompts.yaml"
-
-        with patch("src.core.config_loader.get_config_path", return_value=mock_path):
-            with patch("src.core.config_loader.load_yaml_file", return_value=incomplete_prompts):
-                with pytest.raises(ConfigurationError, match="Missing required prompts"):
-                    load_prompts()
-
-    def test_load_prompts_validates_all_required(self, sample_prompts: dict, tmp_path: Path):
-        """Test all required prompts are validated."""
-        # Only system_prompt is required now
-        required = ["system_prompt"]
-        mock_path = tmp_path / "prompts.yaml"
-
-        for prompt_key in required:
-            incomplete_prompts = sample_prompts.copy()
-            del incomplete_prompts[prompt_key]
-
-            with patch("src.core.config_loader.get_config_path", return_value=mock_path):
-                with patch("src.core.config_loader.load_yaml_file", return_value=incomplete_prompts):
-                    with pytest.raises(ConfigurationError, match=f"Missing required.*{prompt_key}"):
-                        load_prompts()
+    # DELETED with B2.4: test_load_prompts_missing_required_prompts and
+    # test_load_prompts_validates_all_required both asserted that load_prompts()
+    # RAISES when prompts.yaml omits ``system_prompt``. That requirement is the
+    # retired per-profile override; load_prompts() no longer requires any key, so
+    # there is no behaviour left to assert.
 
 
 class TestMergeWithEnv:

@@ -1,13 +1,12 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Edit3, Trash2, MessageSquare, Maximize2, Loader2, User, Clock } from 'lucide-react';
+import { GripVertical, Edit3, Trash2, Maximize2, Loader2, User, Clock } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { Slide, SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { HTMLEditorModal } from './HTMLEditorModal';
-import { useSelection } from '../../contexts/SelectionContext';
 import { VerificationBadge } from './VerificationBadge';
 import { api } from '../../services/api';
 import { buildSlideDocument, SLIDE_PREVIEW_RESET_STYLE } from '../../services/slideDocument';
@@ -61,7 +60,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [scale, setScale] = useState(1);
-  const { selectedIndices, setSelection } = useSelection();
   
   const [verificationResult, setVerificationResult] = useState<VerificationResult | undefined>(
     slide.verification
@@ -155,10 +153,7 @@ export const SlideTile: React.FC<SlideTileProps> = ({
     opacity: isDragging ? 0.5 : 1,
   };
 
-  const isSelected = selectedIndices.includes(index);
-  const containerClassName = `bg-white rounded-lg overflow-hidden ${
-    isSelected ? 'ring-2 ring-blue-500' : ''
-  }`;
+  const containerClassName = 'bg-white rounded-lg overflow-hidden';
 
   return (
     <>
@@ -197,20 +192,6 @@ export const SlideTile: React.FC<SlideTileProps> = ({
               onVerify={handleVerify}
               isStale={isStale}
             />
-
-            {!readOnly && (
-              <Tooltip text={isSelected ? 'Selected for editing' : 'Add to chat context'}>
-                <Button
-                  variant={isSelected ? "secondary" : "ghost"}
-                  size="icon"
-                  onClick={() => setSelection([index], [slide])}
-                  className="h-7 w-7"
-                  aria-pressed={isSelected}
-                >
-                  <MessageSquare className="size-3.5" />
-                </Button>
-              </Tooltip>
-            )}
 
             {!readOnly && onOptimize && (
               <Tooltip text={isOptimizing ? 'Optimizing layout...' : 'Optimize layout'}>

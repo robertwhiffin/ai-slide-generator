@@ -15,18 +15,28 @@ Chat access is controlled by session permissions:
 import asyncio
 import contextvars
 import logging
+import time
 from typing import AsyncGenerator, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session as DBSession
 
+from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.schemas.agent_config import normalize_style_source_exclusivity
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
-from src.api.services.chat_service import get_chat_service
-from src.api.services.job_queue import enqueue_job
+from src.api.services.chat_service import (
+    get_chat_service,
+    resolve_engine_mode_or_unavailable,
+)
+from src.api.services.job_queue import (
+    PINNED_GRAPH_CONFIGURATION_ERROR,
+    enqueue_job,
+    is_pinned_graph_configuration_error_event,
+    pinned_graph_configuration_error_event_payload,
+)
 from src.api.services.session_manager import SessionNotFoundError, get_session_manager
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
@@ -34,13 +44,35 @@ from src.core.permission_context import get_permission_context
 from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
+from src.domain.conversation_engine import selects_graph_engine
 from src.services.agent import UnsafeContentError
-from src.services.permission_service import get_permission_service, PERMISSION_PRIORITY
+from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
+from src.services.permission_service import PERMISSION_PRIORITY, get_permission_service
+from src.services.persisted_graph_release import (
+    PersistedConfigurationUnavailableError,
+    PersistedRuntimeError,
+)
 from src.utils.pi_filter import scan_for_injection
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+#: The typed 503 body both chat routes answer when the turn's engine cannot be
+#: resolved because the database is unavailable (#271 C24/C47).  A stable code
+#: and a fixed message: no exception text, class name or identifier.
+ENGINE_MODE_UNAVAILABLE_DETAIL = {
+    "code": "lakebase_unavailable",
+    "message": "Conversation configuration is temporarily unavailable. Please retry.",
+}
+
+
+class _EngineModeUnresolvedError(Exception):
+    """The async route's engine-mode resolution (and nothing else) failed closed."""
+
+
+def _engine_mode_unavailable() -> HTTPException:
+    return HTTPException(status_code=503, detail=dict(ENGINE_MODE_UNAVAILABLE_DETAIL))
 
 
 def _reject_if_injection(message: str) -> None:
@@ -277,10 +309,33 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         return {**config_data, "template_id": None}
 
     if request.session_id:
-        # Session ID provided — only sync if client explicitly sent agent_config
+        # Existence is independent of agent_config presence. A supplied browser
+        # ID that has not been persisted yet is still a creation boundary and
+        # must take the same message-aware graph-release lock as a generated ID.
+        try:
+            session_manager.get_session(request.session_id)
+        except SessionNotFoundError:
+            current_user = get_current_user()
+            session_manager.create_session(
+                session_id=request.session_id,
+                agent_config=_without_template_pin(
+                    _seeded_for_new_session(agent_config_data)
+                ),
+                created_by=current_user,
+                graph_capable=selects_graph_engine(request.message),
+            )
+            logger.info(
+                "Created session from client-generated ID",
+                extra={"session_id": request.session_id},
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load session before agent_config sync: {e}")
+            return False
+
+        # The row exists. Sync config only when the client supplied it.
         if explicit_config:
             try:
-                session_manager.get_session(request.session_id)
                 # Session exists — update agent_config via DB
                 from src.core.database import get_db_session
                 from src.database.models import UserSession
@@ -295,22 +350,6 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
                             "Synced agent_config from chat request",
                             extra={"session_id": request.session_id},
                         )
-            except SessionNotFoundError:
-                # Session ID was generated client-side but never persisted.
-                # Create it now with the agent_config.
-                current_user = get_current_user()
-                session_manager.create_session(
-                    session_id=request.session_id,
-                    agent_config=_without_template_pin(
-                        _seeded_for_new_session(agent_config_data)
-                    ),
-                    created_by=current_user,
-                )
-                logger.info(
-                    "Created session from client-generated ID with agent_config",
-                    extra={"session_id": request.session_id},
-                )
-                return True
             except Exception as e:
                 logger.warning(f"Failed to sync agent_config: {e}")
         return False
@@ -319,6 +358,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     session = session_manager.create_session(
         agent_config=_without_template_pin(_seeded_for_new_session(agent_config_data)),
         created_by=current_user,
+        graph_capable=selects_graph_engine(request.message),
     )
     request.session_id = session["session_id"]
     return True
@@ -361,7 +401,13 @@ async def send_message(
     session_manager = get_session_manager()
 
     # Create session on the fly if none provided
-    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    try:
+        created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     new_session_id = request.session_id if created else None
 
     # Acquire session lock to prevent concurrent modifications
@@ -465,7 +511,13 @@ async def send_message_streaming(
     current_user = get_current_user()
 
     # Create session on the fly if none provided
-    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    try:
+        created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     new_session_id = request.session_id if created else None
 
     # Acquire session lock to prevent concurrent modifications
@@ -478,6 +530,26 @@ async def send_message_streaming(
             status_code=409,
             detail="Session is currently processing another request. Please wait.",
         )
+
+    # ws4d D2 — the engine for this turn is resolved HERE, in the chat route,
+    # and passed down.  Not in send_message_streaming and not in the job queue:
+    # MCP's enqueue_create_job drains through the same worker as POST
+    # /chat/async, so a resolution downstream of enqueue_job would put MCP on
+    # the graph.  Resolution reads the database, so it runs off the event loop.
+    #
+    # FAIL CLOSED (#271 C24/C47): a failure to resolve is a 503, never a silent
+    # monolith turn.  The response has not started, so the SSE generator's
+    # `finally` below will never run: release the lock taken above HERE.
+    try:
+        engine_mode = await asyncio.to_thread(
+            resolve_engine_mode_or_unavailable, request.session_id
+        )
+    except PersistedConfigurationUnavailableError as e:
+        await asyncio.to_thread(
+            session_manager.release_session_lock,
+            request.session_id,
+        )
+        raise _engine_mode_unavailable() from e
 
     async def generate_events() -> AsyncGenerator[str, None]:
         """Generate SSE events from the chat service."""
@@ -509,6 +581,7 @@ async def send_message_streaming(
                     if request.slide_context
                     else None,
                     image_ids=request.image_ids,
+                    engine_mode=engine_mode,
                 ):
                     event_queue.put(event)
             except Exception as e:
@@ -520,6 +593,8 @@ async def send_message_streaming(
         thread = threading.Thread(target=lambda: ctx.run(run_streaming), daemon=True)
         thread.start()
 
+        pinned_graph_configuration_error_emitted = False
+
         try:
             # Yield events as they arrive
             while True:
@@ -527,6 +602,8 @@ async def send_message_streaming(
                 event = await asyncio.to_thread(event_queue.get)
                 if event is None:
                     break
+                if is_pinned_graph_configuration_error_event(event):
+                    pinned_graph_configuration_error_emitted = True
                 yield event.to_sse()
 
             # Check for errors after completion
@@ -543,6 +620,11 @@ async def send_message_streaming(
                         type=StreamEventType.ERROR,
                         error=f"Session not found: {request.session_id}",
                     )
+                elif (
+                    isinstance(error, PersistedRuntimeError)
+                    and pinned_graph_configuration_error_emitted
+                ):
+                    return
                 else:
                     logger.error(f"Streaming chat request failed: {error}", exc_info=True)
                     error_event = StreamEvent(
@@ -612,7 +694,13 @@ async def submit_chat_async(
     current_user = get_current_user()
 
     # Create session on the fly if none provided
-    created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    try:
+        created = await asyncio.to_thread(_maybe_create_session, request, session_manager)
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     new_session_id = request.session_id if created else None
 
     # Check session lock first
@@ -650,6 +738,23 @@ async def submit_chat_async(
             request_id=request_id,
         )
 
+        # ws4d D2 — resolved AFTER the user message is persisted just above,
+        # because resolve_engine_mode reads the deck's EARLIEST role='user'
+        # message: on turn 1 that row has to exist already or a USE LEGACY MODE
+        # opt-out in the very first message would resolve to the default
+        # (graph) engine.
+        #
+        # FAIL CLOSED (#271 C24/C47): a failure of THIS call (and only this call)
+        # becomes `_EngineModeUnresolvedError`, which the clause below turns into a 503
+        # (not the generic 500) after releasing the lock.  The chat_requests row
+        # and the user message persisted above stay.
+        try:
+            engine_mode = await asyncio.to_thread(
+                resolve_engine_mode_or_unavailable, request.session_id
+            )
+        except PersistedConfigurationUnavailableError as e:
+            raise _EngineModeUnresolvedError() from e
+
         # Queue for processing
         await enqueue_job(
             request_id,
@@ -661,6 +766,10 @@ async def submit_chat_async(
                 ),
                 "is_first_message": is_first_message,
                 "image_ids": request.image_ids,
+                # `engine_mode`, NEVER `mode`: `mode` is already MCP's
+                # generate/edit flag in this same payload (mcp_server.py), whose
+                # values are neither "graph" nor "monolith".
+                "engine_mode": engine_mode,
             },
         )
 
@@ -669,6 +778,19 @@ async def submit_chat_async(
             result["session_id"] = new_session_id
         return result
 
+    except SessionNotFoundError as e:
+        await asyncio.to_thread(
+            session_manager.release_session_lock, request.session_id
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {request.session_id}",
+        ) from e
+    except _EngineModeUnresolvedError as e:
+        await asyncio.to_thread(
+            session_manager.release_session_lock, request.session_id
+        )
+        raise _engine_mode_unavailable() from e.__cause__
     except Exception as e:
         # Release lock on failure
         await asyncio.to_thread(
@@ -682,24 +804,57 @@ async def submit_chat_async(
 async def poll_chat(
     request_id: str,
     after_message_id: int = Query(default=0, description="Return messages after this ID"),
+    slide_cursor: int = Query(
+        default=0, description="Lowest slide position not yet delivered"
+    ),
+    revisions_after: Optional[float] = Query(
+        default=None,
+        ge=0,
+        le=4102444800,  # 2100-01-01: utcfromtimestamp overflows far beyond this
+        allow_inf_nan=False,
+        description="The previous response's revision_mark; omit on the first poll",
+    ),
 ):
-    """Poll for chat request status and new messages.
+    """Poll for chat request status, new messages, and newly released slides.
 
-    Returns the current request status and any new messages since
-    the last poll (based on after_message_id).
+    Returns the current request status, any new messages since the last poll
+    (based on after_message_id), and any slides the reorder buffer has released
+    since ``slide_cursor``.
+
+    **The slides do NOT come through ``msg_to_stream_event``.**  ws4d D3 does not
+    persist slide-ready as a ``SessionMessage``: that converter returns a fixed
+    six-key dict with nowhere to put ``position``/``html``/``scripts``, so a
+    converter that learned the type still could not carry the data — and build
+    mechanics in the transcript pollute a view that is now user-visible and
+    clearable.  This reads **committed rows** instead, via
+    ``SessionManager.slides_since_cursor``, which is the same reorder-buffer prefix
+    rule the graph applies to state on the SSE transport.
 
     Args:
         request_id: Request ID from submit_chat_async
         after_message_id: Return messages with ID greater than this
+        slide_cursor: Lowest slide position the caller has NOT been sent.  ``0``
+            (the default) asks for every released slide.  Positions are 0-based,
+            so this is inclusive — unlike ``after_message_id``, whose ids start
+            at 1.  Hand back the ``slide_cursor`` from the previous response.
+        revisions_after: The previous response's ``revision_mark``.  A slide's
+            builder draft is committed before its review, so a slide the client
+            already holds can be replaced later in the turn; ``slide_revisions``
+            carries those replacements (positions below ``slide_cursor`` whose
+            row changed since the mark).  The client replaces by position.
 
     Returns:
-        Dictionary with status, events, last_message_id, and result
+        Dictionary with status, events, last_message_id, result, error, slides,
+        slide_cursor, slide_revisions and revision_mark
 
     Raises:
         HTTPException: 404 if request not found, 403 if caller is not the
             session creator
     """
     session_manager = get_session_manager()
+    # Taken BEFORE any read, so a row rewritten while this poll runs is newer
+    # than the mark the client hands back and is returned on the next poll.
+    revision_mark = time.time()
 
     # SDR-4437 (chat-poll IDOR): a request_id must not grant access to another
     # user's chat events/result. ChatRequest rows are session-bound — resolve
@@ -733,6 +888,42 @@ async def poll_chat(
         for m in messages
         if m["role"] != "user"
     ]
+    if (
+        chat_request["status"] == "error"
+        and chat_request.get("error_message") == PINNED_GRAPH_CONFIGURATION_ERROR
+    ):
+        events.append(pinned_graph_configuration_error_event_payload())
+
+    # ws4d D3 — incremental slides on the polling transport.  Projected into an
+    # explicit response shape rather than returned as-is: the row query knows
+    # about columns this endpoint has no business shipping, and the four keys
+    # below are the contract ws4e consumes.
+    released_slides = [
+        {
+            "position": row["position"],
+            "html": row["html"],
+            "scripts": row["scripts"],
+            "agent": row["agent"],
+        }
+        for row in await asyncio.to_thread(
+            session_manager.slides_since_cursor, session_id, slide_cursor
+        )
+    ]
+
+    slide_revisions = [
+        {
+            "position": row["position"],
+            "html": row["html"],
+            "scripts": row["scripts"],
+            "agent": row["agent"],
+        }
+        for row in await asyncio.to_thread(
+            session_manager.slide_revisions_since,
+            session_id,
+            slide_cursor,
+            revisions_after,
+        )
+    ]
 
     return {
         "status": chat_request["status"],
@@ -740,4 +931,13 @@ async def poll_chat(
         "last_message_id": messages[-1]["id"] if messages else after_message_id,
         "result": chat_request.get("result") if chat_request["status"] == "completed" else None,
         "error": chat_request.get("error_message") if chat_request["status"] == "error" else None,
+        "slides": released_slides,
+        # The next position NOT yet delivered.  Unchanged when nothing was
+        # released, so a client that keeps handing this back never re-receives a
+        # slide it already has.
+        "slide_cursor": (
+            released_slides[-1]["position"] + 1 if released_slides else slide_cursor
+        ),
+        "slide_revisions": slide_revisions,
+        "revision_mark": revision_mark,
     }

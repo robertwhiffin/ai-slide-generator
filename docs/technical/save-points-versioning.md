@@ -349,7 +349,7 @@ This prevents stale `getSlides` responses (from lock polling, chat completion, o
 
 ### Frontend: Component Remount on Version Preview
 
-`SelectionRibbon` and `SlidePanel` both receive `key={versionKey}` in AppLayout, forcing React to fully destroy and recreate them when switching between version previews. This prevents stale iframe content and thumbnail corruption.
+`SlideViewer` receives `key={versionKey}` in AppLayout, forcing React to fully destroy and recreate it when switching between version previews. This prevents stale iframe content and thumbnail corruption.
 
 ---
 

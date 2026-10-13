@@ -16,11 +16,10 @@ profiles:
       description: "Databricks spend data for KPMG UK. Data is available at a per-workspace, per-month level with an inferred line of business."
     
     # Prompts Configuration
-    # NOTE: system_prompt and slide_editing_instructions use defaults from src/core/defaults.py
+    # NOTE: the system_prompt / slide_editing_instructions overrides are RETIRED —
+    # prompts are assembled from src/core/prompt_modules.py, so a `prompts:` block
+    # here is no longer read by scripts/init_database.py.
     # Visual styling comes from selected_slide_style_id (set automatically to Databricks Brand)
-    prompts:
-      system_prompt: USE_DEFAULT
-      slide_editing_instructions: USE_DEFAULT
 
   # Profile 2: Use Cases Analysis
   - name: "use cases"
@@ -33,8 +32,5 @@ profiles:
       space_name: "01f0ae91105818cf83eec00a66924416"
       description: "Explore use case details from a progression standpoint, dive into any BU, vertical, and account to understand what is causing use cases to slow down and what can be done to speed them up. Try asking 'for the HLS business unit what is slowing down migrations, and what can be done to get the stuck ones moving, and the ones moving slow to move faster?'"
     
-    # Prompts use defaults from src/core/defaults.py
-    prompts:
-      system_prompt: USE_DEFAULT
-      slide_editing_instructions: USE_DEFAULT
+    # Prompt overrides are RETIRED (see the note on the first profile).
 

@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "id": "missing_conclusion:-1:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "missing_conclusion",
+      "message": "The deck has no conclusion or call-to-action slide, leaving the audience without a clear verdict or next steps.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

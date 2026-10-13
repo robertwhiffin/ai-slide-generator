@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "outcome": "success",
+    "synthesis": "Approximately 73% of MLOps teams have adopted YAML for pipeline configuration according to the DevOps State Report.",
+    "sources": [
+      "DevOps State Report"
+    ],
+    "gap": null,
+    "tried_tools": [],
+    "reason": null
+  }
+}

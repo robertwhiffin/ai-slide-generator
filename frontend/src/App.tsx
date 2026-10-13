@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './components/Layout/AppLayout';
 import { AdminPage } from './components/Admin/AdminPage';
+import { ReviewAndPublishPage } from './components/Admin/GraphRelease';
 import { useCurrentUser } from './hooks/useCurrentUser';
 import { WelcomeSetup } from './components/Setup';
 import './index.css';
-import { SelectionProvider } from './contexts/SelectionContext';
 import { AgentConfigProvider } from './contexts/AgentConfigContext';
 import { SessionProvider } from './contexts/SessionContext';
 import { GenerationProvider } from './contexts/GenerationContext';
@@ -53,6 +53,7 @@ function AppRoutes() {
       <Route path="/history" element={<AppLayout key={layoutKey} initialView="history" />} />
       {/* /feedback redirects here, so it inherits this gate for free. */}
       <Route path="/admin" element={<RequireAdmin><AdminPage /></RequireAdmin>} />
+      <Route path="/admin/agent-definitions/review" element={<RequireAdmin><ReviewAndPublishPage /></RequireAdmin>} />
       <Route path="/feedback" element={<Navigate to="/admin" replace />} />
       <Route path="/sessions/:sessionId/edit" element={<AppLayout key={layoutKey} initialView="main" />} />
       <Route path="/sessions/:sessionId/view" element={<AppLayout key={layoutKey} initialView="main" viewOnly={true} />} />
@@ -118,7 +119,6 @@ function App() {
   return (
     <SessionProvider>
       <GenerationProvider>
-        <SelectionProvider>
           <ToastProvider>
             <AgentConfigProvider>
               <TourProvider>
@@ -128,7 +128,6 @@ function App() {
               </TourProvider>
             </AgentConfigProvider>
           </ToastProvider>
-        </SelectionProvider>
       </GenerationProvider>
     </SessionProvider>
   );

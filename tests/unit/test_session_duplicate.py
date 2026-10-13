@@ -2,7 +2,8 @@
 
 import json
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +19,7 @@ from src.api.services.session_manager import (
     SessionNotFoundError,
 )
 from src.core.database import Base
+from src.database.models.graph_configuration import GraphRelease
 from src.database.models.deck_contributor import DeckContributor
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import (
@@ -39,6 +41,18 @@ def db():
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     session = Session()
+    now = datetime.now(timezone.utc)
+    session.add(
+        GraphRelease(
+            id=200,
+            version_number=2,
+            release_note="active duplicate fixture release",
+            published_by="duplicate-fixture@example.com",
+            published_at=now,
+            effective_from=now,
+        )
+    )
+    session.commit()
     yield session
     session.close()
     engine.dispose()
@@ -66,6 +80,7 @@ def _add_deck(
     slide_count: int = 2,
     html: str = "<div>deck</div>",
     deck_json: str = '{"slides":[{"html":"<div>1</div>"},{"html":"<div>2</div>"}]}',
+    deck_spec_json: Optional[str] = None,
 ) -> SessionSlideDeck:
     deck = SessionSlideDeck(
         session_id=session.id,
@@ -77,6 +92,7 @@ def _add_deck(
         verification_map='{"abc": {"score": 90}}',
         version=5,
         modified_by=session.created_by,
+        deck_spec_json=deck_spec_json,
     )
     db.add(deck)
     db.commit()

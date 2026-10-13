@@ -1,0 +1,8 @@
+{
+  "outcome": "no_tool",
+  "synthesis": null,
+  "sources": null,
+  "gap": null,
+  "tried_tools": [],
+  "reason": "This request requires a database query to fetch revenue by region, but no query tool is available."
+}

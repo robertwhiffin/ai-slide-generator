@@ -1,0 +1,5 @@
+{
+  "html": "<section class=\"slide slide--results\">\n  <header class=\"slide__header\">\n    <h2 class=\"slide__title\">Q3 Results</h2>\n  </header>\n  <div class=\"slide__body\">\n    <table class=\"results-table\">\n      <thead>\n        <tr>\n          <th scope=\"col\">Metric</th>\n          <th scope=\"col\">Before (H1 baseline)</th>\n          <th scope=\"col\">After (Q3)</th>\n        </tr>\n      </thead>\n      <tbody>\n        <tr>\n          <td>Median end-to-end latency</td>\n          <td>4.8 h</td>\n          <td>1.8 h</td>\n        </tr>\n        <tr>\n          <td>Data-loss incidents</td>\n          <td>11</td>\n          <td>0</td>\n        </tr>\n        <tr>\n          <td>Infrastructure cost per job</td>\n          <td>baseline</td>\n          <td>&minus;18%</td>\n        </tr>\n      </tbody>\n    </table>\n    <p class=\"slide__attribution\">Sources: pipeline-metrics-dashboard/2024-Q3, cloud-cost-report-2024Q3, incident-tracker/Q3-summary</p>\n  </div>\n</section>",
+  "scripts": "document.querySelectorAll('.results-table tbody tr').forEach(function(row, idx) { row.setAttribute('data-row-index', idx); });",
+  "position": 2
+}

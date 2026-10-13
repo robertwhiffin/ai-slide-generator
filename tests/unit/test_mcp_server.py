@@ -1604,3 +1604,65 @@ async def test_create_deck_length_guard_when_enabled(monkeypatch):
     monkeypatch.setattr(mcp_server, "MCP_PROMPT_LIMIT", 100)
     with pytest.raises(MCPToolError, match="too long"):
         await _create_deck_impl(request=None, prompt="x" * 200)
+
+
+# ---- enqueue_create_job: MCP decks carry the legacy opt-out ------------------
+#
+# Since 2026-10-12 every deck runs on the graph unless its first user message
+# carries USE LEGACY MODE.  MCP stays on the monolith (its worker payload has no
+# engine key; the graph's one-shot path is not built) and its sessions are
+# unpinned, so the persisted first message must carry the opt-out -- otherwise a
+# browser turn on an MCP deck would resolve to the graph and fail with
+# ConversationPinMissingError.  The prompt the worker runs is NOT altered.
+
+
+async def _drive_enqueue_create_job(*, mode, message_count):
+    from unittest.mock import AsyncMock
+
+    from src.api import mcp_server
+
+    sm = MagicMock()
+    sm.acquire_session_lock.return_value = True
+    sm.create_chat_request.return_value = "req-1"
+    sm.get_session.return_value = {"message_count": message_count}
+    enqueue = AsyncMock()
+    with patch("src.api.mcp_server.get_session_manager", return_value=sm), \
+         patch("src.api.mcp_server.enqueue_job", enqueue), \
+         patch("src.core.user_context.get_current_user", return_value="mcp@example.com"):
+        request_id = await mcp_server.enqueue_create_job(
+            session_id="sess-1", prompt="make a deck about Q3", mode=mode
+        )
+    assert request_id == "req-1"
+    persisted = sm.add_message.call_args.kwargs["content"]
+    payload = enqueue.await_args.args[1]
+    return persisted, payload
+
+
+@pytest.mark.asyncio
+async def test_create_deck_first_message_is_persisted_with_the_legacy_opt_out():
+    from src.domain.conversation_engine import LEGACY_MODE_PHRASE, selects_graph_engine
+
+    persisted, payload = await _drive_enqueue_create_job(mode="generate", message_count=0)
+
+    assert LEGACY_MODE_PHRASE in persisted
+    assert persisted.endswith("make a deck about Q3")
+    assert selects_graph_engine(persisted) is False
+    # The worker runs the caller's prompt verbatim, and still has no engine key.
+    assert payload["message"] == "make a deck about Q3"
+    assert "engine_mode" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "message_count"),
+    [("edit", 0), ("edit", 3), ("generate", 2)],
+    ids=["edit-on-empty-deck", "edit", "generate-not-first"],
+)
+async def test_only_the_create_deck_first_message_is_marked(mode, message_count):
+    """edit_deck must never mark: on a browser deck it would flip a pinned graph
+    deck with no messages onto the monolith."""
+    persisted, payload = await _drive_enqueue_create_job(
+        mode=mode, message_count=message_count
+    )
+    assert persisted == "make a deck about Q3"
+    assert payload["message"] == "make a deck about Q3"

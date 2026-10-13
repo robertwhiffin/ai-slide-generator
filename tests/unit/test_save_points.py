@@ -34,11 +34,39 @@ from tests.fixtures.html import (
 )
 
 
-class MockSessionForVersions:
-    """Mock session object with messages and versions for testing."""
+#: The persisted pin the mocked conversation carries.  restore_version records it
+#: alongside the actor, so a non-null value is what makes a lost or wrong pin
+#: observable rather than indistinguishable from "no pin".
+RESTORE_GRAPH_RELEASE_ID = 4242
+RESTORE_SESSION_ID = "test-session"
 
-    def __init__(self, session_id: int = 1):
-        self.id = session_id
+
+class MockSessionForVersions:
+    """Mock session object with messages and versions for testing.
+
+    Carries the identity fields a real ``UserSession`` keeps separate and that the
+    restore path reads separately:
+
+    * ``id`` — integer primary key that deck/message/version rows join on.
+    * ``session_id`` — opaque string business key that attribution names as the
+      actor session.
+    * ``graph_release_id`` — the conversation's persisted pin, recorded on the
+      restore event.
+
+    The original double conflated the first two and omitted the third, so C-4's
+    restore-event actor derivation was never exercised here at all (correction
+    C-11 R4).  Keeping them distinct is what stops that recurring.
+    """
+
+    def __init__(
+        self,
+        row_id: int = 1,
+        session_id: str = RESTORE_SESSION_ID,
+        graph_release_id: Optional[int] = RESTORE_GRAPH_RELEASE_ID,
+    ):
+        self.id = row_id
+        self.session_id = session_id
+        self.graph_release_id = graph_release_id
         self.messages = []
         self.slide_deck = None
         self.versions = []
@@ -141,7 +169,7 @@ class TestVersionCreation:
         sm = SessionManager.__new__(SessionManager)
 
         # Mock database session and queries
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
         mock_session.messages = [
             MockMessage(1, "user", "Create slides about AI"),
             MockMessage(2, "assistant", "Here are your slides"),
@@ -223,7 +251,7 @@ class TestVersionCreation:
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         with patch("src.api.services.session_manager.get_db_session") as mock_db:
             mock_db_session = MagicMock()
@@ -264,7 +292,7 @@ class TestVersionLimit:
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         with patch("src.api.services.session_manager.get_db_session") as mock_db:
             mock_db_session = MagicMock()
@@ -310,7 +338,7 @@ class TestVersionLimit:
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         with patch("src.api.services.session_manager.get_db_session") as mock_db:
             mock_db_session = MagicMock()
@@ -351,7 +379,7 @@ class TestVersionListing:
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         # Create mock version records
         v1 = MockVersionRecord(1, "Generated 3 slides", json.dumps({"slides": [{}] * 3}))
@@ -386,7 +414,7 @@ class TestVersionListing:
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         with patch("src.api.services.session_manager.get_db_session") as mock_db:
             mock_db_session = MagicMock()
@@ -414,7 +442,7 @@ class TestVersionPreview:
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         deck_dict = _create_deck_dict(3, title="AI Presentation")
         chat_history = _create_chat_history(4)
@@ -470,7 +498,7 @@ class TestVersionPreview:
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         with patch("src.api.services.session_manager.get_db_session") as mock_db:
             mock_db_session = MagicMock()
@@ -499,7 +527,7 @@ class TestVersionRestore:
         sm = SessionManager.__new__(SessionManager)
 
         # Create mock session with slide deck
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
         mock_slide_deck = MockSlideDeckRecord(session_id=1)
         mock_session.slide_deck = mock_slide_deck
 
@@ -531,7 +559,40 @@ class TestVersionRestore:
             # Simulate: 2 newer versions deleted, 3 newer messages deleted
             mock_query.delete.side_effect = [2, 3]
 
-            with patch("src.utils.slide_hash.compute_slide_hash", return_value="hash_v2"):
+            # Attribution spy. Correction C-4 makes restore append its own
+            # restore_version event inside this same transaction, deriving the
+            # actor from the requesting session and its persisted pin. The real
+            # recorder needs a live database to resolve and validate identities —
+            # tests/integration/test_shared_deck_mutation_attribution.py owns that
+            # real-transaction matrix per C-8, including the rollback case. What
+            # this unit test owns is the derivation and the ordering: WHICH actor,
+            # WHICH release, and that the call happens after the content rewrite
+            # and flush but before the transaction closes.
+            observed: Dict[str, Any] = {}
+
+            def _spy_recorder(db, **kwargs):
+                observed.update(kwargs)
+                observed["db"] = db
+                # Captured at call time, not afterwards.
+                observed["deck_json_at_call"] = kwargs["deck"].deck_json
+                observed["slide_count_at_call"] = kwargs["deck"].slide_count
+                observed["flush_calls_at_call"] = mock_db_session.flush.call_count
+                # restore_version calls require_editing_lock first, which opens
+                # and closes its own get_db_session; comparing enter/exit counts
+                # (rather than "has __exit__ ever been called") is what shows a
+                # block is still OPEN when the evidence is appended.
+                observed["open_blocks"] = (
+                    mock_db.return_value.__enter__.call_count
+                    - mock_db.return_value.__exit__.call_count
+                )
+                return MagicMock()
+
+            with patch(
+                "src.api.services.session_manager.record_shared_deck_mutation",
+                side_effect=_spy_recorder,
+            ) as recorder, patch(
+                "src.utils.slide_hash.compute_slide_hash", return_value="hash_v2"
+            ):
                 result = sm.restore_version("test-session", 2)
 
             # Should return restored version data
@@ -550,12 +611,102 @@ class TestVersionRestore:
             assert mock_slide_deck.deck_json == json.dumps(deck_dict_v2)
             assert mock_slide_deck.slide_count == 3
 
+            # --- the restore event (C-4) ---
+            assert recorder.call_count == 1, (
+                "restore must append exactly one restore_version event"
+            )
+            assert observed["operation"] == "restore_version"
+            assert observed["object_type"] == "deck"
+            assert observed["object_id"] is None
+
+            # Actor derived from the REQUESTING session and its persisted pin —
+            # not the deck owner, and not the active release.
+            assert observed["actor"].actor_session_id == RESTORE_SESSION_ID
+            assert observed["actor"].graph_release_id == RESTORE_GRAPH_RELEASE_ID
+            assert observed["requesting_session"] is mock_session
+            assert observed["deck_owner"] is mock_session
+            assert observed["deck"] is mock_slide_deck
+
+            # Same transaction, after the content flush: the deck already carries
+            # the restored snapshot when the evidence is appended, and the
+            # transaction has not closed.
+            assert observed["db"] is mock_db_session
+            assert observed["open_blocks"] == 1, (
+                "the restore event must be appended while the restore "
+                "transaction is still open"
+            )
+            assert observed["flush_calls_at_call"] >= 1
+            assert observed["deck_json_at_call"] == json.dumps(deck_dict_v2)
+            assert observed["slide_count_at_call"] == 3
+
+    def test_restore_event_failure_aborts_the_restore(self):
+        """Break caught: restore commits content, deletions, or its post-commit
+        marker discard even though its evidence could not be written.
+
+        The real rollback is proved against a live transaction in
+        tests/integration/test_shared_deck_mutation_attribution.py::
+        test_restore_event_failure_rolls_back_content_deletions_and_event. What is
+        provable here is the half that guards the ordering: the failure escapes
+        restore_version from INSIDE the get_db_session block, so the context
+        manager rolls the transaction back, and none of the post-commit work runs.
+        """
+        from src.api.services.session_manager import SessionManager
+
+        sm = SessionManager.__new__(SessionManager)
+
+        mock_session = MockSessionForVersions(row_id=1)
+        mock_slide_deck = MockSlideDeckRecord(session_id=1)
+        mock_session.slide_deck = mock_slide_deck
+
+        deck_dict_v2 = _create_deck_dict(3, title="Version 2 Deck")
+        mock_version = MockVersionRecord(
+            version_number=2,
+            description="Edited slide 1",
+            deck_json=json.dumps(deck_dict_v2),
+            verification_map_json=json.dumps({"hash_v2": {"status": "verified"}}),
+            chat_history_json=json.dumps(_create_chat_history(2)),
+            created_at=datetime.utcnow() - timedelta(hours=1),
+        )
+
+        with patch("src.api.services.session_manager.get_db_session") as mock_db:
+            mock_db_session = MagicMock()
+            mock_db.return_value.__enter__ = MagicMock(return_value=mock_db_session)
+            mock_db.return_value.__exit__ = MagicMock(return_value=False)
+
+            sm._get_session_or_raise = MagicMock(return_value=mock_session)
+
+            mock_query = MagicMock()
+            mock_db_session.query.return_value = mock_query
+            mock_query.filter.return_value = mock_query
+            mock_query.first.return_value = mock_version
+            mock_query.delete.side_effect = [2, 3]
+
+            with patch(
+                "src.api.services.session_manager.record_shared_deck_mutation",
+                side_effect=RuntimeError("restore evidence failed"),
+            ), patch(
+                "src.utils.slide_hash.compute_slide_hash", return_value="hash_v2"
+            ), patch(
+                "src.services.spec_sync.discard_marker"
+            ) as discard:
+                with pytest.raises(RuntimeError, match="restore evidence failed"):
+                    sm.restore_version("test-session", 2)
+
+            # The failure left the transaction through __exit__ with an exception,
+            # which is what makes get_db_session roll back.
+            assert mock_db.return_value.__exit__.called
+            exit_exc_type = mock_db.return_value.__exit__.call_args[0][0]
+            assert exit_exc_type is RuntimeError
+
+            # Nothing downstream of the transaction ran.
+            discard.assert_not_called()
+
     def test_restore_nonexistent_version_raises_error(self):
         """Restore to nonexistent version should raise ValueError."""
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         with patch("src.api.services.session_manager.get_db_session") as mock_db:
             mock_db_session = MagicMock()
@@ -694,7 +845,7 @@ class TestCurrentVersionNumber:
         from src.api.services.session_manager import SessionManager
 
         sm = SessionManager.__new__(SessionManager)
-        mock_session = MockSessionForVersions(session_id=1)
+        mock_session = MockSessionForVersions(row_id=1)
 
         with patch("src.api.services.session_manager.get_db_session") as mock_db:
             mock_db_session = MagicMock()

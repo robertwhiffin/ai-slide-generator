@@ -250,12 +250,18 @@ class SlideDeck:
 
     def insert_slide(self, slide: Slide, position: int) -> None:
         """Insert slide at the specified position.
-        
+
+        THIS METHOD OWNS THE OUT-OF-RANGE CLAMP, and it does not raise.
+        ``list.insert`` clamps: a position past the end appends, and a negative
+        position counts backwards from the end.  Callers must not re-implement an
+        upper-bound check ("insert beyond the end appends" is this line's
+        behaviour), but SHOULD reject a negative position themselves rather than
+        let it silently land somewhere other than where they asked —
+        ``chat_service.insert_slide`` does.
+
         Args:
             slide: The Slide object to insert
-            position: Index to insert at
-        Raises:
-            IndexError: If position is out of range
+            position: Index to insert at; clamped to the end of the deck
         """
         self.slides.insert(position, slide)
 

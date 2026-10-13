@@ -26,10 +26,12 @@ import re
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 _REPO = Path(__file__).resolve().parents[2]
 _ROOT_MANIFEST = _REPO / "pyproject.toml"
 _APP_MANIFEST = _REPO / "packages" / "databricks-tellr-app" / "pyproject.toml"
+_REQUIREMENTS_TXT = _REPO / "requirements.txt"
 
 #: Root runtime dependencies deliberately NOT declared in the app wheel, each with
 #: the reason it is safe. Anything else missing is a WF-02-shaped defect.
@@ -93,6 +95,18 @@ def _declared(manifest: Path) -> dict[str, str]:
     return out
 
 
+def _declared_req(manifest: Path) -> dict[str, str]:
+    """Runtime dependencies from a plain requirements.txt, keyed by normalized name."""
+    out: dict[str, str] = {}
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        name = re.split(r"[<>=!~\[;]", stripped, maxsplit=1)[0].strip()
+        out[name.lower().replace("_", "-")] = stripped
+    return out
+
+
 @pytest.fixture(scope="module")
 def app_deps() -> dict[str, str]:
     return _declared(_APP_MANIFEST)
@@ -101,6 +115,11 @@ def app_deps() -> dict[str, str]:
 @pytest.fixture(scope="module")
 def root_deps() -> dict[str, str]:
     return _declared(_ROOT_MANIFEST)
+
+
+@pytest.fixture(scope="module")
+def req_deps() -> dict[str, str]:
+    return _declared_req(_REQUIREMENTS_TXT)
 
 
 def test_the_app_wheel_declares_svgpathtools(app_deps):
@@ -150,3 +169,22 @@ def test_the_allowlist_does_not_outlive_its_entries(root_deps):
     name."""
     stale = _ALLOWED_ABSENT_FROM_WHEEL - set(root_deps)
     assert not stale, f"_ALLOWED_ABSENT_FROM_WHEEL names non-dependencies: {sorted(stale)}"
+
+
+def test_the_manifests_declare_openai_within_the_transitive_bounds(
+    app_deps, root_deps, req_deps
+):
+    """openai is pinned exactly in the app wheel and requirements.txt.
+
+    ws2a (Task 0b) pinned openai==3.19.2 and openai-agents==0.22.2 in the app
+    pyproject and requirements.txt: these are the versions that databricks-openai
+    0.17.1 and openai-agents 0.22.2 resolve to, proven by the ws2a devloop build
+    (Task 0b Step 7).  Any change to this pin requires a new devloop-deploy proof
+    that the wheel still resolves correctly.
+
+    The root pyproject keeps the ranged floor (>=1.99.9) because it is not the file
+    that the Databricks Apps BUILD phase resolves.
+    """
+    assert Requirement(app_deps["openai"]).specifier == Requirement("openai==3.19.2").specifier
+    assert Requirement(root_deps["openai"]).specifier == Requirement("openai>=1.99.9").specifier
+    assert Requirement(req_deps["openai"]).specifier == Requirement("openai==3.19.2").specifier

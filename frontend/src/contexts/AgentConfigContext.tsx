@@ -120,9 +120,7 @@ function isConfigMeaningful(config: AgentConfig): boolean {
     config.tools.length > 0 ||
     config.design_system_id != null ||
     config.slide_style_id != null ||
-    config.deck_prompt_id != null ||
-    config.system_prompt != null ||
-    config.slide_editing_instructions != null
+    config.deck_prompt_id != null
   );
 }
 
@@ -594,6 +592,15 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // (including for a config the user has since emptied back out).
   const configEverResolvedRef = useRef(false);
 
+  // Bumped by every EXPLICIT pre-session edit (updateConfig, loadProfile). The
+  // pre-session default load below is async (profiles, design systems, slide
+  // styles); it captures this at issue time and does not repaint if the user
+  // edited meanwhile — the same "explicit edits win" rule the session GET
+  // follows via ownership. Without it, a Genie agent / deck prompt / style
+  // picked before the default load landed was silently replaced by the
+  // defaults, and the first chat request seeded the session without it.
+  const preSessionEditGenRef = useRef(0);
+
   // ------------------------------------------------------------------
   // Pre-session: load default profile's config on first mount if no
   // stored config exists.
@@ -604,6 +611,13 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     defaultProfileLoaded.current = true;
 
     const storedConfig = readStoredConfig();
+    // Explicit edits win over this async default load (see preSessionEditGenRef).
+    const issuedAtEdit = preSessionEditGenRef.current;
+    const applyUnlessEdited = (config: AgentConfig) =>
+      settleForSurface(null, () => {
+        if (preSessionEditGenRef.current !== issuedAtEdit) return;
+        setAgentConfig(config);
+      });
 
     // ANY stored configuration is authoritative — it is this user's own state,
     // mirrored here by the effect below. Its EXISTENCE is the marker: the
@@ -623,7 +637,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         void withResolvedStyleSource(storedConfig).then(resolved => {
           const updated = { ...resolved };
           if (updated.deck_prompt_id == null) updated.deck_prompt_id = resolveDefaultDeckPromptId();
-          settleForSurface(null, () => setAgentConfig(updated));
+          applyUnlessEdited(updated);
         });
       }
       return;
@@ -656,7 +670,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
 
-        settleForSurface(null, () => setAgentConfig(config));
+        applyUnlessEdited(config);
       })
       .catch(err => {
         console.error('Failed to load default profile for pre-session config:', err);
@@ -886,6 +900,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         return false;
       }
     } else {
+      preSessionEditGenRef.current += 1;
       console.log('[AgentConfigContext] Pre-session mode, config saved locally only. isPreSession:', isPreSession, 'urlSessionId:', urlSessionId);
       return true;
     }
@@ -1133,9 +1148,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const hasConfig =
       agentConfig.tools.length > 0 ||
       agentConfig.slide_style_id !== null ||
-      agentConfig.deck_prompt_id !== null ||
-      agentConfig.system_prompt !== null ||
-      agentConfig.slide_editing_instructions !== null;
+      agentConfig.deck_prompt_id !== null;
     if (hasConfig) {
       const confirmed = window.confirm(
         'Loading a profile will replace your current configuration. Continue?',
@@ -1177,6 +1190,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
             // Deliberately loading a profile is a user decision about the style
             // slot, so the applied config carries user provenance — a profile
             // built around a specific style must not be re-resolved away.
+            preSessionEditGenRef.current += 1;
             setAgentConfig({ ...profile.agent_config, style_source: 'user' });
             showToast('Profile loaded', 'success');
           } else {

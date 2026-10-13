@@ -1,6 +1,7 @@
 """Database models."""
 
 from src.database.models.deck_contributor import DeckContributor
+from src.database.models.deck_review import DeckReview
 from src.database.models.design_system import (
     DesignSystem,
     DesignSystemAsset,
@@ -13,6 +14,20 @@ from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.google_global_credentials import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
+from src.database.models.graph_checkpoint import (
+    GraphCheckpoint,
+    GraphCheckpointWrite,
+)
+from src.database.models.graph_configuration import (
+    AgentDefinitionRevision,
+    AgentTestCase,
+    AgentTestRun,
+    GraphDraft,
+    GraphDraftAgent,
+    GraphRelease,
+    GraphReleaseAgent,
+    GraphReleaseTestRun,
+)
 from src.database.models.identity import AppIdentity
 from src.database.models.image import ImageAsset
 from src.database.models.profile import ConfigProfile
@@ -39,9 +54,13 @@ from src.database.models.user_preference import UserProfilePreference
 
 __all__ = [
     "AppIdentity",
+    "AgentDefinitionRevision",
+    "AgentTestCase",
+    "AgentTestRun",
     "ChatRequest",
     "ConfigGenieSpace",
     "DeckContributor",
+    "DeckReview",
     "EncryptionKey",
     "ConfigProfile",
     "ConfigProfileContributor",
@@ -55,6 +74,13 @@ __all__ = [
     "FeedbackConversation",
     "GoogleGlobalCredentials",
     "GoogleOAuthToken",
+    "GraphCheckpoint",
+    "GraphCheckpointWrite",
+    "GraphDraft",
+    "GraphDraftAgent",
+    "GraphRelease",
+    "GraphReleaseAgent",
+    "GraphReleaseTestRun",
     "IdentityType",
     "ImageAsset",
     "PermissionLevel",

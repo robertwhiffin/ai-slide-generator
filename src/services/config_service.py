@@ -26,8 +26,6 @@ class ConfigService:
         profile_id: int,
         selected_deck_prompt_id: int = None,
         selected_slide_style_id: int = None,
-        system_prompt: str = None,
-        slide_editing_instructions: str = None,
         user: str = None,
         clear_deck_prompt: bool = False,
         clear_slide_style: bool = False,
@@ -38,8 +36,6 @@ class ConfigService:
             profile_id: Profile ID
             selected_deck_prompt_id: ID of deck prompt from library (optional)
             selected_slide_style_id: ID of slide style from library (optional)
-            system_prompt: System prompt (advanced setting)
-            slide_editing_instructions: Slide editing instructions (advanced setting)
             user: User making the change
             clear_deck_prompt: If True, clear the selected deck prompt
             clear_slide_style: If True, clear the selected slide style
@@ -65,14 +61,6 @@ class ConfigService:
         elif selected_slide_style_id is not None and selected_slide_style_id != config.selected_slide_style_id:
             changes["selected_slide_style_id"] = {"old": config.selected_slide_style_id, "new": selected_slide_style_id}
             config.selected_slide_style_id = selected_slide_style_id
-
-        if system_prompt is not None and system_prompt != config.system_prompt:
-            changes["system_prompt"] = {"old": "...", "new": "..."}  # Don't log full prompts
-            config.system_prompt = system_prompt
-
-        if slide_editing_instructions is not None and slide_editing_instructions != config.slide_editing_instructions:
-            changes["slide_editing_instructions"] = {"old": "...", "new": "..."}
-            config.slide_editing_instructions = slide_editing_instructions
 
         self.db.commit()
         self.db.refresh(config)

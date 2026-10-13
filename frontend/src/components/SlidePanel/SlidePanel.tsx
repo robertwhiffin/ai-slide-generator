@@ -14,16 +14,14 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import type { Slide, SlideDeck } from '../../types/slide';
+import type { SlideDeck } from '../../types/slide';
 import { SlideTile } from './SlideTile';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
 import { ConfirmDialog } from '../ConfirmDialog';
-import { useSelection } from '../../contexts/SelectionContext';
-import { exportSlideDeckToPDF } from '../../services/pdf_client';
 import { useSession } from '../../contexts/SessionContext';
-import { useToast } from '../../contexts/ToastContext';
-import { buildStandaloneDeckDocument } from '../../services/slideDocument';
+import { useDeckExport } from '../../hooks/useDeckExport';
+import { useAutoVerification } from '../../hooks/useAutoVerification';
 
 interface SlideContext {
   indices: number[];
@@ -56,29 +54,32 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
   const { slideDeck, rawHtml: _rawHtml, onSlideChange, scrollToSlide, onSendMessage, onExportStatusChange, versionKey: _versionKey, readOnly = false, lockedBy = null, onVerificationComplete } = props;
   const [_isReordering, setIsReordering] = useState(false);
   const [viewMode, _setViewMode] = useState<ViewMode>('tiles');
-  const [isExportingPDF, setIsExportingPDF] = useState(false);
-  const [isExportingPPTX, setIsExportingPPTX] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const [presentationStartIndex, setPresentationStartIndex] = useState(0);
   const [optimizingSlideIndex, setOptimizingSlideIndex] = useState<number | null>(null);
   const [deleteSlideIndex, setDeleteSlideIndex] = useState<number | null>(null);
-  const { selectedIndices, setSelection, clearSelection } = useSelection();
   const { sessionId } = useSession();
-  const { showToast } = useToast();
   const slideRefs = useRef<Map<number, HTMLDivElement>>(new Map());
-
-  // Auto-verification state
-  const [isAutoVerifying, setIsAutoVerifying] = useState(false);
-  const [verifyingSlides, setVerifyingSlides] = useState<Set<number>>(new Set());
-  const autoVerifyTriggeredRef = useRef<Set<string>>(new Set());
-  const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
+  const { handleExportPDF, handleExportPPTX, handleSaveAsHTML } = useDeckExport({
+    slideDeck,
+    sessionId,
+    onExportStatusChange,
+  });
 
   const deckEditCounterRef = useRef(0);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
+
+  // Auto-verification: shared hook — handles dedupe, staleness, and session resets.
+  const { verifyingSlides } = useAutoVerification({
+    slideDeck,
+    sessionId,
+    onVerificationComplete,
+    onSlideChange,
+    deckEditCounterRef,
+  });
   
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -126,7 +127,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
         if (result.slide_deck && deckEditCounterRef.current === editId) {
           onSlideChange?.(result.slide_deck);
         }
-        clearSelection();
       } catch (error) {
         console.error('Failed to reorder:', error);
         if (isVersionConflict(error)) {
@@ -159,7 +159,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange?.(result.slide_deck);
       }
-      clearSelection();
     } catch (error) {
       console.error('Failed to delete:', error);
       if (isVersionConflict(error)) {
@@ -181,7 +180,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       if (result.slide_deck && deckEditCounterRef.current === editId) {
         onSlideChange?.(result.slide_deck);
       }
-      clearSelection();
     } catch (error) {
       console.error('Failed to update:', error);
       if (isVersionConflict(error)) {
@@ -216,7 +214,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     if (!slide) return;
 
     setOptimizingSlideIndex(index);
-    clearSelection();
 
     const slideContext = {
       indices: [index],
@@ -244,159 +241,27 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     }
   }, [slideDeck]);
 
-  const handleExportPDF = async () => {
-    if (!slideDeck || isExportingPDF) return;
 
-    setIsExportingPDF(true);
-    setShowExportMenu(false);
-    onExportStatusChange?.('Exporting PDF...');
-    try {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      const filename = `${slideDeck.title || 'slides'}_${timestamp}.pdf`;
-      
-      await exportSlideDeckToPDF(slideDeck, filename, {
-        format: 'a4',
-        orientation: 'landscape',
-        scale: 1.2,
-        waitForCharts: 2000,
-        imageQuality: 0.85,
-      });
-    } catch (error) {
-      console.error('PDF export failed:', error);
-      const message = error instanceof Error 
-        ? error.message 
-        : 'Failed to export PDF. Please try again.';
-      alert(message);
-    } finally {
-      setIsExportingPDF(false);
-      onExportStatusChange?.(null);
-    }
-  };
-
-  const handleExportPPTX = async () => {
-    if (!slideDeck || !sessionId || isExportingPPTX) return;
-
-    setIsExportingPPTX(true);
-    setShowExportMenu(false);
-    onExportStatusChange?.('Generating PPTX…');
-
-    const downloadBlob = (blob: Blob, suffix = '') => {
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const timestamp = new Date().toISOString().slice(0, 10);
-      const trailing = suffix ? `_${suffix}` : '';
-      a.download = `${slideDeck.title || 'slides'}_${timestamp}${trailing}.pptx`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
-    };
-
-    try {
-      // Try the Claude Design path first.
-      const result = await api.exportPptxHuashu(sessionId);
-      downloadBlob(result.blob);
-      onExportStatusChange?.(null);
-      if (result.failures.length === 0) {
-        showToast(`PPTX downloaded (${result.succeeded}/${result.totalSlides} slides)`, 'success');
-      } else {
-        // Partial export must be loud: the file is missing slides, so the
-        // user gets a persistent error naming exactly which ones failed.
-        console.warn('[huashu] per-slide failures:', result.failures);
-        const failedSlideNumbers = result.failures
-          .map((f) => f.slide_index + 1)
-          .sort((a, b) => a - b)
-          .join(', ');
-        const firstError = result.failures[0]?.error?.split('\n')[0] || 'unknown error';
-        showToast(
-          `PPTX incomplete: only ${result.succeeded} of ${result.totalSlides} slides exported. ` +
-            `Slide${result.failures.length > 1 ? 's' : ''} ${failedSlideNumbers} failed (${firstError}).`,
-          'error',
-          { persistent: true },
-        );
-      }
-    } catch (error) {
-      // Fallback path: if the Claude Design path isn't bootstrapped on this
-      // deployment (returns 503), retry via the records pipeline so the
-      // user still gets a working export.
-      const status = (error as any)?.status;
-      const message = error instanceof Error ? error.message : '';
-      const isUnavailable =
-        status === 503 ||
-        /huashu pipeline not available/i.test(message) ||
-        /pipeline (?:still )?installing/i.test(message);
-      if (isUnavailable) {
-        try {
-          onExportStatusChange?.('Falling back to records pipeline (slower)…');
-          const blob = await api.exportPptxEditable(slideDeck, sessionId, 'universal');
-          downloadBlob(blob);
-          onExportStatusChange?.(null);
-          showToast('PPTX downloaded (records pipeline)', 'success');
-          return;
-        } catch (fallbackErr) {
-          console.error('PPTX records-fallback export failed:', fallbackErr);
-          const fbMsg = fallbackErr instanceof Error ? fallbackErr.message : 'Failed to export PPTX.';
-          alert(fbMsg);
-          return;
-        } finally {
-          setIsExportingPPTX(false);
-          onExportStatusChange?.(null);
-        }
-      }
-      console.error('PPTX export failed:', error);
-      const failures = (error as any)?.failures;
-      if (Array.isArray(failures) && failures.length > 0) {
-        console.warn('[huashu] per-slide failures (all rejected):', failures);
-      }
-      alert(message || 'Failed to export PPTX. Please try again.');
-    } finally {
-      setIsExportingPPTX(false);
-      onExportStatusChange?.(null);
-    }
-  };
-
-  const handleSaveAsHTML = () => {
-    if (!slideDeck) return;
-
-    const html = buildStandaloneDeckDocument(slideDeck);
-
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(slideDeck.title || 'presentation').replace(/[^a-z0-9]/gi, '-').toLowerCase()}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
 
   const openPresentationFromActive = useCallback(() => {
     const total = slideDeck?.slides.length ?? 0;
     let idx = 0;
 
-    if (selectedIndices.length > 0) {
-      // Explicit selection wins — clicking a tile is an unambiguous "current".
-      idx = selectedIndices[0];
-    } else {
-      // No selection: pick the slide spanning a virtual trigger line ~25% from
-      // the top of the viewport. As you scroll, the trigger only advances when
-      // one tile's bottom crosses above the line, so there's no oscillation
-      // between two equally-visible tiles. Pattern used by docs-site TOCs.
-      const triggerY = window.innerHeight * 0.25;
-      for (const [tileIndex, el] of slideRefs.current) {
-        const r = el.getBoundingClientRect();
-        if (r.top <= triggerY && r.bottom > triggerY) {
-          idx = tileIndex;
-          break;
-        }
+    // Pick the slide spanning a virtual trigger line ~25% from the top of the
+    // viewport. As you scroll, the trigger only advances when one tile's bottom
+    // crosses above the line, so there's no oscillation between equally-visible tiles.
+    const triggerY = window.innerHeight * 0.25;
+    for (const [tileIndex, el] of slideRefs.current) {
+      const r = el.getBoundingClientRect();
+      if (r.top <= triggerY && r.bottom > triggerY) {
+        idx = tileIndex;
+        break;
       }
     }
 
     setPresentationStartIndex(Math.max(0, Math.min(idx, Math.max(0, total - 1))));
     setIsPresentationMode(true);
-  }, [selectedIndices, slideDeck]);
+  }, [slideDeck]);
 
   useImperativeHandle(ref, () => ({
     exportPDF: handleExportPDF,
@@ -404,24 +269,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
     exportHTML: handleSaveAsHTML,
     openPresentationMode: openPresentationFromActive,
   }));
-
-  useEffect(() => {
-    if (!slideDeck) {
-      clearSelection();
-      return;
-    }
-
-    const validIndices = selectedIndices.filter(
-      index => index >= 0 && index < slideDeck.slides.length,
-    );
-
-    if (validIndices.length !== selectedIndices.length) {
-      const slides: Slide[] = validIndices
-        .map(index => slideDeck.slides[index])
-        .filter((slide): slide is Slide => Boolean(slide));
-      setSelection(validIndices, slides);
-    }
-  }, [slideDeck, selectedIndices, clearSelection, setSelection]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -444,105 +291,6 @@ function SlidePanelComponent(props: SlidePanelProps, ref: React.Ref<SlidePanelHa
       }
     }
   }, [scrollToSlide, viewMode]);
-
-  const runAutoVerification = useCallback(async (slidesToVerify: Array<{ index: number; contentHash: string }>) => {
-    if (!sessionId || slidesToVerify.length === 0 || isAutoVerifying) return;
-    const capturedSessionId = sessionId;
-
-    const editIdAtStart = deckEditCounterRef.current;
-    setIsAutoVerifying(true);
-    console.log(`[Auto-verify] Starting verification for ${slidesToVerify.length} slides`);
-
-    setVerifyingSlides(new Set(slidesToVerify.map(s => s.index)));
-
-    const verificationPromises = slidesToVerify.map(async ({ index, contentHash }) => {
-      try {
-        autoVerifyTriggeredRef.current.add(contentHash);
-        console.log(`[Auto-verify] Verifying slide ${index + 1} (hash: ${contentHash.substring(0, 8)}...)`);
-        await api.verifySlide(capturedSessionId, index);
-        console.log(`[Auto-verify] Slide ${index + 1} verified`);
-        return { index, success: true };
-      } catch (error) {
-        console.error(`[Auto-verify] Failed to verify slide ${index + 1}:`, error);
-        return { index, success: false, error };
-      }
-    });
-
-    const verificationResults = await Promise.all(verificationPromises);
-
-    if (sessionIdRef.current !== capturedSessionId) {
-      console.log('[Auto-verify] Session changed, discarding stale results');
-      setIsAutoVerifying(false);
-      setVerifyingSlides(new Set());
-      return;
-    }
-
-    // Failures already retried with backoff inside api.verifySlide (transient
-    // 5xx); whatever still failed gets a soft, actionable notice instead of
-    // dying silently in the console.
-    const failedVerifications = verificationResults.filter((r) => !r.success);
-    if (failedVerifications.length > 0) {
-      const failedNumbers = failedVerifications.map((r) => r.index + 1).join(', ');
-      showToast(
-        `Verification didn't complete for slide${failedVerifications.length > 1 ? 's' : ''} ${failedNumbers} — use the slide badge to retry.`,
-        'info',
-      );
-    }
-
-    try {
-      const result = await api.getSlides(capturedSessionId);
-      const currentDeck = slideDeckRef.current;
-      if (result.slide_deck && currentDeck && deckEditCounterRef.current === editIdAtStart) {
-        const serverSlides = result.slide_deck.slides || [];
-        const mergedSlides = currentDeck.slides.map((localSlide) => {
-          const match = serverSlides.find(
-            (s: { content_hash?: string }) => s.content_hash && s.content_hash === localSlide.content_hash
-          );
-          if (match?.verification) {
-            return { ...localSlide, verification: match.verification };
-          }
-          return localSlide;
-        });
-        onSlideChange?.({ ...currentDeck, slides: mergedSlides });
-      }
-    } catch (error) {
-      console.error('[Auto-verify] Failed to refresh verification:', error);
-    }
-
-    setVerifyingSlides(new Set());
-    setIsAutoVerifying(false);
-    console.log('[Auto-verify] Completed');
-
-    onVerificationComplete?.();
-  }, [sessionId, isAutoVerifying, onSlideChange, onVerificationComplete, showToast]);
-
-  useEffect(() => {
-    if (!slideDeck || !sessionId || isAutoVerifying) return;
-
-    const slidesNeedingVerification = slideDeck.slides
-      .map((slide, index) => ({
-        index,
-        slide,
-        contentHash: slide.content_hash || '',
-      }))
-      .filter(({ slide, contentHash }) => {
-        if (slide.verification) return false;
-        if (!contentHash) return false;
-        if (autoVerifyTriggeredRef.current.has(contentHash)) return false;
-        return true;
-      });
-
-    if (slidesNeedingVerification.length > 0) {
-      console.log(`[Auto-verify] Found ${slidesNeedingVerification.length} slides needing verification`);
-      runAutoVerification(slidesNeedingVerification);
-    }
-  }, [slideDeck, sessionId, isAutoVerifying, runAutoVerification]);
-
-  useEffect(() => {
-    autoVerifyTriggeredRef.current.clear();
-    setIsAutoVerifying(false);
-    setVerifyingSlides(new Set());
-  }, [sessionId]);
 
   if (!slideDeck) {
     return (

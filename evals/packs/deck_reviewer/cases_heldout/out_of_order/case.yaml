@@ -1,0 +1,8 @@
+kind: mutation
+fault: slides 2 and 4 swapped
+expect:
+  criteria:
+  - arc_gap
+  positions:
+  - -1
+design_system_active: true

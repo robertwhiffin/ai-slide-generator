@@ -10,6 +10,7 @@ Session access is controlled by:
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -22,6 +23,7 @@ from src.api.routes._authz import (
     _require_session_access,
 )
 from src.api.schemas.requests import CreateSessionRequest, DuplicateSessionRequest
+from src.api.services.chat_service import get_chat_service
 from src.api.services.session_manager import (
     SessionAccessDeniedError,
     SessionNotFoundError,
@@ -33,6 +35,14 @@ from src.core.permission_context import get_permission_context
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import UserSession
+from src.services.collaboration_history import (
+    authorized_collaboration_root,
+    get_collaboration_history,
+)
+from src.services.conversation_pins import (
+    ActiveGraphReleaseUnavailableError,
+    ConversationGraphReleaseIntegrityError,
+)
 from src.services.permission_service import (
     VALID_DECK_GLOBAL_PERMISSIONS,
     get_permission_service,
@@ -95,6 +105,7 @@ async def create_session(request: CreateSessionRequest = None):
             session_id=request.session_id,
             title=request.title,
             created_by=current_user,
+            graph_capable=request.graph_capable,
         )
 
         logger.info(
@@ -104,6 +115,12 @@ async def create_session(request: CreateSessionRequest = None):
 
         return result
 
+    except ActiveGraphReleaseUnavailableError as e:
+        logger.error(f"No active Graph Release available: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except Exception as e:
         logger.error(f"Failed to create session: {e}", exc_info=True)
         raise HTTPException(
@@ -302,6 +319,16 @@ async def set_deck_global_permission(
     )
 
 
+def _active_graph_release_exists(db: Session) -> bool:
+    """Whether any Graph Release is active (read-only; selects nothing)."""
+    from src.database.models.graph_configuration import GraphRelease
+
+    return (
+        db.query(GraphRelease.id).filter(GraphRelease.effective_to.is_(None)).first()
+        is not None
+    )
+
+
 @router.post("/{session_id}/contribute")
 async def get_or_create_contributor_session(
     session_id: str,
@@ -330,10 +357,19 @@ async def get_or_create_contributor_session(
     try:
         session_manager = get_session_manager()
 
-        # Get parent session to check permissions
-        parent_session = await asyncio.to_thread(
-            session_manager.get_session, session_id
-        )
+        # Get parent session to check permissions.  Its public projection needs
+        # an active release; with none it raises the projection's integrity
+        # error before the creator below can raise the typed one, so map exactly
+        # that case to the same typed refusal as every other creator (#271 Task
+        # 8).  Any other integrity fault stays a generic failure.
+        try:
+            parent_session = await asyncio.to_thread(
+                session_manager.get_session, session_id
+            )
+        except ConversationGraphReleaseIntegrityError as e:
+            if not _active_graph_release_exists(db):
+                raise ActiveGraphReleaseUnavailableError("no active Graph Release") from e
+            raise
 
         # Don't allow creating contributor session on your own session
         if parent_session.get("created_by") == current_user:
@@ -357,6 +393,11 @@ async def get_or_create_contributor_session(
 
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except HTTPException:
         raise
     except Exception as e:
@@ -365,6 +406,104 @@ async def get_or_create_contributor_session(
             status_code=500,
             detail="Failed to create contributor session",
         ) from e
+
+
+class CollaborationReleaseGroupResponse(BaseModel):
+    """One opaque contributor's mutations on one exact Graph Release.
+
+    Deliberately carries no actor session id, session name, collaboration UUID,
+    internal release id, pin, prompt, content, user id or principal. A null
+    ``graph_version`` means legacy / no graph release — never "active".
+    """
+
+    actor_label: str = Field(description="Response-local label, e.g. 'Contributor 1'")
+    graph_version: Optional[int] = Field(
+        description="Persisted Graph Version, or null for legacy / no graph release"
+    )
+    mutation_count: int = Field(description="Shared-deck mutations in this group")
+    last_mutation_at: datetime = Field(description="Most recent mutation in this group")
+
+
+class CollaborationHistoryResponse(BaseModel):
+    """Privacy-safe collaboration summary plus its grouped evidence."""
+
+    mixed_release_warning: bool = Field(
+        description="True only when two or more persisted non-null Graph Versions appear"
+    )
+    has_legacy_evidence: bool = Field(
+        description="True when any evidence has no persisted Graph Release"
+    )
+    groups: list[CollaborationReleaseGroupResponse]
+
+
+@router.get(
+    "/{session_id}/collaboration-history",
+    response_model=CollaborationHistoryResponse,
+)
+async def get_collaboration_history_for_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    """Grouped, privacy-safe collaboration history for a shared deck.
+
+    ``authorized_collaboration_root`` is the only entry lookup: it resolves the
+    requested session to its deck-owning root and authorizes the caller in one
+    statement. When it returns ``None`` — unknown id, unauthorized caller,
+    guessed contributor id, missing or deleted root, deckless root — this route
+    returns the byte-identical 404 that ``GET /api/sessions/{session_id}``
+    returns for an unknown id, before any history query runs. An unauthorized
+    real id and a fabricated id are therefore indistinguishable.
+
+    Args:
+        session_id: Root or contributor session ID.
+
+    Returns:
+        The two summary flags and the newest-first contributor/release groups.
+    """
+    current_user = get_current_user()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    permission_context = get_permission_context()
+
+    try:
+        root = await asyncio.to_thread(
+            authorized_collaboration_root,
+            db,
+            requested_session_id=session_id,
+            permission_context=permission_context,
+        )
+        if root is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Session not found: {session_id}",
+            )
+
+        warning, has_legacy, groups = await asyncio.to_thread(
+            get_collaboration_history, db, root=root
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get collaboration history: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get collaboration history",
+        ) from e
+
+    return CollaborationHistoryResponse(
+        mixed_release_warning=warning,
+        has_legacy_evidence=has_legacy,
+        groups=[
+            CollaborationReleaseGroupResponse(
+                actor_label=group.actor_label,
+                graph_version=group.graph_version,
+                mutation_count=group.mutation_count,
+                last_mutation_at=group.last_mutation_at,
+            )
+            for group in groups
+        ],
+    )
 
 
 @router.get("/{session_id}")
@@ -541,6 +680,11 @@ async def duplicate_session(
         )
     except SessionAccessDeniedError as e:
         raise HTTPException(status_code=403, detail=e.message) from e
+    except ActiveGraphReleaseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except HTTPException:
         raise
     except ValueError as e:
@@ -701,6 +845,57 @@ async def add_message(session_id: str, request: AddMessageRequest):
         raise HTTPException(
             status_code=500,
             detail="Failed to add message",
+        ) from e
+
+
+@router.delete("/{session_id}/context")
+async def clear_session_context(session_id: str):
+    """Clear the conversation context for a session, keeping the deck and its spec.
+
+    Drops the transcript and the graph checkpoint thread; keeps the slide deck,
+    ``deck_spec_json`` (the structured compaction of what was decided) and the
+    earliest user message, which is what engine-mode resolution reads.
+
+    Requires CAN_EDIT: the helper's default is CAN_VIEW, and taking the default
+    would let a **viewer** wipe another user's transcript and graph thread.
+
+    Args:
+        session_id: Session whose context to clear
+
+    Returns:
+        Clear confirmation with the number of messages deleted
+    """
+    # Permission check: require CAN_EDIT on the deck — NOT the helper's default.
+    await asyncio.to_thread(
+        _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
+    )
+
+    try:
+        chat_service = get_chat_service()
+        result = await asyncio.to_thread(chat_service.clear_context, session_id)
+
+        logger.info(
+            "Session context cleared via API",
+            extra={
+                "session_id": session_id,
+                "deleted_messages": result.get("deleted_messages"),
+            },
+        )
+
+        return result
+
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to clear session context: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to clear session context",
         ) from e
 
 

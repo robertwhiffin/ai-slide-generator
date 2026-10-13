@@ -1,0 +1,377 @@
+"""Graph assembly and the one entry point that runs a turn.
+
+The topology, which IS the product
+----------------------------------
+::
+
+    START           -------------> architect
+    architect       --conditional-> {discuss: END, ask_data: data_analyst,
+                                     build: foreman, edit: foreman,
+                                     confirm_design_contract: END}
+    data_analyst    --static------> architect
+    foreman         --conditional-> [slide_pipeline(Send), placeholder,
+                                     deck_reviewer, END]
+    slide_pipeline  --static------> foreman
+    placeholder     --static------> foreman
+    deck_reviewer   --static------> END
+
+Six nodes.  ``START``/``END`` are the imported sentinels, never the strings.
+
+Why one ``slide_pipeline`` per slide, not four fanned nodes — measured
+----------------------------------------------------------------------
+LangGraph runs in supersteps, and a superstep ends only when its slowest task
+does.  With ``builder``, ``build_reviewer``, ``fixer`` and ``fix_reviewer`` as
+separate nodes, a real 10-slide deck (local, real Gateway models, 2026-10-12)
+spent its time like this::
+
+    SS1      0- 55s  architect
+    SS3     55- 67s  builder x10          slide 0 done at 62s, waited to 67s
+    SS4     67-115s  build_reviewer x10   slide 0 done at 91s, waited to 115s
+    SS5-32 115-301s  foreman -> fixer -> fix_reviewer, x9, ONE AT A TIME
+    SS33   301-308s  deck_reviewer
+
+9 of 10 slides were flagged, and the fixer took the lowest pending position per
+superstep, so 186s of the 308s turn was a queue.  Fanning the fixers out with
+``Send`` removes the queue but not the barriers: every slide would still wait
+for the slowest builder, the slowest reviewer and the slowest fixer before it
+could land.  Folding each slide's whole chain into one task removes both; the
+only barrier left is the foreman's wake after the slowest whole chain, and a
+slide is committed (and visible to a polling client) the moment its own chain
+writes the row.
+
+Hazards this topology must keep closed, each pinned in
+``tests/unit/test_slide_pipeline.py``:
+
+* **Fan-in keys.**  A slide's fix state (``fix_map``, ``fix_target``,
+  ``fixed``) and the single-writer ``error_state`` never leave its pipeline;
+  every key a pipeline does return carries a reducer.
+* **The deck reviewer ran twice** when a branch with nothing to review woke the
+  foreman in the same superstep as its siblings' reviewers (measured on a
+  three-slide turn with one failed builder: SS4 held ``build_reviewer(0)``,
+  ``build_reviewer(2)`` AND ``foreman``, and deck review then fired in SS6 and
+  SS7).  Every pipeline now ends on the same static edge, so all of a batch's
+  branches reach the foreman together however they split, and it wakes once.
+* **Empty wakes** are unchanged: the foreman still records a wake on every
+  entry and the router still never recomputes the batch (see
+  ``foreman_router``).
+* **Exactly one fix round per slide** holds by construction — a pipeline runs
+  its fixer at most once — and ``in_flight`` remains the fixer's own guard.
+
+What still waits: a deck over ``CAP`` slides dispatches its next batch only when
+the whole previous batch's pipelines have finished, and the SSE transport (dev
+only — production polls) releases slides at the foreman's wakes, i.e. after the
+batch.  The polling transport reads committed rows, so it sees each slide as
+soon as its draft, and then its reviewed row, is written.
+
+Configuration
+-------------
+``thread_id`` is passed on every invoke — omitting it raises ``ValueError:
+Checkpointer requires one or more of the following 'configurable' keys``.
+``max_concurrency`` is ``CAP``, the belt to the scheduler's braces.  **No
+``recursion_limit``**: the installed default is 10007, and the superseded plan's
+~50 would have made the graph fail *earlier* than shipping no value.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import uuid
+from typing import Any, Callable, Dict, Optional
+
+from langgraph.graph import END, START, StateGraph
+from sqlalchemy import func, select
+from sqlalchemy.orm import aliased, sessionmaker
+
+from src.core.checkpointer import get_checkpointer
+from src.core.database import get_session_local
+from src.core.user_context import get_current_user
+from src.database.models.session import UserSession
+from src.services.conversation_pins import (
+    ConversationSessionNotFoundError,
+    load_conversation_pin,
+)
+from src.services.foreman_service import CAP
+from src.services.graph.event_emitter import (
+    set_chat_request_id,
+    set_event_emitter,
+)
+from src.services.graph.nodes import (
+    architect_node,
+    data_analyst_node,
+    deck_reviewer_node,
+    foreman_node,
+    placeholder_node,
+    reset_fix_slots,
+    slide_pipeline_node,
+)
+from src.services.graph.routers import (
+    architect_router,
+    foreman_router,
+)
+from src.services.graph.state import GraphState, scoped
+
+logger = logging.getLogger(__name__)
+
+_graph_lock = threading.Lock()
+_compiled_graph = None
+
+
+def build_graph(checkpointer: Any = None):
+    """Assemble and compile the graph.
+
+    Args:
+        checkpointer: Override for the shared checkpointer.  Production passes
+            nothing and gets ``get_checkpointer()``; a compiled-graph test suite
+            passes a file-backed SQLite saver (an in-memory saver on a
+            ``StaticPool`` hands two Pregel worker threads one connection and
+            segfaults the interpreter).
+
+    Returns:
+        The compiled graph.
+    """
+    graph = StateGraph(GraphState)
+
+    graph.add_node("architect", architect_node)
+    graph.add_node("data_analyst", data_analyst_node)
+    graph.add_node("foreman", foreman_node)
+    graph.add_node("slide_pipeline", slide_pipeline_node)
+    graph.add_node("placeholder", placeholder_node)
+    graph.add_node("deck_reviewer", deck_reviewer_node)
+
+    graph.add_edge(START, "architect")
+
+    # One conditional-edge set per node, and no static edge alongside it: a
+    # static add_edge from the same source gives duplicate conflicting edges and
+    # a GraphRecursionError.
+    graph.add_conditional_edges(
+        "architect",
+        architect_router,
+        {"data_analyst": "data_analyst", "foreman": "foreman", END: END},
+    )
+    graph.add_conditional_edges(
+        "foreman",
+        foreman_router,
+        {
+            "slide_pipeline": "slide_pipeline",
+            "placeholder": "placeholder",
+            "deck_reviewer": "deck_reviewer",
+            END: END,
+        },
+    )
+
+    graph.add_edge("data_analyst", "architect")
+    # Static, so every pipeline in a batch reaches the foreman in ONE superstep
+    # and it wakes once — see the module docstring.
+    graph.add_edge("slide_pipeline", "foreman")
+    graph.add_edge("placeholder", "foreman")
+    graph.add_edge("deck_reviewer", END)
+
+    return graph.compile(
+        checkpointer=checkpointer if checkpointer is not None else get_checkpointer()
+    )
+
+
+def get_graph():
+    """The process-wide compiled graph, built on first use."""
+    global _compiled_graph
+    if _compiled_graph is None:
+        with _graph_lock:
+            if _compiled_graph is None:
+                _compiled_graph = build_graph()
+    return _compiled_graph
+
+
+def load_collaboration_root(session_factory: sessionmaker, session_id: str) -> str:
+    """Return the ``session_id`` of the session that OWNS *session_id*'s deck.
+
+    One query and one hop.  ``UserSession.parent_session_id`` is NULL on a root
+    and points at the owner on a contributor session, and
+    ``SessionManager.get_or_create_contributor_session`` refuses to create a
+    contributor session on another contributor session, so the owner is always
+    exactly one hop away — the same single-hop
+    ``coalesce(parent_session_id, id)`` join the collaboration-history resolver
+    uses, and the reason Ruling C-16 withdrew the chain-walking variant.
+
+    Returns *session_id* itself for a root session, so an owner working on their
+    own deck traces root == actor.
+
+    **Fail-closed, exactly as ``authorized_collaboration_root`` is.**  The join
+    requires ``root.parent_session_id IS NULL``, so a hand-forced depth-2 row —
+    reachable only through raw SQL or a pre-guard legacy database — resolves to
+    NOTHING and raises, rather than naming the intermediate contributor as the deck
+    owner.  Without that predicate the **four** root resolvers disagree four ways
+    on such a row:
+
+    1. ``PermissionService._resolve_root_session`` — walks the full chain,
+       returns the real root.
+    2. ``authorized_collaboration_root`` (``collaboration_history.py:243``) —
+       returns ``None`` (fail-closed via ``IS NULL`` guard).
+    3. This function — raises (fail-closed via ``IS NULL`` guard).
+    4. ``SessionManager._get_deck_owner_session`` (``session_manager.py:926``)
+       — returns the **intermediate** contributor; has 32 call sites and
+       supplies ``deck_owner`` to every ``record_shared_deck_mutation`` call,
+       i.e. AC4's persisted root value.
+
+    A fifth site, ``conversation_pins.py:197``, inlines
+    ``coalesce(parent_session_id, id)`` unguarded (pre-existing, #261).
+
+    The consequence is nevertheless **benign**: the attribution seam
+    fail-closes independently on ``deck.session_id != deck_owner.id``
+    (``shared_deck_attribution.py:83-84``), so no mis-attributed evidence row
+    is constructible even from a hand-forced depth-2 row.  Recording a
+    non-root session as the owner is the one thing AC4 exists to prevent, and
+    that invariant is enforced — just by a different predicate than this
+    docstring once claimed (Ruling C-38).  C-16 justifies the one-hop join
+    *shape*; it does not license dropping the guard that makes the hop safe.
+
+    An absent conversation and a hand-forced depth-2 row are indistinguishable
+    here, and deliberately share one outcome: neither has a legal root, so neither
+    may run a turn.  The refusal lands before any node or writer, exactly as the
+    null-pin refusal does (Ruling C-3).
+    """
+    with session_factory() as db:
+        requested = aliased(UserSession)
+        root = aliased(UserSession)
+        owner_session_id = db.scalar(
+            select(root.session_id)
+            .select_from(requested)
+            .join(
+                root,
+                root.id == func.coalesce(requested.parent_session_id, requested.id),
+            )
+            .where(
+                requested.session_id == session_id,
+                root.parent_session_id.is_(None),
+            )
+        )
+        if owner_session_id is None:
+            raise ConversationSessionNotFoundError(session_id)
+        return owner_session_id
+
+
+def invoke_graph(
+    session_id: str,
+    initial: Optional[Dict[str, Any]] = None,
+    *,
+    emitter: Any = None,
+    principal: Optional[str] = None,
+    describe_only: bool = False,
+    request_id: Optional[str] = None,
+    pin_loader: Callable[[sessionmaker, str], int] = load_conversation_pin,
+    root_loader: Callable[[sessionmaker, str], str] = load_collaboration_root,
+) -> Dict[str, Any]:
+    """Run one turn of the graph for *session_id*.
+
+    Args:
+        session_id: The session whose deck this turn builds.  Also the
+            checkpointer's ``thread_id``, so turn 2 resumes the same thread and
+            the ``turn_id`` below is what resets turn-scoped state.
+        initial: Extra state to seed the turn with — in practice the user's
+            request on ``architect_message``.  Only keys ``GraphState`` declares
+            survive; the runtime silently drops the rest.
+        emitter: The caller's event queue, or ``None``.  Installed in a
+            ``ContextVar`` **before** ``invoke`` so it is live for the whole turn,
+            including inside every ``Send``-fanned branch.  With ``None`` nodes
+            skip emission and must not raise: emission is an optional side
+            channel, never a precondition for building a deck.
+        principal: The acting user, for callers with no request context (ws4d's
+            sweeper passes the marker's ``spec_dirty_by``).
+        describe_only: When true, a ``build`` or ``edit`` intent **ends the turn**
+            instead of routing to the foreman — see ``architect_router``.  ws4d's
+            arc-review sweeper passes it: that turn exists to re-describe the
+            deck a human hand-edited, and dispatching builders would overwrite
+            the very edits that scheduled it.
+        request_id: The ``ChatRequest.request_id`` this turn is answering, or
+            ``None``.  Bound in a ``ContextVar`` so a node persisting a chat
+            message can TAG it: ``GET /chat/poll`` reads a turn's assistant text
+            through ``get_messages_for_request``, which filters on that column,
+            so an untagged row is invisible to every polling client — the
+            transport the deployed app uses.  ``None`` is correct on the SSE path
+            (no request row exists) and on the sweeper (no request at all); those
+            rows are still durable and still reach ``_conversation``.
+
+    ``describe_only`` is turn-scoped, and it is wrapped HERE because this is the
+    only place that knows ``turn_id``.  It is written on **every** invocation,
+    ``False`` included, for the same reason the emitter is: turn state
+    accumulates across a thread, so a flag left from an earlier turn would
+    otherwise still read ``True`` and silently bar every later build on that
+    deck.  Belt and braces — ``scoped_vals`` also discards a wrapper whose turn
+    is not this one, so both the write and the read are turn-bounded.
+
+    A fresh ``turn_id`` is minted per turn — it is the discriminator every
+    turn-scoped reducer compares, so reusing one would let turn 2 inherit turn
+    1's landed positions and go straight to deck review having built nothing.
+
+    The collaboration trace is resolved **once**, here, for the same reason:
+    ``actor_session_id`` is this session and ``root_session_id`` is the session
+    that owns the deck, so a contributor's turn on a shared deck records
+    root = owner and actor = contributor at every handoff.  Both are written
+    AFTER the caller's ``initial``, so a seeded root or actor is overwritten
+    rather than trusted.  **Neither ID selects the release** — the actor's
+    persisted pin, loaded above, does — so a contributor pinned to R2 runs R2 on
+    an owner's R1 deck, which is the entire point of the mixed-release epic.
+
+    ``principal or get_current_user()`` is resolved **once**, here, into
+    ``initiated_by``, and every node reads it from state.  A node calling
+    ``get_current_user()`` itself works today and breaks the first time the graph
+    is invoked from a bare thread — and ``write_slide`` with
+    ``modified_by=None`` leaves the author NULL on an INSERT, silently.
+
+    The emitter is set on every invocation, ``None`` included: that is the reset
+    a turn resumed in a new process needs, or events queue into the first
+    process's queue forever.  ``request_id`` is set unconditionally for the same
+    reason, and the failure it prevents is worse than a lost event: a stale id
+    left in the var would tag turn 2's chat rows with turn 1's request, so turn
+    1's poll would receive turn 2's reply and turn 2's own poll would never see
+    it.
+    """
+    # The pin FIRST, and that order is load-bearing (Ruling C-3): a legacy
+    # conversation with no persisted release must raise
+    # ConversationPinMissingError here, before any node runs, any row is written
+    # and any mutation event is recorded.  ws4d's sweeper catches that failure,
+    # releases its claim and leaves the marker queued and retryable.  Resolving
+    # the owner first would spend a query on a turn that cannot legally run.
+    graph_release_id = pin_loader(get_session_local(), session_id)
+    root_session_id = root_loader(get_session_local(), session_id)
+    turn_id = uuid.uuid4().hex
+    initiated_by = principal or get_current_user()
+
+    set_event_emitter(emitter)
+    set_chat_request_id(request_id)
+    # Per turn, like the emitter: concurrent turns must not share one budget of
+    # FIX_CONCURRENCY fix rounds.
+    reset_fix_slots()
+
+    state: Dict[str, Any] = dict(initial or {})
+    state.update(
+        {
+            "session_id": session_id,
+            "graph_release_id": graph_release_id,
+            "turn_id": turn_id,
+            "initiated_by": initiated_by,
+            # AFTER dict(initial), so a caller-seeded root or actor is
+            # OVERWRITTEN rather than trusted.  The actor is this session by
+            # definition — thread_id is session_id — and the root is whatever the
+            # database says owns the deck.
+            "root_session_id": root_session_id,
+            "actor_session_id": session_id,
+            "describe_only": scoped(turn_id, bool(describe_only)),
+        }
+    )
+
+    config = {
+        "configurable": {"thread_id": session_id},
+        "max_concurrency": CAP,
+    }
+
+    logger.info(
+        "Invoking deck graph",
+        extra={
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "has_emitter": emitter is not None,
+            "describe_only": bool(describe_only),
+        },
+    )
+    return get_graph().invoke(state, config)

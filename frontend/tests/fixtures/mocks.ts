@@ -2,6 +2,52 @@
  * Mock data for API responses based on observed network traffic.
  * These mocks simulate the backend responses for testing.
  */
+import type {
+  ActiveRelease,
+  AgentDefinitionWorkbenchResponse,
+  AgentKey,
+  AgentReadiness,
+  AssemblyRulesV1,
+  AssemblyRulesV2,
+  CanonicalFieldDescriptor,
+  ContentIdentity,
+  DraftDefinition,
+  DraftReadiness,
+  DraftSaveConflictResponse,
+  DraftSaveRequest,
+  DraftSaveSuccessResponse,
+  DraftValidationErrorResponse,
+  FieldDescriptor,
+  LegacyPromptSourceResponse,
+  ModelAgentNode,
+  ProtectedStageView,
+  SystemModelEndpoint,
+  TestCaseListEntry,
+  TestCaseReadiness,
+  TestRunEvidence,
+  ChangedDefinitionPreview,
+  DraftFieldError,
+  DraftMetadata,
+  NothingToPublishResponse,
+  PublicationGap,
+  PublicationNotReadyResponse,
+  PublicationValidationErrorResponse,
+  PublishReleaseSuccessResponse,
+  ReleaseFieldDiff,
+  ReleasePreviewResponse,
+  StalePublicationResponse,
+  AgentComparison,
+  DraftEffect,
+  ReleaseComparisonResponse,
+  ReleaseDetailResponse,
+  ReleaseHistoryEntry,
+  ReleaseHistoryListResponse,
+  RollbackIncompatibleResponse,
+  RollbackPreviewResponse,
+  RollbackSuccessResponse,
+  RollbackValidationErrorResponse,
+  StaleRollbackResponse,
+} from '../../src/api/agentDefinitions';
 
 // Profiles endpoint returns an array directly (GET /api/profiles)
 export const mockProfiles = [
@@ -882,4 +928,1443 @@ export function createStreamingResponse(slides: typeof mockSlides): string {
   events.push('data: {"type": "complete", "message": "Generation complete"}\n\n');
 
   return events.join('');
+}
+
+// ============================================
+// Agent Definition Workbench Mocks
+// ============================================
+
+const mockAssemblyRules = {
+  format_version: 1,
+  separator: "\n\n",
+  blocks: [
+    { kind: "authored_prompt", condition: "always" },
+    { kind: "protected", name: "slide_frame_constraints", condition: "design_system_inactive" },
+    { kind: "protected", name: "design_system_precedence", condition: "design_system_active" },
+    { kind: "payload_json", condition: "always", indent: 2, default: "str" },
+    {
+      kind: "structured_output_binding",
+      condition: "always",
+      binding: "langchain.with_structured_output",
+      terminal: true,
+    },
+  ],
+} satisfies AssemblyRulesV1;
+
+export const V1_PROTECTED_IDENTITY = { version: 1, digest: "b".repeat(64) } satisfies ContentIdentity;
+export const V2_PROTECTED_IDENTITY = { version: 2, digest: "e".repeat(64) } satisfies ContentIdentity;
+
+/** v2 schema contract identity used in schema-contract-upgrade fixtures. */
+export const V2_SCHEMA_CONTRACT_IDENTITY = { version: 2, digest: "d".repeat(64) } satisfies ContentIdentity;
+
+/**
+ * The seven roles' `diagnostic_notes` descriptors, in the seven-role order, exactly as
+ * the server's registry emits them. Written as strict JSON (double quotes, no trailing
+ * commas, no comments) because
+ * `test_client_diagnostic_notes_fixture_is_the_server_descriptor_for_all_seven_roles`
+ * (`tests/unit/test_agent_definition_workbench_routes.py`) reads this block as text and
+ * joins it to the live route output.
+ */
+export const DIAGNOSTIC_NOTES_DESCRIPTORS: Record<AgentKey, FieldDescriptor> = {
+  "architect": {"name": "diagnostic_notes", "description": "Concise assumptions or ambiguities that influenced the selected intent; never substitute for `message`, `deck_spec`, `data_request`, targets, or a design proposal.", "examples": ["Assumed the request refers to the existing Q2 deck; no target slide numbers were supplied."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "data_analyst": {"name": "diagnostic_notes", "description": "Concise retrieval limitations, source disagreement, or interpretation assumptions; never replace `outcome`, `synthesis`, `sources`, `gap`, `reason`, or `tried_tools`.", "examples": ["The two sources use different fiscal calendars; synthesis compares calendar-quarter totals."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "builder": {"name": "diagnostic_notes", "description": "Concise non-executable rendering/design trade-offs or unavailable inputs; never contain HTML, scripts, image IDs, or a substitute for canonical slide output.", "examples": ["No supplied image IDs; used a text-and-chart composition."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "build_reviewer": {"name": "diagnostic_notes", "description": "Concise review-scope/evidence notes; never hide, replace, or add a finding outside canonical `findings`.", "examples": ["Contrast was assessed against the resolved style tokens supplied in this invocation."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "fixer": {"name": "diagnostic_notes", "description": "Concise reason for a narrowly limited or declined attempted fix; never replace `changed` or `change_summary`.", "examples": ["Did not alter the chart because the reported issue concerns only title overflow."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "fix_reviewer": {"name": "diagnostic_notes", "description": "Concise evidence about whether the original issue was resolved or a review limitation; never replace the canonical verdict/findings.", "examples": ["Verified the original overflow against the corrected title container."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}},
+  "deck_reviewer": {"name": "diagnostic_notes", "description": "Concise deck-level review scope/limitations; never replace deck findings or introduce slide-level findings.", "examples": ["Narrative assessment used the supplied slide sequence; no presenter notes were available."], "schema": {"type": ["array", "null"], "default": null, "max_items": 8, "items": {"type": "string", "strip_whitespace": true, "min_length": 1, "max_length": 280}}}
+};
+
+/** The architect's descriptor, kept as a named sample for single-role tests. */
+export const DIAGNOSTIC_NOTES_DESCRIPTOR: FieldDescriptor = DIAGNOSTIC_NOTES_DESCRIPTORS.architect;
+
+/**
+ * Each role's code-owned canonical output fields, in the seven-role order and in model
+ * field order, exactly as the server derives them for display. Strict JSON for the same
+ * reason as above: `test_client_canonical_field_fixture_is_the_server_display_data`
+ * reads this block as text and joins it to the live route output.
+ */
+export const CANONICAL_FIELD_DESCRIPTORS: Record<AgentKey, CanonicalFieldDescriptor[]> = {
+  "architect": [
+    {"name": "intent", "type": "string", "required": true, "enum": ["discuss", "ask_data", "build", "edit", "confirm_design_contract"]},
+    {"name": "message", "type": "string", "required": true, "enum": null},
+    {"name": "deck_spec", "type": "DeckSpec | null", "required": false, "enum": null, "default": null},
+    {"name": "data_request", "type": "DataRequest | null", "required": false, "enum": null, "default": null},
+    {"name": "target_positions", "type": "array<integer>", "required": false, "enum": null, "default": []},
+    {"name": "proposed_design_contract", "type": "DesignContractRef | null", "required": false, "enum": null, "default": null}
+  ],
+  "data_analyst": [
+    {"name": "outcome", "type": "string", "required": true, "enum": ["success", "missing_data", "no_tool"]},
+    {"name": "synthesis", "type": "string | null", "required": false, "enum": null, "default": null},
+    {"name": "sources", "type": "array<string> | null", "required": false, "enum": null, "default": null},
+    {"name": "gap", "type": "string | null", "required": false, "enum": null, "default": null},
+    {"name": "tried_tools", "type": "array<string>", "required": false, "enum": null, "default": []},
+    {"name": "reason", "type": "string | null", "required": false, "enum": null, "default": null}
+  ],
+  "builder": [
+    {"name": "position", "type": "integer", "required": true, "enum": null},
+    {"name": "html", "type": "string", "required": true, "enum": null},
+    {"name": "scripts", "type": "string", "required": false, "enum": null, "default": ""}
+  ],
+  "build_reviewer": [
+    {"name": "slide_index", "type": "integer", "required": true, "enum": null},
+    {"name": "verdict", "type": "string", "required": true, "enum": ["clean", "fixed", "surfaced"]},
+    {"name": "findings", "type": "array<Finding>", "required": false, "enum": null, "default": []}
+  ],
+  "fixer": [
+    {"name": "position", "type": "integer", "required": true, "enum": null},
+    {"name": "html", "type": "string", "required": true, "enum": null},
+    {"name": "scripts", "type": "string", "required": false, "enum": null, "default": ""},
+    {"name": "changed", "type": "boolean", "required": true, "enum": null},
+    {"name": "change_summary", "type": "string", "required": false, "enum": null, "default": ""}
+  ],
+  "fix_reviewer": [
+    {"name": "slide_index", "type": "integer", "required": true, "enum": null},
+    {"name": "verdict", "type": "string", "required": true, "enum": ["clean", "fixed", "surfaced"]},
+    {"name": "findings", "type": "array<Finding>", "required": false, "enum": null, "default": []}
+  ],
+  "deck_reviewer": [
+    {"name": "findings", "type": "array<Finding>", "required": false, "enum": null, "default": []}
+  ]
+};
+
+/**
+ * The exact ordered 422 the schema-contract-upgrade route returns for an already-current
+ * contract. The field is the server's unprefixed `schema_contract` (correction 18), and
+ * `test_client_schema_already_current_fixture_is_the_server_issue`
+ * (`tests/unit/test_prompt_assembler.py`) joins this triple to the server literal.
+ */
+export const SCHEMA_ALREADY_CURRENT_REJECTION: DraftValidationErrorResponse = {
+  code: 'invalid_draft',
+  errors: [
+    {
+      field: 'schema_contract',
+      code: 'already_current',
+      message: 'Schema contract is already current.',
+    },
+  ],
+};
+
+export const EMPTY_V2_ASSEMBLY_RULES = {
+  format_version: 2,
+  custom_blocks: [],
+} satisfies AssemblyRulesV2;
+
+/**
+ * The exact protected-stage rows the Task 4 route derives for each bundle. Stage
+ * identities, labels, conditions, and legal anchors mirror the server contract;
+ * every `display_text` is a synthetic fixture value, which is what proves the
+ * client renders server bytes instead of reconstructing protected text.
+ */
+function environmentStagesForRole<T extends { stage_id: string }>(
+  agentKey: AgentKey,
+  rows: T[],
+): T[] {
+  // Mirrors src/services/prompt_assembler.py's role scoping: frame constraints
+  // go to the roles that emit or judge layout, design-system precedence to the
+  // roles that plan or emit styling.
+  const frameRoles: AgentKey[] = ["builder", "fixer", "build_reviewer", "fix_reviewer"];
+  const precedenceRoles: AgentKey[] = ["architect", "builder", "fixer"];
+  return rows.filter((row) => {
+    if (row.stage_id === "slide_frame_constraints") return frameRoles.includes(agentKey);
+    if (row.stage_id === "design_system_precedence") return precedenceRoles.includes(agentKey);
+    return true;
+  });
+}
+
+function v1ProtectedStageView(agentKey: AgentKey): ProtectedStageView[] {
+  const locked = { locked: true, bundle_version: 1, bundle_digest: V1_PROTECTED_IDENTITY.digest } as const;
+  const rows: ProtectedStageView[] = [];
+  if (agentKey === "build_reviewer") {
+    rows.push({
+      stage_id: "build_reviewer_deck_brief",
+      label: "Deck-brief re-review",
+      condition: "payload_has_deck_brief",
+      display_text: "Synthetic v1 deck-brief re-review text.",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    });
+  }
+  rows.push(
+    {
+      stage_id: "slide_frame_constraints",
+      label: "Slide frame constraints",
+      condition: "design_system_inactive",
+      display_text: "Synthetic v1 slide frame constraints text.",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "design_system_precedence",
+      label: "Design system precedence",
+      condition: "design_system_active",
+      display_text: "Synthetic v1 design system precedence text.",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "runtime_payload",
+      label: "Graph Version 1 runtime payload",
+      condition: "always",
+      display_text: "json.dumps(payload, indent=2, default=str)",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "structured_output_binding",
+      label: "Structured-output binding",
+      condition: "always",
+      display_text: "langchain.with_structured_output",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+  );
+  return environmentStagesForRole(agentKey, rows);
+}
+
+export function v2ProtectedStageView(agentKey: AgentKey): ProtectedStageView[] {
+  const locked = { locked: true, bundle_version: 2, bundle_digest: V2_PROTECTED_IDENTITY.digest } as const;
+  const rows: ProtectedStageView[] = [];
+  if (agentKey === "build_reviewer") {
+    rows.push(
+      {
+        stage_id: "build_reviewer_criteria",
+        label: "Build Reviewer criteria",
+        condition: "always",
+        display_text: "Synthetic v2 Build Reviewer criteria text.",
+        legal_adjacent_custom_anchors: [],
+        ...locked,
+      },
+      {
+        stage_id: "build_reviewer_deck_brief",
+        label: "Deck-brief re-review",
+        condition: "payload_has_deck_brief",
+        display_text: "Synthetic v2 deck-brief re-review text.",
+        legal_adjacent_custom_anchors: ["after_deck_brief"],
+        ...locked,
+      },
+    );
+  }
+  rows.push(
+    {
+      stage_id: "slide_frame_constraints",
+      label: "Slide frame constraints",
+      condition: "design_system_inactive",
+      display_text: "Synthetic v2 slide frame constraints text.",
+      legal_adjacent_custom_anchors: ["after_environment_constraints"],
+      ...locked,
+    },
+    {
+      stage_id: "design_system_precedence",
+      label: "Design system precedence",
+      condition: "design_system_active",
+      display_text: "Synthetic v2 design system precedence text.",
+      legal_adjacent_custom_anchors: ["after_environment_constraints"],
+      ...locked,
+    },
+    {
+      stage_id: "untrusted_data_notice",
+      label: "Role-specific untrusted-data notice",
+      condition: "always",
+      display_text: `Synthetic v2 untrusted-data notice for ${agentKey}.`,
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "untrusted_data_open",
+      label: "Untrusted-data opening delimiter",
+      condition: "always",
+      display_text: "<<<UNTRUSTED_DATA>>>",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "runtime_payload",
+      label: "Canonical runtime payload",
+      condition: "always",
+      display_text: "json.dumps(payload, indent=2, default=str, sort_keys=True)",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "untrusted_data_close",
+      label: "Untrusted-data closing delimiter",
+      condition: "always",
+      display_text: "<<<END_UNTRUSTED_DATA>>>",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+    {
+      stage_id: "structured_output_binding",
+      label: "Structured-output binding",
+      condition: "always",
+      display_text: "langchain.with_structured_output",
+      legal_adjacent_custom_anchors: [],
+      ...locked,
+    },
+  );
+  return environmentStagesForRole(agentKey, rows);
+}
+
+const workbenchAgentNames = [
+  ["architect", "Architect"],
+  ["data_analyst", "Data Analyst"],
+  ["builder", "Builder"],
+  ["build_reviewer", "Build Reviewer"],
+  ["fixer", "Fixer"],
+  ["fix_reviewer", "Fix Reviewer"],
+  ["deck_reviewer", "Deck Reviewer"],
+] as const;
+
+const mockModelNodes = workbenchAgentNames.map(([agentKey, displayName], index) => {
+  const definition = {
+    definition_version: 2,
+    prompt_text: `Synthetic ${displayName} prompt — exact fixture value.`,
+    model: {
+      endpoint_name: "databricks-claude-opus-4-6",
+      temperature: 0.7,
+      max_tokens: 60000,
+      top_p: 0.95,
+    },
+    schema_overlay: {
+      field_overrides: agentKey === "architect" ? { title: { description: "Synthetic title override" } } : {},
+      additional_optional_fields: agentKey === "architect" ? ["speaker_notes"] : [],
+    },
+    assembly_rules: mockAssemblyRules,
+    protected_assembly: structuredClone(V1_PROTECTED_IDENTITY),
+    schema_contract: { version: 1, digest: "c".repeat(64) },
+    protected_stage_view: v1ProtectedStageView(agentKey),
+    selectable_optional_fields: [],
+    canonical_fields: structuredClone(CANONICAL_FIELD_DESCRIPTORS[agentKey]),
+  };
+
+  return {
+    agent_key: agentKey,
+    display_name: displayName,
+    execution_kind: "model",
+    editable: true,
+    changed: false,
+    published: {
+      revision_id: index + 11,
+      content_hash: "a".repeat(64),
+      ...definition,
+    },
+    draft: {
+      base_revision_id: index + 11,
+      candidate_hash: "a".repeat(64),
+      ...definition,
+    },
+    read_only_reason: null,
+  } satisfies ModelAgentNode;
+});
+
+export const syntheticDraftDefinitions = Object.fromEntries(
+  mockModelNodes.map((node) => [node.agent_key, structuredClone(node.draft)]),
+) as unknown as Record<AgentKey, DraftDefinition>;
+
+export const syntheticDraftSaveRequest = {
+  lock_version: 0,
+  candidate: {
+    prompt_text: 'Synthetic Architect edited prompt.',
+    model: {
+      endpoint_name: 'databricks-claude-opus-4-6',
+      temperature: 0.7,
+      max_tokens: 60000,
+      top_p: 0.95,
+    },
+  },
+} satisfies DraftSaveRequest;
+
+/** Complete Task 4 wire shape used by both component and browser tests. */
+export const syntheticAgentDefinitionWorkbench = {
+  active_release: {
+    release_id: 41,
+    version_number: 1,
+    previous_release_id: null,
+    restored_from_release_id: null,
+    release_note: "Bootstrap current code-owned Agent Definitions",
+    published_by: "system:bootstrap",
+    published_at: "2026-09-21T12:00:00Z",
+    effective_from: "2026-09-21T12:00:00Z",
+    effective_to: null,
+  },
+  draft: {
+    draft_id: 1,
+    base_release_id: 41,
+    base_version_number: 1,
+    lock_version: 0,
+    updated_by: "system:bootstrap",
+    updated_at: "2026-09-21T12:00:00Z",
+  },
+  nodes: [
+    mockModelNodes[0],
+    mockModelNodes[1],
+    mockModelNodes[2],
+    mockModelNodes[3],
+    {
+      agent_key: "foreman",
+      display_name: "Foreman",
+      execution_kind: "deterministic",
+      editable: false,
+      changed: false,
+      published: null,
+      draft: null,
+      read_only_reason: "Foreman is deterministic scheduling and routing code; it has no Agent Definition.",
+    },
+    mockModelNodes[4],
+    mockModelNodes[5],
+    mockModelNodes[6],
+  ],
+} satisfies AgentDefinitionWorkbenchResponse;
+
+export function syntheticDraftSaveSuccess(
+  agentKey: AgentKey,
+  request: DraftSaveRequest,
+  lockVersion: number,
+): DraftSaveSuccessResponse {
+  const definition = syntheticDraftDefinitions[agentKey];
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+      updated_by: 'admin@test.com',
+      updated_at: `2026-09-22T12:00:0${lockVersion}Z`,
+    },
+    definition: {
+      ...structuredClone(definition),
+      prompt_text: request.candidate.prompt_text,
+      model: structuredClone(request.candidate.model),
+      candidate_hash: 'd'.repeat(64),
+    },
+    changed: true,
+  };
+}
+
+export function syntheticDraftSaveConflict(
+  request: DraftSaveRequest,
+  promptEdits: Partial<Record<AgentKey, string>> = {},
+  currentLockVersion = 1,
+): DraftSaveConflictResponse {
+  const definitions = structuredClone(syntheticDraftDefinitions);
+  for (const [agentKey, promptText] of Object.entries(promptEdits) as Array<[AgentKey, string]>) {
+    definitions[agentKey] = {
+      ...definitions[agentKey],
+      prompt_text: promptText,
+      candidate_hash: 'd'.repeat(64),
+    };
+  }
+  return {
+    code: 'stale_draft',
+    expected_lock_version: request.lock_version,
+    current_lock_version: currentLockVersion,
+    client_candidate: structuredClone(request.candidate),
+    server: {
+      draft: {
+        ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+        lock_version: currentLockVersion,
+      },
+      definitions,
+    },
+  };
+}
+
+// ============================================
+// #265 protected-assembly upgrade and legacy-source fixtures
+// ============================================
+
+/** The two roles whose Graph Version 1 prompt is a protected legacy composite. */
+export const LEGACY_COMPOSITE_ROLES = ['data_analyst', 'build_reviewer'] as const;
+
+/** Exact server-authored v2 targets. The client may never derive these. */
+export const V2_AUTHORED_PROMPT: Record<AgentKey, string> = {
+  architect: 'Synthetic Architect authored-only v2 prompt.',
+  data_analyst: 'Synthetic Data Analyst authored-only v2 prompt.',
+  builder: 'Synthetic Builder authored-only v2 prompt.',
+  build_reviewer: 'Synthetic Build Reviewer authored-only v2 prompt.',
+  fixer: 'Synthetic Fixer authored-only v2 prompt.',
+  fix_reviewer: 'Synthetic Fix Reviewer authored-only v2 prompt.',
+  deck_reviewer: 'Synthetic Deck Reviewer authored-only v2 prompt.',
+};
+
+/**
+ * An edited legacy prompt with a combining mark, a non-breaking space, a trailing
+ * space, and a trailing newline, so byte-exact retention is observable.
+ */
+export const DIRTY_LEGACY_PROMPT = 'Edited énonce legacy composite \n';
+
+/** The exact published Graph Version 1 prompt the source route returns. */
+export const PUBLISHED_V1_PROMPT_SOURCE: Record<'data_analyst' | 'build_reviewer', string> = {
+  data_analyst: 'Synthetic published Data Analyst Graph Version 1 composite prompt.',
+  build_reviewer: 'Synthetic published Build Reviewer Graph Version 1 composite prompt.',
+};
+
+/** A definition already migrated to the v2 protected bundle and v2 rules. */
+export function syntheticV2DraftDefinition(
+  agentKey: AgentKey,
+  overrides: Partial<DraftDefinition> = {},
+): DraftDefinition {
+  return {
+    ...structuredClone(syntheticDraftDefinitions[agentKey]),
+    prompt_text: V2_AUTHORED_PROMPT[agentKey],
+    assembly_rules: structuredClone(EMPTY_V2_ASSEMBLY_RULES),
+    protected_assembly: structuredClone(V2_PROTECTED_IDENTITY),
+    protected_stage_view: v2ProtectedStageView(agentKey),
+    candidate_hash: 'f'.repeat(64),
+    ...structuredClone(overrides) as Partial<DraftDefinition>,
+  };
+}
+
+/**
+ * A draft definition with a v2 schema contract and one selectable optional field
+ * (diagnostic_notes). Produced by a successful schema-contract-upgrade.
+ */
+export function syntheticSchemaV2DraftDefinition(
+  agentKey: AgentKey,
+  overrides: Partial<DraftDefinition> = {},
+): DraftDefinition {
+  return {
+    ...structuredClone(syntheticDraftDefinitions[agentKey]),
+    schema_contract: structuredClone(V2_SCHEMA_CONTRACT_IDENTITY),
+    schema_overlay: { field_overrides: {}, additional_optional_fields: [] },
+    selectable_optional_fields: [structuredClone(DIAGNOSTIC_NOTES_DESCRIPTORS[agentKey])],
+    candidate_hash: '4'.repeat(64),  // valid hex (only 0-9, a-f allowed)
+    ...structuredClone(overrides) as Partial<DraftDefinition>,
+  };
+}
+
+/** The 200 body the schema-contract-upgrade route returns. */
+export function syntheticSchemaUpgradeSuccess(
+  agentKey: AgentKey,
+  lockVersion: number,
+  definitionOverrides: Partial<DraftDefinition> = {},
+): DraftSaveSuccessResponse {
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+      updated_by: 'admin@example.com',
+      updated_at: `2026-09-22T14:00:0${lockVersion}Z`,
+    },
+    definition: syntheticSchemaV2DraftDefinition(agentKey, definitionOverrides),
+    changed: true,
+  };
+}
+
+/** The 200 body the protected-assembly-upgrade route returns. */
+export function syntheticUpgradeSuccess(
+  agentKey: AgentKey,
+  lockVersion: number,
+  definitionOverrides: Partial<DraftDefinition> = {},
+): DraftSaveSuccessResponse {
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+      updated_by: 'admin@example.com',
+      updated_at: `2026-09-22T13:00:0${lockVersion}Z`,
+    },
+    definition: syntheticV2DraftDefinition(agentKey, definitionOverrides),
+    changed: true,
+  };
+}
+
+/**
+ * A 409 for an operation that submitted no candidate. `client_candidate` is exactly
+ * `null`; `v2Roles` names the roles the winning writer already moved to v2.
+ */
+export function syntheticNullCandidateConflict(
+  expectedLockVersion: number,
+  currentLockVersion: number,
+  v2Roles: readonly AgentKey[] = [],
+): DraftSaveConflictResponse {
+  const definitions = structuredClone(syntheticDraftDefinitions);
+  for (const agentKey of v2Roles) definitions[agentKey] = syntheticV2DraftDefinition(agentKey);
+  return {
+    code: 'stale_draft',
+    expected_lock_version: expectedLockVersion,
+    current_lock_version: currentLockVersion,
+    client_candidate: null,
+    server: {
+      draft: {
+        ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+        lock_version: currentLockVersion,
+      },
+      definitions,
+    },
+  };
+}
+
+/** The 200 body the legacy-prompt-source route returns; this route never writes. */
+export function syntheticLegacyPromptSource(
+  agentKey: 'data_analyst' | 'build_reviewer',
+  lockVersion = 0,
+): LegacyPromptSourceResponse {
+  return {
+    draft: {
+      ...structuredClone(syntheticAgentDefinitionWorkbench.draft),
+      lock_version: lockVersion,
+    },
+    agent_key: agentKey,
+    lock_version: lockVersion,
+    source: {
+      prompt_text: PUBLISHED_V1_PROMPT_SOURCE[agentKey],
+      revision_id: 12,
+      content_hash: 'a'.repeat(64),
+    },
+  };
+}
+
+/** The exact ordered 422 the upgrade route returns for an edited legacy prompt. */
+export const MANUAL_RESOLUTION_REJECTION: DraftValidationErrorResponse = {
+  code: 'invalid_draft',
+  errors: [
+    {
+      field: 'prompt_text',
+      code: 'legacy_prompt_manual_resolution_required',
+      message: 'Legacy protected prompt content was edited. Restore the exact Graph Version 1 '
+        + 'prompt before upgrading, then reapply authored edits.',
+    },
+  ],
+};
+
+/** The exact ordered 422 the upgrade route returns for an already-current draft. */
+export const ALREADY_CURRENT_REJECTION: DraftValidationErrorResponse = {
+  code: 'invalid_draft',
+  errors: [
+    {
+      field: 'protected_assembly.version',
+      code: 'already_current',
+      message: 'Protected assembly is already current.',
+    },
+  ],
+};
+
+// ============================================================
+// #266 model endpoint discovery (GET /api/admin/agent-definitions/model-endpoints)
+// ============================================================
+
+/** The exact seed endpoint every packaged role starts on. */
+export const SEED_MODEL_ENDPOINT_NAME = 'databricks-claude-opus-4-6';
+
+/**
+ * A populated discovery list in backend order. The second item's display name differs
+ * from its exact name, and the third keeps an exotic spelling with spaces, so a client
+ * that selects anything but `name` byte-for-byte is observable.
+ */
+export const syntheticSystemModelEndpoints: SystemModelEndpoint[] = [
+  {
+    name: 'databricks-claude-opus-4-6',
+    display_name: 'Claude Opus 4.6',
+    description: 'Synthetic frontier chat model.',
+    docs: 'https://docs.example.invalid/claude-opus-4-6',
+  },
+  {
+    name: 'databricks-gpt-oss-120b',
+    display_name: 'GPT OSS 120B',
+    description: 'Synthetic open-weight chat model.',
+    docs: null,
+  },
+  {
+    name: 'Team Shared Endpoint (EU)',
+    display_name: null,
+    description: null,
+    docs: null,
+  },
+  {
+    name: 'system.ai.endpoint-a2',
+    display_name: null,
+    description: null,
+    docs: null,
+  },
+  {
+    name: 'system.ai.endpoint-b',
+    display_name: null,
+    description: null,
+    docs: null,
+  },
+];
+
+/** A newer family member that a refresh may expose; it must never move the seed. */
+export const syntheticNewerModelEndpoint: SystemModelEndpoint = {
+  name: 'databricks-claude-opus-4-7',
+  display_name: 'Claude Opus 4.7',
+  description: 'Synthetic newer frontier chat model.',
+  docs: 'https://docs.example.invalid/claude-opus-4-7',
+};
+
+export function syntheticModelEndpointDiscovery(
+  items: SystemModelEndpoint[] = syntheticSystemModelEndpoints,
+): { items: SystemModelEndpoint[] } {
+  return { items: structuredClone(items) };
+}
+
+/** The exact 403 envelope the discovery route returns for a forbidden identity. */
+export const MODEL_ENDPOINT_DISCOVERY_FORBIDDEN = {
+  code: 'catalog_forbidden',
+  message: 'Model endpoint discovery is not permitted with this workspace identity.',
+  retryable: false,
+} as const;
+
+/** The exact 503 envelope the discovery route returns when the catalog is unavailable. */
+export const MODEL_ENDPOINT_DISCOVERY_UNAVAILABLE = {
+  code: 'catalog_unavailable',
+  message: 'Model endpoint discovery is temporarily unavailable. Retry the request.',
+  retryable: true,
+} as const;
+
+/**
+ * The one endpoint-name policy case table (#266). The client policy table in
+ * `AgentDefinitionWorkbench.test.tsx` drives `validateDraftForm` with it, and
+ * `tests/unit/test_endpoint_name_policy_client_join.py` reads this block as text and
+ * drives the server's `validate_endpoint_name_policy` with the same cases. Keep the
+ * body strict JSON (double quotes, no trailing commas, no comments).
+ */
+export const ENDPOINT_NAME_POLICY_CASES: Record<'rejected' | 'accepted', string[]> = {
+  "rejected": [
+    "https://example.cloud.databricks.com/serving-endpoints/x/invocations",
+    "  http://example.invalid",
+    "//example.invalid/x",
+    "ftp://example.invalid",
+    "a/b",
+    "a\\b",
+    "x?y=1",
+    "x#frag",
+    "a%2Fb",
+    ".",
+    "..",
+    "tab\tname",
+    "nul\u0000name",
+    "unit\u001fsep",
+    "del\u007fname"
+  ],
+  "accepted": [
+    "databricks-claude-opus-4-6",
+    "Team Shared Endpoint (EU)",
+    " leading and trailing ",
+    "a.b",
+    "...",
+    "mailto:x",
+    "ünïcode-endpoint"
+  ]
+};
+
+// ============================================================
+// #266 saved-candidate structured-output probe
+// (POST /api/admin/agent-definitions/draft/{agent_key}/model-endpoint-probe)
+// ============================================================
+
+/** The exact seed identity every packaged role's saved candidate starts on. */
+export const SEED_CANDIDATE_HASH = 'a'.repeat(64);
+
+/**
+ * The server's code-owned probe failure table, verbatim from
+ * `src/services/model_endpoint_probe.py` and the route's status map (#266 Task 5
+ * ruling): forbidden 403 and unsupported 422 are not retryable; only the ambiguous
+ * 503 is.
+ */
+export const STRUCTURED_OUTPUT_PROBE_FAILURES = {
+  unsupported_structured_output: {
+    status: 422,
+    message: 'The endpoint rejected the structured-output test request.',
+    retryable: false,
+  },
+  endpoint_probe_forbidden: {
+    status: 403,
+    message: 'The app is not permitted to query this endpoint.',
+    retryable: false,
+  },
+  structured_output_probe_failed: {
+    status: 503,
+    message: 'The structured output probe could not complete. Retry the probe.',
+    retryable: true,
+  },
+} as const;
+
+export type StructuredOutputProbeFailureFixtureCode = keyof typeof STRUCTURED_OUTPUT_PROBE_FAILURES;
+
+export interface StructuredOutputProbeIdentityFixture {
+  endpoint_name: string;
+  candidate_hash: string;
+  lock_version: number;
+}
+
+function probeIdentity(
+  identity: Partial<StructuredOutputProbeIdentityFixture>,
+): StructuredOutputProbeIdentityFixture {
+  return {
+    endpoint_name: identity.endpoint_name ?? SEED_MODEL_ENDPOINT_NAME,
+    candidate_hash: identity.candidate_hash ?? SEED_CANDIDATE_HASH,
+    lock_version: identity.lock_version ?? 0,
+  };
+}
+
+/** The exact 200 body: the identity of the saved candidate the probe ran against. */
+export function syntheticProbeSuccess(identity: Partial<StructuredOutputProbeIdentityFixture> = {}) {
+  return { code: 'structured_output_probe_succeeded' as const, ...probeIdentity(identity) };
+}
+
+/** The exact typed failure body for one code; its status is `STRUCTURED_OUTPUT_PROBE_FAILURES[code].status`. */
+export function syntheticProbeFailure(
+  code: StructuredOutputProbeFailureFixtureCode,
+  identity: Partial<StructuredOutputProbeIdentityFixture> = {},
+  providerDetail: string | null = null,
+) {
+  const failure = STRUCTURED_OUTPUT_PROBE_FAILURES[code];
+  return {
+    code,
+    message: failure.message,
+    retryable: failure.retryable,
+    provider_detail: providerDetail,
+    ...probeIdentity(identity),
+  };
+}
+
+// ============================================================
+// #267 Agent Test Cases and Test Runs
+// ============================================================
+// Appended last, and every new name is a function or a constant that begins with no
+// existing exported name (the Python joins find blocks with `index("export const X")`).
+
+/** One active Agent Test Case version exactly as `GET /test-cases` serializes it. */
+export function syntheticAgentTestCase(overrides: Partial<TestCaseListEntry> = {}): TestCaseListEntry {
+  return {
+    id: 101,
+    agent_key: 'architect',
+    name: 'Architect quarterly revenue outline',
+    version: 1,
+    is_active: true,
+    is_required: true,
+    synthetic_payload: {
+      user_request: 'Outline a five-slide quarterly revenue review for a fictional retailer.',
+      session_id: 'synthetic-session-0001',
+    },
+    assembly_context: { design_system_active: false },
+    created_by: 'system:bootstrap',
+    created_at: '2026-09-21T12:00:00Z',
+    updated_by: 'system:bootstrap',
+    updated_at: '2026-09-21T12:00:00Z',
+    is_synthetic_data_warning: true,
+    ...overrides,
+  };
+}
+
+/** The exact list body for `GET /test-cases?agent_key=<role>`. */
+export function syntheticAgentTestCaseList(items: TestCaseListEntry[] = [syntheticAgentTestCase()]) {
+  return { items };
+}
+
+/**
+ * One persisted run exactly as the execute routes serialize it: an execute response
+ * carries boolean currency flags, and the four verdict keys are present and null.
+ */
+export function syntheticTestRunEvidence(overrides: Partial<TestRunEvidence> = {}): TestRunEvidence {
+  return {
+    run_id: 501,
+    run_kind: 'candidate',
+    test_case_id: 101,
+    test_case_version: 1,
+    agent_key: 'architect',
+    candidate_hash: 'a'.repeat(64),
+    compared_release_id: 41,
+    compared_definition_revision_id: 11,
+    synthetic_payload: {
+      user_request: 'Outline a five-slide quarterly revenue review for a fictional retailer.',
+      session_id: 'synthetic-session-0001',
+    },
+    model_payload: {
+      user_request: 'Outline a five-slide quarterly revenue review for a fictional retailer.',
+    },
+    assembled_prompt: 'Synthetic assembled Architect prompt for the saved candidate.',
+    execution_status: 'completed',
+    error_detail: null,
+    deterministic_checks_passed: true,
+    deterministic_check_results: [
+      { name: 'execution', passed: true, message: null, issues: [] },
+      { name: 'output_contract', passed: true, message: null, issues: [] },
+    ],
+    candidate_raw_output: { title: 'Synthetic candidate raw title' },
+    candidate_structured_output: { title: 'Synthetic candidate structured title' },
+    baseline_raw_output: null,
+    baseline_structured_output: null,
+    latency_ms: 812.5,
+    input_tokens: null,
+    output_tokens: null,
+    run_by: 'admin@test.com',
+    run_at: '2026-09-26T10:00:00Z',
+    verdict: null,
+    verdict_reviewer: null,
+    verdict_at: null,
+    verdict_notes: null,
+    candidate_is_current: true,
+    base_release_is_current: true,
+    ...overrides,
+  };
+}
+
+/** The route's exact 503 body: no row was written, and the request may be retried. */
+export function syntheticTestRunUnavailable() {
+  return {
+    code: 'test_run_unavailable' as const,
+    message: 'Test run storage is temporarily unavailable. Retry the request.',
+    retryable: true as const,
+  };
+}
+
+/** The exact 409 body for a superseded or retired case version (Task 2's envelope). */
+export function syntheticStaleTestCase(testCaseId = 101) {
+  return {
+    code: 'stale_test_case' as const,
+    test_case_id: testCaseId,
+    message: 'This test case version is no longer active. Reload and retry.',
+  };
+}
+
+/** The exact ordered 422 envelope for a refused case write or a role-mismatched run. */
+export function syntheticInvalidTestCase(issues: Array<{ field: string; code: string; message: string }>) {
+  return { code: 'invalid_test_case' as const, issues };
+}
+
+// #268 verdicts and draft readiness
+// ============================================================
+// Appended last, and, like #267's block, every new name begins with no existing
+// exported name (the Python joins find blocks with `index("export ...")`).
+
+/** One active required case row of a role exactly as `GET /readiness` serializes it. */
+export function syntheticTestCaseReadiness(overrides: Partial<TestCaseReadiness> = {}): TestCaseReadiness {
+  return {
+    agent_key: 'architect',
+    test_case_id: 101,
+    test_case_name: 'Architect quarterly revenue outline',
+    test_case_version: 1,
+    status: 'needs_test',
+    blocking: false,
+    run_id: null,
+    run_verdict: null,
+    run_checks_passed: null,
+    ...overrides,
+  };
+}
+
+/** One role's readiness item: unchanged from the base, so never blocking. */
+export function syntheticAgentReadiness(
+  agentKey: AgentKey,
+  overrides: Partial<AgentReadiness> = {},
+): AgentReadiness {
+  return {
+    agent_key: agentKey,
+    candidate_hash: 'a'.repeat(64),
+    is_changed_from_base: false,
+    ready: true,
+    missing_required_case: false,
+    cases: [],
+    ...overrides,
+  };
+}
+
+/**
+ * The exact `GET /readiness` body for the synthetic workbench: every role unchanged, so
+ * nothing blocks, at the workbench's lock. `agents` may replace individual roles.
+ */
+export function syntheticDraftReadinessBody(
+  overrides: Omit<Partial<DraftReadiness>, 'agents'> & { agents?: Partial<Record<AgentKey, AgentReadiness>> } = {},
+): DraftReadiness {
+  const { agents = {}, ...rest } = overrides;
+  const roles: AgentKey[] = [
+    'architect', 'data_analyst', 'builder', 'build_reviewer', 'fixer', 'fix_reviewer', 'deck_reviewer',
+  ];
+  return {
+    draft_lock_version: 0,
+    base_release_id: 41,
+    all_ready: true,
+    blocking_agents: [],
+    agents: roles.map((agentKey) => agents[agentKey] ?? syntheticAgentReadiness(agentKey)),
+    ...rest,
+  };
+}
+
+/** The route's exact 422 for a verdict the run cannot carry (nothing was written). */
+export function syntheticVerdictIneligible(
+  reason: 'not_completed' | 'checks_failed' | 'linked_to_release' = 'checks_failed',
+) {
+  const messages = {
+    not_completed: 'Only a completed run can take a verdict.',
+    checks_failed: 'A run whose deterministic checks failed cannot be approved.',
+    linked_to_release: 'This run is evidence for a published Graph Version; its verdict cannot change.',
+  } as const;
+  return {
+    code: 'ineligible_for_approval' as const,
+    reason,
+    message: messages[reason],
+  };
+}
+
+// ============================================================
+// #269: Graph Release preview and publication (Task 6; Task 7's Playwright reuses these)
+// ============================================================
+
+const RELEASE_ROLES: AgentKey[] = [
+  'architect', 'data_analyst', 'builder', 'build_reviewer', 'fixer', 'fix_reviewer', 'deck_reviewer',
+];
+
+/** The architect's saved candidate in the release fixtures (a changed role). */
+export const RELEASE_ARCHITECT_CANDIDATE_HASH = 'c'.repeat(64);
+
+/** The active Graph Version 1, as `GET /release-preview` embeds it. */
+export function syntheticReleaseV1(): ActiveRelease {
+  return structuredClone(syntheticAgentDefinitionWorkbench.active_release);
+}
+
+/** The Graph Version 2 a successful publish returns. */
+export function syntheticReleaseV2(overrides: Partial<ActiveRelease> = {}): ActiveRelease {
+  return {
+    release_id: 42,
+    version_number: 2,
+    previous_release_id: 41,
+    restored_from_release_id: null,
+    release_note: 'Tighten the architect outline',
+    published_by: 'admin@example.com',
+    published_at: '2026-09-27T10:00:00Z',
+    effective_from: '2026-09-27T10:00:00Z',
+    effective_to: null,
+    ...overrides,
+  };
+}
+
+/** The shared draft at `lock_version`, based on Graph Version 1 unless overridden. */
+export function syntheticReleaseDraft(overrides: Partial<DraftMetadata> = {}): DraftMetadata {
+  return {
+    draft_id: 1,
+    base_release_id: 41,
+    base_version_number: 1,
+    lock_version: 3,
+    updated_by: 'admin@example.com',
+    updated_at: '2026-09-27T09:00:00Z',
+    ...overrides,
+  };
+}
+
+/** The architect's two field diffs: a multi-line prompt edit and a temperature change. */
+export function syntheticArchitectFieldDiffs(): ReleaseFieldDiff[] {
+  return [
+    {
+      field: 'prompt_text',
+      published: 'Plan the deck.\nUse three sections.\nCite sources.',
+      candidate: 'Plan the deck.\nUse four sections.\nCite sources.',
+    },
+    { field: 'model.temperature', published: 0.2, candidate: 0.4 },
+  ];
+}
+
+export function syntheticChangedDefinition(
+  agentKey: AgentKey = 'architect',
+  overrides: Partial<ChangedDefinitionPreview> = {},
+): ChangedDefinitionPreview {
+  return {
+    agent_key: agentKey,
+    published_revision_id: 7,
+    published_content_hash: SEED_CANDIDATE_HASH,
+    candidate_hash: RELEASE_ARCHITECT_CANDIDATE_HASH,
+    field_diffs: syntheticArchitectFieldDiffs(),
+    ...overrides,
+  };
+}
+
+/**
+ * The exact `GET /release-preview` 200 for a draft whose architect changed and whose one
+ * required architect case is approved: publishable at lock 3, next Graph Version 2.
+ */
+export function syntheticReleasePreview(overrides: Partial<ReleasePreviewResponse> = {}): ReleasePreviewResponse {
+  return {
+    draft: syntheticReleaseDraft(),
+    active_release: syntheticReleaseV1(),
+    next_version_number: 2,
+    changed: [syntheticChangedDefinition()],
+    readiness: syntheticDraftReadinessBody({
+      draft_lock_version: 3,
+      agents: {
+        architect: syntheticAgentReadiness('architect', {
+          candidate_hash: RELEASE_ARCHITECT_CANDIDATE_HASH,
+          is_changed_from_base: true,
+          ready: true,
+          cases: [syntheticTestCaseReadiness({ status: 'approved', run_id: 501, run_verdict: 'approved', run_checks_passed: true })],
+        }),
+      },
+    }),
+    validation_issues: [],
+    publishable: true,
+    ...overrides,
+  };
+}
+
+/** The preview after Graph Version 2 is published: nothing changed, the draft rebased. */
+export function syntheticPublishedReleasePreview(): ReleasePreviewResponse {
+  return {
+    draft: syntheticReleaseDraft({ base_release_id: 42, base_version_number: 2, lock_version: 4 }),
+    active_release: syntheticReleaseV2(),
+    next_version_number: 3,
+    changed: [],
+    readiness: syntheticDraftReadinessBody({ draft_lock_version: 4, base_release_id: 42 }),
+    validation_issues: [],
+    publishable: false,
+  };
+}
+
+/** The exact `POST /releases` 200: Graph Version 2 with the architect's approval as evidence. */
+export function syntheticPublishSuccess(): PublishReleaseSuccessResponse {
+  return {
+    release: syntheticReleaseV2(),
+    previous_release_id: 41,
+    changed_agents: ['architect'],
+    mappings: Object.fromEntries(RELEASE_ROLES.map((agentKey, index) => [agentKey, {
+      agent_definition_revision_id: agentKey === 'architect' ? 90 : index + 1,
+      content_hash: agentKey === 'architect' ? RELEASE_ARCHITECT_CANDIDATE_HASH : SEED_CANDIDATE_HASH,
+      reused: agentKey !== 'architect',
+    }])) as PublishReleaseSuccessResponse['mappings'],
+    evidence: [{ agent_test_run_id: 501, agent_key: 'architect', test_case_id: 101, evidence_kind: 'approval', source_release_id: null }],
+    draft: syntheticReleaseDraft({ base_release_id: 42, base_version_number: 2, lock_version: 4 }),
+  };
+}
+
+/** The exact stale 409: another admin saved (lock 5) and Graph Version 1 is still active. */
+export function syntheticStalePublication(overrides: Partial<StalePublicationResponse> = {}): StalePublicationResponse {
+  return {
+    code: 'stale_publication',
+    expected_lock_version: 3,
+    current_lock_version: 5,
+    active_release: { release_id: 41, version_number: 1 },
+    draft: syntheticReleaseDraft({ lock_version: 5 }),
+    ...overrides,
+  };
+}
+
+export function syntheticNothingToPublish(): NothingToPublishResponse {
+  return {
+    code: 'nothing_to_publish',
+    active_release: { release_id: 41, version_number: 1 },
+    draft: syntheticReleaseDraft(),
+  };
+}
+
+/** The exact not-ready 409; the gaps default to one architect case without an approval. */
+export function syntheticPublicationNotReady(
+  gaps: PublicationGap[] = [{ agent_key: 'architect', test_case_id: 101, code: 'no_eligible_approval' }],
+): PublicationNotReadyResponse {
+  return {
+    code: 'publication_not_ready',
+    gaps,
+    readiness: syntheticDraftReadinessBody({
+      draft_lock_version: 3,
+      all_ready: false,
+      blocking_agents: ['architect'],
+      agents: {
+        architect: syntheticAgentReadiness('architect', {
+          candidate_hash: RELEASE_ARCHITECT_CANDIDATE_HASH,
+          is_changed_from_base: true,
+          ready: false,
+          cases: [syntheticTestCaseReadiness({ status: 'awaiting_review', blocking: true, run_id: 501, run_checks_passed: true })],
+        }),
+      },
+    }),
+  };
+}
+
+/** The service's blank-note triple, verbatim (`_validate_publication_request`). */
+export const RELEASE_NOTE_BLANK_ERROR: DraftFieldError = {
+  field: 'release_note',
+  code: 'blank',
+  message: 'Release note must not be blank.',
+};
+
+export function syntheticPublicationInvalid(
+  errors: DraftFieldError[] = [RELEASE_NOTE_BLANK_ERROR],
+): PublicationValidationErrorResponse {
+  return { code: 'invalid_publication', errors };
+}
+
+// ============================================================
+// #270: Graph Release history and rollback (Task 7; Task 8's Playwright reuses these)
+// ============================================================
+// Graph Versions 1-4 exist and v4 is active; v3 restored v1. Every release id is the
+// version plus 40, so an id/version confusion shows (ids are never versions). Rolling
+// back to v2 publishes v5 (id 45).
+
+/** A `{ release_id, version_number }` ref with the fixture's id = version + 40. */
+export function releaseRef(versionNumber: number) {
+  return { release_id: versionNumber + 40, version_number: versionNumber };
+}
+
+const HISTORY_CHANGED: Record<number, AgentKey[]> = {
+  1: [...RELEASE_ROLES],
+  2: ['architect', 'builder'],
+  3: ['architect', 'builder'],
+  4: ['architect'],
+  5: ['architect', 'builder'],
+};
+
+/**
+ * Noon UTC on 2026-09-(20 + `offset`), rolled by `Date.UTC` into later months, so any
+ * version yields a real instant (v9 is 2026-09-29; v10's successor is 2026-10-01).
+ * Seconds precision with a `Z` suffix, as on the SQLite history wire.
+ */
+function historyInstant(offset: number): string {
+  return new Date(Date.UTC(2026, 8, 20 + offset, 12)).toISOString().replace('.000Z', 'Z');
+}
+
+/**
+ * One `GET /releases` row. Timestamps end in `Z` (the SQLite history wire); `active`
+ * marks the newest row. `restoredFrom` and `restoredBy` are version numbers.
+ */
+export function syntheticHistoryEntry(
+  versionNumber: number,
+  options: { active?: boolean; restoredFrom?: number | null; restoredBy?: number[]; supersededBy?: number } = {},
+  overrides: Partial<ReleaseHistoryEntry> = {},
+): ReleaseHistoryEntry {
+  const at = historyInstant(versionNumber);
+  const next = options.supersededBy ?? versionNumber + 1;
+  return {
+    release_id: versionNumber + 40,
+    version_number: versionNumber,
+    is_active: options.active ?? false,
+    release_note: versionNumber === 1 ? 'Bootstrap current code-owned Agent Definitions' : `Release note for Graph Version ${versionNumber}`,
+    published_by: versionNumber === 1 ? 'system:bootstrap' : 'admin@example.com',
+    published_at: at,
+    effective_from: at,
+    effective_to: options.active ? null : historyInstant(next),
+    previous: versionNumber === 1 ? null : releaseRef(versionNumber - 1),
+    restored_from: options.restoredFrom == null ? null : releaseRef(options.restoredFrom),
+    restored_by: (options.restoredBy ?? []).map(releaseRef),
+    changed_agents: HISTORY_CHANGED[versionNumber] ?? ['architect'],
+    ...overrides,
+  };
+}
+
+/** `GET /releases` with v4 active: rows v4, v3 (restores v1), v2, v1. */
+export function syntheticReleaseHistory(): ReleaseHistoryListResponse {
+  return {
+    active_release: releaseRef(4),
+    releases: [
+      syntheticHistoryEntry(4, { active: true }),
+      syntheticHistoryEntry(3, { restoredFrom: 1 }),
+      syntheticHistoryEntry(2),
+      syntheticHistoryEntry(1, { restoredBy: [3] }),
+    ],
+  };
+}
+
+/** `GET /releases` after the rollback to v2: v5 is active and restores v2. */
+export function syntheticRestoredReleaseHistory(): ReleaseHistoryListResponse {
+  return {
+    active_release: releaseRef(5),
+    releases: [
+      syntheticHistoryEntry(5, { active: true, restoredFrom: 2 }),
+      syntheticHistoryEntry(4),
+      syntheticHistoryEntry(3, { restoredFrom: 1 }),
+      syntheticHistoryEntry(2, { restoredBy: [5] }),
+      syntheticHistoryEntry(1, { restoredBy: [3] }),
+    ],
+  };
+}
+
+/** The active (v4) and historical (v2) architect prompts the comparison diffs. */
+export const HISTORY_ACTIVE_ARCHITECT_PROMPT = 'Plan the deck.\nUse four sections.\nCite sources.';
+export const HISTORY_V2_ARCHITECT_PROMPT = 'Plan the deck.\nUse three sections.\nCite sources.';
+
+/** `GET /releases/2`: v2's seven definitions and its linked evidence (one of each kind). */
+export function syntheticReleaseDetail(): ReleaseDetailResponse {
+  return {
+    release: syntheticHistoryEntry(2),
+    definitions: Object.fromEntries(RELEASE_ROLES.map((agentKey, index) => [agentKey, {
+      agent_definition_revision_id: 200 + index,
+      content_hash: agentKey === 'architect' ? 'b'.repeat(64) : SEED_CANDIDATE_HASH,
+      content: {
+        agent_key: agentKey,
+        definition_version: 1,
+        prompt_text: agentKey === 'architect' ? HISTORY_V2_ARCHITECT_PROMPT : `You are the ${agentKey} agent.`,
+        model: { endpoint_name: 'databricks-claude-sonnet-4', temperature: 0.2, max_tokens: 4096, top_p: 1 },
+      },
+    }])) as unknown as ReleaseDetailResponse['definitions'],
+    evidence: [
+      {
+        agent_test_run_id: 501,
+        agent_key: 'architect',
+        test_case_id: 101,
+        test_case_version: 2,
+        evidence_kind: 'approval',
+        source: null,
+        verdict: 'approved',
+        verdict_reviewer: 'reviewer@example.com',
+        verdict_at: '2026-09-22T11:00:00Z',
+        execution_status: 'completed',
+        deterministic_checks_passed: true,
+        run_at: '2026-09-22T10:00:00Z',
+      },
+      {
+        agent_test_run_id: 502,
+        agent_key: 'builder',
+        test_case_id: 202,
+        test_case_version: 1,
+        evidence_kind: 'historical_restore',
+        source: releaseRef(1),
+        verdict: 'rejected',
+        verdict_reviewer: 'reviewer@example.com',
+        verdict_at: '2026-09-21T11:00:00Z',
+        execution_status: 'completed',
+        deterministic_checks_passed: true,
+        run_at: '2026-09-21T10:00:00Z',
+      },
+    ],
+  };
+}
+
+/** The seven roles' active (v4) vs historical (v2) comparison: architect and builder differ. */
+export function syntheticAgentComparisons(): AgentComparison[] {
+  return RELEASE_ROLES.map((agentKey, index) => {
+    if (agentKey === 'architect') {
+      return {
+        agent_key: agentKey,
+        active_revision_id: 400,
+        historical_revision_id: 200,
+        same_revision: false,
+        field_diffs: [
+          { field: 'prompt_text', active: HISTORY_ACTIVE_ARCHITECT_PROMPT, historical: HISTORY_V2_ARCHITECT_PROMPT },
+          { field: 'model.temperature', active: 0.4, historical: 0.2 },
+        ],
+      };
+    }
+    if (agentKey === 'builder') {
+      return {
+        agent_key: agentKey,
+        active_revision_id: 402,
+        historical_revision_id: 202,
+        same_revision: false,
+        field_diffs: [{ field: 'model.max_tokens', active: 8192, historical: 4096 }],
+      };
+    }
+    return {
+      agent_key: agentKey,
+      active_revision_id: 200 + index,
+      historical_revision_id: 200 + index,
+      same_revision: true,
+      field_diffs: [],
+    };
+  });
+}
+
+/** `GET /releases/2/comparison`. */
+export function syntheticReleaseComparison(): ReleaseComparisonResponse {
+  return { active_release: releaseRef(4), release: releaseRef(2), agents: syntheticAgentComparisons() };
+}
+
+/** Ruling Q7: architect is clean (reset), builder holds a pending edit (kept). */
+export function syntheticDraftEffect(): Record<AgentKey, DraftEffect> {
+  return Object.fromEntries(RELEASE_ROLES.map((agentKey) => [
+    agentKey,
+    agentKey === 'architect' ? 'reset' : agentKey === 'builder' ? 'kept' : 'unchanged',
+  ])) as Record<AgentKey, DraftEffect>;
+}
+
+/** `GET /releases/2/rollback-preview`: restorable at lock 3, next Graph Version 5. */
+export function syntheticRollbackPreview(overrides: Partial<RollbackPreviewResponse> = {}): RollbackPreviewResponse {
+  return {
+    source: releaseRef(2),
+    active_release: releaseRef(4),
+    next_version_number: 5,
+    lock_version: 3,
+    default_release_note: 'Roll back to Graph Version 2.',
+    restorable: true,
+    blocked: null,
+    issues: [],
+    warnings: [],
+    agents: syntheticAgentComparisons(),
+    evidence: [
+      { agent_test_run_id: 501, agent_key: 'architect', test_case_id: 101 },
+      { agent_test_run_id: 502, agent_key: 'builder', test_case_id: 202 },
+    ],
+    draft_effect: syntheticDraftEffect(),
+    ...overrides,
+  };
+}
+
+/** A structurally incompatible v2: blocked, with one issue. */
+export function syntheticBlockedRollbackPreview(): RollbackPreviewResponse {
+  return syntheticRollbackPreview({
+    restorable: false,
+    blocked: 'incompatible',
+    issues: [{
+      field: 'definitions.builder.model.endpoint_name',
+      code: 'endpoint_name_not_allowed',
+      message: 'Endpoint name is not allowed by the current policy.',
+    }],
+  });
+}
+
+/** `POST /releases/2/rollback` (200): v5 restores v2; the draft is rebased onto v5. */
+export function syntheticRollbackSuccess(): RollbackSuccessResponse {
+  return {
+    release: {
+      release_id: 45,
+      version_number: 5,
+      previous_release_id: 44,
+      restored_from_release_id: 42,
+      release_note: 'Roll back to Graph Version 2.',
+      published_by: 'admin@example.com',
+      published_at: '2026-09-25T12:00:00Z',
+      effective_from: '2026-09-25T12:00:00Z',
+      effective_to: null,
+    },
+    restored_from: releaseRef(2),
+    previous_release_id: 44,
+    changed_agents: ['architect', 'builder'],
+    mappings: Object.fromEntries(RELEASE_ROLES.map((agentKey, index) => [agentKey, {
+      agent_definition_revision_id: 200 + index,
+      content_hash: agentKey === 'architect' ? 'b'.repeat(64) : SEED_CANDIDATE_HASH,
+      reused: true,
+    }])) as RollbackSuccessResponse['mappings'],
+    evidence: [
+      { agent_test_run_id: 501, agent_key: 'architect', test_case_id: 101, evidence_kind: 'historical_restore', source_release_id: 42 },
+      { agent_test_run_id: 502, agent_key: 'builder', test_case_id: 202, evidence_kind: 'historical_restore', source_release_id: 42 },
+    ],
+    draft: syntheticReleaseDraft({ base_release_id: 45, base_version_number: 5, lock_version: 4 }),
+    draft_effect: syntheticDraftEffect(),
+  };
+}
+
+/** The release preview after the rollback: the draft is based on v5. */
+export function syntheticRolledBackReleasePreview(): ReleasePreviewResponse {
+  return {
+    draft: syntheticReleaseDraft({ base_release_id: 45, base_version_number: 5, lock_version: 4 }),
+    active_release: { ...syntheticRollbackSuccess().release },
+    next_version_number: 6,
+    changed: [],
+    readiness: syntheticDraftReadinessBody({ draft_lock_version: 4, base_release_id: 45 }),
+    validation_issues: [],
+    publishable: false,
+  };
+}
+
+/** 409 `stale_rollback`: another admin saved (lock 5); v4 is still active. */
+export function syntheticStaleRollback(): StaleRollbackResponse {
+  return {
+    code: 'stale_rollback',
+    expected_lock_version: 3,
+    current_lock_version: 5,
+    active_release: releaseRef(4),
+    draft: syntheticReleaseDraft({ base_release_id: 44, base_version_number: 4, lock_version: 5 }),
+  };
+}
+
+/** 422 `rollback_incompatible` for v2. */
+export function syntheticRollbackIncompatible(): RollbackIncompatibleResponse {
+  return {
+    code: 'rollback_incompatible',
+    source: releaseRef(2),
+    errors: syntheticBlockedRollbackPreview().issues,
+  };
+}
+
+/** 422 `invalid_rollback`: the service's blank-note triple. */
+export function syntheticRollbackInvalid(
+  errors: DraftFieldError[] = [RELEASE_NOTE_BLANK_ERROR],
+): RollbackValidationErrorResponse {
+  return { code: 'invalid_rollback', errors };
 }

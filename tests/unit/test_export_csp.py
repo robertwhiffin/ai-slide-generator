@@ -185,8 +185,14 @@ def test_the_export_builder_scan_is_not_vacuous():
 
     # And the pattern must be capable of matching: it matches the PREVIEW surface
     # that legitimately still calls the contract builder.
+    #
+    # This exemplar was SlideSelection.tsx until ws6 retired checkbox selection
+    # (PRD §3: "Checkbox selection is retired, not merely supplemented"), which
+    # deleted the file. PresentationMode is the natural replacement: it is one of
+    # the preview surfaces test_preview_box_model_parity.py pins, and it calls the
+    # contract builder directly (`slideHostFrameStyle('.slide-container')`).
     preview = (
-        repo_root / "frontend" / "src" / "components" / "SlidePanel" / "SlideSelection.tsx"
+        repo_root / "frontend" / "src" / "components" / "PresentationMode" / "PresentationMode.tsx"
     ).read_text(encoding="utf-8")
     assert "slideHostFrameStyle(" in preview, (
         "the scan pattern no longer matches a known call site, so the guard above "

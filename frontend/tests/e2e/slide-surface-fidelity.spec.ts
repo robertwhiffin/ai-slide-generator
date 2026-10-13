@@ -92,9 +92,9 @@ async function setupSurfaceMocks(page: Page, css: string, slideHtml?: string) {
   );
 }
 
-test.describe('Filmstrip (SlideSelection) preview fidelity', () => {
+test.describe('Filmstrip (ThumbnailRibbon) preview fidelity', () => {
   test('filmstrip previews keep the deck background and font stack', async ({ page }) => {
-    // dsv2 F2: SlideSelection's reset appended background:#ffffff and
+    // dsv2 F2: the filmstrip's reset (SlideSelection, now ThumbnailRibbon) appended background:#ffffff and
     // font-family:'Inter' after deck CSS, so every filmstrip thumbnail
     // repainted brand decks white in the brand-less UI font.
     await setupSurfaceMocks(page, BRAND_DECK_CSS);
@@ -130,7 +130,7 @@ test.describe('Slide-root outer margin neutralization (dsv2 F3)', () => {
     await expect(tileRoot).toBeVisible({ timeout: 15000 });
     expect(
       await tileRoot.evaluate((el) => el.getBoundingClientRect().top),
-      'SlideTile (shared SLIDE_PREVIEW_RESET_STYLE surface)',
+      'SlideStage (shared SLIDE_PREVIEW_RESET_STYLE surface)',
     ).toBe(0);
 
     const stripRoot = page
@@ -140,7 +140,7 @@ test.describe('Slide-root outer margin neutralization (dsv2 F3)', () => {
     await expect(stripRoot).toBeVisible({ timeout: 15000 });
     expect(
       await stripRoot.evaluate((el) => el.getBoundingClientRect().top),
-      'filmstrip (SlideSelection reset surface)',
+      'filmstrip (ThumbnailRibbon reset surface)',
     ).toBe(0);
   });
 
@@ -239,7 +239,7 @@ test.describe('Uniform root-slide reset (dsv2 cross-review F2)', () => {
     await page.goto(`/sessions/${TEST_SESSION_ID}/edit`);
 
     for (const [name, title] of [
-      ['SlideTile', 'Slide 1'],
+      ['SlideStage', 'Slide 1'],
       ['filmstrip', 'Slide 1 preview'],
     ] as const) {
       const frame = page.frameLocator(`iframe[title="${title}"]`);

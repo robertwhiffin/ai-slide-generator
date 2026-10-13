@@ -59,7 +59,7 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready';
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -76,6 +76,17 @@ export interface StreamEvent {
   experiment_url?: string;
   session_title?: string;
   session_id?: string;
+  // ws4d D3 — carried on a `slide_ready` event: one committed slide released by
+  // the reorder buffer, delivered as it lands instead of only on `complete`.
+  // Rendering these is ws4e's; `handleStreamEvent` deliberately has no
+  // `slide_ready` case yet and falls through its default path.
+  position?: number;
+  html?: string;
+  scripts?: string;
+  /** Which agent this event is attributed to (spec §7.3). */
+  agent?: string;
+  /** Next slide position not yet released; hand back as `slide_cursor` when polling. */
+  slide_cursor?: number;
 }
 
 export interface SessionMessage {
@@ -111,6 +122,52 @@ export interface Session {
   parent_session_id?: string | null;
   /** Workspace-wide share level (root sessions only); null = private */
   global_permission?: 'CAN_VIEW' | 'CAN_EDIT' | null;
+  /** Public conversation graph version pinned to this session, if any. */
+  graph_version: number | null;
+  /** Public graph version newly-created graph-capable sessions receive. */
+  active_graph_version: number;
+  /** Whether this session remains pinned to an older graph version. */
+  is_older_than_active: boolean;
+}
+
+/**
+ * One opaque contributor's mutations on one exact Graph Release.
+ *
+ * These four fields are the ENTIRE privacy-safe contract of
+ * `GET /api/sessions/{id}/collaboration-history`. The endpoint deliberately
+ * emits no actor session id, session name, collaboration UUID, internal
+ * release id, pin, prompt, content, user id or principal, and
+ * `api.getCollaborationHistory` deliberately NARROWS the response to exactly
+ * these four keys so that a future server-side widening cannot reach the UI
+ * without a deliberate change here.
+ *
+ * `graph_version === null` means legacy / no graph release. It is never
+ * "active". The API emits no display vocabulary at all — no "Legacy" string
+ * exists in the payload, and a backend privacy test forbids one — so the
+ * wording is owned by MixedReleaseWarning, not by the server.
+ */
+export interface CollaborationReleaseGroup {
+  /** Response-local opaque label, e.g. "Contributor 1". Never a username. */
+  actor_label: string;
+  /** Persisted Graph Version, or null for legacy / no graph release. */
+  graph_version: number | null;
+  mutation_count: number;
+  last_mutation_at: string;
+}
+
+/**
+ * Privacy-safe collaboration summary plus its grouped evidence.
+ *
+ * `groups` arrives newest first. One actor spanning two releases keeps ONE
+ * `actor_label` across two groups, so `actor_label` is not a unique key —
+ * `actor_label` + `graph_version` is.
+ */
+export interface CollaborationHistory {
+  /** True only when two or more persisted non-null Graph Versions appear. */
+  mixed_release_warning: boolean;
+  /** True when any evidence has no persisted Graph Release. */
+  has_legacy_evidence: boolean;
+  groups: CollaborationReleaseGroup[];
 }
 
 export interface DuplicateSessionResult {
@@ -150,6 +207,17 @@ interface PollResponse {
   status: 'pending' | 'running' | 'completed' | 'error';
   events: StreamEvent[];
   last_message_id: number;
+  /** E10: released slides delivered batch-style on the polling path */
+  slides?: Array<{ position: number; html: string; scripts: string; agent?: string }>;
+  /** E10: next slide position not yet released; advance slidesCursor from this */
+  slide_cursor?: number;
+  /**
+   * Already-delivered slides rewritten since the last poll's revision_mark — a
+   * builder draft replaced by its reviewed or fixed version.  Replace by position.
+   */
+  slide_revisions?: Array<{ position: number; html: string; scripts: string; agent?: string }>;
+  /** Hand back as `revisions_after` on the next poll. */
+  revision_mark?: number;
   result?: {
     slides?: SlideDeck;
     raw_html?: string;
@@ -365,7 +433,7 @@ export const api = {
   /**
    * Create a new session
    */
-  async createSession(options?: { sessionId?: string; title?: string }): Promise<Session> {
+  async createSession(options?: { sessionId?: string; title?: string; graphCapable?: boolean }): Promise<Session> {
     const response = await fetch(`${API_BASE_URL}/api/sessions`, {
       method: 'POST',
       headers: {
@@ -374,6 +442,9 @@ export const api = {
       body: JSON.stringify({
         session_id: options?.sessionId,
         title: options?.title,
+        // Graph is the default engine (2026-10-12), so a root is pinned unless
+        // a caller explicitly opts out.
+        graph_capable: options?.graphCapable ?? true,
       }),
     });
 
@@ -483,6 +554,49 @@ export const api = {
     }
 
     return response.json();
+  },
+
+  /**
+   * Grouped, privacy-safe collaboration history for one shared deck.
+   *
+   * THE 404 CONTRACT. Every denied and no-row path — unknown id, unauthorized
+   * caller, guessed contributor id, missing or deleted root, deckless root —
+   * returns the byte-identical 404 that `GET /api/sessions/{id}` returns for
+   * an unknown id, emitted before any history query runs. An unauthorized real
+   * id and a fabricated id are therefore indistinguishable, and this client
+   * must not defeat that: it never reads the error detail, never branches on
+   * it, and never retries to probe existence. One generic failure covers every
+   * non-ok response, so the UI can only ever show one generic unavailable
+   * state.
+   *
+   * The response is narrowed to the four documented group keys rather than
+   * passed through, so a server that later grew an identifying field could not
+   * reach a consumer through this function.
+   */
+  async getCollaborationHistory(sessionId: string): Promise<CollaborationHistory> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${sessionId}/collaboration-history`,
+    );
+
+    if (!response.ok) {
+      // Deliberately does NOT read response.json().detail: the detail is the
+      // byte-identical "Session not found" for both a real-but-unauthorized id
+      // and a fabricated one, and branching on it is how a client turns an
+      // indistinguishable 404 into an existence oracle.
+      throw new ApiError(response.status, 'Failed to get collaboration history');
+    }
+
+    const payload = (await response.json()) as CollaborationHistory;
+    return {
+      mixed_release_warning: payload.mixed_release_warning === true,
+      has_legacy_evidence: payload.has_legacy_evidence === true,
+      groups: (payload.groups ?? []).map((group) => ({
+        actor_label: group.actor_label,
+        graph_version: group.graph_version ?? null,
+        mutation_count: group.mutation_count,
+        last_mutation_at: group.last_mutation_at,
+      })),
+    };
   },
 
   /**
@@ -814,9 +928,12 @@ export const api = {
 
         if (!response.ok) {
           const error = await response.json().catch(() => ({}));
+          const det = error.detail;
           throw new ApiError(
             response.status,
-            error.detail || 'Failed to start streaming'
+            (typeof det === 'object' && det !== null && typeof det.message === 'string')
+              ? det.message
+              : (det || 'Failed to start streaming'),
           );
         }
 
@@ -899,7 +1016,13 @@ export const api = {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      throw new ApiError(response.status, error.detail || 'Failed to submit chat');
+      const det = error.detail;
+      throw new ApiError(
+        response.status,
+        (typeof det === 'object' && det !== null && typeof det.message === 'string')
+          ? det.message
+          : (det || 'Failed to submit chat'),
+      );
     }
 
     return response.json();
@@ -912,9 +1035,21 @@ export const api = {
    * @param afterMessageId - Return messages after this ID
    * @returns Promise with poll response
    */
-  async pollChat(requestId: string, afterMessageId: number = 0): Promise<PollResponse> {
+  async pollChat(
+    requestId: string,
+    afterMessageId: number = 0,
+    slideCursor?: number,
+    revisionsAfter?: number,
+  ): Promise<PollResponse> {
+    // E0: hand slide_cursor back when polling so the backend delivers only
+    // the slides not yet seen by the client.  Only appended when > 0 to
+    // avoid changing the URL shape for requests that carry no cursor.
+    const cursorParam = slideCursor != null && slideCursor > 0 ? `&slide_cursor=${slideCursor}` : '';
+    // The previous response's revision_mark, so the backend returns only the
+    // delivered slides rewritten since then.  Absent on the first poll.
+    const revisionsParam = revisionsAfter != null ? `&revisions_after=${revisionsAfter}` : '';
     const response = await fetch(
-      `${API_BASE_URL}/api/chat/poll/${requestId}?after_message_id=${afterMessageId}`,
+      `${API_BASE_URL}/api/chat/poll/${requestId}?after_message_id=${afterMessageId}${cursorParam}${revisionsParam}`,
     );
 
     if (!response.ok) {
@@ -952,6 +1087,11 @@ export const api = {
         const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig);
 
         let lastMessageId = 0;
+        // E0: track the next-slide cursor so we hand it back on each poll,
+        // letting the backend deliver only slides not yet released to this client.
+        let slidesCursor = 0;
+        // The server's revision_mark from the last poll; undefined until one arrives.
+        let revisionMark: number | undefined;
 
         pollInterval = setInterval(async () => {
           if (cancelled) {
@@ -960,12 +1100,62 @@ export const api = {
           }
 
           try {
-            const response = await this.pollChat(request_id, lastMessageId);
+            const response = await this.pollChat(
+              request_id,
+              lastMessageId,
+              slidesCursor > 0 ? slidesCursor : undefined,
+              revisionMark,
+            );
 
-            // Process new events
+            // Process new events (streaming path emits real slide_ready events here)
             for (const event of response.events) {
               onEvent(event);
+              // E0: keep the cursor up-to-date as slide_ready events arrive
+              if (event.type === 'slide_ready' && event.slide_cursor != null) {
+                slidesCursor = event.slide_cursor;
+              }
             }
+
+            // E10: translate top-level slides batch (polling path) into slide_ready events.
+            // The streaming path delivers slides as events above; the polling path delivers
+            // them as response.slides + response.slide_cursor.  Both must reach onEvent as
+            // slide_ready before the complete event so the deck builds incrementally.
+            if (response.slides && response.slides.length > 0) {
+              for (const slide of response.slides) {
+                onEvent({
+                  type: 'slide_ready',
+                  position: slide.position,
+                  html: slide.html,
+                  scripts: slide.scripts,
+                  agent: slide.agent,
+                  slide_cursor: response.slide_cursor,
+                });
+              }
+            }
+            // E10: advance the cursor from the top-level response field (polling path).
+            // The streaming path advances it from events above; here we take the max so
+            // whichever path fired last wins and we never go backwards.
+            if (response.slide_cursor != null && response.slide_cursor > slidesCursor) {
+              slidesCursor = response.slide_cursor;
+            }
+
+            // A delivered draft replaced by its reviewed or fixed version.  These
+            // positions are all below the cursor, so they reach the same
+            // slide_ready handler, which replaces a slide that already exists.
+            for (const slide of response.slide_revisions ?? []) {
+              onEvent({
+                type: 'slide_ready',
+                position: slide.position,
+                html: slide.html,
+                scripts: slide.scripts,
+                agent: slide.agent,
+                slide_cursor: slidesCursor,
+              });
+            }
+            if (response.revision_mark != null) {
+              revisionMark = response.revision_mark;
+            }
+
             lastMessageId = response.last_message_id;
 
             // Stop polling on completion

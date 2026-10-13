@@ -32,8 +32,6 @@ class PromptsCreateInline(BaseModel):
 
     selected_deck_prompt_id: Optional[int] = Field(None, description="Selected deck prompt")
     selected_slide_style_id: Optional[int] = Field(None, description="Selected slide style")
-    system_prompt: Optional[str] = Field(None, description="System prompt")
-    slide_editing_instructions: Optional[str] = Field(None, description="Slide editing instructions")
 
 
 class ProfileCreateWithConfig(BaseModel):
@@ -130,13 +128,4 @@ class PromptsConfigUpdate(BaseModel):
 
     selected_deck_prompt_id: Optional[int] = Field(None, description="Selected deck prompt from library (null to clear)")
     selected_slide_style_id: Optional[int] = Field(None, description="Selected slide style from library (null to clear)")
-    system_prompt: Optional[str] = Field(None, description="System prompt (advanced)")
-    slide_editing_instructions: Optional[str] = Field(None, description="Slide editing instructions (advanced)")
-
-    @field_validator("system_prompt")
-    @classmethod
-    def validate_system_prompt(cls, v: Optional[str]) -> Optional[str]:
-        """Validate system prompt format."""
-        # No required placeholders for system prompt
-        return v
 

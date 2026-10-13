@@ -589,10 +589,881 @@ def _run_migrations(engine, schema: str | None = None):
             conn, inspector, schema, _qual, is_sqlite
         )
 
+        # --- row-per-slide schema: session_slides table + deck_spec columns ---
+        # ORDERING: this must stay AFTER _migrate_rewrite_deck_image_placeholders.
+        # That rewrite targets _DECK_PLACEHOLDER_COLUMNS only — deck_json and
+        # html_content on session_slide_decks, plus slide_deck_versions.deck_json —
+        # and NOT session_slides.html, which did not exist when it was written. The
+        # row data is backfilled later still (run.py::init_database calls
+        # backfill_unmigrated_decks after init_db), so rows are always built from
+        # deck_json that has ALREADY been rewritten to {{image:<token>}} form.
+        # Reordering these would backfill rows from int-id placeholders that nothing
+        # subsequently rewrites, silently breaking images on every migrated deck.
+        # This helper itself is schema-only (ALTER for columns create_all() cannot
+        # add); the table comes from the SessionSlide ORM model.
+        # --- row-per-slide schema: session_slides table + deck_spec columns ---
+        _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- LangGraph checkpointer: graph_checkpoints + graph_checkpoint_writes ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so any table this step creates is re-homed onto the shared owner in the
+        # same boot instead of being left owned by the app's service principal.
+        _migrate_graph_checkpoints(conn, schema)
+
+        # --- deck review storage: deck_reviews table ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the table is re-homed onto the shared owner in the same boot.
+        _migrate_deck_reviews(conn, schema)
+
+        # --- spec-dirty marker: three columns + partial index on session_slide_decks ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the partial index created by this step is re-homed onto the shared owner
+        # in the same boot instead of being left owned by the app's service principal.
+        _migrate_spec_dirty_marker(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- retired prompt overrides: drop config_prompts.system_prompt and
+        # --- .slide_editing_instructions ---
+        # ORDERING: must stay INSIDE _run_migrations (i.e. before seed_defaults(),
+        # which init_database calls after init_db()) — see the helper's docstring.
+        # Also stays BEFORE _reassign_new_objects_to_shared_owner below, like its
+        # three siblings.
+        _migrate_drop_config_prompt_columns(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- Conversation Pins: nullable release identity on every session ---
+        # Keep this before graph mutation guards and owner reassignment so its
+        # constraint/index are present and re-homed during the same boot.
+        _migrate_conversation_pin_schema(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- Shared-deck attribution: opaque identities + append-only events ---
+        # Keep immediately after Conversation Pins: event provenance consumes the
+        # exact actor pin and every later owner-reassignment pass must see the new
+        # table, indexes, functions, and triggers in this same transaction.
+        _migrate_shared_deck_mutation_schema(
+            conn, inspector, schema, _qual, is_sqlite
+        )
+
+        # --- Graph Configuration: database-enforced published-row immutability ---
+        # create_all owns the eight fresh table definitions. These PostgreSQL-only
+        # guards add the mutation boundary that constraints alone cannot express.
+        # Keep this before owner reassignment so new functions/triggers are re-homed
+        # in the same migration transaction.
+        _install_graph_configuration_mutation_guards(conn, schema, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _migrate_conversation_pin_schema(
+    conn, inspector, schema, _qual, is_sqlite: bool
+) -> None:
+    """Add the nullable Conversation Pin column, FK, and lookup index."""
+    from sqlalchemy import text
+
+    table_name = "user_sessions"
+    try:
+        columns = {
+            column["name"]
+            for column in inspector.get_columns(table_name, schema=schema)
+        }
+    except Exception:
+        return
+    if not columns:
+        return
+
+    qualified_sessions = _qual(table_name)
+    if "graph_release_id" not in columns:
+        logger.info("Migration: adding graph_release_id to user_sessions")
+        conn.execute(
+            text(
+                f"ALTER TABLE {qualified_sessions} "
+                "ADD COLUMN graph_release_id INTEGER NULL"
+            )
+        )
+
+    if not is_sqlite:
+        foreign_keys = {
+            foreign_key.get("name")
+            for foreign_key in inspector.get_foreign_keys(table_name, schema=schema)
+        }
+        if "fk_user_sessions_graph_release" not in foreign_keys:
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_sessions} "
+                    "ADD CONSTRAINT fk_user_sessions_graph_release "
+                    "FOREIGN KEY (graph_release_id) "
+                    f"REFERENCES {_qual('graph_release')}(id) ON DELETE RESTRICT"
+                )
+            )
+
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_user_sessions_graph_release_id "
+            f"ON {qualified_sessions} (graph_release_id)"
+        )
+    )
+
+
+def _migrate_shared_deck_mutation_schema(
+    conn, inspector, schema, _qual, is_sqlite: bool
+) -> None:
+    """Add stable collaboration UUIDs and the append-only mutation aggregate."""
+    from sqlalchemy import inspect, text
+
+    from src.database.models.session import SharedDeckMutationEvent
+
+    for table_name in ("user_sessions", "session_slide_decks"):
+        fresh_inspector = inspect(conn)
+        try:
+            columns = {
+                column["name"]
+                for column in fresh_inspector.get_columns(table_name, schema=schema)
+            }
+        except Exception:
+            continue
+        if not columns:
+            continue
+
+        qualified_table = _qual(table_name)
+        if "collaboration_identity" not in columns:
+            column_type = "VARCHAR(32)" if is_sqlite else "UUID"
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    f"ADD COLUMN collaboration_identity {column_type} NULL"
+                )
+            )
+
+        if is_sqlite:
+            conn.execute(
+                text(
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = lower(hex(randomblob(16))) "
+                    "WHERE collaboration_identity IS NULL"
+                )
+            )
+            # The column definition in src/database/models/session.py carries the
+            # server-side default, so any table create_all() built already generates
+            # an identity for non-ORM inserts. A legacy table reached here through
+            # ALTER TABLE ADD COLUMN cannot: SQLite rejects a non-constant default in
+            # ADD COLUMN ("Cannot add a column with non-constant default") and has no
+            # ALTER COLUMN SET DEFAULT. Without this trigger such a table would let a
+            # raw-SQL insert store NULL, and every later mutation on that row would
+            # fail in shared_deck_attribution with "collaboration identities must
+            # exist before mutation evidence". The trigger is the SQLite equivalent of
+            # the PostgreSQL DEFAULT below, fires only when the writer supplied no
+            # identity, and so never touches an identity that already exists.
+            conn.execute(
+                text(
+                    f"CREATE TRIGGER IF NOT EXISTS "
+                    f"trg_{table_name}_collaboration_identity_default "
+                    f"AFTER INSERT ON {qualified_table} "
+                    "WHEN NEW.collaboration_identity IS NULL "
+                    "BEGIN "
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = lower(hex(randomblob(16))) "
+                    "WHERE rowid = NEW.rowid; "
+                    "END"
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = gen_random_uuid() "
+                    "WHERE collaboration_identity IS NULL"
+                )
+            )
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    "ALTER COLUMN collaboration_identity SET DEFAULT gen_random_uuid()"
+                )
+            )
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    "ALTER COLUMN collaboration_identity SET NOT NULL"
+                )
+            )
+
+    # Production calls create_all first, but this explicit create owns the legacy
+    # path where the event table did not exist before this migration shipped.
+    SharedDeckMutationEvent.__table__.create(bind=conn, checkfirst=True)
+
+    if is_sqlite:
+        return
+
+    preparer = conn.dialect.identifier_preparer
+    namespace = preparer.quote(schema or "public")
+
+    def qualified(name: str) -> str:
+        return f"{namespace}.{preparer.quote(name)}"
+
+    identity_guard = qualified("guard_collaboration_identity_immutable")
+    event_guard = qualified("guard_shared_deck_mutation_event_append_only")
+    event_table = qualified("shared_deck_mutation_event")
+    sessions_table = qualified("user_sessions")
+    decks_table = qualified("session_slide_decks")
+
+    # Task 3 classifies the direct CRUD delete as a whole-deck rewrite while
+    # SlideWriter.delete_slide remains a row deletion.  Upgrade an interim
+    # Task-1 table as well as fresh installs, so the same operation is valid for
+    # both explicitly classified object types.
+    operation_object_check = preparer.quote(
+        "ck_shared_deck_mutation_event_operation_object"
+    )
+    conn.execute(
+        text(
+            f"ALTER TABLE {event_table} DROP CONSTRAINT IF EXISTS "
+            f"{operation_object_check}"
+        )
+    )
+    conn.execute(
+        text(
+            f"ALTER TABLE {event_table} ADD CONSTRAINT {operation_object_check} "
+            "CHECK ((object_type = 'slide' AND operation IN "
+            "('write_slide', 'delete_slide')) OR "
+            "(object_type = 'deck' AND operation IN "
+            "('save_deck', 'save_deck_slides', 'write_deck_level', "
+            "'insert_slide', 'update_slide', 'duplicate_slide', "
+            "'delete_slide', 'reorder_slides', 'restore_version')))"
+        )
+    )
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {identity_guard}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF NEW.collaboration_identity
+                    IS DISTINCT FROM OLD.collaboration_identity
+                THEN
+                    RAISE EXCEPTION '% collaboration identity is immutable', TG_TABLE_NAME
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    for table_name, trigger_name in (
+        ("user_sessions", "trg_user_sessions_collaboration_identity_immutable"),
+        (
+            "session_slide_decks",
+            "trg_session_slide_decks_collaboration_identity_immutable",
+        ),
+    ):
+        table = qualified(table_name)
+        trigger = preparer.quote(trigger_name)
+        conn.execute(text(f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+        conn.execute(
+            text(
+                f"CREATE TRIGGER {trigger} BEFORE UPDATE ON {table} "
+                f"FOR EACH ROW EXECUTE FUNCTION {identity_guard}()"
+            )
+        )
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {event_guard}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'shared deck mutation events are append-only'
+                        USING ERRCODE = '23514';
+                END IF;
+
+                IF NOT (
+                    NEW.id IS NOT DISTINCT FROM OLD.id
+                    AND NEW.root_session_identity
+                        IS NOT DISTINCT FROM OLD.root_session_identity
+                    AND NEW.root_deck_identity
+                        IS NOT DISTINCT FROM OLD.root_deck_identity
+                    AND NEW.actor_session_identity
+                        IS NOT DISTINCT FROM OLD.actor_session_identity
+                    AND NEW.graph_release_id IS NOT DISTINCT FROM OLD.graph_release_id
+                    AND NEW.graph_version IS NOT DISTINCT FROM OLD.graph_version
+                    AND NEW.operation IS NOT DISTINCT FROM OLD.operation
+                    AND NEW.object_type IS NOT DISTINCT FROM OLD.object_type
+                    AND NEW.object_id IS NOT DISTINCT FROM OLD.object_id
+                    AND NEW.occurred_at IS NOT DISTINCT FROM OLD.occurred_at
+                    AND (
+                        NEW.root_session_id IS DISTINCT FROM OLD.root_session_id
+                        OR NEW.root_deck_id IS DISTINCT FROM OLD.root_deck_id
+                        OR NEW.actor_session_id IS DISTINCT FROM OLD.actor_session_id
+                    )
+                    AND (
+                        NEW.root_session_id IS NOT DISTINCT FROM OLD.root_session_id
+                        OR (
+                            OLD.root_session_id IS NOT NULL
+                            AND NEW.root_session_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {sessions_table}
+                                WHERE id = OLD.root_session_id
+                            )
+                        )
+                    )
+                    AND (
+                        NEW.root_deck_id IS NOT DISTINCT FROM OLD.root_deck_id
+                        OR (
+                            OLD.root_deck_id IS NOT NULL
+                            AND NEW.root_deck_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {decks_table}
+                                WHERE id = OLD.root_deck_id
+                            )
+                        )
+                    )
+                    AND (
+                        NEW.actor_session_id IS NOT DISTINCT FROM OLD.actor_session_id
+                        OR (
+                            OLD.actor_session_id IS NOT NULL
+                            AND NEW.actor_session_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {sessions_table}
+                                WHERE id = OLD.actor_session_id
+                            )
+                        )
+                    )
+                ) THEN
+                    RAISE EXCEPTION 'shared deck mutation events are append-only'
+                        USING ERRCODE = '23514';
+                END IF;
+
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    event_trigger = preparer.quote(
+        "trg_shared_deck_mutation_event_append_only"
+    )
+    conn.execute(text(f"DROP TRIGGER IF EXISTS {event_trigger} ON {event_table}"))
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {event_trigger} "
+            f"BEFORE UPDATE OR DELETE ON {event_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {event_guard}()"
+        )
+    )
+
+
+def _install_graph_configuration_mutation_guards(
+    conn, schema: str | None, is_sqlite: bool
+) -> None:
+    """Install idempotent PostgreSQL guards for published graph rows.
+
+    Definition revisions and release mappings reject every update/delete. A release
+    rejects delete and every update except its first ``effective_to`` transition from
+    NULL to a non-NULL value with all other fields unchanged. A deferred constraint
+    trigger also requires exactly one active release at transaction end, while allowing
+    the atomic close-and-insert transition used by publication. Agent Test Run evidence
+    rejects every update that changes a column other than its four verdict columns;
+    deletes stay allowed (bounded cleanup), subject to the RESTRICT release link. A
+    run linked to a release (``graph_release_test_run``) also rejects any change to
+    those four verdict columns (#269).
+    """
+    if is_sqlite:
+        return
+
+    from sqlalchemy import text
+
+    preparer = conn.dialect.identifier_preparer
+    namespace = preparer.quote(schema or "public")
+
+    def qualified(name: str) -> str:
+        return f"{namespace}.{preparer.quote(name)}"
+
+    reject_function = qualified("reject_graph_published_mutation")
+    release_function = qualified("guard_graph_release_mutation")
+    exactly_one_function = qualified("enforce_graph_release_exactly_one_active")
+    release_table = qualified("graph_release")
+    evidence_function = qualified("guard_agent_test_run_evidence_mutation")
+    evidence_table = qualified("agent_test_run")
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {reject_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME
+                    USING ERRCODE = '23514';
+            END;
+            $$
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {exactly_one_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            DECLARE
+                active_release_count bigint;
+            BEGIN
+                SELECT count(*)
+                INTO active_release_count
+                FROM {release_table}
+                WHERE effective_to IS NULL;
+
+                IF active_release_count <> 1 THEN
+                    RAISE EXCEPTION
+                        'graph_release must have exactly one active release; found %',
+                        active_release_count
+                        USING ERRCODE = '23514',
+                              CONSTRAINT = 'trg_graph_release_exactly_one_active';
+                END IF;
+
+                RETURN NULL;
+            END;
+            $$
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {release_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF TG_OP = 'UPDATE'
+                   AND OLD.effective_to IS NULL
+                   AND NEW.effective_to IS NOT NULL
+                   AND NEW.id IS NOT DISTINCT FROM OLD.id
+                   AND NEW.version_number IS NOT DISTINCT FROM OLD.version_number
+                   AND NEW.previous_release_id IS NOT DISTINCT FROM OLD.previous_release_id
+                   AND NEW.restored_from_release_id
+                       IS NOT DISTINCT FROM OLD.restored_from_release_id
+                   AND NEW.release_note IS NOT DISTINCT FROM OLD.release_note
+                   AND NEW.published_by IS NOT DISTINCT FROM OLD.published_by
+                   AND NEW.published_at IS NOT DISTINCT FROM OLD.published_at
+                   AND NEW.effective_from IS NOT DISTINCT FROM OLD.effective_from
+                THEN
+                    RETURN NEW;
+                END IF;
+
+                RAISE EXCEPTION 'graph_release rows are immutable except for their first close'
+                    USING ERRCODE = '23514';
+            END;
+            $$
+            """
+        )
+    )
+
+    for table_name, trigger_name in (
+        (
+            "agent_definition_revision",
+            "trg_agent_definition_revision_immutable",
+        ),
+        ("graph_release_agent", "trg_graph_release_agent_immutable"),
+    ):
+        table = qualified(table_name)
+        trigger = preparer.quote(trigger_name)
+        conn.execute(text(f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+        conn.execute(
+            text(
+                f"CREATE TRIGGER {trigger} "
+                f"BEFORE UPDATE OR DELETE ON {table} "
+                f"FOR EACH ROW EXECUTE FUNCTION {reject_function}()"
+            )
+        )
+
+    release_trigger = preparer.quote("trg_graph_release_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {release_trigger} ON {release_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {release_trigger} "
+            f"BEFORE UPDATE OR DELETE ON {release_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {release_function}()"
+        )
+    )
+
+    # Compare whole rows minus the verdict columns, so a column added later is
+    # immutable by default rather than silently writable.
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {evidence_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF (to_jsonb(NEW)
+                        - ARRAY['verdict', 'verdict_reviewer', 'verdict_at', 'verdict_notes'])
+                   IS DISTINCT FROM
+                   (to_jsonb(OLD)
+                        - ARRAY['verdict', 'verdict_reviewer', 'verdict_at', 'verdict_notes'])
+                THEN
+                    RAISE EXCEPTION
+                        'agent_test_run evidence is immutable except for its verdict'
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    evidence_trigger = preparer.quote("trg_agent_test_run_evidence_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {evidence_trigger} ON {evidence_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {evidence_trigger} "
+            f"BEFORE UPDATE ON {evidence_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {evidence_function}()"
+        )
+    )
+
+    # #269 (Q3, Corrections 14 and 30): a run linked to a release as evidence
+    # keeps its verdict.  PostgreSQL refuses a subquery in a trigger WHEN, so the
+    # WHEN compares columns only and the function body checks the link, with the
+    # link table schema-qualified so search-path drift cannot change the answer.
+    # It coexists with trg_agent_test_run_evidence_immutable above.
+    linked_verdict_function = qualified("reject_linked_agent_test_run_verdict_change")
+    release_test_run_table = qualified("graph_release_test_run")
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {linked_verdict_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM {release_test_run_table}
+                    WHERE agent_test_run_id = OLD.id
+                ) THEN
+                    RAISE EXCEPTION
+                        'agent test run % is linked to a release; its verdict is immutable',
+                        OLD.id
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    linked_verdict_trigger = preparer.quote("trg_agent_test_run_linked_verdict_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {linked_verdict_trigger} ON {evidence_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {linked_verdict_trigger} "
+            "BEFORE UPDATE OF verdict, verdict_reviewer, verdict_at, verdict_notes "
+            f"ON {evidence_table} "
+            "FOR EACH ROW WHEN ("
+            "OLD.verdict IS DISTINCT FROM NEW.verdict "
+            "OR OLD.verdict_reviewer IS DISTINCT FROM NEW.verdict_reviewer "
+            "OR OLD.verdict_at IS DISTINCT FROM NEW.verdict_at "
+            "OR OLD.verdict_notes IS DISTINCT FROM NEW.verdict_notes) "
+            f"EXECUTE FUNCTION {linked_verdict_function}()"
+        )
+    )
+
+    exactly_one_trigger = preparer.quote("trg_graph_release_exactly_one_active")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {exactly_one_trigger} ON {release_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE CONSTRAINT TRIGGER {exactly_one_trigger} "
+            f"AFTER INSERT OR UPDATE OR DELETE ON {release_table} "
+            "DEFERRABLE INITIALLY DEFERRED "
+            f"FOR EACH ROW EXECUTE FUNCTION {exactly_one_function}()"
+        )
+    )
+
+
+def _migrate_graph_checkpoints(conn, schema: str | None = None) -> None:
+    """Ensure the two LangGraph checkpoint tables exist (idempotent, dialect-safe).
+
+    ``graph_checkpoints`` and ``graph_checkpoint_writes`` persist LangGraph graph
+    state between supersteps. :mod:`src.core.checkpointer` is the saver that reads
+    and writes them; the two ORM models live in
+    ``src/database/models/graph_checkpoint.py``.
+
+    NOT the thing that creates the tables in production. ``init_db`` runs
+    ``Base.metadata.create_all()`` BEFORE ``_run_migrations``, and both tables are
+    ORM models, so on every real deployment ``create_all`` has already made them
+    and this helper short-circuits on ``checkfirst``. That is accepted and has
+    precedent — :func:`_migrate_design_system_tables`' own docstring says the same.
+    What it still earns: databases provisioned before these tables existed, test
+    paths that drive the migration on its own, and explicitness about what the
+    checkpointer depends on.
+
+    Creation is driven from the ORM metadata via ``Table.create(checkfirst=True)``
+    — one source of truth for the schema, idempotent, and correctly compiled for
+    both PostgreSQL/Lakebase and the SQLite used in tests.
+
+    Neither table declares a secondary index, so there is no raw ``CREATE INDEX``
+    pass and this helper emits no raw SQL at all — which is why it takes no
+    ``_qual``, matching :func:`_migrate_design_system_tables`' ``(conn, schema)``
+    shape rather than the five-argument one. Schema qualification comes from
+    ``Table.schema`` below. (Every lookup the saver makes is a leading-column
+    prefix of a primary key, which the PK btree already serves.) The saver's own
+    raw SQL in ``src/core/checkpointer.py`` is deliberately UNQUALIFIED, for the
+    reason spelled out in the NOTE in ``src/core/encryption.py``: it must also run
+    against SQLite and schema-less local Postgres, and it has no schema handed to
+    it. Should a raw statement ever be needed HERE, it must take ``_qual`` and use
+    it, like every other sibling in this module.
+    """
+    from src.database.models.graph_checkpoint import (
+        GraphCheckpoint,
+        GraphCheckpointWrite,
+    )
+
+    for model in (GraphCheckpoint, GraphCheckpointWrite):
+        table = model.__table__
+        # Match init_db()'s schema handling so a qualified deployment creates the
+        # tables in the Lakebase schema; guarded so it stays a no-op on repeat.
+        # NOTE: this mutates the module-global Table.schema on the shared ORM
+        # metadata — intentional, and identical to what init_db() already does.
+        if schema and table.schema is None:
+            table.schema = schema
+        table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: graph checkpoint tables ensured")
+
+
+def _migrate_deck_reviews(conn, schema: str | None = None) -> None:
+    """Ensure the ``deck_reviews`` table exists (idempotent, dialect-safe).
+
+    ``deck_reviews`` stores content-addressed deck-level review verdicts, keyed
+    by ``(deck_id, deck_digest)``.  The store functions live in
+    :mod:`src.services.deck_review_store`; the ORM model is in
+    :mod:`src.database.models.deck_review`.
+
+    NOT the thing that creates the table in production.  ``init_db`` runs
+    ``Base.metadata.create_all()`` BEFORE ``_run_migrations``, and the table is
+    an ORM model, so on every real deployment ``create_all`` has already made
+    it and this helper short-circuits on ``checkfirst``.  That is accepted and
+    has precedent — :func:`_migrate_design_system_tables`' own docstring says
+    the same.  What it still earns: databases provisioned before this table
+    existed, test paths that drive the migration on its own, and explicitness
+    about what the store depends on.
+
+    Creation is driven from the ORM metadata via ``Table.create(checkfirst=True)``
+    — one source of truth for the schema, idempotent, and correctly compiled
+    for both PostgreSQL/Lakebase and the SQLite used in tests.
+
+    This helper emits no raw SQL — which is why it takes ``(conn, schema)``
+    rather than the full five-argument sibling signature, matching
+    :func:`_migrate_graph_checkpoints`' shape.  Schema qualification comes from
+    ``Table.schema`` below.  Should a raw statement ever be needed HERE, it
+    must take ``_qual`` and use it, like every other sibling in this module that
+    does emit raw SQL.
+    """
+    from src.database.models.deck_review import DeckReview
+
+    table = DeckReview.__table__
+    # Match init_db()'s schema handling so a qualified deployment creates the
+    # table in the Lakebase schema; guarded so it stays a no-op on repeat.
+    # NOTE: mutates the module-global Table.schema on the shared ORM metadata —
+    # intentional, and identical to what init_db() already does.
+    if schema and table.schema is None:
+        table.schema = schema
+    table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: deck_reviews table ensured")
+
+
+#: Partial index over ``spec_dirty_at IS NOT NULL`` on ``session_slide_decks``.
+#: Must match the ``Index(...)`` declared in ``src/database/models/session.py`` —
+#: ``create_all`` builds it under this name on fresh installs and
+#: :func:`_migrate_spec_dirty_marker` builds it under the same name on
+#: already-provisioned databases, so both paths converge on one schema.
+_SPEC_DIRTY_INDEX = "ix_session_slide_decks_spec_dirty_at"
+
+
+def _migrate_spec_dirty_marker(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add the three spec-dirty columns to ``session_slide_decks`` (idempotent).
+
+    Adds ``spec_dirty_at``, ``spec_dirty_by``, and ``spec_dirty_claimed_at`` — all
+    nullable — to an already-provisioned ``session_slide_decks`` table.  Also creates
+    the partial index ``ix_session_slide_decks_spec_dirty_at`` on PostgreSQL so the
+    sweeper's "find dirty decks" query touches only the small dirty subset rather than
+    the full table.
+
+    Unlike its two siblings :func:`_migrate_graph_checkpoints` and
+    :func:`_migrate_deck_reviews`, this helper genuinely is the only thing that adds
+    these columns to an already-provisioned database.  Both siblings create brand-new
+    tables, so ``create_all`` runs first and their helpers always short-circuit on
+    ``checkfirst``.  ``create_all`` does NOT ALTER existing tables — it only creates
+    missing ones — so for a database provisioned before B2.3 landed, the columns are
+    absent until this migration runs.  On a fresh install ``create_all`` adds them
+    via the ORM model and the ``ALTER`` statements below are no-ops (the idempotence
+    guard skips them).
+
+    Why three columns, why here.  The marker lives on ``session_slide_decks`` because
+    it never needs to outlive the deck row.  ``spec_dirty_by`` is the identity
+    decision: a sweeper tick has no HTTP request, so ``get_current_user()`` returns
+    ``None`` and the Databricks client factory fails closed in production (SDR-4437
+    HIGH-6 removed the SP fallback outside non-prod).  Recording the marker's author
+    gives the arc review's write a real ``modified_by``, gives cost attribution a real
+    user (PRD §8.1), and carries a permission provenance that was already checked on
+    that human's route — with no new identity concept and no stored credential.
+    ``spec_dirty_claimed_at`` is the storage slot for the worker lease: the sweeper
+    claims a deck by writing this timestamp, and a later worker skips any deck where it
+    is already set.  The column alone does not provide mutual exclusion — that requires
+    a conditional ``UPDATE … WHERE id = ? AND spec_dirty_claimed_at IS NULL`` in the
+    sweeper, where a rowcount of 0 means another worker already claimed the deck.  That
+    write belongs to the sweeper implementation (a later PR), not to this schema.
+
+    NOT deck presentation state: these columns are deliberately absent from
+    ``get_slide_deck``'s returned dict.
+
+    The partial index (PostgreSQL only) is also declared on the ORM model in
+    ``src/database/models/session.py`` with both ``postgresql_where`` and
+    ``sqlite_where`` so ``create_all`` emits it on fresh databases of either dialect.
+    This helper creates it on already-provisioned PostgreSQL databases only.
+    """
+    from sqlalchemy import text
+
+    # Reflect live columns; degrade gracefully if the table does not yet exist.
+    try:
+        cols = {c["name"] for c in inspector.get_columns("session_slide_decks", schema=schema)}
+    except Exception:
+        cols = set()
+
+    if cols:
+        qualified = _qual("session_slide_decks")
+        for col_name, col_def in (
+            ("spec_dirty_at", "TIMESTAMP NULL"),
+            ("spec_dirty_by", "VARCHAR(255) NULL"),
+            ("spec_dirty_claimed_at", "TIMESTAMP NULL"),
+        ):
+            if col_name not in cols:
+                logger.info("Migration: adding %s to session_slide_decks", col_name)
+                conn.execute(text(
+                    f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"
+                ))
+
+    # --- Partial index (PostgreSQL only) ---
+    # SQLite: the ORM model's sqlite_where declaration already builds the index via
+    # create_all on fresh databases; altering an existing SQLite DB to add a partial
+    # index requires recreating the table, which is not worth doing here.
+    if is_sqlite:
+        return
+
+    # Use a FRESH inspector: the shared one caches its reflection from before the
+    # columns may have been added earlier in this same migration transaction.
+    try:
+        from sqlalchemy import inspect as sa_inspect
+        insp = sa_inspect(conn)
+        indexes = insp.get_indexes("session_slide_decks", schema=schema)
+    except Exception:
+        return  # table absent on this deploy
+
+    if any(ix.get("name") == _SPEC_DIRTY_INDEX for ix in indexes):
+        return  # already present
+
+    logger.info("Migration: creating partial index %s on session_slide_decks", _SPEC_DIRTY_INDEX)
+    try:
+        with conn.begin_nested():
+            conn.execute(text(
+                f"CREATE INDEX {_SPEC_DIRTY_INDEX} "
+                f"ON {_qual('session_slide_decks')} (spec_dirty_at) "
+                f"WHERE spec_dirty_at IS NOT NULL"
+            ))
+    except Exception:
+        logger.warning(
+            "Migration: could not create %s; dirty-deck sweeper will fall back to a "
+            "full-table scan until the index is created",
+            _SPEC_DIRTY_INDEX,
+            exc_info=True,
+        )
+
+
+#: The two retired per-profile prompt-override columns on ``config_prompts``.
+#: Prompts are assembled from ``src.core.prompt_modules``; a per-profile override no
+#: longer takes effect, and the ORM declarations were removed in the task before this
+#: one (see ``src/database/models/prompts.py``).
+_RETIRED_CONFIG_PROMPT_COLUMNS = ("system_prompt", "slide_editing_instructions")
+
+
+def _migrate_drop_config_prompt_columns(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Drop the two retired override columns from ``config_prompts`` (idempotent).
+
+    Removes ``system_prompt`` and ``slide_editing_instructions``. Unlike
+    :func:`_migrate_graph_checkpoints` and :func:`_migrate_deck_reviews` — which
+    create brand-new tables that ``create_all`` has already made in production, so
+    their helpers short-circuit there — this helper is the ONLY thing that removes
+    these columns from an already-provisioned database. ``create_all`` creates
+    missing TABLES; it neither alters nor drops, so it cannot retire a column. On a
+    fresh database the columns were never created (the ORM no longer declares them)
+    and the presence guard below makes this a no-op.
+
+    WHY IT MUST RUN HERE, AND MUST NOT BE MOVED LATER IN STARTUP. Both columns are
+    ``Text NOT NULL`` with NO DEFAULT, and the ORM declarations are gone, so nothing
+    supplies a value any more: on a database that still HAS them, every profile
+    insert raises ``IntegrityError: NOT NULL constraint failed:
+    config_prompts.system_prompt`` on SQLite, and ``IntegrityError
+    (psycopg2.errors.NotNullViolation) null value in column "system_prompt"`` on
+    PostgreSQL — both measured, the latter against local PostgreSQL 14.20 on a
+    throwaway database. The drop therefore has to happen
+    before anything creates a profile. Inside ``_run_migrations`` it does:
+    ``_run_migrations`` is reached from :func:`init_db`, which
+    ``run.py::init_database`` calls before ``seed_defaults()``. Relocating this step
+    to any point after seeding would fail on the first boot against an existing
+    database. (The companion blob strip, ``src.core.strip_retired_prompt_keys``, is
+    a different step and deliberately runs LAST in ``init_database``; the two
+    orderings hold simultaneously.)
+
+    A failed DROP is deliberately NOT swallowed. If the columns survive, every
+    profile insert on that database is broken, so a loud ``SystemExit(1)`` at
+    startup is better than a boot that looks healthy and then 500s on the first
+    profile write.
+
+    ``is_sqlite`` is accepted for the five-argument house signature and is
+    deliberately unused: ``ALTER TABLE … DROP COLUMN`` is valid on PostgreSQL and on
+    SQLite >= 3.35 (this environment ships 3.51.0), and neither column is indexed,
+    which is the one case SQLite refuses. Schema qualification comes from ``_qual``
+    like every other raw-SQL helper in this module.
+    """
+    from sqlalchemy import text
+
+    # Reflect live columns; degrade gracefully if the table does not yet exist. The
+    # shared inspector is safe here: no earlier step in _run_migrations reflects or
+    # alters config_prompts, so this reflection is read fresh inside the migration
+    # transaction rather than from a stale cache.
+    try:
+        cols = {c["name"] for c in inspector.get_columns("config_prompts", schema=schema)}
+    except Exception:
+        cols = set()
+
+    for col_name in _RETIRED_CONFIG_PROMPT_COLUMNS:
+        if col_name in cols:
+            logger.info("Migration: dropping config_prompts.%s", col_name)
+            conn.execute(text(
+                f"ALTER TABLE {_qual('config_prompts')} DROP COLUMN {col_name}"
+            ))
 
 
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
@@ -882,6 +1753,7 @@ def _migrate_uncap_brand_text_columns(
 #: name on fresh installs and this migration builds it under the same name on
 #: already-provisioned ones, so the two paths converge on one schema.
 _DS_NAME_ACTIVE_INDEX = "uq_design_system_name_active"
+
 
 
 def _migrate_design_system_partial_name_index(
@@ -1922,3 +2794,68 @@ def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
     logger.info("Migration: granted CAN_MANAGE to existing deck creators")
 
     logger.info("Migration: deck permissions model migration complete")
+
+
+def _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite):
+    """Add columns for row-per-slide schema migration.
+
+    Steps (each idempotent via column-existence check):
+    1. session_slide_decks: add deck_spec_json, css, external_scripts_json,
+       head_meta_json (all nullable during dual-write period; deck_json stays)
+    2. slide_deck_versions: add deck_spec_json (snapshot of spec at save-point time)
+
+    Note: session_slides table itself is created by Base.metadata.create_all() from
+    the Task 1 ORM model (SessionSlide). This helper only handles the ALTER path for
+    columns that create_all() will never add to already-existing tables in a live DB.
+    """
+    from sqlalchemy import text
+
+    # --- session_slide_decks: add deck_spec_json, css, external_scripts_json ---
+    decks_table = "session_slide_decks"
+    try:
+        decks_cols = {c["name"] for c in inspector.get_columns(decks_table, schema=schema)}
+    except Exception:
+        decks_cols = set()
+
+    q_decks = _qual(decks_table)
+
+    if decks_cols and "deck_spec_json" not in decks_cols:
+        logger.info(f"Migration: adding deck_spec_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN deck_spec_json TEXT NULL"
+        ))
+
+    if decks_cols and "css" not in decks_cols:
+        logger.info(f"Migration: adding css column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN css TEXT NULL"
+        ))
+
+    if decks_cols and "external_scripts_json" not in decks_cols:
+        logger.info(f"Migration: adding external_scripts_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN external_scripts_json TEXT NULL"
+        ))
+
+    if decks_cols and "head_meta_json" not in decks_cols:
+        logger.info(f"Migration: adding head_meta_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN head_meta_json TEXT NULL"
+        ))
+
+    # --- slide_deck_versions: add deck_spec_json ---
+    versions_table = "slide_deck_versions"
+    try:
+        versions_cols = {c["name"] for c in inspector.get_columns(versions_table, schema=schema)}
+    except Exception:
+        versions_cols = set()
+
+    q_versions = _qual(versions_table)
+
+    if versions_cols and "deck_spec_json" not in versions_cols:
+        logger.info(f"Migration: adding deck_spec_json column to {versions_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_versions} ADD COLUMN deck_spec_json TEXT NULL"
+        ))
+
+    logger.info("Migration: row-per-slide schema migration complete")

@@ -6,25 +6,9 @@ config_profiles and backfills user_sessions from their profile_id.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
-
-from src.core.defaults import DEFAULT_CONFIG
+from typing import Any
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_SYSTEM_PROMPT = DEFAULT_CONFIG.get("prompts", {}).get("system_prompt")
-_DEFAULT_EDITING_INSTRUCTIONS = DEFAULT_CONFIG.get("prompts", {}).get(
-    "slide_editing_instructions"
-)
-
-
-def _differs_from_default(value: Optional[str], default: Optional[str]) -> bool:
-    """Return True if value is set and differs from the default."""
-    if value is None:
-        return False
-    if default is None:
-        return True
-    return value.strip() != default.strip()
 
 
 def build_agent_config_from_profile(profile_data: dict[str, Any]) -> dict[str, Any]:
@@ -41,19 +25,13 @@ def build_agent_config_from_profile(profile_data: dict[str, Any]) -> dict[str, A
             "description": gs.get("description"),
         })
 
-    system_prompt = prompts.get("system_prompt")
-    editing_instructions = prompts.get("slide_editing_instructions")
-
+    # The retired system_prompt / slide_editing_instructions overrides are NOT
+    # carried forward: prompts are assembled from src.core.prompt_modules and a
+    # per-profile override no longer takes effect.
     return {
         "tools": tools,
         "slide_style_id": prompts.get("selected_slide_style_id"),
         "deck_prompt_id": prompts.get("selected_deck_prompt_id"),
-        "system_prompt": system_prompt
-        if _differs_from_default(system_prompt, _DEFAULT_SYSTEM_PROMPT)
-        else None,
-        "slide_editing_instructions": editing_instructions
-        if _differs_from_default(editing_instructions, _DEFAULT_EDITING_INSTRUCTIONS)
-        else None,
     }
 
 
@@ -73,8 +51,6 @@ def migrate_profiles(session_factory) -> int:
                 "prompts": {
                     "selected_slide_style_id": getattr(profile.prompts, "selected_slide_style_id", None) if profile.prompts else None,
                     "selected_deck_prompt_id": getattr(profile.prompts, "selected_deck_prompt_id", None) if profile.prompts else None,
-                    "system_prompt": getattr(profile.prompts, "system_prompt", None) if profile.prompts else None,
-                    "slide_editing_instructions": getattr(profile.prompts, "slide_editing_instructions", None) if profile.prompts else None,
                 },
                 "genie_spaces": [
                     {
