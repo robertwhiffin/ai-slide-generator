@@ -44,8 +44,6 @@ interface TourFixture {
   stages: {
     plan: { architect_reply: string };
     build: {
-      foreman_line: string;
-      review_lines: string[];
       findings: Record<string, FixtureFinding[]>;
       verification: { rating: string; score: number; explanation: string };
     };
@@ -56,7 +54,6 @@ interface TourFixture {
       position: number;
       slide: FixtureSlide;
       content_brief: string;
-      review_line: string;
     };
   };
 }
@@ -131,15 +128,12 @@ function buildMessages(applied: Set<Stage>): Msg[] {
 
   if (applied.has('prompt')) say('prompt', 'user', fixture.chat_prompt, 'chat', 'user');
   if (applied.has('plan')) say('plan', 'architect', fx.plan.architect_reply, 'llm_response');
-  if (applied.has('build')) {
-    say('build', 'foreman', fx.build.foreman_line, 'info');
-    for (const line of fx.build.review_lines) say('build', 'build_reviewer', line, 'info');
-  }
+  // build writes no chat row: the graph's foreman and per-slide review lines
+  // are emit-only and a polling (deployed) client never sees them.
   if (applied.has('review')) say('review', 'deck_reviewer', fx.review.advisory, 'info');
   if (applied.has('edit')) {
     say('edit', 'user', fx.edit.user_prompt, 'chat', 'user');
     say('edit', 'architect', fx.edit.architect_reply, 'llm_response');
-    say('edit', 'build_reviewer', fx.edit.review_line, 'info');
   }
   return rows.map((r, i) => ({ ...r, id: i + 1, created_at: `2026-10-13T10:00:${String(i).padStart(2, '0')}` }));
 }
@@ -395,6 +389,9 @@ const chat = (page: Page) => page.locator('[data-tour="chat-panel"]');
 
 /** Exact-text count of a chat line (Message.tsx renders plain text). */
 const chatLine = (page: Page, text: string) => chat(page).getByText(text, { exact: true });
+// The graph's emit-only progress lines; the tour must never show them.
+const progressLines = (page: Page) =>
+  chat(page).getByText(/^(Building \d+ slide\(s\)\.|Slide \d+ (fix )?reviewed:.*)$/);
 
 // The suite-wide storageState marks the tour completed; this file needs it fresh.
 test.use({ storageState: { cookies: [], origins: [] } });
@@ -438,10 +435,11 @@ test.describe('app tour — staged graph demo', () => {
           break;
         case 'Slides Arrive One by One':
           await expect(page.getByTestId('ribbon-thumb-2')).toBeVisible();
-          await expect(chatLine(page, fx.build.foreman_line)).toBeVisible();
-          for (const line of fx.build.review_lines) {
-            await expect(chatLine(page, line)).toBeVisible();
-          }
+          await expect(progressLines(page)).toHaveCount(0);
+          break;
+        case 'Every Slide Is Reviewed':
+          await expect(page.getByTestId('thumbnail-ribbon')).toBeVisible();
+          await expect(progressLines(page)).toHaveCount(0);
           break;
         case 'Review Feedback':
           await expect(page.getByTestId('ribbon-thumb-2')).toHaveAttribute('data-current', 'true');
@@ -489,7 +487,8 @@ test.describe('app tour — staged graph demo', () => {
     await startTour(page);
     const target = idx('Every Slide Is Reviewed');
     await walk(page, 0, target);
-    await expect(chatLine(page, fx.build.foreman_line)).toHaveCount(1);
+    await expect(chatLine(page, fx.plan.architect_reply)).toHaveCount(1);
+    await expect(page.getByTestId('ribbon-thumb-2')).toBeVisible();
 
     await clickBack(page);
     await expectStep(page, TITLES[target - 1]); // Slides Arrive One by One (build hook re-entered)
@@ -506,11 +505,10 @@ test.describe('app tour — staged graph demo', () => {
     expect(be.stagePosts).toEqual(['plan', 'build']);
     expect(be.stageResults.every((r) => r.status === 200)).toBe(true);
 
-    await expect(chatLine(page, fx.build.foreman_line)).toHaveCount(1);
+    await expect(chatLine(page, fixture.chat_prompt)).toHaveCount(1);
     await expect(chatLine(page, fx.plan.architect_reply)).toHaveCount(1);
-    for (const line of new Set(fx.build.review_lines)) {
-      await expect(chatLine(page, line)).toHaveCount(fx.build.review_lines.filter((l) => l === line).length);
-    }
+    await expect(page.getByTestId('ribbon-thumb-2')).toBeVisible();
+    await expect(page.getByTestId(`ribbon-thumb-${fixture.slides.length}`)).toHaveCount(0);
     expect(be.forbidden).toEqual([]);
   });
 
