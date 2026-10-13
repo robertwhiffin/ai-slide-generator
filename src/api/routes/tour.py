@@ -129,7 +129,7 @@ def _phase2_add_slides(session_id: str, created_by: str) -> dict:
         ),
     )
 
-    assistant_reply = fixture["chat_reply"]
+    assistant_reply = fixture["stages"]["plan"]["architect_reply"]
 
     sm.add_message(
         session_id=session_id,

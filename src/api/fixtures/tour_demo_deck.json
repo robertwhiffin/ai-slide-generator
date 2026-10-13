@@ -24,7 +24,6 @@
     }
   ],
   "chat_prompt": "Create 3 slides about the benefits of AI in modern healthcare, with a title slide, key advantages, and future outlook.",
-  "chat_reply": "Here's your deck with 3 slides! I've created:\n\n1. **Title Slide** — introducing AI in healthcare\n2. **Key Advantages** — early detection, personalized treatment, operational efficiency, and drug discovery\n3. **Future Outlook** — predictive monitoring, AI-assisted surgery, and global health equity\n\nFeel free to ask me to refine any slide, add new ones, or change the style.",
   "deck_spec": {
     "title": "Example Deck — AI in Healthcare",
     "audience": "A first-time Tellr user taking the product tour: a general business audience, with no clinical or machine-learning background assumed.",
@@ -75,5 +74,49 @@
         "data_references": []
       }
     ]
+  },
+  "stages": {
+    "plan": {
+      "architect_reply": "This deck is for a first-time Tellr user, a general business reader with no clinical or machine-learning background. It argues that AI already delivers concrete benefits in healthcare and that its near-term path points to prevention and wider access. I will build 3 slides: a title, four present-day advantages, and a forward look."
+    },
+    "build": {
+      "foreman_line": "Building 3 slide(s).",
+      "review_lines": [
+        "Slide 0 reviewed: clean.",
+        "Slide 1 reviewed: clean.",
+        "Slide 2 reviewed: surfaced."
+      ],
+      "findings": {
+        "2": [
+          {
+            "criterion": "brief_not_delivered",
+            "category": "content",
+            "objective": false,
+            "message": "The brief asks this slide to carry the argument into the near future, but it never says when predictive monitoring, AI-assisted surgery or global health equity should arrive."
+          }
+        ]
+      },
+      "verification": {
+        "rating": "unknown",
+        "score": 0,
+        "explanation": "No source data to check: this deck was written without data tools."
+      }
+    },
+    "review": {
+      "advisory": "Deck review complete: no narrative issues found across the deck."
+    },
+    "edit": {
+      "user_prompt": "Make slide 2 more concise",
+      "architect_reply": "Editing slide 2.",
+      "position": 1,
+      "slide": {
+        "index": 1,
+        "slide_id": "tour-demo-slide-2",
+        "html": "<div class=\"slide content-slide\">\n  <h2>Key Advantages</h2>\n  <ul>\n    <li><strong>Early Disease Detection</strong> — spotting disease on scans sooner</li>\n    <li><strong>Personalized Treatment Plans</strong> — care tailored to each patient</li>\n    <li><strong>Operational Efficiency</strong> — less admin, more patient time</li>\n    <li><strong>Drug Discovery Acceleration</strong> — faster molecular testing, shorter R&amp;D</li>\n  </ul>\n</div>",
+        "scripts": ""
+      },
+      "content_brief": "Four bolded items, each with a short phrase: early disease detection, personalized treatment plans, operational efficiency, drug discovery acceleration.",
+      "review_line": "Slide 1 reviewed: clean."
+    }
   }
 }
