@@ -1,16 +1,30 @@
 """Tour demo deck endpoints.
 
-Two-phase creation so the tour can show the user prompt first,
-then reveal the AI response and slides after a short delay.
+The tour replays one multi-agent ("graph") generation turn as a forward-only
+sequence of idempotent stages, so the user watches the deck being planned,
+built, reviewed and edited without any model call.
 
-Phase 1 — POST /api/tour/demo-deck
-  Creates a session with only the user's chat message.
+Phase 1 -- POST /api/tour/demo-deck
+  Creates a session holding only the user's prompt (stage ``prompt``).
 
-Phase 2 — POST /api/tour/demo-deck/{session_id}/slides
-  Adds the assistant reply and pre-built slides to the session.
+Stages -- POST /api/tour/demo-deck/{session_id}/stages/{stage}
+  ``plan``   architect reply.
+  ``build``  the three slides, the deck spec, and a seeded verification
+             record (with the scripted finding) for every slide.  No chat row:
+             the graph's foreman and per-slide review lines are emit-only, and
+             production polls, so a deployed user never sees them.
+  ``review`` deck reviewer advisory.
+  ``edit``   a follow-up user request, the architect reply, one rewritten slide
+             and its brief, and verification re-seeded for every slide.
+
+Every chat row is tagged ``metadata.tour_stage``; re-running a stage is a no-op
+and a stage whose predecessor has not run is rejected (409) before any write.
+``build`` writes no chat row, so its marker is the deck itself (see
+``_build_applied``).
 """
 
 import asyncio
+import copy
 import json
 import logging
 from pathlib import Path
@@ -20,8 +34,10 @@ from fastapi import APIRouter, HTTPException
 from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.services.deck_level_writer import write_deck_level_columns
 from src.api.services.session_manager import get_session_manager
+from src.domain.finding import Finding, build_verification_record, make_finding_id
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
+from src.utils.slide_hash import compute_slide_hash
 
 logger = logging.getLogger(__name__)
 
@@ -67,17 +83,60 @@ def _phase1_create_session(created_by: str) -> dict:
         role="user",
         content=_get_user_prompt(fixture),
         message_type="chat",
+        metadata={"tour_stage": "prompt", "node": "user"},
     )
 
     return {"session_id": session_id, "title": fixture["title"]}
 
 
-def _phase2_add_slides(session_id: str, created_by: str) -> dict:
-    """Phase 2: add assistant reply + slides."""
-    fixture = _load_fixture()
-    sm = get_session_manager()
+STAGES: tuple[str, ...] = ("prompt", "plan", "build", "review", "edit")
 
-    slides = fixture.get("slides", [])
+
+class StageOrderError(Exception):
+    """A stage was requested before the stage it follows has run."""
+
+
+def _build_applied(sm, session_id: str) -> bool:
+    """``build`` has run iff the deck has slides, a spec, and EVERY slide is verified.
+
+    The build stage writes no chat row (production never shows the foreman or
+    per-slide review lines), so its idempotency marker is derived from the deck.
+    "Has slides" alone is not enough: build writes slides, then the spec, then
+    the per-slide verification records, and a failure after the slide save
+    would leave slides present but unverified -- a permanent no-op on retry and
+    an LLM judge call from useAutoVerification.  Requiring the LAST write
+    (verification on every slide) keeps a failed build retryable.
+    """
+    deck = sm.get_slide_deck(session_id) or {}
+    slides = deck.get("slides") or []
+    return bool(slides) and bool(deck.get("deck_spec")) and all(
+        s.get("verification") for s in slides
+    )
+
+
+def _applied_stages(sm, session_id: str) -> set[str]:
+    applied = {
+        (m.get("metadata") or {}).get("tour_stage")
+        for m in sm.get_messages(session_id)
+    } - {None}
+    if _build_applied(sm, session_id):
+        applied.add("build")
+    return applied
+
+
+def _say(sm, session_id, stage, node, content, message_type, role="assistant"):
+    sm.add_message(
+        session_id=session_id,
+        role=role,
+        content=content,
+        message_type=message_type,
+        metadata={"tour_stage": stage, "node": node},
+    )
+
+
+def _save_deck(sm, session_id: str, slides: list, deck_spec: dict, created_by: str) -> None:
+    """Replace the deck's slides and write its spec (two writes, see below)."""
+    fixture = _load_fixture()
     deck_dict = {
         "title": fixture["title"],
         "css": fixture.get("css", ""),
@@ -120,7 +179,7 @@ def _phase2_add_slides(session_id: str, created_by: str) -> dict:
     # spec view, which an excluded-and-specless tour deck could not.
     write_deck_level_columns(
         session_id,
-        deck_spec=fixture["deck_spec"],
+        deck_spec=deck_spec,
         modified_by=created_by,
         mutation=sm.deck_mutation_context(
             session_id,
@@ -129,16 +188,93 @@ def _phase2_add_slides(session_id: str, created_by: str) -> dict:
         ),
     )
 
-    assistant_reply = fixture["chat_reply"]
 
-    sm.add_message(
-        session_id=session_id,
-        role="assistant",
-        content=assistant_reply,
-        message_type="chat",
-    )
+def _seed_verification(sm, session_id: str, slides: list, findings_by_position: dict) -> None:
+    """Store a verification record for EVERY slide.
 
-    return {"session_id": session_id, "slide_count": len(slides)}
+    useAutoVerification fires an LLM judge on any slide whose verification is
+    falsy, and save_slide_deck replaces every slide row, so this must run after
+    each save for all slides, not just the ones that changed.
+    """
+    stage_build = _load_fixture()["stages"]["build"]
+    judge = {
+        **{k: stage_build["verification"][k] for k in ("score", "rating", "explanation")},
+        "issues": [],
+        "duration_ms": 0,
+        "error": False,
+    }
+    for position, slide in enumerate(slides):
+        content_hash = compute_slide_hash(slide["html"])
+        findings = [
+            Finding(
+                id=make_finding_id(f["criterion"], content_hash, ordinal=i),
+                slide_index=position,
+                category=f["category"],
+                criterion=f["criterion"],
+                message=f["message"],
+                objective=f["objective"],
+            )
+            for i, f in enumerate(findings_by_position.get(position, []))
+        ]
+        record = build_verification_record(
+            content_hash=content_hash,
+            findings=findings,
+            verdict="surfaced" if findings else "clean",
+        )
+        record[content_hash] = {**judge, **record[content_hash]}
+        sm.write_slide_verification(session_id, position, record)
+
+
+def _run_stage(session_id: str, stage: str, created_by: str) -> dict:
+    """Apply one stage of the scripted graph turn (idempotent, forward-only)."""
+    if stage not in STAGES or stage == "prompt":
+        raise ValueError(f"Unknown tour stage: {stage!r}")
+    sm = get_session_manager()
+
+    applied = _applied_stages(sm, session_id)
+    if stage not in applied:
+        previous = STAGES[STAGES.index(stage) - 1]
+        if previous not in applied:
+            raise StageOrderError(f"Stage {stage!r} requires {previous!r} to run first")
+
+    def slide_count() -> int:
+        deck = sm.get_slide_deck(session_id) or {}
+        return len(deck.get("slides") or [])
+
+    if stage in applied:
+        return {"session_id": session_id, "stage": stage, "applied": False, "slide_count": slide_count()}
+
+    fixture = _load_fixture()
+    script = fixture["stages"]
+    # JSON object keys are strings; positions are ints.
+    findings = {int(k): v for k, v in script["build"]["findings"].items()}
+
+    # Deck writes come BEFORE the stage's first tagged row: that row is the
+    # idempotency marker, so writing it first would turn a failed save or seed
+    # into a permanent no-op (unverified slides -> an LLM judge call).  Deck
+    # writes are convergent on retry (rows replaced, verification merged).
+    # ``build`` has no row; its marker is the fully verified deck, whose last
+    # write is the final slide's verification record (``_build_applied``).
+    if stage == "plan":
+        _say(sm, session_id, stage, "architect", script["plan"]["architect_reply"], "llm_response")
+    elif stage == "build":
+        slides = copy.deepcopy(fixture["slides"])
+        _save_deck(sm, session_id, slides, copy.deepcopy(fixture["deck_spec"]), created_by)
+        _seed_verification(sm, session_id, slides, findings)
+    elif stage == "review":
+        _say(sm, session_id, stage, "deck_reviewer", script["review"]["advisory"], "info")
+    else:  # edit
+        edit = script["edit"]
+        slides = copy.deepcopy(fixture["slides"])
+        slides[edit["position"]] = copy.deepcopy(edit["slide"])
+        spec = copy.deepcopy(fixture["deck_spec"])
+        spec["slides"][edit["position"]]["content_brief"] = edit["content_brief"]
+        _save_deck(sm, session_id, slides, spec, created_by)
+        _seed_verification(sm, session_id, slides, findings)
+        _say(sm, session_id, stage, "user", edit["user_prompt"], "chat", role="user")
+        _say(sm, session_id, stage, "architect", edit["architect_reply"], "llm_response")
+
+    return {"session_id": session_id, "stage": stage, "applied": True, "slide_count": slide_count()}
 
 
 @router.post("/demo-deck")
@@ -154,16 +290,20 @@ async def create_demo_deck():
         raise HTTPException(status_code=500, detail="Failed to create demo deck") from e
 
 
-@router.post("/demo-deck/{session_id}/slides")
-async def add_demo_slides(session_id: str):
-    """Phase 2: add assistant reply and pre-built slides."""
-    # SDR-4437 HIGH-1 class: writes slides into an arbitrary session_id.
+@router.post("/demo-deck/{session_id}/stages/{stage}")
+async def run_demo_stage(session_id: str, stage: str):
+    """Advance the demo deck by one stage of a scripted graph turn."""
+    # SDR-4437 HIGH-1 class: writes into an arbitrary session_id.
     _check_deck_permission_for_session(session_id, PermissionLevel.CAN_EDIT)
+    if stage not in STAGES or stage == "prompt":
+        raise HTTPException(status_code=404, detail="Unknown tour stage")
     current_user = get_current_user()
     try:
-        result = await asyncio.to_thread(_phase2_add_slides, session_id, current_user)
-        logger.info("Tour demo deck phase 2", extra={"session_id": session_id})
-        return result
+        result = await asyncio.to_thread(_run_stage, session_id, stage, current_user)
+    except StageOrderError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
-        logger.error(f"Tour demo deck phase 2 failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to add demo slides") from e
+        logger.error(f"Tour demo stage {stage} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to run demo stage") from e
+    logger.info("Tour demo stage", extra={"session_id": session_id, "stage": stage})
+    return result

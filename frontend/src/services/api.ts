@@ -768,16 +768,17 @@ export const api = {
     return response.json();
   },
 
-  async addTourDemoSlides(sessionId: string): Promise<{ session_id: string; slide_count: number }> {
-    const response = await fetch(`${API_BASE_URL}/api/tour/demo-deck/${sessionId}/slides`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    });
-
+  async runTourDemoStage(
+    sessionId: string,
+    stage: 'plan' | 'build' | 'review' | 'edit',
+  ): Promise<{ session_id: string; stage: string; applied: boolean; slide_count: number }> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/tour/demo-deck/${sessionId}/stages/${stage}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    );
     if (!response.ok) {
-      throw new ApiError(response.status, 'Failed to add tour demo slides');
+      throw new ApiError(response.status, `Failed to run tour demo stage ${stage}`);
     }
-
     return response.json();
   },
 

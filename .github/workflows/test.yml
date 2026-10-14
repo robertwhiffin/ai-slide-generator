@@ -731,6 +731,7 @@ jobs:
           - agent-config-integration
           - agent-definition-workbench
           - api-route-matcher
+          - app-tour
           - chat-ui
           - conversation-graph-version
           - css-bg-export

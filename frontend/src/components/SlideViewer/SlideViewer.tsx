@@ -13,7 +13,7 @@ import { Tooltip } from '../common/Tooltip';
 import type { SlideDeck } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { DECK_LEVEL_CRITERIA, type DrawerCallbacks, type SlideFinding } from '../../types/finding';
-import { ViewerProvider, useViewer } from '../../contexts/ViewerContext';
+import { ViewerProvider, useViewer, type DrawerTab } from '../../contexts/ViewerContext';
 import { SlideStage } from './SlideStage';
 import { ThumbnailRibbon } from './ThumbnailRibbon';
 import { FeedbackDrawer } from './FeedbackDrawer';
@@ -91,7 +91,25 @@ const ViewerBody = forwardRef<
   onSlideChange, onSendMessage, readOnly = false, lockedBy = null,
   onVerificationComplete, sessionId,
 }, ref) => {
-  const { currentIndex, next, prev, first, last, activeTab, drawerOpen } = useViewer();
+  const {
+    currentIndex, next, prev, first, last, activeTab, drawerOpen,
+    setCurrentIndex, setDrawerOpen, setActiveTab,
+  } = useViewer();
+
+  // App tour bridge: the tour sets (never toggles) viewer state so a user whose
+  // drawer was already open, or who sits on another slide, lands where the
+  // step expects. ViewerContext exists only inside this subtree.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { index, drawerOpen: open, tab } =
+        (e as CustomEvent<{ index?: number; drawerOpen?: boolean; tab?: DrawerTab }>).detail ?? {};
+      if (typeof index === 'number') setCurrentIndex(index);
+      if (typeof open === 'boolean') setDrawerOpen(open);
+      if (tab) setActiveTab(tab);
+    };
+    window.addEventListener('tour:viewer', handler);
+    return () => window.removeEventListener('tour:viewer', handler);
+  }, [setCurrentIndex, setDrawerOpen, setActiveTab]);
   const [seen, setSeen] = useState<Set<string>>(() => loadSeen(deckKey));
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const stageRef = useRef<HTMLDivElement | null>(null);
