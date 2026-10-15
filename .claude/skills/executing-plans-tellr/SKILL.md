@@ -11,7 +11,7 @@ PR1 + PR2, both merged 2026-08-12), and which that skill does not currently cove
 
 Kept as a project skill rather than edited into the plugin: the plugin lives in a
 version-pinned cache that upgrades overwrite, and several of these practices reference
-Tellr's specific layout (shared pyenv env, app-wheel BUILD path, live-Postgres test
+Tellr's specific layout (per-worktree uv venvs, app-wheel BUILD path, live-Postgres test
 suites).
 
 ## 1. Sabotage is the only proof a test works
@@ -90,9 +90,11 @@ Tasks touching the same file must run sequentially even when the plan calls them
 independent (three tasks all edited `session_manager.py`). Genuinely independent PRs get
 their own git worktree.
 
-**Check the Python environment first.** If it is a shared interpreter rather than a
-per-repo venv, bar every agent from `pip install` — otherwise parallel agents corrupt each
-other's test runs and each other's dependency verification.
+**Check the Python environment first.** Each worktree gets its own uv-managed `.venv`
+(`uv sync --extra dev` in the worktree root — sub-second from the warm uv cache). Run
+everything through `uv run` so it resolves to that worktree's venv. Never `pip install`
+into a shared interpreter — parallel agents corrupt each other's test runs and dependency
+verification. A dependency change goes in `pyproject.toml` + `uv lock`, not an ad-hoc install.
 
 ## 7. The whole-branch review is where cross-cutting defects live
 

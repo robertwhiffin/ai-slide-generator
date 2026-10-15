@@ -79,7 +79,7 @@ dev = [
 ]
 
 [tool.uv]
-index-url = "https://pypi-proxy.dev.databricks.com/simple/"
+index-url = "https://pypi-proxy.cloud.databricks.com/simple/"
 
 [tool.ruff]
 line-length = 100
