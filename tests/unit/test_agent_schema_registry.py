@@ -39,7 +39,7 @@ EXPECTED_ROLES = (
 )
 
 EXPECTED_V1_DIGESTS = {
-    "architect": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+    "architect": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -49,7 +49,7 @@ EXPECTED_V1_DIGESTS = {
 }
 
 EXPECTED_V2_DIGESTS = {
-    "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+    "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -1278,7 +1278,7 @@ def test_upgraded_content_round_trips_through_the_persistence_mapper() -> None:
         assert restored.schema_overlay.additional_optional_fields == ("diagnostic_notes",)
         assert restored.schema_contract.model_dump() == {
             "version": 2,
-            "digest": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+            "digest": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
         }
         assert definition_content_hash(restored) == definition_content_hash(upgraded)
 

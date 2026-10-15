@@ -6,7 +6,8 @@
     "content_brief": "Bullet slide listing the three pain points of unoptimised prompts — inconsistent outputs, wasted tokens/cost, and slow iteration — with a callout summarising the opportunity cost",
     "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
     "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",
-    "data_references": []
+    "data_references": [],
+    "slide_type": null
   },
   "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
   "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",

@@ -733,6 +733,28 @@ def test_valid_current_upgrade_reports_already_current_but_invalid_current_valid
     )
 
 
+def test_historical_v2_upgrade_is_already_current_and_keeps_custom_blocks() -> None:
+    """A retained v2 digest is already current; upgrading it must not wipe custom blocks."""
+    historical = ContentIdentity(
+        version=2,
+        digest="fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a",
+    )
+    block = _custom("00000000-0000-0000-0000-000000000001", "keep this authored block")
+    original = _v2("fixer", [block], identity=historical)
+    assert original.protected_assembly != V2_PROTECTED_ASSEMBLY_IDENTITY
+    assert original.protected_assembly.version == 2
+    with pytest.raises(PromptAssemblyRejected) as caught:
+        PromptAssembler().upgrade_definition_to_v2(definition=original)
+    assert caught.value.issues == (
+        _issue(
+            "protected_assembly.version",
+            "already_current",
+            "Protected assembly is already current.",
+        ),
+    )
+    assert original.assembly_rules.custom_blocks == (block,)
+
+
 def test_other_v1_role_upgrades_without_changing_authored_prompt() -> None:
     """Catches affected-role transition policy leaking onto unaffected roles."""
     original = _definition("architect")
@@ -760,7 +782,7 @@ def test_other_v1_role_upgrades_without_changing_authored_prompt() -> None:
 
 
 #: Committed separately from ``src/services/prompt_assembler.py``'s own literal.
-INDEPENDENT_V2_DIGEST = "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
+INDEPENDENT_V2_DIGEST = "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
 
 #: Hand-typed from the reviewed v2 contract, in the exact bundle order:
 #: (stage_id, label, condition, contributes_to_prompt, roles, legal anchors).

@@ -785,6 +785,24 @@ def import_bundle(
     from src.services.design_system_templates import materialize_templates
 
     materialize_templates(design_system)
+    # Every slide root of a NEW template must declare a non-empty data-label so
+    # the architect can bind slide types to it. Gated here (not in lazy
+    # materialize_templates) so existing rows are never rewritten or refused.
+    # Zero-root layouts have nothing to label and import unchanged.
+    from src.services.template_sections import section_inventory
+
+    for template in design_system.templates:
+        unlabeled = [
+            entry["index"]
+            for entry in section_inventory(template.layout_html or "")
+            if entry.get("label") is None
+        ]
+        if unlabeled:
+            raise DesignSystemImportError(
+                f"Template {template.entry_path!r} has unlabeled slide roots at "
+                f"indexes {unlabeled}; each slide root must declare a non-empty "
+                "data-label"
+            )
     recompute_compiled_style_content(design_system)
     # The flush above normally raises first, but the index is only DEFINITELY
     # exercised at the commit (a deferrable constraint, a different flush order), so

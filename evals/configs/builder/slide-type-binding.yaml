@@ -1,0 +1,5 @@
+# Builder v1 prompt: fill the bound template section and keep its treatment.
+agent_key: builder
+name: builder-slide-type-binding
+base: v1
+prompt_file: slide-type-binding.md

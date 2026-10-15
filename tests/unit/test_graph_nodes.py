@@ -1057,6 +1057,291 @@ class TestAnEditCarriesItsRevisedSpec:
         assert [s.position for s in updates["deck_spec"].slides] == [0, 1, 2, 3]
 
 
+# Pinned template whose inventory carries design-system labels (vocabulary
+# chosen by this fixture): 0 "Cover", 1 "Content", 2 unlabelled.
+BOUND_LAYOUT = (
+    "<section class='slide' data-label='Cover'><h1>Cover</h1></section>"
+    "<section class='slide' data-label='Content'><p>Body</p></section>"
+    "<section class='slide'><p>Unlabelled</p></section>"
+)
+
+
+def _bind(spec, pairs):
+    """*spec* with ``(slide_type, template_section_index)`` set per position."""
+    return spec.model_copy(
+        update={
+            "slides": [
+                slide.model_copy(
+                    update={
+                        "slide_type": pairs[slide.position][0],
+                        "template_section_index": pairs[slide.position][1],
+                    }
+                )
+                if slide.position in pairs
+                else slide
+                for slide in spec.slides
+            ]
+        }
+    )
+
+
+class TestArchitectValidatesSlideTypeBindings:
+    """Every non-null ``(slide_type, template_section_index)`` pair is checked
+    against the pinned template's inventory before the spec is persisted or any
+    builder is dispatched — on BUILD as well as on EDIT.
+
+    An invalid pair degrades the turn to ``discuss`` through the single degrade
+    path (``error_state.code == "invalid_slide_type_binding"``), commits no spec,
+    and tells the user which slide and which pair, 1-indexed.
+
+    Sabotage: drop the ``invalid_slide_bindings`` check from ``architect_node``
+    and the build-mismatch and edit-mismatch tests go red (the turn proceeds to
+    the foreman and the bad spec is written).
+    """
+
+    THREE = ["<div class='slide'>a</div>", "<div class='slide'>b</div>",
+             "<div class='slide'>c</div>"]
+
+    def _pinned_env(self, env, positions=(0, 1, 2)):
+        """Pin ds 7 / template 3 with BOUND_LAYOUT, and persist an unbound spec
+        under the same contract so the inbound and committed contracts agree
+        (the payload's ``template_sections`` IS the spec's inventory)."""
+        from src.api.services.deck_level_writer import write_deck_level_columns
+
+        env.template.layout = BOUND_LAYOUT
+        prior = make_spec(positions, design_system_id=7, template_id=3)
+        write_deck_level_columns(env.session_id, deck_spec=prior.to_json())
+        return prior
+
+    def _run_and_capture(self, env, state=None):
+        from src.api.services.session_manager import get_session_manager
+
+        before = len(get_session_manager().get_messages(env.session_id))
+        emitter: queue.Queue = queue.Queue()
+        set_event_emitter(emitter)
+        try:
+            state = state if state is not None else env.state()
+            updates = architect_node(state)
+        finally:
+            set_event_emitter(None)
+        events = []
+        while not emitter.empty():
+            events.append(emitter.get_nowait())
+        said = [
+            m.get("content")
+            for m in get_session_manager().get_messages(env.session_id)[before:]
+        ]
+        return state, updates, events, said
+
+    def _assert_degraded(self, env, state, updates, prior):
+        from langgraph.graph import END
+
+        from src.services.graph.routers import architect_router
+
+        assert updates["architect_intent"] == "discuss"
+        assert updates["error_state"] is not None
+        assert updates["error_state"]["node"] == "architect"
+        assert updates["error_state"]["code"] == "invalid_slide_type_binding"
+        assert updates["target_positions"] is None
+        # Nothing committed off the refused spec, in state or in the row.
+        assert "deck_spec" not in updates
+        assert env.deck_row().deck_spec_json == prior.to_json()
+        # And nothing dispatched: the turn ends instead of reaching the foreman.
+        assert architect_router({**state, **updates}) == END
+        assert env.skills.calls_for("builder") == []
+
+    # ---- build ---------------------------------------------------------------
+
+    def test_a_build_binding_a_matching_pair_proceeds(self, graph_env):
+        from src.services.graph.routers import architect_router
+
+        self._pinned_env(graph_env)
+        spec = _bind(
+            make_spec((0, 1, 2), design_system_id=7, template_id=3),
+            {0: ("Cover", 0)},
+        )
+        graph_env.skills.set("architect", architect_build(spec))
+
+        state, updates, _, _ = self._run_and_capture(graph_env)
+
+        # Guard: the model was shown the inventory this test validates against.
+        shown = graph_env.skills.calls_for("architect")[0]["payload"]
+        assert [e["label"] for e in shown["template_sections"]] == [
+            "Cover", "Content", None,
+        ]
+        assert updates["architect_intent"] == "build"
+        assert updates["error_state"] is None
+        assert updates["deck_spec"].slide_at(0).slide_type == "Cover"
+        assert updates["deck_spec"].slide_at(0).template_section_index == 0
+        persisted = json.loads(graph_env.deck_row().deck_spec_json)
+        slide0 = next(s for s in persisted["slides"] if s["position"] == 0)
+        assert (slide0["slide_type"], slide0["template_section_index"]) == ("Cover", 0)
+        assert architect_router({**state, **updates}) == "foreman"
+
+    def test_an_index_only_binding_is_completed_from_the_inventory_label(
+        self, graph_env
+    ):
+        """Live-prompt output sets the index and leaves slide_type null."""
+        self._pinned_env(graph_env)
+        spec = _bind(
+            make_spec((0, 1, 2), design_system_id=7, template_id=3),
+            {0: (None, 0)},
+        )
+        graph_env.skills.set("architect", architect_build(spec))
+
+        _, updates, _, _ = self._run_and_capture(graph_env)
+
+        assert updates["architect_intent"] == "build"
+        assert updates["error_state"] is None
+        assert updates["deck_spec"].slide_at(0).slide_type == "Cover"
+        assert updates["deck_spec"].slide_at(0).template_section_index == 0
+        persisted = json.loads(graph_env.deck_row().deck_spec_json)
+        slide0 = next(s for s in persisted["slides"] if s["position"] == 0)
+        assert (slide0["slide_type"], slide0["template_section_index"]) == ("Cover", 0)
+
+    def test_a_build_binding_several_slides_proceeds(self, graph_env):
+        """Several bound slides, each against its own entry, plus an unbound one."""
+        self._pinned_env(graph_env)
+        spec = _bind(
+            make_spec((0, 1, 2), design_system_id=7, template_id=3),
+            {0: ("Cover", 0), 1: ("Content", 1)},
+        )
+        graph_env.skills.set("architect", architect_build(spec))
+
+        _, updates, _, _ = self._run_and_capture(graph_env)
+
+        assert updates["architect_intent"] == "build"
+        assert updates["error_state"] is None
+
+    @pytest.mark.parametrize(
+        "pair",
+        [("Content", 0), ("Cover", None), (None, 2), ("Cover", 9), ("Unlabelled", 2),
+         ("cover", 0)],
+        ids=["mismatched", "slide_type-only", "index-only-unlabelled", "out-of-range",
+             "null-label", "case-differs"],
+    )
+    def test_a_build_with_an_invalid_pair_degrades_and_commits_nothing(
+        self, graph_env, pair
+    ):
+        prior = self._pinned_env(graph_env)
+        spec = _bind(
+            make_spec((0, 1, 2), design_system_id=7, template_id=3),
+            {0: ("Cover", 0), 2: pair},
+        )
+        graph_env.skills.set("architect", architect_build(spec))
+
+        state, updates, _, _ = self._run_and_capture(graph_env)
+
+        self._assert_degraded(graph_env, state, updates, prior)
+
+    def test_the_refusal_names_the_1_indexed_slide_and_the_pair_on_both_surfaces(
+        self, graph_env
+    ):
+        """Position 2 is "slide 3" to the user. The message names the supplied
+        pair and does not tell the user to invent a type."""
+        import re
+
+        self._pinned_env(graph_env)
+        model_message = "Building your deck."
+        spec = _bind(
+            make_spec((0, 1, 2), design_system_id=7, template_id=3),
+            {2: ("Agenda Wide", 1)},
+        )
+        graph_env.skills.set("architect", architect_build(spec, message=model_message))
+
+        _, updates, events, said = self._run_and_capture(graph_env)
+
+        assert updates["error_state"]["code"] == "invalid_slide_type_binding"
+        refusal = updates["architect_message"]
+        assert refusal and refusal != model_message
+        assert re.search(r"\bslide\s+3\b", refusal, re.IGNORECASE), refusal
+        assert not re.search(r"\bslide\s+2\b", refusal, re.IGNORECASE), (
+            f"0-indexed slide number reached the user: {refusal!r}"
+        )
+        assert "Agenda Wide" in refusal
+        assert "1" in refusal
+        assert "invent" not in refusal.lower()
+        architect_lines = [
+            e.content for e in events if (e.metadata or {}).get("node") == "architect"
+        ]
+        assert architect_lines == [model_message, refusal]
+        assert events[-1].metadata.get("intent") == "discuss"
+        assert said == [model_message, refusal]
+
+    def test_a_bound_pair_on_an_unpinned_deck_degrades(self, graph_env):
+        """No template means no vocabulary: any non-null pair is invalid."""
+        from langgraph.graph import END
+
+        from src.services.graph.routers import architect_router
+
+        spec = _bind(make_spec((0, 1)), {0: ("Cover", 0)})
+        graph_env.skills.set("architect", architect_build(spec))
+
+        state, updates, _, _ = self._run_and_capture(graph_env)
+
+        assert graph_env.template.calls == []
+        assert updates["architect_intent"] == "discuss"
+        assert updates["error_state"]["code"] == "invalid_slide_type_binding"
+        assert "deck_spec" not in updates
+        deck = graph_env.deck_row()
+        assert deck is None or not deck.deck_spec_json
+        assert architect_router({**state, **updates}) == END
+
+    def test_a_build_that_pins_a_template_this_turn_validates_against_it(
+        self, graph_env
+    ):
+        """The inventory is the one for the template the SPEC pins (spec: "the
+        spec's pinned template"). Here the inbound contract is unpinned, so the
+        payload's ``template_sections`` was empty; the committed spec pins ds 7 /
+        template 3 and binds a pair that exists in that template. Validating
+        against the stale inbound inventory would wrongly refuse it."""
+        graph_env.template.layout = BOUND_LAYOUT
+        spec = _bind(
+            make_spec((0, 1), design_system_id=7, template_id=3),
+            {0: ("Cover", 0)},
+        )
+        graph_env.skills.set("architect", architect_build(spec))
+
+        _, updates, _, _ = self._run_and_capture(graph_env)
+
+        assert updates["architect_intent"] == "build"
+        assert updates["error_state"] is None
+        assert updates["deck_spec"].slide_at(0).slide_type == "Cover"
+
+    # ---- edit (C3: the same check, the same degrade) ------------------------
+
+    def test_an_edit_with_a_mismatched_pair_degrades_and_commits_nothing(
+        self, graph_env
+    ):
+        graph_env.seed_slides(self.THREE)
+        prior = self._pinned_env(graph_env)
+        graph_env.skills.set(
+            "architect",
+            _edit_out(_bind(prior, {1: ("Content", 0)}), [1], message="Editing slide 2."),
+        )
+
+        state, updates, _, _ = self._run_and_capture(graph_env)
+
+        self._assert_degraded(graph_env, state, updates, prior)
+
+    def test_an_edit_with_a_matching_pair_proceeds(self, graph_env):
+        graph_env.seed_slides(self.THREE)
+        prior = self._pinned_env(graph_env)
+        graph_env.skills.set(
+            "architect",
+            _edit_out(_bind(prior, {1: ("Content", 1)}), [1], message="Editing slide 2."),
+        )
+
+        _, updates, _, _ = self._run_and_capture(graph_env)
+
+        assert updates["architect_intent"] == "edit"
+        assert updates["error_state"] is None
+        assert updates["target_positions"] == [1]
+        persisted = json.loads(graph_env.deck_row().deck_spec_json)
+        slide1 = next(s for s in persisted["slides"] if s["position"] == 1)
+        assert (slide1["slide_type"], slide1["template_section_index"]) == ("Content", 1)
+
+
 class TestArchitectReadsThePreviousArcVerdict:
     def test_calls_get_deck_review_with_db_deck_id_and_digest(
         self, graph_env, monkeypatch
@@ -1736,6 +2021,159 @@ class TestFindingStamping:
         )
 
         assert updates["findings"][0].slide_index == 3
+
+
+class TestReviewerSeesSectionHtml:
+    """Both production ``build_reviewer`` calls hand the model ``section_html`` —
+    the same extracted fragment the builder saw — so it can tell a filled
+    section from an invented one (``layout_binding_mismatch``,
+    ``off_template_treatment``).
+
+    The key sets below are LITERALS written into each test, not imports of
+    ``tests/fixtures/model_payload_keys.py``: adding ``section_html`` to that
+    fixture alone must leave these red until the production dicts in
+    ``build_reviewer_node`` and ``rereview_committed_slides`` carry it.
+
+    The value is asserted, not just the key: a re-review must extract with
+    ``extract_section(layout, template_section_index)`` exactly as
+    ``build_branch_payload`` does, and send ``""`` when the slide is unbound,
+    the layout is empty, or the index is out of range.
+    """
+
+    SLIDE_REVIEW_KEYS = {
+        "position",
+        "slide_spec",
+        "resolved_style",
+        "section_css",
+        "resolved_data",
+        "section_html",
+        "html",
+        "scripts",
+    }
+    BOUND_FRAGMENT = "<section class='slide cover'><h1>Bound cover</h1></section>"
+
+    def _brand(self, layout_html):
+        return {
+            "resolved_style": DEFAULT_STYLE,
+            "deterministic_css": TEMPLATE_TOKEN_CSS,
+            "design_system_active": True,
+            "template_layout_html": layout_html,
+        }
+
+    def _rereview_payload(self, env, spec, layout_html):
+        env.seed_slides(["<div class='slide'>committed</div>"])
+        env.skills.set("build_reviewer", lambda payload: review_out(0))
+        verdicts = rereview_committed_slides(
+            env.session_id, spec, self._brand(layout_html), 1
+        )
+        calls = env.skills.calls_for("build_reviewer")
+        assert len(calls) == 1
+        return verdicts, calls[0]["payload"]
+
+    def test_the_build_review_payload_carries_the_records_section_html(
+        self, graph_env
+    ):
+        graph_env.skills.set("build_reviewer", lambda payload: review_out(0))
+
+        build_reviewer_node(
+            _branch_payload(
+                graph_env,
+                0,
+                html="<div class='slide'>built</div>",
+                section_html=self.BOUND_FRAGMENT,
+            )
+        )
+
+        payload = graph_env.skills.calls_for("build_reviewer")[0]["payload"]
+        assert set(payload) == self.SLIDE_REVIEW_KEYS
+        assert payload["section_html"] == self.BOUND_FRAGMENT
+
+    def test_an_unbound_records_empty_section_html_reaches_the_reviewer(
+        self, graph_env
+    ):
+        graph_env.skills.set("build_reviewer", lambda payload: review_out(0))
+
+        build_reviewer_node(
+            _branch_payload(graph_env, 0, html="<p>a</p>", section_html="")
+        )
+
+        payload = graph_env.skills.calls_for("build_reviewer")[0]["payload"]
+        assert "section_html" in payload
+        assert payload["section_html"] == ""
+
+    def test_the_reviewer_sees_the_fragment_build_branch_payload_extracted(
+        self, graph_env
+    ):
+        """Branch payload -> builder record -> review payload: one fragment."""
+        from src.services.template_sections import extract_section
+
+        spec = make_spec((0,), slide_type="Section B", template_section_index=1)
+        state = graph_env.state(
+            deck_spec=spec,
+            template_layout_html=TEMPLATE_LAYOUT,
+            slides=scoped(TURN, {}),
+        )
+        branch = build_branch_payload(state, 0)
+        record = {**branch, "html": "<div class='slide'>built</div>", "scripts": ""}
+        graph_env.skills.set("build_reviewer", lambda payload: review_out(0))
+
+        build_reviewer_node(nodes.build_review_payload(record, state))
+
+        expected = extract_section(TEMPLATE_LAYOUT, 1)
+        assert "Section B" in expected
+        assert branch["section_html"] == expected
+        payload = graph_env.skills.calls_for("build_reviewer")[0]["payload"]
+        assert payload["section_html"] == expected
+
+    def test_the_deck_level_re_review_extracts_the_bound_section(self, graph_env):
+        from src.services.template_sections import extract_section
+
+        spec = make_spec((0,), slide_type="Section B", template_section_index=1)
+
+        _verdicts, payload = self._rereview_payload(graph_env, spec, TEMPLATE_LAYOUT)
+
+        assert set(payload) == self.SLIDE_REVIEW_KEYS | {"deck_brief"}
+        expected = extract_section(TEMPLATE_LAYOUT, 1)
+        assert "Section B" in expected and "Section A" not in expected
+        assert payload["section_html"] == expected
+
+    def test_the_re_review_uses_the_shared_extractor(self, graph_env, monkeypatch):
+        """No second extractor: the pass calls ``nodes.extract_section`` with the
+        brand's layout and the slide's index, and sends what it returns."""
+        seen = []
+
+        def spy(layout_html, index):
+            seen.append((layout_html, index))
+            return "<section class='slide'>SPY FRAGMENT</section>"
+
+        monkeypatch.setattr(nodes, "extract_section", spy)
+        spec = make_spec((0,), slide_type="Section A", template_section_index=0)
+
+        _verdicts, payload = self._rereview_payload(graph_env, spec, TEMPLATE_LAYOUT)
+
+        assert seen == [(TEMPLATE_LAYOUT, 0)]
+        assert payload["section_html"] == "<section class='slide'>SPY FRAGMENT</section>"
+
+    @pytest.mark.parametrize(
+        "layout_html, slide_type, index",
+        [
+            (TEMPLATE_LAYOUT, None, None),
+            ("", "Section A", 0),
+            (TEMPLATE_LAYOUT, "Section Z", 9),
+        ],
+        ids=["unbound", "no-layout", "index-out-of-range"],
+    )
+    def test_the_re_review_sends_empty_section_html_when_nothing_is_bound(
+        self, graph_env, layout_html, slide_type, index
+    ):
+        spec = make_spec((0,), slide_type=slide_type, template_section_index=index)
+
+        verdicts, payload = self._rereview_payload(graph_env, spec, layout_html)
+
+        assert set(payload) == self.SLIDE_REVIEW_KEYS | {"deck_brief"}
+        assert payload["section_html"] == ""
+        assert verdicts["reviewed"] == {0}
+        assert verdicts["unreviewable"] == set()
 
 
 # ===========================================================================

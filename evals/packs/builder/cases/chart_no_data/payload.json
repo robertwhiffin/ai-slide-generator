@@ -8,7 +8,8 @@
     "hands_off": "HTML slides look perfect on every screen without manual resizing",
     "data_references": [
       "device_render_comparison"
-    ]
+    ],
+    "slide_type": null
   },
   "assumes": "The audience knows responsive web design exists but may not have connected it to presentations",
   "hands_off": "HTML slides look perfect on every screen without manual resizing",

@@ -563,7 +563,7 @@ def test_persisted_v2_runtime_delegates_exact_prompt_and_provenance(
     assert result.diagnostics.protected_prompt.version == 2
     assert (
         result.diagnostics.protected_prompt.digest
-        == "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
+        == "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
     )
     assert result.diagnostics.assembly_stages == tuple(expected_stages)
 
@@ -704,7 +704,7 @@ def test_persisted_v2_build_reviewer_deck_brief_tracks_truthiness(deck_brief) ->
     assert result.diagnostics.protected_prompt.version == 2
     assert (
         result.diagnostics.protected_prompt.digest
-        == "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a"
+        == "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
     )
     assert result.diagnostics.assembly_stages == tuple(expected_stages)
 
@@ -1340,7 +1340,7 @@ def test_session_factory_runtime_failure_is_a_safe_lakebase_unavailable_error():
 # ---------------------------------------------------------------------------
 
 EXPECTED_V2_SCHEMA_DIGESTS = {
-    "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+    "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -1804,7 +1804,7 @@ def test_runtime_resolves_through_the_one_public_schema_registry() -> None:
     assert runtime._schema_registry.identity_for("architect", 1) == SchemaContractIdentity(
         agent_key="architect",
         version=1,
-        digest="a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+        digest="9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
     )
 
 

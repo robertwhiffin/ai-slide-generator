@@ -6,7 +6,8 @@
     "content_brief": "Bullet slide listing the three pain points of unoptimised prompts — inconsistent outputs, wasted tokens/cost, and slow iteration — with a callout summarising the opportunity cost. Cover at least 12 distinct dense points, each with its own supporting detail: (1) the same query giving different answers on each run; (2) manual review of every output; (3) rework after each inconsistent response; (4) naive prompts burning extra tokens; (5) token waste scaling with every API call; (6) rising monthly inference bills; (7) 3-5 revision rounds before production quality; (8) engineering hours lost to trial and error; (9) no shared record of which prompt version works; (10) regressions when a model is upgraded; (11) each new use case restarting from scratch; (12) stakeholders losing trust in LLM features",
     "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
     "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",
-    "data_references": []
+    "data_references": [],
+    "slide_type": null
   },
   "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
   "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",

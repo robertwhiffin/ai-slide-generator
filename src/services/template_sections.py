@@ -10,6 +10,14 @@ extract_section(layout_html, index) -> str
     Verbatim markup of slide section at 0-based *index*, re-parented in its
     non-promoted ancestor chain so CSS inheritance is preserved.
 
+invalid_slide_bindings(spec, inventory) -> list[str]
+    Errors (one per bad SlideSpec) for ``slide_type`` / ``template_section_index``
+    pairs that do not match the inventory; ``[]`` means valid.
+
+complete_index_only_bindings(spec, inventory) -> None
+    Fill ``slide_type`` from the inventory label when only the index is set
+    and that section is labelled. Mutates *spec* in place.
+
 resolve_template_bytes(design_system_id, template_id) -> tuple[str, str, str]
     (normalized_layout_html, style_block_css_text, token_css)
 
@@ -298,6 +306,33 @@ def _detect_affordances(root_soup) -> list[str]:
     return affordances
 
 
+def _root_label(root) -> str | None:
+    """Return the trimmed ``data-label`` of ``root``, or ``None`` if absent/blank."""
+    raw = root.get("data-label")
+    if not isinstance(raw, str):
+        return None
+    return raw.strip() or None
+
+
+def _depth(el) -> int:
+    """Number of ancestors of ``el`` (document root excluded by BS4 parent chain)."""
+    return sum(1 for _ in el.parents)
+
+
+def _inner_slide_classes(root) -> list[str]:
+    """Class tokens of the innermost ``.slide`` element, when it is not ``root``.
+
+    Candidates are ``root`` and every descendant whose class list contains the
+    token ``slide``.  The deepest candidate wins (first in document order on a
+    depth tie).  Returns ``[]`` when that candidate is the root itself.
+    """
+    candidates = [root, *root.find_all(class_="slide")]
+    innermost = max(candidates, key=_depth)  # max() keeps the first of equal keys
+    if innermost is root:
+        return []
+    return list(innermost.get("class") or [])
+
+
 def _text_snippet(root_soup, max_len: int = 80) -> str:
     """Extract a short text snippet (no markup) from the element."""
     text = root_soup.get_text(separator=" ", strip=True)
@@ -315,8 +350,15 @@ def section_inventory(layout_html: str) -> list[dict]:
 
     Each entry is a plain dict with exactly these keys:
         index (int): 0-based position in document order
+        label (str | None): trimmed ``data-label`` on the inventoried root
+            (after ``find_slide_roots`` wrapper promotion); ``None`` when
+            missing or whitespace-only (a WARNING is logged).  Duplicate
+            labels are valid.
         tag (str): element tag name (e.g. ``"section"``, ``"div"``)
-        classes (list[str]): the element's class tokens
+        classes (list[str]): the root element's class tokens
+        inner_classes (list[str]): class tokens of the INNERMOST descendant
+            whose class list contains the token ``slide``, when that element
+            is not the root; ``[]`` otherwise
         text_snippet (str): up to 80 chars of visible text content (no markup)
         affordances (list[str]): structural features detected — any of:
             ``"canvas"``, ``"image"``, ``"table"``, ``"list"``
@@ -349,16 +391,107 @@ def section_inventory(layout_html: str) -> list[dict]:
 
     inventory = []
     for i, root in enumerate(roots):
+        label = _root_label(root)
+        if label is None:
+            logger.warning(
+                "section_inventory: slide root %d (<%s>) has no data-label; "
+                "label is None (existing rows stay loadable).",
+                i,
+                root.name,
+            )
         inventory.append(
             {
                 "index": i,
+                "label": label,
                 "tag": root.name,
                 "classes": list(root.get("class") or []),
+                "inner_classes": _inner_slide_classes(root),
                 "text_snippet": _text_snippet(root),
                 "affordances": _detect_affordances(root),
             }
         )
     return inventory
+
+
+def complete_index_only_bindings(spec, inventory: list[dict]) -> None:
+    """Fill ``slide_type`` from the inventory when only the section index is set.
+
+    Legacy and lagging architect output bind ``template_section_index`` without
+    ``slide_type``. Completing the pair from the labelled entry keeps the bind
+    instead of refusing the whole turn. Unlabelled, out-of-range, and
+    slide_type-only slides are left for ``invalid_slide_bindings``.
+    """
+    for slide in spec.slides:
+        if slide.slide_type is not None or slide.template_section_index is None:
+            continue
+        index = slide.template_section_index
+        if not inventory or not 0 <= index < len(inventory):
+            continue
+        label = inventory[index].get("label")
+        if label is None:
+            continue
+        logger.info(
+            "complete_index_only_bindings: slide %s index %s -> slide_type %r",
+            slide.position + 1,
+            index,
+            label,
+        )
+        slide.slide_type = label
+
+
+def invalid_slide_bindings(spec, inventory: list[dict]) -> list[str]:
+    """Return human-readable errors for every invalid ``(slide_type, index)`` pair.
+
+    One error per bad ``SlideSpec``; an empty list means every slide is valid.
+    ``inventory`` is the ``section_inventory`` of the template the spec pins
+    (``[]`` when it pins none).
+
+    A pair is valid when it is both ``None``, or when ``template_section_index``
+    is in range, that entry's ``label`` is not ``None``, and ``slide_type``
+    equals that label exactly (case-preserving).  Exactly one field set is
+    invalid.  With an empty inventory only the null pair is valid.  Duplicate
+    labels are valid: the index disambiguates.
+
+    Error text speaks 1-indexed about the slide (matching the UI) and 0-indexed
+    about the template section (matching ``template_section_index``).
+    """
+    errors: list[str] = []
+    for slide in spec.slides:
+        slide_type = slide.slide_type
+        index = slide.template_section_index
+        if slide_type is None and index is None:
+            continue
+
+        where = f"slide {slide.position + 1}"
+        pair = f"slide_type={slide_type!r}, template_section_index={index!r}"
+        if slide_type is None or index is None:
+            errors.append(
+                f"{where}: {pair} — slide_type and template_section_index "
+                "must be set together or both left empty"
+            )
+        elif not inventory:
+            errors.append(
+                f"{where}: {pair} — this deck's template has no inventoried "
+                "sections to bind to"
+            )
+        elif not 0 <= index < len(inventory):
+            errors.append(
+                f"{where}: {pair} — template_section_index is out of range "
+                f"(the template has {len(inventory)} sections, 0 to "
+                f"{len(inventory) - 1})"
+            )
+        else:
+            label = inventory[index].get("label")
+            if label is None:
+                errors.append(
+                    f"{where}: {pair} — section {index} has no label, so it "
+                    "cannot be bound"
+                )
+            elif slide_type != label:
+                errors.append(
+                    f"{where}: {pair} — section {index} is labelled {label!r}"
+                )
+    return errors
 
 
 def extract_section(layout_html: str, index: int) -> str:

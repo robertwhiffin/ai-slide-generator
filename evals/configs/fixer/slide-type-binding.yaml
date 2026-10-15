@@ -1,0 +1,5 @@
+# Fixer v1 prompt: keep the input's outer root tag when applying a finding.
+agent_key: fixer
+name: fixer-slide-type-binding
+base: v1
+prompt_file: slide-type-binding.md

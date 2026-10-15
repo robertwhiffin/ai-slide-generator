@@ -10,7 +10,8 @@
       "token_cost_reduction",
       "consistency_gain",
       "iteration_cycles"
-    ]
+    ],
+    "slide_type": null
   },
   "assumes": "Audience now knows the techniques and wants evidence they work",
   "hands_off": "The gains from structured prompting are large and well-documented",

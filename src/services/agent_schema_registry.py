@@ -48,7 +48,7 @@ MODEL_DRIVEN_AGENT_KEYS = (
 
 _V1_DIGESTS = MappingProxyType(
     {
-        "architect": "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd",
+        "architect": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
         "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
         "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
         "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -60,7 +60,7 @@ _V1_DIGESTS = MappingProxyType(
 
 _V2_DIGESTS = MappingProxyType(
     {
-        "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+        "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
         "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
         "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
         "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -313,6 +313,25 @@ SCHEMA_CONTRACT_BUNDLES = MappingProxyType(
     }
 )
 
+#: Superseded identities a persisted release may still name.  Each composes the
+#: same current canonical model and catalog as the live bundle for its
+#: ``(role, version)``, so the canonical change that superseded it must keep every
+#: output valid under the old digest (new fields optional, nothing removed).
+#: Never removed; ``identity_for`` never returns one.
+_HISTORICAL_DIGESTS = (
+    ("architect", 1, "a03440e5a8578cf3ced4fd1e83219466ccb0abb5f3d7b04f7836fefd4423fafd"),
+    ("architect", 2, "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122"),
+)
+HISTORICAL_SCHEMA_CONTRACT_BUNDLES = MappingProxyType(
+    {
+        (role, version, digest): replace(
+            SCHEMA_CONTRACT_BUNDLES[(role, version)],
+            identity=SchemaContractIdentity(role, version, digest),
+        )
+        for role, version, digest in _HISTORICAL_DIGESTS
+    }
+)
+
 
 class SchemaContractMaterialChangedError(RuntimeError):
     """Frozen identity material changed without a corresponding literal update."""
@@ -381,10 +400,17 @@ class AgentSchemaRegistry:
     def _resolve(
         self, agent_key: str, identity: SchemaContractIdentity
     ) -> SchemaContractBundle | None:
-        bundle = SCHEMA_CONTRACT_BUNDLES.get((agent_key, identity.version))
-        if bundle is None or bundle.identity != identity:
+        live = SCHEMA_CONTRACT_BUNDLES.get((agent_key, identity.version))
+        if live is None:
             return None
-        return bundle
+        if live.identity == identity:
+            return live
+        historical = HISTORICAL_SCHEMA_CONTRACT_BUNDLES.get(
+            (agent_key, identity.version, identity.digest)
+        )
+        if historical is None or historical.identity != identity:
+            return None
+        return historical
 
     def validate_overlay(
         self,

@@ -39,5 +39,16 @@ SLIDESPEC FIELDS (one per slide):
   assumes: what the audience already knows when they reach this slide
   hands_off: the single takeaway the audience should leave with
   data_references: metric names or identifiers this slide depends on (empty list if the slide needs no data)
+  slide_type: exact data-label copied from one template_sections entry, or null
+  template_section_index: that entry's index from template_sections, or null
+
+VISUAL / TEMPLATE BINDING
+The payload carries `template_sections`: the slide types supplied by the pinned template. Each entry has an `index`, the exact design-system `label`, `inner_classes`, `text_snippet` and `affordances`. Choose only from these entries and copy each entry's `label` exactly into `slide_type` and its `index` into `template_section_index`. If none fit, leave both fields null. If the list is empty or absent, leave both fields null. A slide may stay unbound, so never bind a merely similar section. Never invent a type that is not in the list. Never complain that the list was not supplied when the key is present.
+When you commit a design system, pick a `template_id` from the library rather than leaving it unset; an empty template means an empty `template_sections` list.
+`content_brief` names the exhibit when the slide carries numbers. Brand furniture such as a logo or lockup comes from the selected section's markup. Style assets are identity, not evidence.
+Do not plan exhibits onto missing data; prefer `ask_data`.
+
+SLIDE NUMBERS
+In `message` only, speak about slides 1-indexed, matching the UI. `position` and `target_positions` stay 0-indexed.
 
 Return an ArchitectOutput.  Do not include prose outside the structured output.

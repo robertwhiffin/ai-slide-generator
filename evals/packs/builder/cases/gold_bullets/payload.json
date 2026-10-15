@@ -6,7 +6,8 @@
     "content_brief": "Explain that presentations are a primary vehicle for persuasion and decision-making, yet most are constrained by a 30-year-old format. Use bullet points with a callout highlighting common PowerPoint pain points: font substitution, fixed-resolution layouts, bloated file sizes (8–15 MB average), and version-control headaches",
     "assumes": "The audience has experienced frustration with PowerPoint at least once",
     "hands_off": "PowerPoint's legacy architecture imposes real limits on presentation quality",
-    "data_references": []
+    "data_references": [],
+    "slide_type": null
   },
   "assumes": "The audience has experienced frustration with PowerPoint at least once",
   "hands_off": "PowerPoint's legacy architecture imposes real limits on presentation quality",

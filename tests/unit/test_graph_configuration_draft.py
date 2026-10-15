@@ -13,10 +13,9 @@ import src.database.models  # noqa: F401
 from src.core.database import Base
 from src.core.prompt_modules import UNTRUSTED_DATA_NOTICE
 from src.core.skills.build_reviewer import (
-    BUILD_REVIEWER_AUTHORED_PREFIX,
+    BUILD_REVIEWER_AUTHORED_INSTRUCTIONS,
     BUILD_REVIEWER_CRITERIA_STAGE,
-    BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
-    BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
+    INSTRUCTIONS as BUILD_REVIEWER_V1_PROMPT,
 )
 from src.core.skills.data_analyst import ANALYST_AUTHORED_INSTRUCTIONS
 from src.database.models.graph_configuration import (
@@ -685,12 +684,8 @@ INDEPENDENT_TRANSITION_LITERALS = {
         ANALYST_AUTHORED_INSTRUCTIONS,
     ),
     "build_reviewer": (
-        BUILD_REVIEWER_AUTHORED_PREFIX
-        + "\n\n"
-        + BUILD_REVIEWER_CRITERIA_STAGE
-        + "\n\n"
-        + BUILD_REVIEWER_V1_AUTHORED_SUFFIX,
-        BUILD_REVIEWER_AUTHORED_PREFIX + "\n\n" + BUILD_REVIEWER_V2_AUTHORED_SUFFIX,
+        BUILD_REVIEWER_V1_PROMPT,
+        BUILD_REVIEWER_AUTHORED_INSTRUCTIONS,
     ),
 }
 
@@ -2110,7 +2105,7 @@ def _upgrade_schema(
 # produces SchemaContractMaterialChangedError before a single test runs).
 # Source of truth: src/services/agent_schema_registry._V2_DIGESTS.
 _V2_SCHEMA_DIGESTS: dict[str, str] = {
-    "architect": "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122",
+    "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",

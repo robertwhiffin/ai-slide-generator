@@ -60,10 +60,16 @@ def make_spec(
     design_system_id: Optional[int] = None,
     template_id: Optional[int] = None,
     slide_style_id: Optional[int] = None,
-    template_section_index: Optional[int] = 0,
+    slide_type: Optional[str] = None,
+    template_section_index: Optional[int] = None,
     title: str = "Stub Deck",
 ) -> DeckSpec:
-    """A valid ``DeckSpec`` over arbitrary (possibly non-contiguous) positions."""
+    """A valid ``DeckSpec`` over arbitrary (possibly non-contiguous) positions.
+
+    The binding pair defaults to ``(None, None)``: ``architect_node`` refuses a
+    half-null pair, so a default of index ``0`` with no ``slide_type`` would make
+    every build turn built from this helper degrade.
+    """
     return DeckSpec(
         title=title,
         audience="Stub audience",
@@ -85,6 +91,7 @@ def make_spec(
                 "assumes": f"assumes-{p}",
                 "hands_off": f"hands-off-{p}",
                 "data_references": [],
+                "slide_type": slide_type,
                 "template_section_index": template_section_index,
             }
             for p in positions

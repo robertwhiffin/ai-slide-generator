@@ -83,7 +83,15 @@ CRITERIA: Dict[str, FindingCriterion] = {
         category="design",
         level="slide",
         objective=True,
-        description="Text/background contrast fails WCAG AA minimum.",
+        description=(
+            "Text contrast fails WCAG AA.  Measure the effective text colour "
+            "(after cascade and inline overrides) against the colour actually "
+            "painted behind it, resolving ancestor and inline backgrounds.  "
+            "A colour being in the palette is not a defence: a palette token "
+            "on a palette ground can still fail.  When a design-system contrast "
+            "table is present, judge against it; otherwise require at least "
+            "4.5:1 for normal text and 3:1 for large text.  Check every text run."
+        ),
     ),
     "rogue_colour": FindingCriterion(
         name="rogue_colour",
@@ -143,6 +151,31 @@ CRITERIA: Dict[str, FindingCriterion] = {
         level="deck",
         objective=False,
         description="The deck has no conclusion or call-to-action.",
+    ),
+    "off_template_treatment": FindingCriterion(
+        name="off_template_treatment",
+        category="design",
+        level="slide",
+        objective=True,
+        description=(
+            "A bound section is rendered in a treatment other than the one it "
+            "ships in: the ground is flipped (light for dark or vice versa), the "
+            "governing class is not on the element that paints the ground, or an "
+            "inline colour fights descendant .dark / .white rules.  Judge the "
+            "cascade, not class names."
+        ),
+    ),
+    "layout_binding_mismatch": FindingCriterion(
+        name="layout_binding_mismatch",
+        category="design",
+        level="slide",
+        objective=True,
+        description=(
+            "The built HTML is not the section named by the slide_type / "
+            "template_section_index pair.  Distinct from brief_not_delivered: "
+            "this is about which bound layout was built, not whether the "
+            "content answers the brief."
+        ),
     ),
 }
 
