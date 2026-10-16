@@ -1178,6 +1178,65 @@ class TestArchitectValidatesSlideTypeBindings:
         assert (slide0["slide_type"], slide0["template_section_index"]) == ("Cover", 0)
         assert architect_router({**state, **updates}) == "foreman"
 
+    # ---- default template fallback --------------------------------------------
+
+    def _unpinned_ds_env(self, env, monkeypatch, default_template_id):
+        """ds 7 with NO template pin, persisted under that contract; the design
+        system's default template (resolver stubbed) is *default_template_id*."""
+        from src.api.services.deck_level_writer import write_deck_level_columns
+
+        env.template.layout = BOUND_LAYOUT
+        monkeypatch.setattr(
+            "src.core.settings_db.get_default_template_id",
+            lambda ds_id: default_template_id if ds_id == 7 else None,
+        )
+        prior = make_spec((0, 1, 2), design_system_id=7)
+        write_deck_level_columns(env.session_id, deck_spec=prior.to_json())
+        return prior
+
+    def test_an_unpinned_deck_binds_against_the_default_template(
+        self, graph_env, monkeypatch
+    ):
+        """No pin + a default template: the architect is shown that template's
+        sections and a matching pair binds, while the stored contract stays
+        unpinned so the fallback never reads as a design-contract change."""
+        from src.services.graph.routers import architect_router
+
+        self._unpinned_ds_env(graph_env, monkeypatch, default_template_id=3)
+        spec = _bind(make_spec((0, 1, 2), design_system_id=7), {0: ("Cover", 0)})
+        graph_env.skills.set("architect", architect_build(spec))
+
+        state, updates, _, _ = self._run_and_capture(graph_env)
+
+        assert graph_env.template.calls == [(7, 3)]
+        shown = graph_env.skills.calls_for("architect")[0]["payload"]
+        assert [e["label"] for e in shown["template_sections"]] == [
+            "Cover", "Content", None,
+        ]
+        assert shown["available_design_contract"]["template_id"] is None
+        assert updates["error_state"] is None
+        assert updates["deck_spec"].design_contract.template_id is None
+        assert updates["deck_spec"].slide_at(0).slide_type == "Cover"
+        assert updates["deck_spec"].slide_at(0).template_section_index == 0
+        assert updates["template_layout_html"] == BOUND_LAYOUT
+        assert architect_router({**state, **updates}) == "foreman"
+
+    def test_an_unpinned_deck_without_a_default_template_cannot_bind(
+        self, graph_env, monkeypatch
+    ):
+        """The pre-fix behaviour, kept for a design system with no default: an
+        empty inventory, so the same pair is refused rather than bound."""
+        prior = self._unpinned_ds_env(graph_env, monkeypatch, default_template_id=None)
+        spec = _bind(make_spec((0, 1, 2), design_system_id=7), {0: ("Cover", 0)})
+        graph_env.skills.set("architect", architect_build(spec))
+
+        state, updates, _, _ = self._run_and_capture(graph_env)
+
+        assert graph_env.template.calls == []
+        shown = graph_env.skills.calls_for("architect")[0]["payload"]
+        assert shown["template_sections"] == []
+        self._assert_degraded(graph_env, state, updates, prior)
+
     def test_an_index_only_binding_is_completed_from_the_inventory_label(
         self, graph_env
     ):

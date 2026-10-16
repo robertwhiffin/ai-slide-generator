@@ -138,7 +138,17 @@ A profile is also the **only** personal default that follows a user across brows
 - `design_system_id` omitted → seed the org default design system if one resolves, and stop.
 - `design_system_id` explicitly `null` → the design-system default is off the table, but the org default *slide style* may still fill the style slot the client never mentioned.
 
-**Session-creating requests strip `template_id`.** A pin arriving on the request that creates a session can only be another surface's carry-over, so `_without_template_pin` drops it; the design system and everything else carries over.
+**Session-creating requests strip `template_id`, then seed the design system's default template.** A pin arriving on the request that creates a session can only be another surface's carry-over, so `_without_template_pin` drops it; the design system and everything else carries over. `_with_default_template_pin` then pins the **default template of the session's own design system** (`get_default_template_id` in `src/core/settings_db.py`), whichever way that design system was chosen. A design system with no default template leaves the session unpinned. The frontend adopts the seeded pin from the session's stored config, so the template picker shows it and the user can change it.
+
+### 4.4a The default template
+
+Each design system may mark **at most one** template as its default (`design_system_template.is_default`), set by an admin from the Admin page. There is no fallback to an arbitrary template: "no default" is a normal state. The default is used in three places:
+
+- **Browser session creation** — pinned as `template_id` (§4.4).
+- **MCP `create_deck`** — pinned when no `template_name` is supplied, or when the supplied name matches no template (§4.6).
+- **Architect fallback** — for a session that is still unpinned (an older session, or a design system chosen mid-session), `_resolve_brand` in `src/services/graph/nodes.py` resolves the brand from the default template. The architect therefore sees that template's labelled `template_sections` and can bind slides to them. The fallback applies only to the contract the brand is *resolved* from: the stored contract and the architect's `available_design_contract` stay unpinned, so it never reads as a design-contract change that rebuilds every slide.
+
+Without a template, the architect's `template_sections` is empty, nothing can be bound, and each builder improvises markup outside the template's painted `<section>` roots — the dark-text-on-dark-ground failure the slide-type binding was written to remove.
 
 ### 4.5 Entry path: an existing session
 
@@ -148,7 +158,7 @@ The persisted slot is used as stored. The agent-config `GET` sanitizes stale **p
 
 MCP has no browser, so it never sees a `localStorage` preference. `create_deck` resolves in this order:
 
-1. An explicit `design_system_id` wins, and only then is `template_name` resolved to a pin.
+1. An explicit `design_system_id` wins, and only then is `template_name` resolved to a pin. With no `template_name`, or one that matches no template, the design system's default template is pinned (§4.4a).
 2. Otherwise, **an explicit `slide_style_id` suppresses implicit org-default design-system seeding** — the org default is consulted only when *neither* id was supplied.
 3. Otherwise the org default design system.
 4. Otherwise the tellr-configured default slide style: the `is_default` row, falling back to `is_system`, lowest id first on either.
@@ -183,7 +193,9 @@ Authorization follows an org-shared, user-contributed model: **reads are open, m
 | `DELETE` | `/{ds_id}` | Soft delete; `?hard_delete=true` for permanent | `delete_design_system` |
 | `POST` | `/{ds_id}/set-default` | **Admin only.** Set the org default | `set_default_design_system` |
 | `POST` | `/{ds_id}/clear-default` | **Admin only.** Clear the org default | `clear_default_design_system` |
-| `GET` | `/{ds_id}/templates` | List named templates | `list_design_system_templates` |
+| `GET` | `/{ds_id}/templates` | List named templates, each with `is_default` | `list_design_system_templates` |
+| `POST` | `/{ds_id}/templates/{template_id}/set-default` | **Admin only.** Make a template its system's default (unsets the previous one) | `set_default_template` |
+| `POST` | `/{ds_id}/templates/{template_id}/clear-default` | **Admin only.** Clear the system's default template | `clear_default_template` |
 | `GET` | `/{ds_id}/templates/{template_id}/thumbnail` | Serve a template thumbnail | `serve_design_system_template_thumbnail` |
 | `GET` | `/{ds_id}/templates/{template_id}/source` | Serve template HTML | `get_design_system_template_source` |
 | `GET` | `/{ds_id}/assets/{asset_id}` | Serve asset bytes | `serve_design_system_asset` |
@@ -191,7 +203,7 @@ Authorization follows an org-shared, user-contributed model: **reads are open, m
 | `GET` | `/{ds_id}/files` | List bundle files | `list_design_system_files` |
 | `GET` | `/{ds_id}/files/{file_path}` | Serve a bundle file | `serve_design_system_file` |
 
-**`set-default` refuses an inactive system** with a `400` rather than silently setting a tombstone as the org brand.
+**`set-default` refuses an inactive system** with a `400` rather than silently setting a tombstone as the org brand. The template `set-default` refuses a template of an inactive system the same way; both `clear-default` routes always succeed.
 
 **A concurrent same-name import returns `409`, not `500`.** The fail-fast name check and the partial unique index leave a time-of-check window, so the index violation is translated to a conflict. Both paths return `409` and roll back — the losing request creates no row — but their **messages differ**: the sequential check can name the conflicting row, while the concurrent path cannot query it once its transaction has failed.
 

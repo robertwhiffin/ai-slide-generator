@@ -121,6 +121,9 @@ class TemplateOut(BaseModel):
     description: Optional[str]
     entry_path: str
     thumbnail_url: Optional[str]  # template-scoped thumbnail endpoint, or None
+    # The design system's default template (at most one per system). Seeded as
+    # the template pin of new sessions on this design system.
+    is_default: bool = False
 
 
 class DesignSystemTemplateListResponse(BaseModel):
@@ -932,24 +935,7 @@ def list_design_system_templates(ds_id: int, db: Session = Depends(get_db)):
         if materialize_templates(ds):
             db.commit()  # persist lazily-derived rows (and assign their ids)
 
-        templates = sorted(ds.templates, key=lambda t: t.id)
-        return DesignSystemTemplateListResponse(
-            templates=[
-                TemplateOut(
-                    id=t.id,
-                    name=t.name,
-                    description=t.description,
-                    entry_path=t.entry_path,
-                    thumbnail_url=(
-                        _template_thumbnail_url(ds_id, t.id)
-                        if t.thumbnail_asset_id is not None
-                        else None
-                    ),
-                )
-                for t in templates
-            ],
-            total=len(templates),
-        )
+        return _template_list(ds)
     except HTTPException:
         raise
     except Exception as e:
@@ -958,6 +944,123 @@ def list_design_system_templates(ds_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to list design system templates",
+        )
+
+
+def _template_list(ds: DesignSystem) -> DesignSystemTemplateListResponse:
+    templates = sorted(ds.templates, key=lambda t: t.id)
+    return DesignSystemTemplateListResponse(
+        templates=[
+            TemplateOut(
+                id=t.id,
+                name=t.name,
+                description=t.description,
+                entry_path=t.entry_path,
+                thumbnail_url=(
+                    _template_thumbnail_url(ds.id, t.id)
+                    if t.thumbnail_asset_id is not None
+                    else None
+                ),
+                is_default=bool(t.is_default),
+            )
+            for t in templates
+        ],
+        total=len(templates),
+    )
+
+
+def _load_template(
+    db: Session, ds_id: int, template_id: int
+) -> tuple[DesignSystem, DesignSystemTemplate]:
+    ds = db.query(DesignSystem).filter(DesignSystem.id == ds_id).first()
+    if not ds:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Design system {ds_id} not found",
+        )
+    template = next((t for t in ds.templates if t.id == template_id), None)
+    if template is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Template {template_id} not found on design system {ds_id}",
+        )
+    return ds, template
+
+
+# Admin-only, like the org-default design system: the default template is
+# workspace-global state that every new session on this design system inherits.
+@router.post(
+    "/{ds_id}/templates/{template_id}/set-default",
+    response_model=DesignSystemTemplateListResponse,
+    dependencies=[Depends(require_admin)],
+)
+def set_default_template(ds_id: int, template_id: int, db: Session = Depends(get_db)):
+    """Make a template its design system's single default. Idempotent.
+
+    Unsets the system's previous default template in the same transaction.
+    """
+    try:
+        ds, template = _load_template(db, ds_id, template_id)
+        if not ds.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot set a default template on an inactive design system",
+            )
+        if not template.is_default:
+            for other in ds.templates:
+                other.is_default = other.id == template.id
+            db.commit()
+            db.refresh(ds)
+        logger.info(
+            f"Set default template of design system {ds.id}: {template.name} (id={template.id})"
+        )
+        return _template_list(ds)
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(
+            f"Error setting default template {template_id} on design system {ds_id}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to set default template",
+        )
+
+
+@router.post(
+    "/{ds_id}/templates/{template_id}/clear-default",
+    response_model=DesignSystemTemplateListResponse,
+    dependencies=[Depends(require_admin)],
+)
+def clear_default_template(ds_id: int, template_id: int, db: Session = Depends(get_db)):
+    """Remove a design system's default template. Idempotent.
+
+    Allowed on an inactive design system, like ``clear-default`` on the system
+    itself: removing workspace-wide state is always the safe direction.
+    """
+    try:
+        ds, template = _load_template(db, ds_id, template_id)
+        if template.is_default:
+            template.is_default = False
+            db.commit()
+            db.refresh(ds)
+            logger.info(
+                f"Cleared default template of design system {ds.id}: {template.name}"
+            )
+        return _template_list(ds)
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(
+            f"Error clearing default template {template_id} on design system {ds_id}: {e}",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear default template",
         )
 
 

@@ -573,6 +573,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- design system (v1): add font_mapping_json to pre-existing tables ---
         _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- design system template: add is_default (per-system default) ---
+        _migrate_design_system_template_default(conn, inspector, schema, _qual, is_sqlite)
+
         # --- design system: free-form brand text -> UNCAPPED TEXT (no cap at all) ---
         # SUPERSEDES the two ``design_system_token`` widen migrations (name 100 ->
         # 255, group 50 -> 255). Their target columns are now unbounded ``TEXT``,
@@ -1540,6 +1543,36 @@ def _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite
     logger.info("Migration: adding is_active column to design_system")
     conn.execute(text(
         f"ALTER TABLE {_qual('design_system')} ADD COLUMN is_active BOOLEAN DEFAULT TRUE NOT NULL"
+    ))
+
+
+def _migrate_design_system_template_default(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add ``is_default`` to ``design_system_template`` (idempotent).
+
+    ``Base.metadata.create_all()`` adds the column on fresh installs but does not
+    alter a ``design_system_template`` table provisioned by an earlier deploy.
+    Defaults to FALSE and seeds nothing: which template is a system's default is
+    an admin choice, so no existing system gains one by migration.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspector or inspect(conn)
+    try:
+        cols = {
+            c["name"]
+            for c in insp.get_columns("design_system_template", schema=schema)
+        }
+    except Exception:
+        return
+    if not cols or "is_default" in cols:
+        return
+
+    logger.info("Migration: adding is_default column to design_system_template")
+    conn.execute(text(
+        f"ALTER TABLE {_qual('design_system_template')} "
+        "ADD COLUMN is_default BOOLEAN DEFAULT FALSE NOT NULL"
     ))
 
 

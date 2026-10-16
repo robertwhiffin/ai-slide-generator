@@ -453,6 +453,12 @@ DESIGN_SYSTEM_MUTATION_LEVELS = {
     # Removing the org default is the same ORG-WIDE state change as setting it:
     # it decides what EVERY user gets by default, so authorship must not buy it.
     ("POST", "/api/settings/design-systems/{ds_id}/clear-default"): "admin",
+    # A design system's default template is seeded into every new session on that
+    # system, so it is the same org-wide default class as the routes above.
+    ("POST", "/api/settings/design-systems/{ds_id}/templates/{template_id}/set-default"):
+        "admin",
+    ("POST", "/api/settings/design-systems/{ds_id}/templates/{template_id}/clear-default"):
+        "admin",
     # SDR-4437 F-CR-17: contribution is ADMIN-ONLY, reversing the earlier "any
     # user may CONTRIBUTE" decision. Not because creating a row is itself
     # privileged, but because of where the row's content ends up: the bundle's
