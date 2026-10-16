@@ -16,8 +16,10 @@ specifies the format and the model-tiering pipeline, and the pre-pass refuses to
 untagged task. Set the tiers when authoring the plan — they are a review point with the
 author, not a dispatch-time afterthought.
 
-Two environment facts it depends on: the Python env is a **shared pyenv site-packages**
-(never `pip install` from an agent — it corrupts parallel agents' runs), and
+Two environment facts it depends on: the Python env is a **per-worktree uv `.venv`** —
+create it with `uv sync --extra dev` in each worktree root and run commands via `uv run`
+(never `pip install` into a shared/global interpreter — it corrupts parallel agents' runs;
+change deps via `pyproject.toml` + `uv lock`), and
 `packages/databricks-tellr-app/pyproject.toml` is the file the Apps BUILD phase resolves,
 not the repo-root dependency files.
 

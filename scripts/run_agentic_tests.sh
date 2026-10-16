@@ -7,14 +7,15 @@
 #   ./scripts/run_agentic_tests.sh                        # run the layer
 #   ./scripts/run_agentic_tests.sh -k architect           # extra pytest args pass through
 #   ./scripts/run_agentic_tests.sh -v --tb=long
-#   PYTHON=~/.pyenv/versions/3.11.0/bin/python ./scripts/run_agentic_tests.sh
+#   PYTHON=/path/to/python ./scripts/run_agentic_tests.sh
 #
 # Options:
 #   Anything you pass is forwarded to pytest verbatim, after the layer's own
 #   arguments (`tests/agentic -m live -rs`).
 #
 # Environment:
-#   PYTHON   Interpreter to run pytest with (default: python3).
+#   PYTHON   Interpreter to run pytest with (default: this worktree's .venv/bin/python,
+#            created by `uv sync --extra dev`).
 #
 # What this layer is:
 #   The test suite has four layers, organised by what each NEEDS in order to run.
@@ -61,12 +62,12 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$ROOT_DIR"
 
-PYTHON="${PYTHON:-python3}"
+PYTHON="${PYTHON:-$ROOT_DIR/.venv/bin/python}"
 
 if ! command -v "$PYTHON" > /dev/null 2>&1; then
     echo -e "${RED}Interpreter not found: ${PYTHON}${NC}"
-    echo "Set PYTHON to the interpreter that has this project's dev extras installed, e.g."
-    echo "  PYTHON=~/.pyenv/versions/3.11.0/bin/python $0"
+    echo "Run \`uv sync --extra dev\` to create this worktree's .venv, or set PYTHON to an"
+    echo "interpreter that has this project's dev extras installed."
     exit 1
 fi
 

@@ -9,7 +9,6 @@ on:
       - 'release/**'
 
 env:
-  PYTHON_VERSION: '3.11'
   NODE_VERSION: '20'
 
 jobs:
@@ -44,6 +43,9 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'pyproject.toml'
+              - 'uv.lock'
+              - '.python-version'
+              - '.github/actions/setup-python-env/**'
               - '.github/workflows/test.yml'
               - 'frontend/tests/**'
             frontend:
@@ -124,16 +126,8 @@ jobs:
           # recorded at, and its unit join checks that commit is an ancestor (#271).
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+      - name: Set up Python environment
+        uses: ./.github/actions/setup-python-env
 
       - name: Run unit tests
         env:
@@ -184,11 +178,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run API routes tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
@@ -232,11 +222,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run config API tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
@@ -285,11 +271,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run export tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
@@ -333,11 +315,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run streaming tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
@@ -381,11 +359,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run slide tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
@@ -443,11 +417,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run graph orchestration tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
@@ -527,11 +497,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run Genie tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
@@ -568,11 +534,7 @@ jobs:
       needs.changes.outputs.backend == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run general integration tests
         env:
           ENVIRONMENT: test
@@ -675,7 +637,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version-file: .python-version
           cache: 'pip'
 
       - name: Set up Node.js
@@ -811,16 +773,8 @@ jobs:
         working-directory: frontend
         run: npx playwright install --with-deps chromium
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install backend dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+      - name: Set up Python environment
+        uses: ./.github/actions/setup-python-env
 
       - name: Seed database with default data
         env:
@@ -1101,11 +1055,7 @@ jobs:
     if: false
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run layer-3 agentic behaviour tests
         env:
           ENVIRONMENT: test
@@ -1157,11 +1107,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+      - uses: ./.github/actions/setup-python-env
       - name: Run layer-4 concurrency tests
         env:
           DATABASE_URL: postgresql://test@localhost:5432/test_db
