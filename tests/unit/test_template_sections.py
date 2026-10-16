@@ -923,6 +923,40 @@ class TestExtractSection:
             f"Expected verbatim <article>...</article>, got: {result!r}"
         )
 
+    def test_document_shell_and_custom_element_are_not_reparented(self):
+        """<html>, <body> and a custom element are never re-added.
+
+        The Corporate template wraps every section in
+        ``<html><body><deck-stage>``.  Re-added, a builder copied the shell into
+        the slide and the template's ``deck-stage:not(:defined)`` rule hid it:
+        3 of 17 graph slides rendered blank on deck-parity round 3.
+        """
+        from src.services.template_sections import extract_section
+
+        layout = (
+            '<html lang="en"><body><deck-stage width="1280" height="720">'
+            '<section data-label="A"><div class="slide">A</div></section>'
+            '<section data-label="B"><div class="slide dark">B</div></section>'
+            "</deck-stage></body></html>"
+        )
+        assert extract_section(layout, 1) == (
+            '<section data-label="B"><div class="slide dark">B</div></section>'
+        )
+
+    def test_wrapper_outside_a_custom_element_is_still_reparented(self):
+        """Skipping a custom element continues the walk to the wrapper above it."""
+        from src.services.template_sections import extract_section
+
+        layout = (
+            "<body><main class='theme'><deck-stage>"
+            "<section class='slide'>S1</section>"
+            "<section class='slide'>S2</section>"
+            "</deck-stage></main></body>"
+        )
+        assert extract_section(layout, 0) == (
+            "<main class='theme'><section class='slide'>S1</section></main>"
+        )
+
     def test_promoted_wrapper_extracted_verbatim(self):
         """A <section> that wraps a sole <div class='slide'> is promoted.
 

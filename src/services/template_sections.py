@@ -45,6 +45,14 @@ A section whose ancestors are all promoting tags (``section``, ``article``) is
 returned unwrapped — ``find_slide_roots`` already promoted the wrapper to the
 root, so there is no non-promoting ancestor to add.
 
+Two kinds of ancestor are never re-added.  ``<body>`` and ``<html>`` end the
+walk: the slide document supplies its own, so a fragment carrying them nests a
+second document shell.  A custom element (a tag name with a hyphen, such as the
+Corporate template's ``<deck-stage>``) is skipped: the script that defines it
+never runs in a slide document, and the template's own
+``deck-stage:not(:defined){visibility:hidden}`` then hides every slide a
+builder copies into it — measured as blank slides on the graph path.
+
 Return values of ``resolve_template_bytes``
 -------------------------------------------
 | value                  | source                                        |
@@ -72,6 +80,9 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Document-level tags that end the re-parenting walk (see the module docstring).
+_DOCUMENT_TAGS = frozenset({"html", "body"})
 
 _STYLE_BLOCK_RE = re.compile(
     r"<style(?:\s[^>]*)?>(.+?)</style>",
@@ -251,7 +262,9 @@ def _reparent_if_needed(
     ancestor stripped.
 
     Stops when: the ancestor tag is in ``SLIDE_WRAPPER_TAGS`` (promoting:
-    ``section`` or ``article``), or the ancestor has no name (document root).
+    ``section`` or ``article``), the ancestor is ``<body>`` or ``<html>``, or
+    the ancestor has no name (document root).  A custom-element ancestor
+    (hyphenated tag name) is skipped and the walk continues past it.
 
     A section whose immediate ancestors are all promoting tags is returned
     unchanged — ``find_slide_roots`` already promoted those wrappers to the
@@ -274,7 +287,10 @@ def _reparent_if_needed(
     while el is not None and not isinstance(el, BeautifulSoup):
         if el.name in SLIDE_WRAPPER_TAGS:
             break  # promoting ancestor — don't add a promoting wrapper
-        ancestors.append(el)
+        if el.name in _DOCUMENT_TAGS:
+            break  # the slide document supplies its own <html>/<body>
+        if "-" not in el.name:  # custom elements are never defined in a slide
+            ancestors.append(el)
         el = el.parent
 
     if not ancestors:
@@ -504,6 +520,8 @@ def extract_section(layout_html: str, index: int) -> str:
     ``<div>``, etc.) so that inherited CSS properties — ``color``,
     ``font-family``, and custom properties consumed via ``var(--…)`` — are
     preserved.  Siblings of this section are stripped from each ancestor.
+    ``<html>``, ``<body>`` and custom elements are never re-added (see the
+    module docstring).
 
     A section whose immediate ancestors are all promoting tags (``section``,
     ``article``) is returned without additional wrapping — ``find_slide_roots``
