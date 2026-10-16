@@ -1,0 +1,6 @@
+# Architect v1 prompt (deck-parity devloop loop, 2026-10-16): full 14-20 slide decks,
+# reused template sections, figure-free exhibits, slide_type/index self-check.
+agent_key: architect
+name: deck-parity
+base: v1
+prompt_file: deck-parity.md

@@ -181,6 +181,36 @@ class TestBuilderProse:
             "the builder holds no tool grants and cannot call it"
         )
 
+    def test_builder_never_asks_for_a_missing_data_callout(self):
+        """Deck-parity: "Add a callout explaining why the visualization is absent"
+        put an inline-styled "No ... data was available" panel on 3 of 18 slides."""
+        instructions = load_skill("builder").instructions
+        assert "callout explaining why" not in instructions
+        assert "Do not add a note, callout or caption about missing data" in instructions
+
+    def test_builder_treats_sample_furniture_as_placeholder(self):
+        """Deck-parity: the cover kept "Databricks · Brand Design" and every divider
+        kept the template's Unity Catalog lockup whatever its topic."""
+        assert "Sample furniture is placeholder too" in load_skill("builder").instructions
+
+
+class TestArchitectProse:
+    """The architect plans a full deck from reusable sections (deck-parity loop)."""
+
+    def test_architect_plans_a_full_length_deck_by_default(self):
+        """Without it the architect planned 8 slides, one per template section,
+        against the monolith's 19 for the same prompt."""
+        instructions = load_skill("architect").instructions
+        assert "14 to 20 slides" in instructions
+        assert "reusable layouts, not a one-of-each menu" in instructions
+
+    def test_architect_self_checks_each_binding_pair(self):
+        """One mismatched slide_type/index pair rejects the whole plan."""
+        assert (
+            "its slide_type must equal the label of the template_sections entry"
+            in load_skill("architect").instructions
+        )
+
 
 # ---------------------------------------------------------------------------
 # fixer — minimal-change instruction present, safe-area dimension absent

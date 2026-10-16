@@ -33,8 +33,9 @@ from src.services.graph_definition_manifest import (
 
 # --- HEAD literals -----------------------------------------------------------
 
-# Pins updated for the endpoint switch to system.ai Gateway models.
-HEAD_ARCHITECT_CONTENT_HASH = "009eced7c65b0b85a3f241d81d6ba3c40b134e0177e4bd4b8b43fc526694a7d5"
+# Pins updated for the endpoint switch to system.ai Gateway models, then for the
+# deck-parity architect and builder prompts.
+HEAD_ARCHITECT_CONTENT_HASH = "3ed38cb4c08622a8d818868beb0a61fc69351641cfe49d2f4b34bd4f53f46522"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
@@ -44,7 +45,7 @@ HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
 
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
     "data_analyst": "287da422d4aeb6c328685ace87be167feac639e4318cff07f147d9cd181be3c3",
-    "builder": "bb7d6bfa5b655b78e16a4cf13a204c4da63690207159d419aebf856d9187a2e8",
+    "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
     "build_reviewer": "c5b057097c6f952de7b4984d19ad0c6cceaf68e1641401dcf8ae5c3af707d622",
     "fixer": "2da73326e228d16889a9b21f31a7d22bf124db9feee728aeafdaade7d7a39bbc",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
