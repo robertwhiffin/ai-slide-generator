@@ -240,7 +240,7 @@ def bind_structured_output_model(
     models also reject.  Under ``auto`` a model may reply without calling the
     tool; the parser then yields ``None`` and :func:`_require_structured_output`
     raises ``OutputParserException``, the same parse-error class a malformed
-    tool call raises (see ``_is_provider_parse_error``).
+    tool call raises (see ``is_provider_parse_error``).
 
     Only while a #267 test run's model call is in flight (its ``RunObservation``
     is the observed run) is the bound model given a callback that records the
@@ -612,7 +612,7 @@ def report_model_token_usage(*, input_tokens: Any, output_tokens: Any) -> None:
         _record_token_usage(observation, input_tokens, output_tokens)
 
 
-def _is_provider_parse_error(error: Exception) -> bool:
+def is_provider_parse_error(error: Exception) -> bool:
     """A structured-output parser rejected the provider's response.
 
     ``langchain_core`` is imported lazily: the runtime module stays import-light,
@@ -642,7 +642,7 @@ def classify_test_run_failure(
         return "model_error", f"endpoint_unavailable:{endpoint_name}"
     if isinstance(error, NotImplementedError):
         return "model_error", f"structured_output_unsupported:{endpoint_name}"
-    if isinstance(error, AgentOutputValidationError) or _is_provider_parse_error(error):
+    if isinstance(error, AgentOutputValidationError) or is_provider_parse_error(error):
         return "incomplete", f"invalid_output:{type(error).__name__}"
     return "model_error", f"unexpected_error:{type(error).__name__}"
 

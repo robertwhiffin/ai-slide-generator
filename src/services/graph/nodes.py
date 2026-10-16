@@ -70,8 +70,8 @@ from src.domain.slide_deck import SlideDeck
 from src.services.agent import SAFETY_RETRY_NOTICE
 from src.services.agent_runtime import (
     AgentAssemblyContext,
-    _is_provider_parse_error,
     get_agent_runtime,
+    is_provider_parse_error,
     is_transient_model_failure,
 )
 from src.services.deck_css_aggregator import aggregate_deck_css
@@ -2363,7 +2363,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
     every entry lives forever and a duplicate "open" copy of a finding that is
     about to be fixed would never be superseded.
 
-    A review the provider's parser refused (``_is_provider_parse_error``:
+    A review the provider's parser refused (``is_provider_parse_error``:
     unparseable output, or a Finding the registry rejects) is retried once first.
 
     **On any exception the position is placeheld, exactly as a failed builder's
@@ -2427,7 +2427,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
         try:
             out = _review()
         except Exception as exc:
-            if not _is_provider_parse_error(exc):
+            if not is_provider_parse_error(exc):
                 raise
             # An unparseable review is a model glitch, not a verdict on the
             # slide, and placeholding discards a good build: one more attempt
