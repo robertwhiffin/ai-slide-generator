@@ -1998,6 +1998,77 @@ class TestBuildReviewerFailureIsTerminalNotFatal:
         assert "landed_positions" not in updates
         assert "fix_map" not in updates
 
+    @staticmethod
+    def _unparseable(kind):
+        if kind == "parser":
+            from langchain_core.exceptions import OutputParserException
+
+            return OutputParserException("malformed tool call")
+        from pydantic import ValidationError
+
+        from src.domain.finding import Finding
+
+        try:  # the registry refusing a Finding is a pydantic ValidationError
+            Finding(id="x", slide_index=0, category="design",
+                    criterion="not_a_criterion", message="m", objective=True)
+        except ValidationError as exc:
+            return exc
+        raise AssertionError("an unknown criterion must not validate")
+
+    @pytest.mark.parametrize("kind", ["parser", "validation"])
+    def test_an_unparseable_review_is_retried_once_and_the_slide_lands(
+        self, graph_env, kind
+    ):
+        """Measured on deck-parity: one unparseable review discarded a good build."""
+        error = self._unparseable(kind)
+        calls = []
+
+        def review(payload):
+            calls.append(payload["position"])
+            if len(calls) == 1:
+                raise error
+            return review_out(0)
+
+        graph_env.skills.set("build_reviewer", review)
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert calls == [0, 0]
+        assert updates["landed_positions"] == scoped(TURN, {0})
+        assert "placeheld_positions" not in updates
+        assert not is_placeholder_record(
+            json.loads(graph_env.rows()[0].verification_record)
+        )
+
+    def test_a_review_unparseable_twice_is_still_placeheld(self, graph_env):
+        error = self._unparseable("parser")
+        calls = []
+
+        def review(payload):
+            calls.append(payload["position"])
+            raise error
+
+        graph_env.skills.set("build_reviewer", review)
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert calls == [0, 0]
+        assert updates["placeheld_positions"] == scoped(TURN, {0})
+
+    def test_any_other_review_failure_is_not_retried(self, graph_env):
+        calls = []
+
+        def review(payload):
+            calls.append(payload["position"])
+            raise RuntimeError("reviewer exploded")
+
+        graph_env.skills.set("build_reviewer", review)
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert calls == [0]
+        assert updates["placeheld_positions"] == scoped(TURN, {0})
+
     def test_the_row_is_the_sanctioned_placeholder_marker(self, graph_env):
         """``commit_placeholder`` + ``is_placeholder_record``, never a second
         marker and never an HTML class check."""
