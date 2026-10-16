@@ -1771,6 +1771,23 @@ class TestBuilderNode:
         assert seen["session_id"] == graph_env.session_id
         assert updates["slides"]["vals"][0]["html"] == "<div class='slide'>gated</div>"
 
+    def test_literal_escapes_between_tags_never_reach_the_slide(self, graph_env):
+        """An over-escaped ``\\n`` between tags renders as visible text otherwise."""
+        graph_env.skills.set(
+            "builder",
+            lambda payload: builder_out(
+                payload,
+                html="<div class='slide'>\\n  <p>Keep \\n here</p>\\n</div>",
+            ),
+        )
+
+        updates = builder_node(_branch_payload(graph_env, 0))
+
+        assert (
+            updates["slides"]["vals"][0]["html"]
+            == "<div class='slide'>  <p>Keep \\n here</p></div>"
+        )
+
     def test_unsafe_html_is_regenerated_through_the_real_gate(self, graph_env):
         """The regenerate callable is zero-arg, so the correction rides the payload."""
         attempts = []
@@ -2317,6 +2334,18 @@ class TestFixerNode:
         assert updates["fix_target"] == 0
         assert updates["fix_map"]["vals"][0]["in_flight"] is True
         assert updates["fixed"]["vals"][0]["html"] == "<div class='slide'>fixed 0</div>"
+
+    def test_literal_escapes_between_tags_never_reach_the_fixed_slide(self, graph_env):
+        graph_env.skills.set(
+            "fixer",
+            lambda payload: fixer_out(
+                payload, html="<div class='slide'>\\n<p>fixed</p>\\n</div>"
+            ),
+        )
+
+        updates = fixer_node(_fix_state(graph_env, {0: _fix_entry(0)}))
+
+        assert updates["fixed"]["vals"][0]["html"] == "<div class='slide'><p>fixed</p></div>"
 
     def test_unsafe_retry_keeps_the_session_release(self, graph_env):
         attempts = []

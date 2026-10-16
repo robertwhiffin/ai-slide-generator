@@ -110,6 +110,28 @@ def extract_canvas_ids_from_html(html_content: str) -> List[str]:
     return canvas_ids
 
 
+# A run between two tags (or at either end of the fragment) made only of
+# whitespace and LITERAL escape sequences: a backslash followed by n, r or t.
+_INTER_TAG_ESCAPE_RUN = re.compile(r"(^|>)((?:\s|\\[nrt])+)(?=<|$)")
+_LITERAL_ESCAPE = re.compile(r"\\[nrt]")
+
+
+def strip_inter_tag_escapes(html: str) -> str:
+    """Drop literal ``\\n``/``\\r``/``\\t`` sequences from whitespace between tags.
+
+    A model that over-escapes its structured output emits the two characters
+    ``\\`` ``n`` where it meant a newline, and a browser renders them as visible
+    ``\\n`` text on the slide (measured: 1 of 19 and 2 of 19 graph slides on the
+    deck-parity devloop rounds).  Only runs made entirely of whitespace and such
+    sequences are touched, so no visible text, attribute or code sample changes.
+    """
+    if not html or "\\" not in html:
+        return html
+    return _INTER_TAG_ESCAPE_RUN.sub(
+        lambda m: m.group(1) + _LITERAL_ESCAPE.sub("", m.group(2)), html
+    )
+
+
 def split_script_by_canvas(script_text: str) -> List[Tuple[str, List[str]]]:
     """Split a multi-canvas script into individual per-canvas segments.
 

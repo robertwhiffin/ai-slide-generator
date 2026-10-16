@@ -110,6 +110,7 @@ from src.services.template_sections import (
     section_inventory,
 )
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
+from src.utils.html_utils import strip_inter_tag_escapes
 from src.utils.slide_hash import compute_slide_hash
 
 logger = logging.getLogger(__name__)
@@ -2309,6 +2310,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         html, _retried = gate_emitted_html(
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
+        html = strip_inter_tag_escapes(html)
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Builder failed at position %s", position)
@@ -2688,6 +2690,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         html, _retried = gate_emitted_html(
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
+        html = strip_inter_tag_escapes(html)
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Fixer failed at position %s; landing the original", position)

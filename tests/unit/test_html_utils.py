@@ -1,6 +1,10 @@
 """Tests for HTML utility helpers."""
 
-from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
+from src.utils.html_utils import (
+    extract_canvas_ids_from_script,
+    split_script_by_canvas,
+    strip_inter_tag_escapes,
+)
 
 
 def test_extract_canvas_ids_from_script_various_patterns():
@@ -115,3 +119,25 @@ const charts = ['chart1', 'chart2'].forEach(id => {
     # Should fallback to single segment since we can't determine boundaries
     assert len(unsplit_segments) == 1
 
+
+def test_strip_inter_tag_escapes_removes_literal_newlines_between_tags():
+    """The deck-parity r04 slide: over-escaped newlines rendered as visible text."""
+    html = '<ul class="bullets">\\n    <li>A</li>\\n  </ul>\\n</div>'
+
+    assert strip_inter_tag_escapes(html) == '<ul class="bullets">    <li>A</li>  </ul></div>'
+
+
+def test_strip_inter_tag_escapes_trims_runs_at_either_end():
+    assert strip_inter_tag_escapes("\\n\\t<section>x</section>\\r\\n") == "<section>x</section>"
+
+
+def test_strip_inter_tag_escapes_leaves_visible_text_and_attributes_alone():
+    html = '<p title="a\\nb">Use \\n to break</p><code>a\\nb</code><p>\\n x</p>'
+
+    assert strip_inter_tag_escapes(html) == html
+
+
+def test_strip_inter_tag_escapes_keeps_real_whitespace():
+    html = "<div>\n  <p>A</p>\n</div>"
+
+    assert strip_inter_tag_escapes(html) == html
