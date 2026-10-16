@@ -171,7 +171,9 @@ All routes live in `routes/settings/design_systems.py`, mounted under `/api/sett
 | `DELETE` | `/api/settings/design-systems/{id}` | Soft delete; `?hard_delete=true` for permanent | `delete_design_system` |
 | `POST` | `/api/settings/design-systems/{id}/set-default` | **Admin only.** Set the org default | `set_default_design_system` |
 | `POST` | `/api/settings/design-systems/{id}/clear-default` | **Admin only.** Clear the org default | `clear_default_design_system` |
-| `GET` | `/api/settings/design-systems/{id}/templates` | List named templates | `list_design_system_templates` |
+| `GET` | `/api/settings/design-systems/{id}/templates` | List named templates, each with `is_default` | `list_design_system_templates` |
+| `POST` | `/api/settings/design-systems/{id}/templates/{tid}/set-default` | **Admin only.** Set the system's default template | `set_default_template` |
+| `POST` | `/api/settings/design-systems/{id}/templates/{tid}/clear-default` | **Admin only.** Clear the system's default template | `clear_default_template` |
 | `GET` | `/api/settings/design-systems/{id}/templates/{tid}/thumbnail` | Serve a template thumbnail | `serve_design_system_template_thumbnail` |
 | `GET` | `/api/settings/design-systems/{id}/templates/{tid}/source` | Serve template HTML | `get_design_system_template_source` |
 | `GET` | `/api/settings/design-systems/{id}/assets/{aid}` | Serve asset bytes | `serve_design_system_asset` |

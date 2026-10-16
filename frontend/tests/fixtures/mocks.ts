@@ -589,6 +589,7 @@ export const mockDesignSystemTemplates = {
       description: "Centered hero with logo lockup.",
       entry_path: "templates/cover/index.html",
       thumbnail_url: "/api/settings/design-systems/1/templates/1/thumbnail",
+      is_default: false,
     },
   ],
   total: 1,
@@ -604,6 +605,7 @@ export const mockDesignSystemTemplatesWithLive = {
       description: "Centered hero with logo lockup.",
       entry_path: "templates/cover/index.html",
       thumbnail_url: "/api/settings/design-systems/1/templates/1/thumbnail",
+      is_default: false,
     },
     {
       id: 2,
@@ -611,6 +613,7 @@ export const mockDesignSystemTemplatesWithLive = {
       description: "Body layout without a shipped screenshot.",
       entry_path: "templates/content/index.html",
       thumbnail_url: null,
+      is_default: false,
     },
   ],
   total: 2,

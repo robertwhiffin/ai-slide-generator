@@ -374,7 +374,18 @@ export const DesignSystemDetailPanel: React.FC<DesignSystemDetailPanelProps> = (
                   </button>
                 </div>
                 <div className="flex flex-1 flex-col gap-1 p-3">
-                  <div className="text-sm font-medium text-foreground">{tmpl.name}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-foreground">{tmpl.name}</span>
+                    {tmpl.is_default && (
+                      <span
+                        data-testid="template-default-badge"
+                        title="New decks on this design system start with this template"
+                        className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
+                      >
+                        Default
+                      </span>
+                    )}
+                  </div>
                   {tmpl.description && (
                     <div className="text-xs text-muted-foreground">{tmpl.description}</div>
                   )}

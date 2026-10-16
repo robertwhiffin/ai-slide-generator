@@ -58,6 +58,7 @@ const slideSpecKeys: Record<keyof SlideSpec, true> = {
   assumes: true,
   hands_off: true,
   data_references: true,
+  slide_type: true,
   template_section_index: true,
 };
 

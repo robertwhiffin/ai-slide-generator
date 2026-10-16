@@ -280,6 +280,36 @@ async function resolveDefaultDesignSystemId(): Promise<number | null> {
 }
 
 /**
+ * Resolve a design system's DEFAULT TEMPLATE id, or null when it has none.
+ *
+ * Like the org-default design system there is no fallback to an arbitrary
+ * template: the server's per-system `is_default` flag is the only source.
+ */
+async function resolveDefaultTemplateId(designSystemId: number): Promise<number | null> {
+  try {
+    const { templates } = await configApi.listDesignSystemTemplates(designSystemId);
+    return templates.find(t => t.is_default)?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fill an EMPTY template slot with the design system's default template.
+ *
+ * Used only where a genuinely new surface is seeded, so it never overrides a
+ * template the user picked or cleared on an existing session. The server seeds
+ * the same pin on chat-created sessions and falls back to it for unpinned decks;
+ * this is what makes it visible in the agent-config pane (and persisted with the
+ * session's config) on the eagerly-created browser session.
+ */
+async function withDefaultTemplate(config: AgentConfig): Promise<AgentConfig> {
+  if (config.design_system_id == null || config.template_id != null) return config;
+  const templateId = await resolveDefaultTemplateId(config.design_system_id);
+  return templateId == null ? config : { ...config, template_id: templateId };
+}
+
+/**
  * Fill in whichever style SOURCE a config is missing, honouring the product
  * decision that an org-default design system OUTRANKS the default slide style —
  * and, for the same reason, that a user's PERSONAL default design system
@@ -666,6 +696,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         // A genuinely NEW surface: there was no stored config at all, so this is
         // the one place org-default seeding belongs.
         config = await withResolvedStyleSource(config, { isNewSurface: true });
+        config = await withDefaultTemplate(config);
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }
@@ -747,6 +778,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           // This branch is gated on `!isConfigured`, i.e. the server holds NO
           // stored config for the session — genuine creation, so seeding applies.
           config = await withResolvedStyleSource(config, { isNewSurface: true });
+          config = await withDefaultTemplate(config);
         }
 
         if (config.deck_prompt_id == null) {
@@ -1004,12 +1036,16 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, [agentConfig, updateConfig]);
 
   const setDesignSystem = useCallback(async (designSystemId: number | null) => {
-    // Templates belong to a design system: changing (or clearing) the design
-    // system invalidates a pinned template, so reset it to None.
+    // Templates belong to a design system: changing the design system
+    // invalidates a pinned template, so it moves to the NEW system's default
+    // template (None when that system has no default). Clearing the design
+    // system clears the template.
     const templateId =
       designSystemId === agentConfig.design_system_id
         ? agentConfig.template_id ?? null
-        : null;
+        : designSystemId == null
+          ? null
+          : await resolveDefaultTemplateId(designSystemId);
     // Choosing a design system — INCLUDING clearing it to None — is a decision
     // about the style slot, so it stamps user provenance. Without this, "None"
     // was indistinguishable from "never resolved" and the org default was

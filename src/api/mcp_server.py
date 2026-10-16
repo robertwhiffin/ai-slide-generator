@@ -28,7 +28,11 @@ from src.api.services.job_queue import enqueue_job, get_job_status
 from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
-from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
+from src.core.settings_db import (
+    get_default_design_system_id,
+    get_default_slide_style_id,
+    get_default_template_id,
+)
 from src.domain.conversation_engine import with_legacy_marker
 from src.domain.slide_deck import SlideDeck
 from src.services.permission_service import get_permission_service
@@ -491,19 +495,23 @@ async def _create_deck_impl(
             if effective_ds_id is not None:
                 agent_config["design_system_id"] = effective_ds_id
                 # Templates belong to a design system, so a name is only
-                # meaningful here. Unresolvable -> no pin (logged), and the
-                # model soft-picks from the catalog the compiler injects.
+                # meaningful here. No name, or an unresolvable one (logged) ->
+                # the design system's default template; no default -> no pin,
+                # and the model soft-picks from the catalog the compiler injects.
+                template_id = None
                 if template_name and template_name.strip():
                     template_id = _resolve_template_name(effective_ds_id, template_name)
-                    if template_id is not None:
-                        agent_config["template_id"] = template_id
-                    else:
+                    if template_id is None:
                         logger.warning(
                             "MCP create_deck: template_name %r matched no template "
-                            "on design system %s; generating without a pin",
+                            "on design system %s; using its default template, if any",
                             template_name,
                             effective_ds_id,
                         )
+                if template_id is None:
+                    template_id = get_default_template_id(effective_ds_id)
+                if template_id is not None:
+                    agent_config["template_id"] = template_id
             else:
                 # No design system in play: fall back to the tellr-configured
                 # default slide style rather than the hardcoded

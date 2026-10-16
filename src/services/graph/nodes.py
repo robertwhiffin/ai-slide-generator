@@ -838,6 +838,32 @@ def _concat_css(token_css: str, style_block: str) -> str:
     return "\n\n".join(part for part in (token_css, style_block) if part)
 
 
+def _with_default_template(
+    contract: Optional[DesignContractRef],
+) -> Optional[DesignContractRef]:
+    """Fill an unpinned template slot with the design system's default template.
+
+    A design system without a template gives the architect an empty
+    ``template_sections``, so nothing can be bound and every builder improvises
+    markup outside the template's painted ``<section>`` roots. Applied only to the
+    contract the brand is RESOLVED from: the session's stored contract, the
+    payload's ``available_design_contract`` and the committed spec keep the
+    unpinned slot, so this fallback never reads as a design-contract change.
+    """
+    if (
+        contract is None
+        or contract.design_system_id is None
+        or contract.template_id is not None
+    ):
+        return contract
+    from src.core.settings_db import get_default_template_id
+
+    template_id = get_default_template_id(contract.design_system_id)
+    if template_id is None:
+        return contract
+    return contract.model_copy(update={"template_id": template_id})
+
+
 def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
     """Resolve every brand-related value for *contract*, in one place.
 
@@ -858,6 +884,7 @@ def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
     """
     from src.services.agent_resolution import resolve_style_source
 
+    contract = _with_default_template(contract)
     style = resolve_style_source(_agent_config_for(contract))
 
     layout_html = ""

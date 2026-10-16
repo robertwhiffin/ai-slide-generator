@@ -73,6 +73,8 @@ export interface SlideSpec {
   assumes: string;
   hands_off: string;
   data_references: string[];
+  /** The design system's own `data-label` for the bound template section. */
+  slide_type?: string | null;
   template_section_index?: number | null;
 }
 

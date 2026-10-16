@@ -41,7 +41,11 @@ from src.api.services.session_manager import SessionNotFoundError, get_session_m
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
-from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
+from src.core.settings_db import (
+    get_default_design_system_id,
+    get_default_slide_style_id,
+    get_default_template_id,
+)
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.domain.conversation_engine import selects_graph_engine
@@ -196,8 +200,9 @@ def _apply_org_default_style_source(
     ``null`` is a choice ("no style source") and is left alone, while an omitted
     key is seeded. Value inspection cannot tell those apart — both read as
     ``None`` — which is why presence is passed in rather than inferred.
-    ``template_id`` is untouched: it is session-scoped and a session-creating
-    request never seeds a pin (see ``_without_template_pin``).
+    ``template_id`` is untouched: it is session-scoped, a session-creating
+    request's own pin is dropped (see ``_without_template_pin``), and the only pin
+    seeded is the design system's default template (``_with_default_template_pin``).
     """
     # An explicit style choice closes BOTH slots. A user who picked a slide style
     # must not also get a brand layered over it, and one who explicitly cleared
@@ -308,6 +313,23 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
             return config_data
         return {**config_data, "template_id": None}
 
+    def _with_default_template_pin(config_data: dict) -> dict:
+        """Pin the design system's default template on a new session.
+
+        Runs AFTER ``_without_template_pin``: the carried-over pin is dropped, and
+        the only pin a creating request seeds is the server-resolved default of
+        the session's own design system. The frontend adopts it from the
+        session's stored config, so the picker shows it and the user can change
+        it. No default template -> no pin, as before.
+        """
+        design_system_id = config_data.get("design_system_id")
+        if design_system_id is None or config_data.get("template_id") is not None:
+            return config_data
+        template_id = get_default_template_id(design_system_id)
+        if template_id is None:
+            return config_data
+        return {**config_data, "template_id": template_id}
+
     if request.session_id:
         # Existence is independent of agent_config presence. A supplied browser
         # ID that has not been persisted yet is still a creation boundary and
@@ -318,8 +340,8 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
             current_user = get_current_user()
             session_manager.create_session(
                 session_id=request.session_id,
-                agent_config=_without_template_pin(
-                    _seeded_for_new_session(agent_config_data)
+                agent_config=_with_default_template_pin(
+                    _without_template_pin(_seeded_for_new_session(agent_config_data))
                 ),
                 created_by=current_user,
                 graph_capable=selects_graph_engine(request.message),
@@ -356,7 +378,9 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
 
     current_user = get_current_user()
     session = session_manager.create_session(
-        agent_config=_without_template_pin(_seeded_for_new_session(agent_config_data)),
+        agent_config=_with_default_template_pin(
+            _without_template_pin(_seeded_for_new_session(agent_config_data))
+        ),
         created_by=current_user,
         graph_capable=selects_graph_engine(request.message),
     )

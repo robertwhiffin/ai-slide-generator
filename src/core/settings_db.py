@@ -148,6 +148,43 @@ def get_default_design_system_id() -> Optional[int]:
         return None
 
 
+def get_default_template_id(design_system_id: Optional[int]) -> Optional[int]:
+    """Return the default template of *design_system_id*, or ``None``.
+
+    The template counterpart of :func:`get_default_design_system_id`: resolves the
+    ``is_default=True`` template row of that design system, only while the system
+    itself is ACTIVE. Used to seed the template pin of a new session and as the
+    architect's fallback for an unpinned session, so a deck on a design system
+    binds to a template's sections instead of improvising markup.
+
+    Like the design-system default there is no fallback to an arbitrary template:
+    "no default template" is a normal state and resolves to ``None``. Swallows
+    errors for pre-migration databases where the column may not exist yet.
+    """
+    if design_system_id is None:
+        return None
+
+    from src.database.models import DesignSystem, DesignSystemTemplate
+
+    try:
+        with get_db_session() as db:
+            row = (
+                db.query(DesignSystemTemplate.id)
+                .join(DesignSystem, DesignSystem.id == DesignSystemTemplate.design_system_id)
+                .filter(
+                    DesignSystemTemplate.design_system_id == design_system_id,
+                    DesignSystemTemplate.is_default == True,  # noqa: E712
+                    DesignSystem.is_active == True,  # noqa: E712
+                )
+                .order_by(DesignSystemTemplate.id)
+                .first()
+            )
+            return row.id if row else None
+    except Exception:
+        # Column/table may not exist yet (pre-migration)
+        return None
+
+
 class GenieSettings(BaseSettings):
     """Genie configuration settings."""
 

@@ -422,6 +422,7 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
+         patch("src.api.mcp_server.get_default_template_id", return_value=None), \
          patch("src.api.mcp_server.enqueue_create_job") as enqueue:
 
         auth_scope.return_value.__enter__.return_value = identity
@@ -448,6 +449,80 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
         assert "template_id" not in agent_config
         assert "Nonexistent" in caplog.text
         assert "matched no template" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "template_name, resolved",
+    [(None, None), ("Nonexistent", None)],
+    ids=["no-template-name", "unmatched-template-name"],
+)
+@pytest.mark.asyncio
+async def test_create_deck_pins_the_design_systems_default_template(
+    fake_request, identity, template_name, resolved
+):
+    """With no usable template_name, the deck is pinned to the design system's
+    default template so it binds to that template's sections."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
+         patch("src.api.mcp_server._resolve_template_name", return_value=resolved), \
+         patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="deck", template_name=template_name
+        )
+
+        get_tmpl.assert_called_once_with(5)
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["design_system_id"] == 5
+        assert agent_config["template_id"] == 50
+
+
+@pytest.mark.asyncio
+async def test_create_deck_named_template_beats_the_default(fake_request, identity):
+    """A template_name that resolves wins; the default is not consulted."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
+         patch("src.api.mcp_server._resolve_template_name", return_value=102), \
+         patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="deck", template_name="Two Column"
+        )
+
+        get_tmpl.assert_not_called()
+        assert sm.create_session.call_args.kwargs["agent_config"]["template_id"] == 102
 
 
 @pytest.mark.asyncio
