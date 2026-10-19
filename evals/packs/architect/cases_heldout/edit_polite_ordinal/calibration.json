@@ -1,0 +1,10 @@
+{
+  "should_fail": {
+    "intent": "discuss",
+    "message": "Sure. Should the iteration figure replace the slide title or sit above the other stats?",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null
+  }
+}
