@@ -30,7 +30,17 @@ import pytest
 from src.api.services.slide_repository import is_placeholder_record
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SharedDeckMutationEvent, UserSession
-from src.domain.finding import VERDICT_KEY, DeckReviewOutput, make_finding_id
+from src.domain.finding import VERDICT_KEY, DeckReviewOutput, Finding, make_finding_id
+from src.domain.finding_copy import (
+    ADDRESSED,
+    DECK_ADVISORY_CLOSING,
+    DECK_GRAIN_ISSUE,
+    FIXED_AUTOMATICALLY,
+    GENERIC_ISSUE,
+    LEFT_FOR_JUDGEMENT,
+    NOT_FIXED_AUTOMATICALLY,
+    PLAIN_ISSUES,
+)
 from src.domain.skill_io import (
     AnalystOutput,
     ArchitectOutput,
@@ -2842,6 +2852,200 @@ class TestFixReviewerUndeliverableRowIsTerminalNotFatal:
         assert "landed_positions" not in updates
         assert updates["fix_map"]["vals"][0] is None
         assert graph_env.rows() == []
+
+
+# ===========================================================================
+# #316: the plain-language copy is for the user only
+# ===========================================================================
+
+#: The verbatim technical message quoted in #316, the same text as
+#: ``tests.unit.test_finding_copy.ISSUE_316_MESSAGE``.  Non-ASCII on purpose
+#: (``≈``, ``—``): an agent must get it byte-for-byte.
+ISSUE_316_MESSAGE = (
+    'The "NOTE" label in the bottom callout is Coral #FF5F46 at 13px/700 over the '
+    "box fill (rgba(255,95,70,0.12) composited on navy #1B3139 ≈ #2D3A3C), "
+    "giving roughly 3.9:1 — below the 4.5:1 AA floor for text this size. The "
+    "template's own dark-background eyebrow colour (#FFC9BF) clears AA; use that "
+    "instead of raw coral."
+)
+
+_PLAIN_KEY_SPELLINGS = ("plain_message", "plainMessage", "plain_issue", "plainIssue")
+
+
+def _all_plain_copy() -> list:
+    """Every user-visible copy string in ``finding_copy``.
+
+    The present and past sentence of every criterion and of the generic issue,
+    the four status sentences, the deck-grain line and the advisory closing.  The
+    two advisory header fragments and the reviewer's-details separator are left
+    out: they are not sentences a finding could carry.
+    """
+    copy = []
+    for issue in [*PLAIN_ISSUES.values(), GENERIC_ISSUE]:
+        copy += [issue.present, issue.past]
+    copy += [
+        FIXED_AUTOMATICALLY,
+        ADDRESSED,
+        NOT_FIXED_AUTOMATICALLY,
+        LEFT_FOR_JUDGEMENT,
+        DECK_GRAIN_ISSUE,
+        DECK_ADVISORY_CLOSING,
+    ]
+    return copy
+
+
+def _assert_no_plain_copy(blob: str) -> None:
+    """*blob* (serialised JSON) carries no plain copy and no plain-copy key."""
+    copy = _all_plain_copy()
+    assert copy, "an empty copy list would make this check vacuous"
+    # A string json.dumps escapes could never be found as a substring, so the
+    # absence check below would pass however the copy leaked.
+    assert [s for s in copy if json.dumps(s)[1:-1] != s] == []
+    assert [s for s in copy if s in blob] == []
+    assert [k for k in _PLAIN_KEY_SPELLINGS if k in blob] == []
+
+
+class TestReviewersKeepTheTechnicalMessage:
+    """#316 D7: the user sees deterministic plain copy; every AGENT keeps the
+    reviewer's technical message verbatim.
+
+    Characterisation tests: green on the code as it was before #316, and they stay
+    green.  The plain copy is computed on the read path only, so none of it may
+    reach a model payload or a persisted record.
+
+    Sabotage notes (each turns the named test red; restore afterwards and prove it
+    with ``git diff --exit-code -- src/services/graph/nodes.py``):
+
+    1. In ``fixer_node``, change ``"finding": finding,`` to
+       ``"finding": {**finding, "message": "x"},``: the fixer test's verbatim
+       ``message`` assertion goes red.
+    2. Add ``"plain_message": "x"`` to that dict instead
+       (``"finding": {**finding, "plain_message": "x"},``): the fixer test's
+       key-set assertion goes red.
+    3. Add ``"note": "This was fixed automatically."`` (or ``"plainIssue": "x"``)
+       as a top-level key of the fixer's ``fix_payload``: the fixer test's
+       ``_assert_no_plain_copy`` goes red.
+    4. In ``fix_reviewer_node``, change ``"finding": original_finding,`` to
+       ``{**original_finding, "message": "x"}``: the fix-reviewer test goes red.
+    5. In ``_write_reviewed_row``, pass
+       ``findings=[f.model_copy(update={"message": "x"}) for f in findings]``,
+       or add ``"plain_message": "x"`` to every finding dict of the built
+       ``verification_record``: the record assertions of the fix-reviewer test and
+       the persisted-record test go red.
+    6. In ``architect_node``'s ``prior_review``, change
+       ``f.model_dump() if hasattr(f, "model_dump") else f`` to
+       ``{**f.model_dump(), "message": "x"}``: the architect test goes red.
+    """
+
+    _BUILT_HTML = "<div class='slide'>built</div>"
+
+    def _review_then_fix(self, graph_env):
+        """Build reviewer -> fixer on one objective finding carrying the #316 text."""
+        graph_env.skills.set(
+            "build_reviewer",
+            review_out(0, [finding("contrast_failure", message=ISSUE_316_MESSAGE)]),
+        )
+        reviewed = build_reviewer_node(
+            _branch_payload(graph_env, 0, html=self._BUILT_HTML)
+        )
+        assert graph_env.rows() == [], "an objective finding opens a fix, no row yet"
+
+        graph_env.skills.set("fixer", fixer_out)
+        state = _fix_state(graph_env, {0: reviewed["fix_map"]["vals"][0]})
+        fixed = fixer_node(state)
+        return state, fixed
+
+    @staticmethod
+    def _assert_the_finding_is_the_reviewers(sent: dict) -> None:
+        assert sent["message"] == ISSUE_316_MESSAGE
+        assert set(sent) == set(Finding.model_fields)
+        assert sent["criterion"] == "contrast_failure"
+
+    def test_the_fixer_receives_the_build_reviewers_message_verbatim(self, graph_env):
+        self._review_then_fix(graph_env)
+
+        (call,) = graph_env.skills.calls_for("fixer")
+        payload = call["payload"]
+        self._assert_the_finding_is_the_reviewers(payload["finding"])
+        _assert_no_plain_copy(json.dumps(payload))
+
+    def test_the_fix_reviewer_receives_the_same_finding_verbatim(self, graph_env):
+        state, fixed = self._review_then_fix(graph_env)
+        state["fix_map"] = turn_scoped_merge(state["fix_map"], fixed["fix_map"])
+        state["fixed"] = fixed["fixed"]
+        state["fix_target"] = fixed["fix_target"]
+        graph_env.skills.set("fix_reviewer", review_out(0))
+
+        fix_reviewer_node(state)
+
+        (call,) = graph_env.skills.calls_for("fix_reviewer")
+        payload = call["payload"]
+        self._assert_the_finding_is_the_reviewers(payload["finding"])
+        _assert_no_plain_copy(json.dumps(payload))
+
+        (row,) = graph_env.rows()
+        raw = row.verification_record
+        ((_content_hash, verdict),) = json.loads(raw).items()
+        (written,) = verdict[VERDICT_KEY]["findings"]
+        assert written["message"] == ISSUE_316_MESSAGE
+        assert written["status"] == "fixed"
+        assert set(written) == set(Finding.model_fields)
+        _assert_no_plain_copy(raw)
+
+    def test_the_persisted_record_of_a_surfaced_slide_holds_only_finding_fields(
+        self, graph_env
+    ):
+        message = "The brief asks for a timeline; the slide gives none."
+        graph_env.skills.set(
+            "build_reviewer",
+            review_out(0, [finding("brief_not_delivered", message=message)]),
+        )
+
+        updates = build_reviewer_node(
+            _branch_payload(graph_env, 0, html=self._BUILT_HTML)
+        )
+
+        assert "fix_map" not in updates, "a subjective finding has no fix path"
+        (row,) = graph_env.rows()
+        raw = row.verification_record
+        record = json.loads(raw)
+        assert len(record) == 1
+        written = [
+            f for verdict in record.values() for f in verdict[VERDICT_KEY]["findings"]
+        ]
+        assert len(written) == 1
+        for f in written:
+            assert set(f) == set(Finding.model_fields)
+            assert f["message"] == message
+        _assert_no_plain_copy(raw)
+
+    def test_the_next_architect_turn_receives_deck_findings_verbatim(self, graph_env):
+        narrative = "Slide 4 presents pilot results before slide 2 introduces the pilot."
+        htmls = ["<div class='slide'>a</div>", "<div class='slide'>b</div>"]
+        graph_env.seed_slides(htmls)
+        graph_env.skills.set(
+            "deck_reviewer",
+            DeckReviewOutput(
+                findings=[finding("arc_gap", slide_index=-1, message=narrative)]
+            ),
+        )
+        deck_reviewer_node(graph_env.state(turn_id=TURN))
+
+        # The real deck review store, not a stubbed get_deck_review: the point
+        # is what the next turn reads back from it.
+        graph_env.skills.set("architect", architect_build(make_spec((0, 1))))
+        architect_node(graph_env.state())
+
+        (call,) = graph_env.skills.calls_for("architect")
+        payload = call["payload"]
+        previous = payload["previous_deck_review"]
+        assert previous is not None, "the digest lookup missed the stored review"
+        assert previous["digest"] == compute_deck_digest(htmls)
+        (sent,) = previous["findings"]
+        assert sent["message"] == narrative
+        assert sent["criterion"] == "arc_gap"
+        assert set(sent) == set(Finding.model_fields)
+        _assert_no_plain_copy(json.dumps(payload))
 
 
 # ===========================================================================
