@@ -221,6 +221,8 @@ interface PollResponse {
   slide_revisions?: Array<{ position: number; html: string; scripts: string; agent?: string }>;
   /** Hand back as `revisions_after` on the next poll. */
   revision_mark?: number;
+  /** #319: the running turn's latest stage summary; null when finished or legacy. */
+  turn_progress?: TurnProgress | null;
   result?: {
     slides?: SlideDeck;
     raw_html?: string;
@@ -1096,6 +1098,8 @@ export const api = {
         let slidesCursor = 0;
         // The server's revision_mark from the last poll; undefined until one arrives.
         let revisionMark: number | undefined;
+        // #319: the highest turn_progress seq forwarded so far.
+        let lastProgressSeq = 0;
 
         pollInterval = setInterval(async () => {
           if (cancelled) {
@@ -1158,6 +1162,14 @@ export const api = {
             }
             if (response.revision_mark != null) {
               revisionMark = response.revision_mark;
+            }
+
+            // #319: the graph's stage summary.  Re-sent on every poll while the turn
+            // runs; forward it only when it is newer than the last one forwarded.
+            const progress = response.turn_progress;
+            if (progress && typeof progress.seq === 'number' && progress.seq > lastProgressSeq) {
+              lastProgressSeq = progress.seq;
+              onEvent({ type: 'turn_progress', turn_progress: progress });
             }
 
             lastMessageId = response.last_message_id;
