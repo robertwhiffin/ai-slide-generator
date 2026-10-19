@@ -1238,6 +1238,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       ref={chatPanelRef}
                       rawHtml={rawHtml}
                       disabled={isReadOnly}
+                      hasDeckSpec={!!slideDeck?.deck_spec}
                       onGenerationStart={() => {
                         onGenerationStart();
                         // E0: reset released-position tracking for the new turn.
