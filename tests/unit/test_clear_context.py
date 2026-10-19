@@ -22,6 +22,18 @@ a FILE-BACKED engine with ordinary pooling and the REAL
 ``SqlAlchemyCheckpointSaver``, where a delete on a second connection blocks on
 SQLite's write lock (``database is locked``) — and, in CI, a real PostgreSQL
 with a ``do_connect`` listener counting the connections the engine issues.
+
+The kept row is hidden (#323, D1).  ``clear_context`` keeps the earliest user
+row because engine mode is read off it, and re-types it to
+``ENGINE_MODE_MARKER_MESSAGE_TYPE``.  Every transcript read -- the chat panel's
+``get_messages``, the architect's ``conversation``, the monolith's history, a
+save point's ``chat_history`` -- must then see an empty conversation, while
+every mode read still sees the row.  Those tests seed the transcript with the
+types the live paths write (``user_input`` / ``llm_response``): with the
+fixtures' default ``None`` type the architect's and the monolith's own type
+filters would already drop the row, and the tests would pass before the fix.
+The new constant does not exist until the fix lands, so it is imported inside
+the tests, AFTER the behavioural assertion each test is about.
 """
 from __future__ import annotations
 
@@ -38,6 +50,8 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
@@ -50,11 +64,16 @@ from src.api.services.chat_service import (
     resolve_engine_mode,
 )
 from src.api.services.deck_level_writer import read_deck_spec
-from src.api.services.session_manager import SessionNotFoundError
+from src.api.services.session_manager import SessionManager, SessionNotFoundError
 from src.core.checkpointer import SqlAlchemyCheckpointSaver
 from src.core.database import Base, _run_migrations
 from src.database.models.profile_contributor import PermissionLevel
-from src.database.models.session import SessionMessage, SessionSlideDeck, UserSession
+from src.database.models.session import (
+    SessionMessage,
+    SessionSlideDeck,
+    SlideDeckVersion,
+    UserSession,
+)
 from src.database.models.usage_event import UsageEvent
 from tests.unit.conftest import _make_factory, _make_fake_db
 
@@ -625,6 +644,380 @@ class TestTheClearIsOneTransaction:
         _assert_thread_rows(file_backed_db, seeded.sid, 0)
         _assert_thread_rows(file_backed_db, seeded.other_thread, 1)
         assert _clear_events(factory) == [("owner@example.com", seeded.pk)]
+
+
+# ---------------------------------------------------------------------------
+# The kept row is hidden from every transcript read (#323, D1 / D9).
+# ---------------------------------------------------------------------------
+
+# The transcript every test below starts from, as (role, content, message_type)
+# in order: the types the live sync/streaming path writes, so the architect's
+# and the monolith's own type filters ADMIT every row (see the module docstring).
+_ORIGINAL_TRANSCRIPT = [
+    ("user", _PLAIN_MESSAGE, "user_input"),
+    ("assistant", "deck built", "llm_response"),
+    ("user", "make slide 3 shorter", "user_input"),
+    ("assistant", "done", "llm_response"),
+]
+
+# What the user says after the clear.  Distinct from every original row, so a
+# replayed old row can never be mistaken for a new one.
+_NEW_ASK = "Now make slide 2 blue"
+_NEW_REPLY = "Slide 2 is blue now."
+
+
+def _marker_type() -> str:
+    """``ENGINE_MODE_MARKER_MESSAGE_TYPE``, imported only when a test needs it.
+
+    The constant is new in #323; importing it at module scope would stop this
+    whole file collecting before the fix lands.
+    """
+    from src.domain.conversation_engine import ENGINE_MODE_MARKER_MESSAGE_TYPE
+
+    return ENGINE_MODE_MARKER_MESSAGE_TYPE
+
+
+def _seed_transcript(factory, sid: str | None = None, *, first: str = _PLAIN_MESSAGE) -> str:
+    """Give a session ``_ORIGINAL_TRANSCRIPT`` (its first row's content = *first*).
+
+    With *sid*, the session's existing single user row (the
+    ``session_with_spec_and_messages`` fixture's) becomes the first row; with
+    none, a fresh session is created.  Returns the session id.
+    """
+    (_, _, first_type), *rest = _ORIGINAL_TRANSCRIPT
+    if sid is None:
+        sid = f"clear-{uuid.uuid4().hex[:12]}"
+        db = factory()
+        try:
+            db.add(UserSession(session_id=sid, created_by="owner@example.com"))
+            db.commit()
+        finally:
+            db.close()
+        _add_message(factory, sid, role="user", content=first, message_type=first_type)
+    else:
+        db = factory()
+        try:
+            us = db.query(UserSession).filter(UserSession.session_id == sid).one()
+            [row] = db.query(SessionMessage).filter(SessionMessage.session_id == us.id).all()
+            assert row.role == "user", "fixture precondition: one user row"
+            row.content = first
+            row.message_type = first_type
+            db.commit()
+        finally:
+            db.close()
+    for i, (role, content, message_type) in enumerate(rest, start=1):
+        _add_message(factory, sid, role=role, content=content,
+                     message_type=message_type, offset_seconds=5 * i)
+    assert [
+        (r.role, r.content, r.message_type) for r in _messages_of(factory, sid)
+    ] == [(_ORIGINAL_TRANSCRIPT[0][0], first, first_type), *rest], "seed precondition"
+    return sid
+
+
+def _add_new_ask(factory, sid: str, *, with_reply: bool = False) -> None:
+    """What the user (and the assistant) say after the clear."""
+    _add_message(factory, sid, role="user", content=_NEW_ASK,
+                 message_type="user_input", offset_seconds=30)
+    if with_reply:
+        _add_message(factory, sid, role="assistant", content=_NEW_REPLY,
+                     message_type="llm_response", offset_seconds=35)
+
+
+def _visible(messages) -> list[tuple[str, str, str | None]]:
+    """``get_messages`` dicts as (role, content, message_type)."""
+    return [(m["role"], m["content"], m["message_type"]) for m in messages]
+
+
+def _version_rows(factory, sid: str) -> list[dict]:
+    """Every save point on *sid*'s deck, EVERY column, by version number."""
+    db = factory()
+    try:
+        pk = db.query(UserSession).filter(UserSession.session_id == sid).one().id
+        return [
+            {c.name: getattr(v, c.name) for c in SlideDeckVersion.__table__.columns}
+            for v in db.query(SlideDeckVersion)
+            .filter(SlideDeckVersion.session_id == pk)
+            .order_by(SlideDeckVersion.version_number)
+            .all()
+        ]
+    finally:
+        db.close()
+
+
+class TestAClearedConversationIsEmptyToEveryReader:
+    def test_get_messages_returns_nothing_after_a_clear_but_the_marker_row_remains(
+        self, _session_unit_engine
+    ):
+        """The chat panel (on load AND on reload) and ``GET /messages`` read this.
+
+        Before #323 the kept row came back here, so a reload after a clear
+        showed the deck's first prompt again.  The row itself must stay: engine
+        mode is read off it.
+        """
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory)
+
+        with _patched(factory, _RecordingSaver()):
+            assert _visible(SessionManager().get_messages(sid)) == _ORIGINAL_TRANSCRIPT, (
+                "precondition: get_messages reads this test's database"
+            )
+            result = ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+            assert SessionManager().get_messages(sid) == []
+
+        [kept] = _messages_of(factory, sid)
+        assert kept.id == result["preserved_message_id"]
+        assert (kept.role, kept.content) == ("user", _PLAIN_MESSAGE)
+        assert kept.message_type == _marker_type()
+
+    def test_messages_written_after_a_clear_are_the_whole_transcript(
+        self, _session_unit_engine
+    ):
+        """The new conversation, exactly, in order; ``limit`` never returns the
+        hidden row.
+
+        ``limit=3`` is the window that reaches back over the hidden row (three
+        rows exist, two are visible): it must return the two visible rows and
+        nothing else.  ``limit=1`` is the newest visible row.  Whether the
+        filter runs before or after the slice cannot be told apart here: the
+        hidden row is always the session's earliest, so the two orders return
+        the same rows (measured).
+        """
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory)
+
+        with _patched(factory, _RecordingSaver()):
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+            _add_new_ask(factory, sid, with_reply=True)
+            assert len(_messages_of(factory, sid)) == 3, "precondition: marker + 2 new rows"
+
+            new_turns = [
+                ("user", _NEW_ASK, "user_input"),
+                ("assistant", _NEW_REPLY, "llm_response"),
+            ]
+            assert _visible(SessionManager().get_messages(sid)) == new_turns
+            assert _visible(SessionManager().get_messages(sid, limit=3)) == new_turns
+            assert _visible(SessionManager().get_messages(sid, limit=1)) == new_turns[1:]
+
+    def test_only_the_marker_is_hidden_every_other_row_type_stays_visible(
+        self, session_with_spec_and_messages, _session_unit_engine
+    ):
+        """The filter hides ONE type and nothing else.
+
+        Untyped rows are real (``POST /sessions/{id}/messages`` writes them;
+        older decks carry them), and the agent-internal types are what the
+        panel shows as reasoning/tool steps.  A filter that also hid any of
+        them would silently drop chat from the panel and from new save points,
+        and every other test here would stay green (measured: hiding ``None``
+        reddened nothing in tests/unit or the graph/savepoint integration files).
+        """
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory, session_with_spec_and_messages)
+        after = [
+            ("user", "an untyped ask", None),
+            ("assistant", "add or replace?", "clarification"),
+            ("assistant", "thinking it over", "reasoning"),
+            ("tool", "rows from genie", "tool_result"),
+            ("assistant", "an advisory", "info"),
+        ]
+
+        with _patched(factory, _RecordingSaver()):
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+            for i, (role, content, message_type) in enumerate(after):
+                _add_message(factory, sid, role=role, content=content,
+                             message_type=message_type, offset_seconds=30 + i)
+
+            assert _visible(SessionManager().get_messages(sid)) == after
+            SessionManager().create_version(
+                sid, "after the clear", deck_dict={"title": "t", "slides": []}
+            )
+
+        [version] = _version_rows(factory, sid)
+        assert [
+            (m["role"], m["content"], m["message_type"])
+            for m in json.loads(version["chat_history_json"])
+        ] == after
+
+    def test_the_architect_conversation_after_a_clear_is_only_new_turns(
+        self, _session_unit_engine
+    ):
+        """``nodes._conversation`` is the architect payload's ``conversation``.
+
+        Before #323 the deck's first prompt was replayed to the architect as
+        conversation after a clear (plan Context 4's probe).
+        ``_conversation`` swallows a read failure as ``[]``, so the BEFORE
+        assertion is what proves this test reads the seeded rows at all.
+        """
+        from src.services.graph.nodes import _conversation
+
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory)
+
+        with _patched(factory, _RecordingSaver()):
+            assert _conversation(sid) == [
+                {"role": role, "content": content}
+                for role, content, _ in _ORIGINAL_TRANSCRIPT
+            ], "precondition: the old first prompt is in the conversation before the clear"
+
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+            _add_new_ask(factory, sid)
+
+            assert _conversation(sid) == [{"role": "user", "content": _NEW_ASK}]
+
+    def test_the_monolith_history_after_a_clear_is_only_new_turns(
+        self, _session_unit_engine
+    ):
+        """``_hydrate_chat_history`` is the monolith agent's history."""
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory)
+
+        def hydrated() -> tuple[int, list[tuple[type, str]]]:
+            history = ChatMessageHistory()
+            count = ChatService()._hydrate_chat_history(sid, history)
+            return count, [(type(m), m.content) for m in history.messages]
+
+        with _patched(factory, _RecordingSaver()):
+            assert hydrated() == (4, [
+                (HumanMessage if role == "user" else AIMessage, content)
+                for role, content, _ in _ORIGINAL_TRANSCRIPT
+            ]), "precondition: the whole transcript hydrates before the clear"
+
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+            _add_new_ask(factory, sid)
+
+            assert hydrated() == (1, [(HumanMessage, _NEW_ASK)])
+
+    def test_a_later_legacy_phrase_after_a_clear_does_not_move_a_graph_deck(
+        self, _session_unit_engine
+    ):
+        """The kept row is what stops a later ``USE LEGACY MODE`` becoming the
+        deck's earliest user row, and so its engine (plan D1's rejected
+        alternative: delete the row on graph decks)."""
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory)
+
+        with _patched(factory, _RecordingSaver()):
+            assert resolve_engine_mode(sid) == "graph", "precondition: a graph deck"
+
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+            _add_message(factory, sid, role="user",
+                         content=f"{LEGACY_MODE_PHRASE} from now on, please",
+                         message_type="user_input", offset_seconds=30)
+
+            assert resolve_engine_mode(sid) == "graph"
+
+    def test_message_count_still_counts_the_marker(self, _session_unit_engine):
+        """Deliberately NOT filtered: ``is_first_message = message_count == 0``
+        gates title generation, and a cleared deck's next turn is not its first."""
+        from src.services.graph_configuration import bootstrap_graph_configuration
+
+        factory = _make_factory(_session_unit_engine)
+        bootstrap_graph_configuration(factory)  # get_session projects the pin
+        sid = _seed_transcript(factory)
+
+        with _patched(factory, _RecordingSaver()):
+            assert SessionManager().get_session(sid)["message_count"] == 4, "precondition"
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+            assert SessionManager().get_session(sid)["message_count"] == 1
+
+    def test_clearing_twice_keeps_the_same_marker(self, _session_unit_engine):
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory)
+
+        with _patched(factory, _RecordingSaver()):
+            first = ChatService().clear_context(sid, cleared_by="owner@example.com")
+            second = ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+            assert first["preserved_message_id"] is not None
+            assert second["preserved_message_id"] == first["preserved_message_id"]
+            assert (first["deleted_messages"], second["deleted_messages"]) == (3, 0)
+            assert SessionManager().get_messages(sid) == []
+
+        [kept] = _messages_of(factory, sid)
+        assert (kept.id, kept.role, kept.content) == (
+            first["preserved_message_id"], "user", _PLAIN_MESSAGE
+        )
+        assert kept.message_type == _marker_type()
+
+    def test_a_clear_leaves_every_save_point_untouched(
+        self, session_with_spec_and_messages, _session_unit_engine
+    ):
+        """Each save point keeps the chat it captured (D9): a preview of an
+        older save point still shows the old conversation.  Every column of
+        every version row is compared, not a chosen few."""
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory, session_with_spec_and_messages)
+
+        with _patched(factory, _RecordingSaver()):
+            manager = SessionManager()
+            manager.create_version(sid, "v1", deck_dict={"title": "t", "slides": []})
+            manager.create_version(sid, "v2", deck_dict={"title": "t", "slides": []})
+            before = _version_rows(factory, sid)
+            assert [v["version_number"] for v in before] == [1, 2], "precondition"
+            for v in before:
+                assert v["deck_spec_json"], "precondition: the save point snapshots a spec"
+                assert [
+                    (m["role"], m["content"], m["message_type"])
+                    for m in json.loads(v["chat_history_json"])
+                ] == _ORIGINAL_TRANSCRIPT, "precondition: it captured the old chat"
+
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+        assert _version_rows(factory, sid) == before
+
+    def test_a_save_point_taken_after_a_clear_captures_no_marker(
+        self, session_with_spec_and_messages, _session_unit_engine
+    ):
+        """Its preview shows the conversation since the clear, nothing more."""
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory, session_with_spec_and_messages)
+
+        with _patched(factory, _RecordingSaver()):
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+            _add_new_ask(factory, sid)
+            created = SessionManager().create_version(
+                sid, "after the clear", deck_dict={"title": "t", "slides": []}
+            )
+
+        [*_, new_row] = _messages_of(factory, sid)
+        assert (new_row.role, new_row.content) == ("user", _NEW_ASK), "precondition"
+        [version] = _version_rows(factory, sid)
+        assert json.loads(version["chat_history_json"]) == [
+            {
+                "id": new_row.id,
+                "role": "user",
+                "content": _NEW_ASK,
+                "message_type": "user_input",
+                "created_at": new_row.created_at.isoformat(),
+            }
+        ]
+        assert created["message_count"] == 1
+
+    def test_a_duplicate_of_a_cleared_legacy_deck_stays_legacy_and_shows_no_chat(
+        self, session_with_spec_and_messages, _session_unit_engine
+    ):
+        """The duplicate carries the marker (role only) WITH its hidden type.
+
+        So the copy keeps the source's engine, and its chat panel is empty, as a
+        duplicate's always is.
+        """
+        factory = _make_factory(_session_unit_engine)
+        sid = _seed_transcript(factory, session_with_spec_and_messages, first=_PHRASE_MESSAGE)
+
+        with _patched(factory, _RecordingSaver()):
+            assert resolve_engine_mode(sid) == "monolith", "precondition: a legacy deck"
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+            new = SessionManager().duplicate_session(sid, "copier@example.com")["session_id"]
+            assert new != sid
+
+            assert resolve_engine_mode(new) == "monolith"
+            assert SessionManager().get_messages(new) == []
+
+        [carried] = _messages_of(factory, new)
+        assert (carried.role, carried.content) == ("user", _PHRASE_MESSAGE)
+        assert carried.message_type == _marker_type()
 
 
 # ---------------------------------------------------------------------------

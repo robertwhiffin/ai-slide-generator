@@ -29,6 +29,7 @@ from src.database.models.session import (
     SlideDeckVersion,
     UserSession,
 )
+from src.domain.conversation_engine import is_transcript_message
 from src.domain.finding import findings_from_record
 from src.services.conversation_pins import (
     get_conversation_graph_version,
@@ -1522,7 +1523,11 @@ class SessionManager:
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
 
-            messages = session.messages
+            # The row a clear keeps (engine-mode marker) is not part of the
+            # conversation; drop it BEFORE ``limit`` so it never uses a slot.
+            messages = [
+                m for m in session.messages if is_transcript_message(m.message_type)
+            ]
             if limit:
                 messages = messages[-limit:]
 
@@ -2517,6 +2522,7 @@ class SessionManager:
                         "created_at": m.created_at.isoformat(),
                     }
                     for m in session.messages
+                    if is_transcript_message(m.message_type)
                 ]
 
             # Create new version on the deck owner's session.

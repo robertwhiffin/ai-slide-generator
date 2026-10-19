@@ -29,6 +29,7 @@ from src.core.databricks_client import (
 )
 from src.domain.conversation_engine import (
     AGENT_MODE_PHRASE as AGENT_MODE_PHRASE,
+    ENGINE_MODE_MARKER_MESSAGE_TYPE,
     LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
     selects_graph_engine,
 )
@@ -2160,6 +2161,18 @@ class ChatService:
         save point.  It is preserved unconditionally, in both modes, so clearing
         never *changes* the mode in either direction.
 
+        **The kept row is re-typed and hidden.**  Its ``message_type`` becomes
+        :data:`ENGINE_MODE_MARKER_MESSAGE_TYPE`, which every transcript read
+        drops (:meth:`SessionManager.get_messages` -- and so the chat panel,
+        ``GET /messages``, the architect's conversation and the monolith's
+        history -- and save-point capture), so a cleared conversation is empty
+        to every reader and the old first prompt is never replayed.  The
+        engine-mode, Conversation Pin and duplicate-carry reads go by ``role``
+        only, so they still see the row and nothing about the engine changes;
+        ``message_count`` still counts it, so the next turn is not a "first
+        message" and the deck's title is not regenerated.  The re-type is part of
+        this transaction.
+
         **The graph thread is deleted** through the repo's own
         ``SqlAlchemyCheckpointSaver.delete_thread``, whose ``thread_id`` is the
         session id ``invoke_graph`` runs under.  ``BaseCheckpointSaver``'s method
@@ -2240,6 +2253,8 @@ class ChatService:
             if marker_id is not None:
                 doomed = doomed.filter(SessionMessage.id != marker_id)
             deleted_messages = doomed.delete(synchronize_session=False)
+            if marker is not None:
+                marker.message_type = ENGINE_MODE_MARKER_MESSAGE_TYPE
 
             db.add(
                 UsageEvent(
