@@ -141,10 +141,11 @@ def _release_state(env, *, covered, landed=(), placeheld=()):
 
 
 class TestTheSlideReadyEvent:
-    def test_slide_ready_is_on_the_enum_beside_the_seven_shipped_types(self):
+    def test_slide_ready_is_on_the_enum_beside_the_eight_other_shipped_types(self):
         """`to_sse()` reads `self.type.value`, so a type off the enum cannot be
-        constructed at all — and dropping one of the seven would break the
-        frontend union that now names eight."""
+        constructed at all — and dropping one of the other eight (the seven
+        original types plus #319's `turn_progress`) would break the frontend
+        union that now names nine."""
         assert StreamEventType.SLIDE_READY.value == "slide_ready"
         assert {member.value for member in StreamEventType} == {
             "assistant",
@@ -155,6 +156,7 @@ class TestTheSlideReadyEvent:
             "session_title",
             "session_created",
             "slide_ready",
+            "turn_progress",
         }
 
     def test_the_event_carries_position_html_scripts_through_to_sse(self):

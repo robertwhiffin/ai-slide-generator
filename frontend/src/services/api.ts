@@ -3,6 +3,7 @@ import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
 import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse } from '../types/agentConfig';
+import type { TurnProgress } from '../types/turnProgress';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -59,7 +60,7 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready' | 'turn_progress';
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -87,6 +88,8 @@ export interface StreamEvent {
   agent?: string;
   /** Next slide position not yet released; hand back as `slide_cursor` when polling. */
   slide_cursor?: number;
+  /** #319: the graph turn's stage summary, on a 'turn_progress' event. */
+  turn_progress?: TurnProgress | null;
 }
 
 export interface SessionMessage {
