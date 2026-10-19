@@ -3338,6 +3338,101 @@ class TestDeckReviewerReview:
         assert "could not be completed" in info[0]["content"]
 
 
+class TestSurfaceNoticeCarriesDetails:
+    """#321: a failure notice's technical half rides its ``info`` row as
+    ``metadata={"details": {...}}``, behind the plain-language text.
+
+    Read back through ``get_messages_for_request`` — the polling transport the
+    deployed app uses — so a row that lost its ``request_id`` stamp, its
+    ``info`` type or its details all show up here, not only a row that lost one
+    of them.
+    """
+
+    REQUEST_ID = "req-321"
+    DETAILS = {"stage": "builder", "error": "RuntimeError", "request_id": REQUEST_ID}
+
+    def _surface(self, session_id, **kwargs):
+        """Call ``_surface_notice`` under this turn's request id, then clear it."""
+        from src.services.graph.event_emitter import set_chat_request_id
+
+        set_chat_request_id(self.REQUEST_ID)
+        try:
+            return nodes._surface_notice(session_id, "x", **kwargs)
+        finally:
+            set_chat_request_id(None)
+
+    def _polled(self):
+        from src.api.services.session_manager import get_session_manager
+
+        return get_session_manager().get_messages_for_request(self.REQUEST_ID)
+
+    def test_the_row_carries_the_details_and_keeps_its_invariants(self, graph_env):
+        from src.database.models.session import SessionMessage
+
+        returned = self._surface(graph_env.session_id, details=dict(self.DETAILS))
+
+        assert returned is None
+        polled = self._polled()
+        assert len(polled) == 1, polled
+        row = polled[0]
+        assert row["role"] == "assistant"
+        assert row["message_type"] == "info"
+        assert row["content"] == "x"
+        assert row["metadata"] == {"details": self.DETAILS}
+
+        # The stamp itself, read off the column: the poll filters on it, so a
+        # notice written without it is durable and invisible to every polling
+        # client.
+        db = graph_env.factory()
+        try:
+            stored = db.query(SessionMessage).filter(SessionMessage.id == row["id"]).one()
+            assert stored.request_id == self.REQUEST_ID
+        finally:
+            db.close()
+
+        # Reload reads the same single row with the same details.
+        info = [m for m in graph_env.messages() if m["message_type"] == "info"]
+        assert [m["metadata"] for m in info] == [{"details": self.DETAILS}]
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{}, {"details": None}, {"details": {}}],
+        ids=["omitted", "none", "empty"],
+    )
+    def test_without_details_the_row_has_todays_shape(self, graph_env, kwargs):
+        returned = self._surface(graph_env.session_id, **kwargs)
+
+        assert returned is None
+        polled = self._polled()
+        assert len(polled) == 1, polled
+        assert polled[0]["message_type"] == "info"
+        assert polled[0]["role"] == "assistant"
+        assert polled[0]["metadata"] is None
+
+    def test_a_failing_write_still_returns_none(self, graph_env, monkeypatch):
+        calls = []
+
+        class _Boom:
+            def add_message(self, *args, **kwargs):
+                calls.append(kwargs)
+                raise RuntimeError("database is gone")
+
+        monkeypatch.setattr(nodes, "get_session_manager", lambda: _Boom())
+
+        returned = self._surface(graph_env.session_id, details=dict(self.DETAILS))
+
+        assert returned is None
+        # The write was really attempted (and raised) — not skipped.
+        assert len(calls) == 1
+        assert calls[0]["metadata"] == {"details": self.DETAILS}
+
+    @pytest.mark.parametrize("details", ["not-a-mapping", 5], ids=["string", "int"])
+    def test_malformed_details_never_raise(self, graph_env, details):
+        """Building the payload is part of the guarded write, not ahead of it:
+        a notice that cannot be written must not be what fails the turn."""
+        assert self._surface(graph_env.session_id, details=details) is None
+
+
 # ===========================================================================
 # The standing exhaustiveness check (DoD)
 # ===========================================================================

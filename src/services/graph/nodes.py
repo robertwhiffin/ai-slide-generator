@@ -1159,7 +1159,9 @@ def _write_reviewed_row(
     return content_hash
 
 
-def _surface_notice(session_id: str, message: str) -> None:
+def _surface_notice(
+    session_id: str, message: str, *, details: Optional[Dict[str, str]] = None
+) -> None:
     """Persist a machine-generated advisory as an ``info`` chat message.
 
     The shipped channel for advisories the user must see, and the graph's ONE
@@ -1193,6 +1195,11 @@ def _surface_notice(session_id: str, message: str) -> None:
     the SSE path and the sweeper.  The ``info`` TYPE is unchanged and must stay:
     it is what keeps these notices out of ``_conversation``, so the architect
     never reads a machine advisory back as its own prose.
+
+    ``details`` is the technical half of a plain-language notice (#321): the
+    stage, the error class or code, and the request id.  It is persisted as the
+    row's ``metadata["details"]`` and shown behind a collapsed disclosure in chat,
+    never as the headline.  It never carries exception text.
     """
     try:
         get_session_manager().add_message(
@@ -1201,6 +1208,7 @@ def _surface_notice(session_id: str, message: str) -> None:
             content=message,
             message_type="info",
             request_id=get_chat_request_id(),
+            metadata={"details": dict(details)} if details else None,
         )
     except Exception:
         logger.warning("Could not surface a failure notice", exc_info=True)
