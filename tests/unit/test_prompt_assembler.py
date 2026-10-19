@@ -782,7 +782,7 @@ def test_other_v1_role_upgrades_without_changing_authored_prompt() -> None:
 
 
 #: Committed separately from ``src/services/prompt_assembler.py``'s own literal.
-INDEPENDENT_V2_DIGEST = "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
+INDEPENDENT_V2_DIGEST = "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854"
 
 #: Hand-typed from the reviewed v2 contract, in the exact bundle order:
 #: (stage_id, label, condition, contributes_to_prompt, roles, legal anchors).

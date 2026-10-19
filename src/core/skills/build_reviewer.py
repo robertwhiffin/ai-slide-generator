@@ -18,6 +18,20 @@ def _criteria_stage() -> str:
     return "CRITERIA:\n" + criteria_lines
 
 
+#: Colours the bound template section ships are the design system's decision, not
+#: findings.  Without it the reviewer flagged the template's own small coral labels
+#: (~3.4:1) and the fixer turned them navy on every content slide (deck-parity
+#: devloop, 2026-10-16).  Shipped in the v1 composite and in the v2 target alike.
+BOUND_TEMPLATE_COLOURS: str = (
+    "BOUND TEMPLATE COLOURS: when the payload carries a non-empty section_html, "
+    "every colour that section_html itself ships, through its classes or its own "
+    "inline styles and on the ground it ships them on, is the design system's "
+    "decision. Do not report those as contrast_failure or rogue_colour. Judge "
+    "contrast and colour only where the built slide departs from section_html: a "
+    "colour the section does not ship, or shipped text moved onto a different "
+    "ground."
+)
+
 BUILD_REVIEWER_AUTHORED_PREFIX: str = (
     "You are a build reviewer.  Inspect the built slide against every criterion "
     "below and return a SlideReviewOutput.  "
@@ -28,6 +42,7 @@ BUILD_REVIEWER_AUTHORED_PREFIX: str = (
     "uses the bound layout section.  "
     "Never propose a replacement colour or layout in a finding message; state "
     "what is wrong and leave the remedy to the fixer."
+    "\n\n" + BOUND_TEMPLATE_COLOURS
 )
 BUILD_REVIEWER_CRITERIA_STAGE: str = _criteria_stage()
 BUILD_REVIEWER_V1_AUTHORED_SUFFIX: str = (
@@ -67,11 +82,10 @@ def build_instructions() -> str:
     )
 
 
-#: Frozen Graph Version 1 composite.  It must stay byte-identical to the packaged
-#: v1 ``prompt_text`` and is the ``source_composite_prompt`` of the v1→v2
-#: transition: persisted v1 definitions only auto-upgrade on an exact match.
-#: New review rules and criteria reach v2 through ``BUILD_REVIEWER_AUTHORED_INSTRUCTIONS``
-#: and ``BUILD_REVIEWER_CRITERIA_STAGE``, never through this literal.
+#: Graph Version 1 composite: the bootstrap default.  It must stay byte-identical
+#: to the packaged v1 ``prompt_text`` and is the ``source_composite_prompt`` of the
+#: v1→v2 transition: persisted v1 definitions only auto-upgrade on an exact match.
+#: New criteria reach v2 through ``BUILD_REVIEWER_CRITERIA_STAGE``.
 _V1_PREFIX: str = (
     "You are a build reviewer.  Inspect the built slide against every criterion "
     "below and return a SlideReviewOutput."
@@ -99,7 +113,13 @@ _V1_CRITERIA_STAGE: str = (
     "conclusion or call-to-action."
 )
 INSTRUCTIONS: str = (
-    _V1_PREFIX + "\n\n" + _V1_CRITERIA_STAGE + "\n\n" + BUILD_REVIEWER_V1_AUTHORED_SUFFIX
+    _V1_PREFIX
+    + "\n\n"
+    + BOUND_TEMPLATE_COLOURS
+    + "\n\n"
+    + _V1_CRITERIA_STAGE
+    + "\n\n"
+    + BUILD_REVIEWER_V1_AUTHORED_SUFFIX
 )
 
 

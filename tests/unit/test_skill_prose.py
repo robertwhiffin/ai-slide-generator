@@ -41,6 +41,16 @@ from src.services.graph_definition_manifest import load_graph_v1_manifest
 class TestBuildReviewerProse:
     """The build_reviewer's criteria block is generated, not hand-written."""
 
+    def test_template_shipped_colours_are_not_findings_in_v1_and_v2(self):
+        """Deck-parity: without the rule the reviewer flagged the template's own
+        coral labels and the fixer turned them navy.  A fresh install bootstraps
+        the v1 composite; an upgraded reviewer runs the v2 target."""
+        from src.core.skills.build_reviewer import BUILD_REVIEWER_AUTHORED_INSTRUCTIONS
+
+        rule = "every colour that section_html itself ships"
+        assert rule in load_skill("build_reviewer").instructions
+        assert rule in BUILD_REVIEWER_AUTHORED_INSTRUCTIONS
+
     def test_build_reviewer_all_criterion_names_in_instructions(self):
         """Every CRITERIA name appears in the generated v2 criteria stage.
 
