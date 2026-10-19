@@ -34,6 +34,7 @@ import type {
   ResolvedFigure,
   SlideSpec,
 } from '../../types/slide';
+import { pythonClassBody, pythonModelFields } from '../../test/pydanticSource';
 
 // ---------------------------------------------------------------------------
 // The TypeScript side — exhaustive by construction (see the header note)
@@ -92,40 +93,6 @@ const MIRRORS: Record<string, Record<string, true>> = {
 // ---------------------------------------------------------------------------
 // Reading the Python models
 // ---------------------------------------------------------------------------
-
-/**
- * Field names declared on a Pydantic model, in declaration order.
- *
- * Docstrings are stripped first rather than skipped line by line: this codebase's
- * docstrings are long prose and several of their lines would otherwise parse as
- * annotated assignments.
- */
-function pythonClassBody(source: string, className: string): string {
-  const stripped = source.replace(/"""[\s\S]*?"""/g, '');
-  const header = new RegExp(`^class ${className}\\(BaseModel\\):$`, 'm').exec(stripped);
-  if (!header) {
-    throw new Error(
-      `class ${className}(BaseModel) not found in the Python source. Either it was `
-      + 'renamed (update this mirror and slide.ts) or the base class changed.',
-    );
-  }
-  const afterHeader = stripped.slice(header.index + header[0].length);
-  const nextClass = afterHeader.search(/^class \w+/m);
-  return nextClass === -1 ? afterHeader : afterHeader.slice(0, nextClass);
-}
-
-function pythonModelFields(source: string, className: string): string[] {
-  const body = pythonClassBody(source, className);
-
-  const fields: string[] = [];
-  for (const line of body.split('\n')) {
-    // Exactly four spaces of indent: model fields sit at class-body level, while
-    // method bodies sit at eight and decorators start with '@'.
-    const match = /^ {4}([a-z_][A-Za-z0-9_]*)\s*:\s*\S/.exec(line);
-    if (match) fields.push(match[1]);
-  }
-  return fields;
-}
 
 /** Field name -> type annotation, for one `export interface` in slide.ts. */
 function tsInterfaceFields(source: string, interfaceName: string): Map<string, string> {
