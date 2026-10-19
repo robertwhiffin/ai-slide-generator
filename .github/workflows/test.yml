@@ -696,6 +696,7 @@ jobs:
           - api-route-matcher
           - app-tour
           - chat-ui
+          - clear-chat
           - conversation-graph-version
           - css-bg-export
           - deck-integrity
