@@ -7,6 +7,7 @@ import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { api, type StreamEvent } from '../../services/api';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
+import { readMessageDetails } from '../../utils/messageDetails';
 import { ReplacementFeedback } from './ReplacementFeedback';
 import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingIndicator } from './LoadingIndicator';
@@ -108,6 +109,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             name: msg.metadata.tool_name,
             arguments: msg.metadata.tool_input || {},
           } : undefined,
+          details: readMessageDetails(msg.metadata?.details),
         }));
         setMessages(uiMessages);
       } else {
@@ -216,6 +218,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
                 role: 'assistant',
                 content: event.content!,
                 timestamp: new Date().toISOString(),
+                details: readMessageDetails(event.metadata?.details),
               },
             ]);
           }

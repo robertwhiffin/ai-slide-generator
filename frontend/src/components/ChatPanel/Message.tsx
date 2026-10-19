@@ -2,6 +2,13 @@ import React, { useState } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
 
+// Human labels for the keys a failure notice's details carry; unknown keys render as-is.
+const DETAIL_LABELS: Record<string, string> = {
+  stage: 'Stage',
+  error: 'Error',
+  request_id: 'Request ID',
+};
+
 interface MessageProps {
   message: MessageType;
 }
@@ -125,6 +132,10 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
 
   // Regular user/assistant messages with v0 styling
   const isUser = message.role === 'user';
+  const detailEntries =
+    message.role === 'assistant' && message.details
+      ? Object.entries(message.details)
+      : [];
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -138,6 +149,19 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
         <div className="whitespace-pre-wrap">
           {message.content}
         </div>
+        {detailEntries.length > 0 && (
+          <details className="mt-2 text-xs text-muted-foreground" data-testid="message-details">
+            <summary className="cursor-pointer select-none">Details</summary>
+            <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 font-mono">
+              {detailEntries.map(([key, value]) => (
+                <React.Fragment key={key}>
+                  <dt>{DETAIL_LABELS[key] ?? key}</dt>
+                  <dd className="break-all">{value}</dd>
+                </React.Fragment>
+              ))}
+            </dl>
+          </details>
+        )}
       </div>
     </div>
   );
