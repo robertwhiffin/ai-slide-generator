@@ -872,7 +872,9 @@ async def clear_session_context(session_id: str):
 
     try:
         chat_service = get_chat_service()
-        result = await asyncio.to_thread(chat_service.clear_context, session_id)
+        result = await asyncio.to_thread(
+            chat_service.clear_context, session_id, cleared_by=get_current_user()
+        )
 
         logger.info(
             "Session context cleared via API",

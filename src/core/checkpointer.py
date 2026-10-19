@@ -69,7 +69,9 @@ differ because the migration is handed a schema and the saver is not.
 
 IMPLEMENTED SURFACE — exactly the five methods a compiled graph calls, all of
 which raise ``NotImplementedError`` on the base class: ``get_tuple``, ``list``,
-``put``, ``put_writes``, ``delete_thread``.
+``put``, ``put_writes``, ``delete_thread``. ``delete_thread`` also takes an
+optional keyword ``session``: with it the deletes run on the CALLER's session
+and commit or roll back with the caller's transaction (see its docstring).
 
 ``get_next_version`` is NOT overridden, and not because it raises: probed on
 langgraph-checkpoint 4.1.1 the base class ships a WORKING integer increment
@@ -464,11 +466,29 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
                     },
                 )
 
-    def delete_thread(self, thread_id: str) -> None:
-        """Delete every checkpoint AND every pending write for one thread."""
-        with self._session() as session:
+    def delete_thread(self, thread_id: str, *, session: Any | None = None) -> None:
+        """Delete every checkpoint AND every pending write for one thread.
+
+        With ``session`` the two DELETEs run on the CALLER's session and are NOT
+        committed here: they commit or roll back with the caller's transaction.
+        ``ChatService.clear_context`` relies on this so a clear is one transaction,
+        and so it never holds a write open while a second connection writes (on
+        SQLite that self-deadlocks: ``database is locked``). The caller owns the
+        session's lifetime; nothing is retained on ``self``.
+
+        Without ``session`` it opens, commits and closes its own, as before.
+        """
+        if session is not None:
             session.execute(_DELETE_THREAD_WRITES, {"thread_id": thread_id})
             session.execute(_DELETE_THREAD_CHECKPOINTS, {"thread_id": thread_id})
+            logger.info(
+                "Deleted graph checkpoints for thread %s in the caller's transaction",
+                thread_id,
+            )
+            return
+        with self._session() as own:
+            own.execute(_DELETE_THREAD_WRITES, {"thread_id": thread_id})
+            own.execute(_DELETE_THREAD_CHECKPOINTS, {"thread_id": thread_id})
         logger.info("Cleared graph checkpoints for thread %s", thread_id)
 
 

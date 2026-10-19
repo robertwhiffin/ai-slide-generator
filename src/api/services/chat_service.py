@@ -2143,7 +2143,7 @@ class ChatService:
                     session_title=title_container["title"],
                 )
 
-    def clear_context(self, session_id: str) -> Dict[str, Any]:
+    def clear_context(self, session_id: str, *, cleared_by: str) -> Dict[str, Any]:
         """Drop this session's conversation context, keeping the deck and its spec.
 
         The deck spec is a structured compaction of the conversation: once it
@@ -2167,27 +2167,31 @@ class ChatService:
         cannot delete surfaces as a 500 on the route rather than skipping
         quietly.
 
-        **This is not one transaction, and the skew has a direction.**
-        ``delete_thread`` opens ``self._session()``
-        (``core/checkpointer.py:226``), which **commits on success** — its own
-        transaction, committed while this one is still open.  So:
+        **The clear is one transaction.**  The transcript prune, the attribution
+        row and the thread delete all run on this method's own ``db`` session:
+        ``delete_thread(session_id, session=db)`` executes its two DELETEs on that
+        session and does not commit, so they commit or roll back together with the
+        rest.  Any failure -- a raise from ``delete_thread``, a failed insert, a
+        failed commit -- leaves the transcript, the graph thread and the
+        attribution exactly as they were, and the route 500s.  There is no
+        half-state to recover from, and a retry is safe (deleting an absent thread
+        is a no-op DELETE).
 
-        * a **raise** from ``delete_thread`` propagates out of this ``with``
-          block and the transcript prune is rolled back: nothing is lost, and the
-          route 500s.  That direction is safe, and it is why the call sits inside
-          the block rather than after it;
-        * a failure of **this** transaction's commit, after ``delete_thread``
-          returned, leaves the graph thread **deleted and the transcript intact**.
-          Recoverable rather than corrupting — the next graph turn starts a fresh
-          thread and the user can clear again — but it is a real half-state, and
-          no ordering of these two writes removes it while they are two
-          transactions.  Do not read the placement as atomicity.
+        The earlier shape was two transactions, and that is why this is one:
+        ``delete_thread`` used to open its own session and commit while this one
+        was still open.  The bulk ``delete(synchronize_session=False)`` below emits
+        its DELETE immediately, so this connection held a write lock while the
+        checkpointer wrote on a second connection -- on SQLite that
+        self-deadlocks (``database is locked``), and on any database it left a
+        real skew if this transaction's commit then failed (thread gone,
+        transcript intact).  The ``db.flush()`` after the attribution insert
+        makes a failed insert raise before the thread is touched.
 
-        A second consequence of the two connections: the bulk
-        ``delete(synchronize_session=False)`` below emits its DELETE immediately,
-        so the transcript rows are locked on this connection while the
-        checkpointer deletes on another.  Different tables, so there is no
-        ordering cycle today; worth not deepening.
+        **Who cleared is recorded** as one ``usage_events`` row
+        (``EVENT_CONTEXT_CLEARED``, ``username=cleared_by``, the session's internal
+        id) written in the same transaction, so the row exists if and only if the
+        clear committed.  ``cleared_by`` is required: a falsy value is refused
+        before anything changes.
 
         No hidden agent state can survive: every non-architect agent is built
         fresh per invocation and the monolith's history is hydrated from these
@@ -2197,16 +2201,23 @@ class ChatService:
             session_id: The session to clear.  A contributor session clears its
                 own transcript; the owner's marker (and so the deck's mode) is
                 untouched, because a contributor's rows are its own.
+            cleared_by: Username of the caller doing the clear; recorded in
+                ``usage_events`` and the log line.  Required and non-empty.
 
         Returns:
             ``{"status": "cleared", "session_id": ..., "deleted_messages": N,
             "preserved_message_id": id-or-None}``
 
         Raises:
+            ValueError: ``cleared_by`` is empty or None (nothing is changed).
             SessionNotFoundError: session_id does not exist.
         """
+        if not cleared_by:
+            raise ValueError("clear_context requires cleared_by: who cleared must be recorded")
+
         from src.core.database import get_db_session
         from src.database.models.session import SessionMessage
+        from src.database.models.usage_event import EVENT_CONTEXT_CLEARED, UsageEvent
 
         session_manager = get_session_manager()
         with get_db_session() as db:
@@ -2230,15 +2241,27 @@ class ChatService:
                 doomed = doomed.filter(SessionMessage.id != marker_id)
             deleted_messages = doomed.delete(synchronize_session=False)
 
-            # Inside the transaction on purpose — see the docstring.
+            db.add(
+                UsageEvent(
+                    username=cleared_by,
+                    event_type=EVENT_CONTEXT_CLEARED,
+                    session_id=session.id,
+                )
+            )
+            # A failed insert raises here, before the thread is touched.
+            db.flush()
+
+            # On THIS session, so it commits or rolls back with the rest — see
+            # the docstring.
             from src.core.checkpointer import get_checkpointer
 
-            get_checkpointer().delete_thread(session_id)
+            get_checkpointer().delete_thread(session_id, session=db)
 
         logger.info(
             "Cleared session context",
             extra={
                 "session_id": session_id,
+                "cleared_by": cleared_by,
                 "deleted_messages": deleted_messages,
                 "preserved_message_id": marker_id,
             },
