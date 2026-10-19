@@ -669,7 +669,7 @@ Transcribe exactly. Each text is at most two sentences and contains no `(` or `[
 
 **`blocked_unsafe`**
 - headline: `Slide {n} was blocked by a safety check.`
-- text: `Slide {n} was blocked by a safety check because it included something a deck can't contain, such as content loaded from the web. It's shown as a placeholder — ask me to regenerate slide {n} without it, for example without external images, videos or links.`
+- text: `Slide {n} was blocked by a safety check because it included something a deck can't contain, such as content loaded from the web. It's shown as a placeholder — ask me to regenerate slide {n} without it, for example without images or videos from other websites.`
 
 **`check_failed`**
 - headline: `Slide {n} was built but couldn't be checked.`
