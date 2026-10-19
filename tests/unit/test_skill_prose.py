@@ -41,6 +41,16 @@ from src.services.graph_definition_manifest import load_graph_v1_manifest
 class TestBuildReviewerProse:
     """The build_reviewer's criteria block is generated, not hand-written."""
 
+    def test_template_shipped_colours_are_not_findings_in_v1_and_v2(self):
+        """Deck-parity: without the rule the reviewer flagged the template's own
+        coral labels and the fixer turned them navy.  A fresh install bootstraps
+        the v1 composite; an upgraded reviewer runs the v2 target."""
+        from src.core.skills.build_reviewer import BUILD_REVIEWER_AUTHORED_INSTRUCTIONS
+
+        rule = "every colour that section_html itself ships"
+        assert rule in load_skill("build_reviewer").instructions
+        assert rule in BUILD_REVIEWER_AUTHORED_INSTRUCTIONS
+
     def test_build_reviewer_all_criterion_names_in_instructions(self):
         """Every CRITERIA name appears in the generated v2 criteria stage.
 
@@ -179,6 +189,36 @@ class TestBuilderProse:
         assert "search_images" not in skill.instructions, (
             "builder instructions must not mention search_images; "
             "the builder holds no tool grants and cannot call it"
+        )
+
+    def test_builder_never_asks_for_a_missing_data_callout(self):
+        """Deck-parity: "Add a callout explaining why the visualization is absent"
+        put an inline-styled "No ... data was available" panel on 3 of 18 slides."""
+        instructions = load_skill("builder").instructions
+        assert "callout explaining why" not in instructions
+        assert "Do not add a note, callout or caption about missing data" in instructions
+
+    def test_builder_treats_sample_furniture_as_placeholder(self):
+        """Deck-parity: the cover kept "Databricks · Brand Design" and every divider
+        kept the template's Unity Catalog lockup whatever its topic."""
+        assert "Sample furniture is placeholder too" in load_skill("builder").instructions
+
+
+class TestArchitectProse:
+    """The architect plans a full deck from reusable sections (deck-parity loop)."""
+
+    def test_architect_plans_a_full_length_deck_by_default(self):
+        """Without it the architect planned 8 slides, one per template section,
+        against the monolith's 19 for the same prompt."""
+        instructions = load_skill("architect").instructions
+        assert "14 to 20 slides" in instructions
+        assert "reusable layouts, not a one-of-each menu" in instructions
+
+    def test_architect_self_checks_each_binding_pair(self):
+        """One mismatched slide_type/index pair rejects the whole plan."""
+        assert (
+            "its slide_type must equal the label of the template_sections entry"
+            in load_skill("architect").instructions
         )
 
 

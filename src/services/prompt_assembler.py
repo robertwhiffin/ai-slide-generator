@@ -395,7 +395,7 @@ def protected_assembly_v2_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
-_V2_DIGEST = "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
+_V2_DIGEST = "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854"
 _CALCULATED_V2_DIGEST = protected_assembly_v2_digest()
 if _CALCULATED_V2_DIGEST != _V2_DIGEST:
     raise RuntimeError(
@@ -407,6 +407,7 @@ V2_PROTECTED_ASSEMBLY_IDENTITY = ContentIdentity(version=2, digest=_V2_DIGEST)
 # v2 stages; removing one strands every release that names it.
 _HISTORICAL_V2_DIGESTS: tuple[str, ...] = (
     "fb651a0d28276a0daf7b0db09f2648eb6b50d9429a7100cfaf69e3fc2b08592a",
+    "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d",
 )
 
 

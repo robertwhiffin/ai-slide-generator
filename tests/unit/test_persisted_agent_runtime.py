@@ -563,7 +563,7 @@ def test_persisted_v2_runtime_delegates_exact_prompt_and_provenance(
     assert result.diagnostics.protected_prompt.version == 2
     assert (
         result.diagnostics.protected_prompt.digest
-        == "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
+        == "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854"
     )
     assert result.diagnostics.assembly_stages == tuple(expected_stages)
 
@@ -704,7 +704,7 @@ def test_persisted_v2_build_reviewer_deck_brief_tracks_truthiness(deck_brief) ->
     assert result.diagnostics.protected_prompt.version == 2
     assert (
         result.diagnostics.protected_prompt.digest
-        == "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d"
+        == "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854"
     )
     assert result.diagnostics.assembly_stages == tuple(expected_stages)
 

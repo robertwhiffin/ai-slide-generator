@@ -1771,6 +1771,23 @@ class TestBuilderNode:
         assert seen["session_id"] == graph_env.session_id
         assert updates["slides"]["vals"][0]["html"] == "<div class='slide'>gated</div>"
 
+    def test_literal_escapes_between_tags_never_reach_the_slide(self, graph_env):
+        """An over-escaped ``\\n`` between tags renders as visible text otherwise."""
+        graph_env.skills.set(
+            "builder",
+            lambda payload: builder_out(
+                payload,
+                html="<div class='slide'>\\n  <p>Keep \\n here</p>\\n</div>",
+            ),
+        )
+
+        updates = builder_node(_branch_payload(graph_env, 0))
+
+        assert (
+            updates["slides"]["vals"][0]["html"]
+            == "<div class='slide'>  <p>Keep \\n here</p></div>"
+        )
+
     def test_unsafe_html_is_regenerated_through_the_real_gate(self, graph_env):
         """The regenerate callable is zero-arg, so the correction rides the payload."""
         attempts = []
@@ -1980,6 +1997,77 @@ class TestBuildReviewerFailureIsTerminalNotFatal:
         }
         assert "landed_positions" not in updates
         assert "fix_map" not in updates
+
+    @staticmethod
+    def _unparseable(kind):
+        if kind == "parser":
+            from langchain_core.exceptions import OutputParserException
+
+            return OutputParserException("malformed tool call")
+        from pydantic import ValidationError
+
+        from src.domain.finding import Finding
+
+        try:  # the registry refusing a Finding is a pydantic ValidationError
+            Finding(id="x", slide_index=0, category="design",
+                    criterion="not_a_criterion", message="m", objective=True)
+        except ValidationError as exc:
+            return exc
+        raise AssertionError("an unknown criterion must not validate")
+
+    @pytest.mark.parametrize("kind", ["parser", "validation"])
+    def test_an_unparseable_review_is_retried_once_and_the_slide_lands(
+        self, graph_env, kind
+    ):
+        """Measured on deck-parity: one unparseable review discarded a good build."""
+        error = self._unparseable(kind)
+        calls = []
+
+        def review(payload):
+            calls.append(payload["position"])
+            if len(calls) == 1:
+                raise error
+            return review_out(0)
+
+        graph_env.skills.set("build_reviewer", review)
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert calls == [0, 0]
+        assert updates["landed_positions"] == scoped(TURN, {0})
+        assert "placeheld_positions" not in updates
+        assert not is_placeholder_record(
+            json.loads(graph_env.rows()[0].verification_record)
+        )
+
+    def test_a_review_unparseable_twice_is_still_placeheld(self, graph_env):
+        error = self._unparseable("parser")
+        calls = []
+
+        def review(payload):
+            calls.append(payload["position"])
+            raise error
+
+        graph_env.skills.set("build_reviewer", review)
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert calls == [0, 0]
+        assert updates["placeheld_positions"] == scoped(TURN, {0})
+
+    def test_any_other_review_failure_is_not_retried(self, graph_env):
+        calls = []
+
+        def review(payload):
+            calls.append(payload["position"])
+            raise RuntimeError("reviewer exploded")
+
+        graph_env.skills.set("build_reviewer", review)
+
+        updates = build_reviewer_node(_branch_payload(graph_env, 0, html="<p>a</p>"))
+
+        assert calls == [0]
+        assert updates["placeheld_positions"] == scoped(TURN, {0})
 
     def test_the_row_is_the_sanctioned_placeholder_marker(self, graph_env):
         """``commit_placeholder`` + ``is_placeholder_record``, never a second
@@ -2317,6 +2405,18 @@ class TestFixerNode:
         assert updates["fix_target"] == 0
         assert updates["fix_map"]["vals"][0]["in_flight"] is True
         assert updates["fixed"]["vals"][0]["html"] == "<div class='slide'>fixed 0</div>"
+
+    def test_literal_escapes_between_tags_never_reach_the_fixed_slide(self, graph_env):
+        graph_env.skills.set(
+            "fixer",
+            lambda payload: fixer_out(
+                payload, html="<div class='slide'>\\n<p>fixed</p>\\n</div>"
+            ),
+        )
+
+        updates = fixer_node(_fix_state(graph_env, {0: _fix_entry(0)}))
+
+        assert updates["fixed"]["vals"][0]["html"] == "<div class='slide'><p>fixed</p></div>"
 
     def test_unsafe_retry_keeps_the_session_release(self, graph_env):
         attempts = []

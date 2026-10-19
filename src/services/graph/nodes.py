@@ -71,6 +71,7 @@ from src.services.agent import SAFETY_RETRY_NOTICE
 from src.services.agent_runtime import (
     AgentAssemblyContext,
     get_agent_runtime,
+    is_provider_parse_error,
     is_transient_model_failure,
 )
 from src.services.deck_css_aggregator import aggregate_deck_css
@@ -110,6 +111,7 @@ from src.services.template_sections import (
     section_inventory,
 )
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
+from src.utils.html_utils import strip_inter_tag_escapes
 from src.utils.slide_hash import compute_slide_hash
 
 logger = logging.getLogger(__name__)
@@ -2309,6 +2311,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         html, _retried = gate_emitted_html(
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
+        html = strip_inter_tag_escapes(html)
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Builder failed at position %s", position)
@@ -2360,6 +2363,9 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
     every entry lives forever and a duplicate "open" copy of a finding that is
     about to be fixed would never be superseded.
 
+    A review the provider's parser refused (``is_provider_parse_error``:
+    unparseable output, or a Finding the registry rejects) is retried once first.
+
     **On any exception the position is placeheld, exactly as a failed builder's
     is, and the turn continues.**  Measured before this handler existed: a
     raising ``build_reviewer`` produced **no placeholder, no deck-level write and
@@ -2405,16 +2411,33 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             "html": html,
             "scripts": scripts,
         }
-        out = get_agent_runtime().run(
-            "build_reviewer",
-            payload["graph_release_id"],
-            review_payload,
-            _assembly_context(
-                payload.get("design_system_active"),
-                payload.get("root_session_id"),
-                payload.get("actor_session_id"),
-            ),
-        ).output
+
+        def _review():
+            return get_agent_runtime().run(
+                "build_reviewer",
+                payload["graph_release_id"],
+                review_payload,
+                _assembly_context(
+                    payload.get("design_system_active"),
+                    payload.get("root_session_id"),
+                    payload.get("actor_session_id"),
+                ),
+            ).output
+
+        try:
+            out = _review()
+        except Exception as exc:
+            if not is_provider_parse_error(exc):
+                raise
+            # An unparseable review is a model glitch, not a verdict on the
+            # slide, and placeholding discards a good build: one more attempt
+            # (measured: 2 slides in ~150 on the deck-parity devloop rounds).
+            logger.warning(
+                "Build review output unusable at position %s; retrying once",
+                position,
+                exc_info=True,
+            )
+            out = _review()
 
         findings = _stamp_findings(
             _skill_findings(out), subject_hash=content_hash, slide_index=position
@@ -2688,6 +2711,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         html, _retried = gate_emitted_html(
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
+        html = strip_inter_tag_escapes(html)
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Fixer failed at position %s; landing the original", position)

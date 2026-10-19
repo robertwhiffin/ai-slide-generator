@@ -704,10 +704,10 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "009eced7c65b0b85a3f241d81d6ba3c40b134e0177e4bd4b8b43fc526694a7d5",
+    "architect": "3ed38cb4c08622a8d818868beb0a61fc69351641cfe49d2f4b34bd4f53f46522",
     "data_analyst": "287da422d4aeb6c328685ace87be167feac639e4318cff07f147d9cd181be3c3",
-    "builder": "bb7d6bfa5b655b78e16a4cf13a204c4da63690207159d419aebf856d9187a2e8",
-    "build_reviewer": "c5b057097c6f952de7b4984d19ad0c6cceaf68e1641401dcf8ae5c3af707d622",
+    "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
+    "build_reviewer": "8423d4989950e283ee34605059a7f16151404bb687c0651ef55035efce25795a",
     "fixer": "2da73326e228d16889a9b21f31a7d22bf124db9feee728aeafdaade7d7a39bbc",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
@@ -930,7 +930,7 @@ def test_assembly_upgrade_leaves_the_schema_contract_untouched() -> None:
 
     assert upgraded.protected_assembly.model_dump() == {
         "version": 2,
-        "digest": "4e9e32ab3554202474ec4ebae486f6007b4c455a5cef78341d0f1e9ba200b41d",
+        "digest": "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854",
     }
     assert upgraded.schema_contract.model_dump() == {
         "version": 1,
@@ -1156,7 +1156,7 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
 
     # The string-keyed sibling is unaffected, so no existing hash moves.
     assert definition_content_hash(built({"1": "a"})) == (
-        "5c77f8d314bbd26afc4c53458b5c2c14b0d8e0f8c7f6fa8c1552c4e5fdd0ed98"
+        "33a88de7bcee3c89889efc0625adb1fa78f7433b6d34b37d17ca02b48e0969d9"
     )
 
 
