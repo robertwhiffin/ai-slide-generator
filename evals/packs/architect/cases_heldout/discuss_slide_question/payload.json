@@ -114,6 +114,44 @@
     ]
   },
   "committed_slide_count": 6,
+  "slide_numbering": [
+    {
+      "slide_number": 1,
+      "position": 0
+    },
+    {
+      "slide_number": 2,
+      "position": 1
+    },
+    {
+      "slide_number": 3,
+      "position": 2
+    },
+    {
+      "slide_number": 4,
+      "position": 3
+    },
+    {
+      "slide_number": 5,
+      "position": 4
+    },
+    {
+      "slide_number": 6,
+      "position": 5
+    }
+  ],
+  "slide_references": [
+    {
+      "text": "slide 2",
+      "slide_numbers": [
+        2
+      ],
+      "positions": [
+        1
+      ],
+      "out_of_range": []
+    }
+  ],
   "previous_deck_review": null,
   "available_design_contract": {
     "design_system_id": 3,

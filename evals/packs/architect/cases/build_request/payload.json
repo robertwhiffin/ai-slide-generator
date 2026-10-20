@@ -8,6 +8,8 @@
   "message": "Build a deck arguing HTML slides beat PowerPoint",
   "current_deck_spec": null,
   "committed_slide_count": 0,
+  "slide_numbering": [],
+  "slide_references": [],
   "previous_deck_review": null,
   "available_design_contract": {
     "design_system_id": 3,

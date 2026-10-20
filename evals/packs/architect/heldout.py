@@ -6,6 +6,7 @@ import pathlib
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
 from src.domain.deck_spec import DesignContractRef
+from src.domain.slide_numbering import architect_slide_payload
 from src.services.agent_model_payload import model_payload_for
 from src.services.template_sections import section_inventory
 
@@ -68,11 +69,16 @@ def _payload(cid):
     contract = DesignContractRef(
         design_system_id=m.MERIDIAN_ID, template_id=m.MERIDIAN_TEMPLATE
     ).model_dump(mode="json")
+    deck = case.gold_deck_spec(DECK) if has_deck else None
+    slide_keys = architect_slide_payload(
+        conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else []
+    )
     return model_payload_for(AGENT, {
         "conversation": conversation,
         "message": msg,
-        "current_deck_spec": case.gold_deck_spec(DECK) if has_deck else None,
+        "current_deck_spec": deck,
         "committed_slide_count": 6 if has_deck else 0,
+        **slide_keys,
         "previous_deck_review": None,
         "available_design_contract": contract,
         "template_sections": section_inventory(m.LAYOUT.read_text()),

@@ -7,6 +7,7 @@ import pytest
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
 from src.domain.deck_spec import DeckSpec
 from src.domain.skill_io import ArchitectOutput, DataRequest
+from src.domain.slide_numbering import architect_slide_payload
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
 from src.services.template_sections import section_inventory
 
@@ -38,7 +39,8 @@ SLIPPED = ["edit_last_slide", "edit_multi_slide"]
 # which the edit_last_slide request removes (plan Task 3, review finding 11).
 PURPOSE_REVISED = {"edit_last_slide"}
 # D7: adding the #313 cases leaves the five existing cases byte-identical. Digests of the files at
-# 679d2f21. Task 7 regenerates payload.json on purpose and re-pins those five entries.
+# 679d2f21. Task 7 adds the two SLIDE_KEYS to every payload.json on purpose and re-pins nothing: a
+# payload.json digest is checked on that payload with the two keys stripped (D11).
 EXISTING_CASE_SHA256 = {
     "ask_data/calibration.json": "afc2f75a4a409ec4c7a2f78d1bb339f86b5d3946797008c8b56c08b09b9a1c78",
     "ask_data/case.yaml": "80efe39fd29dc2e46a2501fe0f230fc6c5c9681765f568e63f92be260ab59acd",
@@ -63,10 +65,40 @@ EXISTING_CASE_SHA256 = {
 }
 FILES = ("case.yaml", "payload.json", "reference.json", "calibration.json")
 PACK_DIR = case.PACKS_DIR / AGENT
-PAYLOAD_KEYS = {
+# The production architect payload keys, in architect_node's order (src/services/graph/nodes.py).
+PAYLOAD_KEYS = [
     "conversation", "message", "current_deck_spec", "committed_slide_count",
+    "slide_numbering", "slide_references",
     "previous_deck_review", "available_design_contract", "template_sections",
     "resolved_style", "design_system_library",
+]
+# #313 (plan Task 7): the two keys src/domain/slide_numbering.architect_slide_payload builds.
+SLIDE_KEYS = ("slide_numbering", "slide_references")
+DECK_SLIDES = 10
+# #313 (plan Task 7): every slide reference resolved in each case's message, pinned literally.
+SLIDE_REFERENCES = {
+    "build_request": [],
+    "edit_request": [
+        {"text": "slide 2", "slide_numbers": [2], "positions": [1], "out_of_range": []},
+    ],
+    "ask_data": [],
+    "confirm_design": [],
+    "discuss": [],
+    "edit_polite_ordinal": [
+        {"text": "second slide", "slide_numbers": [2], "positions": [1], "out_of_range": []},
+    ],
+    "edit_last_slide": [
+        {"text": "last slide", "slide_numbers": [10], "positions": [9], "out_of_range": []},
+    ],
+    "edit_multi_slide": [
+        {
+            "text": "Slides 4-6", "slide_numbers": [4, 5, 6], "positions": [3, 4, 5],
+            "out_of_range": [],
+        },
+    ],
+    "discuss_slide_question": [
+        {"text": "slide 7", "slide_numbers": [7], "positions": [6], "out_of_range": []},
+    ],
 }
 LAYOUT = case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
 
@@ -118,10 +150,16 @@ def test_case_contract(cid):
     c = case.load_case(AGENT, cid, root=CASES)
     assert c.design_system_active is True
     assert set(c.payload) <= set(MODEL_PAYLOAD_KEYS[AGENT])
-    assert set(c.payload) == PAYLOAD_KEYS
+    assert list(c.payload) == PAYLOAD_KEYS  # the keys, in architect_node's order
     assert c.kind == ("mutation" if cid in MUTATIONS else "positive")
     assert (c.fault == "") == (c.kind == "positive")
     assert c.expect == EXPECT[cid]
+
+
+def test_payload_keys_are_every_production_key():
+    """An eval payload carries every key the architect model sees in production, no fewer."""
+    assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT])
+    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 11
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -298,9 +336,31 @@ def test_edit_calibration_is_the_one_based_off_by_one():
     assert set(bad["target_positions"]) == {2}
 
 
+def _serialised(obj) -> bytes:
+    """``obj`` as the generator writes a case file (``mutations._dump``)."""
+    return (json.dumps(obj, indent=2, ensure_ascii=False) + "\n").encode()
+
+
+def _without_slide_keys(data: bytes) -> bytes:
+    """A payload.json's bytes with the two #313 keys removed, re-serialised as the generator does.
+
+    The file must already be in the generator's serialisation, so re-serialising cannot hide a
+    formatting change; removing the keys then leaves every other key, value and order as written.
+    """
+    obj = json.loads(data)
+    assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
+    return _serialised({k: v for k, v in obj.items() if k not in SLIDE_KEYS})
+
+
 def test_existing_cases_are_byte_identical(generated):
+    """D7, D11: the five existing cases are their 679d2f21 bytes.
+
+    payload.json is compared with the two #313 keys stripped: it may differ only by those keys.
+    """
     got = {
-        path: hashlib.sha256(data).hexdigest()
+        path: hashlib.sha256(
+            _without_slide_keys(data) if path.endswith("/payload.json") else data
+        ).hexdigest()
         for path, data in generated.items()
         if path.split("/")[0] in EXISTING_CASE_IDS
     }
@@ -481,6 +541,53 @@ def test_new_cases_are_fair_on_the_gold():
     assert "callout" in slides[4]["content_brief"]
     assert "callout" in slides[5]["content_brief"]
     assert "Accessibility" in slides[6]["purpose"]
+
+
+# ---- #313 (plan Task 7): the payload carries the production slide numbering and references ----
+
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_slide_numbering_is_the_deck(cid):
+    numbering = case.load_case(AGENT, cid, root=CASES).payload["slide_numbering"]
+    if cid in HAS_DECK:
+        want = [{"slide_number": n, "position": n - 1} for n in range(1, DECK_SLIDES + 1)]
+        assert numbering == want
+    else:
+        assert numbering == []
+
+
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_slide_references_are_pinned(cid):
+    references = case.load_case(AGENT, cid, root=CASES).payload["slide_references"]
+    assert references == SLIDE_REFERENCES[cid]
+
+
+@pytest.mark.parametrize("cid", EDIT_CASES)
+def test_resolved_references_equal_the_expected_edit_positions(cid):
+    """A2's deterministic proof on the eval messages: the resolver yields every expected target."""
+    c = case.load_case(AGENT, cid, root=CASES)
+    references = c.payload["slide_references"]
+    assert sorted({p for r in references for p in r["positions"]}) == c.expect["positions"]
+    assert all(r["out_of_range"] == [] for r in references)
+
+
+def test_a_discuss_case_still_names_a_slide():
+    """References are lexical, not intent: a question naming a slide resolves it, stays discuss."""
+    c = case.load_case(AGENT, "discuss_slide_question", root=CASES)
+    references = c.payload["slide_references"]
+    assert references and all(r["positions"] for r in references)
+    assert c.expect == {"intent": "discuss"}
+    assert c.reference["intent"] == "discuss" and c.reference["target_positions"] == []
+
+
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_committed_slide_keys_are_the_production_helper(cid):
+    """Each committed payload's two #313 keys are what architect_node's helper builds from it."""
+    p = case.load_case(AGENT, cid, root=COMMITTED).payload
+    spec = p["current_deck_spec"]
+    positions = [s["position"] for s in spec["slides"]] if spec else []
+    assert {k: p[k] for k in SLIDE_KEYS} == architect_slide_payload(
+        p["conversation"], p["message"], positions
+    )
 
 
 def test_edit_calibration_still_fails_on_the_off_by_one():
