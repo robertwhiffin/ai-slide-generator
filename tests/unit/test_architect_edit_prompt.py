@@ -34,8 +34,9 @@ from src.services.graph_definition_manifest import (
 # --- HEAD literals -----------------------------------------------------------
 
 # Pins updated for the endpoint switch to system.ai Gateway models, then for the
-# deck-parity architect and builder prompts, then for #313 slide references.
-HEAD_ARCHITECT_CONTENT_HASH = "ffc3074dc9206abc70aa5fd3d0b88a60d8464ad85ef589c849402f3b2464672a"
+# deck-parity architect and builder prompts, then for #313 slide references,
+# then for #314 add a slide.
+HEAD_ARCHITECT_CONTENT_HASH = "b5a4cba61121a97cd55656cc3a1a8de6b231120c87c3ed754668cf341ae650b4"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
@@ -135,11 +136,14 @@ EDITING_RULE_PHRASES = (
     "revise only what the user asked for on the target slides",
     "keep every slide's position and every other slide unchanged",
     "change deck-level fields only when the user asks",
-    "adding or removing slides is not an edit",
+    # #314 retired "adding or removing slides is not an edit": adding is now an edit
+    # (Task 11 property 1), and only removing or reordering stays discuss (property 6).
+    "adding one or more new slides to an existing deck is an edit",
+    "removing or reordering slides is not an edit",
 )
 # Review F1/F2 (controller ruling): an edit never silently restyles — the node treats
 # a changed design_contract on an edit as an answered confirmation and rebuilds every
-# slide — and an add/remove request has a named path instead of a dead end.
+# slide — and a remove/reorder request has a named path instead of a dead end.
 EDITING_GUARD_PHRASES = (
     "keep design_contract unchanged on an edit",
     # ...but the turn that APPLIES an agreed proposal is itself an edit carrying the new
@@ -222,8 +226,15 @@ def test_prompt_states_the_editing_rule():
 
 
 @pytest.mark.parametrize("phrase", EDITING_GUARD_PHRASES)
-def test_editing_rule_keeps_contract_and_names_the_add_remove_path(phrase):
+def test_editing_rule_keeps_contract_and_names_the_remove_reorder_path(phrase):
     assert phrase in _norm(_editing_block(INSTRUCTIONS)), f"EDITING block lacks {phrase!r}"
+
+
+def test_prompt_no_longer_says_adding_a_slide_is_not_an_edit():
+    # #314: the retired sentence would contradict "adding ... is an edit" above.
+    assert not re.search(r"\badd(ing|s|ed)?\b[^.:;]{0,60}\bnot an edit\b", _plain(INSTRUCTIONS)), (
+        "the prompt still says adding slides is not an edit"
+    )
 
 
 def test_unchanged_parts_of_the_prompt_are_byte_identical():
@@ -348,6 +359,13 @@ BINDING_RULES = (
     (
         "empty or absent list => both null",
         r"(empty[^.]{0,30}absent|absent[^.]{0,30}empty)[^.]{0,80}both[^.]{0,30}null",
+    ),
+    (
+        # #314: an inserted slide's binding.  Same one-sentence ([^.]) rule as below.
+        "an entry whose label is null cannot be bound => both null",
+        r"(\blabel\b[^.]{0,10}\bis null\b|\bnull label\b)[^.]{0,20}"
+        r"\b(cannot|can't|must not|is never)\b[^.]{0,10}\b(be )?bound\b[^.]{0,100}"
+        r"\bboth\b[^.]{0,30}\bnull\b",
     ),
     ("never invent a type", r"(never|do not|don't) invent"),
     (
@@ -507,3 +525,112 @@ SLIDE_NUMBERS_RULES = (
 def test_slide_numbers_block_states_rule(description, pattern):
     block = _plain(_slide_numbers_block(INSTRUCTIONS))
     assert re.search(pattern, block), f"SLIDE NUMBERS lacks: {description}"
+
+
+# --- #314: adding a slide to an existing deck is an edit ------------------------------
+#
+# The EDITING block says where a new slide goes and what the rest of the deck keeps;
+# SLIDE NUMBERS says a slide named on an add is the new slide's anchor, read against
+# the deck before the insert.  One regex per instruction of Task 11's properties 2-5
+# and 7, over the plain block that carries it.  Properties 1 and 6 are the phrase pins
+# in EDITING_RULE_PHRASES.  Each regex is kept to one sentence ([^.]), so deleting a
+# sentence turns only its own rules red.
+
+_DO_NOT = r"(\bdo not\b|\bdon't\b|\bnever\b)"
+_NAMED = r"(named slide|anchor)"
+
+# Each entry: (description, block heading, regex over the plain block).
+INSERTION_RULES = (
+    (
+        "property 2: each new slide goes where the user asks",
+        "EDITING",
+        r"\b(put|place|insert)s?\b[^.]{0,20}\bnew slides?\b[^.]{0,20}"
+        r"\bwhere the user (asks|says|wants|requests)\b",
+    ),
+    (
+        "property 2: with no stated place, before the closing slides unless it closes",
+        "EDITING",
+        r"(\bno (stated )?place\b|(\bnot\b|n't\b) (say|state|give)s? where\b)[^.]{0,120}"
+        r"\bbefore\b[^.]{0,40}\bclos\w*[^.]{0,120}\bunless\b[^.]{0,40}\bitself\b[^.]{0,20}"
+        r"\bclosing\b",
+    ),
+    (
+        "property 2: asked to come last, after the last slide even after a closing one",
+        "EDITING",
+        r"\b(last|at the end)\b[^.]{0,60}\bafter the last slide\b[^.]{0,40}\beven after\b"
+        r"[^.]{0,20}\bclosing\b",
+    ),
+    (
+        "property 2: message says where the new slide went",
+        "EDITING",
+        r"\bmessage\b[^.]{0,40}\bwhere\b[^.]{0,30}\bnew slide\b[^.]{0,10}"
+        r"\b(went|goes|is|landed)\b",
+    ),
+    (
+        "property 3: slide numbers are read against slide_numbering, the deck before the insert",
+        "SLIDE NUMBERS",
+        r"slide_numbering\b[^.]{0,60}\bbefore\b[^.]{0,30}\b(new slide|insert\w*)|"
+        r"\bbefore\b[^.]{0,30}\b(new slide|insert\w*)[^.]{0,60}slide_numbering\b",
+    ),
+    (
+        "property 4: every slide after the new one keeps every field; only its position goes up",
+        "EDITING",
+        r"\b(every|each) slide after (it|the new (slide|one))\b[^.]{0,40}"
+        r"\b(every field|unchanged|exactly)\b[^.]{0,200}\bonly\b[^.]{0,10}\bposition\b"
+        r"[^.]{0,20}\b(goes up|increases|rises|moves up)\b[^.]{0,10}\bby one\b",
+    ),
+    (
+        "property 4: no other slide and no deck-level field changes unless the user asks",
+        "EDITING",
+        rf"{_DO_NOT}[^.]{{0,10}}\bchange\b[^.]{{0,10}}\b(any )?other slides?\b[^.]{{0,240}}"
+        r"\bdeck-level fields?\b[^.]{0,60}\bunless\b[^.]{0,20}\buser asks\b",
+    ),
+    (
+        "property 5: target_positions are the new and changed slides' returned positions",
+        "EDITING",
+        r"target_positions\b[^.]{0,40}\bpositions?\b[^.]{0,20}\b(in|of) the (returned|revised) "
+        r"deck_spec\b[^.]{0,40}\b(every|each|the) new slides?\b[^.]{0,60}\basked to change\b",
+    ),
+    (
+        "property 5: a named slide also asked to change is a target at its returned position",
+        "SLIDE NUMBERS",
+        r"\bnamed slide\b[^.]{0,40}\b(asks?|asked|wants?) to change\b[^.]{0,40}\btarget\b"
+        r"[^.]{0,60}\b(returned|revised) deck_spec\b",
+    ),
+    (
+        "property 7: an add is the exception to taking target_positions from slide_references",
+        "SLIDE NUMBERS",
+        r"\bexception\b[^.]{0,60}target_positions\b[^.]{0,30}slide_references\b[^.]{0,60}"
+        r"\badd\w*\b",
+    ),
+    (
+        "property 7: the slide named to place the new one is its anchor, not a target",
+        "SLIDE NUMBERS",
+        r"\b(names?|named|naming|referenc\w*|mention\w*)\b[^.]{0,80}\banchor\b[^.]{0,20}"
+        r"\bnot (a |the )?targets?\b",
+    ),
+    (
+        "property 7: placed after the anchor, the new slide takes the position after it",
+        "SLIDE NUMBERS",
+        rf"\b(after|following) the {_NAMED}\b[^.]{{0,30}}\btakes?\b[^.]{{0,20}}"
+        rf"\bposition after (it|the {_NAMED})\b",
+    ),
+    (
+        "property 7: placed before the anchor, it takes the anchor's position; the anchor moves up",
+        "SLIDE NUMBERS",
+        rf"\bbefore the {_NAMED}\b[^.]{{0,80}}\btakes?\b[^.]{{0,10}}\bthe {_NAMED}'s position\b"
+        rf"[^.]{{0,60}}\b{_NAMED}\b[^.]{{0,10}}\bmoves? up by one\b",
+    ),
+)
+
+_INSERTION_BLOCKS = {"EDITING": _editing_block, "SLIDE NUMBERS": _slide_numbers_block}
+
+
+@pytest.mark.parametrize(
+    ("description", "heading", "pattern"),
+    INSERTION_RULES,
+    ids=[d for d, _, _ in INSERTION_RULES],
+)
+def test_insertion_rule_is_stated(description, heading, pattern):
+    block = _plain(_INSERTION_BLOCKS[heading](INSTRUCTIONS))
+    assert re.search(pattern, block), f"{heading} lacks: {description}"
