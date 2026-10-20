@@ -18,6 +18,7 @@ import ast
 import dataclasses
 import inspect
 import json
+import logging
 import queue
 import time
 import uuid
@@ -27,6 +28,7 @@ from typing import get_type_hints
 
 import pytest
 
+from src.api.schemas.streaming import StreamEventType
 from src.api.services.slide_repository import is_placeholder_record
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SharedDeckMutationEvent, UserSession
@@ -69,6 +71,13 @@ from src.services.graph.state import (
     turn_scoped_concat,
     turn_scoped_merge,
 )
+from src.services.graph.user_notices import (
+    deck_not_updated_notice,
+    deck_review_failed_notice,
+    placeholder_notice,
+    unfinished_slides_notice,
+    unreviewed_slide_notice,
+)
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
     MutationActor,
@@ -81,6 +90,11 @@ from tests.fixtures.model_payload_keys import (
     BUILDER_RETRY_MODEL_KEYS as _BUILDER_RETRY_MODEL_KEYS,
 )
 from tests.fixtures.model_payload_keys import EVERY_MODEL_CALL as _EVERY_MODEL_CALL
+from tests.fixtures.notice_assertions import (
+    assert_numbered,
+    assert_plain_language,
+    failure_notice_records,
+)
 from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
     DEFAULT_STYLE,
     TEMPLATE_LAYOUT,
@@ -1619,10 +1633,10 @@ class TestForemanDecisionOrder:
 
         assert updates["error_state"]["code"] == "end_with_outstanding_positions"
         assert updates["error_state"]["positions"] == [1]
-        assert any(
-            m["message_type"] == "info" and "positions [1]" in m["content"]
-            for m in graph_env.messages()
-        )
+        # #321: the notice is the catalogue's plain-language text (1-based, no
+        # Python list); the 0-based positions stay on error_state above.
+        info = [m for m in graph_env.messages() if m["message_type"] == "info"]
+        assert [m["content"] for m in info] == [unfinished_slides_notice([1]).text]
 
 
 class TestForemanWakeIsWrappedNotBare:
@@ -2090,8 +2104,13 @@ class TestBuildReviewerFailureIsTerminalNotFatal:
 
         info = [m for m in graph_env.messages() if m["message_type"] == "info"]
         assert len(info) == 1
-        assert "Slide 2" in info[0]["content"]
-        assert "build_reviewer" in info[0]["content"]
+        # #321: plain language in the text, the stage and error behind it.
+        assert info[0]["content"] == placeholder_notice(
+            2, stage="build_reviewer", error="RuntimeError"
+        ).text
+        assert info[0]["metadata"] == {
+            "details": {"stage": "build_reviewer", "error": "RuntimeError"}
+        }
 
     def test_it_writes_no_error_state(self, graph_env):
         """Measured: two fanned branches writing error_state raise
@@ -2795,8 +2814,11 @@ class TestFixReviewerUndeliverableRowIsTerminalNotFatal:
         assert updates["error_state"]["code"] == "fix_review_delivery_failed"
         info = [m for m in graph_env.messages() if m["message_type"] == "info"]
         assert len(info) == 1
-        assert "Slide 0" in info[0]["content"]
-        assert "fix_reviewer" in info[0]["content"]
+        # #321: position 0 is the deck's FIRST slide, "Slide 1" in the UI.
+        assert info[0]["content"] == placeholder_notice(
+            0, stage="fix_reviewer", error="RuntimeError"
+        ).text
+        assert info[0]["metadata"]["details"]["stage"] == "fix_reviewer"
 
     def test_an_unvalidatable_prior_finding_is_inside_the_handler_too(
         self, graph_env
@@ -2944,11 +2966,17 @@ class TestPlaceholderNode:
         info = [m for m in graph_env.messages() if m["message_type"] == "info"]
         assert len(info) == 2
         assert [m["role"] for m in info] == ["assistant", "assistant"]
-        assert "Slide 1" in info[0]["content"]
-        assert "Slide 2" in info[1]["content"]
+        assert [m["content"] for m in info] == [
+            placeholder_notice(p, stage="placeholder", error=nodes._STALL_REASON).text
+            for p in (1, 2)
+        ]
         # The reason names the STALL path, not an exception type, which is what
-        # distinguishes a foreman-reconciled placeholder from a node's own.
-        assert "(placeholder: Slide generation did not complete)" in info[0]["content"]
+        # distinguishes a foreman-reconciled placeholder from a node's own.  Since
+        # #321 it rides the row's details, behind the plain-language text.
+        assert [m["metadata"]["details"]["error"] for m in info] == [
+            nodes._STALL_REASON,
+            nodes._STALL_REASON,
+        ]
 
     def test_a_read_back_failure_leaves_the_position_for_the_foreman(
         self, graph_env, monkeypatch
@@ -3206,7 +3234,9 @@ class TestDeckReviewerWriteInputsAreInsideTheHandler:
 
         info = [m for m in graph_env.messages() if m["message_type"] == "info"]
         assert len(info) == 1
-        assert "could not be updated this turn" in info[0]["content"]
+        assert info[0]["content"] == deck_not_updated_notice(
+            review_skipped=True, error="RuntimeError"
+        ).text
         assert "no narrative issues" not in info[0]["content"]
         assert graph_env.skills.calls_for("deck_reviewer") == []
 
@@ -3254,7 +3284,10 @@ class TestDeckReviewerWriteInputsAreInsideTheHandler:
         contents = [
             m["content"] for m in graph_env.messages() if m["message_type"] == "info"
         ]
-        assert any("could not be updated this turn" in c for c in contents), contents
+        assert (
+            deck_not_updated_notice(review_skipped=False, error="RuntimeError").text
+            in contents
+        ), contents
 
 
 class TestDeckReviewerReview:
@@ -3335,7 +3368,7 @@ class TestDeckReviewerReview:
         assert graph_env.deck_row().scripts_content == updates["scripts_content"]
         assert updates["error_state"]["code"] == "deck_review_failed"
         info = [m for m in graph_env.messages() if m["message_type"] == "info"]
-        assert "could not be completed" in info[0]["content"]
+        assert info[0]["content"] == deck_review_failed_notice(error="RuntimeError").text
 
 
 class TestSurfaceNoticeCarriesDetails:
@@ -3431,6 +3464,672 @@ class TestSurfaceNoticeCarriesDetails:
         """Building the payload is part of the guarded write, not ahead of it:
         a notice that cannot be written must not be what fails the turn."""
         assert self._surface(graph_env.session_id, details=details) is None
+
+
+class TestFailureNoticesArePlainLanguage:
+    """#321: every failure site tells the user, in plain words and the UI's 1-based
+    numbering, which slide was affected, what happened and what to do — and puts
+    the technical half (stage, error class or code, request id) on the row's
+    ``metadata.details`` and in ONE ``graph_failure_notice`` WARNING whose fields
+    are inside the message text, because production logs only ``%(message)s``.
+
+    Each site is driven through the REAL node function, and its persisted row is
+    compared EXACTLY with the catalogue's own output.  A copy edit in
+    ``user_notices`` therefore moves nothing here, while a site that bypasses the
+    catalogue, mis-numbers the slide or picks the wrong kind goes red.
+
+    The set-up of ``TestBuildReviewerFailureIsTerminalNotFatal`` and
+    ``TestFixReviewerUndeliverableRowIsTerminalNotFatal`` is copied, not called
+    across classes.
+    """
+
+    REQUEST_ID = "req-321"
+    LOGGER = "src.services.graph.nodes"
+
+    # ---- shared checks and set-up -----------------------------------------
+
+    @staticmethod
+    def _info(graph_env):
+        return [m for m in graph_env.messages() if m["message_type"] == "info"]
+
+    @staticmethod
+    def _assert_row_is(row, notice, *, position=None):
+        """The persisted row IS *notice*: its text, its details and nothing else."""
+        assert row["role"] == "assistant"
+        assert row["content"] == notice.text
+        assert_plain_language(row["content"])
+        if position is not None:
+            assert_numbered(row["content"], position)
+        assert row["metadata"] == {"details": notice.details}
+
+    @staticmethod
+    def _one_record(caplog, kind):
+        """Exactly one ``graph_failure_notice`` line was logged, of *kind*."""
+        records = failure_notice_records(caplog)
+        assert len(records) == 1, [r.getMessage() for r in records]
+        assert records[0].levelno == logging.WARNING
+        assert records[0].notice_kind == kind
+        return records[0]
+
+    @staticmethod
+    def _with_emitter(run):
+        """Run *run* with an emitter installed; return its result and the events."""
+        emitter: queue.Queue = queue.Queue()
+        set_event_emitter(emitter)
+        try:
+            result = run()
+        finally:
+            set_event_emitter(None)
+        events = []
+        while not emitter.empty():
+            events.append(emitter.get_nowait())
+        return result, events
+
+    @staticmethod
+    def _raising(message):
+        return lambda *a, **k: (_ for _ in ()).throw(RuntimeError(message))
+
+    def _fix_review_state(self, graph_env):
+        # Copied from TestFixReviewerUndeliverableRowIsTerminalNotFatal._state.
+        entry = _fix_entry(0, html="<p>original</p>")
+        entry["in_flight"] = True
+        return graph_env.state(
+            turn_id=TURN,
+            fix_target=0,
+            fix_map=scoped(TURN, {0: entry}),
+            fixed=scoped(TURN, {0: {"html": "<p>fixed</p>", "scripts": "", "changed": True}}),
+        )
+
+    def _row_write_explodes(self, monkeypatch):
+        # Copied from TestFixReviewerUndeliverableRowIsTerminalNotFatal.
+        monkeypatch.setattr(nodes, "_write_reviewed_row", self._raising("db exploded"))
+
+    def _seeded_deck(self, graph_env):
+        graph_env.seed_slides(
+            [
+                ("<div class='slide'>a</div>", "renderChartA();"),
+                ("<div class='slide'>b</div>", "renderChartB();"),
+            ]
+        )
+        graph_env.skills.set("deck_reviewer", DeckReviewOutput(findings=[]))
+
+    def _foreman_end_state(self, graph_env):
+        # Copied from TestForemanDecisionOrder: position 1 is outstanding, not
+        # dispatchable (the batch is forced empty) and not reconcilable (no stamp).
+        return graph_env.state(
+            turn_id=TURN,
+            deck_spec=make_spec((0, 1)),
+            landed_positions=scoped(TURN, {0}),
+            target_positions=[0, 1],
+        )
+
+    # ---- 1. builder --------------------------------------------------------
+
+    def test_a_builder_failure_names_the_slide_and_keeps_the_exception_out(
+        self, graph_env, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+
+        def boom(payload):
+            raise RuntimeError("provider said SECRET-123")
+
+        graph_env.skills.set("builder", boom)
+
+        updates = builder_node(_branch_payload(graph_env, 2, spec=make_spec((2,))))
+
+        assert updates == {"placeheld_positions": scoped(TURN, {2})}
+        info = self._info(graph_env)
+        assert len(info) == 1, info
+        self._assert_row_is(
+            info[0], placeholder_notice(2, stage="builder", error="RuntimeError"), position=2
+        )
+        assert info[0]["metadata"]["details"] == {"stage": "builder", "error": "RuntimeError"}
+        # Exception TEXT can echo model output, so only the class name travels —
+        # on the row and on the notice's log line alike.
+        assert "SECRET-123" not in json.dumps(info[0])
+        record = self._one_record(caplog, "build_failed")
+        assert "SECRET-123" not in record.getMessage()
+
+    # ---- 2. builder, the real safety gate ----------------------------------
+
+    def test_a_slide_the_safety_gate_blocks_twice_says_it_was_blocked(
+        self, graph_env, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        attempts = []
+
+        def unsafe(payload):
+            attempts.append(payload.get("corrective_instruction"))
+            return builder_out(payload, html=UNSAFE_HTML)
+
+        graph_env.skills.set("builder", unsafe)
+
+        updates = builder_node(_branch_payload(graph_env, 1, spec=make_spec((1,))))
+
+        # ENTRY: the real gate rejected, retried once with its correction, gave up.
+        assert len(attempts) == 2
+        assert attempts[0] is None and attempts[1]
+        assert updates == {"placeheld_positions": scoped(TURN, {1})}
+        info = self._info(graph_env)
+        assert len(info) == 1, info
+        notice = placeholder_notice(
+            1, stage="builder", error="UnsafeContentError", unsafe=True
+        )
+        assert notice.kind == "blocked_unsafe"
+        self._assert_row_is(info[0], notice, position=1)
+        assert info[0]["metadata"]["details"]["error"] == "UnsafeContentError"
+        self._one_record(caplog, "blocked_unsafe")
+
+    # ---- 3. build reviewer --------------------------------------------------
+
+    def test_a_review_the_parser_refuses_twice_says_the_slide_was_not_checked(
+        self, graph_env, caplog
+    ):
+        from src.domain.finding import Finding
+
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        calls = []
+
+        def review(payload):
+            calls.append(payload["position"])
+            Finding.model_validate({})  # a real pydantic ValidationError
+            raise AssertionError("an empty Finding must not validate")
+
+        graph_env.skills.set("build_reviewer", review)
+
+        updates = build_reviewer_node(
+            _branch_payload(graph_env, 2, html="<p>a</p>", spec=make_spec((2,)))
+        )
+
+        assert calls == [2, 2], "the one parse-error retry must be preserved"
+        assert updates["placeheld_positions"] == scoped(TURN, {2})
+        info = self._info(graph_env)
+        assert len(info) == 1, info
+        self._assert_row_is(
+            info[0],
+            placeholder_notice(2, stage="build_reviewer", error="ValidationError"),
+            position=2,
+        )
+        self._one_record(caplog, "check_failed")
+
+    # ---- 4. fix reviewer, row not deliverable --------------------------------
+
+    def test_a_fix_review_that_cannot_save_the_slide_says_so(
+        self, graph_env, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        graph_env.skills.set("fix_reviewer", lambda payload: review_out(0))
+        self._row_write_explodes(monkeypatch)
+
+        updates = fix_reviewer_node(self._fix_review_state(graph_env))
+
+        assert updates["placeheld_positions"] == scoped(TURN, {0})
+        # error_state is unchanged by #321: technical, the class name only.
+        assert updates["error_state"] == {
+            "node": "fix_reviewer",
+            "code": "fix_review_delivery_failed",
+            "message": "RuntimeError",
+        }
+        info = self._info(graph_env)
+        assert len(info) == 1, info
+        self._assert_row_is(
+            info[0],
+            placeholder_notice(0, stage="fix_reviewer", error="RuntimeError"),
+            position=0,
+        )
+        assert info[0]["metadata"]["details"]["stage"] == "fix_reviewer"
+        self._one_record(caplog, "save_failed")
+
+    # ---- 5. placeholder node, stall reconciliation ----------------------------
+
+    def test_every_stalled_slide_says_it_did_not_finish(self, graph_env, caplog):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        state = graph_env.state(
+            turn_id=TURN,
+            deck_spec=make_spec((0, 1, 2)),
+            foreman_wakes=scoped(TURN, [[0, 1, 2], []]),
+            dispatched_at=scoped(TURN, {1: time.time(), 2: time.time()}),
+            landed_positions=scoped(TURN, {0}),
+        )
+
+        updates = placeholder_node(state)
+
+        assert updates["placeheld_positions"] == scoped(TURN, {1, 2})
+        info = self._info(graph_env)
+        assert len(info) == 2, info
+        for row, position in zip(info, (1, 2)):
+            self._assert_row_is(
+                row,
+                placeholder_notice(position, stage="placeholder", error=nodes._STALL_REASON),
+                position=position,
+            )
+            assert row["metadata"]["details"]["error"] == nodes._STALL_REASON
+        # One log line per notice, each naming its own 0-based position.
+        records = failure_notice_records(caplog)
+        assert [r.notice_kind for r in records] == ["stalled", "stalled"]
+        assert sorted(list(r.positions) for r in records) == [[1], [2]]
+
+    # ---- 6. foreman END with work outstanding ----------------------------------
+
+    def test_a_turn_ending_with_a_slide_outstanding_says_which_in_plain_words(
+        self, graph_env, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        monkeypatch.setattr(nodes, "next_dispatch_batch", lambda s: [])
+
+        updates, events = self._with_emitter(
+            lambda: foreman_node(self._foreman_end_state(graph_env))
+        )
+
+        # error_state is unchanged by #321: technical, 0-based, its own message.
+        assert updates["error_state"]["node"] == "foreman"
+        assert updates["error_state"]["code"] == "end_with_outstanding_positions"
+        assert updates["error_state"]["positions"] == [1]
+        assert "positions [1]" in updates["error_state"]["message"]
+        info = self._info(graph_env)
+        assert len(info) == 1, info
+        notice = unfinished_slides_notice([1])
+        self._assert_row_is(info[0], notice, position=1)
+        assert "[" not in info[0]["content"]
+        errors = [e for e in events if e.type == StreamEventType.ERROR]
+        assert len(errors) == 1, events
+        # Emitted with the row and no commit in between, so it carries the full
+        # text rather than the headline (D2).
+        assert errors[0].error == info[0]["content"]
+        assert errors[0].metadata["node"] == "foreman"
+        assert errors[0].metadata["positions"] == [1]
+        assert errors[0].metadata["details"] == notice.details
+        self._one_record(caplog, "slides_unfinished")
+
+    def test_an_empty_outstanding_set_still_ends_the_turn_without_a_notice(
+        self, graph_env, monkeypatch, caplog
+    ):
+        """C10: the catalogue refuses an empty slide list, and a bug path's bug path
+        must not be what kills the turn.  ``error_state`` is still recorded; no
+        notice is written, because there is no slide to name."""
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        monkeypatch.setattr(nodes, "next_dispatch_batch", lambda s: [])
+        monkeypatch.setattr(nodes, "outstanding_positions", lambda s: [])
+
+        updates = foreman_node(self._foreman_end_state(graph_env))
+
+        assert updates["error_state"]["code"] == "end_with_outstanding_positions"
+        assert updates["error_state"]["positions"] == []
+        assert self._info(graph_env) == []
+        assert failure_notice_records(caplog) == []
+
+    # ---- 7. deck reviewer: three failure paths and the success path ------------
+
+    def test_a_deck_write_failure_says_the_deck_was_not_fully_updated(
+        self, graph_env, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        self._seeded_deck(graph_env)
+        monkeypatch.setattr(nodes, "write_deck_level_columns", self._raising("write exploded"))
+
+        updates, events = self._with_emitter(
+            lambda: deck_reviewer_node(graph_env.state(turn_id=TURN))
+        )
+
+        assert updates["error_state"]["code"] == "deck_level_write_failed"
+        notice = deck_not_updated_notice(review_skipped=False, error="RuntimeError")
+        info = self._info(graph_env)
+        # The write's notice, then the review's own advisory: the review still ran.
+        assert [m["content"] for m in info] == [notice.text, nodes._advisory_text([])]
+        self._assert_row_is(info[0], notice)
+        assert info[0]["metadata"]["details"] == {
+            "stage": "deck_reviewer",
+            "error": "RuntimeError",
+        }
+        assert info[1]["metadata"] is None
+        self._one_record(caplog, "deck_not_updated")
+        advisories = [e for e in events if e.type == StreamEventType.ASSISTANT]
+        assert [(e.content, e.metadata) for e in advisories] == [
+            (nodes._advisory_text([]), {"node": "deck_reviewer"})
+        ]
+
+    def test_a_deck_derivation_failure_says_the_deck_review_was_skipped(
+        self, graph_env, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        self._seeded_deck(graph_env)
+        monkeypatch.setattr(nodes, "aggregate_deck_css", self._raising("css exploded"))
+
+        updates, events = self._with_emitter(
+            lambda: deck_reviewer_node(graph_env.state(turn_id=TURN))
+        )
+
+        assert updates["error_state"]["code"] == "deck_level_derivation_failed"
+        assert graph_env.skills.calls_for("deck_reviewer") == []
+        notice = deck_not_updated_notice(review_skipped=True, error="RuntimeError")
+        info = self._info(graph_env)
+        assert len(info) == 1, info
+        self._assert_row_is(info[0], notice)
+        assert info[0]["metadata"]["details"] == {
+            "stage": "deck_reviewer",
+            "error": "RuntimeError",
+        }
+        self._one_record(caplog, "deck_not_updated_review_skipped")
+        advisories = [e for e in events if e.type == StreamEventType.ASSISTANT]
+        assert [(e.content, e.metadata) for e in advisories] == [
+            (notice.text, {"node": "deck_reviewer", "details": notice.details})
+        ]
+
+    def test_a_failed_deck_review_says_it_will_run_again(
+        self, graph_env, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        self._seeded_deck(graph_env)
+        graph_env.skills.set("deck_reviewer", self._raising("review exploded"))
+
+        updates, events = self._with_emitter(
+            lambda: deck_reviewer_node(graph_env.state(turn_id=TURN))
+        )
+
+        assert updates["error_state"]["code"] == "deck_review_failed"
+        notice = deck_review_failed_notice(error="RuntimeError")
+        info = self._info(graph_env)
+        assert len(info) == 1, info
+        self._assert_row_is(info[0], notice)
+        assert info[0]["metadata"]["details"] == {
+            "stage": "deck_reviewer",
+            "error": "RuntimeError",
+        }
+        self._one_record(caplog, "deck_review_failed")
+        advisories = [e for e in events if e.type == StreamEventType.ASSISTANT]
+        assert [(e.content, e.metadata) for e in advisories] == [
+            (notice.text, {"node": "deck_reviewer", "details": notice.details})
+        ]
+
+    def test_a_clean_deck_review_carries_no_details_and_logs_no_failure(
+        self, graph_env, caplog
+    ):
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        self._seeded_deck(graph_env)
+
+        _, events = self._with_emitter(
+            lambda: deck_reviewer_node(graph_env.state(turn_id=TURN))
+        )
+
+        info = self._info(graph_env)
+        assert [m["content"] for m in info] == [nodes._advisory_text([])]
+        assert info[0]["metadata"] is None
+        assert failure_notice_records(caplog) == []
+        advisories = [e for e in events if e.type == StreamEventType.ASSISTANT]
+        assert [(e.content, e.metadata) for e in advisories] == [
+            (nodes._advisory_text([]), {"node": "deck_reviewer"})
+        ]
+
+    # ---- 8. request id, on the row and in the log text -------------------------
+
+    def test_the_request_id_rides_the_row_and_the_log_line(self, graph_env, caplog):
+        from src.api.services.session_manager import get_session_manager
+        from src.services.graph.event_emitter import set_chat_request_id
+
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        graph_env.skills.set("builder", self._raising("boom"))
+
+        set_chat_request_id(self.REQUEST_ID)
+        try:
+            builder_node(_branch_payload(graph_env, 2, spec=make_spec((2,))))
+        finally:
+            set_chat_request_id(None)
+
+        polled = get_session_manager().get_messages_for_request(self.REQUEST_ID)
+        assert len(polled) == 1, polled
+        self._assert_row_is(
+            polled[0],
+            placeholder_notice(
+                2, stage="builder", error="RuntimeError", request_id=self.REQUEST_ID
+            ),
+            position=2,
+        )
+        assert polled[0]["metadata"]["details"]["request_id"] == self.REQUEST_ID
+
+        record = self._one_record(caplog, "build_failed")
+        # Production logs only %(message)s, so every field is IN the text, and
+        # the positions are labelled as the 0-based positions they are.
+        assert record.getMessage() == (
+            "graph_failure_notice kind=build_failed stage=builder error=RuntimeError "
+            f"positions=[2] request_id={self.REQUEST_ID} "
+            f"session_id={graph_env.session_id}"
+        )
+        # ...and in ``extra`` too, for a structured handler wired later (D6).
+        assert record.request_id == self.REQUEST_ID
+        assert record.graph_stage == "builder"
+        assert record.error_class == "RuntimeError"
+        assert list(record.positions) == [2]
+        assert record.session_id == graph_env.session_id
+
+    # ---- 9. the SSE events -----------------------------------------------------
+
+    def test_the_pre_commit_error_event_carries_the_headline_and_details(
+        self, graph_env
+    ):
+        graph_env.skills.set("builder", self._raising("boom"))
+
+        _, events = self._with_emitter(
+            lambda: builder_node(_branch_payload(graph_env, 2, spec=make_spec((2,))))
+        )
+
+        notice = placeholder_notice(2, stage="builder", error="RuntimeError")
+        errors = [e for e in events if e.type == StreamEventType.ERROR]
+        assert len(errors) == 1, events
+        # Emitted BEFORE the commit, so it must not claim a placeholder exists (D2).
+        assert errors[0].error == notice.headline
+        assert errors[0].error != notice.text
+        assert "placeholder" not in errors[0].error
+        assert_plain_language(errors[0].error)
+        assert_numbered(errors[0].error, 2)
+        assert errors[0].metadata == {
+            "node": "builder",
+            "position": 2,
+            "details": notice.details,
+        }
+
+    def test_a_slide_that_cannot_even_be_placeheld_gets_the_event_but_no_notice(
+        self, graph_env, monkeypatch, caplog
+    ):
+        """Why the event carries the headline: the commit can fail, and then no
+        placeholder exists to be claimed — and no notice row (nor its log line) is
+        written for a slide the foreman will reconcile instead."""
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        graph_env.skills.set("builder", self._raising("boom"))
+        monkeypatch.setattr(
+            nodes.SlideWriter, "commit_placeholder", self._raising("no db")
+        )
+
+        updates, events = self._with_emitter(
+            lambda: builder_node(_branch_payload(graph_env, 2, spec=make_spec((2,))))
+        )
+
+        assert updates == {}
+        errors = [e for e in events if e.type == StreamEventType.ERROR]
+        assert [e.error for e in errors] == [
+            placeholder_notice(2, stage="builder", error="RuntimeError").headline
+        ]
+        assert self._info(graph_env) == []
+        assert failure_notice_records(caplog) == []
+
+    # ---- 10. the review progress lines are 1-based -----------------------------
+
+    def test_the_review_progress_line_numbers_the_slide_as_the_ui_does(
+        self, graph_env
+    ):
+        graph_env.skills.set("build_reviewer", lambda payload: review_out(2))
+
+        _, events = self._with_emitter(
+            lambda: build_reviewer_node(
+                _branch_payload(graph_env, 2, html="<p>a</p>", spec=make_spec((2,)))
+            )
+        )
+
+        reviewed = [
+            e
+            for e in events
+            if e.type == StreamEventType.ASSISTANT
+            and (e.metadata or {}).get("node") == "build_reviewer"
+        ]
+        # The text is 1-based; the metadata stays 0-based.
+        assert [(e.content, e.metadata["position"]) for e in reviewed] == [
+            ("Slide 3 reviewed: clean.", 2)
+        ]
+
+    def test_the_fix_review_progress_line_numbers_the_slide_as_the_ui_does(
+        self, graph_env
+    ):
+        graph_env.skills.set("fix_reviewer", lambda payload: review_out(0))
+
+        _, events = self._with_emitter(
+            lambda: fix_reviewer_node(self._fix_review_state(graph_env))
+        )
+
+        reviewed = [
+            e
+            for e in events
+            if e.type == StreamEventType.ASSISTANT
+            and (e.metadata or {}).get("node") == "fix_reviewer"
+        ]
+        assert len(reviewed) == 1, events
+        assert reviewed[0].content.startswith("Slide 1 fix reviewed: ")
+        assert reviewed[0].content == "Slide 1 fix reviewed: fixed."
+        assert reviewed[0].metadata["position"] == 0
+
+    # ---- 11. no site may bypass the logging helper -----------------------------
+
+    def test_no_site_writes_a_details_bearing_notice_without_its_log_line(self):
+        """``_surface_failure_notice`` is the only sanctioned way to write a notice
+        with details: it is where the ``graph_failure_notice`` line is written.  A
+        site calling ``_surface_notice(..., details=...)`` itself would persist a
+        row with no log line behind it.  A ``**`` splat counts as a bypass too."""
+        tree = ast.parse(inspect.getsource(nodes))
+        owners = []
+        for top in tree.body:
+            for node in ast.walk(top):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                if name != "_surface_notice":
+                    continue
+                if any(kw.arg in ("details", None) for kw in node.keywords):
+                    owners.append(
+                        (type(top).__name__, getattr(top, "name", None))
+                    )
+
+        assert owners, (
+            "no call passes details to _surface_notice at all — the failure "
+            "notices are not wired through _surface_failure_notice"
+        )
+        assert set(owners) == {("FunctionDef", "_surface_failure_notice")}, owners
+
+    # 12. Durable with ``emitter=None``: every site test above except 6, 7, 9 and
+    # 10 runs without an emitter and reads the persisted row, as the existing
+    # tests of each node already do.
+
+    # ---- 13. every OTHER site stamps the request id too ------------------------
+
+    def _drive_failure(self, site, graph_env, monkeypatch):
+        """Run *site*'s failure path; return the notice it must have written.
+
+        The four placeholder sites share ONE notice construction (inside the
+        placeholder helper), which test 8 covers through the builder.  These are
+        the remaining constructions, each with its own ``request_id=`` argument.
+        """
+        rid = self.REQUEST_ID
+        if site == "foreman":
+            monkeypatch.setattr(nodes, "next_dispatch_batch", lambda s: [])
+            foreman_node(self._foreman_end_state(graph_env))
+            return unfinished_slides_notice([1], request_id=rid)
+        if site in ("transient_review", "transient_fix"):
+            during = site.split("_", 1)[1]
+            nodes._transient_failure_notice(graph_env.session_id, 1, during=during)
+            return unreviewed_slide_notice(1, during=during, request_id=rid)
+        self._seeded_deck(graph_env)
+        if site == "deck_write":
+            monkeypatch.setattr(nodes, "write_deck_level_columns", self._raising("x"))
+            notice = deck_not_updated_notice(
+                review_skipped=False, error="RuntimeError", request_id=rid
+            )
+        elif site == "deck_derivation":
+            monkeypatch.setattr(nodes, "aggregate_deck_css", self._raising("x"))
+            notice = deck_not_updated_notice(
+                review_skipped=True, error="RuntimeError", request_id=rid
+            )
+        else:
+            assert site == "deck_review", site
+            graph_env.skills.set("deck_reviewer", self._raising("x"))
+            notice = deck_review_failed_notice(error="RuntimeError", request_id=rid)
+        deck_reviewer_node(graph_env.state(turn_id=TURN))
+        return notice
+
+    @pytest.mark.parametrize(
+        "site",
+        [
+            "foreman",
+            "transient_review",
+            "transient_fix",
+            "deck_write",
+            "deck_derivation",
+            "deck_review",
+        ],
+    )
+    def test_every_other_site_puts_the_request_id_in_details_and_the_log(
+        self, graph_env, monkeypatch, caplog, site
+    ):
+        """The disclosure's request id is how a user's report is matched to the log
+        line, so a site that built its notice without one would leave a row the
+        poll still delivers (the row's own column is stamped separately) but
+        whose details and log line cannot be correlated."""
+        from src.api.services.session_manager import get_session_manager
+        from src.services.graph.event_emitter import set_chat_request_id
+
+        caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        set_chat_request_id(self.REQUEST_ID)
+        try:
+            notice = self._drive_failure(site, graph_env, monkeypatch)
+        finally:
+            set_chat_request_id(None)
+
+        assert notice.details["request_id"] == self.REQUEST_ID
+        polled = get_session_manager().get_messages_for_request(self.REQUEST_ID)
+        rows = [m for m in polled if m["content"] == notice.text]
+        assert len(rows) == 1, [m["content"] for m in polled]
+        assert rows[0]["metadata"] == {"details": notice.details}
+        record = self._one_record(caplog, notice.kind)
+        assert record.request_id == self.REQUEST_ID
+        assert f" request_id={self.REQUEST_ID} " in record.getMessage()
+
+    # ---- 14. a failing log line never costs the notice ------------------------
+
+    def test_a_log_line_that_raises_does_not_cost_the_row_or_the_turn(
+        self, graph_env, monkeypatch
+    ):
+        """``_surface_failure_notice`` never raises.  The realistic way its log line
+        fails is ``makeRecord`` refusing an ``extra`` key (see
+        ``test_logging_extra_reserved_keys``), which raises AT the call site; from
+        a fanned node's exception handler that would kill the turn, and it must
+        not cost the user the chat row either."""
+        real_warning = nodes.logger.warning
+
+        def warning(msg, *args, **kwargs):
+            if str(msg).startswith("graph_failure_notice"):
+                raise KeyError("Attempt to overwrite 'positions' in LogRecord")
+            return real_warning(msg, *args, **kwargs)
+
+        # setitem on the instance dict, so teardown deletes the shadow outright
+        # rather than leaving a bound method behind on the shared module logger.
+        monkeypatch.setitem(vars(nodes.logger), "warning", warning)
+        graph_env.skills.set("builder", self._raising("boom"))
+
+        updates = builder_node(_branch_payload(graph_env, 2, spec=make_spec((2,))))
+
+        assert updates == {"placeheld_positions": scoped(TURN, {2})}
+        info = self._info(graph_env)
+        assert len(info) == 1, info
+        self._assert_row_is(
+            info[0], placeholder_notice(2, stage="builder", error="RuntimeError"), position=2
+        )
 
 
 # ===========================================================================

@@ -20,6 +20,7 @@ not merely so that it passes under the new one:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from typing import Any, Dict
 
@@ -30,7 +31,13 @@ from src.domain.finding import VERDICT_KEY, DeckReviewOutput
 from src.services.foreman_service import CAP
 from src.services.graph import nodes
 from src.services.graph.builder import build_graph
+from src.services.graph.user_notices import unreviewed_slide_notice
 from src.utils.slide_hash import compute_slide_hash
+from tests.fixtures.notice_assertions import (
+    assert_numbered,
+    assert_plain_language,
+    failure_notice_records,
+)
 from tests.unit.conftest_graph import (  # noqa: F401 — fixtures
     architect_build,
     builder_out,
@@ -445,11 +452,38 @@ def _permanent(agent: str):
 
 class TestATransientModelFaultKeepsTheDraft:
     """User decision (2026-10-12): a rate limit or 5xx on one slide must not fail
-    the deck once that slide's draft exists — keep it."""
+    the deck once that slide's draft exists — keep it.
+
+    #321: the slide's notice is the catalogue's plain-language text, 1-based, and
+    its details carry the fixed code ``model_temporarily_unavailable`` — never the
+    caught exception, which for a transient fault is a ``PersistedRuntimeError``
+    subclass naming the pinned endpoint (#271)."""
+
+    @staticmethod
+    def _the_one_notice(env, caplog, notice, *, position):
+        """The turn's single failure notice IS *notice*, and leaks nothing."""
+        info = [m for m in env.messages() if m["message_type"] == "info"]
+        notices = [m for m in info if m["content"] != nodes._advisory_text([])]
+        assert len(notices) == 1, [m["content"] for m in info]
+        row = notices[0]
+        assert row["content"] == notice.text
+        assert_plain_language(row["content"])
+        assert_numbered(row["content"], position)
+        assert row["metadata"]["details"]["error"] == "model_temporarily_unavailable"
+        dumped = json.dumps(row)
+        assert "PinnedInvocation" not in dumped, dumped
+        assert "system.ai" not in dumped, dumped
+        records = failure_notice_records(caplog)
+        assert [r.notice_kind for r in records] == [notice.kind], [
+            r.getMessage() for r in records
+        ]
+        assert "PinnedInvocation" not in records[0].getMessage()
+        assert "system.ai" not in records[0].getMessage()
 
     def test_a_transient_review_failure_keeps_the_draft_and_the_turn_finishes(
-        self, graph_env_threadsafe
+        self, graph_env_threadsafe, caplog
     ):
+        caplog.set_level(logging.WARNING, logger="src.services.graph.nodes")
         env = graph_env_threadsafe
         _wire(env, (0, 1))
         clean = env.skills._handlers["build_reviewer"]
@@ -464,12 +498,15 @@ class TestATransientModelFaultKeepsTheDraft:
         assert rows[1].html == "<div class='slide'>slide 1</div>"
         assert rows[1].verification_record in (None, "", "{}", "null")
         assert len(env.skills.calls_for("deck_reviewer")) == 1
-        info = [m for m in env.messages() if m["message_type"] == "info"]
-        assert any("Slide 1" in m["content"] for m in info)
+        # Position 1 is the deck's SECOND slide: "Slide 2" in the UI.
+        self._the_one_notice(
+            env, caplog, unreviewed_slide_notice(1, during="review"), position=1
+        )
 
     def test_a_transient_fix_failure_lands_the_original_with_its_findings(
-        self, graph_env_threadsafe
+        self, graph_env_threadsafe, caplog
     ):
+        caplog.set_level(logging.WARNING, logger="src.services.graph.nodes")
         env = graph_env_threadsafe
         _wire(env, (0, 1), flagged=(0, 1))
         env.skills.set(
@@ -487,6 +524,11 @@ class TestATransientModelFaultKeepsTheDraft:
         assert verdict["verdict"] == "surfaced"
         assert rows[1].html == "<div class='slide'>fixed 1</div>"
         assert len(env.skills.calls_for("deck_reviewer")) == 1
+        # The skipped fix is SAID: position 0 is "Slide 1", and its findings wait
+        # in the slide's AI feedback.
+        self._the_one_notice(
+            env, caplog, unreviewed_slide_notice(0, during="fix"), position=0
+        )
 
     def test_a_permanent_endpoint_failure_still_fails_the_turn(
         self, graph_env_threadsafe
