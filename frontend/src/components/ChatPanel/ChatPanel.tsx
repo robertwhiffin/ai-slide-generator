@@ -7,6 +7,8 @@ import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { api, type StreamEvent } from '../../services/api';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
+import { describeTurnProgress, newerTurnProgress, parseTurnProgress } from '../../utils/turnProgress';
+import type { TurnProgress } from '../../types/turnProgress';
 import { ReplacementFeedback } from './ReplacementFeedback';
 import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingIndicator } from './LoadingIndicator';
@@ -49,6 +51,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
+  const [turnProgress, setTurnProgress] = useState<TurnProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastReplacement, setLastReplacement] = useState<ReplacementInfo | null>(
     null,
@@ -179,6 +182,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     }
 
     setIsLoading(true);
+    setTurnProgress(null);
     setIsGenerating(true);
     onGenerationStart?.();
     setError(null);
@@ -323,6 +327,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           refreshConfig();
           break;
 
+        // #319 — the graph's stage summary.  Never a chat message: it only feeds
+        // the placeholder.  Older, repeated and malformed snapshots are ignored,
+        // so the label never steps backwards.
+        case 'turn_progress': {
+          const incoming = parseTurnProgress(event.turn_progress);
+          if (incoming) setTurnProgress(prev => newerTurnProgress(prev, incoming));
+          break;
+        }
+
         // E0: ws4d D3 — one committed slide released by the graph's reorder buffer,
         // delivered before `complete`.  Forwards position + content to AppLayout so
         // the viewer can render slides as they land in ascending order.
@@ -397,7 +410,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        <MessageList messages={previewMessages ?? messages} isLoading={isLoading && !previewMessages} />
+        <MessageList
+          messages={previewMessages ?? messages}
+          isLoading={isLoading && !previewMessages}
+          progressLabel={describeTurnProgress(turnProgress)}
+        />
       </div>
 
       {error && (
