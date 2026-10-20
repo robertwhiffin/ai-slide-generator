@@ -20,7 +20,12 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
-from src.api.services.session_manager import SessionNotFoundError, VersionConflictError, get_session_manager
+from src.api.services.session_manager import (
+    SessionNotFoundError,
+    VersionConflictError,
+    earliest_user_message,
+    get_session_manager,
+)
 from src.api.services.session_naming import generate_session_title
 from src.core.databricks_client import (
     get_current_username,
@@ -168,13 +173,14 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
     **Sticky, and derived from the transcript.**  Evaluated per message, only
     turn 1 would carry the phrase and turn 2 would fall back — a deck written
     alternately by both engines diverges between ``session_slides`` rows and
-    ``deck_json``, and the architect's own conversation lives in the
-    checkpointer under a ``thread_id``.  So the answer is a property of the
-    deck, read off the **earliest** ``role='user'`` message.  A later message
-    carrying the phrase must not switch a monolith deck, and assistant messages
-    are ignored so echoed tool output cannot flip the engine.  (Since the
-    2026-10-12 inversion the graph is the default and the phrase is the
-    LEGACY opt-out: a later ``USE LEGACY MODE`` must not switch a graph deck.)
+    ``deck_json``, and the graph's checkpoint thread, keyed by the session id,
+    would be resumed by one engine and ignored by the other.  So the answer is
+    a property of the deck, read off the **earliest** ``role='user'`` message.
+    A later message carrying the phrase must not switch a monolith deck, and
+    assistant messages are ignored so echoed tool output cannot flip the
+    engine.  (Since the 2026-10-12 inversion the graph is the default and the
+    phrase is the LEGACY opt-out: a later ``USE LEGACY MODE`` must not switch a
+    graph deck.)
 
     **Resolved on the OWNER DECK's session, not the calling session** (ruling
     W-3).  Decks are shared through ``UserSession.parent_session_id``; mode is
@@ -212,7 +218,6 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         explicitly (#271 C24).
     """
     from src.core.database import get_db_session
-    from src.database.models.session import SessionMessage
 
     if not session_id:
         return "monolith"
@@ -222,16 +227,8 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         with get_db_session() as db:
             session = session_manager._get_session_or_raise(db, session_id)
             deck_owner = session_manager._get_deck_owner_session(db, session)
-            earliest_user_message = (
-                db.query(SessionMessage)
-                .filter(
-                    SessionMessage.session_id == deck_owner.id,
-                    SessionMessage.role == "user",
-                )
-                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
-                .first()
-            )
-            content = earliest_user_message.content if earliest_user_message else None
+            earliest = earliest_user_message(db, deck_owner.id)
+            content = earliest.content if earliest else None
             owner_session_id = deck_owner.session_id
     except SessionNotFoundError:
         logger.warning(
@@ -2239,15 +2236,7 @@ class ChatService:
         with get_db_session() as db:
             session = session_manager._get_session_or_raise(db, session_id)
 
-            marker = (
-                db.query(SessionMessage)
-                .filter(
-                    SessionMessage.session_id == session.id,
-                    SessionMessage.role == "user",
-                )
-                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
-                .first()
-            )
+            marker = earliest_user_message(db, session.id)
             marker_id = marker.id if marker is not None else None
 
             doomed = db.query(SessionMessage).filter(
