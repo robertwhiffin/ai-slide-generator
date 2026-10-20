@@ -427,7 +427,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       if (currentSessionIdRef.current !== target) return;
       setError(clearChatErrorMessage(err));
     } finally {
-      setIsClearing(false);
+      // Only for the session this clear was for: after a switch the render-phase reset has already
+      // cleared the flag, and the new session may be running its own clear.
+      if (currentSessionIdRef.current === target) setIsClearing(false);
     }
   };
 

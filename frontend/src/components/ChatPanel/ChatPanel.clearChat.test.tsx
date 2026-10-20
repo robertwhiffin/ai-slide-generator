@@ -368,6 +368,39 @@ describe('ChatPanel Clear chat (#323)', () => {
     expect(screen.getByTestId('mock-send')).toBeEnabled();
   });
 
+  it("a late clear for the previous session does not unlock the new session's own running clear", async () => {
+    // Whole-branch review W6: A's clear is in flight, the user switches to B and
+    // starts a clear there; A's response landing must not flip B's isClearing off.
+    getSession.mockImplementation(async (id: string) => (id === 'sess-2'
+      ? { messages: [msg('message C')], my_permission: 'CAN_MANAGE' }
+      : { messages: TWO, my_permission: 'CAN_MANAGE' }));
+    const pendingA = deferred<typeof CLEARED>();
+    const pendingB = deferred<typeof CLEARED>();
+    clearChat.mockReturnValueOnce(pendingA.promise).mockReturnValueOnce(pendingB.promise);
+    const view = mount();
+    await screen.findByText('message B');
+    await confirmClear();
+
+    currentSessionId = 'sess-2';
+    view.rerender(panel({ hasDeckSpec: true }));
+    await screen.findByText('message C');
+    await confirmClear();
+    expect(screen.getByTestId('mock-send')).toBeDisabled();
+    expect(clearButton()).toBeDisabled();
+
+    await act(async () => { pendingA.resolve(CLEARED); });
+    await settle();
+    // B's clear is still running: its input and button stay locked.
+    expect(screen.getByTestId('mock-send')).toBeDisabled();
+    expect(clearButton()).toBeDisabled();
+    expect(screen.getByText('message C')).toBeInTheDocument();
+
+    await act(async () => { pendingB.resolve({ ...CLEARED, session_id: 'sess-2' }); });
+    await waitFor(() => expect(listItems()).toHaveLength(0));
+    expect(screen.getByTestId('mock-send')).toBeEnabled();
+    expect(clearChat.mock.calls).toEqual([['sess-1'], ['sess-2']]);
+  });
+
   it('a deck built in this panel offers Clear chat without a reload', async () => {
     // A new deck: a browser-local id the backend does not know yet.
     currentSessionId = 'local-1';

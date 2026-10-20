@@ -1486,6 +1486,15 @@ sentence against the code from Tasks 1 to 5.
 - **The hidden row.** `ENGINE_MODE_MARKER_MESSAGE_TYPE` and `is_transcript_message()` live in
   `src/domain/conversation_engine.py`. A per-message delete must treat the kept row as not found
   (404): deleting it would change the deck's engine.
+- **The real trap: never delete a session's earliest `role='user'` row (whole-branch review W3).**
+  On a session that was never cleared, the engine-mode row is the earliest user row with its
+  normal type (`user_input`/`user_query`/`chat`), visible in the panel, so it will carry a delete
+  affordance. Deleting it moves a legacy deck to the graph, and on a graph deck it lets a later
+  `USE LEGACY MODE` message become the earliest row. "Deleting" that row must instead re-type it to
+  `ENGINE_MODE_MARKER_MESSAGE_TYPE` (hide it), exactly as `clear_context` does. The "earliest user
+  row" query already has four copies (`resolve_engine_mode`, `clear_context`, the duplicate carry
+  in `session_manager.py`, the pin backfill in `conversation_pins.py`); #317 should extract one
+  shared helper rather than add a fifth.
 - **Reading rows by id.** Deleting must query raw rows by id within the session, because
   `get_messages` hides the kept row.
 - **Attribution.** Add `EVENT_MESSAGE_DELETED` beside `EVENT_CONTEXT_CLEARED` and write it in the
