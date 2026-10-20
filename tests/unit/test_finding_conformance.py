@@ -7,6 +7,7 @@ between the two declarations, which is exactly why they drifted.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -16,6 +17,17 @@ import pytest
 REPO_ROOT = Path(__file__).parents[2]
 FINDING_TS = REPO_ROOT / "frontend" / "src" / "types" / "finding.ts"
 
+#: Keys the read path DERIVES onto every findings entry (#316,
+#: ``_finding_to_camel`` via src/domain/finding_copy.py).  They are declared on
+#: the TypeScript ``SlideFinding`` but are NOT ``Finding`` fields, and must never
+#: become one: ``Finding`` is nested in the reviewers' output schemas, so a new
+#: field (even an optional one no model fills) would move the build/fix/deck
+#: reviewer schema digests in src/services/agent_schema_registry.py.  This is
+#: the ONLY exemption from the "TS declares nothing the backend lacks" rule, and
+#: ``test_projection_only_fields_are_declared_in_ts_and_absent_from_finding``
+#: pins it so it cannot become a bypass.
+PROJECTION_ONLY_FIELDS = {"plainMessage", "plainIssue"}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,6 +35,25 @@ FINDING_TS = REPO_ROOT / "frontend" / "src" / "types" / "finding.ts"
 
 def _read_ts() -> str:
     return FINDING_TS.read_text()
+
+
+def _decode_ts_string_body(body: str) -> str:
+    """Decode the body of a quoted TS string literal (``\\n``, ``\\"``, ``\\'``)."""
+    return json.loads('"' + body.replace("\\'", "'") + '"')
+
+
+def _ts_string_constant(path: Path, name: str) -> str:
+    """Return the decoded value of ``export const NAME[: string] = "...";`` in *path*.
+
+    Fails loudly (not with ``None``) when the constant is absent, so a renamed or
+    deleted constant cannot make an equality pin vacuous.
+    """
+    text = path.read_text()
+    m = re.search(
+        rf"export const {name}(?:\s*:\s*string)?\s*=\s*(['\"])(.*?)\1\s*;", text
+    )
+    assert m, f"{name} not found in {path}"
+    return _decode_ts_string_body(m.group(2))
 
 
 def _snake_to_camel(name: str) -> str:
@@ -136,7 +167,8 @@ class TestFindingConformance:
 
         Fails when TS grows a field that has no Python counterpart, meaning the
         frontend would receive an undefined value at that key from any backend
-        serialisation.
+        serialisation.  The read path's derived keys (PROJECTION_ONLY_FIELDS) are
+        the one exemption; the test below pins that exemption's own terms.
         """
         from src.domain.finding import Finding
 
@@ -144,10 +176,172 @@ class TestFindingConformance:
         ts_fields = set(_extract_interface_fields(ts_src, "SlideFinding"))
         py_fields = set(Finding.model_fields.keys())
         camel_fields = {_snake_to_camel(f) for f in py_fields}
-        extra = ts_fields - camel_fields
+        extra = ts_fields - camel_fields - PROJECTION_ONLY_FIELDS
         assert not extra, (
             f"SlideFinding declares fields not present in Finding: {sorted(extra)}."
         )
+
+    def test_projection_only_fields_are_declared_in_ts_and_absent_from_finding(self) -> None:
+        """The PROJECTION_ONLY_FIELDS exemption is exact, so it cannot be a bypass.
+
+        Each allowlisted key must be (1) declared on the TS SlideFinding, (2) NOT a
+        ``Finding`` field under either spelling (that would move the reviewer
+        schema digests, plan D1/D2), and (3) exactly the set of keys
+        ``_finding_to_camel`` adds beyond the mirrored ``Finding`` fields.  (3)
+        stops the allowlist growing a name the read path never emits (the
+        frontend would read undefined) and the projection growing a key nobody
+        declared.
+        """
+        from src.api.services.session_manager import _finding_to_camel
+        from src.domain.finding import Finding, make_finding_id
+
+        ts_fields = set(_extract_interface_fields(_read_ts(), "SlideFinding"))
+        assert PROJECTION_ONLY_FIELDS <= ts_fields, (
+            f"projection-only keys not declared on SlideFinding in finding.ts: "
+            f"{sorted(PROJECTION_ONLY_FIELDS - ts_fields)}"
+        )
+
+        for name in sorted(PROJECTION_ONLY_FIELDS):
+            for spelling in (name, _camel_to_snake(name)):
+                assert spelling not in Finding.model_fields, (
+                    f"{spelling!r} became a Finding field.  The plain-language copy "
+                    f"is projection-only: a Finding field changes the reviewers' "
+                    f"output JSON schema and so their schema-contract digests."
+                )
+
+        finding = Finding(
+            id=make_finding_id("overflow", "abc123", 0),
+            slide_index=0,
+            category="design",
+            criterion="overflow",
+            message="Content overflows the slide frame.",
+            objective=True,
+        )
+        mirrored = {_snake_to_camel(k) for k in Finding.model_fields}
+        added = set(_finding_to_camel(finding)) - mirrored
+        assert added == PROJECTION_ONLY_FIELDS, (
+            f"_finding_to_camel adds {sorted(added)} beyond the Finding fields; "
+            f"PROJECTION_ONLY_FIELDS is {sorted(PROJECTION_ONLY_FIELDS)}.  The two "
+            f"must be the same set."
+        )
+
+    @pytest.mark.parametrize("status", ["open", "fixed"])
+    def test_finding_to_camel_adds_the_plain_keys_and_keeps_every_finding_field_verbatim(
+        self, status: str
+    ) -> None:
+        """The projection is every Finding field, camelCased and unchanged, plus the
+        two derived keys, and nothing else.
+
+        The #316 contrast finding is used deliberately: its ``message`` is the
+        technical text the plain copy replaces in the drawer's lead, and it must
+        still reach the frontend byte-for-byte (the drawer's details and the
+        Apply/Discuss request carry it).  Expected plain strings are composed
+        from the copy module's constants, never from the helpers under test.
+        """
+        from src.api.services.session_manager import _finding_to_camel
+        from src.domain.finding import Finding, make_finding_id
+        from src.domain.finding_copy import (
+            FIXED_AUTOMATICALLY,
+            NOT_FIXED_AUTOMATICALLY,
+            PLAIN_ISSUES,
+        )
+        from tests.unit.test_finding_copy import ISSUE_316_MESSAGE
+
+        finding = Finding(
+            id=make_finding_id("contrast_failure", "abc123", 0),
+            slide_index=2,
+            category="design",
+            criterion="contrast_failure",
+            message=ISSUE_316_MESSAGE,
+            objective=True,
+            status=status,
+            seen=True,
+        )
+        if status == "fixed":
+            issue = PLAIN_ISSUES["contrast_failure"].past
+            sentence = FIXED_AUTOMATICALLY
+        else:
+            issue = PLAIN_ISSUES["contrast_failure"].present
+            sentence = NOT_FIXED_AUTOMATICALLY
+
+        expected = {_snake_to_camel(k): v for k, v in finding.model_dump().items()} | {
+            "plainMessage": f"{issue} {sentence}",
+            "plainIssue": issue,
+        }
+        assert _finding_to_camel(finding) == expected
+        assert _finding_to_camel(finding)["message"] == ISSUE_316_MESSAGE
+
+    def test_ts_plain_message_fallback_is_the_python_generic_copy(self) -> None:
+        """The frontend's fallback for a finding with no plain keys is the Python
+        generic sentence (plan D6/D10), so an untyped mock or a stale API cache
+        reads exactly as an unknown criterion does server-side."""
+        from src.domain.finding_copy import GENERIC_ISSUE
+
+        assert _ts_string_constant(FINDING_TS, "PLAIN_MESSAGE_FALLBACK") == GENERIC_ISSUE.present
+
+    def test_typed_fixture_literals_carry_the_python_copy(self) -> None:
+        """Every typed SlideFinding literal in the frontend tests carries the
+        plainMessage/plainIssue the Python projection would derive for it.
+
+        These literals stand in for the API in vitest/Playwright; if their plain
+        text drifted from src/domain/finding_copy.py the frontend tests would be
+        asserting copy production never sends.  Only object literals that declare
+        BOTH ``criterion:`` and ``plainMessage:`` as properties (in that order,
+        matching the SlideFinding declaration) are matched, so a test body that
+        merely reads ``f2.plainMessage`` is not mistaken for a literal.  The exact
+        counts make a dropped or duplicated literal fail rather than shrink the
+        sweep.
+        """
+        from src.domain.finding import Finding
+        from src.domain.finding_copy import plain_finding_issue, plain_finding_message
+
+        literal_re = re.compile(
+            r"\{[^{}]*\bcriterion\s*:[^{}]*\bplainMessage\s*:[^{}]*\}"
+        )
+        value_res = {
+            "criterion": re.compile(r"\bcriterion\s*:\s*(['\"])(.*?)\1"),
+            "status": re.compile(r"\bstatus\s*:\s*(['\"])(.*?)\1"),
+            "plainMessage": re.compile(r"\bplainMessage\s*:\s*(['\"])(.*?)\1"),
+            "plainIssue": re.compile(r"\bplainIssue\s*:\s*(['\"])(.*?)\1"),
+        }
+        objective_re = re.compile(r"\bobjective\s*:\s*(true|false)")
+
+        expected_counts = {
+            "frontend/tests/fixtures/findings.ts": 3,
+            "frontend/tests/e2e/findings-drawer.spec.ts": 2,
+            "frontend/tests/e2e/spec-view.spec.ts": 2,
+        }
+        for rel_path, expected_count in expected_counts.items():
+            literals = literal_re.findall((REPO_ROOT / rel_path).read_text())
+            assert len(literals) == expected_count, (
+                f"{rel_path}: expected exactly {expected_count} typed SlideFinding "
+                f"literal(s) declaring criterion: and plainMessage:, found "
+                f"{len(literals)}"
+            )
+            for literal in literals:
+                values = {}
+                for key, value_re in value_res.items():
+                    m = value_re.search(literal)
+                    assert m, f"{rel_path}: no quoted {key} in literal {literal!r}"
+                    values[key] = _decode_ts_string_body(m.group(2))
+                m = objective_re.search(literal)
+                assert m, f"{rel_path}: no boolean objective in literal {literal!r}"
+
+                finding = Finding.model_construct(
+                    criterion=values["criterion"],
+                    objective=m.group(1) == "true",
+                    status=values["status"],
+                )
+                assert values["plainMessage"] == plain_finding_message(finding), (
+                    f"{rel_path}: plainMessage for {values['criterion']}/"
+                    f"{values['status']} is {values['plainMessage']!r}; the Python "
+                    f"projection derives {plain_finding_message(finding)!r}"
+                )
+                assert values["plainIssue"] == plain_finding_issue(finding), (
+                    f"{rel_path}: plainIssue for {values['criterion']}/"
+                    f"{values['status']} is {values['plainIssue']!r}; the Python "
+                    f"projection derives {plain_finding_issue(finding)!r}"
+                )
 
     def test_finding_category_union_has_exactly_three_members(self) -> None:
         """FindingCategory union must equal exactly {content, design, narrative}.
@@ -345,6 +539,11 @@ class TestReadPathFindingsConformance:
         This is the field-for-field mapping assertion: names AND values survive
         the projection in both directions, so no field is silently renamed,
         dropped, or coerced on the way out.
+
+        The derived PROJECTION_ONLY_FIELDS are dropped explicitly before the
+        rebuild, and what remains must be exactly the Finding fields.  ``Finding``
+        silently ignores unknown keys, so relying on that would let any stray key
+        through this test unnoticed.
         """
         from src.domain.finding import Finding
 
@@ -358,10 +557,20 @@ class TestReadPathFindingsConformance:
         entries = deck_with_spec.get_slide_deck()["findings"]
         assert len(entries) == len(expected)
 
-        rebuilt = [
-            Finding(**{_camel_to_snake(k): v for k, v in entry.items()})
+        snake_entries = [
+            {
+                _camel_to_snake(k): v
+                for k, v in entry.items()
+                if k not in PROJECTION_ONLY_FIELDS
+            }
             for entry in entries
         ]
+        for snake in snake_entries:
+            assert set(snake) == set(Finding.model_fields), (
+                f"read-path entry minus the projection-only keys is not exactly the "
+                f"Finding fields: {sorted(snake)} vs {sorted(Finding.model_fields)}"
+            )
+        rebuilt = [Finding(**snake) for snake in snake_entries]
         assert rebuilt == expected, (
             f"read-path findings do not round-trip.\n  from read path: {rebuilt}\n"
             f"  as stored:      {expected}"

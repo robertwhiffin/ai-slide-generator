@@ -30,6 +30,7 @@ from src.database.models.session import (
     UserSession,
 )
 from src.domain.finding import findings_from_record
+from src.domain.finding_copy import plain_finding_issue, plain_finding_message
 from src.services.conversation_pins import (
     get_conversation_graph_version,
     get_conversation_graph_versions,
@@ -195,11 +196,21 @@ def _finding_to_camel(finding: Any) -> Dict[str, Any]:
     added to ``Finding`` mirrors automatically;
     ``tests/unit/test_finding_conformance.py`` is the guard that the TypeScript
     declaration gained the same field.
+
+    ``plainMessage`` and ``plainIssue`` are the two projection-only keys: they are
+    derived here at read time (``src/domain/finding_copy.py``), are not ``Finding``
+    fields, and are never persisted.  ``PROJECTION_ONLY_FIELDS`` in
+    ``tests/unit/test_finding_conformance.py`` pins them.
     """
     camel: Dict[str, Any] = {}
     for key, value in finding.model_dump().items():
         head, *rest = key.split("_")
         camel[head + "".join(part.capitalize() for part in rest)] = value
+    # Derived, read-time only (#316): never Finding fields (that would move the
+    # reviewers' output-schema digests) and never persisted.  See
+    # src/domain/finding_copy.py.
+    camel["plainMessage"] = plain_finding_message(finding)
+    camel["plainIssue"] = plain_finding_issue(finding)
     return camel
 
 
