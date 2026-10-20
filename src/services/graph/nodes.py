@@ -66,6 +66,13 @@ from src.domain.finding import (
     build_verification_record,
     make_finding_id,
 )
+from src.domain.finding_copy import (
+    DECK_ADVISORY_CLOSING,
+    DECK_ADVISORY_HEADER_PREFIX,
+    DECK_ADVISORY_HEADER_SUFFIX,
+    REVIEWER_DETAILS_SEPARATOR,
+    deck_advisory_issue,
+)
 from src.domain.slide_deck import SlideDeck
 from src.services.agent import SAFETY_RETRY_NOTICE
 from src.services.agent_runtime import (
@@ -1299,22 +1306,39 @@ def _placehold_failed_position(
 def _advisory_text(findings: List[Finding]) -> str:
     """Compose the deck-review advisory from findings alone (§5, Ruling C-3).
 
-    ``DeckReviewOutput`` declares ``findings`` and nothing else — no verdict
-    field and no prose field — so the message is composed here rather than read
-    off the model output.  An empty list gets an explicit "no issues" line: a
-    silent absence is indistinguishable from a review that never ran.
+    ``DeckReviewOutput`` declares ``findings`` and nothing else, so the message is
+    composed here.  Shape (#316): plain lines from src/domain/finding_copy.py
+    (never a criterion slug), one closing line, then the REVIEWER_DETAILS_SEPARATOR
+    section with each reviewer message verbatim — the only actionable slide
+    references.  frontend/src/utils/findingText.ts matches exactly this shape to
+    collapse the details; the strings are pinned equal by
+    tests/unit/test_finding_conformance.py.  This is an ``info`` row, so neither
+    replay path (``_conversation``, ``_hydrate_chat_history``) feeds it back to the
+    architect.  The empty-list line is byte-identical to before: the tour fixture
+    and the integration suites pin it, and a silent absence is indistinguishable
+    from a review that never ran.
     """
     if not findings:
         return (
             "Deck review complete: no narrative issues found across the deck."
         )
-    lines = [
-        f"Deck review found {len(findings)} narrative "
-        f"{'issue' if len(findings) == 1 else 'issues'}:"
-    ]
+    counts: Dict[str, int] = {}
     for finding in findings:
-        lines.append(f"- {finding.criterion}: {finding.message}")
-    return "\n".join(lines)
+        line = deck_advisory_issue(finding.criterion)
+        counts[line] = counts.get(line, 0) + 1
+    total = len(findings)
+    lines = [
+        f"{DECK_ADVISORY_HEADER_PREFIX}{total} "
+        f"{'thing' if total == 1 else 'things'}{DECK_ADVISORY_HEADER_SUFFIX}"
+    ]
+    for line, count in counts.items():  # first-seen order
+        lines.append(f"- {line[:-1]} (noted {count} times)." if count > 1 else f"- {line}")
+    lines.append(DECK_ADVISORY_CLOSING)
+    text = "\n".join(lines)
+    details = [f"- {finding.message}" for finding in findings if finding.message.strip()]
+    if details:
+        text += REVIEWER_DETAILS_SEPARATOR + "\n".join(details)
+    return text
 
 
 def _skill_findings(output: Any) -> List[Finding]:

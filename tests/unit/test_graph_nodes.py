@@ -27,19 +27,24 @@ from typing import get_type_hints
 
 import pytest
 
+from src.api.services.session_manager import get_session_manager
 from src.api.services.slide_repository import is_placeholder_record
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SharedDeckMutationEvent, UserSession
-from src.domain.finding import VERDICT_KEY, DeckReviewOutput, Finding, make_finding_id
+from src.domain.finding import CRITERIA, VERDICT_KEY, DeckReviewOutput, Finding, make_finding_id
 from src.domain.finding_copy import (
     ADDRESSED,
     DECK_ADVISORY_CLOSING,
+    DECK_ADVISORY_HEADER_PREFIX,
+    DECK_ADVISORY_HEADER_SUFFIX,
     DECK_GRAIN_ISSUE,
     FIXED_AUTOMATICALLY,
     GENERIC_ISSUE,
     LEFT_FOR_JUDGEMENT,
     NOT_FIXED_AUTOMATICALLY,
     PLAIN_ISSUES,
+    REVIEWER_DETAILS_SEPARATOR,
+    plain_issue,
 )
 from src.domain.skill_io import (
     AnalystOutput,
@@ -57,7 +62,7 @@ from src.services.graph_definition_manifest import load_graph_v1_manifest
 from src.services.persisted_graph_release import ResolvedDefinition
 from src.services.graph import builder as graph_builder
 from src.services.graph import nodes
-from src.services.graph.event_emitter import set_event_emitter
+from src.services.graph.event_emitter import set_chat_request_id, set_event_emitter
 from src.services.graph.nodes import (
     architect_node,
     build_branch_payload,
@@ -3489,7 +3494,12 @@ class TestDeckReviewerReview:
         info = [m for m in graph_env.messages() if m["message_type"] == "info"]
         assert len(info) == 1
         assert info[0]["role"] == "assistant"
-        assert "arc_gap" in info[0]["content"]
+        # #316: the advisory leads with plain language; the criterion slug is no
+        # longer shown to the user (the reviewer's own message follows, verbatim,
+        # under the details separator — TestDeckAdvisoryIsPlain pins that shape).
+        head = info[0]["content"].partition(REVIEWER_DETAILS_SEPARATOR)[0]
+        assert plain_issue("arc_gap") in head
+        assert "arc_gap" not in head
 
     def test_no_findings_still_says_so_explicitly(self, graph_env):
         graph_env.seed_slides(["<div class='slide'>a</div>"])
@@ -3540,6 +3550,207 @@ class TestDeckReviewerReview:
         assert updates["error_state"]["code"] == "deck_review_failed"
         info = [m for m in graph_env.messages() if m["message_type"] == "info"]
         assert "could not be completed" in info[0]["content"]
+
+
+#: A deck reviewer message of the technical kind #316 keeps out of the plain lead.
+NARRATIVE_TECH = "arc_gap between narrative_arc[1] and positions 3,4 (#1B3139 callout)"
+
+
+def _deck_finding(criterion: str, message: str) -> Finding:
+    """A finding as the deck reviewer emits it, at the slide index its level implies."""
+    return finding(
+        criterion,
+        slide_index=-1 if CRITERIA[criterion].level == "deck" else 0,
+        message=message,
+    )
+
+
+class TestDeckAdvisoryIsPlain:
+    """#316: the deck-review advisory in chat is written for the deck author.
+
+    Shape: plain lines (never a criterion slug, never reviewer prose), one closing
+    line, then ``REVIEWER_DETAILS_SEPARATOR`` with each reviewer message verbatim:
+    those messages carry the only actionable slide references.  The no-findings
+    sentence is unchanged.  Expected strings are written out here, never derived
+    by calling ``_advisory_text``.
+    """
+
+    def test_no_findings_line_is_byte_identical(self):
+        """The tour fixture and the integration suites pin this exact sentence."""
+        text = nodes._advisory_text([])
+
+        assert text == "Deck review complete: no narrative issues found across the deck."
+        assert REVIEWER_DETAILS_SEPARATOR not in text
+
+    def test_one_finding_reads_as_plain_language_then_details(self):
+        text = nodes._advisory_text([_deck_finding("arc_gap", NARRATIVE_TECH)])
+
+        assert text == (
+            "Deck review found 1 thing to look at in how the deck reads as a whole:\n"
+            "- The story has a gap or an unexplained jump between slides.\n"
+            "None of these were changed automatically. "
+            "Reply here if you'd like any of them addressed.\n"
+            "\n"
+            "Reviewer's details:\n"
+            "- arc_gap between narrative_arc[1] and positions 3,4 (#1B3139 callout)"
+        )
+
+    def test_repeated_lines_collapse_with_a_count(self):
+        """Plain lines dedupe by text in first-seen order; the header counts
+        findings; the details keep one bullet per finding, in input order."""
+        text = nodes._advisory_text(
+            [
+                _deck_finding("arc_gap", "Slides 2 and 3 jump from cost to roadmap."),
+                _deck_finding("missing_conclusion", "The last slide restates the agenda."),
+                _deck_finding("arc_gap", "Slide 5 introduces a pilot never set up."),
+            ]
+        )
+
+        head, sep, details = text.partition(REVIEWER_DETAILS_SEPARATOR)
+        assert head.split("\n") == [
+            "Deck review found 3 things to look at in how the deck reads as a whole:",
+            "- The story has a gap or an unexplained jump between slides (noted 2 times).",
+            "- The deck has no clear conclusion or call to action.",
+            DECK_ADVISORY_CLOSING,
+        ]
+        assert sep
+        assert details.split("\n") == [
+            "- Slides 2 and 3 jump from cost to roadmap.",
+            "- The last slide restates the agenda.",
+            "- Slide 5 introduces a pilot never set up.",
+        ]
+
+    def test_slide_level_criteria_get_the_deck_grain_line(self):
+        """Nothing filters the deck reviewer's findings by level, and "this slide"
+        has no referent in a deck-wide message (review #5)."""
+        text = nodes._advisory_text(
+            [
+                _deck_finding("overflow", "The chart on slide 3 runs off the bottom edge."),
+                _deck_finding("arc_gap", "Slide 4 presents results before the method."),
+                _deck_finding("rogue_colour", "Slide 2 uses an off-palette orange."),
+                _deck_finding("brief_not_delivered", "Slide 6 omits the planned timeline."),
+            ]
+        )
+
+        head_lines = text.partition(REVIEWER_DETAILS_SEPARATOR)[0].split("\n")
+        assert head_lines == [
+            f"{DECK_ADVISORY_HEADER_PREFIX}4 things{DECK_ADVISORY_HEADER_SUFFIX}",
+            # The full stop moves after the count.
+            "- One of the slides may need a closer look (noted 3 times).",
+            "- The story has a gap or an unexplained jump between slides.",
+            DECK_ADVISORY_CLOSING,
+        ]
+        assert not [line for line in head_lines if "this slide" in line.lower()]
+
+    def test_the_head_never_carries_a_slug_or_a_reviewer_message(self):
+        """One call with every registered criterion: the head is plain copy only,
+        and the details carry every message verbatim, in input order."""
+        messages = [f"MSG-{criterion}-#ABCDEF" for criterion in CRITERIA]
+        text = nodes._advisory_text(
+            [_deck_finding(c, m) for c, m in zip(CRITERIA, messages)]
+        )
+
+        head, sep, details = text.partition(REVIEWER_DETAILS_SEPARATOR)
+        assert sep, "the reviewer's messages must follow the details separator"
+        for criterion in CRITERIA:
+            assert criterion not in head, criterion
+        assert "_" not in head
+        assert "#" not in head
+        for message in messages:
+            assert message not in head, message
+        assert "MSG-" not in head
+        assert "#ABCDEF" not in head
+        assert details == "\n".join(f"- {m}" for m in messages)
+
+    def test_blank_reviewer_messages_add_no_details_section(self):
+        all_blank = nodes._advisory_text(
+            [_deck_finding("arc_gap", "  "), _deck_finding("missing_conclusion", "  ")]
+        )
+
+        assert REVIEWER_DETAILS_SEPARATOR not in all_blank
+        assert "Reviewer's details" not in all_blank
+        assert all_blank.endswith(DECK_ADVISORY_CLOSING)
+
+        one_real = nodes._advisory_text(
+            [
+                _deck_finding("arc_gap", "  "),
+                _deck_finding("missing_conclusion", "The deck stops on the agenda slide."),
+            ]
+        )
+
+        head, sep, details = one_real.partition(REVIEWER_DETAILS_SEPARATOR)
+        # A blank message still gets its plain line; only its bullet is skipped.
+        assert head.split("\n") == [
+            "Deck review found 2 things to look at in how the deck reads as a whole:",
+            "- The story has a gap or an unexplained jump between slides.",
+            "- The deck has no clear conclusion or call to action.",
+            DECK_ADVISORY_CLOSING,
+        ]
+        assert sep
+        assert details == "- The deck stops on the agenda slide."
+
+    def test_both_transports_carry_the_same_advisory_and_the_details_verbatim(
+        self, graph_env
+    ):
+        """SSE (``_emit``) and ``GET /chat/poll`` (the ``info`` row read back by
+        its request id, projected exactly as the route does) carry the same
+        bytes, and ``deck_reviews`` keeps the reviewer's messages (review #12)."""
+        m1 = "Slide 4 presents pilot results before slide 2 introduces the pilot."
+        m2 = "The final slide restates the agenda instead of a recommendation."
+        htmls = ["<div class='slide'>a</div>", "<div class='slide'>b</div>"]
+        graph_env.seed_slides(htmls)
+        graph_env.skills.set(
+            "deck_reviewer",
+            DeckReviewOutput(
+                findings=[
+                    finding("arc_gap", slide_index=-1, message=m1),
+                    finding("missing_conclusion", slide_index=-1, message=m2),
+                ]
+            ),
+        )
+
+        emitter: queue.Queue = queue.Queue()
+        set_event_emitter(emitter)
+        set_chat_request_id("req-316")
+        try:
+            deck_reviewer_node(graph_env.state(turn_id=TURN))
+        finally:
+            set_event_emitter(None)
+            set_chat_request_id(None)
+        events = []
+        while not emitter.empty():
+            events.append(emitter.get_nowait())
+
+        sse = [e for e in events if (e.metadata or {}).get("node") == "deck_reviewer"]
+        assert len(sse) == 1
+        assert sse[0].type == "assistant"
+
+        # Exactly what GET /chat/poll does (src/api/routes/chat.py).
+        sm = get_session_manager()
+        poll = [
+            sm.msg_to_stream_event(m)
+            for m in sm.get_messages_for_request("req-316")
+            if m["role"] != "user"
+        ]
+        assert len(poll) == 1
+        assert poll[0]["type"] == "assistant"
+        assert poll[0]["content"] == sse[0].content
+
+        head, sep, details = sse[0].content.partition(REVIEWER_DETAILS_SEPARATOR)
+        assert sep
+        assert details.split("\n") == [f"- {m1}", f"- {m2}"]
+        assert m1 not in head
+        assert m2 not in head
+        assert "arc_gap" not in head
+
+        db = graph_env.factory()
+        try:
+            stored = get_deck_review(
+                db, graph_env.deck_row().id, compute_deck_digest(htmls)
+            )
+        finally:
+            db.close()
+        assert [f.message for f in stored["findings"]] == [m1, m2]
 
 
 # ===========================================================================
