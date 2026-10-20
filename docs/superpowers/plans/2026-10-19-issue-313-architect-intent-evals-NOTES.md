@@ -274,4 +274,11 @@ of the payload keys, swept 142 realistic phrases and ran its own sabotage checks
 
 ## CI history
 
-(filled in after the PR is opened)
+- **Round 1** (PR #335, head a44f5430): Test Suite run 39409521616 was green on the first attempt.
+  - Unit Tests passed.
+  - All nine integration jobs passed: API Routes, Config API, Export, General, Genie, Graph
+    Orchestration, Layer 4 Concurrency, Slides and Streaming.
+  - Wheel Build and Test Summary passed.
+  - Frontend, E2E and layer-3 jobs were skipped by the path filter, since the frontend is
+    untouched.
+- No reruns were needed. This notes-only commit follows.
