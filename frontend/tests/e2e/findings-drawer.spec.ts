@@ -14,7 +14,14 @@
  *      finding appears on the slide's NEW position, not its old one.
  *
  *   3. Apply fires a real chat request (not console.info) — the handler is wired
- *      to handleSendMessage in AppLayout.
+ *      to handleSendMessage in AppLayout.  Since #316 the request is a plain lead
+ *      (built from plainIssue) followed by the reviewer's technical message under
+ *      "Reviewer's details:" (plan D4).
+ *
+ *   4. Discuss sends the same shape with its own lead (#316 D4).
+ *
+ *   5. The drawer leads with the plain message; the reviewer's technical message
+ *      is not on the page until "Show details" is clicked (#316 D3).
  *
  * Sabotage targets documented inline.
  *
@@ -25,11 +32,20 @@ import { test, expect } from '../fixtures/base-test';
 import { setupMocks } from '../helpers/setup-mocks';
 import { apiPath } from '../helpers/api-route';
 import type { SlideFinding } from '../../src/types/finding';
+import { mockFindings } from '../fixtures/findings';
 import {
   mockSessionWithSlides,
   mockSlidesResponse,
   TEST_SESSION_ID,
 } from '../helpers/session-helpers';
+
+// f2: the open finding on slideIndex 1 that mockSessionWithSlides serves.
+const f2 = mockFindings.find((f) => f.id === 'f2')!;
+
+// The wire separator between the plain lead and the reviewer's text (#316 D4).
+// Spelled out here rather than imported from src/utils/findingText.ts, so these
+// tests pin the bytes the agents receive instead of echoing the helper's output.
+const REVIEWER_DETAILS = "\n\nReviewer's details:\n";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -58,6 +74,21 @@ async function goToSlide(page: import('@playwright/test').Page, index: number) {
   await page.getByTestId(`ribbon-thumb-${index}`).click();
   await expect(page.getByTestId(`ribbon-thumb-${index}`))
     .toHaveAttribute('data-current', 'true');
+}
+
+// Captures every POST body sent to /api/chat/stream and answers with a minimal
+// complete event.  Used by the Apply and Discuss tests.
+async function captureChatBodies(page: import('@playwright/test').Page): Promise<string[]> {
+  const chatBodies: string[] = [];
+  await page.route(apiPath('/api/chat/stream'), (route) => {
+    chatBodies.push(route.request().postData() ?? '');
+    route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: 'data: {"type":"complete","message":"done"}\n\n',
+    });
+  });
+  return chatBodies;
 }
 
 // ── Test 1: window.__TELLR_TEST_FINDINGS__ is inert ──────────────────────────
@@ -166,8 +197,17 @@ test.describe('findings-drawer — reorder travels with the slide', () => {
 // Verifies that onApplyFinding is wired to handleSendMessage in AppLayout,
 // not console.info.  The handler sends a POST to /api/chat/stream.
 //
-// Sabotage target: put console.info back as the onApplyFinding handler in
-// AppLayout.  The captured chatBodies array stays empty and the test fails.
+// #316 D4: the message is `Please fix this on slide <n>: <plainIssue>`, then the
+// separator, then the reviewer's message verbatim (the architect acts on it).  The
+// lead uses plainIssue, never plainMessage: an open finding's status sentence
+// ("This was not fixed automatically.") must not end up in a fix request.
+//
+// Sabotage targets:
+//   - put console.info back as the onApplyFinding handler in AppLayout.  The
+//     captured chatBodies array stays empty and the test fails.
+//   - revert handleApplyFinding to the old `...review suggestion for slide N:
+//     ${finding.message}` template, or build the lead from plainMessage, or drop
+//     the details section.  The strict toBe fails.
 
 test.describe('findings-drawer — Apply handler wired to chat', () => {
   test.beforeEach(async ({ page }) => {
@@ -176,15 +216,7 @@ test.describe('findings-drawer — Apply handler wired to chat', () => {
 
   test('clicking Apply sends a chat request containing the finding message', async ({ page }) => {
     // One open finding on slideIndex 1 (f2 from mockFindings).
-    const chatBodies: string[] = [];
-    await page.route(apiPath('/api/chat/stream'), (route) => {
-      chatBodies.push(route.request().postData() ?? '');
-      route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream',
-        body: 'data: {"type":"complete","message":"done"}\n\n',
-      });
-    });
+    const chatBodies = await captureChatBodies(page);
 
     await openDeck(page);
 
@@ -203,5 +235,87 @@ test.describe('findings-drawer — Apply handler wired to chat', () => {
     expect(body).toHaveProperty('session_id', TEST_SESSION_ID);
     // The message must reference the finding's text.
     expect(body.message).toContain('35%');  // f2's message is 'The 35% figure is not supported...'
+    // The whole message: plain lead (1-indexed slide, plainIssue), separator, verbatim message.
+    expect(body.message).toBe(
+      `Please fix this on slide 2: ${f2.plainIssue}${REVIEWER_DETAILS}${f2.message}`,
+    );
+    // The part the user reads first carries none of the reviewer's technical text.
+    const [lead] = body.message.split(REVIEWER_DETAILS);
+    expect(lead).not.toContain(f2.message);
+  });
+});
+
+// ── Test 4: Discuss sends the plain lead and the reviewer's details ───────────
+//
+// Same shape as Apply (#316 D4), with the Discuss lead.
+//
+// Sabotage targets: revert handleDiscussFinding to the old `...discuss this review
+// finding for slide N: ${finding.message}` template, or build the lead from
+// plainMessage, or route Discuss through applyFindingRequest.  The strict toBe fails.
+
+test.describe('findings-drawer — Discuss handler wired to chat', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupSession(page);
+  });
+
+  test("clicking Discuss sends the plain lead and the reviewer's details", async ({ page }) => {
+    const chatBodies = await captureChatBodies(page);
+
+    await openDeck(page);
+    await goToSlide(page, 1);
+    await expect(page.getByTestId('finding-f2')).toBeVisible();
+
+    await page.getByTestId('finding-discuss-f2').click();
+
+    await expect.poll(() => chatBodies.length, { timeout: 5000 }).toBeGreaterThan(0);
+
+    const body = JSON.parse(chatBodies[0]);
+    expect(body).toHaveProperty('session_id', TEST_SESSION_ID);
+    expect(body.message).toBe(
+      `I'd like to discuss this on slide 2: ${f2.plainIssue}${REVIEWER_DETAILS}${f2.message}`,
+    );
+    const [lead] = body.message.split(REVIEWER_DETAILS);
+    expect(lead).not.toContain(f2.message);
+  });
+});
+
+// ── Test 5: the drawer leads with the plain message ───────────────────────────
+//
+// #316 D3: the drawer shows plainMessage.  The reviewer's message is not in the
+// DOM until the "Show details" toggle is clicked.  The post-click getByText count
+// of 1 proves the pre-click count of 0 is not vacuous.
+//
+// Sabotage targets:
+//   - render {f.message} in finding-plain-*: toHaveText(plainMessage) fails and
+//     the pre-click getByText count is 1.
+//   - render the details unconditionally (or hide them with CSS only): the
+//     pre-click getByText count is 1.
+//   - drop aria-expanded from the toggle: both attribute checks fail.
+
+test.describe('findings-drawer — plain message first, details on request', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupSession(page);
+  });
+
+  test("the drawer leads with the plain message and hides the reviewer's details until asked", async ({ page }) => {
+    await openDeck(page);
+    await goToSlide(page, 1);
+    await expect(page.getByTestId('finding-f2')).toBeVisible();
+
+    await expect(page.getByTestId('finding-plain-f2')).toHaveText(f2.plainMessage);
+
+    const toggle = page.getByTestId('finding-details-toggle-f2');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(toggle).toHaveText('Show details');
+    await expect(page.getByText(f2.message)).toHaveCount(0);
+    await expect(page.getByTestId('finding-details-f2')).toHaveCount(0);
+
+    await toggle.click();
+
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(toggle).toHaveText('Hide details');
+    await expect(page.getByTestId('finding-details-f2')).toHaveText(f2.message);
+    await expect(page.getByTestId('finding-details-f2')).toBeVisible();
+    await expect(page.getByText(f2.message)).toHaveCount(1);
   });
 });

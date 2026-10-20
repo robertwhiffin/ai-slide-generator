@@ -30,6 +30,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { useGoogleOAuthPopup } from '../../hooks/useGoogleOAuthPopup';
 import { api } from '../../services/api';
 import { configApi } from '../../api/config';
+import { applyFindingRequest, discussFindingRequest } from '../../utils/findingText';
 import { Button } from '@/ui/button';
 import { SidebarProvider, SidebarInset } from '@/ui/sidebar';
 import { AppSidebar } from './app-sidebar';
@@ -1057,15 +1058,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   // the dismissed set and seenState; apply/discuss pass through unchanged).
 
   // Apply: no dedicated backend endpoint today.  Route through chat so the agent
-  // can construct and deliver the fix.  Expand the chat so the user sees the
-  // response.
+  // can construct and deliver the fix.  The message leads with a plain statement
+  // and the reviewer's technical text (for the agent).  Message.tsx collapses the
+  // details section. Expand the chat so the user sees the response.
   const handleApplyFinding = useCallback((findingId: string) => {
     const finding = displayDeck?.findings?.find(f => f.id === findingId);
     if (!finding) return;
     setCollapsed((prev) => prev.chat ? { ...prev, chat: false } : prev);
-    handleSendMessage(
-      `Please apply this review suggestion for slide ${finding.slideIndex + 1}: ${finding.message}`,
-    );
+    handleSendMessage(applyFindingRequest(finding));
   }, [displayDeck, handleSendMessage]);
 
   // Dismiss: SlideViewer's handleDismiss already updates the dismissed set and
@@ -1075,13 +1075,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   }, []);
 
   // Discuss: expand the chat panel so the user can ask follow-up questions.
+  // The message leads with a plain statement and the reviewer's technical text
+  // (for the agent).  Message.tsx collapses the details section.
   const handleDiscussFinding = useCallback((findingId: string) => {
     const finding = displayDeck?.findings?.find(f => f.id === findingId);
     setCollapsed((prev) => prev.chat ? { ...prev, chat: false } : prev);
     if (finding) {
-      handleSendMessage(
-        `I'd like to discuss this review finding for slide ${finding.slideIndex + 1}: ${finding.message}`,
-      );
+      handleSendMessage(discussFindingRequest(finding));
     }
   }, [displayDeck, handleSendMessage]);
 
