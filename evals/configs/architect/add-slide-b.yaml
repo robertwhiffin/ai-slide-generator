@@ -1,0 +1,6 @@
+# Architect v1 prompt (#314), candidate B: add-slide plus the rule that a template_sections
+# entry whose label is null cannot be bound, so both binding fields stay null.
+agent_key: architect
+name: add-slide-b
+base: v1
+prompt_file: add-slide-b.md
