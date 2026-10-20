@@ -154,7 +154,19 @@ No new spec files were added, so the CI matrix is unchanged.
 
 ## CI history
 
-See the PR. The CI rounds are recorded in the PR body once they settle.
+- **Round 1** (head `5f8610cb`, run `39407610221`): green on the first push.
+  - 65 checks passed. 2 were skipped by design: `deploy`, and `Agentic Behaviour (layer 3)`.
+  - Passing checks include Unit Tests, Frontend Unit Tests, Frontend Build, Wheel Build, every Integration job (General, Graph Orchestration, Streaming, Slides, …) and all 50 E2E matrix specs (findings-drawer, chat-ui, spec-view, slide-viewer, app-tour and the rest).
+  - No reruns were needed, and nothing was flaky.
+- The only later push changes this notes file.
+
+## Follow-ups
+
+- **Converge with #321 (PR #332).** Once it merges, move both chat shapes (the Apply/Discuss request details and the deck-advisory details) onto its `metadata.details` payload and its "Details" disclosure. Then drop the content-shape parse in `findingText.ts`/`Message.tsx`.
+  - The copy style already matches #332's `user_notices.py`: second person in action lines, 1-based slide numbers, contractions.
+  - Decide then whether finding copy should share a module with the notice catalogue.
+- **Eval for the new Apply/Discuss phrasing.** Add an architect eval case in #313's harness covering the new phrasing.
+- **Optional deck-advisory copy polish.** Use a plural deck-grain line when the count is above 1, and a singular closing line for "1 thing".
 
 ## Known gaps and follow-ups
 
