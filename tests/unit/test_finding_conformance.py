@@ -301,6 +301,33 @@ class TestFindingConformance:
             == REVIEWER_DETAILS_SEPARATOR
         )
 
+    @pytest.mark.parametrize(
+        "name",
+        ["DECK_ADVISORY_HEADER_PREFIX", "DECK_ADVISORY_HEADER_SUFFIX", "DECK_ADVISORY_CLOSING"],
+    )
+    def test_ts_deck_advisory_constants_match_python(self, name: str) -> None:
+        """The frontend's deck-advisory constants are the Python ones, byte for byte.
+
+        ``nodes._advisory_text`` writes the advisory from these strings and
+        ``splitDeckAdvisory`` in findingText.ts matches its plain block against
+        them to collapse the reviewer's details (#316, plan D5/D14).  If a copy
+        edit landed on one side only, the parser would silently stop matching and
+        every advisory would render with the reviewer's text leading again.  A
+        missing file or constant fails here (``_ts_string_constant`` asserts),
+        rather than comparing nothing.
+        """
+        from src.domain import finding_copy
+
+        assert FINDING_TEXT_TS.is_file(), (
+            f"{FINDING_TEXT_TS} not found: {name} must be exported from it "
+            f"(#316 plan Task 7)"
+        )
+        python_value = getattr(finding_copy, name)
+        assert isinstance(python_value, str) and python_value.strip(), (
+            f"finding_copy.{name} must be a non-empty string"
+        )
+        assert _ts_string_constant(FINDING_TEXT_TS, name) == python_value
+
     def test_typed_fixture_literals_carry_the_python_copy(self) -> None:
         """Every typed SlideFinding literal in the frontend tests carries the
         plainMessage/plainIssue the Python projection would derive for it.

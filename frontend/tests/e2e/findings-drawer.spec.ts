@@ -23,6 +23,11 @@
  *   5. The drawer leads with the plain message; the reviewer's technical message
  *      is not on the page until "Show details" is clicked (#316 D3).
  *
+ *   6–8. In the chat, the Apply and Discuss bubbles, and a reloaded Apply-shaped
+ *      user row plus a deck-review advisory row, show only the plain lead; the
+ *      reviewer's text sits in a closed "Reviewer's details" <details> until its
+ *      summary is clicked (#316 D14, plan Task 7).
+ *
  * Sabotage targets documented inline.
  *
  * Known-failing specs (not ours): 3 × slide-surface-fidelity (in-iframe computed
@@ -34,6 +39,7 @@ import { apiPath } from '../helpers/api-route';
 import type { SlideFinding } from '../../src/types/finding';
 import { mockFindings } from '../fixtures/findings';
 import {
+  mockSessionDetail,
   mockSessionWithSlides,
   mockSlidesResponse,
   TEST_SESSION_ID,
@@ -317,5 +323,131 @@ test.describe('findings-drawer — plain message first, details on request', () 
     await expect(page.getByTestId('finding-details-f2')).toHaveText(f2.message);
     await expect(page.getByTestId('finding-details-f2')).toBeVisible();
     await expect(page.getByText(f2.message)).toHaveCount(1);
+  });
+});
+
+// ── Tests 6–8: the chat bubble collapses the reviewer's details ──────────────
+//
+// #316 D14: Message.tsx shows only the plain lead of the two shapes this PR
+// writes (a user Apply/Discuss request; an assistant deck-review advisory) and
+// puts the reviewer's text in a closed native <details>
+// (data-testid="message-reviewer-details", summary "Reviewer's details").  The
+// sent and stored content is unchanged.  Every expected string is a literal.
+//
+// The closed <details> body stays in the DOM, so "hidden" is not.toBeVisible()
+// paired with toHaveCount(1) on the same locator (a bare not.toBeVisible() also
+// passes when the element is absent), then toBeVisible() after the summary click.
+//
+// Sabotage targets:
+//   - render message.content instead of the parsed lead: the exact-lead
+//     getByText finds no element and the technical text is visible pre-click.
+//   - render the details open, or as a plain <div>: the pre-click
+//     not.toBeVisible() fails.
+//   - drop the assistant (advisory) branch, or bind the parsers to the wrong
+//     role: the reload test's toHaveCount(2) fails.
+
+const APPLY_LEAD = `Please fix this on slide 2: ${f2.plainIssue}`;
+const DISCUSS_LEAD = `I'd like to discuss this on slide 2: ${f2.plainIssue}`;
+
+// nodes._advisory_text for one arc_gap finding, as literals (src/domain/finding_copy.py).
+const ADVISORY_LEAD_LINES = [
+  'Deck review found 1 thing to look at in how the deck reads as a whole:',
+  '- The story has a gap or an unexplained jump between slides.',
+  "None of these were changed automatically. Reply here if you'd like any of them addressed.",
+];
+const ADVISORY_DETAIL = 'Slide 3 restates slide 2 instead of moving the argument on.';
+const ADVISORY = `${ADVISORY_LEAD_LINES.join('\n')}${REVIEWER_DETAILS}- ${ADVISORY_DETAIL}`;
+
+test.describe("findings-drawer — chat bubbles collapse the reviewer's details", () => {
+  test.beforeEach(async ({ page }) => {
+    await setupSession(page);
+  });
+
+  for (const { action, testId, lead } of [
+    { action: 'Apply', testId: 'finding-apply-f2', lead: APPLY_LEAD },
+    { action: 'Discuss', testId: 'finding-discuss-f2', lead: DISCUSS_LEAD },
+  ]) {
+    test(`${action} shows the plain lead in the chat bubble with the reviewer's details collapsed`, async ({ page }) => {
+      const chatBodies = await captureChatBodies(page);
+
+      await openDeck(page);
+      await goToSlide(page, 1);
+      await expect(page.getByTestId('finding-f2')).toBeVisible();
+
+      await page.getByTestId(testId).click();
+      await expect.poll(() => chatBodies.length, { timeout: 5000 }).toBeGreaterThan(0);
+
+      const chat = page.getByTestId('chat-panel');
+      await expect(chat.getByText(lead, { exact: true })).toBeVisible();
+
+      const details = chat.getByTestId('message-reviewer-details');
+      await expect(details).toHaveCount(1);
+      const tech = chat.getByText(f2.message, { exact: true });
+      await expect(tech).toHaveCount(1);
+      await expect(tech).not.toBeVisible();
+
+      await details.locator('summary').click();
+      await expect(tech).toBeVisible();
+
+      // Render-only: the sent content still carries the reviewer's text verbatim.
+      const body = JSON.parse(chatBodies[0]);
+      expect(body.message).toBe(`${lead}${REVIEWER_DETAILS}${f2.message}`);
+    });
+  }
+
+  test('persisted Apply-shaped and advisory-shaped messages reload collapsed', async ({ page }) => {
+    const userRow = {
+      id: 1,
+      role: 'user',
+      content: `${APPLY_LEAD}${REVIEWER_DETAILS}${f2.message}`,
+      message_type: 'user_query',
+      created_at: '2026-10-19T10:00:00Z',
+      metadata: null,
+    };
+    const adviceRow = {
+      id: 2,
+      role: 'assistant',
+      content: ADVISORY,
+      message_type: 'info',
+      created_at: '2026-10-19T10:00:05Z',
+      metadata: null,
+    };
+    // Registered after setupSession, so (LIFO) it wins over mockSessionWithSlides'
+    // detail route.  apiPath matches the exact pathname, never a sub-resource.
+    await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}`), (route) => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...mockSessionDetail, messages: [userRow, adviceRow] }),
+      });
+    });
+
+    await openDeck(page);
+
+    const chat = page.getByTestId('chat-panel');
+    const details = chat.getByTestId('message-reviewer-details');
+    await expect(details).toHaveCount(2);
+
+    // The plain leads are visible.
+    await expect(chat.getByText(APPLY_LEAD, { exact: true })).toBeVisible();
+    for (const line of ADVISORY_LEAD_LINES) {
+      await expect(chat.getByText(line)).toBeVisible();
+    }
+
+    // Neither reviewer's text is visible until its own summary is clicked.
+    const userTech = chat.getByText(f2.message, { exact: true });
+    const adviceTech = chat.getByText(ADVISORY_DETAIL);
+    await expect(userTech).toHaveCount(1);
+    await expect(adviceTech).toHaveCount(1);
+    await expect(userTech).not.toBeVisible();
+    await expect(adviceTech).not.toBeVisible();
+
+    await details.nth(0).locator('summary').click();
+    await expect(userTech).toBeVisible();
+    await expect(adviceTech).not.toBeVisible();
+
+    await details.nth(1).locator('summary').click();
+    await expect(adviceTech).toBeVisible();
   });
 });
