@@ -56,7 +56,7 @@ Frontend                    Backend
    │──────────────────────────>│     - StreamingCallbackHandler
    │  { events, status }       │       persists messages with request_id
    │<──────────────────────────│
-   │  (repeat every 2s)        │
+   │  (repeat every 3s)        │
    │                           │
    │  status: complete         │
    │<──────────────────────────│
@@ -337,9 +337,9 @@ While a graph turn runs, the chat placeholder names the stage the graph is in (f
 | `seq` | Integer starting at 1 each turn; rises by one for every report that changed something |
 | `phase` | One of `planning`, `gathering_data`, `checking_slides`, `building`, `reviewing_deck` |
 | `slides.total` | Number of slides the turn covers |
-| `slides.building` / `reviewing` / `fixing` / `done` | Sorted 0-based positions currently at that stage; a slide is in exactly one list |
+| `slides.building` / `reviewing` / `fixing` / `done` | Sorted 0-based positions currently at that stage. A slide is in at most one list: a covered slide the foreman has not dispatched yet (decks of more than 15 slides) counts in `total` but is in none |
 
-Reports are statement-level calls (`report_phase`, `report_slide`, `report_slides`) placed beside existing events in `src/services/graph/nodes.py`: the architect reports `planning` (and `checking_slides` before it re-reviews committed slides after a deck-level brief change); the data analyst reports `gathering_data`; the foreman reports `building` when it dispatches a batch and marks that batch's slides as building; each slide's pipeline reports `reviewing`, `fixing` (when a flagged slide opens a fix round) and `done`; the placeholder node reports the slides it placeholds as `done`; the deck reviewer reports `reviewing_deck`. A turn that only replies in chat (the architect answers without building) reaches only `planning`.
+Reports are statement-level calls (`report_phase`, `report_slide`, `report_slides`) placed beside existing events in `src/services/graph/nodes.py`: the architect reports `planning` (and `checking_slides` before it re-reviews committed slides after a deck-level brief change); the data analyst reports `gathering_data`; the foreman reports `building` when it dispatches a batch and marks that batch's slides as building; each slide's pipeline reports `reviewing`, `fixing` (when a flagged slide opens a fix round) and `done`; the placeholder node reports the slides it placeholds as `done`; the deck reviewer reports `reviewing_deck`. A turn that only replies in chat (the architect answers without building) reaches only `planning`, plus `gathering_data` if the architect first asked the data analyst for data.
 
 **Monotonic rules (in brief):**
 - A phase has a rank: `planning`, `gathering_data` and `checking_slides` share rank 0 (the architect and data analyst can alternate within a turn), `building` is 1, `reviewing_deck` is 2. A report with a lower rank than the current phase is dropped.
@@ -359,7 +359,7 @@ Reports are statement-level calls (`report_phase`, `report_slide`, `report_slide
 
 **Why the poll is cross-worker coherent.** The poll reads the snapshot from the request's database row (`get_chat_request` returns it as `turn_progress`), not from `job_queue.jobs` or any other in-process state. Whichever worker ran the graph wrote the row, and whichever worker serves the poll reads it, so every worker returns the same stage. `poll_chat` returns it only while the request is neither `completed` nor `error`, after the same session-creator check as the rest of the response. See [Multi-User Concurrency](multi-user-concurrency.md).
 
-**Where the label is computed.** The backend sends data, not text. `describeTurnProgress` in `frontend/src/utils/turnProgress.ts` turns a snapshot into the placeholder label, and `frontend/src/types/turnProgress.ts` mirrors the Python enums (a conformance test reads `progress.py` as text and pins both sides). On polling, `startPolling` in `src/services/api.ts` forwards `response.turn_progress` as a `turn_progress` stream event when its `seq` is higher than the last one it forwarded. `ChatPanel` validates the payload, keeps the snapshot with the highest `seq` (it resets at send) and passes the label to `MessageList`, which shows it in the placeholder (`data-testid="chat-turn-progress"`, `aria-live="polite"`). The `turn_progress` event is never added to the chat transcript.
+**Where the label is computed.** The backend sends data, not text. `describeTurnProgress` in `frontend/src/utils/turnProgress.ts` turns a snapshot into the placeholder label, and `frontend/src/types/turnProgress.ts` mirrors the Python enums (a conformance test reads `progress.py` as text and pins both sides). On polling, `startPolling` in `frontend/src/services/api.ts` forwards `response.turn_progress` as a `turn_progress` stream event when its `seq` is higher than the last one it forwarded. `ChatPanel` validates the payload, keeps the snapshot with the highest `seq` (it resets at send) and passes the label to `MessageList`, which shows it in the placeholder (`data-testid="chat-turn-progress"`, `aria-live="polite"`). The `turn_progress` event is never added to the chat transcript.
 
 | Snapshot | Label |
 |----------|-------|
@@ -468,7 +468,7 @@ const pollInterval = setInterval(async () => {
     clearInterval(pollInterval);
     // Emit final complete/error event
   }
-}, 2000);
+}, 3000);  // POLL_INTERVAL_MS
 ```
 
 ### ChatPanel Event Handling
@@ -621,7 +621,7 @@ if (message.tool_call) {
 
 ### Polling Mode (Databricks Apps)
 7. **Async submission** – POST /api/chat/async returns request_id
-8. **Poll updates** – Events arrive via polling every 2 seconds
+8. **Poll updates** – Events arrive via polling every 3 seconds
 9. **Completion detection** – Polling stops when status=completed
 10. **Error handling** – Errors propagate correctly
 11. **Environment detection** – Polling used automatically on *.databricks.com
