@@ -56,6 +56,7 @@ from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_columns
 from src.api.services.session_manager import get_session_manager
 from src.api.services.slide_repository import (
+    SlideRowsChangedError,
     SlideWriter,
     is_placeholder_record,
     is_placeholder_verdict,
@@ -70,6 +71,7 @@ from src.domain.finding import (
     build_verification_record,
     make_finding_id,
 )
+from src.domain.slide_alignment import AlignmentRefused, SlideAlignment, align_slides
 from src.domain.slide_deck import SlideDeck
 from src.domain.slide_numbering import architect_slide_payload, edit_ignores_references
 from src.services.agent import SAFETY_RETRY_NOTICE
@@ -1447,6 +1449,71 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# The refusal for an edit spec that drops or renumbers slides.  An edit may ADD
+# slides (#314), so the sentence names only what is still refused.
+_POSITIONS_CHANGED_TEXT = (
+    "I could not apply that edit: it would have removed or renumbered slides, "
+    "and an edit only adds slides or changes the ones that are there. Nothing "
+    "has been changed."
+)
+
+# An edit spec the alignment cannot read without guessing (#314, D1), by
+# ``AlignmentRefused.code``: the degrade code and the user's sentence.
+# ``removes_slides`` is caught earlier by the position-set guard; it falls back
+# to that guard's refusal should it ever get here.
+_ALIGNMENT_REFUSALS = {
+    "ambiguous": (
+        "edit_insert_ambiguous",
+        "I could not tell which of the existing slides I was changing and where "
+        "the new slide goes, so nothing has been changed. Ask me to add the slide "
+        "on its own first, then for the other change.",
+    ),
+    "moves_slides": (
+        "edit_spec_moves_slides",
+        "I could not apply that edit: it would have moved existing slides, and an "
+        "edit only adds slides or changes the ones that are there. Nothing has "
+        "been changed.",
+    ),
+}
+
+
+def _degrade_edit(
+    state: dict, updates: Dict[str, Any], degrade: Dict[str, str]
+) -> Dict[str, Any]:
+    """Turn an edit that cannot be applied into a discussion, said on both surfaces.
+
+    Mutates *updates* (and returns it); callers then ``return updates`` so the
+    node's state keys stay visible in the node itself.
+    """
+    # An edit that cannot be applied.  Degrade to a discussion turn rather
+    # than routing to a foreman that would cover no positions and reach deck
+    # review on an unbuilt deck — or dispatch a builder against a brief that
+    # describes another slide.  ONE degrade path for every cause,
+    # deliberately: several shapes of the same refusal would be several things
+    # to keep in step.  Only the code and the sentence differ, and the
+    # sentence differs because telling a user with a visible deck that no
+    # specification could be found would be false.
+    updates["architect_intent"] = "discuss"
+    updates["architect_message"] = degrade["user"]
+    updates["error_state"] = {
+        "node": "architect",
+        "code": degrade["code"],
+        "message": degrade["message"],
+    }
+    # A failed shift degrades AFTER the edit's targets were set, and a refused
+    # edit rebuilds nothing.
+    updates["target_positions"] = None
+    # The model's own line ("Editing slide 2.") was already emitted and
+    # persisted above, so the refusal must be SAID too, on the same two
+    # surfaces — otherwise the user is told an edit is under way and then
+    # nothing happens.  A describe-only turn stays silent the same way the
+    # model's line does: _say suppresses it and the sweeper has no emitter.
+    _emit(StreamEventType.ASSISTANT, content=degrade["user"],
+          metadata={"node": "architect", "intent": "discuss"})
+    _say(state, degrade["user"])
+    return updates
+
+
 def architect_node(state: dict) -> Dict[str, Any]:
     """Decide the turn's intent, commit the spec, resolve every brand value.
 
@@ -1487,6 +1554,13 @@ def architect_node(state: dict) -> Dict[str, Any]:
     measurement of why it cannot be a two-pass turn — and narrows coverage to the
     slides that contradict it, so still-valid work including manual edits
     survives.
+
+    **An edit may add slides (#314).**  Which slides are new is derived by
+    aligning the edit's spec to the persisted one (``align_slides``), never read
+    off the model's targets; an alignment that would guess is refused.  The spec
+    is re-stamped to ``0..m-1`` and the rows are shifted to match
+    (``SlideWriter.insert_pending_slides``) before ``classify_spec_change``, and
+    only the new and revised slides are targeted.
     """
     session_id = state["session_id"]
     turn_id = state["turn_id"]
@@ -1724,12 +1798,19 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     "try asking again."
                 ),
             }
-        elif not describe_only and {s.position for s in spec.slides} != {
-            s.position for s in prior_spec.slides
-        }:
-            # An edit revises slides; it never adds or removes one (there is no
-            # insert or delete intent).  A spec with a different position set
-            # would also silently drop a committed row's spec.
+        elif not describe_only and (
+            len(spec.slides) < len(prior_spec.slides)
+            or (
+                len(spec.slides) == len(prior_spec.slides)
+                and {s.position for s in spec.slides}
+                != {s.position for s in prior_spec.slides}
+            )
+        ):
+            # An edit may ADD slides (#314: a longer spec is aligned below), but
+            # it never removes or renumbers one (there is no delete intent).  A
+            # shorter spec would silently drop a committed row's spec; an
+            # equal-length one with other positions describes rows that are not
+            # there.
             edit_degrade = {
                 "code": "edit_spec_positions_changed",
                 "message": (
@@ -1737,11 +1818,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     f"{sorted(s.position for s in spec.slides)} but the persisted "
                     f"deck_spec has {sorted(s.position for s in prior_spec.slides)}"
                 ),
-                "user": (
-                    "I could not apply that edit: it would have added or removed "
-                    "slides, and an edit only changes the slides that are already "
-                    "there. Nothing has been changed."
-                ),
+                "user": _POSITIONS_CHANGED_TEXT,
             }
 
     # The spec's pinned template, not the inbound payload's: a turn that pins or
@@ -1772,44 +1849,102 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 ),
             }
 
+    # #314 (D1): which slides an edit adds is DERIVED from the two specs by an
+    # order-preserving alignment, never read off the model's targets.  It runs
+    # after the bindings (they mutate ``spec``) and before the degrade decision,
+    # so a refusal writes nothing.  Equal-length edits are aligned too: a spec
+    # that swaps two slides' entries is refused, not rebuilt in place.  Not on a
+    # describe-only turn, which dispatches no builder and shifts no row.
+    alignment: Optional[SlideAlignment] = None
+    if (
+        edit_degrade is None
+        and intent == "edit"
+        and not describe_only
+        and prior_spec is not None
+    ):
+        listed = [s.position for s in spec.slides]
+        if listed != sorted(listed):
+            logger.info(
+                "The edit's deck_spec lists its slides as positions %s; they are "
+                "read in position order",
+                listed,
+                extra={"session_id": session_id},
+            )
+        try:
+            alignment = align_slides(prior_spec.slides, spec.slides)
+        except AlignmentRefused as exc:
+            code, user = _ALIGNMENT_REFUSALS.get(
+                exc.code, ("edit_spec_positions_changed", _POSITIONS_CHANGED_TEXT)
+            )
+            edit_degrade = {"code": code, "message": exc.detail, "user": user}
+
     if edit_degrade is not None:
-        # An edit that cannot be applied.  Degrade to a discussion turn rather
-        # than routing to a foreman that would cover no positions and reach deck
-        # review on an unbuilt deck — or dispatch a builder against a brief that
-        # describes another slide.  ONE degrade path for every cause,
-        # deliberately: several shapes of the same refusal would be several things
-        # to keep in step.  Only the code and the sentence differ, and the
-        # sentence differs because telling a user with a visible deck that no
-        # specification could be found would be false.
-        updates["architect_intent"] = "discuss"
-        updates["architect_message"] = edit_degrade["user"]
-        updates["error_state"] = {
-            "node": "architect",
-            "code": edit_degrade["code"],
-            "message": edit_degrade["message"],
-        }
-        # The model's own line ("Editing slide 2.") was already emitted and
-        # persisted above, so the refusal must be SAID too, on the same two
-        # surfaces — otherwise the user is told an edit is under way and then
-        # nothing happens.  A describe-only turn stays silent the same way the
-        # model's line does: _say suppresses it and the sweeper has no emitter.
-        _emit(StreamEventType.ASSISTANT, content=edit_degrade["user"],
-              metadata={"node": "architect", "intent": "discuss"})
-        _say(state, edit_degrade["user"])
+        _degrade_edit(state, updates, edit_degrade)
         return updates
+
+    # An edit that adds slides.  Its spec is re-stamped to positions 0..m-1, the
+    # numbering the shifted rows will have, and that canonical spec is the one
+    # every later step uses: the targets, the shift, classify_spec_change, state
+    # and the pre-fan-out write.
+    inserting = alignment is not None and bool(alignment.inserted_indices)
+    if inserting:
+        model_to_final = {
+            position: index for index, position in enumerate(alignment.new_positions)
+        }
+        spec = spec.model_copy(
+            update={
+                "slides": [
+                    slide.model_copy(update={"position": model_to_final[slide.position]})
+                    for slide in sorted(spec.slides, key=lambda s: s.position)
+                ]
+            }
+        )
 
     # Every slide the edit's spec changes is rebuilt, not only the ones the model
     # named: a slide whose brief changed but is not rebuilt is spec/slide drift.
     edit_targets: List[int] = []
-    if intent == "edit":
-        prior_by_position = (
-            {s.position: s for s in prior_spec.slides} if prior_spec else {}
+    if inserting:
+        # D3: exactly the new and the revised slides, in the canonical numbering.
+        # The model's targets are NOT honoured: one that counted in the old
+        # numbering would rebuild (and destroy any hand edit on) a slide that
+        # only moved.  They are compared, and a difference is logged.
+        edit_targets = sorted(
+            set(alignment.inserted_indices) | set(alignment.revised_indices)
         )
-        changed = {
-            s.position
-            for s in spec.slides
-            if s != prior_by_position.get(s.position)
-        }
+        updates["target_positions"] = list(edit_targets)
+        model_targets = sorted(
+            {model_to_final[p] for p in out.target_positions if p in model_to_final}
+        )
+        unknown = sorted(p for p in out.target_positions if p not in model_to_final)
+        if model_targets != edit_targets or unknown:
+            logger.warning(
+                "insert_targets_disagree: the model targeted positions %s (%s once "
+                "re-stamped%s) but the edit adds %s and revises %s; building %s",
+                sorted(out.target_positions),
+                model_targets,
+                f"; {unknown} are not in its spec" if unknown else "",
+                list(alignment.inserted_indices),
+                list(alignment.revised_indices),
+                edit_targets,
+                extra={"session_id": session_id},
+            )
+        # The #313 D5 guard is skipped: on an add, a named slide is the ANCHOR
+        # ("after slide 3"), never a target, so missing it is no off-by-one.
+    elif intent == "edit":
+        if alignment is not None:
+            # Equal length: the revised POSITIONS, which equal the positional
+            # comparison below on any deck, gapped included.
+            changed = set(alignment.revised)
+        else:
+            # No alignment ran (a describe-only turn): today's comparison.
+            prior_by_position = (
+                {s.position: s for s in prior_spec.slides} if prior_spec else {}
+            )
+            changed = {
+                s.position
+                for s in spec.slides
+                if s != prior_by_position.get(s.position)
+            }
         edit_targets = sorted(set(out.target_positions) | changed)
         updates["target_positions"] = list(edit_targets)
         # #313 (D5), log only: the user named slides and the model's targets miss
@@ -1831,6 +1966,100 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 ),
                 extra={"session_id": session_id},
             )
+
+    # A BUILD answer to an add rebuilds every position in place, so identity and
+    # records stay by position and every slide after the new one is
+    # mis-attributed (pre-existing build semantics, D1).  Diagnostic only: it
+    # changes nothing, and it must never fail a build that shrinks or reorders
+    # the deck, which the alignment refuses (C10).
+    if (
+        intent == "build"
+        and prior_spec is not None
+        and committed_rows
+        and not describe_only
+    ):
+        try:
+            probe = align_slides(prior_spec.slides, spec.slides)
+        except AlignmentRefused:
+            probe = None
+        if probe is not None and probe.inserted_indices and not probe.revised_indices:
+            logger.warning(
+                "build_looks_like_insert: the build's deck_spec is the persisted "
+                "spec plus new slides at %s over %d committed rows; a build "
+                "rebuilds every position in place, so the slides after them lose "
+                "their identity and records",
+                list(probe.inserted_indices),
+                len(committed_rows),
+                extra={"session_id": session_id},
+            )
+
+    # ---- #314 (D4): shift the rows for the new slides ------------------------
+    # At commit, before any builder is dispatched (builders land BY POSITION, so
+    # a shift at land time would interleave with them) and BEFORE
+    # classify_spec_change, so a deck-level re-review reads each shifted slide
+    # against its own spec entry.  ALWAYS called on an insert, whatever the
+    # top-of-node read returned: that read swallows errors and returns [], and
+    # the shift re-reads in its own transaction and refuses rows the node did
+    # not plan against.  One transaction: rows, pending placeholders, the
+    # canonical spec and the version bump, or nothing.
+    if inserting:
+        shift_degrade: Optional[Dict[str, str]] = None
+        try:
+            SlideWriter().insert_pending_slides(
+                session_id,
+                alignment.inserted_indices,
+                deck_spec=spec.to_json(),
+                expected_rows=[
+                    (row.get("slide_id"), row.get("content_hash"))
+                    for row in committed_rows
+                ],
+                created_by=initiated_by,
+                mutation=_deck_mutation_context(
+                    session_id,
+                    state.get("graph_release_id"),
+                    operation="insert_slide",
+                    object_type="deck",
+                ),
+            )
+        except SlideRowsChangedError:
+            # Caught before Exception: it IS a RuntimeError, and a deck someone
+            # changed mid-plan is a retry, not a failure.
+            logger.warning(
+                "The deck's rows changed while the architect planned an insert; "
+                "nothing was shifted",
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+            shift_degrade = {
+                "code": "insert_rows_changed",
+                "message": "the committed rows are not the rows the insert was "
+                "planned against",
+                "user": (
+                    "The deck changed while I was planning, so I have not added "
+                    "the slide. Nothing has been changed; please ask again."
+                ),
+            }
+        except Exception as exc:
+            _raise_if_persisted_runtime_failure(exc)
+            logger.exception("Shifting the rows for an insert failed")
+            shift_degrade = {
+                "code": "insert_rows_failed",
+                "message": type(exc).__name__,
+                "user": (
+                    "I could not add the slide, so nothing has been changed. "
+                    "Please try asking again."
+                ),
+            }
+        if shift_degrade is not None:
+            _degrade_edit(state, updates, shift_degrade)
+            return updates
+        logger.info(
+            "Inserted slides at %s (revised %s); the rows are shifted and the new "
+            "positions hold pending placeholders",
+            list(alignment.inserted_indices),
+            list(alignment.revised_indices),
+            extra={"session_id": session_id},
+        )
 
     # ---- §4.6: what does this commit change about the DECK, not a slide? ----
     # Classified AFTER the edit turn's target_positions is set, so the

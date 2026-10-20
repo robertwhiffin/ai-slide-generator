@@ -808,18 +808,19 @@ class TestAnEditCarriesItsRevisedSpec:
 
     @pytest.mark.parametrize(
         "edit_positions",
-        [(0, 1, 2, 3), (0, 1), (0, 1, 3)],
-        ids=["adds-a-slide", "drops-a-slide", "renumbers-a-slide"],
+        [(0, 1), (0, 1, 3)],
+        ids=["drops-a-slide", "renumbers-a-slide"],
     )
     def test_an_edit_that_changes_the_position_set_is_refused(
         self, graph_env, edit_positions
     ):
-        """Adding or removing slides is not an edit.
+        """Removing or renumbering slides is not an edit.
 
-        Edits never could add or remove a slide.  A model spec that drops a
+        An edit may ADD slides (#314; covered in test_architect_insert_slide.py),
+        but it never removes or renumbers one.  A model spec that drops a
         position would otherwise be persisted with a committed row it no longer
-        describes; one that adds a position would brief nothing for it, or
-        build a slide the user never asked for.
+        describes; one that renumbers a position would brief a builder for a
+        position no committed row holds, and leave the row it renamed undescribed.
         """
         graph_env.seed_slides(self.THREE)
         self._persist(graph_env, make_spec((0, 1, 2)))
@@ -1754,14 +1755,14 @@ class TestArchitectSlideNumbering:
 
     def test_f_a_degraded_edit_logs_nothing(self, graph_env, caplog):
         """(f) The guard sits on the path an ACCEPTED edit takes.  An edit the
-        node refuses (here its spec adds a slide: ``edit_spec_positions_changed``)
+        node refuses (here its spec drops a slide: ``edit_spec_positions_changed``)
         is degraded to a discussion and rebuilds nothing, so its targets are not
         an edit to warn about, off-by-one or not.
 
         Sabotage: move the guard above the degrade return and this goes red."""
         graph_env.seed_slides(self.THREE)
         self._persist(graph_env, make_spec((0, 1, 2)))
-        graph_env.skills.set("architect", _edit_out(make_spec((0, 1, 2, 3)), [2]))
+        graph_env.skills.set("architect", _edit_out(make_spec((0, 1)), [2]))
 
         with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
             updates = architect_node(
