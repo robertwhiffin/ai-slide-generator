@@ -653,6 +653,78 @@ def _prune_slide_rows_beyond(db: Session, owner_id: int, slide_count: int) -> in
     return len(orphans)
 
 
+def _rewrite_slide_rows(
+    db: Session,
+    owner_id: int,
+    slides: List[Dict[str, Any]],
+    *,
+    now_dt: Optional[datetime],
+    author_fallback: Optional[str],
+    attribution: Optional[Dict[int, SlideAttribution]] = None,
+    incoming: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> None:
+    """THE per-slide rewrite of a whole deck: one copy, so its callers cannot diverge.
+
+    ``save_slide_deck``, ``restore_version`` and ``SlideWriter.insert_pending_slides``
+    all rewrite every row of a deck through here.  Hand-copied versions of this
+    block once drifted apart, and a reorder then attached slide identity and
+    verdicts to the wrong slide.
+
+    Steps, in this order:
+
+    1. **Attribution, before any write.**  Unless the caller passes the exact
+       ``attribution`` map, the current rows are read and attributed to the new
+       positions by ``_attribute_slide_records`` (slide_id, then content hash, then
+       unclaimed position).  It must run before the first upsert, because the
+       upsert rewrites those ORM rows in place.  A caller that already knows which
+       old row moves where (the graph's shift) passes the map and skips the
+       heuristic, which could only be wrong there.
+    2. **``_upsert_slide_row`` on the full-identity path for every position**, with
+       the attributed record and spec fragment as its base, and ``incoming[position]``
+       (``{content_hash: verdict}``) merged in.
+    3. **``_prune_slide_rows_beyond``** the new slide count.
+
+    Args:
+        db: live SQLAlchemy session.  The caller owns the transaction; nothing
+            here commits or relies on an implicit flush.
+        owner_id: ``deck_owner.id``.
+        slides: the deck's slide dicts in position order.
+        now_dt: timestamp for a slide that carries none, or None to leave it NULL.
+        author_fallback: author for a slide that names none, or None to leave it
+            NULL.  See ``_upsert_slide_row`` for why callers differ.
+        attribution: ``{new_position: SlideAttribution}``, or None to compute it.
+            A position absent from the map brings no prior record or fragment.
+        incoming: ``{position: {content_hash: verdict}}`` to merge per position.
+    """
+    if attribution is None:
+        old_rows = (
+            db.query(SessionSlide)
+            .filter(SessionSlide.session_id == owner_id)
+            .order_by(SessionSlide.position)
+            .all()
+        )
+        attribution = _attribute_slide_records(old_rows, slides)
+    incoming = incoming or {}
+
+    for position, slide_dict in enumerate(slides):
+        attributed = attribution.get(position, NO_ATTRIBUTION)
+        _upsert_slide_row(
+            db,
+            owner_id,
+            position,
+            slide_dict,
+            now_dt=now_dt,
+            author_fallback=author_fallback,
+            verification=incoming.get(position),
+            base_record=attributed.verification_record,
+            # Both halves of the attribution, or the spec fragment stays on the
+            # position while the verdict moves.
+            base_spec=attributed.deck_spec_slide,
+        )
+
+    _prune_slide_rows_beyond(db, owner_id, len(slides))
+
+
 class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
 
@@ -1661,42 +1733,21 @@ class SessionManager:
                 )
                 deck.head_meta_json = json.dumps(deck_dict.get("head_meta") or {})
 
-                # 2. Per-slide upsert via the shared row writer.
-                #
-                #    Attribution FIRST, writes second: read the pre-write rows and
-                #    work out which existing verification_record belongs to each
-                #    NEW position, because a reorder/insert/delete moves slides
-                #    between positions and the record must follow its slide
-                #    (F1/F2).  This must happen before any upsert mutates a row.
-                old_rows = (
-                    db.query(SessionSlide)
-                    .filter(SessionSlide.session_id == deck_owner.id)
-                    .order_by(SessionSlide.position)
-                    .all()
+                # 2. Per-slide rewrite through THE whole-deck writer: attribution
+                #    first (a reorder/insert/delete moves slides between positions
+                #    and each record must follow its slide, F1/F2), then every
+                #    position upserted, then orphan rows pruned.
+                _rewrite_slide_rows(
+                    db,
+                    deck_owner.id,
+                    slides,
+                    now_dt=now_dt,
+                    # Deliberate divergence from backfill_session_slides.py: the
+                    # backfill leaves created_by=None when absent (it has no writer
+                    # identity); a live save always knows who is writing.  Do NOT
+                    # "harmonise" these to None.
+                    author_fallback=modified_by,
                 )
-                attributed = _attribute_slide_records(old_rows, slides)
-
-                for position, slide_dict in enumerate(slides):
-                    attribution = attributed.get(position, NO_ATTRIBUTION)
-                    _upsert_slide_row(
-                        db,
-                        deck_owner.id,
-                        position,
-                        slide_dict,
-                        now_dt=now_dt,
-                        # Deliberate divergence from backfill_session_slides.py:
-                        # the backfill leaves created_by=None when absent (it has
-                        # no writer identity); a live save always knows who is
-                        # writing.  Do NOT "harmonise" these to None.
-                        author_fallback=modified_by,
-                        base_record=attribution.verification_record,
-                        # Both halves of the attribution, or the spec fragment
-                        # stays on the position while the verdict moves.
-                        base_spec=attribution.deck_spec_slide,
-                    )
-
-                # 3. Orphan pruning (shared strategy — see _prune_slide_rows_beyond).
-                _prune_slide_rows_beyond(db, deck_owner.id, len(slides))
 
             # Update activity on both the requesting session and the deck owner
             session.last_activity = datetime.utcnow()
@@ -2845,49 +2896,33 @@ class SessionManager:
                 restored_slides = deck_dict.get("slides") or []
                 now_dt = datetime.utcnow()
 
-                # Attribution FIRST (F1/F2): a restore can reorder slides relative
-                # to the current rows, so each slide's existing verification record
-                # must follow it rather than stay on its old position.
-                old_rows_r = (
-                    db.query(SessionSlide)
-                    .filter(SessionSlide.session_id == deck_owner.id)
-                    .order_by(SessionSlide.position)
-                    .all()
-                )
-                attributed_r = _attribute_slide_records(old_rows_r, restored_slides)
-
+                # C1: MERGE the save point's verdict for each slide's hash into
+                # whatever record followed the slide to its position.  When the
+                # save-point map has no entry (the normal ordering — the user
+                # verifies AFTER creating the save point) nothing is written over
+                # the attributed record, so post-save-point verdicts survive.
+                restored_incoming: Dict[int, Dict[str, Any]] = {}
                 for position, slide_dict in enumerate(restored_slides):
-                    # C1: MERGE the save point's verdict for this slide's hash into
-                    # whatever record followed the slide here.  When the save-point
-                    # map has no entry (the normal ordering — the user verifies
-                    # AFTER creating the save point) nothing is written over the
-                    # attributed record, so post-save-point verdicts survive.
                     slide_hash = compute_slide_hash(slide_dict.get("html") or "")
                     restored_verdict = verification_map.get(slide_hash)
-                    incoming = (
-                        {slide_hash: restored_verdict}
-                        if restored_verdict is not None
-                        else None
-                    )
+                    if restored_verdict is not None:
+                        restored_incoming[position] = {slide_hash: restored_verdict}
 
-                    attribution_r = attributed_r.get(position, NO_ATTRIBUTION)
-                    _upsert_slide_row(
-                        db,
-                        deck_owner.id,
-                        position,
-                        slide_dict,
-                        now_dt=now_dt,
-                        # No author_fallback: a restore replays stored authorship
-                        # and has no "current writer" to attribute slides to.
-                        author_fallback=None,
-                        verification=incoming,
-                        base_record=attribution_r.verification_record,
-                        base_spec=attribution_r.deck_spec_slide,
-                    )
-
-                # Prune phantom rows beyond the restored slide count (shared
-                # strategy — see _prune_slide_rows_beyond).
-                _prune_slide_rows_beyond(db, deck_owner.id, len(restored_slides))
+                # Attribution FIRST (F1/F2) inside the shared writer: a restore can
+                # reorder slides relative to the current rows, so each slide's
+                # existing verification record must follow it rather than stay on
+                # its old position.  Phantom rows beyond the restored slide count
+                # are pruned there too.
+                _rewrite_slide_rows(
+                    db,
+                    deck_owner.id,
+                    restored_slides,
+                    now_dt=now_dt,
+                    # No author_fallback: a restore replays stored authorship and
+                    # has no "current writer" to attribute slides to.
+                    author_fallback=None,
+                    incoming=restored_incoming,
+                )
 
                 db.flush()
                 restore_mutation = DeckMutationContext(

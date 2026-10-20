@@ -18,13 +18,20 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import and_
 
-from src.api.services.session_manager import SessionManager, get_session_manager
+from src.api.services.session_manager import (
+    SessionManager,
+    SlideAttribution,
+    _attribution_from,
+    _rewrite_slide_rows,
+    get_session_manager,
+)
 from src.core.database import get_db_session
 from src.database.models.session import SessionSlide, SessionSlideDeck
+from src.domain.deck_spec import DeckSpec
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
     record_shared_deck_mutation,
@@ -63,6 +70,61 @@ def is_placeholder_record(verification_record: Optional[Dict[str, Any]]) -> bool
         isinstance(verdict, dict) and verdict.get(PLACEHOLDER_ERROR_KEY) is True
         for verdict in verification_record.values()
     )
+
+
+def is_placeholder_verdict(verdict: Any) -> bool:
+    """Return True if *verdict* (ONE per-hash verdict) is a placeholder's own verdict.
+
+    Stricter than :func:`is_placeholder_record`: the verdict must carry the error
+    flag AND nothing but the placeholder's two keys.  The LLM judge's error
+    verdict also sets ``error`` but carries ``score``/``rating``/``explanation``
+    and more, so it is a judged slide, not a placeholder.  A slot that also holds
+    the graph reviewer's verdict is not a placeholder either.  Pass the verdict
+    for the row's CURRENT content hash, never a whole record.
+    """
+    return (
+        isinstance(verdict, dict)
+        and is_placeholder_record(verdict)
+        and set(verdict) <= {PLACEHOLDER_ERROR_KEY, "message"}
+    )
+
+
+#: The copy a failed position's placeholder shows (``commit_placeholder``).
+FAILED_SLIDE_TEXT = "Slide generation failed."
+#: The copy an inserted position shows until its builder lands (#314).
+PENDING_SLIDE_TEXT = "New slide — not built yet."
+#: The pending placeholder's ``data-error`` and verdict ``message``.
+PENDING_SLIDE_MESSAGE = "Inserted slide not yet built"
+
+
+def placeholder_slide(
+    error_message: str = "", *, text: str = FAILED_SLIDE_TEXT
+) -> Tuple[str, Dict[str, Any]]:
+    """Build a placeholder slide: ``(html, verification_record)``.
+
+    The record is ``{content_hash: {PLACEHOLDER_ERROR_KEY: True, "message":
+    error_message}}``, keyed by the placeholder HTML's own hash (see
+    ``commit_placeholder`` for why the hash-keying is load-bearing).  With the
+    defaults this is exactly what ``commit_placeholder`` writes for a failed
+    position; the pending placeholder passes ``PENDING_SLIDE_MESSAGE`` and
+    ``text=PENDING_SLIDE_TEXT``.
+    """
+    html = (
+        f'<div class="{_PLACEHOLDER_CLASS}" data-error="{error_message}">'
+        f"<p>{text}</p>"
+        f"</div>"
+    )
+    record = {
+        compute_slide_hash(html): {
+            PLACEHOLDER_ERROR_KEY: True,
+            "message": error_message,
+        }
+    }
+    return html, record
+
+
+class SlideRowsChangedError(RuntimeError):
+    """The committed rows are not the rows the caller planned against."""
 
 
 class SlideWriter:
@@ -363,29 +425,237 @@ class SlideWriter:
         Raises:
             SessionNotFoundError: if session_id does not match any session.
         """
-        placeholder_html = (
-            f'<div class="{_PLACEHOLDER_CLASS}" data-error="{error_message}">'
-            f"<p>Slide generation failed.</p>"
-            f"</div>"
-        )
+        placeholder_html, record = placeholder_slide(error_message)
         self.write_slide(
             session_id=session_id,
             position=position,
             html=placeholder_html,
             scripts="",
-            verification_record={
-                compute_slide_hash(placeholder_html): {
-                    PLACEHOLDER_ERROR_KEY: True,
-                    "message": error_message,
-                }
-            },
+            verification_record=record,
             mutation=mutation,
         )
+
+    # ------------------------------------------------------------------
+    # Shift (the graph's slide insertion, #314)
+    # ------------------------------------------------------------------
+
+    def insert_pending_slides(
+        self,
+        session_id: str,
+        insert_at: Sequence[int],
+        *,
+        deck_spec: str,
+        expected_rows: Sequence[Tuple[Optional[str], str]],
+        created_by: Optional[str],
+        mutation: DeckMutationContext,
+    ) -> List[str]:
+        """Shift the deck's rows and open a pending placeholder at each inserted index.
+
+        The graph's only shift, run at architect commit before any builder is
+        dispatched.  Everything happens in ONE ``get_db_session()`` transaction:
+
+        1. The rows are re-read, and ``[(slide_id, content_hash)]`` in position
+           order must equal ``expected_rows`` (the rows the architect planned
+           against).  A session without a deck row, rows that exist while
+           ``expected_rows`` is empty, or any other mismatch raises
+           :class:`SlideRowsChangedError`.
+        2. Each old row is snapshotted to a plain dict (raw column values) and
+           its :class:`SlideAttribution` taken, BEFORE any write: the upsert
+           rewrites those ORM rows in place.
+        3. A pending placeholder (``PENDING_SLIDE_TEXT``) is spliced in at each
+           inserted index, with a fresh ``slide_id`` and explicit authorship
+           (``created_by``) and timestamps.
+        4. Every position is rewritten through ``_rewrite_slide_rows`` with the
+           EXACT old-row map, never the attribution heuristic, and with
+           ``now_dt=None``/``author_fallback=None``, so a moved row with a NULL
+           author or timestamp stays NULL and no moved row gets a fresh
+           ``modified_at``.
+        5. ``deck_spec_json`` is set to *deck_spec*, ``version`` is bumped (which
+           invalidates every worker's deck cache) and ``last_activity`` touched.
+           ``slide_count`` is NOT written: its single writer is the post-commit
+           deck-level write.
+        6. One ``insert_slide``/``deck`` mutation event is recorded.
+
+        A row-less (spec-only) deck with ``expected_rows=[]`` gets steps 5 and 6
+        only, and ``insert_at`` is checked against *deck_spec*'s slide count.
+
+        Args:
+            session_id: the requesting session (a contributor writes the owner's deck).
+            insert_at: the NEW indices of the inserted slides, ascending and distinct.
+            deck_spec: the canonical spec JSON of the deck after the insert.
+            expected_rows: ``[(slide_id, content_hash)]`` the caller planned against.
+            created_by: the author of the turn that opens the pending rows.
+            mutation: provenance; its actor must be the requesting session and
+                its operation ``insert_slide`` on object type ``deck``.
+
+        Returns:
+            The new slides' ``slide_id`` values in ``insert_at`` order (``[]`` for
+            a row-less deck).
+
+        Raises:
+            ValueError: *insert_at* is empty, not ascending and distinct, negative,
+                or out of range for the shifted deck; *deck_spec* is not a valid
+                DeckSpec or its slide count is not ``len(rows) + len(insert_at)``;
+                *mutation* is not an ``insert_slide``/``deck`` context; or the
+                evidence write refuses the actor.
+            SlideRowsChangedError: the committed rows are not *expected_rows*, or
+                the session has no deck row.
+            SessionNotFoundError: *session_id* does not match any session.
+
+        Nothing is written on any raise.
+        """
+        insert_at = list(insert_at)
+        if not insert_at:
+            raise ValueError("insert_at must name at least one new index")
+        if insert_at[0] < 0:
+            raise ValueError(f"insert_at must be non-negative: {insert_at}")
+        if any(b <= a for a, b in zip(insert_at, insert_at[1:])):
+            raise ValueError(f"insert_at must be ascending and distinct: {insert_at}")
+        spec = DeckSpec.from_json(deck_spec)
+        if spec is None:
+            raise ValueError("deck_spec is not a valid DeckSpec")
+        if mutation.operation != "insert_slide" or mutation.object_type != "deck":
+            raise ValueError(
+                "insert_pending_slides records an insert_slide/deck mutation, not "
+                f"{mutation.operation}/{mutation.object_type}"
+            )
+        expected = [(slide_id, content_hash) for slide_id, content_hash in expected_rows]
+        spec_count = len(spec.slides)
+
+        with get_db_session() as db:
+            session = self.session_manager._get_session_or_raise(db, session_id)
+            deck_owner = self.session_manager._get_deck_owner_session(db, session)
+            deck = deck_owner.slide_deck
+            if deck is None:
+                # The caller's prior spec came from this row; its absence means
+                # the deck changed under the planner.
+                raise SlideRowsChangedError(
+                    f"session {session_id} has no deck row to insert into"
+                )
+
+            # 1. The rows the caller planned against, or nothing is written.
+            old_rows = (
+                db.query(SessionSlide)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .order_by(SessionSlide.position)
+                .all()
+            )
+            committed = [
+                (row.slide_id, compute_slide_hash(row.html or "")) for row in old_rows
+            ]
+            if committed != expected:
+                raise SlideRowsChangedError(
+                    f"the committed rows of session {session_id} are not the rows "
+                    f"planned against ({len(committed)} committed, {len(expected)} "
+                    "expected)"
+                )
+            if insert_at[-1] >= spec_count:
+                raise ValueError(
+                    f"insert_at {insert_at} is beyond the spec's {spec_count} slides"
+                )
+            new_count = len(old_rows) + len(insert_at)
+            if old_rows and spec_count != new_count:
+                raise ValueError(
+                    f"deck_spec has {spec_count} slides, but {len(old_rows)} rows plus "
+                    f"{len(insert_at)} inserted make {new_count}"
+                )
+
+            new_ids: List[str] = []
+            now = datetime.utcnow()
+            if old_rows:
+                # 2. Snapshots and attributions from the ORM rows BEFORE any
+                #    write: _upsert_slide_row mutates these objects in place.
+                snapshots = [_snapshot_row(row) for row in old_rows]
+                attributions = [_attribution_from(row) for row in old_rows]
+
+                # 3. Splice a pending placeholder in at each inserted index.
+                pending_html, pending_record = placeholder_slide(
+                    PENDING_SLIDE_MESSAGE, text=PENDING_SLIDE_TEXT
+                )
+                inserted = set(insert_at)
+                slides: List[Dict[str, Any]] = []
+                attribution: Dict[int, SlideAttribution] = {}
+                incoming: Dict[int, Dict[str, Any]] = {}
+                old_index = 0
+                for new_index in range(new_count):
+                    if new_index in inserted:
+                        slide_id = str(uuid.uuid4())
+                        new_ids.append(slide_id)
+                        slides.append(
+                            {
+                                "html": pending_html,
+                                "scripts": "",
+                                "slide_id": slide_id,
+                                "created_by": created_by,
+                                "created_at": now,
+                                "modified_by": created_by,
+                                "modified_at": now,
+                            }
+                        )
+                        incoming[new_index] = {
+                            content_hash: dict(verdict)
+                            for content_hash, verdict in pending_record.items()
+                        }
+                    else:
+                        slides.append(snapshots[old_index])
+                        attribution[new_index] = attributions[old_index]
+                        old_index += 1
+
+                # 4. THE whole-deck rewrite, with the exact map.
+                _rewrite_slide_rows(
+                    db,
+                    deck_owner.id,
+                    slides,
+                    now_dt=None,
+                    author_fallback=None,
+                    attribution=attribution,
+                    incoming=incoming,
+                )
+
+            # 5. Deck columns, in the same transaction as the rows.
+            deck.deck_spec_json = deck_spec
+            deck.version = (deck.version or 0) + 1
+            session.last_activity = now
+            if session.id != deck_owner.id:
+                deck_owner.last_activity = now
+
+            # 6. Evidence; a refusal here rolls the whole shift back.
+            db.flush()
+            record_shared_deck_mutation(
+                db,
+                requesting_session=session,
+                deck_owner=deck_owner,
+                deck=deck,
+                actor=mutation.actor,
+                operation="insert_slide",
+                object_type="deck",
+                object_id=mutation.object_id,
+            )
+            return new_ids
 
 
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
+
+
+def _snapshot_row(row: SessionSlide) -> Dict[str, Any]:
+    """The slide a row holds, as the plain dict ``_upsert_slide_row`` writes back.
+
+    Raw column values (never display names or re-parsed timestamps), so a slide
+    moved to another position is rewritten with exactly what it had.  The
+    verification record and spec fragment travel separately, as its
+    ``SlideAttribution``.
+    """
+    return {
+        "html": row.html,
+        "scripts": row.scripts,
+        "slide_id": row.slide_id,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+        "modified_by": row.modified_by,
+        "modified_at": row.modified_at,
+    }
 
 
 def _row_to_dict(row: SessionSlide) -> Dict[str, Any]:
