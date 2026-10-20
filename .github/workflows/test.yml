@@ -692,6 +692,7 @@ jobs:
           - admin-route-gate
           - agent-config-integration
           - agent-definition-workbench
+          - agent-insert-slide
           - api-route-matcher
           - app-tour
           - chat-ui
