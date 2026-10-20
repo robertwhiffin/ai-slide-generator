@@ -1,0 +1,10 @@
+kind: mutation
+fault: 'a new fourth slide (position 3): it takes position 3 and the old slide 4 shifts
+  up, one place late is wrong'
+expect:
+  intent: edit
+  positions:
+  - 3
+  inserted:
+  - 3
+design_system_active: true

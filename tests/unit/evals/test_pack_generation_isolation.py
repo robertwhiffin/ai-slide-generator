@@ -8,8 +8,8 @@ import src.core.database  # noqa: F401  (break import cycle before src.services.
 from evals.harness import case
 
 AGENTS = ["builder", "build_reviewer", "fixer", "fix_reviewer", "deck_reviewer", "architect", "data_analyst"]
-# Five train cases per agent; the architect has nine (#313 added four).
-EXPECTED_CASE_COUNT = {"architect": 9}
+# Five train cases per agent; the architect has thirteen (#313 added four, #314 four more).
+EXPECTED_CASE_COUNT = {"architect": 13}
 
 
 def _stat(root):

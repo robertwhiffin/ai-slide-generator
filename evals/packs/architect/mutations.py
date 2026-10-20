@@ -66,12 +66,23 @@ MESSAGES = {
     ),
     "edit_multi_slide": "Slides 4-6 are too text-heavy; cut the wording on each by about half",
     "discuss_slide_question": "Why is the accessibility point on slide 7?",
+    # #314: add a slide to the existing deck.
+    "add_slide_anchor": (
+        "Add a slide after slide 3 that compares Reveal.js, Slidev and Marp side by side"
+    ),
+    "add_slide_end": "Add a final slide that lists the sources behind the evidence",
+    "add_slide_as_number": "Insert a new slide 2 with an agenda for the talk",
+    "add_slide_and_revise": (
+        "Add a slide after slide 8 on offline use and security, and add it to the summary on the "
+        "last slide"
+    ),
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
 HAS_DECK = (
     "edit_request", "confirm_design", "discuss",
     "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
+    "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
 )
 
 
@@ -168,6 +179,115 @@ def _revised_spec(
             spec["slides"][position][field] = text
     DeckSpec.model_validate(spec)  # fail fast
     return spec
+
+
+# #314: the new slides, by case. Each is the text of one SlideSpec; ``_inserted_spec`` adds the
+# position and the empty data / slide-type / template-section fields.
+ANCHOR_SLIDE = {
+    "purpose": "Compare the leading HTML slide frameworks side by side",
+    "content_brief": (
+        "Comparison table of Reveal.js, Slidev and Marp across authoring format, interactivity, "
+        "theming and export options, one column per framework"
+    ),
+    "assumes": "The audience has just met HTML slides and heard the leading frameworks named",
+    "hands_off": "Whichever framework a team picks, the case for HTML slides holds",
+}
+# The judge-only calibration: right place and right targets, but a slide nobody asked for.
+OFF_REQUEST_SLIDE = {
+    "purpose": "Recount the history of PowerPoint",
+    "content_brief": (
+        "Timeline of PowerPoint releases from 1987 to today, one milestone per version"
+    ),
+}
+END_SLIDE = {
+    "purpose": "Appendix — the sources behind the evidence",
+    "content_brief": (
+        "Bulleted list of the sources behind the five evidence beats, one line per beat: "
+        "responsiveness, typography, interactivity, accessibility and collaboration"
+    ),
+    "assumes": "The audience has heard the verdict and may want to check the evidence",
+    "hands_off": "Every claim in the deck can be traced to a source",
+}
+AS_NUMBER_SLIDE = {
+    "purpose": "Set out the agenda for the talk",
+    "content_brief": (
+        "Agenda slide listing the five narrative beats in order: why the tool matters, "
+        "PowerPoint's limits, the evidence for HTML slides, the objections, and the verdict"
+    ),
+    "assumes": "The audience has seen the title and knows the topic",
+    "hands_off": "The talk moves from the problem, through the evidence, to a verdict",
+}
+AND_REVISE_SLIDE = {
+    "purpose": "Evidence beat 6 — Offline use and security",
+    "content_brief": (
+        "Show that HTML slides run offline as one self-contained file and can be served from an "
+        "access-controlled internal site, with no macros or embedded executables, as three short "
+        "bullets and a callout"
+    ),
+    "assumes": "The audience has seen the collaboration and distribution advantages",
+    "hands_off": "HTML slides are safe to share and work without a network",
+}
+# The one revision, by wording: the gold summary brief (gold position 9) with this phrase swapped.
+SUMMARY_DIMENSIONS = (
+    "five advantage dimensions — responsiveness, typography, interactivity, accessibility, "
+    "collaboration —",
+    "six advantage dimensions — responsiveness, typography, interactivity, accessibility, "
+    "collaboration, and offline use and security —",
+)
+
+# Every new slide carries no data and no slide type or template section.
+NEW_SLIDE_DEFAULTS = {"data_references": [], "slide_type": None, "template_section_index": None}
+
+
+def _new_slide(position: int, fields: dict) -> dict:
+    return {"position": position, **fields, **NEW_SLIDE_DEFAULTS}
+
+
+def _inserted_spec(
+    deck: dict, inserts: dict[int, dict], briefs: dict[int, str] | None = None
+) -> dict:
+    """``deck`` with new slides spliced in and every slide re-stamped to its index.
+
+    ``inserts`` maps each new slide's FINAL position (its place in the returned deck) to its text
+    fields; ``briefs`` maps a FINAL position to a revised ``content_brief``. Nothing else changes.
+    """
+    spec = copy.deepcopy(deck)
+    slides = spec["slides"]
+    for final in sorted(inserts):
+        slides.insert(final, _new_slide(final, inserts[final]))
+    for index, slide in enumerate(slides):
+        slide["position"] = index
+    for final, brief in (briefs or {}).items():
+        slides[final]["content_brief"] = brief
+    DeckSpec.model_validate(spec)  # fail fast
+    return spec
+
+
+def _replaced_spec(deck: dict, replacements: dict[int, dict]) -> dict:
+    """``deck`` with the slides at the named positions replaced by new slides (count kept)."""
+    spec = copy.deepcopy(deck)
+    for position, fields in replacements.items():
+        spec["slides"][position] = _new_slide(position, fields)
+    DeckSpec.model_validate(spec)  # fail fast
+    return spec
+
+
+def _retargeted(reference: dict, targets: list[int], deck_spec: dict | None = None) -> dict:
+    """``reference`` with its ``target_positions`` (and, if given, its ``deck_spec``) replaced."""
+    bad = copy.deepcopy(reference)
+    bad["target_positions"] = list(targets)
+    if deck_spec is not None:
+        bad["deck_spec"] = deck_spec
+    ArchitectOutput.model_validate(bad)  # fail fast
+    return bad
+
+
+def _summary_brief(deck: dict, position: int) -> str:
+    """The brief at ``position`` with the dimensions phrase swapped for the six-dimension one."""
+    old, new = SUMMARY_DIMENSIONS
+    brief = deck["slides"][position]["content_brief"]
+    assert brief.count(old) == 1, position
+    return brief.replace(old, new)
 
 
 def _slipped(reference: dict) -> dict:
@@ -288,6 +408,65 @@ def generate(out_dir: pathlib.Path | None = None):
              "interactivity, it shows that HTML is accessible by design, and it sets up the "
              "collaboration beat on slide 8. I can move or reword it if you like."),
         _out("edit", "I'll rework the accessibility point on slide 7.", target_positions=[6]),
+    )
+
+    # #314: add a slide to the existing deck. ``positions`` and ``inserted`` are in the revised
+    # deck's numbering; the references are the gold spec with the new slide spliced in.
+    anchor = _out(
+        "edit",
+        "I'll add a new slide 4 comparing Reveal.js, Slidev and Marp side by side, straight "
+        "after slide 3.",
+        target_positions=[3], deck_spec=_inserted_spec(gold, {3: ANCHOR_SLIDE}),
+    )
+    _write(
+        out, "add_slide_anchor", "mutation",
+        "add after slide 3 (position 2): the new slide is position 3, only it is built, and the "
+        "later slides shift unchanged",
+        {"intent": "edit", "positions": [3], "inserted": [3]},
+        anchor,
+        _retargeted(anchor, [3], _inserted_spec(gold, {3: {**ANCHOR_SLIDE, **OFF_REQUEST_SLIDE}})),
+    )
+    end = _out(
+        "edit", "I'll add a final slide, slide 11, listing the sources behind the evidence.",
+        target_positions=[10], deck_spec=_inserted_spec(gold, {10: END_SLIDE}),
+    )
+    _write(
+        out, "add_slide_end", "mutation",
+        "add a final slide to a deck of ten (new slide at position 10): append it; replacing the "
+        "last slide (position 9) loses the closing slide",
+        {"intent": "edit", "positions": [10], "inserted": [10]},
+        end,
+        _retargeted(end, [9], _replaced_spec(gold, {9: END_SLIDE})),
+    )
+    as_number = _out(
+        "edit",
+        "I'll insert a new slide 2 with the agenda for the talk; the current slide 2 becomes "
+        "slide 3.",
+        target_positions=[1], deck_spec=_inserted_spec(gold, {1: AS_NUMBER_SLIDE}),
+    )
+    _write(
+        out, "add_slide_as_number", "mutation",
+        "insert a new slide 2 (position 1): the new slide takes position 1 and the old slide 2 "
+        "shifts to position 2, one place late is wrong",
+        {"intent": "edit", "positions": [1], "inserted": [1]},
+        as_number,
+        _retargeted(as_number, [2], _inserted_spec(gold, {2: AS_NUMBER_SLIDE})),
+    )
+    and_revise = _out(
+        "edit",
+        "I'll add slide 9 on offline use and security after slide 8, and add it to the summary "
+        "on the last slide, now slide 11.",
+        target_positions=[8, 10],
+        deck_spec=_inserted_spec(gold, {8: AND_REVISE_SLIDE}, {10: _summary_brief(gold, 9)}),
+    )
+    _write(
+        out, "add_slide_and_revise", "mutation",
+        "add after slide 8 (position 7): the new slide is position 8 and the summary on the last "
+        "slide (now position 10) must be revised to include it; the gold narrative_arc lists five "
+        "dimensions and must stay unchanged",
+        {"intent": "edit", "positions": [8, 10], "inserted": [8]},
+        and_revise,
+        _retargeted(and_revise, [8], _inserted_spec(gold, {8: AND_REVISE_SLIDE})),
     )
 
 

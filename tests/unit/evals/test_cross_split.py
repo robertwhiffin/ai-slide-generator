@@ -24,6 +24,7 @@ HELDOUT_CASE_IDS = {
     "architect": {
         "build_request", "edit_request", "ask_data", "confirm_design", "discuss",
         "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
+        "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
     },
     "data_analyst": {
         "figures_inline", "conflicting_figures", "two_sources", "needs_tool", "unsourced_public_stat",
@@ -63,8 +64,9 @@ def _tree(root):
 
 
 def test_total_heldout_case_count():
-    # Five per agent, nine for the architect (#313 added four).
-    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 39
+    # Five per agent, thirteen for the architect (#313 added four, #314 four more): 6 x 5 + 13.
+    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 43
+    assert len(HELDOUT_CASE_IDS["architect"]) == 13
 
 
 @pytest.mark.parametrize("agent", AGENTS)

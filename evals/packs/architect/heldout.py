@@ -41,12 +41,23 @@ MESSAGES = {
     "edit_last_slide": "The final slide should open with the call to action, before the checklist",
     "edit_multi_slide": "Slides 2 and 3 are too dense — drop the callouts on both",
     "discuss_slide_question": "Why does slide 2 come before the techniques?",
+    # #314: add a slide to deck 2.
+    "add_slide_anchor": (
+        "Could you add a slide before slide 5 with a worked before-and-after prompt example?"
+    ),
+    "add_slide_end": "Add one more slide at the end with a glossary of the prompt terms",
+    "add_slide_as_number": "Add a new fourth slide on common prompt anti-patterns",
+    "add_slide_and_revise": (
+        "Add a slide after slide 3 on versioning prompts, and add it to the checklist on the "
+        "final slide"
+    ),
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
 HAS_DECK = (
     "edit_request", "confirm_design", "discuss",
     "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
+    "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
 )
 
 EDIT_BRIEF = (
@@ -110,6 +121,72 @@ MULTI_BRIEFS = {
         "chain-of-thought reasoning, and structured output formatting — with no callout"
     ),
 }
+
+
+# #314: the new slides, by case (deck 2). ``m._inserted_spec`` adds the position and the empty
+# data / slide-type / template-section fields.
+ANCHOR_SLIDE = {
+    "purpose": "Make the techniques concrete with one worked example",
+    "content_brief": (
+        "Two-column slide with an ad-hoc prompt on the left and its optimised version on the "
+        "right, labelling where system-prompt framing, a few-shot example and a structured "
+        "output format were applied"
+    ),
+    "assumes": (
+        "Audience has seen the measured gains and wants to see what a better prompt looks like"
+    ),
+    "hands_off": "Applying the patterns to one real prompt is quick and visibly improves it",
+}
+# The judge-only calibration: right place and right targets, but a slide nobody asked for.
+OFF_REQUEST_SLIDE = {
+    "purpose": "Point the team at upcoming AI conferences",
+    "content_brief": (
+        "Bullet slide listing three upcoming AI conferences the team could attend, with dates "
+        "and locations"
+    ),
+}
+END_SLIDE = {
+    "purpose": "Appendix — a glossary of the prompt terms used in the deck",
+    "content_brief": (
+        "Two-column glossary defining system prompt, few-shot example, chain-of-thought, "
+        "structured output, eval criteria and test suite in one line each"
+    ),
+    "assumes": "Audience has heard each term during the talk",
+    "hands_off": "Everyone leaves with the same vocabulary for prompt work",
+}
+AS_NUMBER_SLIDE = {
+    "purpose": "Warn against the habits that undo prompt optimisation",
+    "content_brief": (
+        "Bullet slide listing four common prompt anti-patterns — vague instructions, "
+        "contradictory constraints, examples that leak the answer, and unbounded output — each "
+        "with a one-line fix"
+    ),
+    "assumes": "Audience knows the four core patterns from the previous slide",
+    "hands_off": "Most bad outputs come from a handful of avoidable prompt habits",
+}
+AND_REVISE_SLIDE = {
+    "purpose": "Show how to keep prompts under version control",
+    "content_brief": (
+        "Bullet slide explaining that every prompt change gets a version, a change note and a "
+        "link to its eval results, so a regression can be traced and rolled back"
+    ),
+    "assumes": "Audience knows the four core patterns and that prompts change often",
+    "hands_off": "A versioned prompt can be compared, reviewed and rolled back like code",
+}
+# The one revision, by wording: the gold checklist brief (gold position 5) with this phrase swapped.
+CHECKLIST_ITEMS = (
+    "five-item prompt optimisation checklist (define task scope, choose patterns, write eval "
+    "criteria,",
+    "six-item prompt optimisation checklist (define task scope, choose patterns, version every "
+    "prompt, write eval criteria,",
+)
+
+
+def _checklist_brief(deck: dict, position: int) -> str:
+    old, new = CHECKLIST_ITEMS
+    brief = deck["slides"][position]["content_brief"]
+    assert brief.count(old) == 1, position
+    return brief.replace(old, new)
 
 
 def _edited_deck_spec():
@@ -225,6 +302,65 @@ def generate(out_dir: pathlib.Path | None = None):
                "land as the answer to a problem the audience already feels. I can swap them if "
                "you prefer."),
         m._out("edit", "I'll move slide 2 after the techniques.", target_positions=[1]),
+    )
+
+    # #314: add a slide to the same deck. ``positions`` and ``inserted`` are in the revised
+    # deck's numbering; the references are the gold spec with the new slide spliced in.
+    anchor = m._out(
+        "edit",
+        "I'll add a new slide 5 with a worked before-and-after prompt example, just before the "
+        "workflow slide.",
+        target_positions=[4], deck_spec=m._inserted_spec(gold, {4: ANCHOR_SLIDE}),
+    )
+    _write(
+        out, "add_slide_anchor", "mutation",
+        "add before slide 5 (position 4): the new slide takes position 4, only it is built, and "
+        "the old slide 5 shifts unchanged",
+        {"intent": "edit", "positions": [4], "inserted": [4]},
+        anchor,
+        m._retargeted(
+            anchor, [4], m._inserted_spec(gold, {4: {**ANCHOR_SLIDE, **OFF_REQUEST_SLIDE}})
+        ),
+    )
+    end = m._out(
+        "edit", "I'll add a glossary of the prompt terms as a new final slide, slide 7.",
+        target_positions=[6], deck_spec=m._inserted_spec(gold, {6: END_SLIDE}),
+    )
+    _write(
+        out, "add_slide_end", "mutation",
+        "add a final slide to a deck of six (new slide at position 6): append it; replacing the "
+        "last slide (position 5) loses the closing slide",
+        {"intent": "edit", "positions": [6], "inserted": [6]},
+        end,
+        m._retargeted(end, [5], m._replaced_spec(gold, {5: END_SLIDE})),
+    )
+    as_number = m._out(
+        "edit",
+        "I'll add a new slide 4 on common prompt anti-patterns; the impact slide moves to slide 5.",
+        target_positions=[3], deck_spec=m._inserted_spec(gold, {3: AS_NUMBER_SLIDE}),
+    )
+    _write(
+        out, "add_slide_as_number", "mutation",
+        "a new fourth slide (position 3): it takes position 3 and the old slide 4 shifts up, one "
+        "place late is wrong",
+        {"intent": "edit", "positions": [3], "inserted": [3]},
+        as_number,
+        m._retargeted(as_number, [4], m._inserted_spec(gold, {4: AS_NUMBER_SLIDE})),
+    )
+    and_revise = m._out(
+        "edit",
+        "I'll add slide 4 on versioning prompts after slide 3, and add versioning to the "
+        "checklist on the final slide, now slide 7.",
+        target_positions=[3, 6],
+        deck_spec=m._inserted_spec(gold, {3: AND_REVISE_SLIDE}, {6: _checklist_brief(gold, 5)}),
+    )
+    _write(
+        out, "add_slide_and_revise", "mutation",
+        "add after slide 3 (position 2): the new slide is position 3 and the checklist on the "
+        "final slide (now position 6) must be revised to include it",
+        {"intent": "edit", "positions": [3, 6], "inserted": [3]},
+        and_revise,
+        m._retargeted(and_revise, [3], m._inserted_spec(gold, {3: AND_REVISE_SLIDE})),
     )
 
 
