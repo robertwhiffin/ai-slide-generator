@@ -188,14 +188,21 @@ that rollback is safe:
 
 ## CI history
 
-See the PR checks. This section is updated after the final push.
+- **Round 1 (PR #332, run 39399917287 on `c86d332d`): all green on the first push.** 65 checks passed;
+  2 were skipped by design (Agentic Behaviour layer 3, deploy). No reruns.
+- The `E2E - chat-ui` leg ran the full spec, 29 passed, including the new `Failure notice details`
+  test (the spec has 29 tests). It ran in CI for the first time; see the next section.
+- The Postgres-backed integration jobs (Graph Orchestration, General, Slides, Layer 4 Concurrency,
+  Streaming, API Routes) all passed. The Graph Orchestration job runs the mixed-release
+  acceptance test against Postgres (`test.yml:437`), so the call-site count was checked there too.
+- This notes commit is docs-only.
 
 ## Not verified locally
 
 - **Playwright.** The new `Failure notice details` test in `frontend/tests/e2e/chat-ui.spec.ts` (a
   mocked `page.route`) never ran locally, because the Chromium headless-shell binary is not installed
-  on this machine. The shared browser cache was deliberately left alone. CI's `chat-ui` e2e leg is
-  the check.
+  on this machine. The shared browser cache was deliberately left alone. CI's `chat-ui` e2e leg ran
+  it and it passed (run 39399917287).
 - **Postgres-marked suites** self-skip locally and run in CI. One of them counts the call sites:
   `test_mixed_release_collaboration_acceptance_postgres.py` requires exactly 4 placeholder call
   lines, each with `mutation=`. That count was verified by grep and by simulating its sweep.
