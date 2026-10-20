@@ -550,7 +550,7 @@ When part of a graph turn fails (a slide cannot be built, checked or saved, or t
 | Transport | What the client receives |
 |-----------|--------------------------|
 | Polling | An `assistant` event with `metadata.details` (the persisted row) |
-| SSE | `info` rows are not streamed. A failed slide emits an `error` event whose `error` is a short headline, shown in the error banner (its `metadata.details` is not rendered); unfinished slides emit an `error` event with the full text; a deck-level failure emits an `assistant` event with `metadata.details` |
+| SSE | `info` rows are not streamed. A failed slide emits an `error` event whose `error` is a short headline, shown in the error banner (its `metadata.details` is not rendered); unfinished slides emit an `error` event with the full text; a skipped or failed deck review emits an `assistant` event with `metadata.details`. A slide kept as built after a brief AI-service fault, and a failed deck-level write on its own, emit no event (row only) |
 | Reload | `GET /api/sessions/{id}` returns `messages[].metadata.details` |
 
 `Message.tsx` shows `details` in a collapsed **Details** disclosure under assistant messages only. The save-point preview and the MCP transcript deliberately drop `details`. Rows written before this change keep their old text and have no disclosure.

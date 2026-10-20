@@ -333,7 +333,7 @@ interface SlideStyle {
 | `src/components/SlideViewer/SlideViewer.tsx` | Public entry point for the flip-through viewer. Wraps `ViewerProvider`. Owns keyboard listener, seen-state lifecycle, stage CRUD, and presentation-mode handle. | `api.getSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
 | `src/components/SlideViewer/SlideStage.tsx` | Renders one slide at a time in a sandboxed iframe via `buildSlideDocument`. Handles wheel-paging. | None (renders via `buildSlideDocument`) |
 | `src/components/SlideViewer/ThumbnailRibbon.tsx` | Vertical ribbon of scaled thumbnails. Drives slide selection on click. Drag-reorder via `@dnd-kit`. Amber unseen dot per slide with unread findings. | `onReorder` callback to `AppLayout` |
-| `src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer for per-slide AI findings. Drag-resize handle. Apply / Dismiss / Discuss actions (stubs until PRD workstream 5 ships). | None (prop callbacks only) |
+| `src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer for per-slide AI findings. Drag-resize handle. Apply and Discuss send a chat message asking the AI to apply or discuss the finding (`AppLayout.tsx` `handleApplyFinding` / `handleDiscussFinding`); Dismiss is client-side only. | None (prop callbacks only) |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
 | `src/components/AgentConfigBar/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.patchTools` |
