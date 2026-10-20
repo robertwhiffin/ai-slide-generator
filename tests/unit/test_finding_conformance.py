@@ -16,6 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).parents[2]
 FINDING_TS = REPO_ROOT / "frontend" / "src" / "types" / "finding.ts"
+FINDING_TEXT_TS = REPO_ROOT / "frontend" / "src" / "utils" / "findingText.ts"
 
 #: Keys the read path DERIVES onto every findings entry (#316,
 #: ``_finding_to_camel`` via src/domain/finding_copy.py).  They are declared on
@@ -278,6 +279,27 @@ class TestFindingConformance:
         from src.domain.finding_copy import GENERIC_ISSUE
 
         assert _ts_string_constant(FINDING_TS, "PLAIN_MESSAGE_FALLBACK") == GENERIC_ISSUE.present
+
+    def test_ts_reviewer_details_separator_matches_python(self) -> None:
+        """The frontend's REVIEWER_DETAILS_SEPARATOR is the Python one, byte for byte.
+
+        One separator splits a chat message's plain lead from the reviewer's
+        technical text in both directions: the Python deck advisory and the TS
+        Apply/Discuss writers emit it, and the TS chat collapse parses it.  If the
+        two drifted, the collapse would silently stop matching one side's output
+        and the technical text would lead the bubble again (#316, plan D4/D14).
+        A missing file or constant fails here rather than comparing nothing.
+        """
+        from src.domain.finding_copy import REVIEWER_DETAILS_SEPARATOR
+
+        assert FINDING_TEXT_TS.is_file(), (
+            f"{FINDING_TEXT_TS} not found: REVIEWER_DETAILS_SEPARATOR must be "
+            f"exported from it (#316 plan Task 4)"
+        )
+        assert (
+            _ts_string_constant(FINDING_TEXT_TS, "REVIEWER_DETAILS_SEPARATOR")
+            == REVIEWER_DETAILS_SEPARATOR
+        )
 
     def test_typed_fixture_literals_carry_the_python_copy(self) -> None:
         """Every typed SlideFinding literal in the frontend tests carries the
