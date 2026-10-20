@@ -24,7 +24,7 @@ from src.api.routes._authz import (
     _require_session_access,
 )
 from src.api.schemas.requests import CreateSessionRequest, DuplicateSessionRequest
-from src.api.services.chat_service import get_chat_service
+from src.api.services.chat_service import ArcReviewInFlightError, get_chat_service
 from src.api.services.session_manager import (
     SessionAccessDeniedError,
     SessionNotFoundError,
@@ -883,7 +883,8 @@ async def clear_session_context(session_id: str):
     Raises:
         HTTPException 401/403/404: not signed in, not an editor / not the
             session's creator, unknown session.
-        HTTPException 409: a turn or slide operation holds the session lock.
+        HTTPException 409: a turn or slide operation holds the session lock,
+            or the deck's arc review is running a turn on this thread.
     """
     # Permission check: require CAN_EDIT on the deck — NOT the helper's default.
     await asyncio.to_thread(
@@ -917,6 +918,10 @@ async def clear_session_context(session_id: str):
 
         return result
 
+    except ArcReviewInFlightError:
+        # The arc-review sweeper is running a turn on this thread without the
+        # session lock; the clear changed nothing and can be retried.
+        raise HTTPException(status_code=409, detail=CONVERSATION_BUSY_DETAIL)
     except SessionNotFoundError:
         raise HTTPException(
             status_code=404,

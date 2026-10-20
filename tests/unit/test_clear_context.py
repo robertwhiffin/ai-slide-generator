@@ -514,6 +514,114 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
 
 
 # ---------------------------------------------------------------------------
+# The clear waits for an arc review (#323).  The sweeper runs a graph turn on
+# the owner's thread without the session lock, and a thread deleted under that
+# turn is written back with pre-clear state:
+# tests/integration/test_clear_context_graph_turn.py runs the race itself.
+# Here: the claim the refusal keys on, read the way the sweeper reads it.
+# ---------------------------------------------------------------------------
+
+
+def _give_the_session_a_deck_claimed_at(factory, sid: str, claimed_at) -> None:
+    db = factory()
+    try:
+        us = db.query(UserSession).filter(UserSession.session_id == sid).one()
+        db.add(
+            SessionSlideDeck(
+                session_id=us.id,
+                title="Puffins",
+                html_content="",
+                scripts_content="",
+                slide_count=0,
+                spec_dirty_at=datetime.utcnow() - timedelta(seconds=400),
+                spec_dirty_by="hand-editor@example.com",
+                spec_dirty_claimed_at=claimed_at,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+class TestTheClearWaitsForAnArcReview:
+    def test_a_live_review_claim_refuses_the_clear_and_changes_nothing(
+        self, session_with_messages, _session_unit_engine
+    ):
+        sid = session_with_messages(
+            [_PLAIN_MESSAGE, "make slide 3 shorter"], message_type="user_input"
+        )
+        factory = _make_factory(_session_unit_engine)
+        _give_the_session_a_deck_claimed_at(
+            factory, sid, datetime.utcnow() - timedelta(seconds=30)
+        )
+        before = [(r.content, r.message_type) for r in _messages_of(factory, sid)]
+
+        saver = _RecordingSaver()
+        with _patched(factory, saver):
+            with pytest.raises(Exception) as raised:
+                ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+        assert [(r.content, r.message_type) for r in _messages_of(factory, sid)] == (
+            before
+        ), "a refused clear changed the transcript"
+        assert saver.deleted == [], "a refused clear deleted the thread"
+        assert _clear_events(factory) == [], "a refused clear was attributed"
+
+        from src.api.services.chat_service import ArcReviewInFlightError
+
+        assert isinstance(raised.value, ArcReviewInFlightError), raised.value
+
+    def test_a_claim_older_than_the_lease_does_not_block_the_clear(
+        self, session_with_messages, _session_unit_engine
+    ):
+        """A worker that died mid-review leaves its claim behind; once the claim
+        is past ``CLAIM_TTL_SECONDS`` the sweeper itself treats the deck as
+        unclaimed, and so does the clear."""
+        from src.services.spec_sync import CLAIM_TTL_SECONDS
+
+        sid = session_with_messages(
+            [_PLAIN_MESSAGE, "make slide 3 shorter"], message_type="user_input"
+        )
+        factory = _make_factory(_session_unit_engine)
+        _give_the_session_a_deck_claimed_at(
+            factory, sid, datetime.utcnow() - timedelta(seconds=CLAIM_TTL_SECONDS + 60)
+        )
+
+        saver = _RecordingSaver()
+        with _patched(factory, saver):
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+        assert saver.deleted == [sid]
+
+    def test_a_contributor_is_not_refused_by_the_owners_review(
+        self, contributor_session
+    ):
+        """The sweeper runs on the OWNER's thread; a contributor's thread is its
+        own, so the owner's live claim does not block the contributor's clear."""
+        factory = contributor_session._factory
+        contrib_sid = contributor_session.contributor_session_id
+        db = factory()
+        try:
+            deck = (
+                db.query(SessionSlideDeck)
+                .filter(SessionSlideDeck.id == contributor_session.owner_deck_row().id)
+                .one()
+            )
+            deck.spec_dirty_claimed_at = datetime.utcnow() - timedelta(seconds=30)
+            db.commit()
+        finally:
+            db.close()
+        _add_message(factory, contrib_sid, role="user", content="my own first ask",
+                     message_type="user_query")
+
+        saver = _RecordingSaver()
+        with _patched(factory, saver):
+            ChatService().clear_context(contrib_sid, cleared_by="contributor@example.com")
+
+        assert saver.deleted == [contrib_sid]
+
+
+# ---------------------------------------------------------------------------
 # Attribution (#323, D5): one usage_events row per committed clear.
 # ---------------------------------------------------------------------------
 
@@ -1377,6 +1485,31 @@ class TestClearContextRoute:
             "Something is still running on this deck. "
             "Wait for it to finish, then try again."
         )
+
+    def test_an_arc_review_in_flight_is_a_409_and_the_lock_is_released(
+        self, client, allowing_gate, allowing_creator, session_lock, as_editor,
+        events, monkeypatch,
+    ):
+        """The service refuses while the deck's arc review runs (#323): the same
+        busy answer as a held lock, and this request took the lock, so it
+        releases it."""
+        from src.api.routes.sessions import CONVERSATION_BUSY_DETAIL
+        from src.api.services.chat_service import ArcReviewInFlightError
+
+        class _Refusing:
+            def clear_context(self, session_id, *, cleared_by):
+                events.append(("service", session_id))
+                raise ArcReviewInFlightError(session_id)
+
+        monkeypatch.setattr(
+            "src.api.routes.sessions.get_chat_service", lambda: _Refusing()
+        )
+
+        resp = client.delete("/api/sessions/s1/context")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == CONVERSATION_BUSY_DETAIL
+        assert events == _the_whole_clear("s1")
 
     def test_the_route_passes_the_caller_as_cleared_by(
         self, client, allowing_gate, allowing_creator, session_lock, stub_service,

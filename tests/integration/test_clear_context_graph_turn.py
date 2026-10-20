@@ -58,8 +58,13 @@ from src.core.checkpointer import SqlAlchemyCheckpointSaver
 from src.domain.skill_io import BuilderOutput
 from src.services.conversation_pins import load_conversation_pin
 from src.services.deck_review_store import compute_deck_digest
+from src.services.spec_sync import mark_dirty, sweep_once
 from tests.integration.conftest import _make_fake_db
 from tests.integration.conftest_stub_skills import edited_brief
+from tests.integration.test_sweeper_describe_only import (  # noqa: F401
+    _age_the_marker,
+    sweeper_env,
+)
 
 _FIRST_PROMPT = "Build me a deck about puffins"
 _EDIT_ASK = "Make slide 3 shorter"
@@ -205,3 +210,127 @@ def test_after_a_clear_an_edit_turn_runs_from_the_spec_and_the_committed_rows(
     assert {k: v for k, v in spec_after.items() if k != "slides"} == {
         k: v for k, v in spec_before.items() if k != "slides"
     }
+
+
+# ===========================================================================
+# A clear that lands while the arc-review sweeper is running a turn
+# ===========================================================================
+#
+# The sweeper (``spec_sync.sweep_once`` -> ``run_arc_review`` -> ``invoke_graph``)
+# runs a whole graph turn on the deck OWNER's thread, whose ``thread_id`` is the
+# session id (``builder.invoke_graph``), and it never takes the session lock that
+# the clear route checks.  The turn loads the thread's latest checkpoint before
+# its architect runs and writes a checkpoint after every superstep, and each
+# checkpoint carries EVERY channel it holds.  So a clear that commits during the
+# review's model call deletes the thread, and the review's next superstep writes
+# it back: the pre-clear turn's ``findings`` (an all-turns log), its turn-scoped
+# wrappers, and a reply from an architect that was given the cleared
+# conversation.  The next turn resumes that checkpoint.
+#
+# The stub architect quotes the conversation it was given in its reply.  A real
+# model's reply is a function of its payload; the quote makes that dependency
+# visible without a model.
+
+_RACE_PROMPT = "SENTINEL-RACE build me a deck about puffins"
+_RACE_NEXT_ASK = "AFTER-THE-CLEAR make slide 2 shorter"
+_HAND_EDITOR = "hand-editor@example.com"
+_FINDING_TEXT = "content overflows the frame"  # objective_finding()'s message
+
+
+def _thread_holds(saver, sid: str, needle: str) -> bool:
+    """True when ANY checkpoint or pending write of the thread contains *needle*."""
+    return any(
+        needle in repr(t.checkpoint) or needle in repr(t.pending_writes)
+        for t in saver.list(_thread_config(sid))
+    )
+
+
+def _payload_mentions(recorder, needle: str) -> list:
+    return [c["name"] for c in recorder.calls if needle in repr(c["payload"])]
+
+
+def test_a_clear_during_an_arc_review_leaves_nothing_from_before_it(
+    sweeper_env, monkeypatch  # noqa: F811 (the imported fixture)
+):
+    env = sweeper_env
+    sid = env.session_id
+    saver = SqlAlchemyCheckpointSaver(session_factory=env.factory)
+    manager = get_session_manager()
+    stub_architect = env.recorder._skill_architect
+
+    # -- Before: a build whose review leaves a finding in the thread ----------
+    env.recorder.configure(slide_count=3, objective_findings_at={1})
+    manager.add_message(sid, "user", _RACE_PROMPT, message_type="user_input")
+    first = env.run(initial={"architect_message": _RACE_PROMPT})
+    assert first["architect_intent"] == "build" and first["error_state"] is None
+    pre_clear_turn = env.last_turn_id
+    transcript_before = env.messages()
+    assert _thread_holds(saver, sid, pre_clear_turn), "precondition: turn 1's state"
+    assert _thread_holds(saver, sid, _FINDING_TEXT), "precondition: turn 1's finding"
+
+    # -- A hand edit schedules an arc review, and its debounce has passed -----
+    assert mark_dirty(sid, _HAND_EDITOR) is True
+    _age_the_marker(env)
+
+    # -- The user clears while the review's model call is running -------------
+    attempts: list = []
+
+    def architect_during_the_review(payload):
+        try:
+            with _clear_reaches(env):
+                ChatService().clear_context(sid, cleared_by="owner@example.com")
+            attempts.append("cleared")
+        except Exception as exc:  # asserted on below, by type
+            attempts.append(exc)
+        out = stub_architect(payload)
+        said = [m["content"] for m in payload["conversation"] if m["role"] == "user"]
+        return out.model_copy(
+            update={"message": f"Re-described the arc. You had asked: {said}"}
+        )
+
+    monkeypatch.setattr(env.recorder, "_skill_architect", architect_during_the_review)
+    env.recorder.reset_observations()
+    env.recorder.configure(slide_count=3)
+    assert sweep_once() == 1, "precondition: the sweeper claimed the marker"
+    monkeypatch.setattr(env.recorder, "_skill_architect", stub_architect)
+    assert len(attempts) == 1, "precondition: the review's architect ran once"
+
+    if attempts[0] != "cleared":
+        # Refused while the review ran: nothing changed, and the user retries
+        # once it has finished, as the 409 tells them to.
+        assert env.messages() == transcript_before, "a refused clear changed rows"
+        with _clear_reaches(env):
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+    # -- A committed clear leaves nothing from before it in the thread --------
+    assert env.messages() == []
+    assert not _thread_holds(saver, sid, "SENTINEL-RACE"), (
+        "the review wrote a reply built from the cleared conversation into the thread"
+    )
+    assert not _thread_holds(saver, sid, pre_clear_turn), (
+        "the review wrote the pre-clear turn's state back into the cleared thread"
+    )
+    assert not _thread_holds(saver, sid, _FINDING_TEXT), (
+        "the review wrote the pre-clear turn's findings back into the cleared thread"
+    )
+
+    # -- The next turn starts fresh -------------------------------------------
+    env.recorder.reset_observations()
+    env.recorder.configure(slide_count=3, edit_target_positions={1})
+    manager.add_message(sid, "user", _RACE_NEXT_ASK, message_type="user_input")
+    final = env.run(initial={"architect_message": _RACE_NEXT_ASK})
+
+    assert final["architect_intent"] == "edit" and final["error_state"] is None
+    assert final["findings"] == [], "the next turn inherited the pre-clear findings"
+    payload = env.recorder.calls_for("architect")[0]["payload"]
+    assert payload["conversation"] == [{"role": "user", "content": _RACE_NEXT_ASK}]
+    assert _payload_mentions(env.recorder, "SENTINEL-RACE") == []
+    assert _payload_mentions(env.recorder, _FINDING_TEXT) == []
+    assert not _thread_holds(saver, sid, pre_clear_turn)
+    assert not _thread_holds(saver, sid, "SENTINEL-RACE")
+    assert _thread_holds(saver, sid, "AFTER-THE-CLEAR"), "positive control"
+
+    # -- How: the clear is refused while the review holds its claim -----------
+    from src.api.services.chat_service import ArcReviewInFlightError
+
+    assert isinstance(attempts[0], ArcReviewInFlightError), attempts[0]

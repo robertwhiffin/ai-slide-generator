@@ -201,7 +201,7 @@ Session endpoints (`/api/sessions/*`) manage session lifecycle and do not requir
 Known limits of that lock, shared with every other lock user:
 - A lock older than 300 seconds counts as stale and can be taken by another request.
 - On the SSE chat path the lock is released in the stream generator's `finally` while the turn keeps running in a daemon thread. A client that disconnects or reloads mid-turn therefore releases the lock early, and a clear in that window succeeds; the turn's later rows and checkpoints then land in the cleared conversation. The async/polling path holds the lock for the whole job, so this affects the SSE path only.
-- The describe-only arc-review sweeper (`spec_sync.py`) invokes the graph on the owner's thread without the lock. It writes no chat rows, so a checkpoint it writes after a clear is harmless: the graph thread holds only per-turn state.
+- The describe-only arc-review sweeper (`spec_sync.py`) invokes the graph on the owner's thread without the lock. Its turn checkpoints every channel after each superstep, and the thread holds cross-turn state (the `findings` log, for one), so a thread deleted under it would come back with pre-clear state. So the clear also checks the deck's arc-review claim. While `spec_sync.review_in_flight` is true (a claim younger than `CLAIM_TTL_SECONDS`), `clear_context` raises `ArcReviewInFlightError` before it changes anything, and the route answers the same 409. The deck row is read `FOR UPDATE`, so on PostgreSQL a claim that arrives during a clear waits for the clear to commit, and its review then loads the already-deleted thread. Contributor sessions are never refused, because the sweeper runs on the owner's thread only.
 
 ---
 
