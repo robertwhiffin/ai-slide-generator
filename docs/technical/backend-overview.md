@@ -561,12 +561,77 @@ Users say "slide 2"; the graph keys everything on `SlideSpec.position` (0-based)
 - SpecView labels slides `position + 1` (`SpecView.tsx`), so on a gapped deck its label differs from the panel's number, which is what the graph follows.
 - On the SSE transport the image-attachment context is appended to the user message before it is persisted (`_inject_image_context`, `src/api/services/chat_service.py`), so an attachment filename such as "slide 3.png" can resolve as a reference. The polling transport persists the raw message, so it does not.
 
-**For #314 (add a slide to an existing deck).**
-- Inserting a slide shifts the Position, and so the Slide Number, of every later slide. The numbering is recomputed from the rows every turn, so nothing needs to be stored.
-- "after slide 3" resolves "slide 3" only; what the anchor means is for #314 to interpret.
-- Indefinite ordinals ("add a final slide") are deliberately left unresolved, also for #314 to interpret.
-- The indefinite exclusion covers ordinals only: "Insert a new slide 3" and "make a slide 3 about pricing" resolve the EXISTING slide 3 today. #314 must interpret insertion phrasing before trusting `slide_references`.
-- The architect's EDITING rule "adding or removing slides is not an edit" is the rule #314 changes.
+### Adding a slide (#314)
+
+A user on the graph path can ask for a new slide in an existing deck ("add a slide on X after slide 3"). The architect answers with intent `edit` and the revised `deck_spec`. No intent, field or schema was added. `architect_node` works out which slides are new, shifts the rows, and builds only the new ones. Glossary: **Slide Insertion** and **Pending Slide** in `CONTEXT.md`. An insertion changes the Position, and so the Slide Number, of every later slide. The numbering is recomputed from the rows every turn, so nothing is stored.
+
+**Alignment** (`src/domain/slide_alignment.py`, pure, no I/O; `tests/unit/test_slide_alignment.py` pins it). `align_slides(old, new)` reads both lists in position order and pairs every persisted slide with one returned slide, keeping the order. The remaining `len(new) - len(old)` returned slides are the inserted ones. It minimises, in order, two costs per pair: 1 if `(purpose, content_brief)` differ, then 1 if any field but `position` differs (`slide_key`). An untouched slide pairs at (0, 0), a neighbour whose only change is `assumes` or `hands_off` at (0, 1), and a rewritten slide at (1, 1). It never guesses. `AlignmentRefused.code` is one of:
+- `ambiguous`: more than one pairing is optimal. The usual case is an add plus a rewrite of the slide next to it.
+- `moves_slides`: the edit moves a slide's spec. Two forms are caught: a revised pair whose returned slide equals a different persisted slide, and an inserted slide equal to a persisted slide whose own pair is revised (a moved slide read as "insert a copy, rewrite the original"). A duplicate append (`[A, B, C]` to `[A, B, C, B]`) is not refused.
+- `removes_slides`: fewer slides than the deck has.
+
+The result is reported in both numberings. `inserted` and `revised` are the returned spec's own `SlideSpec.position` values. `inserted_indices` and `revised_indices` are indices in position order, which is the canonical numbering once the node re-stamps. `old_to_new_index` maps each persisted position to its index. The equal-length path uses `revised` (positions), which equals the old positional `changed` on any deck, gapped included. The insertion path re-stamps the spec to `0..m-1` and uses the indices. A returned list that is out of position order is read in position order, with an INFO log.
+
+Equal-length edits are aligned too. One that turns a slide into an exact copy of another is now refused as `moves_slides`; before, it was rebuilt in place.
+
+**Refusals.** A refused turn degrades to `discuss` with the code in `error_state`. Nothing is written but the chat lines: rows, spec and version are unchanged.
+
+| Code | Cause |
+| --- | --- |
+| `edit_insert_ambiguous` | Alignment `ambiguous`. The message asks for the add first, then the other change. |
+| `edit_spec_moves_slides` | Alignment `moves_slides`. |
+| `edit_spec_positions_changed` | A shorter spec, or an equal-length one with other positions (`removes_slides` falls back to it). The message says the edit would have removed or renumbered slides. |
+| `insert_rows_changed` | `SlideRowsChangedError` from the shift: the rows are not the ones the architect planned against (for example a UI edit during planning). |
+| `insert_rows_failed` | Any other failure of the shift. A persisted runtime failure is re-raised instead. |
+
+A spec with duplicate positions never reaches the node: the runtime's parser rejects it and the turn ends with an error, not a refusal. The binding check (`invalid_slide_type_binding`) runs before the alignment, as on any edit.
+
+**Targets.** On an insertion turn, `target_positions` is exactly the inserted and revised slides, in the canonical numbering. The model's own targets are mapped through the re-stamp and compared. A difference logs the WARNING `insert_targets_disagree` and is not honoured: a model that counted in the old numbering would otherwise rebuild a shifted, unchanged slide and destroy any hand edit on it. The #313 `edit_ignores_references` guard is skipped on an insertion turn, because a named slide is the anchor, not a target. A neighbour whose `assumes` or `hands_off` the model also changed is revised and rebuilt, so spec and slide stay consistent. The prompt forbids it and the eval scores it as a failure. Equal-length edits keep the model's targets plus the revised positions. A `design_contract` change still rebuilds every position. A deck-level change re-reviews after the shift, so each slide is reviewed against its own spec entry.
+
+**The shift** (`SlideWriter.insert_pending_slides`, `src/api/services/slide_repository.py`). It runs in `architect_node` after every degrade decision and before `classify_spec_change`, on every insertion turn that is not describe-only. Builders land by position, so shifting later would interleave with them. All of it is one `get_db_session()` transaction:
+1. Re-read the rows. `[(slide_id, content_hash)]` in position order must equal `expected_rows`, the list the node read at the top. Rows that exist while `expected_rows` is empty (the top read swallows errors and returns `[]`), a missing deck row, or any other mismatch raises `SlideRowsChangedError`. Both empty (a spec-only deck) writes the spec and version only.
+2. Snapshot each old row (raw column values) and its `SlideAttribution` before any write. The upsert rewrites those ORM objects in place.
+3. Splice a Pending Slide at each inserted index: `placeholder_slide(PENDING_SLIDE_MESSAGE, text=PENDING_SLIDE_TEXT)`, which reads "New slide — not built yet.", with a fresh `slide_id` and explicit authorship.
+4. Rewrite every position through `_rewrite_slide_rows` (`session_manager.py`), the one per-slide whole-deck rewrite that `save_slide_deck` and `restore_version` also use. The old-row-to-new-position map is exact, never the attribution heuristic, and `now_dt=None` and `author_fallback=None` mean a moved row keeps its `slide_id`, authorship, `modified_at`, verification record and spec fragment, and a NULL stays NULL.
+5. Set `deck_spec_json` to the canonical spec, bump `version` (every worker's deck cache is invalidated, and a stale client save gets a 409 and refetches) and touch `last_activity`. `slide_count` and `html_content` are not written here.
+6. Record one `insert_slide` shared-deck mutation.
+
+A Pending Slide, rather than a gap, keeps rows and spec aligned on every path: a gap would break `_persisted_spec_describes_these_rows` and the polling prefix.
+
+**Failure guarantee.**
+- *A refusal, or a failed or stale shift:* nothing is written (above).
+- *After the shift:* rows `0..n+k-1` equal the spec positions, and each new position holds a Pending Slide.
+- *The new slide's build fails or is rejected:* `_placehold_failed_position` replaces the Pending Slide with the failed placeholder and posts a chat notice. Every other slide is untouched.
+- *The turn dies after the shift* (for example a re-raised non-transient `PersistedRuntimeError`): the Pending Slide stays and its copy is still true. The next turn sees rows matching the spec, so an edit that targets the new slide builds it from its brief. Side effects: `slide_count` and `html_content` stay stale (the session list and the raw view) until the next post-commit deck-level write, which is the deck reviewer's; and the client keeps its mid-turn view until reload.
+- *The pre-fan-out deck-level write fails:* rows and spec are already aligned, because the spec was written in the shift's transaction. The turn records `deck_level_write_failed` as today.
+- *Version:* an insertion turn bumps `deck.version` twice, once in the shift and once in the pre-fan-out write.
+- *Save points:* the end-of-turn save point snapshots the shifted deck. Restoring an earlier one restores rows and `deck_spec_json` together.
+- *Still true of every edit turn:* a UI mutation made after the shift, while builders run, can misplace a landed slide.
+
+No in-process state is added (multi-worker coherence): the shift re-reads the rows inside its own transaction, and the version bump invalidates every other worker's cache.
+
+**Findings and verification follow their slide.**
+- On the row path, `get_slide_deck` gives each finding (except a deck-level `-1`) the list index of the row it was read from, not the index stamped when it was minted (`_deck_findings(..., slide_indices=...)`, applied before `_finding_to_camel`). The stored record is not rewritten, and the blob and no-rows paths still project verbatim. This also fixes UI insert, reorder, delete and duplicate.
+- `write_slide_verification` treats `position` as a hint, because a shift may have landed since the judge started. The verdict goes to the row at `position` if its HTML hashes to the record's key; else to the one other row whose HTML does; else to `position`, as before. A record with more than one key, or two rows sharing the hash, falls through to `position`.
+
+**A placeholder is judged by its current verdict.** `is_placeholder_verdict(verdict)` (`slide_repository.py`) is stricter than `is_placeholder_record`: the verdict has `error: true` and its keys are a subset of `error` and `message`. The LLM judge's error verdict also sets `error` but carries `score`, `rating`, `explanation` and more, so a judged slide whose judge call failed is not a placeholder. `nodes._holds_placeholder(row)` applies it to the verdict under the row's CURRENT `content_hash`, never the whole record, because a record keeps the history of every hash and a slide rebuilt after being a placeholder would still match. `_write_draft_row` uses it (a Pending or failed position takes the builder's draft, a real slide is never overwritten), and so does `rereview_committed_slides` (a placeholder fails by definition).
+
+**Transports.** No frontend change. Both transports end in `ChatPanel`'s `complete` case (the polling client emits the same event), which refetches the deck with `api.getSlides` and passes it to `onSlidesGenerated`; `event.slides` (the poll route's `result.slides` on polling) is the same final deck and the fallback. After an insertion the refetched rows and spec are contiguous, so the panel (`index + 1`) and SpecView (`position + 1`) agree. `frontend/tests/e2e/agent-insert-slide.spec.ts` pins the SSE end state. Known limits, each pinned by a test:
+- *Mid-turn on SSE:* the new slide's `slide_ready` replaces the old slide at that index until `complete`.
+- *Mid-turn on polling:* when the first poll lands before the shift, later polls get the old last slide again at `n` (`slides_since_cursor`) and only the Pending Slide as a revision (`slide_revisions_since`; moved rows keep their `modified_at` because it is attribution). The client shows `[A, B, P, D, D]` until `complete`, whose `result.slides` is the shifted deck. `tests/unit/test_poll_route_across_an_insert.py` pins this at the route.
+- *Error path:* `ChatPanel`'s `error` case does not refetch, so a turn that dies after the shift leaves the mid-turn view until reload. A refetch on `error` is a follow-up.
+
+**Where the new slide goes.** The resolver is unchanged: "after slide 3" still resolves "slide 3" only, an indefinite ordinal ("a final slide") is still unresolved, and "Insert a new slide 3" still resolves the EXISTING slide 3. The prompt carries the placement. In an add, the architect reads slide numbers against `slide_numbering` (the deck before the insert), and a slide the user names to say where the new one goes is the anchor, not a target. Product rule when the user states no place: the new slide goes where it fits the argument, before a closing or call-to-action slide unless it is itself a closing slide, and the message says where it went. When the user asks for the end, it goes after the last slide. A mis-anchored insert lands one place off but never mis-attributes or rebuilds an existing slide. No eval case measures the no-place rule; the layer-3 RC2 test exercises it. If anchor slips show up, the follow-up is a deterministic `slide_insertions` payload key.
+
+**A build that is really an add.** A model that answers an add with `build` rebuilds every position in place, and identity and records stay by position, so every slide after the new one is mis-attributed (existing build semantics). `architect_node` logs the WARNING `build_looks_like_insert` when a build's spec aligns as a pure insertion of the persisted spec over committed rows. It is a diagnostic: it changes nothing, and a build the alignment refuses (one that shrinks or reorders the deck) logs nothing and never fails. The eval scores `build` on an add as a failure.
+
+**Contract change (RC2 and RC9).** An add used to come back as `build`, and the layer-3 tests `test_rc2_architect_identifies_add_intent.py` and `test_rc9_architect_add_with_slide_reference.py` asserted that. An add is now an `edit`. Both tests assert: intent `edit`; one more slide than the deck; `target_positions` equal to the new slide only; every other slide equal in all fields but `position` (`slide_key`). RC9 also asserts the new slide straight after the named slide, and RC2 (no stated place, deck ending in a closing slide) asserts it goes before the closing slide. They are live tests and not run in CI. The architect's EDITING block no longer says "adding or removing slides is not an edit": adding is an edit, and removing or reordering is still refused as `discuss`.
+
+**Rollout.** The Graph V1 manifest only seeds a fresh bootstrap (see "Rollout" above). An existing install gets the node behaviour at once (alignment, shift, refusals) but keeps its persisted architect prompt, which still answers an add with `discuss`, until an admin publishes a release carrying the new one.
+
+**Limits of this path.**
+- Deleting or reordering slides on the agent path is still refused.
+- An agent "duplicate slide N", or adjacent identical blank entries, align as `ambiguous`, and the refusal text ("add the slide on its own first") misleads.
 
 ---
 
