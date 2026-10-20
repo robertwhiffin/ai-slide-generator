@@ -554,6 +554,7 @@ jobs:
           pytest \
             tests/integration/test_clear_chat_routes.py \
             tests/integration/test_comments_removed.py \
+            tests/integration/test_delete_message_routes.py \
             tests/integration/test_export_parity.py \
             tests/integration/test_get_slide_deck_row_read.py \
             tests/integration/test_image_api.py \
