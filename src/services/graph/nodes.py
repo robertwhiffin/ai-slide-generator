@@ -55,7 +55,11 @@ from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_columns
 from src.api.services.session_manager import get_session_manager
-from src.api.services.slide_repository import SlideWriter, is_placeholder_record
+from src.api.services.slide_repository import (
+    SlideWriter,
+    is_placeholder_record,
+    is_placeholder_verdict,
+)
 from src.core.database import get_db_session
 from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
@@ -644,7 +648,7 @@ def rereview_committed_slides(
         row = by_position[position]
         committed.add(position)
 
-        if is_placeholder_record(row.get("verification_record")):
+        if _holds_placeholder(row):
             placeheld.add(position)
             failing.add(position)
             continue
@@ -3076,6 +3080,27 @@ def _fold(acc: Dict[str, Any], update: Dict[str, Any]) -> None:
             acc[key] = value
 
 
+def _holds_placeholder(row: Optional[dict]) -> bool:
+    """Whether *row* is a position whose CURRENT slide is a placeholder.
+
+    Judges the verdict stored under the row's CURRENT ``content_hash`` with the
+    strict ``is_placeholder_verdict``, never the whole ``verification_record``
+    with ``is_placeholder_record``:
+
+    * a verification record is keyed by content hash and keeps the history of
+      every hash the slot has held, so a placeholder hash left behind by a slide
+      that was later rebuilt is not the slide that is there now;
+    * the LLM judge's error verdict also sets ``error`` but carries ``score``,
+      ``rating``, ``explanation`` and more, so a real, judged slide whose judge
+      call failed is not a placeholder.
+
+    ``None`` (an empty position) holds nothing.
+    """
+    return row is not None and is_placeholder_verdict(
+        (row.get("verification_record") or {}).get(row.get("content_hash"))
+    )
+
+
 def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
     """Commit the builder's HTML so the slide is visible before it is reviewed.
 
@@ -3084,11 +3109,14 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
     releases committed rows, so this write is what makes the slide visible;
     the reviewed write later overwrites it in place.
 
-    **A draft only ever fills an EMPTY position.**  On an edit or a rebuild the
-    position already holds a committed slide, and a turn that then dies on a
-    persisted runtime failure (a removed pinned endpoint, say) would leave the
-    user's good slide replaced by an unreviewed draft and report an error.  So
-    a position with a row keeps it until the reviewed write replaces it.
+    **A draft never overwrites a committed REAL slide.**  On an edit or a
+    rebuild the position already holds a committed slide, and a turn that then
+    dies on a persisted runtime failure (a removed pinned endpoint, say) would
+    leave the user's good slide replaced by an unreviewed draft and report an
+    error.  So a position holding a real slide keeps it until the reviewed write
+    replaces it.  A position that is empty, or holds only a placeholder (a
+    pending inserted slide or a failed one — ``_holds_placeholder``), has no
+    real slide to protect and is filled.
 
     **No ``verification_record``**: ``write_slide`` preserves the row's existing
     record when given ``None``, and that record is keyed by content hash, so
@@ -3106,7 +3134,8 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
     slide_spec = record.get("slide_spec")
     try:
         writer = SlideWriter()
-        if writer.get_slide(record["session_id"], position) is not None:
+        existing = writer.get_slide(record["session_id"], position)
+        if existing is not None and not _holds_placeholder(existing):
             return False
         writer.write_slide(
             session_id=record["session_id"],
