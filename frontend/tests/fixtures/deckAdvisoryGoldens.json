@@ -1,0 +1,217 @@
+{
+  "about": "Recorded from src/services/graph/nodes.py::_advisory_text. tests/unit/test_finding_conformance.py::TestDeckAdvisoryGolden rebuilds each case's findings (slide_index -1 for a deck-level criterion, 0 otherwise) and requires the writer to return `advisory` exactly, and `split` to be `advisory` partitioned at the first REVIEWER_DETAILS_SEPARATOR (null when it has none). frontend/src/utils/findingText.test.ts requires splitDeckAdvisory(advisory) to equal `split`. When the writer's format changes, replace `advisory` and `split` with the values that Python test prints, never with hand-written ones.",
+  "cases": [
+    {
+      "name": "no findings: the unchanged no-findings sentence",
+      "findings": [],
+      "advisory": "Deck review complete: no narrative issues found across the deck.",
+      "split": null
+    },
+    {
+      "name": "a single deck-level finding",
+      "findings": [
+        {
+          "criterion": "arc_gap",
+          "message": "arc_gap between narrative_arc[1] and positions 3,4 (#1B3139 callout)"
+        }
+      ],
+      "advisory": "Deck review found 1 thing to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.\n\nReviewer's details:\n- arc_gap between narrative_arc[1] and positions 3,4 (#1B3139 callout)",
+      "split": {
+        "lead": "Deck review found 1 thing to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+        "details": "- arc_gap between narrative_arc[1] and positions 3,4 (#1B3139 callout)"
+      }
+    },
+    {
+      "name": "a single slide-level finding gets the deck-grain line",
+      "findings": [
+        {
+          "criterion": "overflow",
+          "message": "The chart on slide 3 runs off the bottom edge."
+        }
+      ],
+      "advisory": "Deck review found 1 thing to look at in how the deck reads as a whole:\n- One of the slides may need a closer look.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.\n\nReviewer's details:\n- The chart on slide 3 runs off the bottom edge.",
+      "split": {
+        "lead": "Deck review found 1 thing to look at in how the deck reads as a whole:\n- One of the slides may need a closer look.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+        "details": "- The chart on slide 3 runs off the bottom edge."
+      }
+    },
+    {
+      "name": "a repeated deck-level criterion collapses to one counted line",
+      "findings": [
+        {
+          "criterion": "arc_gap",
+          "message": "Slides 2 and 3 jump from cost to roadmap."
+        },
+        {
+          "criterion": "missing_conclusion",
+          "message": "The last slide restates the agenda."
+        },
+        {
+          "criterion": "arc_gap",
+          "message": "Slide 5 introduces a pilot never set up."
+        }
+      ],
+      "advisory": "Deck review found 3 things to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides (noted 2 times).\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.\n\nReviewer's details:\n- Slides 2 and 3 jump from cost to roadmap.\n- The last slide restates the agenda.\n- Slide 5 introduces a pilot never set up.",
+      "split": {
+        "lead": "Deck review found 3 things to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides (noted 2 times).\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+        "details": "- Slides 2 and 3 jump from cost to roadmap.\n- The last slide restates the agenda.\n- Slide 5 introduces a pilot never set up."
+      }
+    },
+    {
+      "name": "mixed deck- and slide-level findings: the slide-level ones share one counted deck-grain line",
+      "findings": [
+        {
+          "criterion": "overflow",
+          "message": "The chart on slide 3 runs off the bottom edge."
+        },
+        {
+          "criterion": "arc_gap",
+          "message": "Slide 4 presents results before the method."
+        },
+        {
+          "criterion": "rogue_colour",
+          "message": "Slide 2 uses an off-palette orange."
+        },
+        {
+          "criterion": "brief_not_delivered",
+          "message": "Slide 6 omits the planned timeline."
+        }
+      ],
+      "advisory": "Deck review found 4 things to look at in how the deck reads as a whole:\n- One of the slides may need a closer look (noted 3 times).\n- The story has a gap or an unexplained jump between slides.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.\n\nReviewer's details:\n- The chart on slide 3 runs off the bottom edge.\n- Slide 4 presents results before the method.\n- Slide 2 uses an off-palette orange.\n- Slide 6 omits the planned timeline.",
+      "split": {
+        "lead": "Deck review found 4 things to look at in how the deck reads as a whole:\n- One of the slides may need a closer look (noted 3 times).\n- The story has a gap or an unexplained jump between slides.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+        "details": "- The chart on slide 3 runs off the bottom edge.\n- Slide 4 presents results before the method.\n- Slide 2 uses an off-palette orange.\n- Slide 6 omits the planned timeline."
+      }
+    },
+    {
+      "name": "all 11 criteria: a two-digit total",
+      "findings": [
+        {
+          "criterion": "overflow",
+          "message": "MSG-overflow-#ABCDEF"
+        },
+        {
+          "criterion": "contrast_failure",
+          "message": "MSG-contrast_failure-#ABCDEF"
+        },
+        {
+          "criterion": "rogue_colour",
+          "message": "MSG-rogue_colour-#ABCDEF"
+        },
+        {
+          "criterion": "distorted_image",
+          "message": "MSG-distorted_image-#ABCDEF"
+        },
+        {
+          "criterion": "source_contradiction",
+          "message": "MSG-source_contradiction-#ABCDEF"
+        },
+        {
+          "criterion": "brief_not_delivered",
+          "message": "MSG-brief_not_delivered-#ABCDEF"
+        },
+        {
+          "criterion": "arc_gap",
+          "message": "MSG-arc_gap-#ABCDEF"
+        },
+        {
+          "criterion": "cross_slide_repetition",
+          "message": "MSG-cross_slide_repetition-#ABCDEF"
+        },
+        {
+          "criterion": "missing_conclusion",
+          "message": "MSG-missing_conclusion-#ABCDEF"
+        },
+        {
+          "criterion": "off_template_treatment",
+          "message": "MSG-off_template_treatment-#ABCDEF"
+        },
+        {
+          "criterion": "layout_binding_mismatch",
+          "message": "MSG-layout_binding_mismatch-#ABCDEF"
+        }
+      ],
+      "advisory": "Deck review found 11 things to look at in how the deck reads as a whole:\n- One of the slides may need a closer look (noted 8 times).\n- The story has a gap or an unexplained jump between slides.\n- The same point is made on more than one slide.\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.\n\nReviewer's details:\n- MSG-overflow-#ABCDEF\n- MSG-contrast_failure-#ABCDEF\n- MSG-rogue_colour-#ABCDEF\n- MSG-distorted_image-#ABCDEF\n- MSG-source_contradiction-#ABCDEF\n- MSG-brief_not_delivered-#ABCDEF\n- MSG-arc_gap-#ABCDEF\n- MSG-cross_slide_repetition-#ABCDEF\n- MSG-missing_conclusion-#ABCDEF\n- MSG-off_template_treatment-#ABCDEF\n- MSG-layout_binding_mismatch-#ABCDEF",
+      "split": {
+        "lead": "Deck review found 11 things to look at in how the deck reads as a whole:\n- One of the slides may need a closer look (noted 8 times).\n- The story has a gap or an unexplained jump between slides.\n- The same point is made on more than one slide.\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+        "details": "- MSG-overflow-#ABCDEF\n- MSG-contrast_failure-#ABCDEF\n- MSG-rogue_colour-#ABCDEF\n- MSG-distorted_image-#ABCDEF\n- MSG-source_contradiction-#ABCDEF\n- MSG-brief_not_delivered-#ABCDEF\n- MSG-arc_gap-#ABCDEF\n- MSG-cross_slide_repetition-#ABCDEF\n- MSG-missing_conclusion-#ABCDEF\n- MSG-off_template_treatment-#ABCDEF\n- MSG-layout_binding_mismatch-#ABCDEF"
+      }
+    },
+    {
+      "name": "one blank message among real ones (its plain line stays, its bullet goes)",
+      "findings": [
+        {
+          "criterion": "arc_gap",
+          "message": "  "
+        },
+        {
+          "criterion": "missing_conclusion",
+          "message": "The deck stops on the agenda slide."
+        }
+      ],
+      "advisory": "Deck review found 2 things to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides.\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.\n\nReviewer's details:\n- The deck stops on the agenda slide.",
+      "split": {
+        "lead": "Deck review found 2 things to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides.\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+        "details": "- The deck stops on the agenda slide."
+      }
+    },
+    {
+      "name": "all messages blank: no details section",
+      "findings": [
+        {
+          "criterion": "arc_gap",
+          "message": "  "
+        },
+        {
+          "criterion": "missing_conclusion",
+          "message": "\t\n"
+        }
+      ],
+      "advisory": "Deck review found 2 things to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides.\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+      "split": null
+    },
+    {
+      "name": "a single finding with a blank message: no details section",
+      "findings": [
+        {
+          "criterion": "cross_slide_repetition",
+          "message": ""
+        }
+      ],
+      "advisory": "Deck review found 1 thing to look at in how the deck reads as a whole:\n- The same point is made on more than one slide.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+      "split": null
+    },
+    {
+      "name": "a multi-line reviewer message is kept verbatim in the details",
+      "findings": [
+        {
+          "criterion": "arc_gap",
+          "message": "Slide 4 presents results —\nbefore the method on slide 5."
+        },
+        {
+          "criterion": "missing_conclusion",
+          "message": "The last slide restates the agenda."
+        }
+      ],
+      "advisory": "Deck review found 2 things to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides.\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.\n\nReviewer's details:\n- Slide 4 presents results —\nbefore the method on slide 5.\n- The last slide restates the agenda.",
+      "split": {
+        "lead": "Deck review found 2 things to look at in how the deck reads as a whole:\n- The story has a gap or an unexplained jump between slides.\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+        "details": "- Slide 4 presents results —\nbefore the method on slide 5.\n- The last slide restates the agenda."
+      }
+    },
+    {
+      "name": "a reviewer message containing the separator: the split is at the FIRST one",
+      "findings": [
+        {
+          "criterion": "missing_conclusion",
+          "message": "The deck ends on the agenda.\n\nReviewer's details:\n(quoted from the brief)"
+        }
+      ],
+      "advisory": "Deck review found 1 thing to look at in how the deck reads as a whole:\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.\n\nReviewer's details:\n- The deck ends on the agenda.\n\nReviewer's details:\n(quoted from the brief)",
+      "split": {
+        "lead": "Deck review found 1 thing to look at in how the deck reads as a whole:\n- The deck has no clear conclusion or call to action.\nNone of these were changed automatically. Reply here if you'd like any of them addressed.",
+        "details": "- The deck ends on the agenda.\n\nReviewer's details:\n(quoted from the brief)"
+      }
+    }
+  ]
+}

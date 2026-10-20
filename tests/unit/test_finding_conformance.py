@@ -512,6 +512,152 @@ class TestFindingConformance:
 
 
 # ---------------------------------------------------------------------------
+# #316 M3 — the deck advisory's SHAPE, pinned by one golden both sides read
+# ---------------------------------------------------------------------------
+#
+# The constant pins above cover PREFIX/SUFFIX/CLOSING/separator only.  The shape
+# around them (the "- " bullets, the "\n" joins, thing/things, the count,
+# "(noted N times)") is written by nodes._advisory_text and parsed by
+# splitDeckAdvisory in frontend/src/utils/findingText.ts.  Hand-copied goldens on
+# each side let a writer edit stay green on both while the parser silently stops
+# matching, so the technical text leads the chat bubble again.  This golden is
+# the one record both sides test: here it must equal the real writer's output;
+# findingText.test.ts requires splitDeckAdvisory to return each recorded split.
+
+DECK_ADVISORY_GOLDENS = REPO_ROOT / "frontend" / "tests" / "fixtures" / "deckAdvisoryGoldens.json"
+
+#: Fewer cases than this means the golden was truncated, not deliberately pruned.
+MIN_DECK_ADVISORY_GOLDENS = 10
+
+
+def _load_deck_advisory_goldens() -> list[dict]:
+    """The golden's cases; fails loudly when the file is missing, empty or short."""
+    assert DECK_ADVISORY_GOLDENS.is_file(), (
+        f"{DECK_ADVISORY_GOLDENS} not found: it is the shared deck-advisory golden "
+        f"that findingText.test.ts parses (#316 M3)"
+    )
+    text = DECK_ADVISORY_GOLDENS.read_text(encoding="utf-8")
+    assert text.strip(), f"{DECK_ADVISORY_GOLDENS} is empty"
+    doc = json.loads(text)
+    assert isinstance(doc, dict) and isinstance(doc.get("cases"), list), (
+        f"{DECK_ADVISORY_GOLDENS} must be an object with a 'cases' list"
+    )
+    cases = doc["cases"]
+    assert len(cases) >= MIN_DECK_ADVISORY_GOLDENS, (
+        f"{DECK_ADVISORY_GOLDENS} has {len(cases)} case(s); expected at least "
+        f"{MIN_DECK_ADVISORY_GOLDENS}"
+    )
+    return cases
+
+
+def _golden_findings(case: dict) -> list:
+    """Real ``Finding`` objects for a case, at the slide index each criterion's
+    level implies (as tests/unit/test_graph_nodes.py::_deck_finding builds them)."""
+    from src.domain.finding import CRITERIA, Finding
+
+    return [
+        Finding(
+            id="golden",
+            slide_index=-1 if CRITERIA[f["criterion"]].level == "deck" else 0,
+            category=CRITERIA[f["criterion"]].category,
+            criterion=f["criterion"],
+            message=f["message"],
+            objective=CRITERIA[f["criterion"]].objective,
+        )
+        for f in case["findings"]
+    ]
+
+
+def _split_at_first_separator(advisory: str) -> dict | None:
+    """``{lead, details}`` at the first REVIEWER_DETAILS_SEPARATOR, else None."""
+    from src.domain.finding_copy import REVIEWER_DETAILS_SEPARATOR
+
+    lead, sep, details = advisory.partition(REVIEWER_DETAILS_SEPARATOR)
+    return {"lead": lead, "details": details} if sep else None
+
+
+class TestDeckAdvisoryGolden:
+    """frontend/tests/fixtures/deckAdvisoryGoldens.json is the real writer's output."""
+
+    def test_the_golden_covers_every_input_shape(self) -> None:
+        """Coverage is judged on the INPUTS, so a regenerated golden that lost a
+        scenario fails here whatever the writer's format has become."""
+        from collections import Counter
+
+        from src.domain.finding import CRITERIA
+
+        cases = _load_deck_advisory_goldens()
+        names = [case["name"] for case in cases]
+        assert len(set(names)) == len(names), f"duplicate case names: {names}"
+        for case in cases:
+            assert set(case) == {"name", "findings", "advisory", "split"}, case["name"]
+            for f in case["findings"]:
+                assert set(f) == {"criterion", "message"}, case["name"]
+
+        def criteria(case: dict) -> list[str]:
+            return [f["criterion"] for f in case["findings"]]
+
+        def blanks(case: dict) -> list[bool]:
+            return [not f["message"].strip() for f in case["findings"]]
+
+        def deck_level_repeats(case: dict) -> bool:
+            counts = Counter(c for c in criteria(case) if CRITERIA[c].level == "deck")
+            return any(n > 1 for n in counts.values())
+
+        def mixed_levels(case: dict) -> bool:
+            levels = Counter(CRITERIA[c].level for c in criteria(case))
+            return levels["deck"] >= 1 and levels["slide"] >= 2
+
+        required = {
+            "no findings": lambda c: not c["findings"],
+            "one finding with a message (1 thing)": lambda c: blanks(c) == [False],
+            "several findings with messages (things)": (
+                lambda c: len(blanks(c)) > 1 and not any(blanks(c))
+            ),
+            "a repeated deck-level criterion": deck_level_repeats,
+            "one deck-level and several slide-level criteria": mixed_levels,
+            "every registered criterion": lambda c: set(criteria(c)) == set(CRITERIA),
+            "a blank message among real ones": (
+                lambda c: any(blanks(c)) and not all(blanks(c))
+            ),
+            "every message blank": lambda c: bool(blanks(c)) and all(blanks(c)),
+            "a multi-line message": (
+                lambda c: any("\n" in f["message"].strip() for f in c["findings"])
+            ),
+        }
+        missing = [label for label, has in required.items() if not any(map(has, cases))]
+        assert not missing, f"{DECK_ADVISORY_GOLDENS} has no case for: {missing}"
+
+    def test_advisory_text_writes_every_recorded_advisory(self) -> None:
+        """A format edit in nodes._advisory_text fails here until the golden is
+        regenerated, and the regenerated golden is what findingText.test.ts parses."""
+        from src.services.graph import nodes
+
+        drifted = {}
+        for case in _load_deck_advisory_goldens():
+            actual = nodes._advisory_text(_golden_findings(case))
+            if actual != case["advisory"]:
+                drifted[case["name"]] = {
+                    "advisory": actual,
+                    "split": _split_at_first_separator(actual),
+                }
+        assert not drifted, (
+            f"nodes._advisory_text no longer writes {len(drifted)} recorded "
+            f"advisory(ies) in {DECK_ADVISORY_GOLDENS}.  Replace each case's advisory "
+            f"and split with the values below, then run "
+            f"frontend/src/utils/findingText.test.ts: splitDeckAdvisory must still "
+            f"return every split, or the reviewer's technical text leads the chat "
+            f"bubble again (#316 M3).\n" + json.dumps(drifted, indent=2, ensure_ascii=False)
+        )
+
+    def test_every_recorded_split_is_the_advisory_split_at_its_first_separator(self) -> None:
+        """The expected splits come from the writer's output, not from what the
+        parser happens to accept: a split cannot be nulled to make the TS side pass."""
+        for case in _load_deck_advisory_goldens():
+            assert case["split"] == _split_at_first_separator(case["advisory"]), case["name"]
+
+
+# ---------------------------------------------------------------------------
 # B3.2 — the deck read path's `findings` key, conformed to the same declaration
 # ---------------------------------------------------------------------------
 #

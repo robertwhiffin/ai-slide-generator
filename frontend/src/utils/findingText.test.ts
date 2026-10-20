@@ -38,6 +38,19 @@
  *    -> the wrong-lead, prefixed, suffixed, newline-in-lead, slide 0,
  *    0 things and no-bullet cases.
  *  - Drop the closing-line requirement -> "the closing line altered".
+ *
+ * #316 M3: those literals are hand copies, so a Python format edit with its own
+ * goldens updated would leave them green while the parser stopped matching.
+ * The shared golden frontend/tests/fixtures/deckAdvisoryGoldens.json closes
+ * that: tests/unit/test_finding_conformance.py::TestDeckAdvisoryGolden requires
+ * it to equal the real writer's output, and "the shared golden" below requires
+ * `splitDeckAdvisory` to return each recorded split.  Sabotage notes:
+ *  - Require `things` only (drop the `?`) -> the golden's single-finding cases.
+ *  - Write the plain lines as `* ` bullets, or join them with "\n\n", in
+ *    nodes._advisory_text and regenerate the golden -> every golden case with
+ *    a details section.
+ *  Writer edits the parser still accepts (the "(noted N times)" wording, the
+ *  details bullets) stay green by design: those advisories still collapse.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -47,6 +60,7 @@ import {
   DECK_ADVISORY_HEADER_SUFFIX,
   DISCUSS_REQUEST_LEAD,
   REVIEWER_DETAILS_SEPARATOR,
+  type SplitMessage,
   applyFindingRequest,
   discussFindingRequest,
   findingPlainIssue,
@@ -55,6 +69,7 @@ import {
   splitFindingRequest,
 } from './findingText';
 import { PLAIN_MESSAGE_FALLBACK, type SlideFinding } from '../types/finding';
+import deckAdvisoryGoldens from '../../tests/fixtures/deckAdvisoryGoldens.json';
 
 /** The technical message quoted in #316, verbatim. */
 const TECH =
@@ -320,6 +335,15 @@ const PYTHON_ADVISORIES: Array<{ name: string; content: string; lead: string; de
   },
 ];
 
+/**
+ * The shared golden (#316 M3): nodes._advisory_text's outputs, recorded from the
+ * real writer and re-checked against it by
+ * tests/unit/test_finding_conformance.py::TestDeckAdvisoryGolden, with each
+ * output's split at its first separator (`null` when it has none).
+ */
+const DECK_ADVISORY_GOLDENS: ReadonlyArray<{ name: string; advisory: string; split: SplitMessage | null }> =
+  deckAdvisoryGoldens.cases;
+
 /** What the old code wrote; rows stored before #316 keep these (D6, S22). */
 const LEGACY_APPLY = `Please apply this review suggestion for slide 2: ${TECH}`;
 const LEGACY_DISCUSS = `I'd like to discuss this review finding for slide 2: ${TECH}`;
@@ -486,5 +510,21 @@ describe('splitDeckAdvisory — rejects everything else (D14: strict, legacy nev
     ['an ordinary message with the exact separator (C5)', "Here is the plan.\n\nReviewer's details:\nnone"],
   ])('%s -> null', (_label, content) => {
     expect(splitDeckAdvisory(content)).toBeNull();
+  });
+});
+
+describe('splitDeckAdvisory — the shared golden (frontend/tests/fixtures/deckAdvisoryGoldens.json, #316 M3)', () => {
+  it('loads the golden, with cases the parser must accept and cases it must reject', () => {
+    expect(DECK_ADVISORY_GOLDENS.length).toBeGreaterThanOrEqual(10);
+    expect(DECK_ADVISORY_GOLDENS.filter((c) => c.split !== null).length).toBeGreaterThanOrEqual(8);
+    expect(DECK_ADVISORY_GOLDENS.filter((c) => c.split === null).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it.each(DECK_ADVISORY_GOLDENS)('returns the recorded split: $name', ({ advisory, split }) => {
+    expect(splitDeckAdvisory(advisory)).toStrictEqual(split);
+  });
+
+  it.each(DECK_ADVISORY_GOLDENS)('is never taken for an Apply/Discuss request: $name', ({ advisory }) => {
+    expect(splitFindingRequest(advisory)).toBeNull();
   });
 });

@@ -3572,7 +3572,10 @@ class TestDeckAdvisoryIsPlain:
     line, then ``REVIEWER_DETAILS_SEPARATOR`` with each reviewer message verbatim:
     those messages carry the only actionable slide references.  The no-findings
     sentence is unchanged.  Expected strings are written out here, never derived
-    by calling ``_advisory_text``.
+    by calling ``_advisory_text``.  A format change here must also regenerate
+    frontend/tests/fixtures/deckAdvisoryGoldens.json (pinned to this writer by
+    tests/unit/test_finding_conformance.py::TestDeckAdvisoryGolden), which is
+    what proves the frontend's ``splitDeckAdvisory`` still parses the result.
     """
 
     def test_no_findings_line_is_byte_identical(self):
