@@ -736,6 +736,7 @@ jobs:
           - template-cards
           - template-preview-import-scan
           - template-viewer
+          - turn-progress
           - viewer-readonly
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
