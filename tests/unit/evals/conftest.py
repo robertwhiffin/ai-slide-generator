@@ -13,6 +13,7 @@ import os
 import pytest
 
 from evals.harness import render
+from tests.unit.evals.mlflow_isolation import end_stray_runs
 
 CHROMIUM_SKIP_REASON = "Playwright chromium not installed"
 
@@ -21,6 +22,19 @@ if os.environ.get("EVALS_FORCE_NO_CHROMIUM") == "1":
         raise AssertionError("render_slide called by a test that does not request requires_chromium")
 
     render.render_slide = _no_render
+
+
+@pytest.fixture(autouse=True)
+def _no_stray_mlflow_run():
+    """Start and finish every eval-harness test with no active MLflow run.
+
+    A test elsewhere in the same xdist worker can leave one active (see
+    ``tests/unit/evals/mlflow_isolation.py``); a sweep test would then fail with
+    "Run ... is already active" depending on test distribution alone.
+    """
+    end_stray_runs()
+    yield
+    end_stray_runs()
 
 
 @pytest.fixture
