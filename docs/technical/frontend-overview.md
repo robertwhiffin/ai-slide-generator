@@ -321,7 +321,7 @@ interface SlideStyle {
 |------|----------------|---------------------|
 | `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea for composing prompts; accepts an optional `badge?: React.ReactNode` slot above the textarea (currently no caller supplies one) | None (props only) |
-| `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
+| `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs; collapses the reviewer's details section of finding requests and the deck-review advisory | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides. Still exists but is no longer the primary slide surface — `SlideViewer` fulfils that role. | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview tile used within `SlidePanel` for the tab-based view. Still exists; not the primary slide surface. | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |
@@ -333,7 +333,7 @@ interface SlideStyle {
 | `src/components/SlideViewer/SlideViewer.tsx` | Public entry point for the flip-through viewer. Wraps `ViewerProvider`. Owns keyboard listener, seen-state lifecycle, stage CRUD, and presentation-mode handle. | `api.getSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
 | `src/components/SlideViewer/SlideStage.tsx` | Renders one slide at a time in a sandboxed iframe via `buildSlideDocument`. Handles wheel-paging. | None (renders via `buildSlideDocument`) |
 | `src/components/SlideViewer/ThumbnailRibbon.tsx` | Vertical ribbon of scaled thumbnails. Drives slide selection on click. Drag-reorder via `@dnd-kit`. Amber unseen dot per slide with unread findings. | `onReorder` callback to `AppLayout` |
-| `src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer for per-slide AI findings. Drag-resize handle. Apply / Dismiss / Discuss actions (stubs until PRD workstream 5 ships). | None (prop callbacks only) |
+| `src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer for per-slide AI findings. Drag-resize handle. Each finding leads with its plain-language message; a per-finding Show details toggle reveals the reviewer's technical note. Apply / Dismiss / Discuss actions. | None (prop callbacks only) |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
 | `src/components/AgentConfigBar/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.patchTools` |
