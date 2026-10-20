@@ -1314,9 +1314,11 @@ def _advisory_text(findings: List[Finding]) -> str:
     collapse the details; the strings are pinned equal by
     tests/unit/test_finding_conformance.py.  This is an ``info`` row, so neither
     replay path (``_conversation``, ``_hydrate_chat_history``) feeds it back to the
-    architect.  The empty-list line is byte-identical to before: the tour fixture
-    and the integration suites pin it, and a silent absence is indistinguishable
-    from a review that never ran.
+    architect.  The empty-list line is byte-identical to before (pinned by
+    tests/unit/test_graph_nodes.py::TestDeckAdvisoryIsPlain::
+    test_no_findings_line_is_byte_identical; the tour fixture's copy of it is
+    pinned separately by tests/unit/test_tour_fixture_script.py), and a silent
+    absence is indistinguishable from a review that never ran.
     """
     if not findings:
         return (

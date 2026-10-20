@@ -13,9 +13,15 @@ Deliberate, and pinned by tests:
   src/services/agent_schema_registry.py) hash the JSON schema; a field, even an
   optional one no model fills, would move them.  Pinned by the schema-digest
   tests and by tests/unit/test_finding_conformance.py (PROJECTION_ONLY_FIELDS).
-* Nothing here reaches a model.  ``CRITERIA`` is rendered into the build
-  reviewer's prompt; this is a separate mapping so editing copy never edits a
-  prompt.  Pinned by tests/unit/test_finding_copy.py.
+* No prompt, schema or replayed advisory carries this copy.  ``CRITERIA`` is
+  rendered into the build reviewer's prompt; this is a separate mapping so
+  editing copy never edits a prompt (pinned by tests/unit/test_finding_copy.py),
+  and the fixer / fix-reviewer / architect payloads carry ``Finding`` only
+  (pinned by tests/unit/test_graph_nodes.py::TestReviewersKeepTheTechnicalMessage).
+  The one route to a model is the user's own Apply/Discuss message, which leads
+  with the plain issue sentence and carries ``message`` verbatim after
+  REVIEWER_DETAILS_SEPARATOR — so editing PLAIN_ISSUES changes what the
+  architect reads on those turns.
 * Derived, never stored, so findings persisted before this module existed render
   exactly like new ones.
 

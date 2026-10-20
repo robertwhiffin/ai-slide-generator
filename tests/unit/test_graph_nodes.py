@@ -3576,7 +3576,12 @@ class TestDeckAdvisoryIsPlain:
     """
 
     def test_no_findings_line_is_byte_identical(self):
-        """The tour fixture and the integration suites pin this exact sentence."""
+        """The one pin on the function's no-findings output.
+
+        The integration suites compare against ``_advisory_text([])`` itself, and
+        test_tour_fixture_script.py pins only the fixture's copy of the sentence,
+        so this is the test that keeps it byte-identical.
+        """
         text = nodes._advisory_text([])
 
         assert text == "Deck review complete: no narrative issues found across the deck."
