@@ -134,7 +134,12 @@ The supervisor ledger, plan review and corrections are kept outside the repo, un
 
 ## CI history
 
-The CI section is updated after the PR runs; see the PR for the final state.
+- PR #333, round 1 (head `8ac7b455`, run `39400692876`): **all 66 checks green, 2 skipped by design** (the layer-3 agentic job and deploy). This was green on the first attempt, with no reruns or flakes.
+  - `Integration: Layer 4 Concurrency`: all 4 `TestTurnProgressWritersNeverRegress` tests **PASSED** against postgres:15 (11 passed in total), including the lock-timeout give-up test.
+  - `Unit Tests`: `TestPostgresAlterPath::test_run_migrations_adds_both_columns_and_reruns_cleanly` **PASSED**, giving 9161 passed and 232 skipped.
+  - `Integration: Graph Orchestration`: the 4 `test_turn_progress_polling.py` tests and `test_stage_progress_streams_before_complete_in_seq_order` PASSED, giving 584 passed in total.
+  - `E2E - turn-progress`: 3 passed. The spec mocks the API, so it does not depend on the real backend or SCIM.
+- Round 2 is this notes-only update.
 
 ## Known gaps and follow-ups
 
