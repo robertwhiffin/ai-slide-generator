@@ -63,6 +63,33 @@ Refine slides through follow-up messages in the same session:
 | Add a slide | "Add a new slide about \{X\} after this one" |
 | Regenerate all | "Regenerate all slides with more data" |
 
+## Clearing the Chat
+
+A long conversation can drift. To start the conversation over without losing your deck, click **Clear chat** at the top of the chat panel, on the right of the "AI Assistant" heading.
+
+A confirmation asks "Clear chat?" before anything happens. Confirm with **Clear chat**, or choose **Cancel** to leave everything as it is.
+
+**What is kept:**
+- Your slides
+- The deck's Spec (the **Spec** view beside **Slides**)
+- Your save points
+- The Graph Version the deck is pinned to (the "Pinned Graph Version" line above the chat). Clearing the chat does not move the deck to a newer version.
+
+**What is deleted:** your conversation on this deck. The chat panel empties, and stays empty after you reload the page.
+
+The assistant carries on from the Spec and the current slides, not from the old conversation. You can send "make slide 3 shorter" straight away.
+
+**When the button is available:**
+- Only on decks that have a Spec, and only when you can edit the deck. Viewers do not see it. See [Sharing & Permissions](./08-profile-sharing-permissions.md).
+- It is greyed out while a reply is being generated, while you are previewing a save point, while the chat input is read-only, and when the chat is already empty.
+- It clears **your** conversation only. On a shared deck, each person's conversation is their own, and clearing yours never touches anyone else's.
+- If something else is still running on the deck, such as a slide operation or a reply in another tab, you see "Something is still running on this deck. Wait for it to finish, then clear the chat." Your conversation is kept; try again once it finishes.
+
+**Things to know:**
+- **It cannot be undone.** The cleared messages do not come back to the chat.
+- **Save points keep the chat they were saved with.** Previewing an older save point still shows the conversation as it was then. Restoring a save point does not bring a cleared conversation back.
+- If the **Clear chat** button is missing right after you restore a save point, reload the page and it will reappear.
+
 ## Navigating Slides
 
 Click any thumbnail in the ribbon on the left to jump to that slide. You can also use the arrow buttons on the stage, or keyboard arrow keys when the viewer is focused. The current slide is always kept in view in the ribbon.

@@ -504,7 +504,7 @@ if (message.tool_call) {
 | `session_id` | INTEGER | FK to user_sessions |
 | `role` | VARCHAR | `user`, `assistant`, `system` |
 | `content` | TEXT | Message content |
-| `message_type` | VARCHAR | `user_input`, `user_query`, `reasoning`, `tool_call`, `tool_result`, `llm_response`, `clarification`, `info`, `error` |
+| `message_type` | VARCHAR | `user_input`, `user_query`, `reasoning`, `tool_call`, `tool_result`, `llm_response`, `clarification`, `info`, `error`, `engine_mode_marker` (the one row a clear keeps; `SessionManager.get_messages` and save-point capture drop it, so the chat panel and the agents never see it. The per-request `get_messages_for_request` does not filter it; see [MCP Server](./mcp-server.md)) |
 | `metadata_json` | TEXT | JSON with `tool_name`, `tool_input` |
 | `request_id` | VARCHAR(64) | Links to async chat request (for polling) |
 | `created_at` | TIMESTAMP | Message timestamp |

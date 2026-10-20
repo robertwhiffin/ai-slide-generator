@@ -196,7 +196,12 @@ All slide manipulation and chat endpoints require `session_id`:
 | `/api/slides/{index}/duplicate` | POST | Request body (`session_id`) |
 | `/api/slides/{index}` | DELETE | Query param (`?session_id=...`) |
 
-Session endpoints (`/api/sessions/*`) manage session lifecycle and do not require locking.
+Session endpoints (`/api/sessions/*`) manage session lifecycle and do not require locking, with one exception: **`DELETE /api/sessions/{id}/context` (Clear chat)** takes the session lock. It runs, in order, the deck permission gate (CAN_EDIT), the conversation-creator gate, `acquire_session_lock`, the clear, and the release. If a chat turn or a slide operation holds the lock, it answers **409** with `CONVERSATION_BUSY_DETAIL` ("Something is still running on this deck. Wait for it to finish, then try again.") and changes nothing. It releases the lock in `finally`, and only if this request acquired it, so a 409 never releases another request's lock. The chat panel maps any 409 from this route to its own copy, by status rather than by matching the detail text.
+
+Known limits of that lock, shared with every other lock user:
+- A lock older than 300 seconds counts as stale and can be taken by another request.
+- On the SSE chat path the lock is released in the stream generator's `finally` while the turn keeps running in a daemon thread. A client that disconnects or reloads mid-turn therefore releases the lock early, and a clear in that window succeeds; the turn's later rows and checkpoints then land in the cleared conversation. The async/polling path holds the lock for the whole job, so this affects the SSE path only.
+- The describe-only arc-review sweeper (`spec_sync.py`) invokes the graph on the owner's thread without the lock. It writes no chat rows, so a checkpoint it writes after a clear is harmless: the graph thread holds only per-turn state.
 
 ---
 

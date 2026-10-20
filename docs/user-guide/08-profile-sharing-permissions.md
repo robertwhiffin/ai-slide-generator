@@ -60,6 +60,7 @@ To change the workspace level, use the dropdown on the **All workspace users** r
 - Edit slides (directly or via chat)
 - Reorder or duplicate slides
 - Delete slides
+- Clear the chat
 - Manage deck contributors
 
 #### CAN EDIT
@@ -70,6 +71,7 @@ To change the workspace level, use the dropdown on the **All workspace users** r
 - Edit slides directly and via chat
 - Reorder and duplicate slides
 - Resolve and unresolve comments
+- Clear your own chat on the deck (never the owner's or anyone else's). See [Clearing the Chat](./01-generating-slides.md#clearing-the-chat)
 
 **What you CANNOT do:**
 - Delete slides
