@@ -163,12 +163,19 @@ The decisions below were made on the user's behalf.
     reviewer-added test), and removing the ambiguity check (W1).
   - **Playwright:** 10 production sabotages, among them a slide refetch, no local removal, the delete button for
     viewers, the Spec gate put back, and removing `disabled:opacity-0`.
-- **Not verifiable locally (first run is CI):** the e2e matrix run of `delete-message`; the unit job on
-  Postgres with `-n auto` (the new tests are SQLite-only by construction).
+- **First run in CI:** the e2e matrix run of `delete-message` and the unit job on Postgres with `-n auto`
+  (the new tests are SQLite-only by construction). Both green in round 2.
 
 ## CI history
 
-See the PR. Rounds are recorded in the supervisor's ledger.
+- **Round 1** (run 39447003588): everything green except `E2E - graph-release-conversation-journey`. Cause
+  (this branch): that spec's strict contract records every request it did not expect, and its `/messages` stub
+  regex was anchored at the path, so the panel's new turn-end `GET …/messages?limit=200` read fell through and
+  the final "unmatched empty" check went red. Reproduced locally (red with the old stub, green with the fix).
+  Fix: the stub accepts an optional query string; the contract stays strict.
+- **Round 2** (run 39450691683): **green**, 67 pass, 2 skipping (agentic layer 3, deploy). The new graph tests
+  ran in Integration: Graph Orchestration, the new route tests in Integration: General, and `delete-message`
+  in the e2e matrix.
 
 ## Known gaps and follow-ups
 
