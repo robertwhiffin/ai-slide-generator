@@ -321,8 +321,9 @@ class GraphTurnFailedError(RuntimeError):
 class ArcReviewInFlightError(RuntimeError):
     """The deck's arc review is running a graph turn on this session's thread.
 
-    Raised by :meth:`ChatService.clear_context` before anything changes; the
-    route answers 409 with ``CONVERSATION_BUSY_DETAIL``.
+    Raised by :meth:`ChatService.clear_context` and
+    :meth:`ChatService.delete_message` before anything changes; their routes
+    answer 409 with ``CONVERSATION_BUSY_DETAIL``.
     """
 
     def __init__(self, session_id: str) -> None:
@@ -340,8 +341,9 @@ def _refuse_during_an_arc_review(db: Any, session: Any) -> None:
     after every superstep, each carrying every channel it holds; a thread
     deleted under it comes back with the pre-clear ``findings``, turn-scoped
     state and a reply written from the cleared conversation, and the next turn
-    resumes it.  So a clear waits for the review, and the review's claim is the
-    signal: :func:`spec_sync.review_in_flight`.
+    resumes it.  So a clear (or a message delete, which deletes the thread
+    too) waits for the review, and the review's claim is the signal:
+    :func:`spec_sync.review_in_flight`.
 
     The deck row is read ``FOR UPDATE`` (a no-op on SQLite, which serialises
     writers anyway): on PostgreSQL a claim that commits first is seen here, and
@@ -2379,6 +2381,9 @@ class ChatService:
             SessionNotFoundError: session_id does not exist.
             MessageNotFoundError: ``message_id`` is not a visible user message
                 of this session (nothing is changed).
+            ArcReviewInFlightError: the deck's arc review is running a graph
+                turn on this thread (nothing is changed); see
+                :func:`_refuse_during_an_arc_review`.
         """
         if not deleted_by:
             raise ValueError(
@@ -2392,6 +2397,9 @@ class ChatService:
         session_manager = get_session_manager()
         with get_db_session() as db:
             session = session_manager._get_session_or_raise(db, session_id)
+            # Before anything changes: an arc review in flight would write the
+            # thread back after the delete below, as for a clear.
+            _refuse_during_an_arc_review(db, session)
 
             # Columns only, in transcript order: grouping needs no content, and a
             # tool_result row's content can be large.

@@ -44,8 +44,20 @@ The decisions below were made on the user's behalf.
     no payload of any agent (architect, builder, build reviewer, deck reviewer) contains the deleted text; no
     checkpoint or pending write contains it (and the test first proves it was there);
   - a reset (#323's clear) leaves nothing from before in any payload or checkpoint;
-  - a polling turn and an SSE turn are each one deletable turn.
+  - a polling turn and an SSE turn are each one deletable turn;
+  - a delete during an arc review leaves nothing of the deleted turn
+    (`test_a_delete_during_an_arc_review_leaves_nothing_of_the_deleted_turn`; see the next bullet).
   The model is stubbed: this proves what the agents are given, not what a model would do.
+- **A delete or clear during an arc review (fixed after review, in #323 and here).** The arc-review sweeper
+  (`spec_sync.run_arc_review` → `invoke_graph`) runs a turn on the owner's thread without the session lock.
+  Before the fix, a delete that committed during the review's model call deleted the thread, and the review
+  then wrote it back: the deleted turn's `findings` and scoped state, plus a reply from an architect that had
+  been given the deleted turn's text. The next turn resumed that thread and inherited the findings.
+  `multi-user-concurrency.md` used to say only that a late describe-only reply could land in the new thread.
+  That understated the problem, and the passage is rewritten.
+  `delete_message`, like #323's `clear_context`, now refuses with `ArcReviewInFlightError` while
+  `spec_sync.review_in_flight` holds (a claim younger than `CLAIM_TTL_SECONDS`). It reads the deck row
+  `FOR UPDATE` before changing anything, and the route answers 409 with `CONVERSATION_BUSY_DETAIL`.
 
 **A3: only users with edit rights can do it on a shared deck; the action is attributable.**
 - **Route order** (`delete_session_message`, `src/api/routes/sessions.py`), exactly as #323's clear:
@@ -192,6 +204,9 @@ The decisions below were made on the user's behalf.
 - **Inherited from #323:** the stale-lock window (300 s lock vs 600 s jobs), SSE disconnect releasing the lock,
   a delete the instant a turn completes can answer 409, and mid-turn per-slide error events ending the panel's
   loading state early.
+- **A delete or clear answers 409 while the deck's arc review runs** (tens of seconds, a few minutes after a
+  hand edit). If a worker dies mid-review, its claim blocks them until the claim is `CLAIM_TTL_SECONDS` (900 s)
+  old, the same lease the sweeper itself waits out.
 - **Cosmetic:** `MessageList` keys rows by index, so a collapsible's open state can move to the next message
   after a middle delete. The API tests match URLs with `endsWith`, so dropping the API base URL would go unseen
   (the same as #323's clear tests).

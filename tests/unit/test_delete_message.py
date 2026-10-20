@@ -794,6 +794,37 @@ class TestSavePoints:
         assert created["message_count"] == len(visible)
 
 
+class TestTheDeleteWaitsForAnArcReview:
+    """As for a clear (#323): the arc-review sweeper runs a graph turn on the
+    owner's thread without the session lock, so a delete waits for its claim.
+    The race itself: ``tests/integration/test_delete_message_graph_turn.py``."""
+
+    def test_a_live_review_claim_refuses_the_delete_and_changes_nothing(
+        self, _session_unit_engine
+    ):
+        from tests.unit.test_clear_context import _give_the_session_a_deck_claimed_at
+
+        factory = _make_factory(_session_unit_engine)
+        seeded = _seed_turns(factory)
+        _give_the_session_a_deck_claimed_at(
+            factory, seeded.sid, datetime.utcnow() - timedelta(seconds=30)
+        )
+        before = _rows(factory, seeded.sid)
+
+        saver = _RecordingSaver()
+        with _patched(factory, saver):
+            with pytest.raises(Exception) as raised:
+                _delete(seeded.sid, seeded.ids["U2"])
+
+        assert _rows(factory, seeded.sid) == before, "a refused delete changed rows"
+        assert saver.deleted == [], "a refused delete deleted the thread"
+        assert _events(factory, _MESSAGE_DELETED) == [], "a refused delete was attributed"
+
+        from src.api.services.chat_service import ArcReviewInFlightError
+
+        assert isinstance(raised.value, ArcReviewInFlightError), raised.value
+
+
 # ---------------------------------------------------------------------------
 # One transaction, attributed (D6, D8).
 # ---------------------------------------------------------------------------
@@ -1212,6 +1243,24 @@ class TestDeleteMessageRoute:
         assert delete_stub_service.calls == [("ghost", 42, "editor@example.com")]
         assert session_lock.released == ["ghost"]
         assert events == _the_whole_delete("ghost")
+
+    def test_an_arc_review_in_flight_is_a_409_and_the_lock_is_released(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events,
+    ):
+        """The service refuses while the deck's arc review runs: the same busy
+        answer as a held lock, and this request took the lock, so it releases it."""
+        from src.api.routes.sessions import CONVERSATION_BUSY_DETAIL
+        from src.api.services.chat_service import ArcReviewInFlightError
+
+        delete_stub_service.raises = ArcReviewInFlightError("s1")
+
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"] == CONVERSATION_BUSY_DETAIL
+        assert session_lock.released == ["s1"]
+        assert events == _the_whole_delete("s1")
 
     def test_an_unexpected_failure_is_a_500_and_the_lock_is_released(
         self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,

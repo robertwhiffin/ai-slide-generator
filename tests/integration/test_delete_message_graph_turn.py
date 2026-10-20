@@ -60,6 +60,7 @@ from src.database.models.session import SessionMessage, UserSession
 from src.domain.skill_io import BuilderOutput
 from src.services.conversation_pins import load_conversation_pin
 from src.services.graph.nodes import _advisory_text
+from src.services.spec_sync import mark_dirty, sweep_once
 from tests.integration.conftest import _make_fake_db
 from tests.integration.conftest_stub_skills import edited_brief
 from tests.integration.test_architect_reply_is_persisted import (  # noqa: F401
@@ -69,6 +70,10 @@ from tests.integration.test_architect_reply_is_persisted import (  # noqa: F401
 )
 from tests.integration.test_graph_mode_turn import AUTHOR as SSE_AUTHOR
 from tests.integration.test_graph_mode_turn import graph_chat_env  # noqa: F401
+from tests.integration.test_sweeper_describe_only import (  # noqa: F401
+    _age_the_marker,
+    sweeper_env,
+)
 
 # Sentinels no stub produces.  The KEEP turns survive the delete in the rows;
 # the DELETE turn must be gone from every payload and every checkpoint.
@@ -476,3 +481,113 @@ def test_an_sse_turn_is_one_deletable_turn(
         for m in SessionManager().get_messages(sid)
     ] == turn_one
     assert list(saver.list(_thread_config(sid))) == [], "the graph thread survived"
+
+
+# ===========================================================================
+# 5. A delete that lands while the arc-review sweeper is running a turn
+# ===========================================================================
+#
+# As in test_clear_context_graph_turn.py: the sweeper runs a graph turn on the
+# owner's thread without the session lock, loads the thread before its architect
+# runs and checkpoints every channel after each superstep.  A delete committed
+# during the review's model call deletes the thread, and the review then wrote
+# it back with the deleted turn's findings and scoped state, plus a reply from
+# an architect given the deleted turn's text; the next turn resumed it.  The
+# stub architect quotes the conversation it was given, which makes a real
+# model's dependence on its payload visible.
+
+RACE_KEEP = "RACE-KEEP build me a deck about puffins"
+RACE_DELETE = "RACE-DELETE make slide 2 shorter"
+RACE_NEXT = "RACE-NEXT make slide 1 punchier"
+RACE_FINDING = "content overflows the frame"  # objective_finding()'s message
+
+
+def test_a_delete_during_an_arc_review_leaves_nothing_of_the_deleted_turn(
+    sweeper_env, monkeypatch  # noqa: F811 (the imported fixture)
+):
+    env = sweeper_env
+    sid = env.session_id
+    saver = SqlAlchemyCheckpointSaver(session_factory=env.factory)
+    manager = get_session_manager()
+    stub_architect = env.recorder._skill_architect
+
+    # -- Turn 1 (kept): a build ----------------------------------------------
+    env.recorder.configure(slide_count=3)
+    manager.add_message(sid, "user", RACE_KEEP, message_type="user_input")
+    env.run(initial={"architect_message": RACE_KEEP})
+
+    # -- Turn 2 (deleted): an edit whose review leaves a finding --------------
+    env.recorder.configure(
+        slide_count=3, edit_target_positions={1}, objective_findings_at={1}
+    )
+    doomed_id = manager.add_message(
+        sid, "user", RACE_DELETE, message_type="user_input"
+    )["id"]
+    second = env.run(initial={"architect_message": RACE_DELETE})
+    assert second["architect_intent"] == "edit" and second["error_state"] is None
+    doomed_turn = env.last_turn_id
+    assert _thread_holds(saver, sid, doomed_turn), "precondition: turn 2's state"
+    assert _thread_holds(saver, sid, RACE_FINDING), "precondition: turn 2's finding"
+
+    # -- A hand edit schedules an arc review, and its debounce has passed -----
+    assert mark_dirty(sid, "hand-editor@example.com") is True
+    _age_the_marker(env)
+
+    # -- The user deletes turn 2 while the review's model call is running -----
+    attempts: list = []
+
+    def architect_during_the_review(payload):
+        try:
+            with _delete_reaches(env):
+                ChatService().delete_message(sid, doomed_id, deleted_by=OWNER)
+            attempts.append("deleted")
+        except Exception as exc:  # asserted on below, by type
+            attempts.append(exc)
+        out = stub_architect(payload)
+        said = [m["content"] for m in payload["conversation"] if m["role"] == "user"]
+        return out.model_copy(
+            update={"message": f"Re-described the arc. You had asked: {said}"}
+        )
+
+    monkeypatch.setattr(env.recorder, "_skill_architect", architect_during_the_review)
+    env.recorder.reset_observations()
+    env.recorder.configure(slide_count=3)
+    assert sweep_once() == 1, "precondition: the sweeper claimed the marker"
+    monkeypatch.setattr(env.recorder, "_skill_architect", stub_architect)
+    assert len(attempts) == 1, "precondition: the review's architect ran once"
+
+    if attempts[0] != "deleted":
+        # Refused while the review ran; the user retries once it has finished.
+        assert RACE_DELETE in _contents(env), "a refused delete changed rows"
+        with _delete_reaches(env):
+            ChatService().delete_message(sid, doomed_id, deleted_by=OWNER)
+
+    # -- A committed delete leaves nothing of the deleted turn in the thread --
+    assert RACE_DELETE not in _contents(env)
+    assert not _thread_holds(saver, sid, "RACE-DELETE"), (
+        "the review wrote a reply built from the deleted turn into the thread"
+    )
+    assert not _thread_holds(saver, sid, doomed_turn), (
+        "the review wrote the deleted turn's state back into the thread"
+    )
+    assert not _thread_holds(saver, sid, RACE_FINDING), (
+        "the review wrote the deleted turn's findings back into the thread"
+    )
+
+    # -- The next turn carries nothing of it ----------------------------------
+    env.recorder.reset_observations()
+    env.recorder.configure(slide_count=3, edit_target_positions={0})
+    manager.add_message(sid, "user", RACE_NEXT, message_type="user_input")
+    final = env.run(initial={"architect_message": RACE_NEXT})
+
+    assert final["architect_intent"] == "edit" and final["error_state"] is None
+    assert final["findings"] == [], "the next turn inherited the deleted turn's findings"
+    assert _payload_mentions(env.recorder, "RACE-DELETE", RACE_FINDING) == []
+    assert not _thread_holds(saver, sid, doomed_turn)
+    assert not _thread_holds(saver, sid, "RACE-DELETE")
+    assert _thread_holds(saver, sid, "RACE-NEXT"), "positive control"
+
+    # -- How: the delete is refused while the review holds its claim ----------
+    from src.api.services.chat_service import ArcReviewInFlightError
+
+    assert isinstance(attempts[0], ArcReviewInFlightError), attempts[0]

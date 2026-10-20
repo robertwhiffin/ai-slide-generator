@@ -969,7 +969,8 @@ async def delete_session_message(session_id: str, message_id: int):
     Raises:
         HTTPException 401/403/404: not signed in, not an editor / not the
             session's creator, unknown session or a message not in it.
-        HTTPException 409: a turn or slide operation holds the session lock.
+        HTTPException 409: a turn or slide operation holds the session lock,
+            or the deck's arc review is running a turn on this thread.
         HTTPException 422: ``message_id`` is not an integer.
     """
     await asyncio.to_thread(
@@ -1002,6 +1003,10 @@ async def delete_session_message(session_id: str, message_id: int):
 
         return result
 
+    except ArcReviewInFlightError:
+        # The arc-review sweeper is running a turn on this thread without the
+        # session lock; the delete changed nothing and can be retried.
+        raise HTTPException(status_code=409, detail=CONVERSATION_BUSY_DETAIL)
     except MessageNotFoundError:
         raise HTTPException(status_code=404, detail=MESSAGE_NOT_FOUND_DETAIL)
     except SessionNotFoundError:
