@@ -283,4 +283,12 @@ sabotages (same red counts) and four of its own on cross-task seams.
 
 ## CI history
 
-- Round 1: pending (this commit is pushed with the PR).
+- **Round 1** (PR #337, head 1b3dc61e): Test Suite run 39468280126 was green on the first attempt: 66
+  checks passed, 2 skipped by design (layer-3 agentic, deploy).
+  - Unit Tests: 10010 passed, 232 skipped; both `test_insert_pending_slides_postgres.py` tests ran
+    and PASSED on the job's Postgres service.
+  - All nine integration jobs passed (API Routes, Config API, Export, General, Genie, Graph
+    Orchestration, Layer 4 Concurrency, Slides, Streaming).
+  - Frontend Build, Frontend Unit Tests and every E2E matrix job passed, including the new
+    `agent-insert-slide`.
+- No reruns were needed. This notes-only commit follows.
