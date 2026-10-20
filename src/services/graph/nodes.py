@@ -95,6 +95,13 @@ from src.services.graph.event_emitter import (
     get_event_emitter,
     get_slide_cursor,
 )
+from src.services.graph.progress import (
+    SlideProgressStage,
+    TurnPhase,
+    report_phase,
+    report_slide,
+    report_slides,
+)
 from src.services.graph.state import GraphState, scoped, scoped_vals
 from src.services.persisted_graph_release import PersistedRuntimeError
 from src.services.shared_deck_attribution import (
@@ -1464,6 +1471,9 @@ def architect_node(state: dict) -> Dict[str, Any]:
     turn_id = state["turn_id"]
     initiated_by = state.get("initiated_by")
 
+    # #319: the placeholder's first stage, for the whole architect call
+    report_phase(TurnPhase.PLANNING)
+
     committed_rows = _committed_slide_rows(session_id)
     committed_htmls = [row.get("html") or "" for row in committed_rows]
     committed_positions = {
@@ -1804,6 +1814,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # user edits.  The pass runs serially inside rereview_committed_slides;
         # its docstring carries the measurement of why it cannot be the two-pass
         # turn the plan imagined.
+        report_phase(TurnPhase.CHECKING_SLIDES)
         verdicts = rereview_committed_slides(
             session_id,
             spec,
@@ -2015,6 +2026,7 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     unreachable on the graph path.  Closing it needs a declared field on
     ``AnalystOutput``, an escalation to ws4b, not a mapping invented here.
     """
+    report_phase(TurnPhase.GATHERING_DATA)
     request = state.get("architect_message") or ""
 
     # Content only (#258): the analyst's model is handed no session identifier.
@@ -2152,6 +2164,15 @@ def foreman_node(state: dict) -> Dict[str, Any]:
             StreamEventType.ASSISTANT,
             content=f"Building {len(batch)} slide(s).",
             metadata={"node": "foreman", "batch": list(batch)},
+        )
+        # #319: the same moment as data — every covered position (the total
+        # never shrinks across wakes) and this batch marked as building.  The
+        # foreman's report is the ONLY one that puts a slide into building: it
+        # precedes every Send, so the pipeline needs no start-of-build report.
+        report_phase(
+            TurnPhase.BUILDING,
+            covered=outstanding_positions(state),
+            dispatched=batch,
         )
         return {
             "foreman_wakes": scoped(turn_id, [list(batch)]),
@@ -3131,6 +3152,7 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
     _fold(acc, builder_node(payload))
     record = ((acc.get("slides") or {}).get("vals") or {}).get(position)
     if record is None:
+        report_slide(position, SlideProgressStage.DONE)
         return {k: v for k, v in acc.items() if k not in _PIPELINE_LOCAL_KEYS}
 
     session_id = payload["session_id"]
@@ -3142,6 +3164,7 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
         object_type="slide",
     )
     drafted = _write_draft_row(record, mutation)
+    report_slide(position, SlideProgressStage.REVIEWING)
 
     try:
         _fold(acc, build_reviewer_node(build_review_payload(record, payload)))
@@ -3165,10 +3188,12 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
                 "reviewed_positions": scoped(turn_id, {position}),
             },
         )
+        report_slide(position, SlideProgressStage.DONE)
         return {k: v for k, v in acc.items() if k not in _PIPELINE_LOCAL_KEYS}
 
     entry = ((acc.get("fix_map") or {}).get("vals") or {}).get(position)
     if entry is not None:
+        report_slide(position, SlideProgressStage.FIXING)
         fix_state: Dict[str, Any] = {
             "turn_id": turn_id,
             "session_id": session_id,
@@ -3213,6 +3238,7 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
                     },
                 )
 
+    report_slide(position, SlideProgressStage.DONE)
     return {k: v for k, v in acc.items() if k not in _PIPELINE_LOCAL_KEYS}
 
 
@@ -3283,6 +3309,7 @@ def placeholder_node(state: dict) -> Dict[str, Any]:
         ):
             placeheld.add(position)
 
+    report_slides(placeheld, SlideProgressStage.DONE)
     if not placeheld:
         return {}
     return {"placeheld_positions": scoped(turn_id, placeheld)}
@@ -3365,6 +3392,7 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
     and neither node reads the database — so the call belongs here, and belongs
     there the moment a payload field for prior slides exists.
     """
+    report_phase(TurnPhase.REVIEWING_DECK)
     session_id = state["session_id"]
     initiated_by = state.get("initiated_by")
 
