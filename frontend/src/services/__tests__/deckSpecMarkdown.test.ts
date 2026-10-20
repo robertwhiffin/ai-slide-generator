@@ -418,6 +418,17 @@ describe('GitHub-only characters (the one string-match test: a CommonMark parser
   });
 });
 
+describe('the ordered-marker rule is exactly CommonMark\'s (a byte-level contract a port must reproduce, D4)', () => {
+  it('escapes a leading 1-9 digit marker before a space or the end, and leaves a longer or unspaced one alone', () => {
+    // Sabotage targets: widen `\d{1,9}` to `\d+` (a 10-digit "marker" is not a list in CommonMark, so no
+    // parse-based test sees the extra escape, but the bytes change); narrow it to `\d{1,8}`; drop `(?= |$)`.
+    expect(linesOf(renderAudience('123456789. nine digits'))).toContain('123456789\\. nine digits');
+    expect(linesOf(renderAudience('123456789)'))).toContain('123456789\\)');
+    expect(linesOf(renderAudience('1234567890. ten digits'))).toContain('1234567890. ten digits');
+    expect(linesOf(renderAudience('11.4% of Q4'))).toContain('11.4% of Q4');
+  });
+});
+
 // ── control characters and whitespace (D4 steps 1 and 2) ─────────────────────
 
 describe('control characters and NEL (D4 steps 1-2: the code-point sets are a cross-language contract)', () => {

@@ -349,7 +349,7 @@ The field `template_section_index` is omitted: it is a 0-based machine index int
 
 **Escaping** (CommonMark §2.4):
 - Backslash before each of `` \ ` * _ [ ] < > # | ~ $ & @ ``
-- Also before a leading `-`/`+`/`=`, and before the `.`/`)` of a leading ordered-list marker (e.g., `2024\. A year`)
+- Also before a leading `-`/`+`/`=`, and before the `.`/`)` of a leading ordered-list marker: 1 to 9 digits, then `.` or `)`, then a space or the end of the value (e.g., `2024\. A year`; `11.4%` and a 10-digit number are left alone)
 - Integer ids are written verbatim, and an integer position as `position + 1`; any other value in a numeric slot is escaped as text, so a non-integer position gives `### Slide {escaped value}`, with no +1
 
 **Determinism.** No clock, locale or randomness. Fixed section order; object keys read by name, never by iteration. `narrative_arc` and `slides` keep their given order. Blocks joined by exactly one blank line; LF only, no trailing whitespace, one trailing newline.

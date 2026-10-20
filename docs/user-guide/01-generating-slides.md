@@ -79,7 +79,7 @@ Click **Spec** above the slide viewer to see the plan the agents work from.
 
 It is read-only; click **Discuss** to change it in the chat.
 
-Click **Export spec** to download it as a Markdown file named after the deck, for review or sharing outside Tellr. The file holds everything in the Spec view, plus each slide's type, the data it uses, and the data gaps the agents recorded.
+Click **Export spec** to download it as a Markdown file, for review or sharing outside Tellr. The file is named after the title the agents gave the plan, which can differ from the deck name in the header. It holds everything in the Spec view, plus that title, each slide's type and data references, and the data the agents resolved: a summary, each figure with its source, and any gaps they recorded.
 
 ## Tips
 

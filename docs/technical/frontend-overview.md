@@ -370,7 +370,7 @@ interface SlideStyle {
 | `src/components/PresentationMode/PresentationMode.tsx` | Full-window slide presentation (opt-in browser fullscreen via F/toolbar) with keyboard navigation; snapshots deck on mount to immunize against parent re-renders; wraps scripts in try/catch for graceful chart failures | None (renders slide HTML in iframe) |
 | `src/components/SpecView/SpecView.tsx` | Read-only view of `deck_spec`, toggled with Slides; Discuss hands off to the chat; Export spec downloads Markdown | None (reads the deck in hand) |
 | `src/services/deckSpecMarkdown.ts` | Pure, deterministic `DeckSpec` → Markdown, plus the filename | None (pure) |
-| `src/utils/downloadFile.ts` | Saves a string as a file through an object URL, with a deferred revoke | None (pure) |
+| `src/utils/downloadFile.ts` | Saves a string as a file through an object URL, with a deferred revoke | None (browser DOM only; no request) |
 
 ---
 
