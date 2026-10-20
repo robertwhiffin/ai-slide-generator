@@ -463,6 +463,7 @@ jobs:
             tests/integration/test_graph_lifecycle_runtime_postgres.py \
             tests/integration/test_lakebase_contract_failures_postgres.py \
             tests/integration/test_clear_context_graph_turn.py \
+            tests/integration/test_delete_message_graph_turn.py \
             -v --tb=short --junitxml=test-results/graph-results.xml -m "not live" \
             -o faulthandler_timeout=120
       - uses: actions/upload-artifact@v4
