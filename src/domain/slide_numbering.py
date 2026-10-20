@@ -41,9 +41,11 @@ Number and ordinal words refuse a hyphen on either side, so "twenty-one",
   ("Slide 2, 3 and 4").  A continuation that is not a number keeps the
   reference: "Change slide 2 to a chart" and "Compare slide 2 to slide 5" read
   slide 2, and a lone comma ("On slide 2, 3 cards ...") is slide 2 only.
-* F2, a singular span: "slide 2 through slide 5" / "slide two thru slide four"
-  is one inclusive range, never the two truncated ends.  ``to`` is not a span
-  ("move the chart from slide 2 to slide 5" names two slides).
+* F2, a span: "slide 2 through slide 5", "slide two thru slide four", "slide 2
+  up to / until / till / through to slide 5", "slide #2 through slide #5",
+  "slides 2 through slide 5" are one inclusive range, never the two truncated
+  ends.  Plain ``to`` is not a span ("move the chart from slide 2 to slide 5"
+  names two slides).
 * F3, plural ``slides``: items separated by ``,``, ``, and``, ``and`` or ``&``.
   An item is a number, a dash range of digits (en and em dashes too, optional
   spaces around the dash), or two numbers joined by ``to``/``through``/``thru``:
@@ -255,7 +257,12 @@ _ORDINAL_FORM = rf"(?P<ordinal>{_ORDINAL_TOKEN})\s+{_ORDINAL_SLIDE_END}"
 # two truncated ends.  "to" is left to F1 ("compare slide 2 to slide 5" and "move
 # the chart from slide 2 to slide 5" name two slides).  Tried first, so it wins
 # over F1 at the same start.
-_SPAN_FORM = rf"\bslide\s+(?P<span_items>{_NUMBER}\s+(?:through|thru)\s+slide\s+{_NUMBER})\b"
+_SPAN_PREFIX = r"(?:number\s+|#\s*)?"
+_SPAN_WORD = r"(?:through(?:\s+to)?|thru|up\s+to|until|till)"
+_SPAN_FORM = (
+    rf"\bslides?\s+{_SPAN_PREFIX}(?P<span_items>{_NUMBER}\s+{_SPAN_WORD}\s+"
+    rf"slides?\s+{_SPAN_PREFIX}{_NUMBER})\b"
+)
 
 _REFERENCE_RE = re.compile(
     f"{_SPAN_FORM}|{_PLURAL_FORM}|{_SINGULAR_FORM}|{_ORDINAL_FORM}", re.IGNORECASE

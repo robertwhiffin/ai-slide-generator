@@ -527,6 +527,21 @@ SINGULAR_SPAN = [
      [("slide 9 through slide 12", [9, 10, 11, 12], [8, 9], [11, 12])]),
     ("move the chart from slide 2 to slide 5", DECK10,
      [("slide 2", [2], [1], []), ("slide 5", [5], [4], [])]),
+    # Other range words, prefixes and a plural head are still one range.
+    ("slide 2 up to slide 5", DECK10,
+     [("slide 2 up to slide 5", [2, 3, 4, 5], [1, 2, 3, 4], [])]),
+    ("from slide 2 until slide 5", DECK10,
+     [("slide 2 until slide 5", [2, 3, 4, 5], [1, 2, 3, 4], [])]),
+    ("slide 2 till slide 5", DECK10,
+     [("slide 2 till slide 5", [2, 3, 4, 5], [1, 2, 3, 4], [])]),
+    ("slide 2 through to slide 5", DECK10,
+     [("slide 2 through to slide 5", [2, 3, 4, 5], [1, 2, 3, 4], [])]),
+    ("slide #2 through slide #5", DECK10,
+     [("slide #2 through slide #5", [2, 3, 4, 5], [1, 2, 3, 4], [])]),
+    ("slide number 2 through slide number 5", DECK10,
+     [("slide number 2 through slide number 5", [2, 3, 4, 5], [1, 2, 3, 4], [])]),
+    ("slides 2 through slide 5", DECK10,
+     [("slides 2 through slide 5", [2, 3, 4, 5], [1, 2, 3, 4], [])]),
 ]
 
 
