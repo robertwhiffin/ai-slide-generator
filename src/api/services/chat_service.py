@@ -318,6 +318,50 @@ class GraphTurnFailedError(RuntimeError):
         super().__init__(GRAPH_TURN_FAILED_MESSAGE)
 
 
+class ArcReviewInFlightError(RuntimeError):
+    """The deck's arc review is running a graph turn on this session's thread.
+
+    Raised by :meth:`ChatService.clear_context` before anything changes; the
+    route answers 409 with ``CONVERSATION_BUSY_DETAIL``.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"An arc review is running on session {session_id}")
+        self.session_id = session_id
+
+
+def _refuse_during_an_arc_review(db: Any, session: Any) -> None:
+    """Raise :class:`ArcReviewInFlightError` while an arc review runs on *session*.
+
+    The arc-review sweeper (``spec_sync.run_arc_review``) runs a whole graph
+    turn on the deck OWNER's thread (``thread_id`` is the session id) and takes
+    no session lock, so the lock the clear route checks does not exclude it.
+    That turn loaded the thread before its architect ran and writes a checkpoint
+    after every superstep, each carrying every channel it holds; a thread
+    deleted under it comes back with the pre-clear ``findings``, turn-scoped
+    state and a reply written from the cleared conversation, and the next turn
+    resumes it.  So a clear waits for the review, and the review's claim is the
+    signal: :func:`spec_sync.review_in_flight`.
+
+    The deck row is read ``FOR UPDATE`` (a no-op on SQLite, which serialises
+    writers anyway): on PostgreSQL a claim that commits first is seen here, and
+    a claim that comes second blocks on this row until the clear commits, so
+    its review loads the already-deleted thread.  A contributor session owns no
+    deck row and the sweeper never runs on its thread, so it is never refused.
+    """
+    from src.database.models.session import SessionSlideDeck
+    from src.services.spec_sync import review_in_flight
+
+    deck = (
+        db.query(SessionSlideDeck)
+        .filter(SessionSlideDeck.session_id == session.id)
+        .with_for_update()
+        .first()
+    )
+    if deck is not None and review_in_flight(deck, datetime.utcnow()):
+        raise ArcReviewInFlightError(session.session_id)
+
+
 def _pinned_graph_configuration_error_event() -> StreamEvent:
     """The one safe, typed event for an unavailable pinned graph configuration."""
     return StreamEvent(
@@ -2226,6 +2270,9 @@ class ChatService:
         Raises:
             ValueError: ``cleared_by`` is empty or None (nothing is changed).
             SessionNotFoundError: session_id does not exist.
+            ArcReviewInFlightError: the deck's arc review holds a live claim and
+                is running a graph turn on this thread (nothing is changed); see
+                :func:`_refuse_during_an_arc_review`.
         """
         if not cleared_by:
             raise ValueError("clear_context requires cleared_by: who cleared must be recorded")
@@ -2237,6 +2284,9 @@ class ChatService:
         session_manager = get_session_manager()
         with get_db_session() as db:
             session = session_manager._get_session_or_raise(db, session_id)
+            # Before anything changes: an arc review in flight would write the
+            # thread back after the delete below.
+            _refuse_during_an_arc_review(db, session)
 
             marker = earliest_user_message(db, session.id)
             marker_id = marker.id if marker is not None else None

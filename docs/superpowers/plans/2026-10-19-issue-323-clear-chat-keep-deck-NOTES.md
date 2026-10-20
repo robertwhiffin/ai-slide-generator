@@ -108,7 +108,8 @@ works without the old transcript and doesn't rebuild unrelated slides. A graph t
    would report a private chat clear as a deck change. A side effect is that the admin analytics now
    count a clear as user activity.
 5. **A clear is refused mid-turn (409), through the existing DB-backed session lock.** That lock works
-   across workers.
+   across workers. The arc-review sweeper takes no session lock, so a clear is also refused (409) while
+   the deck's arc review holds a live claim (see Known gaps, "Corrected").
 6. **Copy.**
    - Busy (409): "Something is still running on this deck. Wait for it to finish, then clear the chat."
    - Forbidden (403): "Only editors can clear the chat, and only their own conversation."
@@ -229,8 +230,29 @@ works without the old transcript and doesn't rebuild unrelated slides. A graph t
   swallows that error.
 - **The welcome text after a clear is the new-deck welcome.** Wording written for a cleared deck belongs
   to #319's surface.
-- **The arc-review sweeper can write a checkpoint after a clear.** This is harmless, because the thread
-  holds only per-turn state.
+- **Corrected: a clear during an arc review used to leave pre-clear state in the thread.** This list
+  said the sweeper's post-clear checkpoint was harmless "because the thread holds only per-turn state".
+  That premise (plan Context 7) is false. #317's planning found it, and a test here confirms it.
+  - The sweeper (`spec_sync.sweep_once` → `run_arc_review` → `invoke_graph`, `src/services/spec_sync.py`)
+    runs a graph turn on the owner's thread without the session lock. `thread_id` is the session id
+    (`src/services/graph/builder.py`, `config = {"configurable": {"thread_id": session_id}}`), so the
+    next turn after a clear resumes the same thread.
+  - The turn loads the thread before its architect runs and writes a checkpoint after every superstep,
+    carrying every channel. A clear that committed during the review's model call deleted the thread,
+    and the review then wrote it back with the pre-clear `findings` (an all-turns log,
+    `src/services/graph/state.py`), the pre-clear turn's scoped state, and a reply from an architect
+    that had been given the cleared conversation. The next turn's state inherited those findings. No
+    agent payload carried pre-clear text: the architect reads `conversation` from the rows and
+    `message` from the turn's input.
+  - **Fixed:** `clear_context` now refuses with `ArcReviewInFlightError` while the deck's review holds a
+    live claim (`spec_sync.review_in_flight`, the inverse of the sweeper's own lease test). It reads the
+    deck row `FOR UPDATE` before changing anything. The route answers 409 with
+    `CONVERSATION_BUSY_DETAIL`. Proof: `test_a_clear_during_an_arc_review_leaves_nothing_from_before_it`
+    (`tests/integration/test_clear_context_graph_turn.py`, real compiled graph and real saver, stubbed
+    model) is red without the refusal. Unit tests in `TestTheClearWaitsForAnArcReview` cover the lease
+    edge and the contributor case.
+  - **Cost:** if a worker dies mid-review, its claim blocks the owner's clear until the claim is
+    `CLAIM_TTL_SECONDS` (900 s) old. The sweeper waits out the same lease before it claims again.
 - **Pre-existing, not changed:**
   - a duplicate of an *uncleared* legacy deck shows the carried first prompt;
   - `save-points-versioning.md` §9 still has the stale "chatKey remount" line.
