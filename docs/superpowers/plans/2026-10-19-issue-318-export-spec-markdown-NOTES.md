@@ -105,7 +105,8 @@
 | Fixture | L1 violation; a key deleted; a padded `slide_type`; CRLF, BOM or invalid UTF-8 in `full.md` | pytest |
 
 ## CI history
-(Filled in after the PR's CI runs; see the PR.)
+- **Round 1** (Test Suite run 39398065466, attempt 1): every job passed, including `E2E - spec-view` on CI's bundled chromium, except `E2E - template-viewer`. That job failed in `playwright install --with-deps`, before any test ran: the runner's apt got `403 Forbidden` from packages.microsoft.com ("no longer signed"). It is an infrastructure flake unrelated to this branch.
+- **Rerun of the failed job** (attempt 2): `E2E - template-viewer` passed, and `Test Summary` passed. Final state: 65 checks passed and 2 skipped. Deploy Docs run 39398065462 also succeeded.
 
 ## Known gaps and follow-ups
 - **Save-point previews show no spec.** `get_version` serves only `deck_json`, which never carries `deck_spec`. The Spec view therefore shows its empty state while previewing, and the button is hidden. This is pre-existing.
