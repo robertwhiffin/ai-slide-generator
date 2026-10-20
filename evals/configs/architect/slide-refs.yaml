@@ -1,0 +1,6 @@
+# Architect v1 prompt (#313): the SLIDE NUMBERS block points at the slide_numbering and
+# slide_references payload keys, so positions are copied, never computed as number - 1.
+agent_key: architect
+name: slide-refs
+base: v1
+prompt_file: slide-refs.md
