@@ -81,7 +81,7 @@ The assistant carries on from the Spec and the current slides, not from the old 
 
 **When the button is available:**
 - On any saved deck you can edit, whether or not it has a Spec. Viewers do not see it. See [Sharing & Permissions](./08-profile-sharing-permissions.md).
-- It is greyed out while a reply is being generated, while you are previewing a save point, while the chat input is read-only, and when the chat is already empty.
+- It is greyed out while a reply is being generated, while you are previewing a save point, while the chat input is read-only, and when the chat is already empty. One exception: if a reply reports a problem part-way, or you click **Apply** or **Discuss** on a review suggestion while a reply is running, the button can become available before the reply has finished. Clearing then shows the "still running" message below, and nothing is cleared.
 - It clears **your** conversation only. On a shared deck, each person's conversation is their own, and clearing yours never touches anyone else's.
 - If something else is still running on the deck, such as a slide operation or a reply in another tab, you see "Something is still running on this deck. Wait for it to finish, then clear the chat." Your conversation is kept; try again once it finishes.
 
@@ -102,6 +102,7 @@ To remove one exchange from the conversation, hover over one of your messages in
 **When the trash icon is available:**
 - Only on **your own** messages, only on a saved deck, and only when you can edit the deck. Viewers do not see it. On a shared deck, each person's conversation is their own: you can delete in your conversation, never in the owner's or anyone else's. See [Sharing & Permissions](./08-profile-sharing-permissions.md).
 - The trash icon appears only while you hover over the message (or tab to it with the keyboard). While a reply is being generated, while a clear or another delete is running, and while the chat is read-only, it appears greyed out and cannot be clicked. It is not shown at all while you preview a save point.
+- One exception: if a reply reports a problem part-way, or you click **Apply** or **Discuss** on a review suggestion while a reply is running, the icon can become clickable before the reply has finished. A click then shows the "still running" message below, and nothing is deleted.
 - A message you have just sent can be deleted as soon as its reply has finished. Until then it has no trash icon. If it still has none after the reply, reload the page.
 - If something else is still running on the deck, such as a slide operation or a reply in another tab, you see "Something is still running on this deck. Wait for it to finish, then delete the message." Your conversation is kept; try again once it finishes. This can also happen in the moment right after a reply finishes.
 - If the message is already gone, for example because you deleted it in another tab, you see "That message is no longer in this conversation. Reload the page to see the current conversation."

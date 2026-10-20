@@ -288,6 +288,7 @@ This ensures both slides and chat history stay in sync when previewing or revert
 - **Existing save points are unchanged.** Previewing one reads its `chat_history_json` snapshot, not the live `session_messages` rows, so the preview still shows a turn that was deleted after the save point was taken.
 - **A save point taken after a delete excludes the turn, and excludes a hidden first row.** `create_version` captures `session.messages`, so a deleted turn is not in it. When the deleted turn was the session's first, its user row is kept re-typed `engine_mode_marker`, and `create_version` drops rows of that type.
 - **A restore never brings a deleted turn back.** `restore_version` deletes this session's rows created after the save point and re-inserts no rows, so a deleted turn stays deleted whichever save point is restored.
+- **A restore and a deck delete do not delete the graph thread.** Only a clear and a message delete call `delete_thread`. After a restore, the thread still holds the text of the turns the restore removed; after a deck delete (`delete_session`), the thread's rows stay, keyed by the deleted session's id (the checkpoint tables have no foreign key to the session, so nothing cascades). Nothing replays the thread's messages to an agent: the architect's `conversation` is rebuilt from `session_messages` every turn. Deleting the thread in both places is a follow-up.
 
 ---
 

@@ -1007,7 +1007,11 @@ async def delete_session_message(session_id: str, message_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete message: {e}", exc_info=True)
+        logger.error(
+            f"Failed to delete message: {e}",
+            exc_info=True,
+            extra={"session_id": session_id, "message_id": message_id, "deleted_by": current_user},
+        )
         raise HTTPException(
             status_code=500,
             detail="Failed to delete the message",
