@@ -14,6 +14,7 @@ Names fixed here (see task-7-report.md):
 from __future__ import annotations
 
 import warnings
+from types import SimpleNamespace
 
 import pytest
 
@@ -335,3 +336,98 @@ def test_calibrate_empty_pack_prints_and_does_not_crash(monkeypatch, capsys):
     _wire(monkeypatch)  # judge.calibrate stub returns []
     cli.main(["--agent", "deck_reviewer", "--calibrate"])
     assert "no cases" in capsys.readouterr().out
+
+
+# ---- #314 Task 8 (D10, C16): --calibrate honours --cases ----------------------
+
+def _trusted_rows(case_ids):
+    return [{"case_id": cid, "reference_passed": True, "mutation_failed": True,
+             "trusted": True, "reason": ""} for cid in case_ids]
+
+
+def test_calibrate_cases_flag_reaches_calibrate_as_case_filter(monkeypatch, capsys):
+    _, spy, cal = _wire(monkeypatch)
+    monkeypatch.setattr(judge_mod, "calibrate", lambda *a, **k: cal.append((a, k)) or _trusted_rows(
+        k.get("case_filter") or []))
+    cli.main(["--agent", "architect", "--calibrate", "--cases", "add_slide_anchor,add_slide_end"])
+    assert spy.calls == []
+    (args, kw), = cal
+    assert "architect" in args or kw.get("agent_key") == "architect"
+    assert list(kw["case_filter"]) == ["add_slide_anchor", "add_slide_end"]
+    out = capsys.readouterr().out
+    assert "add_slide_anchor" in out and "add_slide_end" in out
+
+
+def test_calibrate_without_cases_passes_no_filter(monkeypatch):
+    _, _, cal = _wire(monkeypatch)
+    cli.main(["--agent", "architect", "--calibrate"])
+    (_, kw), = cal
+    assert kw.get("case_filter") is None
+
+
+def _calibrate_for_real_over(monkeypatch, packs):
+    """Run the REAL judge.calibrate over stub packs ``{agent_key: [Case]}``.
+
+    The stub judge passes a case's reference and fails anything else; the
+    returned list records every judge call.
+    """
+    calls = []
+    references = [c.reference for cases in packs.values() for c in cases]
+
+    def stub_judge(**kwargs):
+        calls.append(kwargs)
+        ok = kwargs.get("outputs") in references
+        return SimpleNamespace(value="pass" if ok else "fail", rationale="stub", error=None)
+
+    monkeypatch.setattr(cli, "_endpoint_reachable", lambda name: True)
+    should_fail = {"should_fail": {"intent": "discuss", "message": "WRONG"}}
+    monkeypatch.setattr(judge_mod, "load_cases",
+                        lambda agent_key, **kw: list(packs.get(agent_key, [])))
+    monkeypatch.setattr(judge_mod, "build_judge", lambda *a, **k: stub_judge)
+    monkeypatch.setattr(judge_mod, "load_calibration",
+                        lambda agent_key, case_id, **kw: should_fail)
+    return calls
+
+
+def _architect_pack():
+    return {"architect": [
+        Case(cid, "architect", "mutation", True, "f",
+             payload={"message": "m", "current_deck_spec": None},
+             reference={"intent": "edit", "message": f"REF-{cid}", "target_positions": [1]},
+             expect={})
+        for cid in ("add_slide_anchor", "add_slide_end")]}
+
+
+@pytest.mark.parametrize("agent", ["architect", "all"])
+def test_calibrate_cases_matching_no_case_exits_naming_the_unknown_ids(monkeypatch, capsys, agent):
+    """C16: a typo in --cases must not silently calibrate nothing."""
+    calls = _calibrate_for_real_over(monkeypatch, _architect_pack())
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--agent", agent, "--calibrate", "--cases", "add_slide_anchr,add_slide_ned"])
+    message = str(e.value)
+    assert "add_slide_anchr" in message and "add_slide_ned" in message
+    assert calls == [], "nothing may be judged"
+    assert "nothing to calibrate" not in capsys.readouterr().out
+
+
+def test_calibrate_agent_all_with_cases_calibrates_only_the_named_cases(monkeypatch, capsys):
+    """Mirrors the sweep: agents without the named cases are skipped, not fatal."""
+    calls = _calibrate_for_real_over(monkeypatch, _architect_pack())
+    cli.main(["--agent", "all", "--calibrate", "--cases", "add_slide_end"])
+    assert len(calls) == 2, "only add_slide_end's reference and should_fail are judged"
+    assert {c["outputs"].get("message") for c in calls} == {"REF-add_slide_end", "WRONG"}
+    assert "add_slide_end" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("agent", ["architect", "all"])
+def test_calibrate_cases_with_one_unknown_id_calibrates_the_rest_then_exits(
+        monkeypatch, capsys, agent):
+    """A typo among valid ids must not pass for a full calibration: the named
+    cases are judged and shown, then the run fails naming only the unknown id."""
+    calls = _calibrate_for_real_over(monkeypatch, _architect_pack())
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--agent", agent, "--calibrate", "--cases", "add_slide_end,add_slide_ned"])
+    message = str(e.value)
+    assert "add_slide_ned" in message and "add_slide_end" not in message, message
+    assert {c["outputs"].get("message") for c in calls} == {"REF-add_slide_end", "WRONG"}
+    assert "add_slide_end" in capsys.readouterr().out

@@ -356,3 +356,37 @@ def test_verdict_returns_the_judge_rationale(value):
     v, detail = judge._verdict(stub, _case(), {"html": "C"})
     assert v == value.lower()
     assert detail == "WHY-SENTINEL"
+
+
+# ---- #314 Task 8 (D10): calibrate honours a case filter ----------------------
+#
+# ``calibrate(agent_key, *, model=..., render_fn=None, split="train",
+# case_filter: list[str] | None = None)``: cases still come from
+# ``judge.load_cases`` (the whole pack); only the named ones are judged.
+
+def _filtered_calibrate(monkeypatch, case_filter):
+    cases = [_case("a"), _case("b"), _case("c")]
+    stub = StubJudge([c.reference for c in cases], _good)
+    monkeypatch.setattr(judge, "load_cases", lambda agent_key, **kw: cases)
+    monkeypatch.setattr(judge, "build_judge", lambda *a, **k: stub)
+    by_id = {c.case_id: c for c in cases}
+    monkeypatch.setattr(judge, "load_calibration",
+                        lambda agent, cid, **kw: {"should_fail": _wrong(by_id[cid])})
+    rows = judge.calibrate("fixer", case_filter=case_filter)
+    return cases, rows, stub
+
+
+def test_calibrate_case_filter_judges_only_the_named_cases(monkeypatch):
+    (a, b, c), rows, stub = _filtered_calibrate(monkeypatch, ["c", "a"])
+    assert sorted(r["case_id"] for r in rows) == ["a", "c"]
+    assert all(r["trusted"] for r in rows)
+    assert len(stub.candidates) == 4, "only the named cases' two candidates are judged"
+    for kept in (a, c):
+        assert kept.reference in stub.candidates and _wrong(kept) in stub.candidates
+    assert b.reference not in stub.candidates and _wrong(b) not in stub.candidates
+
+
+def test_calibrate_case_filter_none_judges_every_case(monkeypatch):
+    _, rows, stub = _filtered_calibrate(monkeypatch, None)
+    assert [r["case_id"] for r in rows] == ["a", "b", "c"]
+    assert len(stub.candidates) == 6
