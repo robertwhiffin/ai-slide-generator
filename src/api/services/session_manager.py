@@ -203,7 +203,11 @@ def _finding_to_camel(finding: Any) -> Dict[str, Any]:
     return camel
 
 
-def _deck_findings(pairs: List[Tuple[Any, str]]) -> List[Dict[str, Any]]:
+def _deck_findings(
+    pairs: List[Tuple[Any, str]],
+    *,
+    slide_indices: Optional[List[int]] = None,
+) -> List[Dict[str, Any]]:
     """Flatten review findings out of ``(record, content_hash)`` pairs (B3.2).
 
     Returns ONE FLAT deck-level list of ``SlideFinding``-shaped dicts, never a
@@ -212,11 +216,21 @@ def _deck_findings(pairs: List[Tuple[Any, str]]) -> List[Dict[str, Any]]:
     path has no ``slides`` array to key an index against, and the feedback drawer
     holds a single flat list which it filters by ``slideIndex``.
 
-    ``slideIndex`` is projected verbatim from what the reviewer stamped — no
-    index rewriting, because a deck-level finding's ``-1`` sentinel has to
-    survive the projection.  A consequence, stated because it is a real limit
-    rather than a measured behaviour of any current writer: a finding whose slide
-    was reordered after the review carries the index it was stamped with.
+    ``slide_indices`` is given on the ROW path only: the list index of each
+    pair's row, parallel to *pairs*.  A finding is minted for a slide's content
+    and lives in that content hash's slot of the row's record, so the row it was
+    read from IS its slide; the stamped ``slideIndex`` is only where the reviewer
+    saw it.  Each finding with ``slide_index != -1`` is therefore projected with
+    ``slide_index`` replaced by its row's list index, BEFORE ``_finding_to_camel``
+    (#314, D7), so an insert, reorder, delete or duplicate shows a slide's
+    findings on that slide.  A deck-level finding's ``-1`` sentinel survives the
+    projection, and the stored record is never rewritten.
+
+    On the blob and no-rows paths ``slide_indices`` is not given and ``slideIndex``
+    is projected verbatim from what the reviewer stamped.  A consequence, stated
+    because it is a real limit rather than a measured behaviour of any current
+    writer: on those two paths a finding whose slide was reordered after the
+    review carries the index it was stamped with.
 
     Two slides with identical HTML share a content hash, so on the ``deck_json``
     blob path (where one deck-wide ``verification_map`` is consulted per slide)
@@ -226,9 +240,13 @@ def _deck_findings(pairs: List[Tuple[Any, str]]) -> List[Dict[str, Any]]:
     the deck read.
     """
     findings: List[Dict[str, Any]] = []
-    for record, content_hash in pairs:
+    for pair_index, (record, content_hash) in enumerate(pairs):
         try:
             for finding in findings_from_record(record, content_hash):
+                if slide_indices is not None and finding.slide_index != -1:
+                    finding = finding.model_copy(
+                        update={"slide_index": slide_indices[pair_index]}
+                    )
                 findings.append(_finding_to_camel(finding))
         except Exception:
             logger.warning("findings: unreadable verification record, skipping")
@@ -1889,6 +1907,7 @@ class SessionManager:
                 # `findings` key below.  Collected here because this is the only
                 # place both halves are in hand.
                 row_finding_pairs: List[Tuple[Any, str]] = []
+                row_finding_indices: List[int] = []
                 for list_index, slide_row in enumerate(slides_from_rows):
                     content_hash = compute_slide_hash(slide_row.html or "")
                     slide_dict: Dict[str, Any] = {
@@ -1933,6 +1952,7 @@ class SessionManager:
                     row_finding_pairs.append(
                         (_parse_record(slide_row.verification_record), content_hash)
                     )
+                    row_finding_indices.append(list_index)
 
                     slides_list.append(slide_dict)
 
@@ -1967,7 +1987,12 @@ class SessionManager:
                     # `undefined` — a specless deck reports None, a findingless
                     # deck reports [].
                     "deck_spec": _read_deck_spec(deck),
-                    "findings": _deck_findings(row_finding_pairs),
+                    # Row path: each finding is shown on the row it was read
+                    # from, so it follows its slide through a shift (#314, D7).
+                    "findings": _deck_findings(
+                        row_finding_pairs,
+                        slide_indices=row_finding_indices,
+                    ),
                 }
                 if deck.html_content:
                     deck_dict["html_content"] = deck.html_content
@@ -2143,9 +2168,13 @@ class SessionManager:
         disjoint keys, and a repeat from the same producer is identical anyway
         (same HTML → same judge result).
 
+        The target row follows the content verified (#314, D8): *position* is only
+        a hint, read before the judge ran.  If a shift has since moved the slide,
+        the verdict lands on the unique row whose HTML hashes to the record's key.
+
         Args:
             session_id: Session to save verification for
-            position: 0-based slide position (index)
+            position: 0-based slide position (index) the verdict was read at
             verification_record: Dict shaped ``{content_hash: verdict}``
         """
         with get_db_session() as db:
@@ -2197,6 +2226,36 @@ class SessionManager:
                 )
                 .one_or_none()
             )
+
+            # D8 (#314): a verdict follows the content it verified.  *position*
+            # was read before the judge ran, and a shift (an agent insert, a UI
+            # reorder) may have landed since.  The record's single key IS the
+            # content hash the verdict is about, so: the row at *position* if its
+            # HTML hashes to that key; else the one other row whose HTML does;
+            # else *position*, as before.  A record with != 1 key has no single
+            # subject to follow, and two rows sharing the hash have no unique one.
+            if len(verification_record) == 1:
+                from src.utils.slide_hash import compute_slide_hash
+
+                subject_hash = next(iter(verification_record))
+                if row is None or compute_slide_hash(row.html or "") != subject_hash:
+                    matching = [
+                        candidate
+                        for candidate in db.query(SessionSlide)
+                        .filter(SessionSlide.session_id == deck_owner.id)
+                        .order_by(SessionSlide.position)
+                        .all()
+                        if compute_slide_hash(candidate.html or "") == subject_hash
+                    ]
+                    if len(matching) == 1:
+                        logger.info(
+                            "write_slide_verification: verification followed its "
+                            "slide (position %d -> %d) for session %s",
+                            position,
+                            matching[0].position,
+                            session_id,
+                        )
+                        row = matching[0]
 
             if row is None:
                 # Deck has rows but not at this position — genuine caller error.
