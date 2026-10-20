@@ -41,3 +41,15 @@ _Avoid_: Graph run, conversation turn
 **Rollback**:
 Publication of a new Graph Release whose definitions restore a selected historical Graph Release.
 _Avoid_: Reopen, revert in place
+
+**Slide Number**:
+The 1-based number a user sees and says. It is the slide's place in presentation order among the deck's current slides, and it changes when a slide before it is inserted, deleted or moved.
+_Avoid_: Position, index
+
+**Slide Position**:
+The 0-based identity of a slide: `SlideSpec.position` and the slide row's `position`. `target_positions` and builder briefs are keyed on it. Routes keep it contiguous from 0, but the graph maps Slide Numbers through `src/domain/slide_numbering.py` instead of assuming that.
+_Avoid_: Slide number, list index
+
+**Slide Reference**:
+A phrase naming existing slides by number or ordinal ("slide 2", "slides 4-6", "the last slide"). `src/domain/slide_numbering.py` resolves it to Slide Positions before the architect runs. It does not decide the intent, and an indefinite ordinal ("a final slide") is not one.
+_Avoid_: Slide context (the monolith's UI selection)
