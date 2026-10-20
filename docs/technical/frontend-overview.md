@@ -321,7 +321,7 @@ interface SlideStyle {
 |------|----------------|---------------------|
 | `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea for composing prompts; accepts an optional `badge?: React.ReactNode` slot above the textarea (currently no caller supplies one) | None (props only) |
-| `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
+| `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs; while a turn runs, shows the stage placeholder (the `progressLabel` from `ChatPanel`, default `Generating slides...`) | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides. Still exists but is no longer the primary slide surface — `SlideViewer` fulfils that role. | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview tile used within `SlidePanel` for the tab-based view. Still exists; not the primary slide surface. | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |
@@ -335,6 +335,7 @@ interface SlideStyle {
 | `src/components/SlideViewer/ThumbnailRibbon.tsx` | Vertical ribbon of scaled thumbnails. Drives slide selection on click. Drag-reorder via `@dnd-kit`. Amber unseen dot per slide with unread findings. | `onReorder` callback to `AppLayout` |
 | `src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer for per-slide AI findings. Drag-resize handle. Apply / Dismiss / Discuss actions (stubs until PRD workstream 5 ships). | None (prop callbacks only) |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
+| `src/utils/turnProgress.ts` | Validates a graph turn's `turn_progress` snapshot, keeps the newest by `seq`, and computes the stage placeholder text (`describeTurnProgress`, e.g. `Reviewing slide 3…`); types in `src/types/turnProgress.ts` | None (fed by `turn_progress` events from SSE or `api.startPolling`) |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
 | `src/components/AgentConfigBar/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.patchTools` |
 | `src/components/AgentConfigBar/GenieDetailPanel.tsx` | Inline panel for viewing and editing a Genie space description before adding or after selecting a tool; supports add and edit modes | None (callback props via `AgentConfigBar`) |

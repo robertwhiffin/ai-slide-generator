@@ -83,6 +83,8 @@ Defined in `src/api/schemas/streaming.py`:
 | `complete` | Generation finished | `slides`, `raw_html`, `replacement_info`, `metadata`, `experiment_url` |
 | `session_title` | Auto-generated session title | `session_title` |
 | `session_created` | New session created on first message | `session_id` |
+| `slide_ready` | One committed slide released by the reorder buffer (graph engine) | `position`, `html`, `scripts`, `agent`, `slide_cursor` |
+| `turn_progress` | The graph turn's current stage (graph engine, #319) | `turn_progress` (`seq`, `phase`, `slides`) |
 
 ```python
 class StreamEvent(BaseModel):
@@ -100,6 +102,12 @@ class StreamEvent(BaseModel):
     experiment_url: Optional[str] = None        # MLflow experiment URL
     session_title: Optional[str] = None         # Auto-generated session title
     session_id: Optional[str] = None            # Session ID (for session_created events)
+    position: Optional[int] = None              # 0-based slide position (for slide_ready events)
+    html: Optional[str] = None                  # One slide's body HTML (for slide_ready events)
+    scripts: str = ""                           # One slide's per-slide JavaScript (for slide_ready events)
+    agent: Optional[str] = None                 # Agent this event is attributed to
+    slide_cursor: Optional[int] = None          # Next position not yet released (for slide_ready events)
+    turn_progress: Optional[Dict[str, Any]] = None  # Graph turn's stage summary (for turn_progress events, #319)
     
     def to_sse(self) -> str:
         return f"event: {self.type.value}\ndata: {self.model_dump_json()}\n\n"
@@ -303,9 +311,71 @@ X-Accel-Buffering: no
   ],
   "last_message_id": 45,
   "result": null,  // Populated when status=completed
-  "error": null    // Populated when status=error
+  "error": null,   // Populated when status=error
+  "turn_progress": { "seq": 14, "phase": "building", "slides": { ... } }  // object | null
 }
 ```
+
+`turn_progress` is the graph turn's latest stage summary (see [Turn progress](#turn-progress-graph-engine-319)). It is `null` once the request is `completed` or `error`, for a request that has not reported yet, and for the legacy (monolith) engine, which never reports.
+
+### Turn progress (graph engine, #319)
+
+While a graph turn runs, the chat placeholder names the stage the graph is in (for example "Reviewing slide 3…") instead of a fixed "Generating slides...". The backend reports a structured snapshot of the stage; the frontend turns it into text. The tracker lives in `src/services/graph/progress.py`.
+
+**Snapshot shape:**
+
+```json
+{
+  "seq": 14,
+  "phase": "building",
+  "slides": { "total": 10, "building": [4, 5], "reviewing": [3], "fixing": [], "done": [0, 1, 2] }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `seq` | Integer starting at 1 each turn; rises by one for every report that changed something |
+| `phase` | One of `planning`, `gathering_data`, `checking_slides`, `building`, `reviewing_deck` |
+| `slides.total` | Number of slides the turn covers |
+| `slides.building` / `reviewing` / `fixing` / `done` | Sorted 0-based positions currently at that stage; a slide is in exactly one list |
+
+Reports are statement-level calls (`report_phase`, `report_slide`, `report_slides`) placed beside existing events in `src/services/graph/nodes.py`: the architect reports `planning` (and `checking_slides` before it re-reviews committed slides after a deck-level brief change); the data analyst reports `gathering_data`; the foreman reports `building` when it dispatches a batch and marks that batch's slides as building; each slide's pipeline reports `reviewing`, `fixing` (when a flagged slide opens a fix round) and `done`; the placeholder node reports the slides it placeholds as `done`; the deck reviewer reports `reviewing_deck`. A turn that only replies in chat (the architect answers without building) reaches only `planning`.
+
+**Monotonic rules (in brief):**
+- A phase has a rank: `planning`, `gathering_data` and `checking_slides` share rank 0 (the architect and data analyst can alternate within a turn), `building` is 1, `reviewing_deck` is 2. A report with a lower rank than the current phase is dropped.
+- A slide's stage only moves forward: `building` < `reviewing` < `fixing` < `done`. A stage can be skipped (a slide whose builder failed goes straight to `done`); a report that does not advance the slide is dropped.
+- A slide report that applies raises the phase to `building` if it was lower.
+- The covered set only grows, so `total` never falls.
+- A report that changes nothing does not bump `seq` and publishes nothing. There are no timer heartbeats.
+- So any sequence of snapshots a client observes (the SSE stream, or the subsequence a poll samples) never lowers the phase's rank or a slide's stage, and `done` and `total` never fall. The per-stage lists do shrink as slides move on.
+
+**Two sinks.** Each applied report builds the snapshot under the tracker's lock and publishes it to both:
+- **SSE:** a `turn_progress` event (`StreamEvent.turn_progress`) is put on the turn's event queue inside the lock, so the queue carries snapshots in `seq` order. On polling, the job worker drains the same generator but reads only `complete` and `session_title` from it, so these events never reach a polling client; the row does.
+- **Polling:** after the lock is released, `progress._persist` calls `SessionManager.record_chat_request_progress`, which writes `progress_json` and `progress_seq` on the turn's `chat_requests` row with a conditional UPDATE: `WHERE request_id = :r AND (progress_seq IS NULL OR progress_seq < :seq)`. Slide pipelines run on separate threads and their commits can land in any order; the predicate makes an older snapshot a no-op, so the stored `seq` never goes backwards. Without a `request_id` (the SSE path and the sweeper) there is no row and nothing is written.
+
+**Lock discipline.** The database write is outside the tracker lock, so a slow write blocks only the thread that reported and never another slide's report. On PostgreSQL the write first runs `SET LOCAL lock_timeout = '2s'` (`_PROGRESS_LOCK_TIMEOUT`), which covers exactly that one UPDATE because `get_db_session` is one transaction per `with` block, so it waits at most 2 seconds for the row lock (SQLite skips the setting). On timeout the call raises, `_persist` logs a warning, and the next report carries a newer snapshot. The timeout bounds the row-lock wait only; a connection-pool checkout is shared with every other writer and is not bounded by it. Every `report_*` function swallows and logs its own errors: progress is a side channel and never fails a turn.
+
+**Scope of the tracker.** `invoke_graph` (`src/services/graph/builder.py`) wraps `get_graph().invoke(...)` in `turn_progress_scope()`, which installs a fresh tracker in a `ContextVar` before the invoke and resets it in a `finally`. LangGraph copies the calling context into every task and each copy shares the tracker object, so the architect, the foreman and every concurrent slide pipeline report into one tracker. Nothing outlives the invoke, and the next turn starts again at `seq` 1. With no tracker installed, every `report_*` call is a no-op.
+
+**Why the poll is cross-worker coherent.** The poll reads the snapshot from the request's database row (`get_chat_request` returns it as `turn_progress`), not from `job_queue.jobs` or any other in-process state. Whichever worker ran the graph wrote the row, and whichever worker serves the poll reads it, so every worker returns the same stage. `poll_chat` returns it only while the request is neither `completed` nor `error`, after the same session-creator check as the rest of the response. See [Multi-User Concurrency](multi-user-concurrency.md).
+
+**Where the label is computed.** The backend sends data, not text. `describeTurnProgress` in `frontend/src/utils/turnProgress.ts` turns a snapshot into the placeholder label, and `frontend/src/types/turnProgress.ts` mirrors the Python enums (a conformance test reads `progress.py` as text and pins both sides). On polling, `startPolling` in `src/services/api.ts` forwards `response.turn_progress` as a `turn_progress` stream event when its `seq` is higher than the last one it forwarded. `ChatPanel` validates the payload, keeps the snapshot with the highest `seq` (it resets at send) and passes the label to `MessageList`, which shows it in the placeholder (`data-testid="chat-turn-progress"`, `aria-live="polite"`). The `turn_progress` event is never added to the chat transcript.
+
+| Snapshot | Label |
+|----------|-------|
+| None yet, or the legacy engine | `Generating slides...` |
+| `planning` | `Planning the deck…` |
+| `gathering_data` | `Gathering the data…` |
+| `checking_slides` | `Checking the slides against the new brief…` |
+| `reviewing_deck` | `Reviewing the narrative…` |
+| `building` | One clause per active stage, in order building, reviewing, fixing, for example `Building 10 slides…`, `Reviewing slide 3…` or `Building 3 slides, reviewing 2 slides, fixing slide 6…`. Slide numbers are 1-based. ` (D of T done)` is appended when `done` is above 0 and `total` is above 1. With nothing active the label is `Building the slides…`, or `Finishing the slides…` once every slide is done. |
+
+**Legacy engine.** The monolith never calls `invoke_graph`, so no tracker exists, every report is a no-op, `progress_json` stays NULL and the poll returns `"turn_progress": null`. The placeholder keeps `Generating slides...`. The rotating loading-message bar below the transcript is timer-driven and unchanged on both engines.
+
+**Known gaps:**
+- A crashed or unrecovered request keeps its last stage. The poll serves `turn_progress` for as long as the request's status is `pending` or `running`, and `recover_stuck_requests` marks a `running` request as `error` only at startup and only once it is older than 10 minutes. A turn whose worker died can therefore keep showing its last label. There is no staleness check on the snapshot.
+- There is no resume after a page reload mid-turn. `startPolling` holds the `request_id` only in its closure, so a reload shows no placeholder for the in-flight turn.
+- On SSE, the `error` event that `_placehold_failed_position` emits for a slide that could not be built reaches `ChatPanel`'s `error` case, which ends loading before the turn is over. This predates progress reporting; polling is unaffected.
 
 ### Updated Session Endpoint
 
@@ -519,10 +589,12 @@ if (message.tool_call) {
 | `status` | VARCHAR(20) | `pending`, `running`, `completed`, `error` |
 | `error_message` | TEXT | Error details if status=error |
 | `result_json` | TEXT | JSON with slides, raw_html, replacement_info |
+| `progress_json` | TEXT NULL | The graph turn's latest stage summary (JSON); NULL for the legacy engine and before the first report (#319) |
+| `progress_seq` | INTEGER NULL | `seq` of the stored `progress_json`; the conditional UPDATE only writes a higher value (#319) |
 | `created_at` | TIMESTAMP | Request creation time |
 | `completed_at` | TIMESTAMP | Request completion time |
 
-**Migration SQL:** See `scripts/migrate_polling_support.sql`
+**Migration SQL:** See `scripts/migrate_polling_support.sql`. The two `progress_*` columns are not in that script; `_migrate_chat_request_progress()` adds them at startup (see [Database Configuration](database-configuration.md)).
 
 ---
 
