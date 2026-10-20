@@ -223,7 +223,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       .then(result => {
         // Dropped after a session switch, and after a newer send: that send's message (often the
         // same text) would otherwise take this turn's row, and a delete would remove the wrong
-        // turn. The next turn's read pairs everything.
+        // turn. The next turn's read pairs whatever is not ambiguous.
         if (sendSeqRef.current !== seq || currentSessionIdRef.current !== target) return;
         if (!Array.isArray(result?.messages)) return;
         setMessages(prev => withPersistedUserIds(prev, result.messages));

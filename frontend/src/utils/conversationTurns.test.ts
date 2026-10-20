@@ -5,7 +5,8 @@
  * message with that id and every message after it up to (not including) the next user message,
  * the same span the backend deletes. `withPersistedUserIds(panel, persisted)` gives the panel's
  * id-less user messages (a just-sent message is shown before its row exists) the ids of the
- * persisted user rows they are, by identical content, pairing from the newest (plan D12).
+ * persisted user rows they are, by identical content, pairing from the newest (plan D12), and
+ * never pairing content shared by more id-less messages than unclaimed rows (whole-branch W1).
  *
  * Every expectation is the whole resulting array, so an implementation that passes these tests
  * removes or identifies exactly the right messages.
@@ -14,7 +15,10 @@
  *   - withoutTurn stops at the first non-assistant message instead of the next user message
  *                                                      -> "a tool message ... is removed with it" RED.
  *   - withoutTurn matches any role carrying the id    -> "only a user message starts a turn" RED.
- *   - withPersistedUserIds pairs from the oldest      -> "2 — failed then retried" RED.
+ *   - withPersistedUserIds pairs from the oldest      -> "1 — assigns ids ..." RED.
+ *   - drop the ambiguity skip (W1)                    -> "2", "2b", "2c" RED (and ChatPanel's
+ *                                                         "a refused duplicate send ..." RED).
+ *   - skip every content once any is ambiguous        -> "2c — only the ambiguous content ..." RED.
  *   - drop the `taken` check                          -> "4 — ... (an assistant message carries the id)" RED.
  *   - drop the `floor` bound                          -> "9 — a row older than ..." RED.
  *   - drop the `limit` bound                          -> "9b — a row newer than ..." RED.
@@ -148,7 +152,7 @@ describe('withoutTurn', () => {
 });
 
 describe('withPersistedUserIds', () => {
-  it('1 — assigns ids to id-less user messages by identical content, in order', () => {
+  it('1 — assigns ids to id-less user messages by identical content, in order (two stored copies, two rows: both pair)', () => {
     const panel = [
       user('Build a deck about puffins'),
       assistant('Here is a plan.'),
@@ -178,15 +182,40 @@ describe('withPersistedUserIds', () => {
     ]);
   });
 
-  it('2 — failed then retried: only the LAST identical message takes the row', () => {
-    // The first 'retry' was refused before it was stored; the second is row 9.
+  it('2 — refused then retried with the same text, one row: NEITHER message takes it (W1)', () => {
+    // The first 'retry' was refused before it was stored; the second is row 9. The panel cannot
+    // tell which of the two is row 9, so it pairs neither: both offer delete after the next load.
     const panel = [user('hi', 1), user('retry'), user('retry')];
     const rows = [row(1, 'user', 'hi'), row(9, 'user', 'retry')];
 
     const result = withPersistedUserIds(panel, rows);
 
-    expect(result).toEqual([panel[0], panel[1], { ...panel[2], id: 9 }]);
     expect(result[1].id).toBeUndefined();
+    expect(result[2].id).toBeUndefined();
+    expect(result).toBe(panel);
+  });
+
+  it('2b — stored then refused with the same text, one row: NEITHER message takes it (W1)', () => {
+    // The first 'yes' is row 10, but its own id read was dropped because the second send started
+    // first; the second 'yes' was refused (409) before it was stored. Pairing from the newest would
+    // give row 10 to the refused copy, and deleting that copy would delete the stored turn.
+    const panel = [user('build a deck', 1), assistant('Building 4 slide(s).', 2), user('yes'), assistant('Done.'), user('yes')];
+    const rows = [row(1, 'user', 'build a deck'), row(2, 'assistant', 'Building 4 slide(s).'), row(10, 'user', 'yes'), row(11, 'assistant', 'Done.')];
+
+    const result = withPersistedUserIds(panel, rows);
+
+    expect(result.map(m => m.id)).toEqual([1, 2, undefined, undefined, undefined]);
+    expect(result).toBe(panel);
+  });
+
+  it('2c — only the ambiguous content is skipped: other id-less messages in the same read still pair', () => {
+    // Two id-less 'yes' and one 'yes' row (ambiguous), beside a unique 'make it blue' that is stored.
+    const panel = [user('yes'), user('yes'), assistant('Done.'), user('make it blue'), assistant('Blue.')];
+    const rows = [row(10, 'user', 'yes'), row(11, 'assistant', 'Done.'), row(12, 'user', 'make it blue'), row(13, 'assistant', 'Blue.')];
+
+    const result = withPersistedUserIds(panel, rows);
+
+    expect(result).toEqual([panel[0], panel[1], panel[2], { ...panel[3], id: 12 }, panel[4]]);
   });
 
   it('3 — a failed send in the middle does not shift later ids', () => {

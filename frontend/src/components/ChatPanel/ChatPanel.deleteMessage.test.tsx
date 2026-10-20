@@ -760,6 +760,48 @@ describe('ChatPanel delete a message (#317)', () => {
     expect(deleteMessage).toHaveBeenCalledTimes(2);
   });
 
+  it('a refused duplicate send never takes the stored send\'s id: neither copy offers delete (W1)', async () => {
+    // A double-click on a finding's Apply: AppLayout sends the same fixed text twice through the
+    // imperative handle. Send 1 is stored as row 10; send 2 is refused (409) before anything is stored.
+    // Send 2's onError read sees row 10 and is the newest read, so it lands; send 1's read is dropped
+    // (its seq is stale). The panel cannot tell which copy row 10 is, so neither may offer delete.
+    const APPLY = 'Please apply this review suggestion for slide 2: Shorten the title';
+    const turns: Turn[] = [];
+    sendChatMessage.mockImplementation((_s, _m, _c, onEvent, onError) => {
+      turns.push({ onEvent, onError });
+      return () => {};
+    });
+    listMessages.mockResolvedValue(rowsRead([...FOUR, U(10, APPLY), A(11, 'Applied.')]));
+    const ref = createRef<ChatPanelHandle>();
+    mount({}, ref);
+    await loaded();
+
+    act(() => { ref.current?.sendMessage(APPLY); });
+    await settle();
+    act(() => { ref.current?.sendMessage(APPLY); });
+    await settle();
+    expect(sendChatMessage).toHaveBeenCalledTimes(2);
+    expect(rowsWith(APPLY)).toHaveLength(2);
+
+    // Send 2 is refused: its read runs and lands (control: it is the read the old pairing misused).
+    await act(async () => { turns[1].onError(new Error('Session is already processing a request')); });
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(1));
+    await settle();
+    // Send 1 completes; its own read is dropped by the send-seq guard.
+    await act(async () => { turns[0].onEvent({ type: 'assistant', content: 'Applied.' }); });
+    await act(async () => { turns[0].onEvent({ type: 'complete' }); });
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+    await settle();
+
+    expect(rowTexts()).toEqual([...FOUR_TEXTS, APPLY, APPLY, 'Applied.']);
+    expect(rowsWith(APPLY).map(deleteButtonIn)).toEqual([null, null]);
+    // The loaded messages still offer delete, so the read did land and nothing else changed.
+    expect(deleteButtons()).toHaveLength(2);
+    expect(deleteButtonIn(rowWith('Build a deck'))).toBeEnabled();
+    expect(deleteButtonIn(rowWith('Make the title punchier'))).toBeEnabled();
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+
   it('an id read that lands while a delete runs is kept when the delete lands', async () => {
     // The delete must apply to the messages as they are when it lands, not as they were when it was
     // confirmed: otherwise the ids the read added meanwhile are lost.
