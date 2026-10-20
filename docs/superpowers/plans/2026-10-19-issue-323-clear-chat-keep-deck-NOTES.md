@@ -186,7 +186,7 @@ works without the old transcript and doesn't rebuild unrelated slides. A graph t
       deleting the became-persisted effect, dropping the `isClearing` input guard, and mapping 409 to
       the generic copy each turned vitest red;
     - in Playwright, a `getSlides` refetch turned 1 red, and not emptying the messages turned 3 red.
-- **Not verifiable locally (first run is CI):**
+- **Not verifiable locally; both passed in CI round 1:**
   - The `@pytest.mark.postgres` class in `tests/unit/test_clear_context.py` checks the single
     transaction on real Postgres, and that no new DBAPI connection opens during `delete_thread`. It
     skips locally because there is no Postgres here. Two reviewers read it line by line against the CI
@@ -195,7 +195,16 @@ works without the old transcript and doesn't rebuild unrelated slides. A graph t
 
 ## CI history
 
-See the PR for the final run. Rounds are recorded in the supervisor's ledger.
+- **Round 1 (PR #331, Test Suite run 39399590333): green on the first push.** 66 checks passed. The
+  only two not run, "Agentic Behaviour (layer 3)" and "deploy", skip on every PR.
+  - The unit job ran 9135 passed and 232 skipped against Postgres 15. Both
+    `TestTheClearAgainstRealPostgres` tests ran there for the first time and passed. They are
+    `test_the_clear_is_one_transaction_on_postgres` and
+    `test_a_failed_commit_on_postgres_leaves_everything`.
+  - Integration: General ran all three `test_clear_chat_routes.py` tests, and all passed.
+  - Integration: Graph Orchestration ran `test_clear_context_graph_turn.py`, and it passed.
+  - `E2E - clear-chat` passed.
+- **No re-runs and no fixes were needed.**
 
 ## Known gaps and follow-ups
 
