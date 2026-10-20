@@ -910,6 +910,7 @@ async def clear_session_context(session_id: str):
             "Session context cleared via API",
             extra={
                 "session_id": session_id,
+                "cleared_by": current_user,
                 "deleted_messages": result.get("deleted_messages"),
             },
         )
@@ -930,7 +931,16 @@ async def clear_session_context(session_id: str):
             detail="Failed to clear session context",
         ) from e
     finally:
-        await asyncio.to_thread(session_manager.release_session_lock, session_id)
+        # By now the clear has committed (or failed with its own error).  A
+        # release failure must neither turn a committed clear into a 500 nor
+        # mask the clear's own exception; the lock then goes stale on its own.
+        try:
+            await asyncio.to_thread(session_manager.release_session_lock, session_id)
+        except Exception:
+            logger.exception(
+                "Failed to release session lock after clear",
+                extra={"session_id": session_id},
+            )
 
 
 @router.get("/{session_id}/slides")

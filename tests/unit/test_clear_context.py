@@ -1248,6 +1248,31 @@ class TestClearContextRoute:
         # passed, and is held across the clear.
         assert events == _the_whole_clear("s1")
 
+    def test_a_lock_release_failure_after_a_committed_clear_is_still_a_200(
+        self, client, allowing_gate, allowing_creator, session_lock, stub_service,
+        as_editor, events, monkeypatch,
+    ):
+        """Whole-branch review W2: the clear has committed by the time the
+        ``finally`` releases the lock.  If the release raises, the caller must
+        still be told the clear happened (D2 rejected "500 for a clear that
+        actually happened"); the release failure is logged, not surfaced."""
+        from src.api.routes import sessions as sessions_route
+
+        manager = sessions_route.get_session_manager()  # the session_lock stub
+
+        def _broken_release(session_id):
+            events.append(("release", session_id))
+            raise RuntimeError("lock row unreachable")
+
+        monkeypatch.setattr(manager, "release_session_lock", _broken_release)
+
+        resp = client.delete("/api/sessions/s1/context")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "cleared"
+        assert stub_service == [("s1", "editor@example.com")]
+        assert events == _the_whole_clear("s1")
+
     def test_a_missing_session_is_a_404(
         self, client, allowing_gate, allowing_creator, session_lock, monkeypatch,
         as_editor, events,

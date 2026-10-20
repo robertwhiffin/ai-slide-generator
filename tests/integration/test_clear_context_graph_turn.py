@@ -1,12 +1,17 @@
 """#323 A2 — after a clear, an edit turn runs from the Spec and the committed rows.
 
-**This is the only test that puts a real architect turn after a clear.**  The
-unit suite (``tests/unit/test_clear_context.py``) pins each reader of the
+**This is the only test that runs the real graph — the real architect NODE and
+its payload — after a clear.**  The model is NOT real: ``AgentRuntime`` is
+stubbed, and the edit's target (slide 3, position 2) is scripted on the
+recorder (``edit_target_positions={2}``).  So this proves what the architect is
+GIVEN after a clear and that only the targeted slide is rebuilt; it does not
+prove a model would choose slide 3.  No test in CI runs a model after a clear.
+The unit suite (``tests/unit/test_clear_context.py``) pins each reader of the
 transcript on its own; this one runs build, clear, edit through
 ``build_graph()``'s compiled graph, over a real file-backed database, with the
-real ``SqlAlchemyCheckpointSaver`` and only ``AgentRuntime`` stubbed (the
-``graph_turn_env`` harness — see ``tests/integration/test_graph_orchestration.py``
-for how it is registered and why its knobs live on the recorder).
+real ``SqlAlchemyCheckpointSaver`` (the ``graph_turn_env`` harness — see
+``tests/integration/test_graph_orchestration.py`` for how it is registered and
+why its knobs live on the recorder).
 
 What a clear must leave the next turn
 -------------------------------------
