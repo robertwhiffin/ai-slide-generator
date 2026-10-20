@@ -1,4 +1,4 @@
-"""`clear_context` (ws4d D1 / spec §7.2): the service, and the route's CAN_EDIT gate.
+"""`clear_context` (ws4d D1 / spec §7.2): the service, and the route's gates and lock.
 
 Real sqlite for the service half — the defect this code exists to prevent (a
 clear that takes the engine-mode marker with it, silently switching the deck's
@@ -67,6 +67,7 @@ from src.api.services.deck_level_writer import read_deck_spec
 from src.api.services.session_manager import SessionManager, SessionNotFoundError
 from src.core.checkpointer import SqlAlchemyCheckpointSaver
 from src.core.database import Base, _run_migrations
+from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import (
     SessionMessage,
@@ -1021,7 +1022,20 @@ class TestAClearedConversationIsEmptyToEveryReader:
 
 
 # ---------------------------------------------------------------------------
-# The route: DELETE /api/sessions/{session_id}/context, gated on CAN_EDIT.
+# The route: DELETE /api/sessions/{session_id}/context (#323, D3/D4/D6).
+#
+# The checks run in exactly this order: the deck gate (CAN_EDIT, resolved on
+# the ROOT deck), the creator gate (only the session's creator may change its
+# conversation), the session lock (409 while a turn or a slide operation holds
+# it, and a 409 never releases a lock it did not take), the clear, then the
+# release.  Every stub below appends to ONE shared ``events`` list, so the
+# order is asserted, not inferred from call counts.
+#
+# ``_require_conversation_creator`` and ``CONVERSATION_BUSY_DETAIL`` do not
+# exist before the fix: the creator fixtures patch the route module's name with
+# ``raising=False`` (an unpatched route simply never calls them, which the
+# tests see as a missing event), and the constant is imported AFTER the
+# behavioural assertions, so the rest of the file still collects.
 # ---------------------------------------------------------------------------
 
 
@@ -1033,12 +1047,19 @@ def client():
 
 
 @pytest.fixture
-def deck_gate(monkeypatch):
+def events():
+    """The one ordered log every route stub below appends ``(step, session_id)`` to."""
+    return []
+
+
+@pytest.fixture
+def deck_gate(monkeypatch, events):
     """Records (session_id, min_permission) and refuses, like a viewer's call."""
     calls = []
 
     def gate(session_id, min_permission=PermissionLevel.CAN_VIEW):
         calls.append((session_id, min_permission))
+        events.append(("deck_gate", session_id))
         raise HTTPException(status_code=403, detail="denied")
 
     monkeypatch.setattr(
@@ -1048,16 +1069,89 @@ def deck_gate(monkeypatch):
 
 
 @pytest.fixture
-def allowing_gate(monkeypatch):
+def allowing_gate(monkeypatch, events):
     calls = []
 
     def gate(session_id, min_permission=PermissionLevel.CAN_VIEW):
         calls.append((session_id, min_permission))
+        events.append(("deck_gate", session_id))
 
     monkeypatch.setattr(
         "src.api.routes.sessions._check_deck_permission_for_session", gate
     )
     return calls
+
+
+@pytest.fixture
+def allowing_creator(monkeypatch, events):
+    """The creator gate, passing.  Records (session_id, the caller it ran as)."""
+    calls = []
+
+    def gate(session_id):
+        calls.append((session_id, get_current_user()))
+        events.append(("creator", session_id))
+
+    monkeypatch.setattr(
+        "src.api.routes.sessions._require_conversation_creator", gate, raising=False
+    )
+    return calls
+
+
+@pytest.fixture
+def refusing_creator(monkeypatch, events):
+    """The creator gate, refusing: an editor of the deck who did not create
+    this session (the owner's, or another contributor's)."""
+    calls = []
+
+    def gate(session_id):
+        calls.append(session_id)
+        events.append(("creator", session_id))
+        raise HTTPException(
+            status_code=403,
+            detail="Only the session's creator can change its conversation.",
+        )
+
+    monkeypatch.setattr(
+        "src.api.routes.sessions._require_conversation_creator", gate, raising=False
+    )
+    return calls
+
+
+@pytest.fixture
+def session_lock(monkeypatch, events):
+    """The session lock, on the session manager the route module looks up.
+
+    ``grant`` is what ``acquire_session_lock`` answers (False: a turn holds
+    it); ``acquired`` / ``released`` record the session id of every call.
+    """
+    lock = SimpleNamespace(grant=True, acquired=[], released=[])
+
+    class _Manager:
+        def acquire_session_lock(self, session_id, timeout_seconds=300):
+            lock.acquired.append(session_id)
+            events.append(("acquire", session_id))
+            return lock.grant
+
+        def release_session_lock(self, session_id):
+            lock.released.append(session_id)
+            events.append(("release", session_id))
+
+    manager = _Manager()
+    monkeypatch.setattr(
+        "src.api.routes.sessions.get_session_manager", lambda: manager
+    )
+    return lock
+
+
+# The order a clear that gets as far as the service runs its steps in.
+def _the_whole_clear(session_id: str) -> list[tuple[str, str]]:
+    return [
+        ("deck_gate", session_id),
+        ("creator", session_id),
+        ("acquire", session_id),
+        ("service", session_id),
+        ("release", session_id),
+    ]
 
 
 @pytest.fixture
@@ -1072,13 +1166,14 @@ def as_editor(monkeypatch):
 
 
 @pytest.fixture
-def stub_service(monkeypatch):
+def stub_service(monkeypatch, events):
     """Replaces ChatService for the route tests; records (session_id, cleared_by)."""
     calls = []
 
     class _Stub:
         def clear_context(self, session_id, *, cleared_by):
             calls.append((session_id, cleared_by))
+            events.append(("service", session_id))
             return {
                 "status": "cleared",
                 "session_id": session_id,
@@ -1103,7 +1198,7 @@ class TestClearContextRoute:
                            frozenset({"DELETE"}))}
 
     def test_a_viewer_is_refused_and_nothing_is_cleared(
-        self, client, deck_gate, stub_service
+        self, client, deck_gate, allowing_creator, session_lock, stub_service, events
     ):
         """The gate's DEFAULT is CAN_VIEW: taking it would let a viewer wipe
         another user's transcript and graph thread."""
@@ -1112,6 +1207,12 @@ class TestClearContextRoute:
         assert resp.status_code == 403
         assert deck_gate == [("s1", PermissionLevel.CAN_EDIT)]
         assert stub_service == [], "the gate must run BEFORE any clearing"
+        # The deck gate is FIRST: a viewer reaches neither the creator gate nor
+        # the lock (#323, Review focus 3).
+        assert allowing_creator == []
+        assert session_lock.acquired == []
+        assert session_lock.released == []
+        assert events == [("deck_gate", "s1")]
 
     def test_the_refusal_is_an_httpexception_not_a_permissionerror(
         self, deck_gate, stub_service
@@ -1127,7 +1228,8 @@ class TestClearContextRoute:
         assert stub_service == []
 
     def test_the_happy_path_returns_the_services_result(
-        self, client, allowing_gate, stub_service, as_editor
+        self, client, allowing_gate, allowing_creator, session_lock, stub_service,
+        as_editor, events,
     ):
         resp = client.delete("/api/sessions/s1/context")
 
@@ -1141,9 +1243,14 @@ class TestClearContextRoute:
         assert allowing_gate == [("s1", PermissionLevel.CAN_EDIT)]
         # The caller is passed as the actor (#323, D5).
         assert stub_service == [("s1", "editor@example.com")]
+        # Exactly this order: deck gate, creator gate, acquire, clear, release
+        # (#323, Review focus 3).  The lock is taken only once both gates have
+        # passed, and is held across the clear.
+        assert events == _the_whole_clear("s1")
 
     def test_a_missing_session_is_a_404(
-        self, client, allowing_gate, monkeypatch, as_editor
+        self, client, allowing_gate, allowing_creator, session_lock, monkeypatch,
+        as_editor, events,
     ):
         """The stub records the call, so the 404 cannot come from a signature
         mismatch (a TypeError would be a 500, and would record nothing)."""
@@ -1152,6 +1259,7 @@ class TestClearContextRoute:
         class _Missing:
             def clear_context(self, session_id, *, cleared_by):
                 calls.append((session_id, cleared_by))
+                events.append(("service", session_id))
                 raise SessionNotFoundError(f"Session not found: {session_id}")
 
         monkeypatch.setattr(
@@ -1161,9 +1269,13 @@ class TestClearContextRoute:
         resp = client.delete("/api/sessions/ghost/context")
         assert resp.status_code == 404
         assert calls == [("ghost", "editor@example.com")]
+        # A failed clear still gives the lock back: once, after the service.
+        assert session_lock.released == ["ghost"]
+        assert events == _the_whole_clear("ghost")
 
     def test_an_unimplemented_saver_surfaces_as_a_500(
-        self, client, allowing_gate, monkeypatch, as_editor
+        self, client, allowing_gate, allowing_creator, session_lock, monkeypatch,
+        as_editor, events,
     ):
         """The stub records the call: a TypeError from a signature mismatch is
         also a 500, so the status alone would pass while testing nothing."""
@@ -1172,6 +1284,7 @@ class TestClearContextRoute:
         class _Unimplemented:
             def clear_context(self, session_id, *, cleared_by):
                 calls.append((session_id, cleared_by))
+                events.append(("service", session_id))
                 raise NotImplementedError
 
         monkeypatch.setattr(
@@ -1181,6 +1294,219 @@ class TestClearContextRoute:
         resp = client.delete("/api/sessions/s1/context")
         assert resp.status_code == 500
         assert calls == [("s1", "editor@example.com")]
+        # A failed clear still gives the lock back: once, after the service.
+        assert session_lock.released == ["s1"]
+        assert events == _the_whole_clear("s1")
+
+    def test_an_editor_who_is_not_the_sessions_creator_is_refused(
+        self, client, allowing_gate, refusing_creator, session_lock, stub_service,
+        as_editor, events,
+    ):
+        """The deck gate resolves on the ROOT deck, so every editor of a shared
+        deck passes it -- for the owner's session id too, which is what
+        ``/api/sessions/shared`` lists.  Conversations are private (D3/D4): the
+        creator gate refuses, before the lock is taken and before anything is
+        cleared."""
+        resp = client.delete("/api/sessions/owners-session/context")
+
+        assert resp.status_code == 403
+        assert refusing_creator == ["owners-session"]
+        assert stub_service == [], "a refused clear must not reach the service"
+        assert session_lock.acquired == [], "the creator gate runs BEFORE the lock"
+        assert session_lock.released == []
+        assert events == [
+            ("deck_gate", "owners-session"),
+            ("creator", "owners-session"),
+        ]
+
+    def test_a_session_with_a_turn_in_flight_is_a_409_and_nothing_is_cleared(
+        self, client, allowing_gate, allowing_creator, session_lock, stub_service,
+        as_editor, events,
+    ):
+        """A chat turn or a slide operation holds the session lock (D6).  The
+        busy answer must NOT release it: the lock belongs to the request that
+        took it, and freeing it would let a third request run alongside that
+        turn."""
+        session_lock.grant = False
+
+        resp = client.delete("/api/sessions/s1/context")
+
+        assert resp.status_code == 409
+        assert stub_service == [], "a busy session must not be cleared"
+        assert session_lock.acquired == ["s1"]
+        assert session_lock.released == [], (
+            "a 409 must not release a lock this request did not acquire"
+        )
+        assert events == [
+            ("deck_gate", "s1"),
+            ("creator", "s1"),
+            ("acquire", "s1"),
+        ]
+
+        from src.api.routes.sessions import CONVERSATION_BUSY_DETAIL
+
+        assert resp.json()["detail"] == CONVERSATION_BUSY_DETAIL
+        # Plan Task 3 interface, accepted by PLAN-CORRECTIONS C6.  The frontend
+        # maps the 409 by status, never by this string.
+        assert CONVERSATION_BUSY_DETAIL == (
+            "Something is still running on this deck. "
+            "Wait for it to finish, then try again."
+        )
+
+    def test_the_route_passes_the_caller_as_cleared_by(
+        self, client, allowing_gate, allowing_creator, session_lock, stub_service,
+        as_editor,
+    ):
+        """The identity comes from the request (``DEV_USER_ID`` through the real
+        middleware), not from anything the test patches: the creator gate judges
+        the same caller the clear is attributed to (D5)."""
+        resp = client.delete("/api/sessions/s1/context")
+
+        assert resp.status_code == 200
+        assert allowing_creator == [("s1", "editor@example.com")]
+        assert stub_service == [("s1", "editor@example.com")]
+
+
+# ---------------------------------------------------------------------------
+# The creator gate: ``_require_conversation_creator`` (src/api/routes/_authz.py).
+#
+# The SAME check GET /api/sessions/{id}/messages makes (sessions.py,
+# ``if session.get("created_by") != current_user: 403``): the session's own
+# ``created_by`` against the caller, exactly.  No fallback to the parent or root
+# deck, and nothing about deck permission -- the owner of a deck is refused on
+# a contributor's session.  On top of that copy, a missing user is a 401 (an
+# exact compare alone would let "no user" through on a session with no
+# recorded creator).  The gate does not exist before the fix, so each test
+# imports it inside its body.
+# ---------------------------------------------------------------------------
+
+
+def _conversation_creator_gate():
+    from src.api.routes._authz import _require_conversation_creator
+
+    return _require_conversation_creator
+
+
+def _session_info(
+    session_id: str,
+    created_by: str | None,
+    *,
+    internal_id: int = 1,
+    parent: str | None = None,
+    parent_internal_id: int | None = None,
+) -> dict:
+    """The keys of ``SessionManager.get_session``'s dict a creator check could read."""
+    return {
+        "id": internal_id,
+        "session_id": session_id,
+        "created_by": created_by,
+        "is_contributor_session": parent is not None,
+        "parent_session_id": parent,
+        "parent_session_internal_id": parent_internal_id,
+    }
+
+
+@pytest.fixture
+def gate_sessions(monkeypatch):
+    """The session manager the gate reads, at ``src.api.routes._authz``.
+
+    ``known`` maps session_id -> ``get_session``'s dict; any other id raises
+    ``SessionNotFoundError``, as the real one does.  ``lookups`` records ids.
+    """
+    state = SimpleNamespace(known={}, lookups=[])
+
+    class _Manager:
+        def get_session(self, session_id):
+            state.lookups.append(session_id)
+            if session_id not in state.known:
+                raise SessionNotFoundError(f"Session not found: {session_id}")
+            return dict(state.known[session_id])
+
+    manager = _Manager()
+    monkeypatch.setattr("src.api.routes._authz.get_session_manager", lambda: manager)
+    return state
+
+
+class TestTheConversationCreatorGate:
+    def test_the_creator_passes(self, gate_sessions, as_user):
+        gate_sessions.known["s1"] = _session_info("s1", "alice@example.com")
+        gate = _conversation_creator_gate()
+
+        with as_user("alice@example.com"):
+            assert gate("s1") is None
+
+        assert gate_sessions.lookups == ["s1"]
+
+    @pytest.mark.parametrize(
+        "created_by",
+        ["alice@example.com", None],
+        ids=["someone_elses_session", "no_recorded_creator"],
+    )
+    def test_another_user_is_a_403(self, gate_sessions, as_user, created_by):
+        """``created_by`` is nullable; GET /messages refuses every caller on a
+        session with no recorded creator, and so does this gate."""
+        gate_sessions.known["s1"] = _session_info("s1", created_by)
+        gate = _conversation_creator_gate()
+
+        with as_user("mallory@example.com"), pytest.raises(HTTPException) as excinfo:
+            gate("s1")
+
+        assert excinfo.value.status_code == 403
+
+    @pytest.mark.parametrize(
+        "created_by",
+        ["alice@example.com", None],
+        ids=["someone_elses_session", "no_recorded_creator"],
+    )
+    def test_no_user_is_a_401(self, gate_sessions, as_user, created_by):
+        """The ``no_recorded_creator`` case is the one an exact compare alone
+        gets wrong: ``None != None`` is False, so it would pass an anonymous caller."""
+        gate_sessions.known["s1"] = _session_info("s1", created_by)
+        gate = _conversation_creator_gate()
+
+        with as_user(None), pytest.raises(HTTPException) as excinfo:
+            gate("s1")
+
+        assert excinfo.value.status_code == 401
+
+    def test_an_unknown_session_is_a_404(self, gate_sessions, as_user):
+        """An HTTPException, not the manager's SessionNotFoundError: the route
+        calls the gate outside its try block, where that would be a 500."""
+        gate = _conversation_creator_gate()
+
+        with as_user("alice@example.com"), pytest.raises(HTTPException) as excinfo:
+            gate("ghost")
+
+        assert excinfo.value.status_code == 404
+        assert gate_sessions.lookups == ["ghost"]
+
+    def test_a_contributor_session_is_gated_on_the_contributor_not_the_owner(
+        self, gate_sessions, as_user
+    ):
+        """A contributor clears only their own session (D3).  The deck owner,
+        though they manage the deck, cannot clear the contributor's
+        conversation: the gate reads the session's own ``created_by``, never the
+        parent's (the owner's root session is known to the stub, so resolving to
+        it would let the owner through and fail here)."""
+        gate_sessions.known["owner"] = _session_info(
+            "owner", "owner@example.com", internal_id=1
+        )
+        gate_sessions.known["contrib"] = _session_info(
+            "contrib",
+            "contributor@example.com",
+            internal_id=2,
+            parent="owner",
+            parent_internal_id=1,
+        )
+        gate = _conversation_creator_gate()
+
+        with as_user("contributor@example.com"):
+            assert gate("contrib") is None
+
+        with as_user("owner@example.com"), pytest.raises(HTTPException) as excinfo:
+            gate("contrib")
+
+        assert excinfo.value.status_code == 403
 
 
 # ---------------------------------------------------------------------------

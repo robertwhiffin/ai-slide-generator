@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from src.api.routes._authz import (
     _check_deck_permission_for_session,
+    _require_conversation_creator,
     _require_session_access,
 )
 from src.api.schemas.requests import CreateSessionRequest, DuplicateSessionRequest
@@ -51,6 +52,12 @@ from src.services.permission_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+# Any holder of the session lock: a chat turn, or a slide operation (slides.py:187-195).
+CONVERSATION_BUSY_DETAIL = (
+    "Something is still running on this deck. "
+    "Wait for it to finish, then try again."
+)
 
 
 class UpdateSessionRequest(BaseModel):
@@ -856,24 +863,47 @@ async def clear_session_context(session_id: str):
     ``deck_spec_json`` (the structured compaction of what was decided) and the
     earliest user message, which is what engine-mode resolution reads.
 
-    Requires CAN_EDIT: the helper's default is CAN_VIEW, and taking the default
-    would let a **viewer** wipe another user's transcript and graph thread.
+    Requires CAN_EDIT on the deck (the helper's default is CAN_VIEW, and taking
+    the default would let a **viewer** wipe another user's transcript and graph
+    thread) AND that the caller is the session's creator: conversations are
+    private, and deck permission resolves on the root deck, so CAN_EDIT alone
+    would let any editor of a shared deck clear the owner's (or another
+    contributor's) conversation.
+
+    Answers 409 while the session lock is held (a chat turn or a slide
+    operation is running); the lock is released only if this request took it.
+    The prune, the thread delete and the attribution row are one transaction.
 
     Args:
         session_id: Session whose context to clear
 
     Returns:
         Clear confirmation with the number of messages deleted
+
+    Raises:
+        HTTPException 401/403/404: not signed in, not an editor / not the
+            session's creator, unknown session.
+        HTTPException 409: a turn or slide operation holds the session lock.
     """
     # Permission check: require CAN_EDIT on the deck — NOT the helper's default.
     await asyncio.to_thread(
         _check_deck_permission_for_session, session_id, PermissionLevel.CAN_EDIT
     )
+    # The deck gate resolves on the ROOT deck; the conversation is the
+    # session's own, so its creator alone may clear it.
+    await asyncio.to_thread(_require_conversation_creator, session_id)
+
+    current_user = get_current_user()
+    session_manager = get_session_manager()
+    locked = await asyncio.to_thread(session_manager.acquire_session_lock, session_id)
+    if not locked:
+        # The lock belongs to whoever holds it: do not release it.
+        raise HTTPException(status_code=409, detail=CONVERSATION_BUSY_DETAIL)
 
     try:
         chat_service = get_chat_service()
         result = await asyncio.to_thread(
-            chat_service.clear_context, session_id, cleared_by=get_current_user()
+            chat_service.clear_context, session_id, cleared_by=current_user
         )
 
         logger.info(
@@ -899,6 +929,8 @@ async def clear_session_context(session_id: str):
             status_code=500,
             detail="Failed to clear session context",
         ) from e
+    finally:
+        await asyncio.to_thread(session_manager.release_session_lock, session_id)
 
 
 @router.get("/{session_id}/slides")

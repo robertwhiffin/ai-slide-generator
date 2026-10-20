@@ -218,6 +218,46 @@ def _check_deck_permission_for_session(
         _require_session_access(session_info, db, min_permission)
 
 
+def _require_conversation_creator(session_id: str) -> None:
+    """Refuse a change to a session's conversation by anyone but its creator.
+
+    Conversations are private (GET /api/sessions/{id}/messages is creator-only).
+    Deck permission resolves on the ROOT session, so a CAN_EDIT gate alone lets
+    any editor of a shared deck change the OWNER's (or another contributor's)
+    conversation by passing that session's id.  Used by DELETE …/context; #317's
+    per-message delete reuses it.
+
+    The comparison is the same one GET /messages makes: the session's OWN
+    ``created_by`` against the caller, never the parent's or the root's.  A
+    session with no recorded creator is refused for every caller.
+
+    Raises:
+        HTTPException 401: no authenticated user.
+        HTTPException 404: unknown session.
+        HTTPException 403: the caller did not create this session.
+    """
+    current_user = get_current_user()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        session_info = get_session_manager().get_session(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        ) from None
+
+    if session_info.get("created_by") != current_user:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Conversations are private. "
+                "Only the session creator can change its conversation."
+            ),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Job-ID access (export poll/download, Google Slides poll)
 # ---------------------------------------------------------------------------
