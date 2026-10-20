@@ -509,6 +509,18 @@ if (message.tool_call) {
 | `request_id` | VARCHAR(64) | Links to async chat request (for polling) |
 | `created_at` | TIMESTAMP | Message timestamp |
 
+### Message ids in the chat panel
+
+The chat panel needs the id of a user's message to offer [delete](../user-guide/01-generating-slides.md#deleting-a-message), and neither transport hands it over:
+
+- **SSE** graph events carry no `message_id`.
+- **Poll** events do, but the user's own row is not echoed (`poll_chat` excludes `role == "user"`), because the panel already shows it.
+- `complete.metadata` reaches the panel on both transports, but a turn that ends in an `error` event or the transport's `onError` sends no `complete`, and a failed turn is exactly the one a user wants to delete.
+
+So the panel reads `GET /api/sessions/{id}/messages?limit=200` (the newest 200 rows) when a turn ends (`complete`, `error` or `onError`), on both transports, and adds ids to its id-less user messages by identical content, pairing from the newest (`withPersistedUserIds`). It only adds ids: it does not replace the panel's messages with the stored list, because SSE's emit-only progress lines ("Building N slide(s).") are never stored and would vanish. A read that resolves after the user sent again is dropped (`sendSeqRef`), so a repeated prompt can never take the previous turn's id, and the next turn's read pairs both. `complete.metadata.user_message_id` is the upgrade path if content pairing ever proves too weak. See [Frontend Overview](./frontend-overview.md#conversation-api-srcapiconversationts).
+
+A delete removes a turn's rows by role and order (the user message and the rows up to the next user message), not by `request_id`: the SSE path writes rows with no `request_id`. A row written late, after the next user message, therefore joins the turn it lands after.
+
 ### chat_requests Table (Polling Support)
 
 | Column | Type | Purpose |
