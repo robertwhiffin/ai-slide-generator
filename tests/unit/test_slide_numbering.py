@@ -16,6 +16,10 @@ Conventions:
   appearance. ``text`` is the exact matched substring (case kept, no leading
   "the"), so a matcher that over- or under-consumes fails.
 - The default deck is positions 0-9 (10 slides).
+- Abstain: the architect prompt copies ``target_positions`` from these
+  references, so a wrong or truncated reference is worse than none. A form
+  that cannot be read with certainty gives NO reference for that phrase
+  (other references in the same text are unaffected).
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from evals.harness.case import load_case
 from src.domain.slide_numbering import (
     MAX_RANGE_SPAN,
     architect_slide_payload,
@@ -160,11 +165,12 @@ def test_every_cardinal_word(number, word):
 # Resolved: singular lists (F1 takes and/& lists, NOT bare commas, NOT to-ranges)
 # ---------------------------------------------------------------------------
 
+# "move slide 2 to 5" used to be pinned here as slide 2; Task 12 makes it no
+# reference (see SINGULAR_UNREADABLE_CONTINUATION).
 SINGULAR_LISTS = [
     ("slide 2 and 3", DECK10, [("slide 2 and 3", [2, 3], [1, 2], [])]),
     ("slide 2 & 3", DECK10, [("slide 2 & 3", [2, 3], [1, 2], [])]),
     ("On slide 2, 3 cards instead of a list", DECK10, [("slide 2", [2], [1], [])]),
-    ("move slide 2 to 5", DECK10, [("slide 2", [2], [1], [])]),
     # F1 ITEM may be a digit dash range, inside an and-list too.
     ("slide 2-4 and 6", DECK10, [("slide 2-4 and 6", [2, 3, 4, 6], [1, 2, 3, 5], [])]),
 ]
@@ -342,6 +348,19 @@ def test_known_limit_bare_comma_plural_resolves_both_numbers():
     ]
 
 
+def test_known_limit_singular_and_count_reads_the_count_as_a_slide():
+    """PINNED KNOWN LIMIT (D3, Task 12 ruling D; NOT fixed): singular "and <count>".
+
+    "Put 3 KPIs on slide 2 and 4 on slide 3" means 4 KPIs on slide 3, but F1
+    accepts "and" as a separator and cannot tell a count from a slide, so the
+    first phrase resolves [2, 4]. Changing this is a deliberate grammar change.
+    """
+    assert _resolved("Put 3 KPIs on slide 2 and 4 on slide 3", DECK10) == [
+        ("slide 2 and 4", [2, 4], [1, 3], []),
+        ("slide 3", [3], [2], []),
+    ]
+
+
 # The issue #313 train eval messages (plan D6) resolve to their expected targets.
 TRAIN_MESSAGES = [
     ("Could you make the second slide less wordy?", DECK10, [("second slide", [2], [1], [])]),
@@ -441,6 +460,261 @@ NO_REFERENCE = [
 @pytest.mark.parametrize("text,positions", _params(NO_REFERENCE))
 def test_no_reference(text, positions):
     assert _resolved(text, positions) == []
+
+
+# ---------------------------------------------------------------------------
+# Abstain (Task 12): a form that cannot be read with certainty is NO reference.
+# The architect copies these positions, so "slide 2" from "slide 2 through 5"
+# (a truncated range) or "last slide" from "the last slide deck" (a compound
+# noun) is worse than no reference at all.
+# ---------------------------------------------------------------------------
+
+# Ruling A: singular "slide" followed by a continuation F1 cannot read drops the
+# WHOLE singular reference, never a truncated "slide 2".
+SINGULAR_UNREADABLE_CONTINUATION = [
+    # A dash range with spaces (F1 reads only a tight digit dash range).
+    # "slide 2 - 4" used to resolve slide 2; it is now no reference.
+    ("slide 3 - 5 need work", DECK10),
+    ("slide 2 - 4", DECK10),
+    ("slide 2 – 4", DECK10),  # en dash
+    ("slide 2 — 4", DECK10),  # em dash
+    ("slide 2 -4", DECK10),
+    ("slide 2- 4", DECK10),
+    # to / through / thru plus a number: a range F1 does not take.
+    ("Apply the dark theme to slide 2 through 5", DECK10),
+    ("Make slide 2 thru 4 bold", DECK10),
+    ("Change slide 2 to 4 to use the new colours", DECK10),
+    ("slide one through three", DECK10),
+    ("move slide 2 to 5", DECK10),  # was pinned as slide 2 in SINGULAR_LISTS
+    # A comma list (a comma, a number, then ",", "and" or "&").
+    ("Slide 2, 3 and 4 should match", DECK10),
+    ("Slide 2, 3, and 4", DECK10),
+    ("slide 2, 3 & 4", DECK10),
+    ("Slide 2, 3, 4 should match", DECK10),
+    ("slide two, three and four", DECK10),
+]
+
+
+@pytest.mark.parametrize("text,positions", _params(SINGULAR_UNREADABLE_CONTINUATION))
+def test_singular_unreadable_continuation_drops_the_whole_reference(text, positions):
+    assert _resolved(text, positions) == []
+
+
+# The unreadable continuation must fail the WHOLE singular item list, never a
+# shorter prefix of it: a backtracking group would emit "slide 2" (or "slide 2 and
+# 3") out of these.  Pins the atomic read of the singular item list.
+SINGULAR_LIST_THEN_UNREADABLE = [
+    ("slide 2 and 3 through 5", DECK10),
+    ("slide 2 & 3 - 5", DECK10),
+    ("slide 2 and 3, 4 and 5", DECK10),
+]
+
+
+@pytest.mark.parametrize("text,positions", _params(SINGULAR_LIST_THEN_UNREADABLE))
+def test_an_unreadable_tail_fails_the_whole_singular_list_not_a_prefix(text, positions):
+    assert _resolved(text, positions) == []
+
+
+# "slide 2 through slide 5" names a range, so it resolves as one, never as the
+# two truncated ends "slide 2" and "slide 5".  "to" stays two references
+# ("Compare slide 2 to slide 5", "move the chart from slide 2 to slide 5").
+SINGULAR_SPAN = [
+    ("Restyle slide 2 through slide 5", DECK10,
+     [("slide 2 through slide 5", [2, 3, 4, 5], [1, 2, 3, 4], [])]),
+    ("slide two thru slide four", DECK10,
+     [("slide two thru slide four", [2, 3, 4], [1, 2, 3], [])]),
+    ("slide 9 through slide 12", DECK10,
+     [("slide 9 through slide 12", [9, 10, 11, 12], [8, 9], [11, 12])]),
+    ("move the chart from slide 2 to slide 5", DECK10,
+     [("slide 2", [2], [1], []), ("slide 5", [5], [4], [])]),
+]
+
+
+@pytest.mark.parametrize("text,positions,expected", _params(SINGULAR_SPAN))
+def test_slide_through_slide_is_one_range(text, positions, expected):
+    assert _resolved(text, positions) == expected
+
+
+# Ruling A controls: a continuation that is NOT a number keeps the reference.
+# Also pinned elsewhere: "On slide 2 - the chart is wrong" (SEVERAL) and "On
+# slide 2, 3 cards instead of a list" (SINGULAR_LISTS) stay slide 2.
+SINGULAR_READABLE_CONTINUATION = [
+    ("Change slide 2 to a chart", DECK10, [("slide 2", [2], [1], [])]),
+    ("Add a chart to slide 2 to show growth", DECK10, [("slide 2", [2], [1], [])]),
+    (
+        "Compare slide 2 to slide 5",
+        DECK10,
+        [("slide 2", [2], [1], []), ("slide 5", [5], [4], [])],
+    ),
+]
+
+
+@pytest.mark.parametrize("text,positions,expected", _params(SINGULAR_READABLE_CONTINUATION))
+def test_singular_readable_continuation_still_resolves(text, positions, expected):
+    assert _resolved(text, positions) == expected
+
+
+# Ruling B: an ordinal + "slide" with a count-relative tail AFTER it.
+ORDINAL_RELATIVE_TAIL_AFTER = [
+    ("the second slide from the end", DECK10),
+    ("the third slide from the end", DECK10),
+    ("the second slide from last", DECK10),
+    ("the second slide from the back", DECK10),
+    ("the last slide but one", DECK10),
+]
+
+
+@pytest.mark.parametrize("text,positions", _params(ORDINAL_RELATIVE_TAIL_AFTER))
+def test_ordinal_slide_with_a_relative_tail_is_no_reference(text, positions):
+    assert _resolved(text, positions) == []
+
+
+# Ruling C: an ordinal + "slide" used as a compound noun names no slide.
+ORDINAL_COMPOUND_NOUN = [
+    ("the last slide deck you made", DECK10),
+    ("the first slide deck", DECK10),
+    ("the first slide template", DECK10),
+    ("What should the final slide count be?", DECK10),
+    ("the first slideshow", DECK10),
+    ("the final slide master", DECK10),
+    ("the second slide-deck", DECK10),
+]
+
+
+@pytest.mark.parametrize("text,positions", _params(ORDINAL_COMPOUND_NOUN))
+def test_ordinal_slide_compound_noun_is_no_reference(text, positions):
+    assert _resolved(text, positions) == []
+
+
+# Rulings B and C controls: "slide" followed by punctuation or a possessive
+# still resolves (the bare "the second slide" and "the last slide" stay pinned
+# in ORDINALS).
+ORDINAL_STILL_RESOLVES = [
+    ("the last slide.", DECK10, [("last slide", [10], [9], [])]),
+    ("the last slide, please", DECK10, [("last slide", [10], [9], [])]),
+    ("the last slide's chart", DECK10, [("last slide", [10], [9], [])]),
+]
+
+
+@pytest.mark.parametrize("text,positions,expected", _params(ORDINAL_STILL_RESOLVES))
+def test_ordinal_slide_followed_by_punctuation_still_resolves(text, positions, expected):
+    assert _resolved(text, positions) == expected
+
+
+# Dropping one phrase leaves the other references in the same text alone.
+ABSTAIN_KEEPS_OTHER_REFERENCES = [
+    (
+        "Apply the dark theme to slide 2 through 5, like slide 7",
+        DECK10,
+        [("slide 7", [7], [6], [])],
+    ),
+    ("slide 3 - 5 need work; keep slide 8", DECK10, [("slide 8", [8], [7], [])]),
+    ("Slide 2, 3 and 4 should match the last slide", DECK10, [("last slide", [10], [9], [])]),
+    (
+        "Swap the second slide from the end with slide 2",
+        DECK10,
+        [("slide 2", [2], [1], [])],
+    ),
+    (
+        "Use the last slide deck's style on slide 4",
+        DECK10,
+        [("slide 4", [4], [3], [])],
+    ),
+]
+
+
+@pytest.mark.parametrize("text,positions,expected", _params(ABSTAIN_KEEPS_OTHER_REFERENCES))
+def test_a_dropped_phrase_leaves_the_other_references(text, positions, expected):
+    assert _resolved(text, positions) == expected
+
+
+# ---------------------------------------------------------------------------
+# Volume (Task 12, ruling E): at most MAX_REFERENCES references, duplicates once
+# ---------------------------------------------------------------------------
+
+
+def test_max_references_is_20():
+    # Imported here so the rest of this file still collects against a module
+    # without the constant.
+    from src.domain.slide_numbering import MAX_REFERENCES
+
+    assert MAX_REFERENCES == 20
+
+
+def test_a_repeated_reference_is_emitted_once():
+    assert _resolved("slide 2 " * 50, DECK10) == [("slide 2", [2], [1], [])]
+
+
+def test_a_repeated_wide_range_is_emitted_once():
+    deck100 = list(range(100))
+    assert _resolved("slides 1-100 " * 30, deck100) == [
+        ("slides 1-100", list(range(1, 101)), list(range(100)), [])
+    ]
+
+
+def test_distinct_references_are_capped_at_the_first_20_in_order():
+    deck30 = list(range(30))
+    text = " ".join(f"slide {n}" for n in range(1, 31))
+    assert _resolved(text, deck30) == [(f"slide {n}", [n], [n - 1], []) for n in range(1, 21)]
+
+
+def test_duplicates_do_not_count_towards_the_cap():
+    deck30 = list(range(30))
+    text = " ".join(f"slide {n} slide {n}" for n in range(1, 31))
+    assert _resolved(text, deck30) == [(f"slide {n}", [n], [n - 1], []) for n in range(1, 21)]
+
+
+def test_deduplication_keeps_the_first_occurrence_in_order():
+    assert _resolved("make slide 3 match slide 2, then recheck slide 3", DECK10) == [
+        ("slide 3", [3], [2], []),
+        ("slide 2", [2], [1], []),
+    ]
+
+
+def test_deduplication_key_is_text_and_slide_numbers():
+    # "second slide" names the same slide as "slide 2" but is a different
+    # phrase, so it is kept; only the identical second "slide 2" is dropped.
+    assert _resolved("slide 2, the second slide, slide 2", DECK10) == [
+        ("slide 2", [2], [1], []),
+        ("second slide", [2], [1], []),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The committed architect train payloads still resolve to their pinned
+# references, so a grammar change needs no eval payload regeneration.
+# ---------------------------------------------------------------------------
+
+ARCHITECT_TRAIN_CASE_IDS = [
+    "ask_data",
+    "build_request",
+    "confirm_design",
+    "discuss",
+    "discuss_slide_question",
+    "edit_last_slide",
+    "edit_multi_slide",
+    "edit_polite_ordinal",
+    "edit_request",
+]
+# Non-vacuity: these cases' committed payloads carry at least one reference.
+ARCHITECT_TRAIN_CASES_WITH_REFERENCES = {
+    "discuss_slide_question",
+    "edit_last_slide",
+    "edit_multi_slide",
+    "edit_polite_ordinal",
+    "edit_request",
+}
+
+
+@pytest.mark.parametrize("case_id", ARCHITECT_TRAIN_CASE_IDS)
+def test_architect_train_case_payload_references_still_resolve(case_id):
+    payload = load_case("architect", case_id).payload
+    spec = payload["current_deck_spec"]
+    positions = [slide["position"] for slide in spec["slides"]] if spec else []
+    committed = payload["slide_references"]
+    assert bool(committed) == (case_id in ARCHITECT_TRAIN_CASES_WITH_REFERENCES)
+    rebuilt = architect_slide_payload(payload["conversation"], payload["message"], positions)
+    assert rebuilt["slide_references"] == committed
 
 
 # ---------------------------------------------------------------------------

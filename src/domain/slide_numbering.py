@@ -33,8 +33,17 @@ Number and ordinal words refuse a hyphen on either side, so "twenty-one",
 
 * F1, singular ``slide``: "slide 2", "slide #2", "slide number 2", "slide two",
   "slide 2-4" (a digit dash range, no spaces), "slide 2 and 3", "slide 2 & 3".
-  It takes no bare-comma continuation ("On slide 2, 3 cards ..." is slide 2
-  only) and no ``to``/``through`` range ("move slide 2 to 5" is slide 2 only).
+  It abstains on a continuation it cannot read: the WHOLE singular match fails
+  (no shorter "slide 2" is emitted) when the item list is followed by a dash and
+  a digit, with or without spaces ("slide 2 - 4", "slide 2 -4"), by ``to``/
+  ``through``/``thru`` and a number ("move slide 2 to 5" is no reference, not
+  slide 2), or by a comma list: a comma, a number, then ``,``, ``and`` or ``&``
+  ("Slide 2, 3 and 4").  A continuation that is not a number keeps the
+  reference: "Change slide 2 to a chart" and "Compare slide 2 to slide 5" read
+  slide 2, and a lone comma ("On slide 2, 3 cards ...") is slide 2 only.
+* F2, a singular span: "slide 2 through slide 5" / "slide two thru slide four"
+  is one inclusive range, never the two truncated ends.  ``to`` is not a span
+  ("move the chart from slide 2 to slide 5" names two slides).
 * F3, plural ``slides``: items separated by ``,``, ``, and``, ``and`` or ``&``.
   An item is a number, a dash range of digits (en and em dashes too, optional
   spaces around the dash), or two numbers joined by ``to``/``through``/``thru``:
@@ -47,7 +56,14 @@ Number and ordinal words refuse a hyphen on either side, so "twenty-one",
 * F4, an ordinal before the singular ``slide``: "the second slide", "the 4th
   slide", "last slide: ...".  ``last`` and ``final`` are the slide count;
   ``penultimate``, ``second-to-last``, ``second to last``, ``second-last`` and
-  ``second last`` are the count minus one.
+  ``second last`` are the count minus one.  The ordinal is NOT a reference when
+  ``slide`` is a compound noun or begins a relative tail: it is followed by a
+  hyphen and a word ("the second slide-deck"), by ``deck``, ``template``,
+  ``count`` or ``master``, optionally plural ("the last slide deck you made",
+  "the final slide count"), by ``from`` plus an optional ``the`` and ``end``,
+  ``last``, ``back`` or ``bottom`` ("the second slide from the end"), or by
+  ``but one`` ("the last slide but one").  "the last slide.", "the last slide,
+  please" and "the last slide's chart" stay references.
 * Indefinite exclusion: an F4 match immediately preceded by ``a``, ``an``,
   ``another``, ``new``, ``extra``, ``additional``, ``one`` or ``one more`` is
   NOT a reference.  "Add a final slide", "Add one last slide", "I need a third
@@ -62,6 +78,10 @@ Number and ordinal words refuse a hyphen on either side, so "twenty-one",
   slide" is still the last slide.
 * Ranges are inclusive and may run in either order.  A range spanning more than
   ``MAX_RANGE_SPAN`` numbers drops the whole reference.
+* At most ``MAX_REFERENCES`` (20) references are returned.  An identical
+  reference (same ``text`` and ``slide_numbers``) is emitted once, at its first
+  position; duplicates are removed before the cap, so they never use it up.
+  "slide 2" and "the second slide" are different phrases and are both kept.
 
 Each reference is ``{"text", "slide_numbers", "positions", "out_of_range"}``.
 ``slide_numbers`` is sorted and deduplicated; ``positions`` maps the in-range
@@ -74,6 +94,10 @@ Deliberately unresolved (each is tested; the model looks these up in
 
 * count-relative plurals ("the last two slides") and plural ordinals ("the
   second and third slides");
+* a singular ``slide`` followed by an unreadable continuation ("slide 2
+  through 5", "slide 2 - 4", "slide 2, 3 and 4", "move slide 2 to 5"), and an
+  ordinal ``slide`` that is a compound noun or has a relative tail ("the first
+  slide template", "the second slide from the end", "the last slide but one");
 * count-relative ordinals other than the count-minus-one forms above ("the
   third to last slide", "the second from last slide", "the next to last
   slide", "the 2nd-to-last slide");
@@ -84,9 +108,11 @@ Deliberately unresolved (each is tested; the model looks these up in
 * "or" is not a separator ("slides 2 or 3" is slides 2 only);
 * a range spanning more than ``MAX_RANGE_SPAN`` numbers.
 
-Known limit, pinned by a test: a bare-comma plural such as "On slides 2, 3
+Known limits, each pinned by a test: a bare-comma plural such as "On slides 2, 3
 bullets each" resolves to slides 2 and 3, because F3 accepts a bare comma as a
-separator and cannot tell a count from a slide.
+separator and cannot tell a count from a slide; and "Put 3 KPIs on slide 2 and
+4 on slide 3" resolves "slide 2 and 4" (slides 2 and 4) and "slide 3", because
+the singular form accepts ``and`` as a separator and reads the count as a slide.
 
 References are lexical.  They say which existing slide a phrase names, not that
 the user wants it changed or what the phrase means for the edit: "after slide
@@ -117,6 +143,7 @@ import re
 from typing import Iterable, Mapping, Sequence
 
 MAX_RANGE_SPAN = 100
+MAX_REFERENCES = 20
 
 # ---------------------------------------------------------------------------
 # Word tables
@@ -179,11 +206,28 @@ _PLURAL_ITEM = rf"(?:{_WORD_RANGE}|{_LOOSE_RANGE}|{_LONE_PLURAL})"
 _SINGULAR_SEP = r"(?:\s+and\s+|\s*&\s*)"
 _PLURAL_SEP = r"(?:\s*,\s*and\s+|\s*,\s*|\s+and\s+|\s*&\s*)"
 
+# After the singular item list, a continuation F1 cannot read: a dash and a digit,
+# to/through/thru and a number, or a comma list (", <number>" then a comma, "and"
+# or "&").  The singular match then fails whole, so it abstains instead of
+# emitting "slide 2" for "slide 2 through 5".
+_SINGULAR_UNREADABLE = (
+    rf"(?!\s*{_DASH}\s*\d"
+    rf"|\s+(?:to|through|thru)\s+{_NUMBER}"
+    rf"|\s*,\s*{_NUMBER}(?:\s*,|\s+and\b|\s*&))"
+)
+
 # F3: "slides 2-4", "slides 2, 3 and 5".  F1: "slide 2", "slide #2", "slide 2 and 3".
+# The F1 item list is read inside a lookahead and then re-consumed with a
+# backreference.  A lookahead never backtracks once it has matched, so a failed
+# ``_SINGULAR_UNREADABLE`` cannot retry a shorter list ("slide 2" out of "slide 2
+# and 3 through 5"); an atomic group ``(?>...)`` would do the same but needs
+# Python 3.11, and the package supports 3.10.
 _PLURAL_FORM = rf"\bslides\s+(?P<plural_items>{_PLURAL_ITEM}(?:{_PLURAL_SEP}{_PLURAL_ITEM})*)"
 _SINGULAR_FORM = (
     r"\bslide(?:\s+number\s+|\s*#\s*|\s+)"
-    rf"(?P<singular_items>{_SINGULAR_ITEM}(?:{_SINGULAR_SEP}{_SINGULAR_ITEM})*)"
+    rf"(?=(?P<singular_items>{_SINGULAR_ITEM}(?:{_SINGULAR_SEP}{_SINGULAR_ITEM})*))"
+    r"(?P=singular_items)"
+    f"{_SINGULAR_UNREADABLE}"
 )
 
 # F4: an ordinal, then the singular "slide".  Relative ordinals come before the
@@ -195,10 +239,27 @@ _ORDINAL_TOKEN = _word(
     rf"|(?P<ordinal_word>{'|'.join(_ORDINALS)})"
     r"|(?P<ordinal_digits>\d{1,3})(?:st|nd|rd|th)"
 )
-_ORDINAL_FORM = rf"(?P<ordinal>{_ORDINAL_TOKEN})\s+slide\b"
+# "slide" must not be a compound noun ("the first slide template", "slide-deck")
+# or begin a relative tail ("the second slide from the end", "the last slide but
+# one"): neither names the slide the ordinal seems to.
+_ORDINAL_SLIDE_END = (
+    r"slide\b(?!-\w"
+    r"|\s+(?:deck|template|count|master)s?\b"
+    r"|\s+from\s+(?:the\s+)?(?:end|last|back|bottom)\b"
+    r"|\s+but\s+one\b)"
+)
+_ORDINAL_FORM = rf"(?P<ordinal>{_ORDINAL_TOKEN})\s+{_ORDINAL_SLIDE_END}"
 
 # One alternation, tried in this order at each start: F3, then F1, then F4.
-_REFERENCE_RE = re.compile(f"{_PLURAL_FORM}|{_SINGULAR_FORM}|{_ORDINAL_FORM}", re.IGNORECASE)
+# F2: "slide 2 through slide 5" names a range, so it is read as one, never as the
+# two truncated ends.  "to" is left to F1 ("compare slide 2 to slide 5" and "move
+# the chart from slide 2 to slide 5" name two slides).  Tried first, so it wins
+# over F1 at the same start.
+_SPAN_FORM = rf"\bslide\s+(?P<span_items>{_NUMBER}\s+(?:through|thru)\s+slide\s+{_NUMBER})\b"
+
+_REFERENCE_RE = re.compile(
+    f"{_SPAN_FORM}|{_PLURAL_FORM}|{_SINGULAR_FORM}|{_ORDINAL_FORM}", re.IGNORECASE
+)
 
 # Used to split a matched item list back into items, and an item into numbers.
 _ITEM_RE = re.compile(_PLURAL_ITEM, re.IGNORECASE)
@@ -243,12 +304,15 @@ def resolve_slide_references(text: str | None, positions: Iterable[int]) -> list
 
     Every entry is ``{"text": str, "slide_numbers": [int], "positions": [int],
     "out_of_range": [int]}``.  The result is ``[]`` when ``text`` is empty or
-    ``None`` or when ``positions`` is empty.
+    ``None`` or when ``positions`` is empty.  An identical reference (same
+    ``text`` and ``slide_numbers``) is kept once, at its first position, and
+    at most ``MAX_REFERENCES`` distinct references are returned.
     """
     ordered = _ordered_positions(positions)
     if not text or not ordered:
         return []
-    references = []
+    references: list[dict] = []
+    seen: set[tuple[str, tuple[int, ...]]] = set()
     for match in _REFERENCE_RE.finditer(text):
         if _is_indefinite(text, match):
             continue
@@ -257,7 +321,13 @@ def resolve_slide_references(text: str | None, positions: Iterable[int]) -> list
         numbers = _match_numbers(match, len(ordered))
         if numbers is None:
             continue
+        key = (match.group(0), tuple(numbers))
+        if key in seen:
+            continue
+        seen.add(key)
         references.append(_build_reference(match.group(0), numbers, ordered))
+        if len(references) >= MAX_REFERENCES:
+            break
     return references
 
 
@@ -342,6 +412,12 @@ def _preceded_by(pattern: re.Pattern[str], text: str, start: int) -> bool:
 
 def _match_numbers(match: re.Match[str], slide_count: int) -> list[int] | None:
     """The sorted, distinct slide numbers a match names, or ``None`` to drop it."""
+    span = match.group("span_items")
+    if span is not None:
+        low, high = sorted(_cardinal_value(t) for t in _NUMBER_RE.findall(span))
+        if high - low + 1 > MAX_RANGE_SPAN:
+            return None
+        return list(range(low, high + 1))
     items = match.group("plural_items") or match.group("singular_items")
     if items is not None:
         return _item_list_numbers(items)

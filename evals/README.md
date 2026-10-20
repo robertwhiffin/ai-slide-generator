@@ -403,8 +403,9 @@ are from the issue-313 worktree's local `mlflow.db`.
 | F3 69ece733 | slide-refs | train | build_request, ask_data | 3 | 6 | 1.00 | 6/6 | – | 0 | 8.9k / 4.3k | 1.13 |
 | F4 417a9ec7 | slide-refs | held-out | all 9 | 1 | 9 | 1.00 | 9/9 | 4/4 | 1 | 10.7k / 2.4k | 1.33 |
 
-The nine runs sum to about USD 17.35. With a 2-row probe run (11c50057) and calibration the total is
-about USD 19.16. Held-out results are aggregates only (B4, F4), as for the earlier held-out baselines.
+The nine runs sum to about USD 17.35. With a 2-row probe run (11c50057), calibration and the
+post-review diagnostic described below, the total is about USD 19.74. Held-out results are aggregates
+only (B4, F4), as for the earlier held-out baselines.
 
 What it showed:
 
@@ -422,5 +423,13 @@ What it showed:
   positions are copied from deterministic keys, it is robust on a gapped deck (where a slide number is
   not position + 1), and an out-of-range reference becomes `discuss` instead of an edit. No train-driven
   tuning happened.
+- **Multi-reference edits.** A post-review diagnostic ran `slide-refs` directly on three ad-hoc
+  multi-reference edits (a layout copied from one slide to another, a chart replaced with another slide's
+  chart): it targeted only the slide being changed in 3/3 (about USD 0.58, no judge). The two-reference
+  case is not yet an eval case; a follow-up.
 - **Branch shipped.** The payload keys are wired into `architect_node` and the `slide-refs` prompt is the
   v1 default. The architect rows in the earlier baseline tables above describe previous prompts.
+- **Rollout caveat.** The Graph V1 manifest only seeds a fresh bootstrap (it is not read once any Graph
+  Release exists), so an existing install keeps its persisted architect prompt: it gets the two payload
+  keys immediately, but the new SLIDE NUMBERS text only when an admin publishes a release carrying it
+  (see "Rollout" in `docs/technical/backend-overview.md`).
