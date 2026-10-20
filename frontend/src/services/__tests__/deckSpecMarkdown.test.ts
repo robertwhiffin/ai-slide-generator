@@ -412,7 +412,7 @@ describe('long values (D4 collapses whitespace but never truncates)', () => {
 });
 
 describe('GitHub-only characters (the one string-match test: a CommonMark parser cannot see these, D4)', () => {
-  it('escapes | ~ $ @ so GFM tables, strikethrough, math and @-mentions stay inert on GitHub', () => {
+  it('escapes | ~ $ @ (GFM tables and strikethrough stay inert on GitHub; dollar-math and citations where the escape is honoured)', () => {
     // Sabotage target: drop `|`, `~`, `$` or `@` from ESCAPE_ANYWHERE.
     expect(linesOf(renderAudience('a | b ~~c~~ $d$ @team'))).toContain('a \\| b \\~\\~c\\~\\~ \\$d\\$ \\@team');
   });

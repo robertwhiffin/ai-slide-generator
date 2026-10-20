@@ -13,7 +13,7 @@ import type { DeckSpec, ResolvedData } from '../types/slide';
 export const DECK_SPEC_MARKDOWN_MIME = 'text/markdown;charset=utf-8';
 
 const NOT_SET = 'Not set.';
-/** CommonMark §2.4 lets any ASCII punctuation be backslash-escaped; these are the ones with meaning (D4). `@` stops GitHub mentions. */
+/** CommonMark §2.4 lets any ASCII punctuation be backslash-escaped; these are the ones with meaning (D4). `|` and `~` keep GFM tables and strikethrough inert (GitHub honours these escapes); `$` and `@` keep dollar-math and citation syntax inert where a renderer honours the escape (e.g. pandoc). GitHub's own math, @-mention and #N rendering ignores backslash escapes (checked against GitHub's markdown API, 2026-10-20). */
 const ESCAPE_ANYWHERE = /[\\`*_[\]<>#|~$&@]/g;
 /** D4 step 1, by code point: C0/C1 controls, except the whitespace ones and NEL (U+0085), which step 2 collapses. */
 // eslint-disable-next-line no-control-regex -- removing control characters is this pattern's purpose
