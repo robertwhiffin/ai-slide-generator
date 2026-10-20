@@ -977,3 +977,457 @@ class TestTheDeleteIsOneAttributedTransaction:
 # (#317 Task 3).  Route tests go below this line; the service tests above are
 # Task 2's.
 # ===========================================================================
+#
+# The checks run in exactly #323's order (plan D7): the deck gate (CAN_EDIT,
+# not the helper's CAN_VIEW default), the creator gate (a contributor deletes
+# only in their own session), the session lock (409 while a turn or slide
+# operation holds it, and a 409 never releases a lock it did not take), the
+# delete, then the release in ``finally``.  #323's stubs all append to ONE
+# ``events`` list, so the order is asserted, not inferred from call counts.
+#
+# #323's route fixtures are re-bound below by NAME (pytest finds a fixture by
+# the name it was defined with).  A plain binding, unlike an import, does not
+# trip F811 on every test that requests one.  The real-row class at the
+# end drives the REAL ``ChatService`` through the route on a file-backed engine:
+# the route runs the service in a worker thread, and the house in-memory
+# engine gives every thread its own empty database.
+#
+# Red before Task 3, test by test: the route table holds no such path, and
+# FastAPI answers every ``DELETE /api/sessions/{id}/messages/{id}`` itself with
+# ``404 {"detail": "Not Found"}``.  A test expecting another status fails on
+# it; a test expecting a 404 fails on what the route would have done (the
+# service call, the lock it takes and gives back, the session 404's detail).
+# ``MESSAGE_NOT_FOUND_DETAIL`` is imported inside a test body, AFTER its
+# behavioural assertions (``ImportError`` only once those pass), so the file
+# still collects.
+
+from src.database.models.profile_contributor import PermissionLevel  # noqa: E402
+from tests.unit import test_clear_context as _clear_route  # noqa: E402
+
+client = _clear_route.client
+events = _clear_route.events
+deck_gate = _clear_route.deck_gate
+allowing_gate = _clear_route.allowing_gate
+allowing_creator = _clear_route.allowing_creator
+refusing_creator = _clear_route.refusing_creator
+session_lock = _clear_route.session_lock
+as_editor = _clear_route.as_editor
+
+_ROUTE_PATH = "/api/sessions/{session_id}/messages/{message_id}"
+_ROUTES_LOGGER = "src.api.routes.sessions"
+
+# What the stub service answers: the real service's shape (Task 2), fixed, so
+# a route that rebuilt or altered the result shows up.
+_STUB_RESULT = {
+    "status": "deleted",
+    "session_id": "s1",
+    "message_id": 42,
+    "deleted_messages": 5,
+    "hidden_message_id": None,
+}
+
+
+def _message_not_found_detail() -> str:
+    """``MESSAGE_NOT_FOUND_DETAIL``, imported only when a test needs it (new in Task 3)."""
+    from src.api.routes.sessions import MESSAGE_NOT_FOUND_DETAIL
+
+    return MESSAGE_NOT_FOUND_DETAIL
+
+
+def _the_whole_delete(session_id: str) -> list[tuple[str, str]]:
+    """The order a delete that gets as far as the service runs its steps in."""
+    return [
+        ("deck_gate", session_id),
+        ("creator", session_id),
+        ("acquire", session_id),
+        ("service", session_id),
+        ("release", session_id),
+    ]
+
+
+@pytest.fixture
+def delete_stub_service(monkeypatch, events):
+    """Replaces ChatService for the route: records (session_id, message_id, deleted_by).
+
+    Set ``.raises`` to an exception to make ``delete_message`` raise it (after
+    recording the call: a ``TypeError`` from a signature mismatch would be a
+    500 too, and would record nothing).
+    """
+    stub = SimpleNamespace(calls=[], raises=None)
+
+    class _Stub:
+        def delete_message(self, session_id, message_id, *, deleted_by):
+            stub.calls.append((session_id, message_id, deleted_by))
+            events.append(("service", session_id))
+            if stub.raises is not None:
+                raise stub.raises
+            return dict(_STUB_RESULT)
+
+    monkeypatch.setattr("src.api.routes.sessions.get_chat_service", lambda: _Stub())
+    return stub
+
+
+def _break_the_release(monkeypatch, events) -> None:
+    """Make the ``session_lock`` stub's release raise, after recording the call."""
+    from src.api.routes import sessions as sessions_route
+
+    manager = sessions_route.get_session_manager()  # the session_lock stub
+
+    def _broken_release(session_id):
+        events.append(("release", session_id))
+        raise RuntimeError("lock row unreachable")
+
+    monkeypatch.setattr(manager, "release_session_lock", _broken_release)
+
+
+class TestDeleteMessageRoute:
+    def test_the_route_is_delete_on_the_message_path(self):
+        from src.api.main import app
+
+        matches = {
+            (r.path, frozenset(r.methods))
+            for r in app.routes
+            if getattr(r, "path", "") == _ROUTE_PATH
+        }
+        assert matches == {(_ROUTE_PATH, frozenset({"DELETE"}))}
+
+    def test_a_viewer_is_refused_and_nothing_is_deleted(
+        self, client, deck_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events,
+    ):
+        """The deck gate's DEFAULT is CAN_VIEW: taking it would let a viewer of
+        a shared deck delete from a conversation.  The deck gate is FIRST, so a
+        viewer reaches neither the creator gate nor the lock."""
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 403, resp.text
+        assert deck_gate == [("s1", PermissionLevel.CAN_EDIT)]
+        assert delete_stub_service.calls == [], "the gate must run BEFORE any delete"
+        assert allowing_creator == []
+        assert session_lock.acquired == []
+        assert session_lock.released == []
+        assert events == [("deck_gate", "s1")]
+
+    def test_the_happy_path_runs_gate_creator_lock_service_release_in_order(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events,
+    ):
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == _STUB_RESULT
+        assert allowing_gate == [("s1", PermissionLevel.CAN_EDIT)]
+        # The caller is the actor (D8), and the id reaches the service as the
+        # int the path parameter declares, not the URL's string.
+        assert delete_stub_service.calls == [("s1", 42, "editor@example.com")]
+        assert type(delete_stub_service.calls[0][1]) is int
+        # Exactly this order: the lock is taken only once both gates have
+        # passed, is held across the delete, and is given back once.
+        assert events == _the_whole_delete("s1")
+
+    def test_an_editor_who_is_not_the_sessions_creator_is_refused(
+        self, client, allowing_gate, refusing_creator, session_lock, delete_stub_service,
+        as_editor, events,
+    ):
+        """Deck permission resolves on the ROOT deck, so every editor of a
+        shared deck passes the deck gate, for the owner's session id too.
+        Conversations are private: the creator gate refuses before the lock is
+        taken and before anything is deleted."""
+        resp = client.delete("/api/sessions/owners-session/messages/42")
+
+        assert resp.status_code == 403, resp.text
+        assert refusing_creator == ["owners-session"]
+        assert delete_stub_service.calls == [], "a refused delete must not reach the service"
+        assert session_lock.acquired == [], "the creator gate runs BEFORE the lock"
+        assert session_lock.released == []
+        assert events == [("deck_gate", "owners-session"), ("creator", "owners-session")]
+
+    def test_no_user_is_a_401_before_the_lock(
+        self, client, allowing_gate, session_lock, delete_stub_service, monkeypatch, events,
+    ):
+        """The REAL creator gate (not stubbed here): with no signed-in user the
+        route answers 401, before the lock and before anything is deleted.  An
+        empty ``DEV_USER_ID`` is how the real middleware yields no user."""
+        monkeypatch.setenv("DEV_USER_ID", "")
+
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 401, resp.text
+        assert delete_stub_service.calls == []
+        assert session_lock.acquired == []
+        assert session_lock.released == []
+        assert events == [("deck_gate", "s1")]
+
+    def test_a_turn_in_flight_is_a_409_and_the_lock_is_not_released(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events,
+    ):
+        """A chat turn or a slide operation holds the session lock.  The busy
+        answer must NOT release it: the lock belongs to the request that took
+        it, and freeing it would let a third request run alongside that turn."""
+        session_lock.grant = False
+
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 409, resp.text
+        assert delete_stub_service.calls == [], "a busy session must not be deleted from"
+        assert session_lock.acquired == ["s1"]
+        assert session_lock.released == [], (
+            "a 409 must not release a lock this request did not acquire"
+        )
+        assert events == [("deck_gate", "s1"), ("creator", "s1"), ("acquire", "s1")]
+
+        from src.api.routes.sessions import CONVERSATION_BUSY_DETAIL
+
+        assert resp.json()["detail"] == CONVERSATION_BUSY_DETAIL
+
+    def test_a_message_not_in_this_conversation_is_a_404_and_the_lock_is_released(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events,
+    ):
+        delete_stub_service.raises = _message_not_found_error()("message 42 not in s1")
+
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 404, resp.text
+        assert delete_stub_service.calls == [("s1", 42, "editor@example.com")]
+        # A failed delete still gives the lock back: once, after the service.
+        assert session_lock.released == ["s1"]
+        assert events == _the_whole_delete("s1")
+        # The one text for every not-found case (D3), and not the service's
+        # message, which names the id.
+        assert resp.json()["detail"] == _message_not_found_detail()
+        assert _message_not_found_detail() == "That message is not in this conversation."
+
+    def test_a_missing_session_is_a_404_and_the_lock_is_released(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events,
+    ):
+        delete_stub_service.raises = SessionNotFoundError("Session not found: ghost")
+
+        resp = client.delete("/api/sessions/ghost/messages/42")
+
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["detail"] == "Session not found: ghost"
+        assert delete_stub_service.calls == [("ghost", 42, "editor@example.com")]
+        assert session_lock.released == ["ghost"]
+        assert events == _the_whole_delete("ghost")
+
+    def test_an_unexpected_failure_is_a_500_and_the_lock_is_released(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events,
+    ):
+        """The 500 carries a fixed text, never the exception's own message."""
+        delete_stub_service.raises = RuntimeError("internal: saver dsn=secret")
+
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 500, resp.text
+        assert "secret" not in resp.text
+        assert delete_stub_service.calls == [("s1", 42, "editor@example.com")]
+        assert session_lock.released == ["s1"]
+        assert events == _the_whole_delete("s1")
+
+    def test_a_lock_release_failure_after_a_committed_delete_is_still_a_200(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events, monkeypatch, caplog,
+    ):
+        """#323's whole-branch review W2, for the delete: the delete has
+        committed by the time the ``finally`` releases the lock.  If the release
+        raises, the caller must still be told the delete happened; the release
+        failure is logged, not surfaced."""
+        _break_the_release(monkeypatch, events)
+
+        with caplog.at_level(logging.ERROR, logger=_ROUTES_LOGGER):
+            resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == _STUB_RESULT
+        assert delete_stub_service.calls == [("s1", 42, "editor@example.com")]
+        assert events == _the_whole_delete("s1")
+        # Logged, not swallowed: the lock now goes stale on its own, and the
+        # log line is the only trace of why the session stays busy until then.
+        logged = [
+            (getattr(r, "session_id", None), str(r.exc_info[1]))
+            for r in caplog.records
+            if r.name == _ROUTES_LOGGER and r.levelno >= logging.ERROR and r.exc_info
+        ]
+        assert logged == [("s1", "lock row unreachable")]
+
+    def test_a_lock_release_failure_does_not_mask_the_deletes_own_404(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, events, monkeypatch,
+    ):
+        """The other half of W2: a release failure must not replace the
+        delete's own answer with a 500."""
+        _break_the_release(monkeypatch, events)
+        delete_stub_service.raises = _message_not_found_error()("message 42 not in s1")
+
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 404, resp.text
+        assert events == _the_whole_delete("s1")
+        assert resp.json()["detail"] == _message_not_found_detail()
+
+    @pytest.mark.parametrize("message_id", ["abc", "4.5"])
+    def test_a_non_integer_message_id_is_a_422_before_any_gate(
+        self, message_id, client, allowing_gate, allowing_creator, session_lock,
+        delete_stub_service, as_editor, events,
+    ):
+        """FastAPI validates the ``int`` path parameter before the handler
+        runs: no gate, no lock, no delete."""
+        resp = client.delete(f"/api/sessions/s1/messages/{message_id}")
+
+        assert resp.status_code == 422, resp.text
+        assert events == []
+        assert delete_stub_service.calls == []
+
+    @pytest.mark.parametrize("caller", ["editor@example.com", "contributor@example.com"])
+    def test_the_route_passes_the_caller_as_deleted_by(
+        self, caller, client, allowing_gate, allowing_creator, session_lock,
+        delete_stub_service, monkeypatch,
+    ):
+        """The identity comes from the request (``DEV_USER_ID`` through the real
+        middleware), not from anything the route invents: the creator gate
+        judges the same caller the delete is attributed to (D8)."""
+        monkeypatch.setenv("DEV_USER_ID", caller)
+
+        resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 200, resp.text
+        assert allowing_creator == [("s1", caller)]
+        assert delete_stub_service.calls == [("s1", 42, caller)]
+
+    def test_the_log_line_names_who_deleted_which_message(
+        self, client, allowing_gate, allowing_creator, session_lock, delete_stub_service,
+        as_editor, caplog,
+    ):
+        """The route's log line carries ``deleted_by`` and ``message_id`` (D8)."""
+        with caplog.at_level(logging.INFO, logger=_ROUTES_LOGGER):
+            resp = client.delete("/api/sessions/s1/messages/42")
+
+        assert resp.status_code == 200, resp.text
+        lines = [
+            (r.session_id, r.message_id, r.deleted_by)
+            for r in caplog.records
+            if r.name == _ROUTES_LOGGER and hasattr(r, "deleted_by")
+        ]
+        assert lines == [("s1", 42, "editor@example.com")]
+
+
+# ---------------------------------------------------------------------------
+# The route on REAL rows: the real ChatService behind the route, on a
+# file-backed engine.  The gates and the lock are #323's stubs; what is real is
+# what a request does (and does not do) to the transcript, the attribution row
+# and the graph thread.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def real_service(monkeypatch):
+    """The route's ChatService is a real one (``_patched`` points it at the test DB)."""
+    monkeypatch.setattr("src.api.routes.sessions.get_chat_service", lambda: ChatService())
+
+
+class TestTheRouteOnRealRows:
+    def test_a_delete_through_the_route_removes_the_turn_and_is_attributed_to_the_caller(
+        self, client, allowing_gate, allowing_creator, session_lock, real_service,
+        as_editor, events, file_backed_db,  # noqa: F811 (the imported fixture)
+    ):
+        factory = _make_factory(file_backed_db)
+        seeded = _seed_turns(factory, created_by="editor@example.com")
+        before = _rows(factory, seeded.sid)
+        saver = _RecordingSaver()
+
+        with _patched(factory, saver):
+            resp = client.delete(f"/api/sessions/{seeded.sid}/messages/{seeded.ids['U2']}")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "status": "deleted",
+            "session_id": seeded.sid,
+            "message_id": seeded.ids["U2"],
+            "deleted_messages": 5,
+            "hidden_message_id": None,
+        }
+        kept = ["U1", "A1", "N1", "U3", "A3"]
+        assert _rows(factory, seeded.sid) == _only(before, seeded, kept)
+        assert saver.deleted == [seeded.sid]
+        assert _events(factory, _MESSAGE_DELETED) == [("editor@example.com", seeded.pk)]
+        assert session_lock.released == [seeded.sid]
+
+    @pytest.mark.parametrize(
+        "case",
+        ["absent", "another_sessions_user_message", "an_assistant_message",
+         "the_hidden_first_message"],
+    )
+    def test_every_not_found_case_is_the_same_404_and_changes_nothing(
+        self, case, client, allowing_gate, allowing_creator, session_lock, real_service,
+        as_editor, file_backed_db,  # noqa: F811 (the imported fixture)
+    ):
+        """One detail for every case (D3), so a 404 says nothing about ids in
+        other sessions; and a 404 deletes, re-types, records and drops nothing,
+        in this session or the other one."""
+        factory = _make_factory(file_backed_db)
+        mine = _seed_turns(factory, created_by="editor@example.com")
+        theirs = _seed_turns(factory, created_by="other@example.com")
+        if case == "the_hidden_first_message":
+            with _patched(factory, _RecordingSaver()):
+                _delete(mine.sid, mine.ids["U1"], deleted_by="editor@example.com")
+            assert _rows(factory, mine.sid)[0][4] == _marker_type(), "precondition"
+        message_id = {
+            "absent": max(theirs.ids.values()) + 1000,
+            "another_sessions_user_message": theirs.ids["U2"],
+            "an_assistant_message": mine.ids["A2"],
+            "the_hidden_first_message": mine.ids["U1"],
+        }[case]
+        mine_before = _rows(factory, mine.sid)
+        theirs_before = _rows(factory, theirs.sid)
+        events_before = _all_events(factory)
+        saver = _RecordingSaver()
+
+        with _patched(factory, saver):
+            resp = client.delete(f"/api/sessions/{mine.sid}/messages/{message_id}")
+
+        assert resp.status_code == 404, resp.text
+        # The route's own 404 (it took and gave back the lock), not FastAPI's.
+        assert session_lock.released == [mine.sid]
+        assert _rows(factory, mine.sid) == mine_before
+        assert _rows(factory, theirs.sid) == theirs_before
+        assert _all_events(factory) == events_before
+        assert saver.deleted == []
+        assert resp.json()["detail"] == _message_not_found_detail()
+
+    @pytest.mark.parametrize(
+        "refusal, status",
+        [("viewer", 403), ("not_the_creator", 403), ("turn_in_flight", 409)],
+    )
+    def test_a_refused_request_deletes_nothing(
+        self, refusal, status, request, client, session_lock, real_service, as_editor,
+        file_backed_db,  # noqa: F811 (the imported fixture)
+    ):
+        """A refusal is not a partial delete: the transcript, the attribution
+        rows and the graph thread are as they were."""
+        if refusal == "viewer":
+            request.getfixturevalue("deck_gate")
+            request.getfixturevalue("allowing_creator")
+        elif refusal == "not_the_creator":
+            request.getfixturevalue("allowing_gate")
+            request.getfixturevalue("refusing_creator")
+        else:
+            request.getfixturevalue("allowing_gate")
+            request.getfixturevalue("allowing_creator")
+            session_lock.grant = False
+        factory = _make_factory(file_backed_db)
+        seeded = _seed_turns(factory, created_by="editor@example.com")
+        before = _rows(factory, seeded.sid)
+        saver = _RecordingSaver()
+
+        with _patched(factory, saver):
+            resp = client.delete(f"/api/sessions/{seeded.sid}/messages/{seeded.ids['U2']}")
+
+        assert resp.status_code == status, resp.text
+        assert _rows(factory, seeded.sid) == before
+        assert _all_events(factory) == []
+        assert saver.deleted == []
+        assert session_lock.released == []
