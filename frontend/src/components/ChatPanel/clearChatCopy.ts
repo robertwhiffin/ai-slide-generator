@@ -1,6 +1,7 @@
 /**
  * Copy for the chat panel's "Clear chat" action (#323, plan decision D8).
  * One message serves the owner and a contributor: "your conversation" is true for both.
+ * The dialog message and tooltip have a Spec-less variant, chosen by hasDeckSpec (#317 D1).
  */
 export const CLEAR_CHAT_LABEL = 'Clear chat';
 export const CLEAR_CHAT_DIALOG_TITLE = 'Clear chat?';
@@ -8,6 +9,16 @@ export const CLEAR_CHAT_DIALOG_MESSAGE =
   'This deletes your conversation on this deck. Your slides, the Spec and save points stay as they '
   + "are, and the assistant carries on from the Spec and the current slides. This can't be undone.";
 export const CLEAR_CHAT_TOOLTIP = 'Delete this conversation and keep the deck, its Spec and save points';
+/**
+ * On a deck without a Spec (#317 lifted #323's Spec gate). It promises no Spec and no "carries on":
+ * the graph architect never sees slide HTML and refuses an edit with no persisted Spec
+ * (edit_without_spec), and the legacy assistant has only the slides once its history is gone.
+ */
+export const CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC =
+  'This deletes your conversation on this deck. Your slides and save points stay as they are, but '
+  + "the assistant won't remember anything you discussed, so say what you want in full. This can't "
+  + 'be undone.';
+export const CLEAR_CHAT_TOOLTIP_NO_SPEC = 'Delete this conversation and keep the deck and its save points';
 export const CLEAR_CHAT_BUSY =
   'Something is still running on this deck. Wait for it to finish, then clear the chat.';
 export const CLEAR_CHAT_FORBIDDEN = 'Only editors can clear the chat, and only their own conversation.';

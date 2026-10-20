@@ -14,7 +14,9 @@ import {
   CLEAR_CHAT_LABEL,
   CLEAR_CHAT_DIALOG_TITLE,
   CLEAR_CHAT_DIALOG_MESSAGE,
+  CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC,
   CLEAR_CHAT_TOOLTIP,
+  CLEAR_CHAT_TOOLTIP_NO_SPEC,
   clearChatErrorMessage,
 } from './clearChatCopy';
 import {
@@ -52,7 +54,7 @@ interface ChatPanelProps {
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
   viewOnlyReason?: string;  // When provided, show why the user cannot edit
-  /** Whether the live deck has a Spec. Clear chat is offered only where there is a Spec to continue from. */
+  /** Whether the live deck has a Spec. Chooses Clear chat's wording: with a Spec the assistant carries on from it; without one the wording promises nothing about a Spec (#317 lifted #323's Spec gate). */
   hasDeckSpec?: boolean;
 }
 
@@ -449,8 +451,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     );
   };
 
-  // Clear chat: only where there is a Spec to continue from, for editors, on a persisted session.
-  const showClearChat = isSessionPersisted && hasDeckSpec && canEditConversation(myPermission);
+  // Clear chat: for editors, on a persisted session, with or without a Spec.
+  const showClearChat = isSessionPersisted && canEditConversation(myPermission);
   const clearChatDisabled =
     isLoading || isClearing || isDeletingMessage || disabled || !!previewMessages || messages.length === 0;
 
@@ -537,7 +539,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             size="sm"
             variant="ghost"
             disabled={clearChatDisabled}
-            title={CLEAR_CHAT_TOOLTIP}
+            title={hasDeckSpec ? CLEAR_CHAT_TOOLTIP : CLEAR_CHAT_TOOLTIP_NO_SPEC}
             onClick={() => setIsClearChatDialogOpen(true)}
           >
             <Eraser />
@@ -548,7 +550,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       <ConfirmDialog
         open={isClearChatDialogOpen}
         title={CLEAR_CHAT_DIALOG_TITLE}
-        message={CLEAR_CHAT_DIALOG_MESSAGE}
+        message={hasDeckSpec ? CLEAR_CHAT_DIALOG_MESSAGE : CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC}
         confirmLabel={CLEAR_CHAT_LABEL}
         cancelLabel="Cancel"
         variant="danger"

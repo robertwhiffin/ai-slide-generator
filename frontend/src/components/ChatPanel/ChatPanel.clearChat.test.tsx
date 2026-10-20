@@ -4,6 +4,10 @@
  *
  * Mock scaffold copied from ChatPanel.tourRefresh.test.tsx, plus the conversation API, a list that
  * renders one <li> per message, and a one-button ChatInput. The permission helper is real.
+ *
+ * #317 (plan Task 7b, D1) lifted #323's Spec gate: Clear chat is offered on every persisted deck an
+ * editor can edit. Without a Spec, the button title and the dialog use a Spec-less wording that
+ * promises no Spec to carry on from; with a Spec, #323's wording is unchanged.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createRef, type Ref } from 'react';
@@ -72,7 +76,9 @@ import {
   CLEAR_CHAT_LABEL,
   CLEAR_CHAT_DIALOG_TITLE,
   CLEAR_CHAT_DIALOG_MESSAGE,
+  CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC,
   CLEAR_CHAT_TOOLTIP,
+  CLEAR_CHAT_TOOLTIP_NO_SPEC,
   CLEAR_CHAT_BUSY,
   CLEAR_CHAT_FORBIDDEN,
   CLEAR_CHAT_FAILED,
@@ -176,6 +182,20 @@ describe('ChatPanel Clear chat (#323)', () => {
     );
   });
 
+  it('uses the agreed wording for a deck without a Spec (#317 D1)', () => {
+    expect(CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC).toBe(
+      'This deletes your conversation on this deck. Your slides and save points stay as they are, but '
+      + "the assistant won't remember anything you discussed, so say what you want in full. This can't "
+      + 'be undone.',
+    );
+    expect(CLEAR_CHAT_TOOLTIP_NO_SPEC).toBe('Delete this conversation and keep the deck and its save points');
+    // A deck without a Spec has no Spec to keep or carry on from, so neither string may promise one.
+    for (const text of [CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC, CLEAR_CHAT_TOOLTIP_NO_SPEC]) {
+      expect(text).not.toContain('Spec');
+      expect(text).not.toMatch(/carries on/i);
+    }
+  });
+
   it.each(['CAN_EDIT', 'CAN_MANAGE'])('offers Clear chat to an editor (%s) on a deck with a Spec', async (permission) => {
     getSession.mockResolvedValue({ messages: TWO, my_permission: permission });
     mount({ hasDeckSpec: true });
@@ -186,11 +206,10 @@ describe('ChatPanel Clear chat (#323)', () => {
   });
 
   // Same setup as the test above except for the one condition named; each must hide the button.
+  // #317 removed #323's two "without a Spec" rows: a missing Spec no longer hides Clear chat (D1).
   it.each([
     { label: 'to a viewer (CAN_VIEW)', permission: 'CAN_VIEW', hasDeckSpec: true, persisted: true },
     { label: 'without a permission', permission: undefined, hasDeckSpec: true, persisted: true },
-    { label: 'without a Spec (hasDeckSpec false)', permission: 'CAN_MANAGE', hasDeckSpec: false, persisted: true },
-    { label: 'without a Spec (hasDeckSpec omitted)', permission: 'CAN_MANAGE', hasDeckSpec: undefined, persisted: true },
     { label: 'before the session is persisted', permission: 'CAN_MANAGE', hasDeckSpec: true, persisted: false },
   ])('does not offer Clear chat $label', async ({ permission, hasDeckSpec, persisted }) => {
     currentPersisted = persisted;
@@ -199,6 +218,59 @@ describe('ChatPanel Clear chat (#323)', () => {
     await screen.findByText('message B'); // the load, and the my_permission it carries, has landed
     await settle();
     expect(clearButtonCount()).toBe(0);
+  });
+
+  // #317 D1: a legacy deck, or one whose first build failed, has no Spec; its chat can still be reset.
+  it.each([
+    { label: 'hasDeckSpec false', hasDeckSpec: false },
+    { label: 'hasDeckSpec omitted', hasDeckSpec: undefined },
+  ])('offers Clear chat on a deck without a Spec ($label), with the wording for one', async ({ hasDeckSpec }) => {
+    // `mount()` defaults to a deck with a Spec, so "omitted" must mount with no hasDeckSpec at all.
+    mount(hasDeckSpec === undefined ? {} : { hasDeckSpec });
+    await screen.findByText('message B');
+    const button = await enabledClearButton();
+    expect(button).toHaveTextContent('Clear chat');
+    expect(button.getAttribute('title')).toBe(CLEAR_CHAT_TOOLTIP_NO_SPEC);
+    expect(button.getAttribute('title')).not.toContain('Spec');
+
+    fireEvent.click(button);
+    const dialog = screen.getByTestId('confirm-dialog');
+    expect(within(dialog).getByText(CLEAR_CHAT_DIALOG_TITLE)).toBeInTheDocument();
+    expect(within(dialog).getByText(CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC)).toBeInTheDocument();
+    expect(within(dialog).queryByText(CLEAR_CHAT_DIALOG_MESSAGE)).toBeNull();
+    // Nothing the user reads promises a Spec to keep or carry on from.
+    expect(dialog).not.toHaveTextContent(/Spec/);
+    expect(dialog).not.toHaveTextContent(/carries on/i);
+
+    await act(async () => { fireEvent.click(confirmInDialog()); });
+    await waitFor(() => expect(listItems()).toHaveLength(0));
+    expect(screen.queryByTestId('confirm-dialog')).toBeNull();
+    expect(clearChat).toHaveBeenCalledTimes(1);
+    expect(clearChat).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('a deck with a Spec still gets the Spec wording (#317 D1)', async () => {
+    mount({ hasDeckSpec: true });
+    await screen.findByText('message B');
+    const button = await enabledClearButton();
+    expect(button.getAttribute('title')).toBe(CLEAR_CHAT_TOOLTIP);
+
+    fireEvent.click(button);
+    const dialog = screen.getByTestId('confirm-dialog');
+    expect(within(dialog).getByText(CLEAR_CHAT_DIALOG_MESSAGE)).toBeInTheDocument();
+    expect(within(dialog).queryByText(CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC)).toBeNull();
+  });
+
+  it('the wording follows the deck when it gains a Spec (#317 D1)', async () => {
+    // A first build on an existing Spec-less deck writes its Spec; AppLayout then passes hasDeckSpec.
+    const view = mount({ hasDeckSpec: false });
+    await screen.findByText('message B');
+    expect((await enabledClearButton()).getAttribute('title')).toBe(CLEAR_CHAT_TOOLTIP_NO_SPEC);
+
+    view.rerender(panel({ hasDeckSpec: true }));
+    await waitFor(() => expect(clearButton().getAttribute('title')).toBe(CLEAR_CHAT_TOOLTIP));
+    fireEvent.click(clearButton());
+    expect(within(screen.getByTestId('confirm-dialog')).getByText(CLEAR_CHAT_DIALOG_MESSAGE)).toBeInTheDocument();
   });
 
   it('disables Clear chat when there is nothing to clear', async () => {
