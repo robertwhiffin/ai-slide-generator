@@ -690,6 +690,15 @@ class SessionNotFoundError(Exception):
     pass
 
 
+class MessageNotFoundError(Exception):
+    """A message id is not a deletable message of the session.
+
+    One error for every case (absent, another session's, not a user message,
+    the hidden engine-mode marker), so the route's 404 is no oracle for ids in
+    other sessions.
+    """
+
+
 class SessionAccessDeniedError(Exception):
     """Raised when the current user lacks permission on a session."""
 

@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.session_manager import (
+    MessageNotFoundError,
     SessionNotFoundError,
     VersionConflictError,
     earliest_user_message,
@@ -38,6 +39,7 @@ from src.domain.conversation_engine import (
     LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
     selects_graph_engine,
 )
+from src.domain.conversation_turns import turn_message_ids
 from src.domain.slide import Slide, has_slide_wrapper
 from src.domain.slide_deck import SlideDeck
 from src.api.schemas.agent_config import resolve_agent_config
@@ -2279,6 +2281,132 @@ class ChatService:
             "session_id": session_id,
             "deleted_messages": deleted_messages,
             "preserved_message_id": marker_id,
+        }
+
+    def delete_message(
+        self, session_id: str, message_id: int, *, deleted_by: str
+    ) -> Dict[str, Any]:
+        """Delete one turn of this session's conversation: a user message and its replies.
+
+        The turn is ``message_id`` (a user row of THIS session) and every later
+        row up to the next ``role='user'`` row (``turn_message_ids``): replies,
+        notices, reasoning and tool rows, whatever their type or request id.
+        Deleting a prompt but keeping its reply would leave the architect an
+        orphan reply in ``conversation``; the turn goes whole.
+
+        **The session's earliest user row is never deleted** (#323): engine mode
+        is read off it.  When the turn starts there, that row is re-typed
+        ``ENGINE_MODE_MARKER_MESSAGE_TYPE`` (hidden from every transcript read)
+        and the rest of its turn is deleted; ``hidden_message_id`` says so.
+
+        **The graph thread is deleted.**  The checkpointer keeps every
+        checkpoint of every turn, and each stores that turn's user message
+        (``__start__``, ``architect_message``) and the architect's reply
+        (``architect_message``).  Nothing replays them, but a deletion the
+        checkpoint still holds is not a deletion.  The next turn starts a new
+        thread and builds its payload from the database.
+
+        **The deck is not rolled back**: slides, the Spec, save points and the
+        Conversation Pin are untouched.
+
+        **One transaction**, as in :meth:`clear_context`: the row delete, the
+        re-type, the ``usage_events`` row and ``delete_thread(session=db)``
+        commit or roll back together.
+
+        Args:
+            session_id: The session whose conversation to edit.  A contributor
+                session edits only its own rows.
+            message_id: The user message that starts the turn.
+            deleted_by: Username of the caller; recorded in ``usage_events`` and
+                the log line.  Required and non-empty.
+
+        Returns:
+            ``{"status": "deleted", "session_id", "message_id",
+            "deleted_messages": N, "hidden_message_id": id-or-None}``
+
+        Raises:
+            ValueError: ``deleted_by`` is empty or None (nothing is changed).
+            SessionNotFoundError: session_id does not exist.
+            MessageNotFoundError: ``message_id`` is not a visible user message
+                of this session (nothing is changed).
+        """
+        if not deleted_by:
+            raise ValueError(
+                "delete_message requires deleted_by: who deleted must be recorded"
+            )
+
+        from src.core.database import get_db_session
+        from src.database.models.session import SessionMessage
+        from src.database.models.usage_event import EVENT_MESSAGE_DELETED, UsageEvent
+
+        session_manager = get_session_manager()
+        with get_db_session() as db:
+            session = session_manager._get_session_or_raise(db, session_id)
+
+            # Columns only, in transcript order: grouping needs no content, and a
+            # tool_result row's content can be large.
+            rows = (
+                db.query(
+                    SessionMessage.id, SessionMessage.role, SessionMessage.message_type
+                )
+                .filter(SessionMessage.session_id == session.id)
+                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+                .all()
+            )
+            turn = turn_message_ids(rows, message_id)
+            if not turn:
+                raise MessageNotFoundError(message_id)
+
+            doomed = list(turn)
+            hidden_message_id = None
+            earliest = earliest_user_message(db, session.id)
+            if earliest is not None and earliest.id == message_id:
+                # Never delete the engine-mode row: hide it, as a clear does.
+                earliest.message_type = ENGINE_MODE_MARKER_MESSAGE_TYPE
+                hidden_message_id = earliest.id
+                doomed = turn[1:]
+
+            deleted_messages = 0
+            if doomed:
+                deleted_messages = (
+                    db.query(SessionMessage)
+                    .filter(
+                        SessionMessage.session_id == session.id,
+                        SessionMessage.id.in_(doomed),
+                    )
+                    .delete(synchronize_session=False)
+                )
+
+            db.add(
+                UsageEvent(
+                    username=deleted_by,
+                    event_type=EVENT_MESSAGE_DELETED,
+                    session_id=session.id,
+                )
+            )
+            # A failed insert or re-type raises here, before the thread is touched.
+            db.flush()
+
+            from src.core.checkpointer import get_checkpointer
+
+            get_checkpointer().delete_thread(session_id, session=db)
+
+        logger.info(
+            "Deleted a conversation turn",
+            extra={
+                "session_id": session_id,
+                "message_id": message_id,
+                "deleted_by": deleted_by,
+                "deleted_messages": deleted_messages,
+                "hidden_message_id": hidden_message_id,
+            },
+        )
+        return {
+            "status": "deleted",
+            "session_id": session_id,
+            "message_id": message_id,
+            "deleted_messages": deleted_messages,
+            "hidden_message_id": hidden_message_id,
         }
 
     def _ensure_user_experiment(
