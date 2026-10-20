@@ -62,6 +62,17 @@ Refine slides through follow-up messages in the same session:
 | Edit slide contents | "Change title to 'Q4 Results'" |
 | Add a slide | "Add a new slide about \{X\} after this one" |
 | Regenerate all | "Regenerate all slides with more data" |
+| Regenerate one slide | "Regenerate slide 3" |
+
+### If a slide can't be generated
+
+Occasionally one slide fails while the rest of the deck is built. When that happens:
+
+- The chat tells you which slide it was, in plain words, and what to do next. Slide numbers match the thumbnail ribbon, so the first slide is slide 1.
+- The failed slide appears in its place as a placeholder, and the other slides are not affected.
+- To try again, ask the AI to regenerate it, for example "Regenerate slide 3".
+- If the message says a slide is shown without its automatic fix, the slide is still there as first built. Open the **AI feedback** drawer under the slide and choose **Apply** next to an issue to try the fix again.
+- Some messages have a collapsed **Details** line underneath. Expand it to see technical information (stage, error and request ID) to share with support.
 
 ## Navigating Slides
 

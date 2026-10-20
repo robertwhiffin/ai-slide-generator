@@ -321,7 +321,7 @@ interface SlideStyle {
 |------|----------------|---------------------|
 | `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea for composing prompts; accepts an optional `badge?: React.ReactNode` slot above the textarea (currently no caller supplies one) | None (props only) |
-| `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
+| `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs, and shows a collapsed **Details** disclosure (stage, error, request ID) under an assistant message that carries `details` | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides. Still exists but is no longer the primary slide surface — `SlideViewer` fulfils that role. | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
 | `src/components/SlidePanel/SlideTile.tsx` | Slide preview tile used within `SlidePanel` for the tab-based view. Still exists; not the primary slide surface. | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |

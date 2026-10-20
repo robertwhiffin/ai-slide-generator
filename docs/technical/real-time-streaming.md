@@ -307,6 +307,8 @@ X-Accel-Buffering: no
 }
 ```
 
+An event built from a chat message also carries `metadata`: `{"details": {"stage", "error", "request_id"}}` for a graph failure notice (see [Graph failure notices](#graph-failure-notices-agent-mode)), and `null` for every other message. Only `details` is forwarded, never the row's whole metadata.
+
 ### Updated Session Endpoint
 
 `GET /api/sessions/{id}` now returns messages and slide deck for restoration:
@@ -505,7 +507,7 @@ if (message.tool_call) {
 | `role` | VARCHAR | `user`, `assistant`, `system` |
 | `content` | TEXT | Message content |
 | `message_type` | VARCHAR | `user_input`, `user_query`, `reasoning`, `tool_call`, `tool_result`, `llm_response`, `clarification`, `info`, `error` |
-| `metadata_json` | TEXT | JSON with `tool_name`, `tool_input` |
+| `metadata_json` | TEXT | JSON with `tool_name`, `tool_input`; on graph failure notices, `details` (`stage`, `error` and, when the turn has one, `request_id`) (#321) |
 | `request_id` | VARCHAR(64) | Links to async chat request (for polling) |
 | `created_at` | TIMESTAMP | Message timestamp |
 
@@ -534,6 +536,24 @@ if (message.tool_call) {
 | Session lock conflict | 409 returned, stream not started |
 | Network disconnect | `AbortController` cancels stream |
 | Tool error | `error` event with tool name |
+
+---
+
+## Graph failure notices (agent mode)
+
+When part of a graph turn fails (a slide cannot be built, checked or saved, or the deck-level update fails), the chat gets a plain-language `info` message that names the slide, says what happened and says what to do, for example "Slide 3 couldn't be built, so it's shown as a placeholder — ask me to regenerate slide 3." All wording lives in `src/services/graph/user_notices.py`; the technical side never appears in the headline.
+
+- **Row** – An `info` message stamped with the turn's `request_id` (so polling finds it) and excluded from the architect's replayed conversation. Its `metadata_json` is `{"details": {"stage", "error", "request_id"}}`; `request_id` is omitted when the turn has none (SSE). `error` is an exception class name or a fixed marker (`model_temporarily_unavailable` for a transient model fault), never exception text and never a persisted-runtime error name.
+- **Numbers** – 1-based in text (matching the slide ribbon); 0-based in event metadata (`position`, `positions`) and in the log's `positions=`. `details` carries no slide numbers.
+- **Log** – One WARNING per notice, with every field in the message because `extra=` is not rendered by the deployed log format: `graph_failure_notice kind=build_failed stage=builder error=RuntimeError positions=[2] request_id=... session_id=...`.
+
+| Transport | What the client receives |
+|-----------|--------------------------|
+| Polling | An `assistant` event with `metadata.details` (the persisted row) |
+| SSE | `info` rows are not streamed. A failed slide emits an `error` event whose `error` is a short headline, shown in the error banner (its `metadata.details` is not rendered); unfinished slides emit an `error` event with the full text; a deck-level failure emits an `assistant` event with `metadata.details` |
+| Reload | `GET /api/sessions/{id}` returns `messages[].metadata.details` |
+
+`Message.tsx` shows `details` in a collapsed **Details** disclosure under assistant messages only. The save-point preview and the MCP transcript deliberately drop `details`. Rows written before this change keep their old text and have no disclosure.
 
 ---
 
