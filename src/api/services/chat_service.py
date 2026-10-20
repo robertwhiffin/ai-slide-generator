@@ -2156,10 +2156,13 @@ class ChatService:
         from it (:func:`resolve_engine_mode`), so deleting it would silently
         revert a graph-mode deck to the monolith on the next turn — the two
         halves of this PR would contradict each other.  There is precedent:
-        ``restore_version`` also prunes messages selectively, and preserving the
-        first user row is safe for that pruning too because it predates every
-        save point.  It is preserved unconditionally, in both modes, so clearing
-        never *changes* the mode in either direction.
+        ``restore_version`` also prunes messages selectively -- it deletes this
+        session's rows created after the save point, so the kept row survives a
+        restore whenever it predates that save point (always true for a root
+        deck's own first turn).  A contributor's kept row can be removed by a
+        restore; that is harmless, because engine mode resolves on the deck
+        OWNER's rows.  It is preserved unconditionally, in both modes, so
+        clearing never *changes* the mode in either direction.
 
         **The kept row is re-typed and hidden.**  Its ``message_type`` becomes
         :data:`ENGINE_MODE_MARKER_MESSAGE_TYPE`, which every transcript read
