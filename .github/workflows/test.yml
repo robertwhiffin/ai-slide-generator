@@ -706,6 +706,7 @@ jobs:
           - deck-review-flag
           - deck-prompts-integration
           - deck-prompts-ui
+          - delete-message
           - design-system-brand-text-uncapped
           - design-system-selector
           - design-systems-ui
