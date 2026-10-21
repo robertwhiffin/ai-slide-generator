@@ -9,6 +9,7 @@ A flip-through viewer that shows one slide at a time, a vertical thumbnail ribbo
 - **Components:** `frontend/src/components/SlideViewer/` (five files — see component table below)
 - **Context:** `frontend/src/contexts/ViewerContext.tsx` — current-slide index, drawer open/height/tab
 - **Types:** `frontend/src/types/finding.ts` — `SlideFinding`, `DrawerCallbacks`
+- **Finding text:** `frontend/src/utils/findingText.ts` — plain-language drawer text, the Apply/Discuss chat text, and the parsers that fold the reviewer's details in chat. Its copy is derived server-side by `src/domain/finding_copy.py`.
 - **Seen-state:** `frontend/src/components/SlideViewer/seenState.ts` — localStorage helpers
 - **Slide rendering:** `frontend/src/services/slideDocument.ts` — shared `buildSlideDocument` (see Security Invariant below)
 - **Export handlers:** `frontend/src/hooks/useDeckExport.ts` — extracted from `AppLayout`
@@ -125,11 +126,19 @@ AI feedback findings display an amber unseen dot on the thumbnail and the drawer
 ### `SlideFinding` (`frontend/src/types/finding.ts`)
 
 ```typescript
+export type FindingCategory = 'content' | 'design' | 'narrative';
+export type FindingStatus = 'open' | 'fixed';
+
 export interface SlideFinding {
   id: string;
-  slideIndex: number;   // 0-based, matches Slide.index
-  category: 'content' | 'design' | 'narrative';
-  message: string;
+  slideIndex: number;   // 0-based, matches Slide.index; -1 for deck-level findings
+  category: FindingCategory;
+  criterion: string;    // key into the Python CRITERIA registry
+  message: string;      // the reviewer's technical note, verbatim
+  plainMessage: string; // issue + status in plain words; derived at read time, NOT a Python Finding field
+  plainIssue: string;   // the issue sentence alone (tense by status); same derivation
+  objective: boolean;   // could an automated fixer handle this?
+  status: FindingStatus; // open = unaddressed; fixed = handled by the auto-fixer
   seen: boolean;        // initial value only; lifecycle owned client-side
 }
 ```
@@ -144,7 +153,18 @@ export interface DrawerCallbacks {
 }
 ```
 
-**Findings arrive as props.** `SlideViewer` receives `findings: SlideFinding[]` and `callbacks: DrawerCallbacks` from `AppLayout`. The findings are never fetched by the viewer — the producing backend (AI review agents) is PRD workstream 5. Until that workstream ships, `findings` is an empty array in production (the callbacks log to console for development-time testing).
+**Findings arrive in the deck.** The viewer never fetches them. `SessionManager.get_slide_deck` projects each stored `Finding` through `_finding_to_camel` (`src/api/services/session_manager.py`) onto the `SlideFinding` shape and returns them as `slideDeck.findings`. `AppLayout` passes that list, plus `callbacks: DrawerCallbacks`, to `SlideViewer`, which scopes it to the current slide and drops deck-level criteria (`DECK_LEVEL_CRITERIA`; those go to chat). The projection is generic over `Finding.model_dump()` (snake_case to camelCase) plus two read-time keys, `plainMessage` and `plainIssue`. `src/domain/finding_copy.py` derives both from the finding's `criterion`, the registry's `objective` and its `status`, and never from `message`. They are not `Finding` fields and are never persisted, so findings stored before they existed read the same as new ones. They stay off `Finding` because it is nested in the reviewers' output schemas, and a new field would move the schema digests pinned in `src/services/agent_schema_registry.py`.
+
+### Plain message and details
+
+A reviewer's `message` is written for the fixer and is technical (hex codes, sizes, contrast ratios). The user sees plain words first, and the technical text one click away.
+
+- **Drawer.** Each finding leads with `plainMessage` (`finding-plain-<id>`). A per-finding **Show details** / **Hide details** toggle (`finding-details-toggle-<id>`) reveals `message` verbatim. It is collapsed by default, keyed by finding id, held in component state and not persisted, and the technical text is absent from the DOM until opened. It is not rendered when `message` is blank. A finding that arrives without `plainMessage` or `plainIssue` falls back to `PLAIN_MESSAGE_FALLBACK`.
+- **Apply and Discuss.** `AppLayout`'s `handleApplyFinding` and `handleDiscussFinding` post `applyFindingRequest(f)` / `discussFindingRequest(f)` from `findingText.ts`: `<lead> <slideIndex + 1>: <plainIssue>`, then `REVIEWER_DETAILS_SEPARATOR` and `message` verbatim (omitted when `message` is blank). The lead uses `plainIssue`, not `plainMessage`, because only open findings show these buttons and a status sentence would contradict the request. The technical message is sent in full because the architect acts on it.
+- **Chat bubble.** `Message.tsx` folds everything after the separator behind a native `<details>` labelled "Reviewer's details", closed by default. It does so only for a user Apply/Discuss request (`splitFindingRequest`) and the assistant deck-review advisory (`splitDeckAdvisory`), and only when the text matches that exact shape. Anything else, including chat messages stored before this change, renders as it was. This is render-only: the sent, stored and polled content is unchanged.
+- **Deck advisory.** `_advisory_text` in `src/services/graph/nodes.py` writes plain lines (one per deck-level criterion, repeats merged as "(noted N times)"; a non-deck criterion gets a generic "one of the slides" line), a closing line, then the same separator and one bullet per reviewer message verbatim. The no-findings sentence ("Deck review complete: no narrative issues found across the deck.") is unchanged and has no details section.
+- **Deck-level findings** appear only in that advisory, never in the drawer. Their detail also reaches the architect on the next turn as `previous_deck_review`. The advisory is an `info` row, which neither replay path feeds back to the architect.
+- **Agents still get the technical text.** The fixer, fix reviewer and architect still receive the full technical `message`. No prompt, schema, agent payload or replayed advisory carries the plain copy. The one route to a model is the user's own Apply/Discuss message, which leads with `plainIssue` and carries `message` verbatim after the separator, so editing `PLAIN_ISSUES` changes what the architect reads on those turns.
 
 ---
 
@@ -155,10 +175,11 @@ export interface DrawerCallbacks {
 | `frontend/src/components/SlideViewer/SlideViewer.tsx` | Public entry point. Wraps `ViewerProvider`. Renders empty state when deck is null or has no slides. Owns keyboard listener, seen-state lifecycle, stage CRUD, presentation-mode handle (`SlideViewerHandle` ref). |
 | `frontend/src/components/SlideViewer/SlideStage.tsx` | Renders the single current slide in a sandboxed iframe via `buildSlideDocument`. Handles wheel-paging (threshold + cooldown). Shows prev/next arrow controls and slide position counter. |
 | `frontend/src/components/SlideViewer/ThumbnailRibbon.tsx` | Vertical ribbon of scaled slide thumbnails (each at `134/1280 ≈ 10.5%` scale). Drives current-slide selection on click. Supports drag-reorder via `@dnd-kit`. Shows amber unseen dot per slide. Wheel events scroll the list only. |
-| `frontend/src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer docked to the bottom of the stage column. One `feedback` tab today; tabbed shell ready for `notes`. Drag-resize handle (pointer capture). Shows per-slide findings with Apply / Dismiss / Discuss actions. |
+| `frontend/src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer docked to the bottom of the stage column. One `feedback` tab today; tabbed shell ready for `notes`. Drag-resize handle (pointer capture). Shows per-slide findings led by their plain message, with a per-finding Show details toggle and Apply / Dismiss / Discuss actions. |
 | `frontend/src/components/SlideViewer/seenState.ts` | `localStorage` read/write for seen finding IDs. Exports `loadSeen(deckKey)` and `markSeen(deckKey, ids[])`. Enforces `MAX_DECKS = 50` growth bound. |
 | `frontend/src/contexts/ViewerContext.tsx` | Current-slide index (with deck-shrink clamping), next/prev/first/last helpers, drawer open/height/tab. Height clamped to 96–480 px. Persists drawer state to `localStorage`. |
 | `frontend/src/types/finding.ts` | `SlideFinding` and `DrawerCallbacks` type definitions. |
+| `frontend/src/utils/findingText.ts` | Pure helpers for finding text: `findingPlainText`, `findingPlainIssue`, `applyFindingRequest`, `discussFindingRequest`, and the `splitFindingRequest` / `splitDeckAdvisory` parsers `Message.tsx` uses to fold the reviewer's details. Holds the request leads and the TS mirrors of the separator and deck-advisory strings. |
 | `frontend/src/hooks/useDeckExport.ts` | PDF, PPTX, and HTML export handlers, extracted from `AppLayout`. |
 
 ---
@@ -196,6 +217,14 @@ All CRUD handlers guard against concurrent edits with a monotonic `deckEditCount
 ---
 
 ## Extension Guidance
+
+### Editing finding copy
+
+1. Edit `PLAIN_ISSUES` in `src/domain/finding_copy.py`: one present-tense and one past-tense sentence per criterion. `GENERIC_ISSUE` covers an unknown or retired criterion. The status sentences and deck-advisory strings are module constants in the same file.
+2. A new `CRITERIA` entry in `src/domain/finding.py` needs a `PLAIN_ISSUES` entry, or `tests/unit/test_finding_copy.py` goes red.
+3. The deck-advisory strings, `REVIEWER_DETAILS_SEPARATOR` and `PLAIN_MESSAGE_FALLBACK` are mirrored in `frontend/src/utils/findingText.ts` and `frontend/src/types/finding.ts`. `tests/unit/test_finding_conformance.py` pins each pair equal, so editing one side alone fails it.
+4. Follow the style rules, which `test_finding_copy.py` enforces. Whole sentences start with a capital and end with a full stop. No digits, `%`, hex colours, `px`, `rgb(`/`hsl(`, contrast ratios, `WCAG`, underscores, backticks, criterion names, or agent role names. Issue sentences describe the slide in the third person; the second person is for action lines such as the closing line and the judgement-call sentence. A finding's full plain message is at most 140 characters.
+5. Keep the copy out of `CRITERIA`: that registry is rendered into the build reviewer's prompt, so a separate mapping means editing copy never edits a prompt or a schema digest.
 
 ### Adding a drawer tab
 

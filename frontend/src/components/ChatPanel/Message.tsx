@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
+import { splitDeckAdvisory, splitFindingRequest } from '../../utils/findingText';
 
 interface MessageProps {
   message: MessageType;
@@ -125,6 +126,18 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
 
   // Regular user/assistant messages with v0 styling
   const isUser = message.role === 'user';
+  // #316: collapse the reviewer's technical section of exactly the two shapes this
+  // PR writes (Apply/Discuss requests from the user; the deck-review advisory from
+  // the assistant).  Strict match, role-bound; any other content renders verbatim.
+  // Render-only: what was sent and stored is unchanged.
+  const split = isUser
+    ? splitFindingRequest(message.content)
+    : message.role === 'assistant'
+      ? splitDeckAdvisory(message.content)
+      : null;
+  // Full-opacity foreground on the primary bubble: white on primary is 5.2:1;
+  // /80 would be 3.9:1, below AA at this size.
+  const detailsTone = isUser ? 'text-primary-foreground' : 'text-muted-foreground';
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -136,8 +149,16 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
         }`}
       >
         <div className="whitespace-pre-wrap">
-          {message.content}
+          {split ? split.lead : message.content}
         </div>
+        {split && (
+          <details className={`mt-2 text-xs ${detailsTone}`} data-testid="message-reviewer-details">
+            <summary className="cursor-pointer select-none underline-offset-2 hover:underline">
+              Reviewer's details
+            </summary>
+            <div className="mt-1 whitespace-pre-wrap break-words">{split.details}</div>
+          </details>
+        )}
       </div>
     </div>
   );

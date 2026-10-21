@@ -16,6 +16,7 @@ from src.api.services.deck_level_writer import read_deck_spec
 from src.api.services.session_manager import get_session_manager
 from src.api.routes.tour import FIXTURE_PATH, _load_fixture
 from src.database.models.profile_contributor import PermissionLevel
+from src.domain.finding_copy import LEFT_FOR_JUDGEMENT, PLAIN_ISSUES
 from src.utils.slide_hash import compute_slide_hash
 from tests.unit.conftest import _make_fake_db, _make_factory, _make_in_memory_engine
 
@@ -232,6 +233,21 @@ def test_the_finding_id_is_minted_from_the_slide_hash(db):
     assert finding["message"] == scripted["message"]
     assert finding["category"] == scripted["category"]
     assert finding["objective"] is scripted["objective"]
+
+
+def test_the_surfaced_finding_carries_plain_keys_and_keeps_its_scripted_detail(db):
+    # #316, plan D13: the real tour drawer leads with derived plain copy for its
+    # open, subjective brief_not_delivered finding; the scripted reviewer text
+    # stays verbatim as the finding's message (shown under "Show details").
+    fx = _load_fixture()
+    sid = _start()
+    _run_through(sid, "build")
+    (finding,) = get_session_manager().get_slide_deck(sid)["findings"]
+    assert finding["plainMessage"] == (
+        f"{PLAIN_ISSUES['brief_not_delivered'].present} {LEFT_FOR_JUDGEMENT}"
+    )
+    assert finding["plainIssue"] == PLAIN_ISSUES["brief_not_delivered"].present
+    assert finding["message"] == fx["stages"]["build"]["findings"]["2"][0]["message"]
 
 
 def test_edit_changes_only_the_target_slide_and_its_brief(db):

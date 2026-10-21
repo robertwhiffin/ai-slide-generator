@@ -118,6 +118,22 @@ Click any thumbnail in the ribbon on the left to jump to that slide. You can als
 
 To refine a specific slide, navigate to it and describe the change in the chat panel — the AI will target the slide you are currently viewing.
 
+## Review Feedback
+
+Each slide is checked as it lands. Anything the review finds appears in the feedback drawer under the slide, and the slide's thumbnail shows an amber dot until you have seen it.
+
+Each point is explained in plain words, with a note on what happened to it: it was fixed automatically, it was not fixed automatically, or it is a judgement call left to you. Click **Show details** under a point to read the reviewer's technical note, and **Hide details** to fold it away again.
+
+For a point that was not fixed, choose what happens next:
+
+- **Apply** asks the agents to fix it.
+- **Dismiss** hides it.
+- **Discuss** moves it to the chat so you can talk it through first.
+
+Apply and Discuss send the technical note along with your request so the agents have what they need, but the chat keeps it folded under **Reviewer's details**. Click it to read it.
+
+Points about the deck as a whole, such as a gap in the story, repeated points or a missing conclusion, appear as a chat message instead. The reviewer's specifics are folded underneath, under **Reviewer's details**.
+
 ## Returning to a Previous Session
 
 To get back to a previous session, click **My Sessions** in the navigation bar. Any session with slides has a **Restore** button that loads it back into the editor.

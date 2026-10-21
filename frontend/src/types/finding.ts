@@ -7,6 +7,8 @@ export interface SlideFinding {
   category: FindingCategory;
   criterion: string;    // key into Python CRITERIA registry
   message: string;
+  plainMessage: string; // issue + status, derived at read time (src/domain/finding_copy.py via _finding_to_camel); NOT a Python Finding field
+  plainIssue: string;   // the issue sentence alone (tense by status); same derivation; leads Apply/Discuss requests
   objective: boolean;   // predicate: could an automated fixer handle this?
   status: FindingStatus;  // open = unaddressed; fixed = handled by auto-fixer
   seen: boolean;        // initial value only; lifecycle owned client-side
@@ -28,6 +30,10 @@ export const CATEGORY_LABEL: Record<FindingCategory, string> = {
   design: 'Design',
   narrative: 'Narrative',
 };
+
+/** Shown if a finding arrives without plainMessage/plainIssue (an untyped mock or a stale API cache). Equals
+ *  GENERIC_ISSUE.present in src/domain/finding_copy.py — pinned by test_finding_conformance.py. */
+export const PLAIN_MESSAGE_FALLBACK = "Something here may need a closer look.";
 
 /**
  * Criteria whose findings are routed to CHAT, not the slide drawer (grain-routing rule).
