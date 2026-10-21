@@ -484,6 +484,7 @@ def _upsert_slide_row(
     base_spec: Optional[str] = None,
     deck_spec_slide: Optional[Dict[str, Any]] = None,
     partial: bool = False,
+    insert_only: bool = False,
 ) -> SessionSlide:
     """Insert or update THE session_slides row for ``(owner_id, position)``.
 
@@ -532,6 +533,12 @@ def _upsert_slide_row(
             PR3 relies on these semantics (a reviewer rewrites HTML without
             touching the verdict; the foreman attaches a spec fragment without
             disturbing verification).
+        insert_only: the caller has already established that no row exists at
+            ``(owner_id, position)``, so skip the existence SELECT and INSERT.
+            Used by the row-per-slide backfill, which knows it from its own
+            guard; that SELECT was a round trip per slide on ~57k slides at
+            startup.  If the claim is wrong the composite primary key rejects
+            the INSERT at flush — a loud IntegrityError, never a silent overwrite.
 
     Returns:
         The inserted or updated SessionSlide row.
@@ -548,7 +555,7 @@ def _upsert_slide_row(
 
     spec_json = json.dumps(deck_spec_slide) if deck_spec_slide is not None else None
 
-    existing = (
+    existing = None if insert_only else (
         db.query(SessionSlide)
         .filter(
             and_(
