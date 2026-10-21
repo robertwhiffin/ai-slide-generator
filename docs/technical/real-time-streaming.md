@@ -509,6 +509,20 @@ if (message.tool_call) {
 | `request_id` | VARCHAR(64) | Links to async chat request (for polling) |
 | `created_at` | TIMESTAMP | Message timestamp |
 
+### Message ids in the chat panel
+
+The chat panel needs the id of a user's message to offer [delete](../user-guide/01-generating-slides.md#deleting-a-message), and neither transport hands it over:
+
+- **SSE** graph events carry no `message_id`.
+- **Poll** events do, but the user's own row is not echoed (`poll_chat` excludes `role == "user"`), because the panel already shows it.
+- `complete.metadata` reaches the panel on both transports, but a turn that ends in an `error` event or the transport's `onError` sends no `complete`, and a failed turn is exactly the one a user wants to delete.
+
+So the panel reads `GET /api/sessions/{id}/messages?limit=200` (the newest 200 rows) when a turn ends (`complete`, `error` or `onError`), on both transports, and adds ids to its id-less user messages by identical content, pairing from the newest (`withPersistedUserIds`). It only adds ids: it does not replace the panel's messages with the stored list, because SSE's emit-only progress lines ("Building N slide(s).") are never stored and would vanish. A read that resolves after the user sent again is dropped (`sendSeqRef`), so a stored repeated prompt does not take the previous turn's id, and the next turn's read pairs both. Content shared by more unsent messages than stored rows is not paired: when the panel holds more id-less user messages with a text than there are unclaimed stored rows with it, some of them were refused before they were stored (`POST /api/chat/async` answers 409 before it stores anything, as a double-click on a review finding's **Apply** produces), and the panel cannot tell which. Those messages offer delete after the next load.
+
+One residual remains: a send refused in one tab whose text matches a message stored from another tab on the same session can, in rare cases, take that row's id when the counts happen to match (one id-less message, one unclaimed row), and its delete then removes the other tab's turn. The exact fix is for `POST /api/chat/async` to return the stored row's id (`user_message_id`) beside `request_id`; it already stores the row before it answers. That is a follow-up. `complete.metadata.user_message_id` would not cover it, because a refused send gets no `complete`. See [Frontend Overview](./frontend-overview.md#conversation-api-srcapiconversationts).
+
+A delete removes a turn's rows by role and order (the user message and the rows up to the next user message), not by `request_id`: the SSE path writes rows with no `request_id`. A row written late, after the next user message, therefore joins the turn it lands after.
+
 ### chat_requests Table (Polling Support)
 
 | Column | Type | Purpose |

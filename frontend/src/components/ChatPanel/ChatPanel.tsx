@@ -14,9 +14,18 @@ import {
   CLEAR_CHAT_LABEL,
   CLEAR_CHAT_DIALOG_TITLE,
   CLEAR_CHAT_DIALOG_MESSAGE,
+  CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC,
   CLEAR_CHAT_TOOLTIP,
+  CLEAR_CHAT_TOOLTIP_NO_SPEC,
   clearChatErrorMessage,
 } from './clearChatCopy';
+import {
+  DELETE_MESSAGE_CONFIRM_LABEL,
+  DELETE_MESSAGE_DIALOG_MESSAGE,
+  DELETE_MESSAGE_DIALOG_TITLE,
+  deleteMessageErrorMessage,
+} from './deleteMessageCopy';
+import { withoutTurn, withPersistedUserIds } from '../../utils/conversationTurns';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
 import { ReplacementFeedback } from './ReplacementFeedback';
 import { ErrorDisplay } from './ErrorDisplay';
@@ -45,9 +54,12 @@ interface ChatPanelProps {
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
   viewOnlyReason?: string;  // When provided, show why the user cannot edit
-  /** Whether the live deck has a Spec. Clear chat is offered only where there is a Spec to continue from. */
+  /** Whether the live deck has a Spec. Chooses Clear chat's wording: with a Spec the assistant carries on from it; without one the wording promises nothing about a Spec (#317 lifted #323's Spec gate). */
   hasDeckSpec?: boolean;
 }
+
+// #317: the turn-end id read asks for the newest rows only (GET …/messages keeps messages[-limit:]).
+const MESSAGE_ID_READ_LIMIT = 200;
 
 export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   rawHtml,
@@ -71,9 +83,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const [myPermission, setMyPermission] = useState<string | null>(null);
   const [isClearChatDialogOpen, setIsClearChatDialogOpen] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  // Delete a message (#317). Declared above the render-phase reset block for the same reason.
+  const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null);
+  const [isDeletingMessage, setIsDeletingMessage] = useState(false);
   const messageIndexRef = useRef(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cancelStreamRef = useRef<(() => void) | null>(null);
+  const sendSeqRef = useRef(0);  // #317: the send a turn-end id read belongs to
   const navigate = useNavigate();
   const { sessionId, isSessionPersisted, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
   const { agentConfig, refreshConfig, configOwnerSessionId, isPreSession } = useAgentConfig();
@@ -88,6 +104,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     setMyPermission(null);
     setIsClearChatDialogOpen(false);
     setIsClearing(false);
+    setPendingDeleteId(null);
+    setIsDeletingMessage(false);
   }
 
   // Show session error
@@ -123,6 +141,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       if (session.messages && session.messages.length > 0) {
         // Convert database messages to UI Message format
         const uiMessages: Message[] = session.messages.map(msg => ({
+          id: msg.id,
           role: msg.role as 'user' | 'assistant' | 'tool',
           content: msg.content,
           timestamp: msg.created_at,
@@ -195,6 +214,23 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     setLoadingMessage('');
   };
 
+  // #317: a message sent here has no id until the panel matches it to its stored row, and only a
+  // message with an id offers delete. Read the stored conversation and add ids; never replace.
+  const refreshMessageIds = (target: string | null, seq: number) => {
+    if (!target) return;
+    Promise.resolve()
+      .then(() => conversationApi.listMessages(target, MESSAGE_ID_READ_LIMIT))
+      .then(result => {
+        // Dropped after a session switch, and after a newer send: that send's message (often the
+        // same text) would otherwise take this turn's row, and a delete would remove the wrong
+        // turn. The next turn's read pairs whatever is not ambiguous.
+        if (sendSeqRef.current !== seq || currentSessionIdRef.current !== target) return;
+        if (!Array.isArray(result?.messages)) return;
+        setMessages(prev => withPersistedUserIds(prev, result.messages));
+      })
+      .catch(() => { /* the ids arrive with the next load; the delete action waits for them */ });
+  };
+
   const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | string[], maybeImageIds?: string[]) => {
     // Support two calling conventions:
     // 1. From ChatInput: (content, imageIds)
@@ -216,12 +252,16 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     if (isClearing) {
       return;
     }
+    if (isDeletingMessage) {
+      return;
+    }
 
     // A browser-local root must be made graph-capable before a graph turn.
     // Failed persistence deliberately sends no chat request.
     if (!isSessionPersisted && !await ensureGraphCapableRoot()) {
       return;
     }
+    const sentTo = sessionId;
 
     setIsLoading(true);
     setIsGenerating(true);
@@ -238,6 +278,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         timestamp: new Date().toISOString(),
       },
     ]);
+    const seq = ++sendSeqRef.current;
 
     messageIndexRef.current = 0;
     setLoadingMessage(getRotatingLoadingMessage(0));
@@ -318,6 +359,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           stopLoadingMessages();
           setIsLoading(false);
           setIsGenerating(false);
+          refreshMessageIds(sentTo, seq);
           break;
 
         case 'complete':
@@ -366,6 +408,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           // they persist across every prompt/generation in this session until
           // the user changes them (no after-generation reset).
           refreshConfig();
+          refreshMessageIds(sentTo, seq);
           break;
 
         // E0: ws4d D3 — one committed slide released by the graph's reorder buffer,
@@ -401,16 +444,41 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         stopLoadingMessages();
         setIsLoading(false);
         setIsGenerating(false);
+        refreshMessageIds(sentTo, seq);
       },
       imageIds,
       configIsForThisSession ? agentConfig : undefined,
     );
   };
 
-  // Clear chat: only where there is a Spec to continue from, for editors, on a persisted session.
-  const showClearChat = isSessionPersisted && hasDeckSpec && canEditConversation(myPermission);
+  // Clear chat: for editors, on a persisted session, with or without a Spec.
+  const showClearChat = isSessionPersisted && canEditConversation(myPermission);
   const clearChatDisabled =
-    isLoading || isClearing || disabled || !!previewMessages || messages.length === 0;
+    isLoading || isClearing || isDeletingMessage || disabled || !!previewMessages || messages.length === 0;
+
+  // Delete a message (#317): shown to editors on a persisted session, never in a save-point preview.
+  const canDeleteMessages = isSessionPersisted && canEditConversation(myPermission) && !previewMessages;
+  const deleteMessageDisabled = isLoading || isClearing || isDeletingMessage || disabled;
+
+  const handleConfirmDeleteMessage = async () => {
+    const messageId = pendingDeleteId;
+    if (!sessionId || messageId == null || isDeletingMessage) return;
+    const target = sessionId;
+    setPendingDeleteId(null);
+    setIsDeletingMessage(true);
+    setError(null);
+    try {
+      await conversationApi.deleteMessage(target, messageId);
+      if (currentSessionIdRef.current !== target) return;  // the user moved on; leave the new session alone
+      setMessages(prev => withoutTurn(prev, messageId));
+      setLastReplacement(null);
+    } catch (err) {
+      if (currentSessionIdRef.current !== target) return;
+      setError(deleteMessageErrorMessage(err));
+    } finally {
+      if (currentSessionIdRef.current === target) setIsDeletingMessage(false);
+    }
+  };
 
   const handleConfirmClearChat = async () => {
     if (!sessionId || isClearing) return;
@@ -471,7 +539,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             size="sm"
             variant="ghost"
             disabled={clearChatDisabled}
-            title={CLEAR_CHAT_TOOLTIP}
+            title={hasDeckSpec ? CLEAR_CHAT_TOOLTIP : CLEAR_CHAT_TOOLTIP_NO_SPEC}
             onClick={() => setIsClearChatDialogOpen(true)}
           >
             <Eraser />
@@ -482,16 +550,30 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       <ConfirmDialog
         open={isClearChatDialogOpen}
         title={CLEAR_CHAT_DIALOG_TITLE}
-        message={CLEAR_CHAT_DIALOG_MESSAGE}
+        message={hasDeckSpec ? CLEAR_CHAT_DIALOG_MESSAGE : CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC}
         confirmLabel={CLEAR_CHAT_LABEL}
         cancelLabel="Cancel"
         variant="danger"
         onConfirm={handleConfirmClearChat}
         onCancel={() => setIsClearChatDialogOpen(false)}
       />
+      <ConfirmDialog
+        open={pendingDeleteId !== null}
+        title={DELETE_MESSAGE_DIALOG_TITLE}
+        message={DELETE_MESSAGE_DIALOG_MESSAGE}
+        confirmLabel={DELETE_MESSAGE_CONFIRM_LABEL}
+        cancelLabel="Cancel"
+        variant="danger"
+        onConfirm={handleConfirmDeleteMessage}
+        onCancel={() => setPendingDeleteId(null)}
+      />
 
       <div className="flex-1 overflow-y-auto">
-        <MessageList messages={previewMessages ?? messages} isLoading={isLoading && !previewMessages} />
+        <MessageList
+          messages={previewMessages ?? messages}
+          isLoading={isLoading && !previewMessages}
+          deleteAction={canDeleteMessages ? { disabled: deleteMessageDisabled, onDelete: setPendingDeleteId } : undefined}
+        />
       </div>
 
       {error && (
@@ -505,6 +587,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         disabled={
           isLoading || isInitializing || !sessionId || disabled
           || isClearing
+          || isDeletingMessage
         }
         placeholder={
           viewOnlyReason

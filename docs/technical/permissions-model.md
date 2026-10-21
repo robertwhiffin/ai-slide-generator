@@ -72,6 +72,7 @@ Conversations (chat messages) are **always private** to the session creator.
 | Send chat messages | ✅ | ❌ (uses own contributor session) |
 | View other users' conversations | ❌ | ❌ |
 | Clear chat | ✅ with CAN_EDIT or above | ❌ (they clear only their own contributor session) |
+| Delete a message | ✅ with CAN_EDIT or above | ❌ (they delete only in their own contributor session) |
 
 > When a CAN_EDIT contributor uses chat to modify slides, they do so through their own **contributor session** — a private session that shares the parent's slide deck but has its own chat history.
 
@@ -81,6 +82,8 @@ Conversations (chat messages) are **always private** to the session creator.
 2. **Conversation creator:** `_require_conversation_creator(session_id)` (`routes/_authz.py`). The caller must be the session's `created_by`. No authenticated user is a 401, an unknown session a 404, and anyone else a 403. CAN_MANAGE does not bypass it. The deck gate alone would let any editor of a shared deck clear the owner's private conversation by passing the owner's session id.
 
 A contributor's clear therefore touches only their own contributor session (its own transcript and its own graph thread). The owner's transcript, and the engine that is resolved from the owner's first message, are untouched. The route then takes the session lock and answers 409 while a turn or slide operation holds it; see [Multi-User Concurrency](./multi-user-concurrency.md). Each clear is recorded as a `context_cleared` row in `usage_events` under the caller's username; see [Usage Analytics](./usage-analytics.md).
+
+**Delete a message** (`DELETE /api/sessions/{id}/messages/{message_id}`) applies the same two gates in the same order, then the session lock, then deletes one turn (the user message and the rows that follow it up to the next user message). It records a `message_deleted` row in `usage_events` under the caller's username, in the delete's own transaction. It answers 404 with one text, "That message is not in this conversation.", for any id that is not a visible user message of that session: an absent id, another session's id, an assistant or tool row, or the hidden first message. The 404 therefore tells a caller nothing about ids in other sessions. A non-integer id is a 422, before any gate. As with a clear, a contributor's delete touches only their own contributor session, never the owner's, and the delete changes no deck state (nothing is undone in the slides, the Spec or the save points). See [Backend Overview](./backend-overview.md#session-messages-endpoints).
 
 ---
 
@@ -460,6 +463,7 @@ POST   /api/sessions/{id}/contribute           # Get/create contributor session
 GET    /api/sessions/{id}                      # Session detail — messages only if you are the creator
 GET    /api/sessions/{id}/messages             # 403 unless you are the session creator
 DELETE /api/sessions/{id}/context              # Clear chat: CAN_EDIT + session creator; 409 while a turn runs
+DELETE /api/sessions/{id}/messages/{message_id}  # Delete a message and its replies: CAN_EDIT + session creator; 409 while a turn runs; 404 for any id that is not a user message of the session
 ```
 
 ### Editing Lock

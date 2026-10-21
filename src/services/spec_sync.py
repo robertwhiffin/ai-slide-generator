@@ -15,7 +15,7 @@ and the sweeper that drains the queue those three define:
 :data:`SWEEP_INTERVAL_SECONDS`   how often the loop wakes
 :data:`CLAIM_TTL_SECONDS`        how long a worker's lease is honoured
 :func:`claim_due_marker`         ``(now) -> (owner_session_id, author) | None``
-:func:`review_in_flight`         ``(deck, now) -> bool`` — a live claim; the clear waits on it
+:func:`review_in_flight`         ``(deck, now) -> bool`` — a live claim; a clear or delete waits on it
 :func:`run_arc_review`           ``(session_id, author) -> bool`` — never raises
 :func:`sweep_once`               one tick: claim at most one marker and review it
 :func:`spec_review_sweeper_loop` the periodic loop, started in the FastAPI lifespan
@@ -531,9 +531,9 @@ def review_in_flight(deck: SessionSlideDeck, now: datetime) -> bool:
     than :data:`CLAIM_TTL_SECONDS` means a review may be running a graph turn on
     the deck owner's thread right now (the claim is taken before
     :func:`run_arc_review` invokes the graph and released only after it
-    returns).  ``ChatService.clear_context`` refuses on it, because that turn
-    takes no session lock and would write its pre-clear state back into the
-    thread the clear deletes.
+    returns).  ``ChatService.clear_context`` and ``ChatService.delete_message``
+    refuse on it, because that turn takes no session lock and would write its
+    earlier state back into the thread they delete.
     """
     claimed_at = deck.spec_dirty_claimed_at
     return claimed_at is not None and claimed_at > now - timedelta(

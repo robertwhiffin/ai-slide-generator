@@ -654,10 +654,49 @@ def _prune_slide_rows_beyond(db: Session, owner_id: int, slide_count: int) -> in
     return len(orphans)
 
 
+def earliest_user_message(db: Session, session_pk: int) -> Optional[SessionMessage]:
+    """The session's earliest ``role='user'`` row: the row engine mode is read off.
+
+    THE one copy of this rule (#317).  Earliest means ``created_at``, then
+    ``id``.  ``role`` only, never ``message_type``: the live paths write
+    different types for one user turn (``user_input`` on SSE, ``user_query`` on
+    the async route and MCP, ``chat`` on the tour), and the row a clear or a
+    message delete keeps is re-typed ``engine_mode_marker`` but is still this
+    row.
+
+    Callers: ``resolve_engine_mode`` (on the deck OWNER's session),
+    ``ChatService.clear_context`` and ``ChatService.delete_message`` (the row
+    they keep), ``SessionManager.duplicate_session`` (the marker it carries).
+    The startup pin backfill (``conversation_pins._backfill_in_transaction``)
+    applies the same rule set-based, over every root at once, with
+    ``row_number()`` over the same two columns; keep the two in step.
+
+    ``session_pk`` is ``UserSession.id`` (the integer key), not the string id.
+    """
+    return (
+        db.query(SessionMessage)
+        .filter(
+            SessionMessage.session_id == session_pk,
+            SessionMessage.role == "user",
+        )
+        .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+        .first()
+    )
+
+
 class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
 
     pass
+
+
+class MessageNotFoundError(Exception):
+    """A message id is not a deletable message of the session.
+
+    One error for every case (absent, another session's, not a user message,
+    the hidden engine-mode marker), so the route's 404 is no oracle for ids in
+    other sessions.
+    """
 
 
 class SessionAccessDeniedError(Exception):
@@ -1231,15 +1270,7 @@ class SessionManager:
             # Determine graph capability before constructing the new actor. The
             # duplicate owns a fresh immutable pin selected under the active-row
             # lock; the source's older pin is never copied or rewritten.
-            marker = (
-                db.query(SessionMessage)
-                .filter(
-                    SessionMessage.session_id == deck_owner.id,
-                    SessionMessage.role == "user",
-                )
-                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
-                .first()
-            )
+            marker = earliest_user_message(db, deck_owner.id)
             # The duplicate keeps its SOURCE deck's engine.  Since 2026-10-12
             # the graph is the default and the marker is the LEGACY opt-out:
             # a graph source (no first user message, or one without

@@ -18,6 +18,10 @@
  * `api.getSlides` (test 1 goes red on the slides-GET count); send the parent
  * session id for contributors (test 3's tripwire fires); drop `isLoading` from
  * `clearChatDisabled` (test 5); call the clear from the dialog's onCancel (test 6).
+ *
+ * #317 lifted the Spec gate: test 7 is a deck without a Spec. Put `hasDeckSpec &&`
+ * back in `showClearChat` (test 7 finds no button), or give it the Spec wording
+ * (test 7 reads the wrong dialog).
  */
 import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/base-test';
@@ -31,8 +35,10 @@ import {
 } from '../helpers/session-helpers';
 import {
   CLEAR_CHAT_DIALOG_MESSAGE,
+  CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC,
   CLEAR_CHAT_DIALOG_TITLE,
   CLEAR_CHAT_LABEL,
+  CLEAR_CHAT_TOOLTIP_NO_SPEC,
 } from '../../src/components/ChatPanel/clearChatCopy';
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
@@ -135,7 +141,12 @@ interface ClearableDeck {
 
 async function mockClearableDeck(
   page: Page,
-  { myPermission, isContributor = false }: { myPermission: string; isContributor?: boolean },
+  // A destructuring default, not `??`: test 7's explicit `null` must stay null (#317 C17).
+  {
+    myPermission,
+    isContributor = false,
+    deckSpec = DECK_SPEC,
+  }: { myPermission: string; isContributor?: boolean; deckSpec?: typeof DECK_SPEC | null },
 ): Promise<ClearableDeck> {
   const deck: ClearableDeck = {
     state: { cleared: false, slides: ORIGINAL_SLIDES },
@@ -205,7 +216,7 @@ async function mockClearableDeck(
     });
   });
 
-  // The deck, with a Spec, counted so a refetch after the clear is visible.
+  // The deck, with a Spec unless the test says otherwise, counted so a refetch after the clear is visible.
   await page.route(apiPath(`/api/sessions/${TEST_SESSION_ID}/slides`), (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     deck.counts.slidesGets += 1;
@@ -216,7 +227,7 @@ async function mockClearableDeck(
         ...mockSlidesResponse,
         slide_deck: {
           ...mockSlidesResponse.slide_deck,
-          deck_spec: DECK_SPEC,
+          deck_spec: deckSpec,
           slides: deck.state.slides,
         },
       }),
@@ -481,5 +492,29 @@ test.describe('clear chat', () => {
     }
     await expect(page.getByTestId('chat-welcome')).toHaveCount(0);
     await expect(clearButton(page)).toBeEnabled();
+  });
+
+  test('on a deck without a Spec, Clear chat is offered with the wording for one', async ({ page }) => {
+    const deck = await mockClearableDeck(page, { myPermission: 'CAN_MANAGE', deckSpec: null });
+    await openDeck(page);
+
+    await expect(clearButton(page)).toBeVisible();
+    await expect(clearButton(page)).toBeEnabled();
+    await expect(clearButton(page)).toHaveAttribute('title', CLEAR_CHAT_TOOLTIP_NO_SPEC);
+
+    await clearButton(page).click();
+    const dialog = confirmDialog(page);
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText(CLEAR_CHAT_DIALOG_TITLE);
+    await expect(dialog).toContainText(CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC);
+    // No promise about a Spec the deck does not have.
+    await expect(dialog).not.toContainText(CLEAR_CHAT_DIALOG_MESSAGE);
+    await dialog.getByRole('button', { name: CLEAR_CHAT_LABEL, exact: true }).click();
+
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByTestId('chat-welcome')).toBeVisible();
+    await expectNoTranscript(page);
+    expect(deck.clears).toEqual([CONTEXT_PATH]);
+    expect(deck.contextDeletes).toEqual([CONTEXT_PATH]);
   });
 });

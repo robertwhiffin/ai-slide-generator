@@ -56,7 +56,7 @@ class UsageEvent(Base):
     __tablename__ = "usage_events"
     id = Column(Integer, primary_key=True)
     username = Column(String(255), nullable=False)
-    event_type = Column(String(30), nullable=False)  # 'login' | 'deck_created' | 'deck_retrieved' | 'context_cleared'
+    event_type = Column(String(30), nullable=False)  # 'login' | 'deck_created' | 'deck_retrieved' | 'context_cleared' | 'message_deleted'
     session_id = Column(Integer, nullable=True)      # user_sessions.id when applicable; NOT a FK
     ts = Column(DateTime, default=datetime.utcnow, nullable=False)
 ```
@@ -66,16 +66,16 @@ a foreign key — events must survive session deletion; that is the point of the
 Unlike `user_sessions`, this table is **never pruned**.
 
 Event-type constants (`EVENT_LOGIN`, `EVENT_DECK_CREATED`, `EVENT_DECK_RETRIEVED`,
-`EVENT_CONTEXT_CLEARED`) live in `src/database/models/usage_event.py`.
+`EVENT_CONTEXT_CLEARED`, `EVENT_MESSAGE_DELETED`) live in `src/database/models/usage_event.py`.
 
 ### Event capture semantics
 
-All writes except `context_cleared` are **fire-and-forget** (same pattern as the
-`request_logs` middleware): dispatched via `loop.run_in_executor` when called on the event
-loop, written inline when already on a worker thread. Exceptions are swallowed and logged
-at debug — event writing must never block or fail a user request. `context_cleared` is the
-one deliberate exception: it is written inside the clear's own database transaction (see
-below).
+All writes except `context_cleared` and `message_deleted` are **fire-and-forget** (same
+pattern as the `request_logs` middleware): dispatched via `loop.run_in_executor` when called
+on the event loop, written inline when already on a worker thread. Exceptions are swallowed
+and logged at debug — event writing must never block or fail a user request.
+`context_cleared` and `message_deleted` are the two deliberate exceptions: each is written
+inside its own operation's database transaction (see below).
 
 | Event | Write site | Semantics / dedup |
 |---|---|---|
@@ -83,6 +83,7 @@ below).
 | `deck_created` | `SessionManager.save_slide_deck` create branch (`src/api/services/session_manager.py`, where `SessionSlideDeck(...)` is instantiated) | One per deck creation; never deduped. `session_id` = the deck-owner session's id. |
 | `deck_retrieved` | `GET /api/sessions/{session_id}` route (deck open, `src/api/routes/sessions.py`) | Deduped per `(username, session_id)` with the same in-process 30-minute window, so repeated polling within a visit counts once. |
 | `context_cleared` | `ChatService.clear_context` (`src/api/services/chat_service.py`), behind `DELETE /api/sessions/{id}/context`. **Written in the clear's own transaction, not fire-and-forget**, so the row exists if and only if the clear committed. | Never deduped: one per clear. `username` = the caller who cleared (`cleared_by`, required: a falsy value is refused before anything changes); `session_id` = the cleared session's internal id. It is the attribution record for a clear. The admin dashboard has no metric for it, but like every event type it counts as activity in the metrics that read any event (the summary's active users, the daily distinct, new and returning users, weekly retention, the heatmap). |
+| `message_deleted` | `ChatService.delete_message` (`src/api/services/chat_service.py`), behind `DELETE /api/sessions/{id}/messages/{message_id}`. **Written in the delete's own transaction, not fire-and-forget**, so the row exists if and only if the delete committed. | Never deduped: one per delete. `username` = the caller who deleted (`deleted_by`, required: a falsy value is refused before anything changes); `session_id` = the session's internal id. It is the attribution record for a delete. The admin dashboard has no metric for it, but like every event type it counts as activity in the metrics that read any event (the summary's active users, the daily distinct, new and returning users, weekly retention). The heatmap counts each delete as one event, as it counts each clear. |
 
 `src/api/services/usage_events.py` owns both dedup caches and the non-blocking write.
 `reset_dedup_caches()` is a test helper.
@@ -323,6 +324,7 @@ gated, because an endpoint with no callers has nothing to gain from a gate.
 
 - `record_*` functions never raise; failures are logged at debug and dropped.
 - **`context_cleared` is outside this guarantee, on purpose.** `ChatService.clear_context` adds the row to its own session, flushes it, and commits it with the transcript prune and the graph-thread delete. A failure to write it rolls the whole clear back (the route answers 500); it is never dropped silently.
+- **`message_deleted` is outside this guarantee too.** `ChatService.delete_message` adds the row to its own session, flushes it, and commits it with the turn's row delete, the first-message re-type and the graph-thread delete. A failure to write it rolls the whole delete back (the route answers 500); it is never dropped silently.
 - Dedup caches are per-process and use `time.monotonic()`; a restart may produce
   occasional extra `login` events, which is acceptable.
 - DB sessions for event writes are created from `get_session_local()` per write and

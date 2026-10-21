@@ -20,7 +20,13 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
-from src.api.services.session_manager import SessionNotFoundError, VersionConflictError, get_session_manager
+from src.api.services.session_manager import (
+    MessageNotFoundError,
+    SessionNotFoundError,
+    VersionConflictError,
+    earliest_user_message,
+    get_session_manager,
+)
 from src.api.services.session_naming import generate_session_title
 from src.core.databricks_client import (
     get_current_username,
@@ -33,6 +39,7 @@ from src.domain.conversation_engine import (
     LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
     selects_graph_engine,
 )
+from src.domain.conversation_turns import turn_message_ids
 from src.domain.slide import Slide, has_slide_wrapper
 from src.domain.slide_deck import SlideDeck
 from src.api.schemas.agent_config import resolve_agent_config
@@ -168,13 +175,14 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
     **Sticky, and derived from the transcript.**  Evaluated per message, only
     turn 1 would carry the phrase and turn 2 would fall back — a deck written
     alternately by both engines diverges between ``session_slides`` rows and
-    ``deck_json``, and the architect's own conversation lives in the
-    checkpointer under a ``thread_id``.  So the answer is a property of the
-    deck, read off the **earliest** ``role='user'`` message.  A later message
-    carrying the phrase must not switch a monolith deck, and assistant messages
-    are ignored so echoed tool output cannot flip the engine.  (Since the
-    2026-10-12 inversion the graph is the default and the phrase is the
-    LEGACY opt-out: a later ``USE LEGACY MODE`` must not switch a graph deck.)
+    ``deck_json``, and the graph's checkpoint thread, keyed by the session id,
+    would be resumed by one engine and ignored by the other.  So the answer is
+    a property of the deck, read off the **earliest** ``role='user'`` message.
+    A later message carrying the phrase must not switch a monolith deck, and
+    assistant messages are ignored so echoed tool output cannot flip the
+    engine.  (Since the 2026-10-12 inversion the graph is the default and the
+    phrase is the LEGACY opt-out: a later ``USE LEGACY MODE`` must not switch a
+    graph deck.)
 
     **Resolved on the OWNER DECK's session, not the calling session** (ruling
     W-3).  Decks are shared through ``UserSession.parent_session_id``; mode is
@@ -212,7 +220,6 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         explicitly (#271 C24).
     """
     from src.core.database import get_db_session
-    from src.database.models.session import SessionMessage
 
     if not session_id:
         return "monolith"
@@ -222,16 +229,8 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         with get_db_session() as db:
             session = session_manager._get_session_or_raise(db, session_id)
             deck_owner = session_manager._get_deck_owner_session(db, session)
-            earliest_user_message = (
-                db.query(SessionMessage)
-                .filter(
-                    SessionMessage.session_id == deck_owner.id,
-                    SessionMessage.role == "user",
-                )
-                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
-                .first()
-            )
-            content = earliest_user_message.content if earliest_user_message else None
+            earliest = earliest_user_message(db, deck_owner.id)
+            content = earliest.content if earliest else None
             owner_session_id = deck_owner.session_id
     except SessionNotFoundError:
         logger.warning(
@@ -322,8 +321,9 @@ class GraphTurnFailedError(RuntimeError):
 class ArcReviewInFlightError(RuntimeError):
     """The deck's arc review is running a graph turn on this session's thread.
 
-    Raised by :meth:`ChatService.clear_context` before anything changes; the
-    route answers 409 with ``CONVERSATION_BUSY_DETAIL``.
+    Raised by :meth:`ChatService.clear_context` and
+    :meth:`ChatService.delete_message` before anything changes; their routes
+    answer 409 with ``CONVERSATION_BUSY_DETAIL``.
     """
 
     def __init__(self, session_id: str) -> None:
@@ -341,8 +341,9 @@ def _refuse_during_an_arc_review(db: Any, session: Any) -> None:
     after every superstep, each carrying every channel it holds; a thread
     deleted under it comes back with the pre-clear ``findings``, turn-scoped
     state and a reply written from the cleared conversation, and the next turn
-    resumes it.  So a clear waits for the review, and the review's claim is the
-    signal: :func:`spec_sync.review_in_flight`.
+    resumes it.  So a clear (or a message delete, which deletes the thread
+    too) waits for the review, and the review's claim is the signal:
+    :func:`spec_sync.review_in_flight`.
 
     The deck row is read ``FOR UPDATE`` (a no-op on SQLite, which serialises
     writers anyway): on PostgreSQL a claim that commits first is seen here, and
@@ -2289,15 +2290,7 @@ class ChatService:
             # thread back after the delete below.
             _refuse_during_an_arc_review(db, session)
 
-            marker = (
-                db.query(SessionMessage)
-                .filter(
-                    SessionMessage.session_id == session.id,
-                    SessionMessage.role == "user",
-                )
-                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
-                .first()
-            )
+            marker = earliest_user_message(db, session.id)
             marker_id = marker.id if marker is not None else None
 
             doomed = db.query(SessionMessage).filter(
@@ -2340,6 +2333,138 @@ class ChatService:
             "session_id": session_id,
             "deleted_messages": deleted_messages,
             "preserved_message_id": marker_id,
+        }
+
+    def delete_message(
+        self, session_id: str, message_id: int, *, deleted_by: str
+    ) -> Dict[str, Any]:
+        """Delete one turn of this session's conversation: a user message and its replies.
+
+        The turn is ``message_id`` (a user row of THIS session) and every later
+        row up to the next ``role='user'`` row (``turn_message_ids``): replies,
+        notices, reasoning and tool rows, whatever their type or request id.
+        Deleting a prompt but keeping its reply would leave the architect an
+        orphan reply in ``conversation``; the turn goes whole.
+
+        **The session's earliest user row is never deleted** (#323): engine mode
+        is read off it.  When the turn starts there, that row is re-typed
+        ``ENGINE_MODE_MARKER_MESSAGE_TYPE`` (hidden from every transcript read)
+        and the rest of its turn is deleted; ``hidden_message_id`` says so.
+
+        **The graph thread is deleted.**  The checkpointer keeps every
+        checkpoint of every turn, and each stores that turn's user message
+        (``__start__``, ``architect_message``) and the architect's reply
+        (``architect_message``).  Nothing replays them, but a deletion the
+        checkpoint still holds is not a deletion.  The next turn starts a new
+        thread and builds its payload from the database.
+
+        **The deck is not rolled back**: slides, the Spec, save points and the
+        Conversation Pin are untouched.
+
+        **One transaction**, as in :meth:`clear_context`: the row delete, the
+        re-type, the ``usage_events`` row and ``delete_thread(session=db)``
+        commit or roll back together.
+
+        Args:
+            session_id: The session whose conversation to edit.  A contributor
+                session edits only its own rows.
+            message_id: The user message that starts the turn.
+            deleted_by: Username of the caller; recorded in ``usage_events`` and
+                the log line.  Required and non-empty.
+
+        Returns:
+            ``{"status": "deleted", "session_id", "message_id",
+            "deleted_messages": N, "hidden_message_id": id-or-None}``
+
+        Raises:
+            ValueError: ``deleted_by`` is empty or None (nothing is changed).
+            SessionNotFoundError: session_id does not exist.
+            MessageNotFoundError: ``message_id`` is not a visible user message
+                of this session (nothing is changed).
+            ArcReviewInFlightError: the deck's arc review is running a graph
+                turn on this thread (nothing is changed); see
+                :func:`_refuse_during_an_arc_review`.
+        """
+        if not deleted_by:
+            raise ValueError(
+                "delete_message requires deleted_by: who deleted must be recorded"
+            )
+
+        from src.core.database import get_db_session
+        from src.database.models.session import SessionMessage
+        from src.database.models.usage_event import EVENT_MESSAGE_DELETED, UsageEvent
+
+        session_manager = get_session_manager()
+        with get_db_session() as db:
+            session = session_manager._get_session_or_raise(db, session_id)
+            # Before anything changes: an arc review in flight would write the
+            # thread back after the delete below, as for a clear.
+            _refuse_during_an_arc_review(db, session)
+
+            # Columns only, in transcript order: grouping needs no content, and a
+            # tool_result row's content can be large.
+            rows = (
+                db.query(
+                    SessionMessage.id, SessionMessage.role, SessionMessage.message_type
+                )
+                .filter(SessionMessage.session_id == session.id)
+                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+                .all()
+            )
+            turn = turn_message_ids(rows, message_id)
+            if not turn:
+                raise MessageNotFoundError(message_id)
+
+            doomed = list(turn)
+            hidden_message_id = None
+            earliest = earliest_user_message(db, session.id)
+            if earliest is not None and earliest.id == message_id:
+                # Never delete the engine-mode row: hide it, as a clear does.
+                earliest.message_type = ENGINE_MODE_MARKER_MESSAGE_TYPE
+                hidden_message_id = earliest.id
+                doomed = turn[1:]
+
+            deleted_messages = 0
+            if doomed:
+                deleted_messages = (
+                    db.query(SessionMessage)
+                    .filter(
+                        SessionMessage.session_id == session.id,
+                        SessionMessage.id.in_(doomed),
+                    )
+                    .delete(synchronize_session=False)
+                )
+
+            db.add(
+                UsageEvent(
+                    username=deleted_by,
+                    event_type=EVENT_MESSAGE_DELETED,
+                    session_id=session.id,
+                )
+            )
+            # A failed insert or re-type raises here, before the thread is touched.
+            db.flush()
+
+            from src.core.checkpointer import get_checkpointer
+
+            get_checkpointer().delete_thread(session_id, session=db)
+
+        logger.info(
+            "Deleted a conversation turn",
+            extra={
+                "session_id": session_id,
+                "message_id": message_id,
+                "deleted_by": deleted_by,
+                "deleted_messages": deleted_messages,
+                "hidden_message_id": hidden_message_id,
+            },
+        )
+        return {
+            "status": "deleted",
+            "session_id": session_id,
+            "message_id": message_id,
+            "deleted_messages": deleted_messages,
+            "hidden_message_id": hidden_message_id,
         }
 
     def _ensure_user_experiment(
