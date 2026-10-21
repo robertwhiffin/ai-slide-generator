@@ -40,6 +40,12 @@ from src.domain.conversation_engine import (
     selects_graph_engine,
 )
 from src.domain.conversation_turns import turn_message_ids
+# BLANK_SLIDE_HTML is re-exported: callers and tests import it from here.
+from src.domain.deck_spec_slides import (
+    BLANK_DECK_SPEC_ENTRY,
+    BLANK_SLIDE_HTML as BLANK_SLIDE_HTML,
+    renumber_spec_slides,
+)
 from src.domain.slide import Slide, has_slide_wrapper
 from src.domain.slide_deck import SlideDeck
 from src.api.schemas.agent_config import resolve_agent_config
@@ -65,24 +71,11 @@ from src.utils.image_utils import substitute_deck_dict_images, substitute_image_
 
 logger = logging.getLogger(__name__)
 
-#: The slide ``insert_slide`` adds when the caller supplies no HTML.
-#: The wrapper is not decoration: ``has_slide_wrapper`` is what the parser, the
-#: frontend thumbnail panel and every export path use to recognise a slide, so an
-#: empty slide still has to carry it.  Left otherwise bare deliberately — the deck's
-#: own CSS styles it, and any content here would be content nobody asked for.
-BLANK_SLIDE_HTML = '<div class="slide"></div>'
-
-# The deck-spec entry a newly inserted slide gets: contiguous with its neighbours
-# (`DeckSpec.slide_at` depends on that) and deliberately undescribed.  The route
-# that inserts fires the spec-dirty marker and the arc-review sweeper writes the
-# prose; inventing a purpose here would put words in the architect's mouth.
-_BLANK_DECK_SPEC_ENTRY: Dict[str, Any] = {
-    "purpose": "",
-    "content_brief": "",
-    "assumes": "",
-    "hands_off": "",
-    "data_references": [],
-}
+# The deck-spec entry a newly inserted slide gets (defined in
+# src.domain.deck_spec_slides): contiguous with its neighbours (`DeckSpec.slide_at`
+# depends on that) and deliberately undescribed.  The spliced entry is the blank's
+# description; inventing a purpose here would put words in the architect's mouth.
+_BLANK_DECK_SPEC_ENTRY = BLANK_DECK_SPEC_ENTRY
 
 
 def _pinned_graph_failure_release_id(
@@ -4144,44 +4137,30 @@ class ChatService:
             )
             return None
 
-        # One pass, and identity is never inferred from equality: two entries with
-        # the same content are still two entries.
-        positioned: List[Dict[str, Any]] = []
-        unpositioned: List[Any] = []
-        for entry in slides:
-            if isinstance(entry, dict) and isinstance(entry.get("position"), int):
-                positioned.append(entry)
-            else:
-                unpositioned.append(entry)
-        positioned.sort(key=lambda e: e["position"])
-
+        # The split, the reorder and the re-stamp are the pure core, shared with the
+        # manual insert's transaction (src.domain.deck_spec_slides).
         try:
-            rewritten = reorder(list(positioned))
+            spec = renumber_spec_slides(spec, reorder)
         except IndexError:
             # The route validated its index against the DECK, so an index the spec
             # cannot answer means the two have already drifted.  Leaving a drifted
             # spec alone is recoverable; renumbering it against the wrong slides is
-            # not.
+            # not.  The count is the entries renumber_spec_slides handed to reorder.
+            positioned = sum(
+                1
+                for entry in slides
+                if isinstance(entry, dict) and isinstance(entry.get("position"), int)
+            )
             logger.warning(
                 "deck spec has %s entries and cannot answer this mutation; "
                 "leaving it untouched",
-                len(positioned),
+                positioned,
                 extra={"session_id": session_id, "route": label},
             )
             return None
 
-        if rewritten is None:
+        if spec is None:
             return None
-
-        renumbered: List[Any] = []
-        for index, entry in enumerate(rewritten):
-            entry = dict(entry)
-            entry["position"] = index
-            renumbered.append(entry)
-        renumbered.extend(unpositioned)
-
-        spec = dict(spec)
-        spec["slides"] = renumbered
 
         try:
             _user = get_current_username()
