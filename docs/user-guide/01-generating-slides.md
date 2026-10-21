@@ -53,7 +53,7 @@ Click the **Send** button or press Enter to start generation. A session is creat
 
 ## Iterating on Your Slides
 
-After slides are generated, they appear in the right panel. You can see progress in the chat panel as slides stream in.
+While your request runs, the chat shows what Tellr is doing — planning the deck, building and reviewing slides, fixing slides the review flags and reviewing the narrative — and slides appear in the right panel as they finish.
 
 Refine slides through follow-up messages in the same session:
 

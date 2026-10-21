@@ -89,6 +89,13 @@ class ChatRequest(Base):
     # Final result data (JSON) - slides, raw_html, replacement_info
     result_json = Column(Text, nullable=True)
 
+    # #319: the graph turn's latest stage summary (JSON) and its sequence number.
+    # Written ONLY by SessionManager.record_chat_request_progress, whose
+    # conditional UPDATE on progress_seq is what stops concurrent per-slide
+    # writers regressing it.  Read by GET /chat/poll as `turn_progress`.
+    progress_json = Column(Text, nullable=True)
+    progress_seq = Column(Integer, nullable=True)
+
     # Relationship
     session = relationship("UserSession", back_populates="chat_requests")
 

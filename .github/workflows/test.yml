@@ -454,6 +454,7 @@ jobs:
             tests/integration/test_spec_dirty_marker_routes.py \
             tests/integration/test_sweeper_describe_only.py \
             tests/integration/test_architect_reply_is_persisted.py \
+            tests/integration/test_turn_progress_polling.py \
             tests/integration/test_insert_slide_route.py \
             tests/integration/test_slide_id_is_durable.py \
             tests/integration/test_deck_spec_change_turn.py \
@@ -742,6 +743,7 @@ jobs:
           - template-cards
           - template-preview-import-scan
           - template-viewer
+          - turn-progress
           - viewer-readonly
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
