@@ -44,6 +44,7 @@ import {
   renderDeckSpecMarkdown,
 } from '../../services/deckSpecMarkdown';
 import { downloadTextFile } from '../../utils/downloadFile';
+import { isBlankSlideSpec } from '../../services/blankSlide';
 
 interface SpecViewProps {
   /** The deck whose `deck_spec` is rendered; null before a deck exists. */
@@ -245,18 +246,32 @@ export function SpecView({ slideDeck, onDiscuss, reviewInProgress = false }: Spe
                   <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                     Slide {slide.position + 1}
                   </div>
-                  <p
-                    data-testid={`spec-slide-purpose-${slide.position}`}
-                    className="mt-0.5 text-sm font-medium text-foreground"
-                  >
-                    {slide.purpose}
-                  </p>
-                  <p
-                    data-testid={`spec-slide-brief-${slide.position}`}
-                    className="mt-1 text-sm text-foreground"
-                  >
-                    {slide.content_brief}
-                  </p>
+                  {isBlankSlideSpec(slide) ? (
+                    // A manually inserted slide has an empty purpose and brief; two empty
+                    // paragraphs would read as a broken plan. The Markdown export says the
+                    // same ("Blank slide."), decided by the same predicate.
+                    <p
+                      data-testid={`spec-slide-blank-${slide.position}`}
+                      className="mt-0.5 text-sm italic text-muted-foreground"
+                    >
+                      Blank slide
+                    </p>
+                  ) : (
+                    <>
+                      <p
+                        data-testid={`spec-slide-purpose-${slide.position}`}
+                        className="mt-0.5 text-sm font-medium text-foreground"
+                      >
+                        {slide.purpose}
+                      </p>
+                      <p
+                        data-testid={`spec-slide-brief-${slide.position}`}
+                        className="mt-1 text-sm text-foreground"
+                      >
+                        {slide.content_brief}
+                      </p>
+                    </>
+                  )}
                   {/* assumes / hands off are the pair that makes the arc legible:
                       what this slide inherits, and what it leaves the reader. */}
                   <p className="mt-1 text-xs text-muted-foreground">

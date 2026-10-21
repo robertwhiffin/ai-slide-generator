@@ -25,6 +25,11 @@
  *   - not gated on the review  : `{spec && !reviewInProgress && ...}`, or
  *                                `disabled={reviewInProgress}` (deckReviewFlag's scan too)
  *
+ * A blank slide (#314 Task 7, D11), the block after the export block:
+ *   - blank entry labelled     : drop the spec-slide-blank-N label (or keep the empty purpose/brief <p>s)
+ *   - only a BLANK entry       : label any entry with an empty purpose (or brief) only
+ *   - C4's whitespace rule     : decide blankness with `trim()` (U+00A0 is not blank)
+ *
  * THE LAST ONE IS FINDING 18b's RESHAPED ASSERTION, and the reason it is shaped
  * this way is worth keeping.  The plan asked for "the design contract shows which
  * brand (ids), never compiled style content".  `DesignContractRef` holds THREE
@@ -675,5 +680,84 @@ describe('SpecView — Export spec as Markdown', () => {
     expect(clicks[0].download).toBe(GOLDEN_FILENAME);
     expect(createdBlobs).toHaveLength(1);
     expect(await readBlobText(createdBlobs[0])).toBe(goldenMarkdown);
+  });
+});
+
+// ── a blank slide (#314 Task 7, D11) ──────────────────────────────────────────
+//
+// A manually inserted slide gets the blank spec entry: purpose and content brief empty
+// (BLANK_DECK_SPEC_ENTRY, src/domain/deck_spec_slides.py). Without a label the view shows a
+// heading over two empty paragraphs, which reads as a broken plan. The label replaces exactly
+// those two paragraphs; the heading and the assumes / hands-off pair stay. "Blank" is
+// isBlankSlideSpec's rule (C4): both fields HTML ASCII whitespace only. The Markdown export says
+// the same thing ("Blank slide."), which deckSpecMarkdownCoverage.test.tsx's guard (b) checks.
+
+describe('SpecView — a blank slide', () => {
+  /** The blank entry a manual insert writes, with its position stamped. */
+  function blankSlide(position: number): SlideSpec {
+    return {
+      position,
+      purpose: '',
+      content_brief: '',
+      assumes: '',
+      hands_off: '',
+      data_references: [],
+      template_section_index: null,
+    };
+  }
+
+  it('labels a blank entry "Blank slide" in place of its purpose and brief, and keeps its heading', () => {
+    // Sabotage: drop the label (or keep rendering the empty purpose/brief paragraphs).
+    renderSpec(makeSpec({ slides: [makeSlide(0), blankSlide(1), makeSlide(2)] }));
+
+    const entry = screen.getByTestId('spec-slide-1');
+    expect(entry).toHaveTextContent('Slide 2');
+    const label = within(entry).getByTestId('spec-slide-blank-1');
+    expect(label.textContent).toBe('Blank slide');
+    expect(screen.queryByTestId('spec-slide-purpose-1')).toBeNull();
+    expect(screen.queryByTestId('spec-slide-brief-1')).toBeNull();
+    // The rest of the entry is unchanged: the assumes / hands-off pair is still there.
+    expect(within(entry).getByTestId('spec-slide-assumes-1')).toBeInTheDocument();
+    expect(within(entry).getByTestId('spec-slide-hands-off-1')).toBeInTheDocument();
+
+    // The non-blank neighbours keep their purpose and brief, and carry no label.
+    for (const position of [0, 2]) {
+      expect(screen.getByTestId(`spec-slide-${position}`)).toHaveTextContent(`Slide ${position + 1}`);
+      expect(screen.getByTestId(`spec-slide-purpose-${position}`))
+        .toHaveTextContent(`Purpose of the brief at position ${position}.`);
+      expect(screen.getByTestId(`spec-slide-brief-${position}`))
+        .toHaveTextContent(`Content brief for position ${position}.`);
+      expect(screen.queryByTestId(`spec-slide-blank-${position}`)).toBeNull();
+    }
+    // Exactly one label, on the one blank entry.
+    expect(screen.getAllByTestId(/^spec-slide-blank-/)).toHaveLength(1);
+  });
+
+  it.each<{ label: string; purpose: string; contentBrief: string; blank: boolean }>([
+    { label: 'ASCII spaces in both', purpose: '   ', contentBrief: '   ', blank: true },
+    { label: 'every HTML ASCII whitespace character', purpose: '\t\n\f\r ', contentBrief: ' \n', blank: true },
+    { label: 'a purpose but no brief', purpose: 'Pricing', contentBrief: '', blank: false },
+    { label: 'a brief but no purpose', purpose: '', contentBrief: 'Three tiers, one table.', blank: false },
+    { label: 'U+00A0 purpose, empty brief', purpose: '\u00a0', contentBrief: '', blank: false },
+    { label: 'empty purpose, U+00A0 brief', purpose: '', contentBrief: '\u00a0', blank: false },
+  ])('$label -> blank: $blank', ({ purpose, contentBrief, blank }) => {
+    // Sabotage: label an entry with only ONE empty field; decide blankness with `trim()`.
+    renderSpec(makeSpec({
+      slides: [makeSlide(0), { ...makeSlide(1), purpose, content_brief: contentBrief }],
+    }));
+
+    // Precondition: the entry rendered under its heading either way.
+    expect(screen.getByTestId('spec-slide-1')).toHaveTextContent('Slide 2');
+    if (blank) {
+      expect(screen.getByTestId('spec-slide-blank-1').textContent).toBe('Blank slide');
+      expect(screen.queryByTestId('spec-slide-purpose-1')).toBeNull();
+      expect(screen.queryByTestId('spec-slide-brief-1')).toBeNull();
+    } else {
+      expect(screen.queryByTestId('spec-slide-blank-1')).toBeNull();
+      expect(screen.getByTestId('spec-slide-purpose-1').textContent).toBe(purpose);
+      expect(screen.getByTestId('spec-slide-brief-1').textContent).toBe(contentBrief);
+    }
+    // The non-blank neighbour is never labelled.
+    expect(screen.queryByTestId('spec-slide-blank-0')).toBeNull();
   });
 });

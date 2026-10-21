@@ -5,14 +5,17 @@
  * mutates it. The output is a function of the spec alone (no clock, locale or randomness), so the
  * same spec always yields the same bytes. Every user value is collapsed to one line and
  * backslash-escaped (`escapeText`), so a value cannot inject structure into the document; renderer
- * constants (labels, `None.`, `Not set.`) are never escaped.
+ * constants (labels, `None.`, `Not set.`, `Blank slide.`) are never escaped.
  */
 import type { DeckSpec, ResolvedData } from '../types/slide';
+import { isBlankSlideSpec } from './blankSlide';
 
 /** RFC 7763 media type, UTF-8, no BOM. */
 export const DECK_SPEC_MARKDOWN_MIME = 'text/markdown;charset=utf-8';
 
 const NOT_SET = 'Not set.';
+/** A blank slide's line, standing in for its Purpose and Content brief lines. A renderer constant: never escaped. */
+const BLANK_SLIDE = 'Blank slide.';
 /** CommonMark §2.4 lets any ASCII punctuation be backslash-escaped; these are the ones with meaning (D4). `|` and `~` keep GFM tables and strikethrough inert (GitHub honours these escapes); `$` and `@` keep dollar-math and citation syntax inert where a renderer honours the escape (e.g. pandoc). GitHub's own math, @-mention and #N rendering ignores backslash escapes (checked against GitHub's markdown API, 2026-10-20). */
 const ESCAPE_ANYWHERE = /[\\`*_[\]<>#|~$&@]/g;
 /** D4 step 1, by code point: C0/C1 controls, except the whitespace ones and NEL (U+0085), which step 2 collapses. */
@@ -89,9 +92,16 @@ export function renderDeckSpecMarkdown(spec: DeckSpec): string {
   }
   for (const slide of spec.slides) {
     blocks.push(`### Slide ${Number.isInteger(slide.position) ? String(slide.position + 1) : escapeText(slide.position)}`);
+    // A blank slide (a manual insert) says so in place of its two empty lines, as the Spec view does.
+    // Blankness is the view's rule (`isBlankSlideSpec`: HTML ASCII whitespace only), NOT `normalise()`'s,
+    // so the file and the view always agree on which slides are blank.
     const fields = [
-      `**Purpose:** ${escapeText(slide.purpose)}`,
-      `**Content brief:** ${escapeText(slide.content_brief)}`,
+      ...(isBlankSlideSpec(slide)
+        ? [BLANK_SLIDE]
+        : [
+            `**Purpose:** ${escapeText(slide.purpose)}`,
+            `**Content brief:** ${escapeText(slide.content_brief)}`,
+          ]),
       `**Assumes:** ${escapeText(slide.assumes)}`,
       `**Hands off:** ${escapeText(slide.hands_off)}`,
     ];

@@ -639,6 +639,101 @@ describe('slide order', () => {
   });
 });
 
+// ── a blank slide (#314 Task 7, M1) ───────────────────────────────────────────
+
+describe('a blank slide entry (#314 M1): "Blank slide." in place of its two Not set. lines', () => {
+  // A manually inserted slide gets the blank spec entry: purpose and content brief empty. The Spec
+  // view labels it "Blank slide" (SpecView.test.tsx), so the export must say the same, or the view
+  // shows text the file does not carry (deckSpecMarkdownCoverage.test.tsx guard (b), its BLANK
+  // fixture). "Blank" is the VIEW's rule, isBlankSlideSpec (PLAN-CORRECTIONS C4): both fields HTML
+  // ASCII whitespace only. It is NOT this renderer's normalise(), which also collapses U+00A0,
+  // U+FEFF, U+3000 and VT: an entry holding only those is not blank in the view, so here it keeps
+  // its two "Not set." lines. Every other line of the entry is unchanged. GOLDEN has no blank entry,
+  // so its bytes do not move (the 'golden' describe above).
+  //
+  // Sabotage targets:
+  //  - no blank branch (or a wording other than `Blank slide.`)  -> the exact-section tests;
+  //  - the blank branch also drops Assumes / Hands off / Slide type / Data references -> the same;
+  //  - blank when only ONE field is empty                       -> 'one empty field';
+  //  - blank decided by normalise() or trim(), not isBlankSlideSpec -> 'not HTML ASCII whitespace'.
+  const SLIDE_2_PURPOSE = '- **Purpose:** Show the money at stake.\n';
+  const SLIDE_2_BRIEF = '- **Content brief:** One stat: ARR at risk, with its share of Q4.\n';
+  /** GOLDEN's "Slide 2" section with its purpose and brief replaced by the blank line. */
+  const BLANK_SLIDE_2 = '### Slide 2\n\n'
+    + '- Blank slide.\n'
+    + '- **Assumes:** The reader accepts the churn number from slide 1.\n'
+    + '- **Hands off:** The reader wants to know what fixing it costs.\n'
+    + '- **Slide type:** Stats\n'
+    + '- **Data references:** churn\\_rate, arr\\_at\\_risk\n\n';
+
+  function withSlide2(purpose: string, contentBrief: string): DeckSpec {
+    const spec = golden();
+    spec.slides[1].purpose = purpose;
+    spec.slides[1].content_brief = contentBrief;
+    return spec;
+  }
+
+  it('precondition: GOLDEN carries the two Slide 2 lines a blank replaces, and no blank line', () => {
+    expect(goldenMarkdown).toContain(`### Slide 2\n\n${SLIDE_2_PURPOSE}${SLIDE_2_BRIEF}`);
+    expect(goldenMarkdown).not.toContain('Blank slide');
+  });
+
+  it('a blank entry renders exactly "- Blank slide." in place of its Purpose and Content brief lines', () => {
+    const out = render(withSlide2('', ''));
+    expect(slideBlock(out, 'Slide 2')).toBe(BLANK_SLIDE_2);
+    // And nothing else in the document moved: it is GOLDEN with those two lines swapped for one.
+    const expected = goldenMarkdown.replace(`${SLIDE_2_PURPOSE}${SLIDE_2_BRIEF}`, '- Blank slide.\n');
+    expect(expected).not.toBe(goldenMarkdown);
+    expect(out).toBe(expected);
+  });
+
+  it('a blank entry as a manual insert writes it (every field empty) renders its exact section', () => {
+    // BLANK_DECK_SPEC_ENTRY with a position stamped, between GOLDEN's slides at positions 1 and 3.
+    const spec = golden();
+    spec.slides.splice(2, 0, {
+      position: 2, purpose: '', content_brief: '', assumes: '', hands_off: '', data_references: [],
+    });
+    const out = render(spec);
+    expect(slideBlock(out, 'Slide 3')).toBe(
+      '### Slide 3\n\n'
+      + '- Blank slide.\n'
+      + '- **Assumes:** Not set.\n'
+      + '- **Hands off:** Not set.\n'
+      + '- **Data references:** None.\n\n',
+    );
+    // The blank line is a renderer constant: unescaped, and its own list item.
+    expect(linesOf(out).filter((line) => line === '- Blank slide.')).toHaveLength(1);
+    expect(out).not.toContain('**Purpose:** Not set.');
+    expect(out).not.toContain('**Content brief:** Not set.');
+  });
+
+  it('HTML ASCII whitespace only, in both fields, is blank', () => {
+    expect(slideBlock(render(withSlide2('\t\n\f\r ', ' \n')), 'Slide 2')).toBe(BLANK_SLIDE_2);
+  });
+
+  it.each([
+    ['purpose', '', 'One stat: ARR at risk, with its share of Q4.', `- **Purpose:** Not set.\n${SLIDE_2_BRIEF}`],
+    ['content brief', 'Show the money at stake.', '', `${SLIDE_2_PURPOSE}- **Content brief:** Not set.\n`],
+  ])('one empty field (%s) is not blank: that field still prints Not set.', (_field, purpose, contentBrief, lines) => {
+    const block = slideBlock(render(withSlide2(purpose, contentBrief)), 'Slide 2');
+    expect(block).toContain(`### Slide 2\n\n${lines}- **Assumes:** `);
+    expect(block).not.toContain('Blank slide');
+  });
+
+  it.each([
+    ['U+00A0', '\u00a0'],
+    ['U+FEFF', '\ufeff'],
+    ['U+3000', '\u3000'],
+    ['VT (U+000B)', '\u000b'],
+  ])('%s only, in both fields, is not HTML ASCII whitespace: not blank, so two Not set. lines', (_label, value) => {
+    // normalise() turns these into nothing, so the renderer's own emptiness test would call the entry
+    // blank; the view's isBlankSlideSpec does not, and the export must agree with the view.
+    const block = slideBlock(render(withSlide2(value, value)), 'Slide 2');
+    expect(block).toContain('### Slide 2\n\n- **Purpose:** Not set.\n- **Content brief:** Not set.\n- **Assumes:** ');
+    expect(block).not.toContain('Blank slide');
+  });
+});
+
 // ── determinism (D5) ──────────────────────────────────────────────────────────
 
 describe('determinism (D5)', () => {
