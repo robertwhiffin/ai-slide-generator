@@ -1353,6 +1353,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       lockedBy={!isLockHolder ? editingLockHolder : null}
                       onVerificationComplete={handleVerificationComplete}
                       sessionId={sessionId}
+                      insertDisabled={isGenerating}
                     />
                   </div>
 
