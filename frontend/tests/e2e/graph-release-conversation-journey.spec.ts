@@ -258,8 +258,10 @@ test.describe.serial(
           });
         },
       );
+      // #317: the chat panel reads GET …/messages?limit=200 when a turn ends, to learn the ids
+      // of the messages it sent; the optional query keeps that read inside this stub.
       await context.route(
-        /\/api\/sessions\/[^/]+\/messages$/,
+        /\/api\/sessions\/[^/]+\/messages(\?.*)?$/,
         async (route) => {
           await route.fulfill({
             status: 200,

@@ -11,6 +11,9 @@ export interface ToolCall {
 export type MessageDetails = Record<string, string>;
 
 export interface Message {
+  /** Persisted SessionMessage.id. Absent on a message this panel has shown but not yet matched
+   *  to its row (a just-sent or streamed one); only messages with an id can be deleted (#317). */
+  id?: number;
   role: MessageRole;
   content: string;
   timestamp: string;

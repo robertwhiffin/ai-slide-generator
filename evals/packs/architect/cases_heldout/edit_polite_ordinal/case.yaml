@@ -1,0 +1,8 @@
+kind: mutation
+fault: 'a polite question with an ordinal is still an edit request: act on position
+  3, do not ask'
+expect:
+  intent: edit
+  positions:
+  - 3
+design_system_active: true

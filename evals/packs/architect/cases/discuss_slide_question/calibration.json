@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll rework the accessibility point on slide 7.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [
+      6
+    ],
+    "proposed_design_contract": null
+  }
+}

@@ -870,7 +870,7 @@ async def poll_chat(
 
     Returns:
         Dictionary with status, events, last_message_id, result, error, slides,
-        slide_cursor, slide_revisions and revision_mark
+        slide_cursor, slide_revisions, revision_mark and turn_progress
 
     Raises:
         HTTPException: 404 if request not found, 403 if caller is not the
@@ -965,4 +965,13 @@ async def poll_chat(
         ),
         "slide_revisions": slide_revisions,
         "revision_mark": revision_mark,
+        # #319 — the graph turn's latest stage summary, read off this request's
+        # row, so any worker serves the same value.  Null once the request is
+        # terminal (a finished turn never shows a stale stage) and null for a
+        # monolith turn, which never writes one.
+        "turn_progress": (
+            chat_request.get("turn_progress")
+            if chat_request["status"] not in ("completed", "error")
+            else None
+        ),
     }

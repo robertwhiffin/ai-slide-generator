@@ -105,6 +105,7 @@ from src.services.graph.nodes import (
     reset_fix_slots,
     slide_pipeline_node,
 )
+from src.services.graph.progress import turn_progress_scope
 from src.services.graph.routers import (
     architect_router,
     foreman_router,
@@ -325,6 +326,9 @@ def invoke_graph(
     left in the var would tag turn 2's chat rows with turn 1's request, so turn
     1's poll would receive turn 2's reply and turn 2's own poll would never see
     it.
+
+    The turn's stage summary (#319) is installed around the invoke and removed
+    after it, success or failure, so nothing outlives the turn.
     """
     # The pin FIRST, and that order is load-bearing (Ruling C-3): a legacy
     # conversation with no persisted release must raise
@@ -374,4 +378,9 @@ def invoke_graph(
             "describe_only": bool(describe_only),
         },
     )
-    return get_graph().invoke(state, config)
+    # #319: this turn's stage summary, installed for exactly the duration of
+    # the invoke.  Set BEFORE invoke for the same context-copy reason as the
+    # emitter and the fix slots (every fanned task shares the object) and
+    # removed after it, success or failure, so nothing outlives the turn.
+    with turn_progress_scope():
+        return get_graph().invoke(state, config)

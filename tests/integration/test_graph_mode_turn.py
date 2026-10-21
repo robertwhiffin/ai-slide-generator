@@ -1078,6 +1078,47 @@ class TestTheCompleteEvent:
         assert slides is not None, "COMPLETE carried no deck"
         assert len(slides["slides"]) == 3
 
+    def test_stage_progress_streams_before_complete_in_seq_order(
+        self, graph_chat_env
+    ):
+        """#319 on SSE: the turn's stages reach the client while it runs, in order.
+
+        The real ``_send_message_streaming_graph`` yields whatever the graph
+        thread queues, and the tracker queues each snapshot INSIDE its lock, so
+        the stream must carry them as ``1..n`` with no gap and no reordering —
+        a gap is a lost stage, a repeat or a step back is a placeholder that
+        flickers backwards.  Every one must precede COMPLETE: a stage arriving
+        after the deck is a stage nobody sees.
+        """
+        graph_chat_env.recorder.configure(slide_count=3)
+
+        events = graph_chat_env.run(is_first_message=False)
+
+        types = _types(events)
+        progress_at = [
+            i for i, kind in enumerate(types) if kind == StreamEventType.TURN_PROGRESS
+        ]
+        assert progress_at, (
+            "the SSE stream carried no turn_progress event: the placeholder can "
+            "only ever say 'Generating slides...'"
+        )
+        complete_at = types.index(StreamEventType.COMPLETE)
+        assert max(progress_at) < complete_at, (
+            "a turn_progress event arrived after COMPLETE, when the placeholder "
+            "is already gone"
+        )
+        seqs = [events[i].turn_progress["seq"] for i in progress_at]
+        assert seqs == list(range(1, len(seqs) + 1)), (
+            f"the streamed stages are not seq 1..n in order: {seqs}"
+        )
+        last = events[progress_at[-1]].turn_progress
+        assert last["phase"] == "reviewing_deck", (
+            f"the last streamed stage is {last!r}, not the deck review"
+        )
+        assert last["slides"]["done"] == [0, 1, 2], (
+            f"the last streamed stage does not have every slide done: {last!r}"
+        )
+
     def test_complete_declares_which_engine_ran(self, graph_chat_env):
         graph_chat_env.recorder.configure(slide_count=1)
 

@@ -143,16 +143,42 @@ class TestTopology:
 # ---------------------------------------------------------------------------
 
 
+def _installed_turn_progress():
+    """The #319 turn-progress tracker installed right now, or ``None``.
+
+    Imported lazily, with a missing module read as "no tracker", so the
+    pre-#319 tests in this file keep collecting and running whether or not
+    ``src.services.graph.progress`` exists.  The two tracker tests import it
+    directly and fail loudly instead.
+    """
+    try:
+        from src.services.graph.progress import get_turn_progress
+    except ModuleNotFoundError:
+        return None
+    return get_turn_progress()
+
+
 class _FakeCompiled:
     """Records what ``invoke_graph`` hands the compiled graph."""
 
     def __init__(self):
         self.calls = []
         self.emitter_during_invoke = "not-invoked"
+        # #319: the tracker installed while each invoke ran, and its seq then.
+        self.progress_during_invoke = []
+        self.progress_seq_during_invoke = []
+        self.raise_on_invoke = False
 
     def invoke(self, state, config):
         self.emitter_during_invoke = get_event_emitter()
+        tracker = _installed_turn_progress()
+        self.progress_during_invoke.append(tracker)
+        self.progress_seq_during_invoke.append(
+            tracker.snapshot()["seq"] if tracker is not None else None
+        )
         self.calls.append({"state": dict(state), "config": dict(config)})
+        if self.raise_on_invoke:
+            raise RuntimeError("the compiled graph failed mid-turn")
         return {"ok": True}
 
 
@@ -346,6 +372,51 @@ class TestInvokeGraphConfig:
     def test_session_id_always_wins_over_the_initial_state(self, fake_graph):
         invoke_graph("sess-42", {"session_id": "someone-elses-session"})
         assert fake_graph.calls[0]["state"]["session_id"] == "sess-42"
+
+    def test_every_turn_gets_a_fresh_progress_tracker(self, fake_graph):
+        """#319 D14: each turn's stage summary starts from nothing, in its own
+        tracker, so turn 2's placeholder can never show turn 1's stage."""
+        from src.services.graph.progress import TurnPhase, turn_progress_var
+
+        turn_progress_var.set(None)
+        try:
+            invoke_graph("sess-42", {})
+            first = fake_graph.progress_during_invoke[0]
+            assert first is not None, "no tracker was installed for the invoke"
+            # Turn 1 made progress; turn 2 must not inherit any of it.
+            first.report(phase=TurnPhase.PLANNING)
+            assert first.snapshot()["seq"] == 1
+            invoke_graph("sess-42", {})
+        finally:
+            turn_progress_var.set(None)
+
+        first, second = fake_graph.progress_during_invoke
+        assert second is not None, "no tracker was installed for the second invoke"
+        assert second is not first
+        assert fake_graph.progress_seq_during_invoke == [0, 0]
+
+    def test_the_tracker_does_not_outlive_the_turn(self, fake_graph):
+        """#319 D19: the scope removes the tracker when the invoke ends, success
+        or failure, so a later monolith turn (or any code after the invoke) in
+        the same context has nothing to report into."""
+        from src.services.graph.progress import get_turn_progress, turn_progress_var
+
+        turn_progress_var.set(None)
+        try:
+            invoke_graph("sess-42", {})
+            after_success = get_turn_progress()
+            fake_graph.raise_on_invoke = True
+            with pytest.raises(RuntimeError, match="failed mid-turn"):
+                invoke_graph("sess-42", {})
+            after_failure = get_turn_progress()
+        finally:
+            turn_progress_var.set(None)
+
+        during_success, during_failure = fake_graph.progress_during_invoke
+        assert during_success is not None, "no tracker was installed for the invoke"
+        assert after_success is None, "the tracker outlived a turn that succeeded"
+        assert during_failure is not None, "no tracker was installed for the invoke"
+        assert after_failure is None, "the tracker outlived a turn that raised"
 
 
 class TestInvokeGraphDescribeOnly:

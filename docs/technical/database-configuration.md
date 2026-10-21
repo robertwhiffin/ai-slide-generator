@@ -489,6 +489,8 @@ class ChatRequest(Base):
     status: str                  # 'pending', 'running', 'completed', 'error'
     error_message: str | None    # Error details if status=error
     result_json: str | None      # JSON with slides, raw_html, replacement_info
+    progress_json: str | None    # Graph turn's latest stage summary (JSON), #319
+    progress_seq: int | None     # seq of progress_json; guards against out-of-order writes
     created_at: datetime
     completed_at: datetime | None
 ```
@@ -737,6 +739,7 @@ For adding columns to existing tables in production, a private `_run_migrations(
 8. Adds `parent_session_id` to `user_sessions` with FK and composite index for contributor sessions
 9. Drops legacy `profile_id`/`profile_name` from `user_sessions`; migrates `CAN_VIEW` to `CAN_USE` in contributor tables
 10. Adds `global_permission` to `user_sessions` for workspace-wide deck sharing (`_migrate_deck_workspace_sharing()`)
+11. Adds `progress_json`, `progress_seq` to `chat_requests` (`_migrate_chat_request_progress()`, #319)
 
 ```python
 # src/core/database.py

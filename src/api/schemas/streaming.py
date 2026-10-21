@@ -21,6 +21,7 @@ class StreamEventType(str, Enum):
     SESSION_TITLE = "session_title"  # Auto-generated session title
     SESSION_CREATED = "session_created"  # New session created on first message
     SLIDE_READY = "slide_ready"  # One committed slide released by the reorder buffer
+    TURN_PROGRESS = "turn_progress"  # Graph turn's stage summary for the chat placeholder (#319)
 
 
 class StreamEvent(BaseModel):
@@ -40,6 +41,7 @@ class StreamEvent(BaseModel):
         scripts: One slide's per-slide JavaScript (for slide_ready events)
         agent: Which agent produced this event's subject (§7.3 attribution)
         slide_cursor: The next position not yet released (for slide_ready events)
+        turn_progress: The graph turn's stage summary (for turn_progress events)
     """
 
     type: StreamEventType = Field(..., description="Event type")
@@ -74,6 +76,11 @@ class StreamEvent(BaseModel):
     agent: Optional[str] = Field(default=None, description="Agent this event is attributed to")
     slide_cursor: Optional[int] = Field(
         default=None, description="Next slide position not yet released"
+    )
+    # #319 — the graph turn's stage summary ({seq, phase, slides}); see
+    # src/services/graph/progress.py for the contract.  Only on turn_progress events.
+    turn_progress: Optional[Dict[str, Any]] = Field(
+        default=None, description="Graph turn stage summary (for turn_progress events)"
     )
 
     def to_sse(self) -> str:

@@ -29,10 +29,25 @@ from typing import get_type_hints
 import pytest
 
 from src.api.schemas.streaming import StreamEventType
+from src.api.services.session_manager import get_session_manager
 from src.api.services.slide_repository import is_placeholder_record
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SharedDeckMutationEvent, UserSession
-from src.domain.finding import VERDICT_KEY, DeckReviewOutput, make_finding_id
+from src.domain.finding import CRITERIA, VERDICT_KEY, DeckReviewOutput, Finding, make_finding_id
+from src.domain.finding_copy import (
+    ADDRESSED,
+    DECK_ADVISORY_CLOSING,
+    DECK_ADVISORY_HEADER_PREFIX,
+    DECK_ADVISORY_HEADER_SUFFIX,
+    DECK_GRAIN_ISSUE,
+    FIXED_AUTOMATICALLY,
+    GENERIC_ISSUE,
+    LEFT_FOR_JUDGEMENT,
+    NOT_FIXED_AUTOMATICALLY,
+    PLAIN_ISSUES,
+    REVIEWER_DETAILS_SEPARATOR,
+    plain_issue,
+)
 from src.domain.skill_io import (
     AnalystOutput,
     ArchitectOutput,
@@ -49,7 +64,7 @@ from src.services.graph_definition_manifest import load_graph_v1_manifest
 from src.services.persisted_graph_release import ResolvedDefinition
 from src.services.graph import builder as graph_builder
 from src.services.graph import nodes
-from src.services.graph.event_emitter import set_event_emitter
+from src.services.graph.event_emitter import set_chat_request_id, set_event_emitter
 from src.services.graph.nodes import (
     architect_node,
     build_branch_payload,
@@ -1462,6 +1477,366 @@ class TestArchitectReadsThePreviousArcVerdict:
         assert called == []
 
 
+def _numbering(positions):
+    """The ``slide_numbering`` value for a deck at *positions*, spelled out."""
+    return [
+        {"slide_number": number, "position": position}
+        for number, position in enumerate(positions, start=1)
+    ]
+
+
+def _reference(text, numbers, positions, out_of_range=()):
+    return {
+        "text": text,
+        "slide_numbers": list(numbers),
+        "positions": list(positions),
+        "out_of_range": list(out_of_range),
+    }
+
+
+class TestArchitectSlideNumbering:
+    """#313: the architect is handed the user's slide numbers already resolved.
+
+    Users say "slide 2" and mean the second slide the slide panel shows; the
+    model was left to compute the position and sometimes read it 0-indexed.
+    ``architect_node`` now sends ``slide_numbering`` (slide number -> position,
+    D1: committed rows first, else the persisted spec, else nothing) and
+    ``slide_references`` (every reference in the user's LATEST turn, resolved,
+    D4: none on a describe-only turn), and logs — never overrides — an edit
+    whose targets miss every slide the user named (D5).
+
+    Every assertion is on the full value, never on presence alone: a key that
+    is present but resolved against the wrong deck is the defect.
+    """
+
+    THREE = ["<div class='slide'>a</div>", "<div class='slide'>b</div>",
+             "<div class='slide'>c</div>"]
+    NODES_LOGGER = "src.services.graph.nodes"
+
+    def _persist(self, env, spec):
+        from src.api.services.deck_level_writer import write_deck_level_columns
+
+        write_deck_level_columns(env.session_id, deck_spec=spec.to_json())
+
+    def _payload(self, env):
+        calls = env.skills.calls_for("architect")
+        assert len(calls) == 1
+        return calls[0]["payload"]
+
+    def _warnings(self, caplog):
+        return [
+            r for r in caplog.records
+            if r.name == self.NODES_LOGGER and r.levelno >= logging.WARNING
+        ]
+
+    # -- (a) the payload carries both keys, resolved against the deck ---------
+
+    def test_a_three_slide_deck_resolves_slide_2_to_position_1(self, graph_env):
+        """(a) The A2 case: "slide 2" is position 1, not position 2."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Make slide 2 shorter"))
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == [
+            {"slide_number": 1, "position": 0},
+            {"slide_number": 2, "position": 1},
+            {"slide_number": 3, "position": 2},
+        ]
+        assert payload["slide_references"] == [
+            {
+                "text": "slide 2",
+                "slide_numbers": [2],
+                "positions": [1],
+                "out_of_range": [],
+            }
+        ]
+
+    # -- (b), (c), (d): where the numbering comes from (D1) -------------------
+
+    def test_b_a_build_with_no_deck_sends_both_keys_empty(self, graph_env):
+        """(b) No rows and no spec: there is no slide 2 to name yet, so the
+        reference in the message resolves nothing — both keys are ``[]``, still
+        present."""
+        graph_env.skills.set("architect", architect_build(make_spec((0, 1, 2))))
+
+        architect_node(
+            graph_env.state(
+                architect_message="Build a deck about pricing; slide 2 is the table"
+            )
+        )
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == []
+        assert payload["slide_references"] == []
+
+    @pytest.mark.parametrize(
+        "positions, expected_positions",
+        [((0, 1, 2), [1]), ((0, 2, 5), [2])],
+        ids=["contiguous-spec", "gapped-spec"],
+    )
+    def test_c_with_no_rows_the_numbering_comes_from_the_persisted_spec(
+        self, graph_env, positions, expected_positions
+    ):
+        """(c) A deck described but not yet built: the persisted spec's
+        POSITIONS number it (the gapped case shows they are read, not counted)."""
+        self._persist(graph_env, make_spec(positions))
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Make slide 2 shorter"))
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == _numbering(positions)
+        assert payload["slide_references"] == [
+            _reference("slide 2", [2], expected_positions)
+        ]
+
+    def test_d_gapped_rows_number_in_position_order(self, graph_env, monkeypatch):
+        """(d) Rows at 0, 2, 5 are slides 1, 2, 3, so "slide 3" is position 5 —
+        not 2 (N - 1) and not out of range."""
+        monkeypatch.setattr(
+            nodes,
+            "_committed_slide_rows",
+            lambda session_id: [
+                {"position": p, "html": f"<div class='slide'>{p}</div>"}
+                for p in (0, 2, 5)
+            ],
+        )
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Make slide 3 shorter"))
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == _numbering((0, 2, 5))
+        assert payload["slide_references"] == [_reference("slide 3", [3], [5])]
+
+    def test_d_committed_rows_win_over_a_persisted_spec(self, graph_env, monkeypatch):
+        """D1's order: the rows are what the slide panel shows, so they number
+        the deck even when a persisted spec describes other positions.
+
+        Rows at 0, 2, 5 against a spec at 0, 1, 2: "slide 3" is the row at
+        position 5.  Numbering from the spec first would give position 2."""
+        monkeypatch.setattr(
+            nodes,
+            "_committed_slide_rows",
+            lambda session_id: [
+                {"position": p, "html": f"<div class='slide'>{p}</div>"}
+                for p in (0, 2, 5)
+            ],
+        )
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Make slide 3 shorter"))
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == _numbering((0, 2, 5))
+        assert payload["slide_references"] == [_reference("slide 3", [3], [5])]
+
+    # -- (e) which text is resolved (D4) --------------------------------------
+
+    def test_e_the_latest_user_turn_wins_over_the_analysts_synthesis(
+        self, graph_env, monkeypatch
+    ):
+        """(e) After the analyst returns, ``architect_message`` is its synthesis;
+        the user's "slide 4" is in the latest USER turn and must still resolve.
+
+        Sabotage: resolve ``message`` instead and this goes red."""
+        conversation = [
+            {"role": "user", "content": "Put our figures on slide 4"},
+            {"role": "assistant", "content": "Fetching the figures first."},
+        ]
+        monkeypatch.setattr(nodes, "_conversation", lambda session_id: conversation)
+        graph_env.seed_slides([f"<div class='slide'>{p}</div>" for p in range(5)])
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Q3 revenue was 10"))
+
+        payload = self._payload(graph_env)
+        assert payload["conversation"] == conversation
+        assert payload["message"] == "Q3 revenue was 10"
+        assert payload["slide_numbering"] == _numbering(range(5))
+        assert payload["slide_references"] == [_reference("slide 4", [4], [3])]
+
+    # -- (f) the log-only guard (D5) ------------------------------------------
+
+    def test_f_an_edit_that_misses_the_named_slide_logs_one_warning_only(
+        self, graph_env, caplog
+    ):
+        """(f) The user named slide 2 (position 1); the model edited position 2.
+
+        The off-by-one is logged — once, naming the reference, with the session
+        id — and nothing else changes: the edit still targets [2], because the
+        model also revised that slide's spec and overriding the targets would
+        rebuild a slide whose brief did not change.
+
+        Sabotage: remove the log call and this goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(
+                _revised(make_spec((0, 1, 2)), {2: "revised brief-2"}),
+                [2],
+                message="Editing slide 3.",
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            updates = architect_node(
+                graph_env.state(architect_message="Make slide 2 shorter")
+            )
+
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert warnings[0].levelno == logging.WARNING
+        assert "slide 2" in warnings[0].getMessage()
+        assert getattr(warnings[0], "session_id", None) == graph_env.session_id
+        # Log only: the turn is exactly the edit the model asked for.
+        assert updates["architect_intent"] == "edit"
+        assert updates["error_state"] is None
+        assert updates["target_positions"] == [2]
+        assert updates["architect_message"] == "Editing slide 3."
+
+    def test_f_an_edit_on_the_named_slide_logs_nothing(self, graph_env, caplog):
+        """(f) The user named slide 2 (position 1) and the model edited 1."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(
+                _revised(make_spec((0, 1, 2)), {1: "revised brief-1"}),
+                [1],
+                message="Editing slide 2.",
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            updates = architect_node(
+                graph_env.state(architect_message="Make slide 2 shorter")
+            )
+
+        assert self._warnings(caplog) == []
+        assert updates["target_positions"] == [1]
+
+    def test_f_a_describe_only_turn_logs_nothing(self, graph_env, caplog):
+        """(f) The same off-by-one edit on a describe-only (sweeper) turn: the
+        text it would be checked against predates the hand edit, so there is
+        nothing to warn about."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(_revised(make_spec((0, 1, 2)), {2: "revised brief-2"}), [2]),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            architect_node(
+                graph_env.state(
+                    architect_message="Make slide 2 shorter",
+                    describe_only=scoped(TURN, True),
+                )
+            )
+
+        assert self._warnings(caplog) == []
+
+    def test_f_the_guard_reads_the_models_targets_not_the_rebuilt_set(
+        self, graph_env, caplog
+    ):
+        """(f) D5's trigger is the MODEL's ``target_positions``, not the rebuilt
+        set: the model revised the named slide's spec (position 1) but targeted
+        position 2.  The rebuild still covers both (every changed slide is
+        rebuilt), and the warning still fires, because the model's targets missed
+        the slide the user named.  Checking the union instead would hide it.
+
+        Sabotage: pass ``edit_targets`` to ``edit_ignores_references`` and this
+        goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(_revised(make_spec((0, 1, 2)), {1: "revised brief-1"}), [2]),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            updates = architect_node(
+                graph_env.state(architect_message="Make slide 2 shorter")
+            )
+
+        assert updates["target_positions"] == [1, 2]
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert "slide 2" in warnings[0].getMessage()
+
+    def test_f_a_degraded_edit_logs_nothing(self, graph_env, caplog):
+        """(f) The guard sits on the path an ACCEPTED edit takes.  An edit the
+        node refuses (here its spec adds a slide: ``edit_spec_positions_changed``)
+        is degraded to a discussion and rebuilds nothing, so its targets are not
+        an edit to warn about, off-by-one or not.
+
+        Sabotage: move the guard above the degrade return and this goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set("architect", _edit_out(make_spec((0, 1, 2, 3)), [2]))
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            updates = architect_node(
+                graph_env.state(architect_message="Make slide 2 shorter")
+            )
+
+        assert updates["architect_intent"] == "discuss"
+        assert updates["error_state"]["code"] == "edit_spec_positions_changed"
+        assert self._warnings(caplog) == []
+
+    # -- (g) describe-only resolves no references (D4) ------------------------
+
+    def test_g_a_describe_only_turn_sends_no_references_but_the_numbering(
+        self, graph_env, monkeypatch
+    ):
+        """(g) The sweeper persists no user row, so the latest user turn is from
+        before the hand edit that triggered the sweep and its "slide 2" may now
+        name another slide: no references.  The numbering still describes the
+        deck as it is, so it is sent.
+
+        Sabotage: drop the ``describe_only=`` argument and this goes red."""
+        from src.services.spec_sync import ARC_REVIEW_MESSAGE
+
+        conversation = [
+            {"role": "assistant", "content": "Here is your deck."},
+            {"role": "user", "content": "Make slide 2 shorter"},
+        ]
+        monkeypatch.setattr(nodes, "_conversation", lambda session_id: conversation)
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Described.")
+        )
+
+        architect_node(
+            graph_env.state(
+                architect_message=ARC_REVIEW_MESSAGE,
+                describe_only=scoped(TURN, True),
+            )
+        )
+
+        payload = self._payload(graph_env)
+        assert payload["conversation"] == conversation
+        assert payload["slide_references"] == []
+        assert payload["slide_numbering"] == _numbering((0, 1, 2))
+
+
 # ===========================================================================
 # data_analyst_node
 # ===========================================================================
@@ -2867,6 +3242,200 @@ class TestFixReviewerUndeliverableRowIsTerminalNotFatal:
 
 
 # ===========================================================================
+# #316: the plain-language copy is for the user only
+# ===========================================================================
+
+#: The verbatim technical message quoted in #316, the same text as
+#: ``tests.unit.test_finding_copy.ISSUE_316_MESSAGE``.  Non-ASCII on purpose
+#: (``≈``, ``—``): an agent must get it byte-for-byte.
+ISSUE_316_MESSAGE = (
+    'The "NOTE" label in the bottom callout is Coral #FF5F46 at 13px/700 over the '
+    "box fill (rgba(255,95,70,0.12) composited on navy #1B3139 ≈ #2D3A3C), "
+    "giving roughly 3.9:1 — below the 4.5:1 AA floor for text this size. The "
+    "template's own dark-background eyebrow colour (#FFC9BF) clears AA; use that "
+    "instead of raw coral."
+)
+
+_PLAIN_KEY_SPELLINGS = ("plain_message", "plainMessage", "plain_issue", "plainIssue")
+
+
+def _all_plain_copy() -> list:
+    """Every user-visible copy string in ``finding_copy``.
+
+    The present and past sentence of every criterion and of the generic issue,
+    the four status sentences, the deck-grain line and the advisory closing.  The
+    two advisory header fragments and the reviewer's-details separator are left
+    out: they are not sentences a finding could carry.
+    """
+    copy = []
+    for issue in [*PLAIN_ISSUES.values(), GENERIC_ISSUE]:
+        copy += [issue.present, issue.past]
+    copy += [
+        FIXED_AUTOMATICALLY,
+        ADDRESSED,
+        NOT_FIXED_AUTOMATICALLY,
+        LEFT_FOR_JUDGEMENT,
+        DECK_GRAIN_ISSUE,
+        DECK_ADVISORY_CLOSING,
+    ]
+    return copy
+
+
+def _assert_no_plain_copy(blob: str) -> None:
+    """*blob* (serialised JSON) carries no plain copy and no plain-copy key."""
+    copy = _all_plain_copy()
+    assert copy, "an empty copy list would make this check vacuous"
+    # A string json.dumps escapes could never be found as a substring, so the
+    # absence check below would pass however the copy leaked.
+    assert [s for s in copy if json.dumps(s)[1:-1] != s] == []
+    assert [s for s in copy if s in blob] == []
+    assert [k for k in _PLAIN_KEY_SPELLINGS if k in blob] == []
+
+
+class TestReviewersKeepTheTechnicalMessage:
+    """#316 D7: the user sees deterministic plain copy; every AGENT keeps the
+    reviewer's technical message verbatim.
+
+    Characterisation tests: green on the code as it was before #316, and they stay
+    green.  The plain copy is computed on the read path only, so none of it may
+    reach a model payload or a persisted record.
+
+    Sabotage notes (each turns the named test red; restore afterwards and prove it
+    with ``git diff --exit-code -- src/services/graph/nodes.py``):
+
+    1. In ``fixer_node``, change ``"finding": finding,`` to
+       ``"finding": {**finding, "message": "x"},``: the fixer test's verbatim
+       ``message`` assertion goes red.
+    2. Add ``"plain_message": "x"`` to that dict instead
+       (``"finding": {**finding, "plain_message": "x"},``): the fixer test's
+       key-set assertion goes red.
+    3. Add ``"note": "This was fixed automatically."`` (or ``"plainIssue": "x"``)
+       as a top-level key of the fixer's ``fix_payload``: the fixer test's
+       ``_assert_no_plain_copy`` goes red.
+    4. In ``fix_reviewer_node``, change ``"finding": original_finding,`` to
+       ``{**original_finding, "message": "x"}``: the fix-reviewer test goes red.
+    5. In ``_write_reviewed_row``, pass
+       ``findings=[f.model_copy(update={"message": "x"}) for f in findings]``,
+       or add ``"plain_message": "x"`` to every finding dict of the built
+       ``verification_record``: the record assertions of the fix-reviewer test and
+       the persisted-record test go red.
+    6. In ``architect_node``'s ``prior_review``, change
+       ``f.model_dump() if hasattr(f, "model_dump") else f`` to
+       ``{**f.model_dump(), "message": "x"}``: the architect test goes red.
+    """
+
+    _BUILT_HTML = "<div class='slide'>built</div>"
+
+    def _review_then_fix(self, graph_env):
+        """Build reviewer -> fixer on one objective finding carrying the #316 text."""
+        graph_env.skills.set(
+            "build_reviewer",
+            review_out(0, [finding("contrast_failure", message=ISSUE_316_MESSAGE)]),
+        )
+        reviewed = build_reviewer_node(
+            _branch_payload(graph_env, 0, html=self._BUILT_HTML)
+        )
+        assert graph_env.rows() == [], "an objective finding opens a fix, no row yet"
+
+        graph_env.skills.set("fixer", fixer_out)
+        state = _fix_state(graph_env, {0: reviewed["fix_map"]["vals"][0]})
+        fixed = fixer_node(state)
+        return state, fixed
+
+    @staticmethod
+    def _assert_the_finding_is_the_reviewers(sent: dict) -> None:
+        assert sent["message"] == ISSUE_316_MESSAGE
+        assert set(sent) == set(Finding.model_fields)
+        assert sent["criterion"] == "contrast_failure"
+
+    def test_the_fixer_receives_the_build_reviewers_message_verbatim(self, graph_env):
+        self._review_then_fix(graph_env)
+
+        (call,) = graph_env.skills.calls_for("fixer")
+        payload = call["payload"]
+        self._assert_the_finding_is_the_reviewers(payload["finding"])
+        _assert_no_plain_copy(json.dumps(payload))
+
+    def test_the_fix_reviewer_receives_the_same_finding_verbatim(self, graph_env):
+        state, fixed = self._review_then_fix(graph_env)
+        state["fix_map"] = turn_scoped_merge(state["fix_map"], fixed["fix_map"])
+        state["fixed"] = fixed["fixed"]
+        state["fix_target"] = fixed["fix_target"]
+        graph_env.skills.set("fix_reviewer", review_out(0))
+
+        fix_reviewer_node(state)
+
+        (call,) = graph_env.skills.calls_for("fix_reviewer")
+        payload = call["payload"]
+        self._assert_the_finding_is_the_reviewers(payload["finding"])
+        _assert_no_plain_copy(json.dumps(payload))
+
+        (row,) = graph_env.rows()
+        raw = row.verification_record
+        ((_content_hash, verdict),) = json.loads(raw).items()
+        (written,) = verdict[VERDICT_KEY]["findings"]
+        assert written["message"] == ISSUE_316_MESSAGE
+        assert written["status"] == "fixed"
+        assert set(written) == set(Finding.model_fields)
+        _assert_no_plain_copy(raw)
+
+    def test_the_persisted_record_of_a_surfaced_slide_holds_only_finding_fields(
+        self, graph_env
+    ):
+        message = "The brief asks for a timeline; the slide gives none."
+        graph_env.skills.set(
+            "build_reviewer",
+            review_out(0, [finding("brief_not_delivered", message=message)]),
+        )
+
+        updates = build_reviewer_node(
+            _branch_payload(graph_env, 0, html=self._BUILT_HTML)
+        )
+
+        assert "fix_map" not in updates, "a subjective finding has no fix path"
+        (row,) = graph_env.rows()
+        raw = row.verification_record
+        record = json.loads(raw)
+        assert len(record) == 1
+        written = [
+            f for verdict in record.values() for f in verdict[VERDICT_KEY]["findings"]
+        ]
+        assert len(written) == 1
+        for f in written:
+            assert set(f) == set(Finding.model_fields)
+            assert f["message"] == message
+        _assert_no_plain_copy(raw)
+
+    def test_the_next_architect_turn_receives_deck_findings_verbatim(self, graph_env):
+        narrative = "Slide 4 presents pilot results before slide 2 introduces the pilot."
+        htmls = ["<div class='slide'>a</div>", "<div class='slide'>b</div>"]
+        graph_env.seed_slides(htmls)
+        graph_env.skills.set(
+            "deck_reviewer",
+            DeckReviewOutput(
+                findings=[finding("arc_gap", slide_index=-1, message=narrative)]
+            ),
+        )
+        deck_reviewer_node(graph_env.state(turn_id=TURN))
+
+        # The real deck review store, not a stubbed get_deck_review: the point
+        # is what the next turn reads back from it.
+        graph_env.skills.set("architect", architect_build(make_spec((0, 1))))
+        architect_node(graph_env.state())
+
+        (call,) = graph_env.skills.calls_for("architect")
+        payload = call["payload"]
+        previous = payload["previous_deck_review"]
+        assert previous is not None, "the digest lookup missed the stored review"
+        assert previous["digest"] == compute_deck_digest(htmls)
+        (sent,) = previous["findings"]
+        assert sent["message"] == narrative
+        assert sent["criterion"] == "arc_gap"
+        assert set(sent) == set(Finding.model_fields)
+        _assert_no_plain_copy(json.dumps(payload))
+
+
+# ===========================================================================
 # placeholder_node
 # ===========================================================================
 
@@ -3318,7 +3887,12 @@ class TestDeckReviewerReview:
         info = [m for m in graph_env.messages() if m["message_type"] == "info"]
         assert len(info) == 1
         assert info[0]["role"] == "assistant"
-        assert "arc_gap" in info[0]["content"]
+        # #316: the advisory leads with plain language; the criterion slug is no
+        # longer shown to the user (the reviewer's own message follows, verbatim,
+        # under the details separator — TestDeckAdvisoryIsPlain pins that shape).
+        head = info[0]["content"].partition(REVIEWER_DETAILS_SEPARATOR)[0]
+        assert plain_issue("arc_gap") in head
+        assert "arc_gap" not in head
 
     def test_no_findings_still_says_so_explicitly(self, graph_env):
         graph_env.seed_slides(["<div class='slide'>a</div>"])
@@ -4130,6 +4704,215 @@ class TestFailureNoticesArePlainLanguage:
         self._assert_row_is(
             info[0], placeholder_notice(2, stage="builder", error="RuntimeError"), position=2
         )
+
+
+#: A deck reviewer message of the technical kind #316 keeps out of the plain lead.
+NARRATIVE_TECH = "arc_gap between narrative_arc[1] and positions 3,4 (#1B3139 callout)"
+
+
+def _deck_finding(criterion: str, message: str) -> Finding:
+    """A finding as the deck reviewer emits it, at the slide index its level implies."""
+    return finding(
+        criterion,
+        slide_index=-1 if CRITERIA[criterion].level == "deck" else 0,
+        message=message,
+    )
+
+
+class TestDeckAdvisoryIsPlain:
+    """#316: the deck-review advisory in chat is written for the deck author.
+
+    Shape: plain lines (never a criterion slug, never reviewer prose), one closing
+    line, then ``REVIEWER_DETAILS_SEPARATOR`` with each reviewer message verbatim:
+    those messages carry the only actionable slide references.  The no-findings
+    sentence is unchanged.  Expected strings are written out here, never derived
+    by calling ``_advisory_text``.  A format change here must also regenerate
+    frontend/tests/fixtures/deckAdvisoryGoldens.json (pinned to this writer by
+    tests/unit/test_finding_conformance.py::TestDeckAdvisoryGolden), which is
+    what proves the frontend's ``splitDeckAdvisory`` still parses the result.
+    """
+
+    def test_no_findings_line_is_byte_identical(self):
+        """The one pin on the function's no-findings output.
+
+        The integration suites compare against ``_advisory_text([])`` itself, and
+        test_tour_fixture_script.py pins only the fixture's copy of the sentence,
+        so this is the test that keeps it byte-identical.
+        """
+        text = nodes._advisory_text([])
+
+        assert text == "Deck review complete: no narrative issues found across the deck."
+        assert REVIEWER_DETAILS_SEPARATOR not in text
+
+    def test_one_finding_reads_as_plain_language_then_details(self):
+        text = nodes._advisory_text([_deck_finding("arc_gap", NARRATIVE_TECH)])
+
+        assert text == (
+            "Deck review found 1 thing to look at in how the deck reads as a whole:\n"
+            "- The story has a gap or an unexplained jump between slides.\n"
+            "None of these were changed automatically. "
+            "Reply here if you'd like any of them addressed.\n"
+            "\n"
+            "Reviewer's details:\n"
+            "- arc_gap between narrative_arc[1] and positions 3,4 (#1B3139 callout)"
+        )
+
+    def test_repeated_lines_collapse_with_a_count(self):
+        """Plain lines dedupe by text in first-seen order; the header counts
+        findings; the details keep one bullet per finding, in input order."""
+        text = nodes._advisory_text(
+            [
+                _deck_finding("arc_gap", "Slides 2 and 3 jump from cost to roadmap."),
+                _deck_finding("missing_conclusion", "The last slide restates the agenda."),
+                _deck_finding("arc_gap", "Slide 5 introduces a pilot never set up."),
+            ]
+        )
+
+        head, sep, details = text.partition(REVIEWER_DETAILS_SEPARATOR)
+        assert head.split("\n") == [
+            "Deck review found 3 things to look at in how the deck reads as a whole:",
+            "- The story has a gap or an unexplained jump between slides (noted 2 times).",
+            "- The deck has no clear conclusion or call to action.",
+            DECK_ADVISORY_CLOSING,
+        ]
+        assert sep
+        assert details.split("\n") == [
+            "- Slides 2 and 3 jump from cost to roadmap.",
+            "- The last slide restates the agenda.",
+            "- Slide 5 introduces a pilot never set up.",
+        ]
+
+    def test_slide_level_criteria_get_the_deck_grain_line(self):
+        """Nothing filters the deck reviewer's findings by level, and "this slide"
+        has no referent in a deck-wide message (review #5)."""
+        text = nodes._advisory_text(
+            [
+                _deck_finding("overflow", "The chart on slide 3 runs off the bottom edge."),
+                _deck_finding("arc_gap", "Slide 4 presents results before the method."),
+                _deck_finding("rogue_colour", "Slide 2 uses an off-palette orange."),
+                _deck_finding("brief_not_delivered", "Slide 6 omits the planned timeline."),
+            ]
+        )
+
+        head_lines = text.partition(REVIEWER_DETAILS_SEPARATOR)[0].split("\n")
+        assert head_lines == [
+            f"{DECK_ADVISORY_HEADER_PREFIX}4 things{DECK_ADVISORY_HEADER_SUFFIX}",
+            # The full stop moves after the count.
+            "- One of the slides may need a closer look (noted 3 times).",
+            "- The story has a gap or an unexplained jump between slides.",
+            DECK_ADVISORY_CLOSING,
+        ]
+        assert not [line for line in head_lines if "this slide" in line.lower()]
+
+    def test_the_head_never_carries_a_slug_or_a_reviewer_message(self):
+        """One call with every registered criterion: the head is plain copy only,
+        and the details carry every message verbatim, in input order."""
+        messages = [f"MSG-{criterion}-#ABCDEF" for criterion in CRITERIA]
+        text = nodes._advisory_text(
+            [_deck_finding(c, m) for c, m in zip(CRITERIA, messages)]
+        )
+
+        head, sep, details = text.partition(REVIEWER_DETAILS_SEPARATOR)
+        assert sep, "the reviewer's messages must follow the details separator"
+        for criterion in CRITERIA:
+            assert criterion not in head, criterion
+        assert "_" not in head
+        assert "#" not in head
+        for message in messages:
+            assert message not in head, message
+        assert "MSG-" not in head
+        assert "#ABCDEF" not in head
+        assert details == "\n".join(f"- {m}" for m in messages)
+
+    def test_blank_reviewer_messages_add_no_details_section(self):
+        all_blank = nodes._advisory_text(
+            [_deck_finding("arc_gap", "  "), _deck_finding("missing_conclusion", "  ")]
+        )
+
+        assert REVIEWER_DETAILS_SEPARATOR not in all_blank
+        assert "Reviewer's details" not in all_blank
+        assert all_blank.endswith(DECK_ADVISORY_CLOSING)
+
+        one_real = nodes._advisory_text(
+            [
+                _deck_finding("arc_gap", "  "),
+                _deck_finding("missing_conclusion", "The deck stops on the agenda slide."),
+            ]
+        )
+
+        head, sep, details = one_real.partition(REVIEWER_DETAILS_SEPARATOR)
+        # A blank message still gets its plain line; only its bullet is skipped.
+        assert head.split("\n") == [
+            "Deck review found 2 things to look at in how the deck reads as a whole:",
+            "- The story has a gap or an unexplained jump between slides.",
+            "- The deck has no clear conclusion or call to action.",
+            DECK_ADVISORY_CLOSING,
+        ]
+        assert sep
+        assert details == "- The deck stops on the agenda slide."
+
+    def test_both_transports_carry_the_same_advisory_and_the_details_verbatim(
+        self, graph_env
+    ):
+        """SSE (``_emit``) and ``GET /chat/poll`` (the ``info`` row read back by
+        its request id, projected exactly as the route does) carry the same
+        bytes, and ``deck_reviews`` keeps the reviewer's messages (review #12)."""
+        m1 = "Slide 4 presents pilot results before slide 2 introduces the pilot."
+        m2 = "The final slide restates the agenda instead of a recommendation."
+        htmls = ["<div class='slide'>a</div>", "<div class='slide'>b</div>"]
+        graph_env.seed_slides(htmls)
+        graph_env.skills.set(
+            "deck_reviewer",
+            DeckReviewOutput(
+                findings=[
+                    finding("arc_gap", slide_index=-1, message=m1),
+                    finding("missing_conclusion", slide_index=-1, message=m2),
+                ]
+            ),
+        )
+
+        emitter: queue.Queue = queue.Queue()
+        set_event_emitter(emitter)
+        set_chat_request_id("req-316")
+        try:
+            deck_reviewer_node(graph_env.state(turn_id=TURN))
+        finally:
+            set_event_emitter(None)
+            set_chat_request_id(None)
+        events = []
+        while not emitter.empty():
+            events.append(emitter.get_nowait())
+
+        sse = [e for e in events if (e.metadata or {}).get("node") == "deck_reviewer"]
+        assert len(sse) == 1
+        assert sse[0].type == "assistant"
+
+        # Exactly what GET /chat/poll does (src/api/routes/chat.py).
+        sm = get_session_manager()
+        poll = [
+            sm.msg_to_stream_event(m)
+            for m in sm.get_messages_for_request("req-316")
+            if m["role"] != "user"
+        ]
+        assert len(poll) == 1
+        assert poll[0]["type"] == "assistant"
+        assert poll[0]["content"] == sse[0].content
+
+        head, sep, details = sse[0].content.partition(REVIEWER_DETAILS_SEPARATOR)
+        assert sep
+        assert details.split("\n") == [f"- {m1}", f"- {m2}"]
+        assert m1 not in head
+        assert m2 not in head
+        assert "arc_gap" not in head
+
+        db = graph_env.factory()
+        try:
+            stored = get_deck_review(
+                db, graph_env.deck_row().id, compute_deck_digest(htmls)
+            )
+        finally:
+            db.close()
+        assert [f.message for f in stored["findings"]] == [m1, m2]
 
 
 # ===========================================================================

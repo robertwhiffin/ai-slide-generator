@@ -652,6 +652,9 @@ def _run_migrations(engine, schema: str | None = None):
         # in the same migration transaction.
         _install_graph_configuration_mutation_guards(conn, schema, is_sqlite)
 
+        # --- chat_requests: the graph turn's stage summary for the chat placeholder (#319) ---
+        _migrate_chat_request_progress(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
@@ -1400,6 +1403,34 @@ def _migrate_spec_dirty_marker(
             _SPEC_DIRTY_INDEX,
             exc_info=True,
         )
+
+
+def _migrate_chat_request_progress(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Add ``progress_json`` and ``progress_seq`` to ``chat_requests`` (#319, idempotent).
+
+    ``create_all`` adds both on a fresh install from the ORM model but never ALTERs
+    an existing table, so for every database provisioned before #319 this helper is
+    the only thing that adds them.  Both are nullable with no default: a request
+    that predates the columns, a monolith turn and a pending request all read NULL,
+    which the poll serves as ``turn_progress: null``.  TEXT/INTEGER on both
+    dialects, matching ``result_json``.
+    """
+    from sqlalchemy import text
+
+    try:
+        cols = {c["name"] for c in inspector.get_columns("chat_requests", schema=schema)}
+    except Exception:
+        return
+    if not cols:
+        return
+    qualified = _qual("chat_requests")
+    for col_name, col_def in (
+        ("progress_json", "TEXT NULL"),
+        ("progress_seq", "INTEGER NULL"),
+    ):
+        if col_name not in cols:
+            logger.info("Migration: adding %s to chat_requests", col_name)
+            conn.execute(text(f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"))
 
 
 #: The two retired per-profile prompt-override columns on ``config_prompts``.

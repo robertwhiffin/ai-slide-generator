@@ -50,6 +50,15 @@ token is stale by 2, and its next save produces a 409.  This case is different
 from assertion 2: assertion 2 proves the lock works; this proves the graph's
 two sequential writes together cause the mismatch a user actually experiences.
 
+Plus: turn-progress writers never move a request backwards (#319)
+------------------------------------------------------------------
+Several slide pipelines write the turn's stage to one ``chat_requests`` row from
+several threads, and their commits land in any order.  The conditional UPDATE
+(``progress_seq < :seq``) keeps the row monotonic, and only PostgreSQL's READ
+COMMITTED re-check of a queued UPDATE exercises it; SQLite serialises writers.
+``SET LOCAL lock_timeout`` bounds how long one write can wait on that row.  See
+``TestTurnProgressWritersNeverRegress``.
+
 Fixture note
 -----------
 Every class here uses ``postgres_engine`` (``conftest.py``).  NOT
@@ -63,17 +72,20 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import random
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
 from src.api.main import app
 from src.api.services.session_manager import SessionManager, VersionConflictError
@@ -1035,3 +1047,310 @@ class TestHumanVsGraph409:
                 )
         finally:
             app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# #319: turn-progress writers never move a request backwards
+# ---------------------------------------------------------------------------
+
+
+def _new_chat_request(factory) -> str:
+    """A chat request on a fresh owner session, created by the production writer."""
+    session_id = _seed_owner(factory)
+    with _patched_db(factory):
+        return SessionManager().create_chat_request(session_id)
+
+
+def _stored_progress(factory, request_id: str) -> tuple:
+    """``(raw progress_seq, the snapshot get_chat_request serves)`` for *request_id*.
+
+    Both, because they are different claims: the raw column is what the next
+    writer's predicate compares against, and the served snapshot is what every
+    worker's poll returns.  A writer that stored the seq but not the JSON (or
+    the reverse) would satisfy only one.
+    """
+    db = factory()
+    try:
+        raw = db.execute(
+            sa_text("SELECT progress_seq FROM chat_requests WHERE request_id = :r"),
+            {"r": request_id},
+        ).scalar()
+    finally:
+        db.close()
+    with _patched_db(factory):
+        served = SessionManager().get_chat_request(request_id)["turn_progress"]
+    return raw, served
+
+
+class _RowHolder:
+    """A raw connection whose OPEN transaction has written *seq* to the request row.
+
+    Until :meth:`commit`, it holds that row's lock, so any progress write to the
+    same request queues behind it — the interleaving a slow pipeline thread
+    produces in production, made deterministic.
+    """
+
+    def __init__(self, engine, request_id: str, seq: int) -> None:
+        self._conn = engine.connect()
+        self._txn = self._conn.begin()
+        self._conn.execute(
+            sa_text(
+                "UPDATE chat_requests SET progress_seq = :s, progress_json = :j "
+                "WHERE request_id = :r"
+            ),
+            {"s": seq, "j": json.dumps({"seq": seq}), "r": request_id},
+        )
+        self._closed = False
+
+    def commit(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._txn.is_active:
+                self._txn.commit()
+        finally:
+            self._conn.close()
+
+
+def _start_progress_writer(request_id: str, seq: int, outcome: Dict[str, Any]):
+    """Run one production progress write on its own thread, recording what happened.
+
+    ``outcome`` gains ``stored`` (the writer's return) or ``error`` (what it
+    raised), and always ``elapsed`` — the write's own wall time, measured on its
+    thread, which is the only place a lock wait is observable.
+    """
+
+    def write() -> None:
+        started = time.monotonic()
+        try:
+            outcome["stored"] = SessionManager().record_chat_request_progress(
+                request_id, seq, {"seq": seq}
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            outcome["elapsed"] = time.monotonic() - started
+
+    thread = threading.Thread(target=write, name=f"l4-progress-writer-{seq}")
+    thread.start()
+    return thread
+
+
+class TestTurnProgressWritersNeverRegress:
+    """The request row's ``progress_seq`` never decreases, whatever order commits land in.
+
+    ``record_chat_request_progress`` is one conditional UPDATE:
+    ``... WHERE request_id = :r AND (progress_seq IS NULL OR progress_seq < :s)``.
+    On PostgreSQL an UPDATE queued behind another transaction's uncommitted
+    write of the same row waits for that commit and then RE-EVALUATES its WHERE
+    against the committed tuple (READ COMMITTED), so an older snapshot queued
+    behind a newer one updates nothing.  The two queued-writer tests pin both
+    directions of that re-check; the stress test pins the outcome under real
+    contention; the timeout test pins the bound on the wait.
+
+    ``_patched_db`` is entered once, on the test's own thread, around every
+    writer thread: ``patch`` swaps the module attribute process-wide, so the
+    threads see it, and no thread's exit can restore the real
+    ``get_db_session`` under another that is still writing.
+
+    Sabotage: drop ``progress_seq < seq`` from the predicate and the older
+    queued writer stores 4 over 5 (red).  Drop ``SET LOCAL lock_timeout`` and
+    the timeout test's writer is still blocked after 5 s (red).
+    """
+
+    def test_concurrent_writers_leave_the_highest_seq(self, postgres_engine):
+        _assert_postgres(postgres_engine)
+
+        factory = _make_factory(postgres_engine)
+        request_id = _new_chat_request(factory)
+
+        seqs = list(range(1, 13))
+        random.Random(319).shuffle(seqs)
+        barrier = threading.Barrier(len(seqs), timeout=30.0)
+        stored: Dict[int, bool] = {}
+        errors: List[BaseException] = []
+        lock = threading.Lock()
+
+        def write(seq: int) -> None:
+            try:
+                barrier.wait()  # all twelve start together → real contention
+                outcome = SessionManager().record_chat_request_progress(
+                    request_id, seq, {"seq": seq}
+                )
+                with lock:
+                    stored[seq] = outcome
+            except BaseException as exc:
+                with lock:
+                    errors.append(exc)
+
+        with _patched_db(factory):
+            threads = [
+                threading.Thread(
+                    target=write, args=(seq,), name=f"l4-progress-{seq}"
+                )
+                for seq in seqs
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60.0)
+
+        assert not any(t.is_alive() for t in threads), (
+            "a progress writer was still running after 60 s"
+        )
+        assert not errors, (
+            f"{len(errors)} of 12 concurrent progress writes raised:\n"
+            + "\n".join(f"  {e!r}" for e in errors[:5])
+        )
+        assert sorted(stored) == list(range(1, 13)), (
+            f"only {sorted(stored)} of 12 writers finished"
+        )
+        assert stored[12] is True, (
+            "the newest snapshot's writer reported it was not stored"
+        )
+
+        raw, served = _stored_progress(factory, request_id)
+        assert raw == 12, (
+            f"after 12 concurrent writes the row's progress_seq is {raw}, not 12: "
+            "a late-committing older writer moved the request backwards"
+        )
+        assert served == {"seq": 12}, (
+            f"get_chat_request serves {served!r} after the seq-12 write"
+        )
+
+    def test_an_older_writer_queued_behind_a_newer_one_loses(self, postgres_engine):
+        _assert_postgres(postgres_engine)
+
+        factory = _make_factory(postgres_engine)
+        request_id = _new_chat_request(factory)
+        outcome: Dict[str, Any] = {}
+
+        with _patched_db(factory):
+            holder = _RowHolder(postgres_engine, request_id, 5)
+            writer = None
+            try:
+                writer = _start_progress_writer(request_id, 4, outcome)
+                peak_waiters = _await_lock_waiters(postgres_engine, 1)
+            finally:
+                # At once, no sleep: the queued writer's lock_timeout is 2 s.
+                holder.commit()
+            writer.join(timeout=_WAIT_SECONDS)
+
+        assert peak_waiters >= 1, (
+            "the older writer never queued; the race was not exercised"
+        )
+        assert not writer.is_alive(), "the older writer never finished"
+        assert "error" not in outcome, (
+            f"the queued writer raised instead of re-checking its predicate: "
+            f"{outcome.get('error')!r} (a lock timeout here means the holder "
+            "committed later than lock_timeout on a slow runner)"
+        )
+        assert outcome["stored"] is False, (
+            "an older snapshot queued behind a newer one was stored"
+        )
+
+        raw, served = _stored_progress(factory, request_id)
+        assert raw == 5, (
+            f"the row's progress_seq is {raw} after an older seq-4 write queued "
+            "behind the seq-5 one: the predicate was not re-checked"
+        )
+        assert served == {"seq": 5}, f"get_chat_request serves {served!r}"
+
+    def test_a_newer_writer_queued_behind_an_older_one_wins(self, postgres_engine):
+        _assert_postgres(postgres_engine)
+
+        factory = _make_factory(postgres_engine)
+        request_id = _new_chat_request(factory)
+        outcome: Dict[str, Any] = {}
+
+        with _patched_db(factory):
+            holder = _RowHolder(postgres_engine, request_id, 4)
+            writer = None
+            try:
+                writer = _start_progress_writer(request_id, 6, outcome)
+                peak_waiters = _await_lock_waiters(postgres_engine, 1)
+            finally:
+                # At once, no sleep: the queued writer's lock_timeout is 2 s.
+                holder.commit()
+            writer.join(timeout=_WAIT_SECONDS)
+
+        assert peak_waiters >= 1, (
+            "the newer writer never queued; the race was not exercised"
+        )
+        assert not writer.is_alive(), "the newer writer never finished"
+        assert "error" not in outcome, (
+            f"the queued writer raised: {outcome.get('error')!r} (a lock timeout "
+            "here means the holder committed later than lock_timeout on a slow "
+            "runner)"
+        )
+        assert outcome["stored"] is True, (
+            "a newer snapshot queued behind an older one was refused"
+        )
+
+        raw, served = _stored_progress(factory, request_id)
+        assert raw == 6, (
+            f"the row's progress_seq is {raw} after a newer seq-6 write queued "
+            "behind the seq-4 one"
+        )
+        assert served == {"seq": 6}, f"get_chat_request serves {served!r}"
+
+    def test_a_progress_write_gives_up_on_a_held_row_lock_within_the_timeout(
+        self, postgres_engine
+    ):
+        """A stuck request row costs one progress write ~2 s, never a stalled thread.
+
+        The holder is kept open past the writer's ``lock_timeout``.  The writer
+        must give up on its own, with PostgreSQL's lock-timeout error, in about
+        the configured 2 s; ``progress._persist`` swallows and logs that error
+        on the production path (Task 2's
+        ``test_a_failing_persist_is_logged_and_never_raises``).  The window is
+        deliberately wide for a slow runner: if CI flakes, widen the WINDOW,
+        never the production timeout.
+        """
+        _assert_postgres(postgres_engine)
+
+        factory = _make_factory(postgres_engine)
+        request_id = _new_chat_request(factory)
+        outcome: Dict[str, Any] = {}
+
+        with _patched_db(factory):
+            holder = _RowHolder(postgres_engine, request_id, 5)
+            writer = None
+            try:
+                writer = _start_progress_writer(request_id, 6, outcome)
+                peak_waiters = _await_lock_waiters(postgres_engine, 1)
+                writer.join(timeout=5.0)
+                gave_up = not writer.is_alive()
+            finally:
+                # Released only now, so a sabotaged (unbounded) writer is
+                # unblocked and joined rather than left behind on the database.
+                holder.commit()
+                if writer is not None:
+                    writer.join(timeout=_WAIT_SECONDS)
+
+        assert peak_waiters >= 1, (
+            "the writer never queued on the held row lock; nothing was bounded"
+        )
+        assert gave_up, (
+            "the progress write was still blocked on the row lock after 5 s: "
+            "nothing bounds its wait (SET LOCAL lock_timeout is not in effect)"
+        )
+        error = outcome.get("error")
+        assert isinstance(error, OperationalError), (
+            f"the blocked write did not fail with OperationalError: {outcome!r}"
+        )
+        assert "lock timeout" in str(error), (
+            f"the write failed, but not on the lock timeout: {error!r}"
+        )
+        assert 1.5 <= outcome["elapsed"] <= 3.5, (
+            f"the write gave up after {outcome['elapsed']:.2f} s, outside the "
+            "1.5–3.5 s window around the 2 s lock_timeout"
+        )
+
+        raw, served = _stored_progress(factory, request_id)
+        assert raw == 5, (
+            f"the row's progress_seq is {raw}: the timed-out write was not rolled "
+            "back, or the holder's write was lost"
+        )
+        assert served == {"seq": 5}, f"get_chat_request serves {served!r}"

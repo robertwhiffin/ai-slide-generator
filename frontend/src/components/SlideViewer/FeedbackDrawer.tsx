@@ -1,8 +1,9 @@
-import React, { useCallback, useRef } from 'react';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useCallback, useRef, useState } from 'react';
+import { ChevronDown, ChevronRight, ChevronUp } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { CATEGORY_LABEL, type DrawerCallbacks, type SlideFinding } from '../../types/finding';
 import { useViewer } from '../../contexts/ViewerContext';
+import { findingPlainText } from '../../utils/findingText';
 
 interface FeedbackDrawerProps {
   findings: SlideFinding[];        // already scoped to the current slide
@@ -14,6 +15,18 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callba
   const { drawerOpen, setDrawerOpen, drawerHeight, setDrawerHeight, activeTab, setActiveTab } = useViewer();
   // Captures the pointer's starting Y and the drawer's starting height at drag begin.
   const dragStart = useRef<{ y: number; h: number } | null>(null);
+  // Findings whose technical details are expanded, keyed by finding id. Collapsed
+  // by default, per finding, not persisted (#316): the plain message leads and the
+  // reviewer's text is absent from the DOM until asked for.
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleDetails = useCallback((id: string) => {
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   // Pointer down: record drag origin and capture the pointer so moves/up fire
   // even when the pointer moves fast and leaves the thin handle element.
@@ -125,7 +138,38 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callba
                       {CATEGORY_LABEL[f.category]}
                     </span>
                   </div>
-                  <p className="mb-2 text-xs text-foreground">{f.message}</p>
+                  <div className="mb-2">
+                    <p
+                      data-testid={`finding-plain-${f.id}`}
+                      className="mb-1 text-xs text-foreground"
+                    >
+                      {findingPlainText(f)}
+                    </p>
+                    {f.message.trim() !== '' && (
+                      <button
+                        type="button"
+                        data-testid={`finding-details-toggle-${f.id}`}
+                        aria-expanded={expandedIds.has(f.id)}
+                        onClick={() => toggleDetails(f.id)}
+                        className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                      >
+                        {expandedIds.has(f.id) ? (
+                          <ChevronDown className="size-3" aria-hidden="true" />
+                        ) : (
+                          <ChevronRight className="size-3" aria-hidden="true" />
+                        )}
+                        {expandedIds.has(f.id) ? 'Hide details' : 'Show details'}
+                      </button>
+                    )}
+                    {f.message.trim() !== '' && expandedIds.has(f.id) && (
+                      <p
+                        data-testid={`finding-details-${f.id}`}
+                        className="mt-1 whitespace-pre-wrap break-words text-[11px] text-muted-foreground"
+                      >
+                        {f.message}
+                      </p>
+                    )}
+                  </div>
                   {f.status === 'fixed' ? (
                     <span
                       data-testid={`finding-status-${f.id}`}
