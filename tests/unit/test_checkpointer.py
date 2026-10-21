@@ -383,6 +383,68 @@ class TestThreadIsolationAndDeletion:
         assert _count(saver_engine, "graph_checkpoint_writes", "thread-b") == 1
         assert saver.get_tuple(_config("thread-b")) is not None
 
+    # -- on the CALLER's session (#323: ChatService.clear_context is one
+    # transaction). ``_count`` reads on a connection of its own, so it sees only
+    # what has been COMMITTED; a count taken through ``s`` sees the caller's own
+    # uncommitted work. The pair is what tells "ran on the caller's session and
+    # left the commit to the caller" apart from "committed on its own" and from
+    # "ran on some other session".
+
+    @staticmethod
+    def _count_through(session, table_name: str, thread_id: str) -> int:
+        return session.execute(
+            text(f"SELECT COUNT(*) FROM {table_name} WHERE thread_id = :t"),
+            {"t": thread_id},
+        ).scalar_one()
+
+    def test_delete_thread_on_a_callers_session_commits_with_the_caller(
+        self, saver, saver_engine, two_threads
+    ):
+        s = sessionmaker(bind=saver_engine)()
+        try:
+            saver.delete_thread("thread-a", session=s)
+
+            # The caller's own transaction already sees thread-a gone ...
+            for table in _TABLES:
+                assert self._count_through(s, table, "thread-a") == 0, table
+            # ... and nothing is committed: another connection still sees it.
+            assert _count(saver_engine, "graph_checkpoints", "thread-a") == 1
+            assert _count(saver_engine, "graph_checkpoint_writes", "thread-a") == 1
+
+            s.commit()
+        finally:
+            s.close()
+
+        assert _count(saver_engine, "graph_checkpoints", "thread-a") == 0
+        assert _count(saver_engine, "graph_checkpoint_writes", "thread-a") == 0
+        assert saver.get_tuple(_config("thread-a")) is None
+
+        assert _count(saver_engine, "graph_checkpoints", "thread-b") == 1
+        assert _count(saver_engine, "graph_checkpoint_writes", "thread-b") == 1
+        assert saver.get_tuple(_config("thread-b")) is not None
+
+    def test_delete_thread_on_a_callers_session_rolls_back_with_the_caller(
+        self, saver, saver_engine, two_threads
+    ):
+        s = sessionmaker(bind=saver_engine)()
+        try:
+            saver.delete_thread("thread-a", session=s)
+            # It did run, on THIS session — so the rollback below has something
+            # to undo, and the rows surviving it is not vacuous.
+            for table in _TABLES:
+                assert self._count_through(s, table, "thread-a") == 0, table
+
+            s.rollback()
+        finally:
+            s.close()
+
+        assert _count(saver_engine, "graph_checkpoints", "thread-a") == 1
+        assert _count(saver_engine, "graph_checkpoint_writes", "thread-a") == 1
+        restored = saver.get_tuple(_config("thread-a", two_threads["thread-a"]))
+        assert restored is not None
+        assert restored.checkpoint["channel_values"] == {"who": "alpha"}
+        assert restored.pending_writes == [("task-alpha", "slides", "alpha")]
+
 
 class TestTheRealSessionHelperPath:
     """No injected factory — so the double call on get_session_local is exercised.

@@ -78,6 +78,76 @@ def test_priced_reachable_endpoint_is_silent(monkeypatch):
     assert not [w for w in rec if "databricks-claude-opus-4-6" in str(w.message)]
 
 
+# ---- the reachability probe resolves gateway model names -------------------
+#
+# ``system.ai.<m>`` is an AI Gateway model name, not a serving-endpoint name: the workspace
+# only knows ``databricks-<m>``.  These tests stub the SDK itself (not ``_endpoint_reachable``)
+# so they see exactly which names the probe asks the workspace about.
+
+class _FakeServingEndpoints:
+    def __init__(self, probed, known):
+        self._probed = probed
+        self._known = known
+
+    def get(self, name):
+        self._probed.append(name)
+        if self._known is not None and name not in self._known:
+            raise LookupError(f"serving endpoint {name!r} does not exist")
+        return object()
+
+
+def _install_fake_workspace(monkeypatch, known):
+    """Replace ``databricks.sdk.WorkspaceClient``; return the list of probed endpoint names.
+
+    ``known`` is the set of names the fake workspace resolves (anything else raises, as the
+    real SDK does); ``None`` makes every probe succeed.
+    """
+    import databricks.sdk
+
+    probed = []
+
+    class FakeWorkspaceClient:
+        def __init__(self, *args, **kwargs):
+            self.serving_endpoints = _FakeServingEndpoints(probed, known)
+
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", FakeWorkspaceClient)
+    return probed
+
+
+def test_gateway_model_name_is_probed_as_its_serving_endpoint(monkeypatch):
+    probed = _install_fake_workspace(monkeypatch, known={"databricks-claude-opus-5"})
+    assert cli._endpoint_reachable("system.ai.claude-opus-5") is True
+    assert probed == ["databricks-claude-opus-5"]
+
+
+def test_legacy_endpoint_name_is_probed_as_is(monkeypatch):
+    probed = _install_fake_workspace(monkeypatch, known={"databricks-claude-sonnet-5"})
+    assert cli._endpoint_reachable("databricks-claude-sonnet-5") is True
+    assert probed == ["databricks-claude-sonnet-5"]
+
+
+def test_probe_is_false_when_the_workspace_raises(monkeypatch):
+    probed = _install_fake_workspace(monkeypatch, known=set())
+    assert cli._endpoint_reachable("system.ai.claude-opus-5") is False
+    assert probed == ["databricks-claude-opus-5"]
+
+
+def test_validate_endpoint_accepts_a_gateway_name_whose_endpoint_exists(monkeypatch):
+    probed = _install_fake_workspace(monkeypatch, known={"databricks-claude-opus-5"})
+    cli.validate_endpoint(_cfg_with_endpoint("system.ai.claude-opus-5"))  # must not raise
+    assert probed == ["databricks-claude-opus-5"]
+
+
+def test_unreachable_gateway_name_error_names_configured_and_probed_endpoint(monkeypatch):
+    probed = _install_fake_workspace(monkeypatch, known=set())
+    with pytest.raises(SystemExit) as e:
+        cli.validate_endpoint(_cfg_with_endpoint("system.ai.claude-opus-5"))
+    message = str(e.value)
+    assert "system.ai.claude-opus-5" in message
+    assert "databricks-claude-opus-5" in message
+    assert probed == ["databricks-claude-opus-5"]
+
+
 # ---- main: sweep wiring -----------------------------------------------------
 
 class SweepSpy:

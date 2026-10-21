@@ -12,6 +12,19 @@
  *   - design contract ids      : stop rendering the ids
  *   - NO compiled style content: render {slideDeck.css}
  *
+ * Export spec as Markdown (#318), the block at the end of this file — one per test:
+ *   - export offered           : remove the spec-export-markdown Button
+ *   - export only with a spec  : render the Button unconditionally (drop `spec &&`)
+ *   - exactly the rendered spec: name the file from `slideDeck.title`; MIME `text/plain`;
+ *                                write `spec.audience` instead of the rendered document;
+ *                                an inline download that revokes the URL synchronously
+ *   - NO compiled style in file: write `renderDeckSpecMarkdown(spec) + slideDeck!.css`
+ *   - export follows the deck  : `useMemo(() => renderDeckSpecMarkdown(spec!), [])`, or a
+ *                                useRef that latches the first spec (or first document)
+ *   - export makes no request  : `void fetch('/api/...')` in the click handler
+ *   - not gated on the review  : `{spec && !reviewInProgress && ...}`, or
+ *                                `disabled={reviewInProgress}` (deckReviewFlag's scan too)
+ *
  * THE LAST ONE IS FINDING 18b's RESHAPED ASSERTION, and the reason it is shaped
  * this way is worth keeping.  The plan asked for "the design contract shows which
  * brand (ids), never compiled style content".  `DesignContractRef` holds THREE
@@ -25,9 +38,14 @@
  * and the assertion is that no CSS-shaped text reaches the rendered output.
  * Widening the component to render the resolved style turns it red.
  */
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import type { Mock } from 'vitest';
 import { SpecView } from './SpecView';
 import type { DeckSpec, SlideDeck, SlideSpec } from '../../types/slide';
+import goldenSpecJson from '../../../tests/fixtures/deck-spec-markdown/full.deck-spec.json?raw';
+import goldenMarkdown from '../../../tests/fixtures/deck-spec-markdown/full.md?raw';
+import { readBlobText } from '../../test/readBlobText';
+import { REVOKE_DELAY_MS } from '../../utils/downloadFile';
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -397,5 +415,265 @@ describe('SpecView — never compiled style content (finding 18b, reshaped)', ()
     // A `{…}` block containing a colon — i.e. a declaration body.  Reported as a
     // match rather than a boolean so a failure names the leaked text.
     expect(text.match(/\{[^{}]*:[^{}]*\}/)).toBeNull();
+  });
+});
+
+// ── Export spec as Markdown (#318) ────────────────────────────────────────────
+//
+// The button downloads the spec this view is showing, as renderDeckSpecMarkdown
+// renders it, named after the SPEC's title. The renderer's own contract (escaping,
+// order, field coverage) is pinned byte for byte against the golden pair in
+// services/__tests__/deckSpecMarkdown.test.ts. These tests pin the WIRING: the view
+// writes exactly that document, for the current spec, with no compiled style, no
+// request, and no gate on the deck review.
+//
+// The deck comes from makeDeck(), so its `title` ('Renewal risk, Q3') is NOT the
+// golden spec's title and its `css` is COMPILED_DECK_CSS: a file name or content
+// taken from the deck instead of the spec is caught.
+
+describe('SpecView — Export spec as Markdown', () => {
+  const GOLDEN: DeckSpec = JSON.parse(goldenSpecJson);
+  /** A fresh deep copy of the golden input. Tests mutate copies, never GOLDEN. */
+  const golden = (): DeckSpec => structuredClone(GOLDEN);
+  const EXPORT_NAME = 'Export spec as Markdown';
+  /** deckSpecMarkdownFilename(GOLDEN.title), spelled out so the test does not call the code under test. */
+  const GOLDEN_FILENAME = 'renewal-risk-q3-emea-apac-spec.md';
+  const MARKDOWN_MIME = 'text/markdown;charset=utf-8';
+  const OBJECT_URL = 'blob:http://localhost/spec-view-export-object-url';
+  /**
+   * A later chat turn's audience. Local on purpose: the follow-the-deck describe's
+   * REVISED_AUDIENCE is scoped to that describe, and that describe is not touched.
+   */
+  const EXPORT_REVISED_AUDIENCE = 'The board only, revised before export.';
+
+  // FileReader.readAsText silently strips a leading BOM, so only the bytes can show one.
+  function readBlobBytes(blob: Blob): Promise<number[]> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(Array.from(new Uint8Array(reader.result as ArrayBuffer)));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  function renderExport(deckSpec: DeckSpec, reviewInProgress = false) {
+    return render(
+      <SpecView
+        slideDeck={makeDeck(deckSpec)}
+        onDiscuss={noop}
+        reviewInProgress={reviewInProgress}
+      />,
+    );
+  }
+
+  const exportButton = () => screen.getByRole('button', { name: EXPORT_NAME });
+
+  let createdBlobs: Blob[];
+  let clicks: { download: string; href: string | null }[];
+  let createObjectURL: Mock<(blob: Blob) => string>;
+  let revokeObjectURL: Mock<(url: string) => void>;
+
+  beforeEach(() => {
+    // Fake ONLY these two: the default also fakes setImmediate, which jsdom's
+    // FileReader uses, so readBlobText would never settle.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+    createdBlobs = [];
+    clicks = [];
+    // jsdom implements neither URL.createObjectURL nor URL.revokeObjectURL.
+    createObjectURL = vi.fn((blob: Blob) => {
+      createdBlobs.push(blob);
+      return OBJECT_URL;
+    });
+    revokeObjectURL = vi.fn((url: string) => {
+      void url;
+    });
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      writable: true,
+      value: createObjectURL,
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      writable: true,
+      value: revokeObjectURL,
+    });
+    // Without this stub jsdom logs "not implemented: navigation" on an <a download> click.
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicks.push({ download: this.download, href: this.getAttribute('href') });
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(URL, 'createObjectURL');
+    Reflect.deleteProperty(URL, 'revokeObjectURL');
+  });
+
+  it('offers Export spec as Markdown when the deck has a spec', () => {
+    // Sabotage: remove the spec-export-markdown Button.
+    renderExport(golden());
+
+    // In the spec pane's header, by role and by its EXACT accessible name.
+    const button = within(screen.getByTestId('spec-view-header'))
+      .getByRole('button', { name: EXPORT_NAME });
+    // The visible words are a prefix of the accessible name (WCAG 2.5.3, label in name).
+    expect(button).toHaveTextContent('Export spec');
+    // The element the specless test looks for by test id IS this button, so that
+    // absence check cannot pass by looking for the wrong thing.
+    expect(screen.getByTestId('spec-export-markdown')).toBe(button);
+  });
+
+  it('offers no export on a specless deck, while Discuss stays', () => {
+    // Sabotage: render the Button unconditionally (drop the `spec &&` guard).
+    const cases: [string, SlideDeck | null][] = [
+      ['deck_spec null (a specless deck)', makeDeck(null)],
+      ['deck_spec absent (a client-side deck)', makeDeck(undefined)],
+      ['no deck at all', null],
+    ];
+    for (const [label, slideDeck] of cases) {
+      const { unmount } = render(<SpecView slideDeck={slideDeck} onDiscuss={noop} />);
+      // Precondition: the header rendered and the empty state is showing, so the
+      // absence below is not over a missing subtree. Asking for a plan is the
+      // action left, so Discuss must stay.
+      expect(screen.getByTestId('spec-view-empty'), label).toBeInTheDocument();
+      expect(screen.getByTestId('spec-discuss'), label).toBeInTheDocument();
+
+      expect(screen.queryByTestId('spec-export-markdown'), label).toBeNull();
+      expect(screen.queryByRole('button', { name: /export/i }), label).toBeNull();
+      unmount();
+    }
+  });
+
+  it('downloads exactly the rendered spec, named after the spec title', async () => {
+    // Sabotage: name the file from `slideDeck.title`; MIME `text/plain`; write
+    // `spec.audience` instead of the rendered document; an inline download that
+    // revokes the URL synchronously.
+    //
+    // Precondition: the deck's title is not the spec's, so a name taken from the
+    // deck ('renewal-risk-q3-spec.md') is a different name.
+    expect(makeDeck(null).title).not.toBe(GOLDEN.title);
+    renderExport(golden());
+
+    fireEvent.click(exportButton());
+
+    // One download, of one Blob, through the URL created for it.
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(createdBlobs).toHaveLength(1);
+    expect(clicks).toHaveLength(1);
+    expect(clicks[0].download).toBe(GOLDEN_FILENAME);
+    expect(clicks[0].href).toBe(createObjectURL.mock.results[0].value);
+    // Not revoked at click time, while the browser may still be reading the blob.
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+
+    const blob = createdBlobs[0];
+    expect(blob.type).toBe(MARKDOWN_MIME);
+    expect(await readBlobText(blob)).toBe(goldenMarkdown);
+    // Exactly the UTF-8 bytes of the golden document: no BOM, no re-encoding.
+    expect(await readBlobBytes(blob)).toEqual(Array.from(new TextEncoder().encode(goldenMarkdown)));
+
+    vi.advanceTimersByTime(REVOKE_DELAY_MS);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith(createObjectURL.mock.results[0].value);
+  });
+
+  it('the export carries no compiled style content, though the deck CSS is in scope', async () => {
+    // Sabotage: write `renderDeckSpecMarkdown(spec) + slideDeck!.css`.
+    //
+    // L3, the export's half of finding 18b, and kept apart from the exact-document
+    // test above for the same reason the render-side pair is split. The deck carries
+    // all four CSS shapes (pinned by 'the fixture deck genuinely carries compiled
+    // style content'), and this is that deck.
+    const deck = makeDeck(golden());
+    expect(deck.css).toBe(COMPILED_DECK_CSS);
+    render(<SpecView slideDeck={deck} onDiscuss={noop} />);
+
+    fireEvent.click(exportButton());
+
+    expect(createdBlobs).toHaveLength(1);
+    const text = await readBlobText(createdBlobs[0]);
+    // Precondition: a populated document, so the absences below are not over an empty file.
+    expect(text).toContain('## Slide briefs');
+
+    expect(text).not.toContain('var(--');
+    expect(text).not.toContain('@media');
+    expect(text).not.toContain('@font-face');
+    // A `{...}` block containing a colon, i.e. a declaration body. Reported as a
+    // match so a failure names the leaked text.
+    expect(text.match(/\{[^{}]*:[^{}]*\}/)).toBeNull();
+  });
+
+  it('the export follows the deck: after a revision, it exports the revised spec', async () => {
+    // Sabotage: `useMemo(() => renderDeckSpecMarkdown(spec!), [])`, or a useRef that
+    // latches the first spec (or the first document it rendered).
+    const first = golden();
+    // The renderer collapses whitespace runs (GOLDEN's audience has a tab).
+    const firstAudience = first.audience.replace(/\s+/g, ' ');
+    // Precondition: this is the text the first export carries, so its absence from
+    // the second one means something.
+    expect(goldenMarkdown).toContain(firstAudience);
+
+    const { rerender } = render(<SpecView slideDeck={makeDeck(first)} onDiscuss={noop} />);
+    // Export once BEFORE the revision too, so a latch filled on the first click is caught.
+    fireEvent.click(exportButton());
+
+    // A later chat turn replaces the deck: the architect narrowed the audience.
+    rerender(
+      <SpecView
+        slideDeck={makeDeck({ ...golden(), audience: EXPORT_REVISED_AUDIENCE })}
+        onDiscuss={noop}
+      />,
+    );
+    // Precondition: the view itself shows the revision.
+    expect(screen.getByTestId('spec-audience')).toHaveTextContent(EXPORT_REVISED_AUDIENCE);
+    fireEvent.click(exportButton());
+
+    expect(createdBlobs).toHaveLength(2);
+    expect(await readBlobText(createdBlobs[0])).toContain(firstAudience);
+    const revisedExport = await readBlobText(createdBlobs[1]);
+    expect(revisedExport).toContain(EXPORT_REVISED_AUDIENCE);
+    // Replaced, not joined: the superseded audience is gone from the file.
+    expect(revisedExport).not.toContain(firstAudience);
+  });
+
+  it('the export issues no network request', async () => {
+    // Sabotage: `void fetch('/api/...')` in the click handler.
+    //
+    // There is no spec endpoint (D1): the view already holds the spec it exports.
+    const fetchStub = vi.fn();
+    vi.stubGlobal('fetch', fetchStub);
+    const xhrOpen = vi.spyOn(XMLHttpRequest.prototype, 'open');
+    renderExport(golden());
+
+    fireEvent.click(exportButton());
+    // Precondition: the click really exported.
+    expect(clicks).toHaveLength(1);
+    // Let anything deferred run as well: the microtask queue, then the revoke delay.
+    await Promise.resolve();
+    vi.advanceTimersByTime(REVOKE_DELAY_MS);
+
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(xhrOpen).not.toHaveBeenCalled();
+  });
+
+  it('export stays offered and enabled while the deck review is in progress', async () => {
+    // Sabotage: `{spec && !reviewInProgress && ...}`, or `disabled={reviewInProgress}`
+    // (the second is also caught by deckReviewFlag.test.tsx's source scan).
+    renderExport(golden(), true);
+    // Precondition: the review state reached the component.
+    expect(screen.getByTestId('deck-review-in-progress')).toBeInTheDocument();
+
+    const button = exportButton();
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    expect(clicks).toHaveLength(1);
+    expect(clicks[0].download).toBe(GOLDEN_FILENAME);
+    expect(createdBlobs).toHaveLength(1);
+    expect(await readBlobText(createdBlobs[0])).toBe(goldenMarkdown);
   });
 });

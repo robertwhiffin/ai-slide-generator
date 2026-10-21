@@ -704,7 +704,7 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "3ed38cb4c08622a8d818868beb0a61fc69351641cfe49d2f4b34bd4f53f46522",
+    "architect": "ffc3074dc9206abc70aa5fd3d0b88a60d8464ad85ef589c849402f3b2464672a",
     "data_analyst": "287da422d4aeb6c328685ace87be167feac639e4318cff07f147d9cd181be3c3",
     "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
     "build_reviewer": "8423d4989950e283ee34605059a7f16151404bb687c0651ef55035efce25795a",
@@ -1154,9 +1154,10 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
         with pytest.raises(TypeError, match="canonical object keys must be strings"):
             definition_content_hash(built(rejected))
 
-    # The string-keyed sibling is unaffected, so no existing hash moves.
+    # The string-keyed sibling is unaffected, so no existing hash moves.  The literal
+    # covers the architect prompt too; recomputed for the #313 slide-references prompt.
     assert definition_content_hash(built({"1": "a"})) == (
-        "33a88de7bcee3c89889efc0625adb1fa78f7433b6d34b37d17ca02b48e0969d9"
+        "7fc660074a415874259a7eb661aa67851337ee9ddfaced6cdcdf1c80c5e0ba91"
     )
 
 

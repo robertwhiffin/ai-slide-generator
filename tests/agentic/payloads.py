@@ -26,6 +26,8 @@ ARCHITECT_PAYLOAD_KEYS: tuple[str, ...] = (
     "message",
     "current_deck_spec",
     "committed_slide_count",
+    "slide_numbering",
+    "slide_references",
     "previous_deck_review",
     "available_design_contract",
     "template_sections",
@@ -38,7 +40,7 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
     """The architect's payload, with every production key present.
 
     Absent keys are as significant as present ones: ``architect_node`` always
-    sends all nine, so a builder that omitted ``template_sections`` would be
+    sends all eleven, so a builder that omitted ``template_sections`` would be
     testing a prompt shape the architect never sees.
 
     Args:
@@ -54,6 +56,8 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
         "message": message,
         "current_deck_spec": None,
         "committed_slide_count": 0,
+        "slide_numbering": [],
+        "slide_references": [],
         "previous_deck_review": None,
         "available_design_contract": None,
         "template_sections": [],
@@ -68,6 +72,23 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
             "architect_node would test a prompt shape production never sends."
         )
     payload.update(overrides)
+
+    # #313: the two derived keys come from the post-override conversation and
+    # deck, through the helper ``architect_node`` calls, so a layer-3 test is
+    # handed the numbering production would hand the model.  An explicit
+    # override of either key still wins.
+    from src.domain.slide_numbering import architect_slide_payload
+
+    deck = payload["current_deck_spec"]
+    positions = (
+        [slide["position"] for slide in deck["slides"]] if isinstance(deck, dict) else []
+    )
+    derived = architect_slide_payload(
+        payload["conversation"], payload["message"], positions
+    )
+    for key in ("slide_numbering", "slide_references"):
+        if key not in overrides:
+            payload[key] = derived[key]
     return payload
 
 

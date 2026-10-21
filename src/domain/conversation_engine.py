@@ -17,6 +17,13 @@ LEGACY_MODE_PHRASE = "USE LEGACY MODE"
 # recognise the historical graph decks it was written to pin.
 AGENT_MODE_PHRASE = "USE AGENT MODE"
 
+#: ``SessionMessage.message_type`` of the one row ``ChatService.clear_context`` keeps.
+#: The deck's engine is read off its earliest role='user' row (role only), so a
+#: clear cannot delete that row; this type hides it from every transcript read
+#: (``SessionManager.get_messages``, save-point capture), and so from the chat
+#: panel, the architect's conversation and the monolith's history.
+ENGINE_MODE_MARKER_MESSAGE_TYPE = "engine_mode_marker"
+
 
 def selects_legacy_engine(content: str | None) -> bool:
     """Return whether ``content`` contains the case-sensitive legacy opt-out."""
@@ -43,3 +50,8 @@ def with_legacy_marker(content: str) -> str:
     if selects_legacy_engine(content):
         return content
     return f"{LEGACY_MODE_PHRASE}\n\n{content}"
+
+
+def is_transcript_message(message_type: str | None) -> bool:
+    """Whether a persisted chat row belongs to the visible conversation."""
+    return message_type != ENGINE_MODE_MARKER_MESSAGE_TYPE

@@ -271,6 +271,25 @@ if version.created_at:
 
 This ensures both slides and chat history stay in sync when previewing or reverting.
 
+### Clearing the chat
+
+[Clear chat](../user-guide/01-generating-slides.md#clearing-the-chat) (`DELETE /api/sessions/{id}/context`) never touches `slide_deck_versions`:
+
+- **Existing save points are unchanged.** Previewing one reads its `chat_history_json` snapshot, not the live `session_messages` rows, so the preview still shows the chat it captured even after that chat was cleared.
+- **The row a clear keeps is never captured.** A clear keeps the session's earliest `role='user'` row (on the deck owner's session, engine mode reads it) and re-types it `message_type = "engine_mode_marker"`. `SessionManager.create_version` drops rows of that type when it captures `session.messages`, so a save point taken after a clear holds only the conversation since the clear.
+- **A restore does not bring a cleared conversation back.** `restore_version` deletes this session's rows created after the save point and never re-inserts the snapshot's chat rows. The kept row survives whenever it predates that save point, which is always true for a root deck's own first turn. A contributor's kept row can be removed by a restore, which is harmless: the deck's engine resolves on the owner's rows.
+
+**Known gap.** After restoring a save point in the same tab, the Clear chat button shows (it no longer depends on the Spec), but until the deck is next loaded from the server (a page reload, or the next reply that returns slides) its dialog and tooltip use the Spec-less wording. The restored deck object is built from the save point's `deck_json` and carries no Spec, so `hasDeckSpec` is false until then. That wording is still true: it promises only that the slides and save points stay, and that the assistant will not remember the conversation.
+
+### Deleting a message
+
+[Deleting a message](../user-guide/01-generating-slides.md#deleting-a-message) (`DELETE /api/sessions/{id}/messages/{message_id}`) never touches `slide_deck_versions` either, and nothing is undone in the deck:
+
+- **Existing save points are unchanged.** Previewing one reads its `chat_history_json` snapshot, not the live `session_messages` rows, so the preview still shows a turn that was deleted after the save point was taken.
+- **A save point taken after a delete excludes the turn, and excludes a hidden first row.** `create_version` captures `session.messages`, so a deleted turn is not in it. When the deleted turn was the session's first, its user row is kept re-typed `engine_mode_marker`, and `create_version` drops rows of that type.
+- **A restore never brings a deleted turn back.** `restore_version` deletes this session's rows created after the save point and re-inserts no rows, so a deleted turn stays deleted whichever save point is restored.
+- **A restore and a deck delete do not delete the graph thread.** Only a clear and a message delete call `delete_thread`. After a restore, the thread still holds the text of the turns the restore removed; after a deck delete (`delete_session`), the thread's rows stay, keyed by the deleted session's id (the checkpoint tables have no foreign key to the session, so nothing cascades). Nothing replays the thread's messages to an agent: the architect's `conversation` is rebuilt from `session_messages` every turn. Deleting the thread in both places is a follow-up.
+
 ---
 
 ## 10. Implementation Notes

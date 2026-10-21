@@ -21,7 +21,10 @@ HELDOUT_CASE_IDS = {
         "content_broken_reject", "fault_left_reject",
     },
     "deck_reviewer": {"clean", "missing_conclusion", "out_of_order", "repetition", "arc_gap_drop_workflow"},
-    "architect": {"build_request", "edit_request", "ask_data", "confirm_design", "discuss"},
+    "architect": {
+        "build_request", "edit_request", "ask_data", "confirm_design", "discuss",
+        "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
+    },
     "data_analyst": {
         "figures_inline", "conflicting_figures", "two_sources", "needs_tool", "unsourced_public_stat",
     },
@@ -59,8 +62,9 @@ def _tree(root):
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def test_total_is_thirty_five():
-    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 35
+def test_total_heldout_case_count():
+    # Five per agent, nine for the architect (#313 added four).
+    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 39
 
 
 @pytest.mark.parametrize("agent", AGENTS)

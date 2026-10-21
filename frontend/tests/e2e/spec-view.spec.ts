@@ -19,6 +19,15 @@
  * with a conditional render (`{!showSpec && <SlideViewer …>}`); make the toggle
  * call setViewMode/navigate instead of setShowSpec; put showSpec into the chat
  * request body.
+ *
+ * Export spec as Markdown (#318) sabotage targets, in SpecView.tsx's export onClick
+ * unless named: a wrong filename (change the `-spec.md` suffix in
+ * services/deckSpecMarkdown.ts's deckSpecMarkdownFilename); wrong content (pass
+ * `spec.audience` instead of renderDeckSpecMarkdown(spec)); a request from the
+ * handler (`void fetch('/api/sessions')`); hiding the button on `/view` (removing it
+ * turns the main and read-only export tests red while the specless test stays green
+ * — SpecView takes no route or permission prop, so the read-only test pins the
+ * product decision against a future gating prop).
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +56,26 @@ const COMPILED_DECK_CSS = [
   '.slide h1 { color: var(--brand-primary); font-family: var(--brand-body); }',
   '@media (min-width: 900px) { .slide { padding: 64px; } }',
 ].join('\n');
+
+/**
+ * The golden pair (#318): the spec the export is fed and the Markdown it must write,
+ * byte for byte. The same files are the renderer's unit-test contract, so a browser
+ * download that equals `full.md` is the renderer's output and nothing else — not the
+ * deck's CSS, not a field the Spec view happens to show.
+ */
+const GOLDEN_DIR = new URL('../fixtures/deck-spec-markdown/', import.meta.url);
+const GOLDEN_SPEC = JSON.parse(readFileSync(new URL('full.deck-spec.json', GOLDEN_DIR), 'utf8'));
+const GOLDEN_MARKDOWN = readFileSync(new URL('full.md', GOLDEN_DIR), 'utf8');
+/** Spelled out, not derived from GOLDEN_SPEC.title: both sides must not move together. */
+const GOLDEN_FILENAME = 'renewal-risk-q3-emea-apac-spec.md';
+
+/** Click Export and read back what the browser actually saved. */
+async function exportSpec(page: Page) {
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export spec as Markdown' }).click();
+  const download = await downloadPromise;
+  return { filename: download.suggestedFilename(), text: readFileSync(await download.path(), 'utf8') };
+}
 
 /** Order matters: neither a reverse nor an alphabetical sort reproduces it. */
 const NARRATIVE_ARC = [
@@ -420,6 +449,36 @@ test.describe('spec view toggle', () => {
     expect(requests.filter((r) => r.includes('/api/'))).toEqual([]);
   });
 
+  // ── Export spec as Markdown (#318) ─────────────────────────────────────────
+
+  test('Export spec as Markdown downloads the rendered spec, and asks the server for nothing', async ({ page }) => {
+    // Registered after the beforeEach's DECK_SPEC route, so LIFO serves the golden.
+    await mockDeckSpec(page, GOLDEN_SPEC);
+    await openDeck(page);
+    await showSpec(page);
+    // The golden is what is showing, so the file is the spec on screen.
+    await expect(page.getByTestId('spec-audience')).toContainText(GOLDEN_SPEC.audience);
+
+    const requests: string[] = [];
+    page.on('request', (r) => requests.push(`${r.method()} ${r.url()}`));
+
+    const { filename, text } = await exportSpec(page);
+
+    expect(filename).toBe(GOLDEN_FILENAME);
+    // Byte-exact against the renderer's golden: covers the UTF-8 em dash and the
+    // Blob -> object URL -> <a download> path a jsdom test cannot exercise.
+    expect(text).toBe(GOLDEN_MARKDOWN);
+
+    // The served deck carries real compiled CSS (COMPILED_DECK_CSS); the spec holds
+    // only ids, so none of that content may reach the file (L3).
+    expect(text).not.toContain('var(--');
+    expect(text).not.toContain('@media');
+    expect(text).not.toContain('@font-face');
+
+    // The deck the viewer holds IS the spec: exporting it is not a fetch.
+    expect(requests.filter((r) => r.includes('/api/'))).toEqual([]);
+  });
+
   // ── nothing is unmounted ───────────────────────────────────────────────────
 
   test('the conversation survives the toggle', async ({ page }) => {
@@ -628,6 +687,17 @@ test.describe('spec view toggle', () => {
     await showSlides(page);
     await expect(page.getByTestId('slide-viewer')).toBeVisible();
   });
+
+  test('a specless deck offers no export', async ({ page }) => {
+    await mockDeckSpec(page, null);
+    await openDeck(page);
+    await showSpec(page);
+
+    await expect(page.getByTestId('spec-view-empty')).toBeVisible();
+    await expect(page.getByTestId('spec-export-markdown')).toHaveCount(0);
+    // The header itself is still there, so the absence above is not an empty pane.
+    await expect(page.getByTestId('spec-discuss')).toBeVisible();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -651,6 +721,21 @@ test.describe('spec visibility rides deck visibility', () => {
     await showSpec(page);
     await expect(page.getByTestId('spec-view')).toBeVisible();
     await expect(page.getByTestId('spec-audience')).toContainText(DECK_SPEC.audience);
+  });
+
+  test('a read-only viewer can export the spec', async ({ page }) => {
+    // D1: the export rides spec visibility. Anyone who can read the spec can take
+    // it away as Markdown; the read-only route grants nothing less.
+    await mockDeckSpec(page, GOLDEN_SPEC);
+    await openDeck(page, 'view');
+    await expect(page.getByTestId('chat-input')).toBeDisabled();   // genuinely read-only
+
+    await showSpec(page);
+    await expect(page.getByTestId('spec-audience')).toContainText(GOLDEN_SPEC.audience);
+
+    const { filename, text } = await exportSpec(page);
+    expect(filename).toBe(GOLDEN_FILENAME);
+    expect(text).toBe(GOLDEN_MARKDOWN);
   });
 
   test('the permission gate lives in the route, not in get_slide_deck', async () => {

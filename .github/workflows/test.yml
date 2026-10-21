@@ -454,6 +454,7 @@ jobs:
             tests/integration/test_spec_dirty_marker_routes.py \
             tests/integration/test_sweeper_describe_only.py \
             tests/integration/test_architect_reply_is_persisted.py \
+            tests/integration/test_turn_progress_polling.py \
             tests/integration/test_insert_slide_route.py \
             tests/integration/test_slide_id_is_durable.py \
             tests/integration/test_deck_spec_change_turn.py \
@@ -462,6 +463,8 @@ jobs:
             tests/integration/test_graph_lifecycle_acceptance_postgres.py \
             tests/integration/test_graph_lifecycle_runtime_postgres.py \
             tests/integration/test_lakebase_contract_failures_postgres.py \
+            tests/integration/test_clear_context_graph_turn.py \
+            tests/integration/test_delete_message_graph_turn.py \
             -v --tb=short --junitxml=test-results/graph-results.xml -m "not live" \
             -o faulthandler_timeout=120
       - uses: actions/upload-artifact@v4
@@ -550,7 +553,9 @@ jobs:
           DATABRICKS_TOKEN: ""
         run: |
           pytest \
+            tests/integration/test_clear_chat_routes.py \
             tests/integration/test_comments_removed.py \
+            tests/integration/test_delete_message_routes.py \
             tests/integration/test_export_parity.py \
             tests/integration/test_get_slide_deck_row_read.py \
             tests/integration/test_image_api.py \
@@ -695,12 +700,14 @@ jobs:
           - api-route-matcher
           - app-tour
           - chat-ui
+          - clear-chat
           - conversation-graph-version
           - css-bg-export
           - deck-integrity
           - deck-review-flag
           - deck-prompts-integration
           - deck-prompts-ui
+          - delete-message
           - design-system-brand-text-uncapped
           - design-system-selector
           - design-systems-ui
@@ -736,6 +743,7 @@ jobs:
           - template-cards
           - template-preview-import-scan
           - template-viewer
+          - turn-progress
           - viewer-readonly
     
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well

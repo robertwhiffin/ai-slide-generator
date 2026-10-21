@@ -70,6 +70,8 @@ EVERY_MODEL_CALL = (
                 "message",
                 "current_deck_spec",
                 "committed_slide_count",
+                "slide_numbering",
+                "slide_references",
                 "previous_deck_review",
                 "available_design_contract",
                 "template_sections",

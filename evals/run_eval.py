@@ -12,6 +12,7 @@ from evals.harness import render as render_mod
 from evals.harness.case import meridian_section_css, split_kwargs
 from evals.harness.config import AgentEvalConfig, load_config, prices, v1_baseline
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
+from src.services.model_endpoint_catalog import gateway_endpoint_name
 
 HTML_ROLES = ("builder", "fixer")
 
@@ -21,11 +22,16 @@ def apply_profile(profile: str) -> str:
 
 
 def _endpoint_reachable(endpoint_name: str) -> bool:
-    """Probe the serving endpoint; True if it resolves."""
+    """Probe the serving endpoint behind *endpoint_name*; True if it resolves.
+
+    A ``system.ai.<m>`` gateway model name is not a serving-endpoint name, so the probe
+    looks up ``gateway_endpoint_name(name)`` (``databricks-<m>``); the agent call keeps
+    the configured name.
+    """
     try:
         from databricks.sdk import WorkspaceClient
 
-        WorkspaceClient().serving_endpoints.get(endpoint_name)
+        WorkspaceClient().serving_endpoints.get(gateway_endpoint_name(endpoint_name))
         return True
     except Exception:  # noqa: BLE001 - any failure means not reachable
         return False
@@ -37,7 +43,10 @@ def validate_endpoint(config: AgentEvalConfig) -> None:
         warnings.warn(f"endpoint_name {name!r} has no entry in prices.yaml; cost will be unestimated",
                       UserWarning, stacklevel=2)
     if not _endpoint_reachable(name):
-        raise SystemExit(f"endpoint_name {name!r} is not reachable (agent {config.agent_key})")
+        raise SystemExit(
+            f"endpoint_name {name!r} is not reachable "
+            f"(probed serving endpoint {gateway_endpoint_name(name)!r}; agent {config.agent_key})"
+        )
 
 
 def _load(agent_key: str, config_arg: str) -> AgentEvalConfig:

@@ -34,8 +34,8 @@ from src.services.graph_definition_manifest import (
 # --- HEAD literals -----------------------------------------------------------
 
 # Pins updated for the endpoint switch to system.ai Gateway models, then for the
-# deck-parity architect and builder prompts.
-HEAD_ARCHITECT_CONTENT_HASH = "3ed38cb4c08622a8d818868beb0a61fc69351641cfe49d2f4b34bd4f53f46522"
+# deck-parity architect and builder prompts, then for #313 slide references.
+HEAD_ARCHITECT_CONTENT_HASH = "ffc3074dc9206abc70aa5fd3d0b88a60d8464ad85ef589c849402f3b2464672a"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
@@ -421,3 +421,89 @@ def test_binding_block_allows_a_slide_to_stay_unbound():
     assert re.search(r"both[^.]{0,30}null", block), (
         "binding block must state the pair is either fully populated or fully null"
     )
+
+
+# --- #313: SLIDE NUMBERS points at the resolved slide numbers ------------------------
+#
+# architect_node now puts two keys in the model payload (src/domain/slide_numbering.py):
+# `slide_numbering`, [{slide_number, position}] for the current deck, and
+# `slide_references`, the slides the user's latest message names, already resolved to
+# positions, with numbers the deck lacks reported in `out_of_range` (never clamped).
+# The SLIDE NUMBERS block must send the architect to them instead of "number - 1".
+# Same style as BINDING_RULES: a regex per instruction over the plain block, so the
+# wording may change as long as each instruction is still there.  Each regex is kept
+# to one sentence ([^.]), so deleting a sentence turns only its own rules red.
+
+SLIDE_NUMBERS_HEADING = "SLIDE NUMBERS"
+
+# "unresolved", "not resolved", "does not resolve", "doesn't resolve", "fails to resolve".
+_UNRESOLVED = (
+    r"(\bunresolved\b|\bnot (been )?resolved?\b|n't (been )?resolved?\b|\bfails? to resolve\b)"
+)
+# "do not edit", "is not edited", "never edit", "not an edit", "no edit".
+_NOT_EDIT = r"(\bnot\b|n't\b|\bnever\b|\bno\b)[^.]{0,20}\bedit(ed|s)?\b"
+_NOT_EDIT_AND_DISCUSS = rf"({_NOT_EDIT}[^.]{{0,80}}\bdiscuss\b|\bdiscuss\b[^.]{{0,80}}{_NOT_EDIT})"
+
+
+def _slide_numbers_block(prompt: str) -> str:
+    blocks = [b for b in prompt.split("\n\n") if b.startswith(SLIDE_NUMBERS_HEADING)]
+    assert len(blocks) == 1, (
+        f"expected exactly one {SLIDE_NUMBERS_HEADING!r} block, found {len(blocks)}"
+    )
+    return blocks[0]
+
+
+# Each entry: (description, regex over the plain SLIDE NUMBERS block).
+SLIDE_NUMBERS_RULES = (
+    (
+        "slide_numbering maps each slide_number to its position",
+        r"slide_numbering\b[^.]{0,80}\b(slide_)?numbers?\b[^.]{0,40}\bpositions?\b|"
+        r"slide_numbering\b[^.]{0,80}\bpositions?\b[^.]{0,40}\b(slide_)?numbers?\b",
+    ),
+    (
+        "slide_references holds the slides the message names, already resolved",
+        r"slide_references\b[^.]{0,100}\b(message|turn|request)\b[^.]{0,80}\bresolved\b",
+    ),
+    (
+        "target_positions come from slide_references when the phrase was resolved",
+        r"target_positions\b[^.]{0,60}slide_references\b[^.]{0,80}\bresolved\b|"
+        r"\bresolved\b[^.]{0,80}slide_references\b[^.]{0,80}target_positions|"
+        r"slide_references\b[^.]{0,80}\bresolved\b[^.]{0,80}target_positions",
+    ),
+    (
+        "a number or ordinal that does not resolve is looked up in slide_numbering",
+        rf"{_UNRESOLVED}[^.]{{0,80}}slide_numbering|slide_numbering\b[^.]{{0,80}}{_UNRESOLVED}",
+    ),
+    (
+        "never compute a position as the number minus one",
+        r"(\bnever\b|\bdo not\b|\bdon't\b|\bmust not\b)[^.]{0,80}"
+        r"(\bminus (one|1)\b|number ?[−-] ?1\b|\bsubtract(ing)? (one|1)\b)",
+    ),
+    (
+        "an out_of_range reference is not edited, use discuss",
+        rf"out_of_range\b[^.]{{0,160}}{_NOT_EDIT_AND_DISCUSS}|"
+        rf"{_NOT_EDIT_AND_DISCUSS}[^.]{{0,160}}out_of_range",
+    ),
+    (
+        "naming a slide is not by itself a request to change it",
+        r"\b(referenc\w*|nam(e|es|ed|ing)|mention\w*)\b[^.]{0,80}"
+        r"(\bnot that\b[^.]{0,40}\b(chang|edit)\w*|"
+        r"(\bnot\b|n't\b|\bnever\b)[^.]{0,30}"
+        r"\b(make|makes|mean|means|imply|implies|ask|asks|request|requests)\b"
+        r"[^.]{0,40}\b(chang|edit)\w*)",
+    ),
+    (
+        "the intent is decided from what the user asks for",
+        r"\b(intent|classif\w*)\b[^.]{0,60}"
+        r"(\bwhat (the user|they) (actually )?(asks?|wants?|requests?)\b|"
+        r"\buser's (actual )?(request|ask|words)\b)",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("description", "pattern"), SLIDE_NUMBERS_RULES, ids=[d for d, _ in SLIDE_NUMBERS_RULES]
+)
+def test_slide_numbers_block_states_rule(description, pattern):
+    block = _plain(_slide_numbers_block(INSTRUCTIONS))
+    assert re.search(pattern, block), f"SLIDE NUMBERS lacks: {description}"

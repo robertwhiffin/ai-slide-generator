@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import and_, delete, func, or_
+from sqlalchemy import and_, delete, func, or_, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
@@ -29,6 +29,7 @@ from src.database.models.session import (
     SlideDeckVersion,
     UserSession,
 )
+from src.domain.conversation_engine import is_transcript_message
 from src.domain.finding import findings_from_record
 from src.domain.finding_copy import plain_finding_issue, plain_finding_message
 from src.services.conversation_pins import (
@@ -48,6 +49,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_SESSION_TITLE_LEN = 255
 _DUPLICATE_TITLE_PREFIX = "Copy of "
+
+#: How long a turn-progress write waits for its request row's lock on PostgreSQL
+#: before giving up (#319).  A progress write is a side channel running on a
+#: slide's own thread; it must never hold that slide up for long.
+_PROGRESS_LOCK_TIMEOUT = "2s"
 
 
 def _truncate_session_title(title: str, max_len: int = _MAX_SESSION_TITLE_LEN) -> str:
@@ -664,10 +670,49 @@ def _prune_slide_rows_beyond(db: Session, owner_id: int, slide_count: int) -> in
     return len(orphans)
 
 
+def earliest_user_message(db: Session, session_pk: int) -> Optional[SessionMessage]:
+    """The session's earliest ``role='user'`` row: the row engine mode is read off.
+
+    THE one copy of this rule (#317).  Earliest means ``created_at``, then
+    ``id``.  ``role`` only, never ``message_type``: the live paths write
+    different types for one user turn (``user_input`` on SSE, ``user_query`` on
+    the async route and MCP, ``chat`` on the tour), and the row a clear or a
+    message delete keeps is re-typed ``engine_mode_marker`` but is still this
+    row.
+
+    Callers: ``resolve_engine_mode`` (on the deck OWNER's session),
+    ``ChatService.clear_context`` and ``ChatService.delete_message`` (the row
+    they keep), ``SessionManager.duplicate_session`` (the marker it carries).
+    The startup pin backfill (``conversation_pins._backfill_in_transaction``)
+    applies the same rule set-based, over every root at once, with
+    ``row_number()`` over the same two columns; keep the two in step.
+
+    ``session_pk`` is ``UserSession.id`` (the integer key), not the string id.
+    """
+    return (
+        db.query(SessionMessage)
+        .filter(
+            SessionMessage.session_id == session_pk,
+            SessionMessage.role == "user",
+        )
+        .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+        .first()
+    )
+
+
 class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
 
     pass
+
+
+class MessageNotFoundError(Exception):
+    """A message id is not a deletable message of the session.
+
+    One error for every case (absent, another session's, not a user message,
+    the hidden engine-mode marker), so the route's 404 is no oracle for ids in
+    other sessions.
+    """
 
 
 class SessionAccessDeniedError(Exception):
@@ -1241,15 +1286,7 @@ class SessionManager:
             # Determine graph capability before constructing the new actor. The
             # duplicate owns a fresh immutable pin selected under the active-row
             # lock; the source's older pin is never copied or rewritten.
-            marker = (
-                db.query(SessionMessage)
-                .filter(
-                    SessionMessage.session_id == deck_owner.id,
-                    SessionMessage.role == "user",
-                )
-                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
-                .first()
-            )
+            marker = earliest_user_message(db, deck_owner.id)
             # The duplicate keeps its SOURCE deck's engine.  Since 2026-10-12
             # the graph is the default and the marker is the LEGACY opt-out:
             # a graph source (no first user message, or one without
@@ -1533,7 +1570,11 @@ class SessionManager:
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
 
-            messages = session.messages
+            # The row a clear keeps (engine-mode marker) is not part of the
+            # conversation; drop it BEFORE ``limit`` so it never uses a slot.
+            messages = [
+                m for m in session.messages if is_transcript_message(m.message_type)
+            ]
             if limit:
                 messages = messages[-limit:]
 
@@ -2528,6 +2569,7 @@ class SessionManager:
                         "created_at": m.created_at.isoformat(),
                     }
                     for m in session.messages
+                    if is_transcript_message(m.message_type)
                 ]
 
             # Create new version on the deck owner's session.
@@ -3275,6 +3317,40 @@ class SessionManager:
 
             chat_request.result_json = json.dumps(result) if result else None
 
+    def record_chat_request_progress(
+        self, request_id: str, seq: int, progress: Dict[str, Any]
+    ) -> bool:
+        """Store *progress* as this request's stage summary iff *seq* is newer.
+
+        The predicate is the whole concurrency story: several slide pipelines report
+        from several threads and their commits land in any order, so an older
+        snapshot must be a no-op rather than a regression.  On PostgreSQL a
+        concurrent UPDATE of the same row waits for the first commit and then
+        re-evaluates this WHERE against the new row (READ COMMITTED), so two
+        writers cannot both win.  Core ``update`` on ``__table__``, as
+        ``spec_sync``'s claim does (``src/services/spec_sync.py:475-487``).
+
+        On PostgreSQL the wait for the row lock is bounded by ``SET LOCAL
+        lock_timeout``: ``get_db_session`` runs one transaction per ``with`` block,
+        so the setting covers exactly the UPDATE below.  A timeout raises
+        ``sqlalchemy.exc.OperationalError``; the only production caller
+        (``progress._persist``) logs it and the next report carries a newer snapshot.
+
+        Returns True when this snapshot was stored, False when a newer (or equal)
+        one already was or the request does not exist.
+        """
+        table = ChatRequest.__table__
+        statement = (
+            update(table)
+            .where(table.c.request_id == request_id)
+            .where(or_(table.c.progress_seq.is_(None), table.c.progress_seq < seq))
+            .values(progress_json=json.dumps(progress), progress_seq=seq)
+        )
+        with get_db_session() as db:
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(text(f"SET LOCAL lock_timeout = '{_PROGRESS_LOCK_TIMEOUT}'"))
+            return db.execute(statement).rowcount == 1
+
     def get_chat_request(self, request_id: str) -> Optional[Dict[str, Any]]:
         """Get request status and result.
 
@@ -3308,6 +3384,11 @@ class SessionManager:
                 "result": (
                     json.loads(chat_request.result_json)
                     if chat_request.result_json
+                    else None
+                ),
+                "turn_progress": (
+                    json.loads(chat_request.progress_json)
+                    if chat_request.progress_json
                     else None
                 ),
             }

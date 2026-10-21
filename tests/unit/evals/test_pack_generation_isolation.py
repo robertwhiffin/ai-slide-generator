@@ -8,6 +8,8 @@ import src.core.database  # noqa: F401  (break import cycle before src.services.
 from evals.harness import case
 
 AGENTS = ["builder", "build_reviewer", "fixer", "fix_reviewer", "deck_reviewer", "architect", "data_analyst"]
+# Five train cases per agent; the architect has nine (#313 added four).
+EXPECTED_CASE_COUNT = {"architect": 9}
 
 
 def _stat(root):
@@ -26,7 +28,7 @@ def test_generate_into_out_dir_leaves_the_committed_tree_untouched(agent, tmp_pa
     mutations.generate(out_dir=out)
     assert _stat(committed) == before, "generate(out_dir=tmp) wrote into the committed tree"
     written = sorted(d.name for d in out.iterdir() if d.is_dir())
-    assert len(written) == 5
+    assert len(written) == EXPECTED_CASE_COUNT.get(agent, 5)
     loaded = case.load_cases(agent, root=out)
     assert sorted(c.case_id for c in loaded) == written
     one = case.load_case(agent, written[0], root=out)
