@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import type { SlideDeck, Slide } from '../../types/slide';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlideViewer, type SlideViewerHandle } from '../SlideViewer/SlideViewer';
+import { syntheticSlideId } from '../SlideViewer/newSlides';
 import { SpecView } from '../SpecView/SpecView';
 import { useDeckExport } from '../../hooks/useDeckExport';
 import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
@@ -175,7 +176,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     });
     const newSlide: Slide = {
       index: position,
-      slide_id: `build-${position}`,
+      slide_id: syntheticSlideId(position),
       html,
       scripts,
     };
@@ -1266,6 +1267,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                           }
                         }
                       }}
+                      onDeckRefetched={(deck) => setSlideDeckGated(deck, deck.version)}
                       viewOnlyReason={viewOnlyReason}
                     />
                   </div>

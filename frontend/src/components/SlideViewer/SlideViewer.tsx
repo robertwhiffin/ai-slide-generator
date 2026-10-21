@@ -18,6 +18,7 @@ import { SlideStage } from './SlideStage';
 import { ThumbnailRibbon } from './ThumbnailRibbon';
 import { FeedbackDrawer } from './FeedbackDrawer';
 import { loadSeen, markSeen } from './seenState';
+import { diffNewSlides, NEW_SLIDE_INDICATOR_MS } from './newSlides';
 import { HTMLEditorModal } from '../SlidePanel/HTMLEditorModal';
 import { VerificationBadge } from '../SlidePanel/VerificationBadge';
 import { ConfirmDialog } from '../ConfirmDialog';
@@ -29,6 +30,16 @@ import { useAutoVerification } from '../../hooks/useAutoVerification';
 interface SlideContext {
   indices: number[];
   slide_htmls: string[];
+}
+
+/** Stable empty set: clearing the chips with it is a no-op render when nothing was flagged. */
+const NO_FRESH_IDS: ReadonlySet<string> = new Set();
+
+function stopTimer(timer: { current: ReturnType<typeof setTimeout> | null }) {
+  if (timer.current !== null) {
+    clearTimeout(timer.current);
+    timer.current = null;
+  }
 }
 
 interface SlideViewerProps {
@@ -147,6 +158,12 @@ const ViewerBody = forwardRef<
   // The slide_id of the slide a manual insert just created. Set only once the insert's refetched deck
   // is about to be handed up, consumed by the effect below after that deck has rendered.
   const pendingSelectionRef = useRef<string | null>(null);
+  // New-slide indicator (#314 D10). The baseline is the last SERVER deck's slide_ids (mid-turn views
+  // with synthetic ids never replace it); `lastDeckKeyRef` detects a session switch.
+  const baselineRef = useRef<ReadonlySet<string> | null>(null);
+  const lastDeckKeyRef = useRef(deckKey);
+  const [freshIds, setFreshIds] = useState<ReadonlySet<string>>(NO_FRESH_IDS);
+  const freshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
 
@@ -174,19 +191,53 @@ const ViewerBody = forwardRef<
     setIsOptimizing(false);
   }, [slideDeck]);
 
-  // Select the slide a manual insert just created, once the deck holding it has rendered. Done in an
-  // effect, after render, because `setCurrentIndex` clamps to the slide count of the render it was
-  // created in: selecting from the insert handler would clamp an append (index n) to the old last
-  // slide. Matches by slide_id, so whatever else the refetch changed (another editor's insert or
-  // delete) cannot move the selection onto the wrong slide.
+  // The new-slide indicator and the selection that goes with it, in ONE effect so the order is fixed.
+  // Runs after the deck has rendered (a child effect, before ViewerProvider's own): `setCurrentIndex`
+  // clamps to the slide count of the render it was created in, so selecting from the insert handler
+  // would clamp an append (index n) to the old last slide.
+  //   1. A deckKey change (session switch, e.g. to a duplicate sharing slide_ids) resets the baseline
+  //      BEFORE diffing, drops a pending selection and the current chips: nothing is new in a deck we
+  //      have only just switched to.
+  //   2. Diff against the baseline (newSlides.ts). Mid-turn views and non-growth flag nothing.
+  //   3. Select: the slide a manual insert just created whenever it is in the deck (matched by slide_id,
+  //      whatever else the refetch changed; cleared only once found), else the first new slide.
+  //   4. Chips for every new slide, for NEW_SLIDE_INDICATOR_MS from the latest growth.
   useEffect(() => {
+    if (deckKey !== lastDeckKeyRef.current) {
+      lastDeckKeyRef.current = deckKey;
+      baselineRef.current = null;
+      pendingSelectionRef.current = null;
+      stopTimer(freshTimerRef);
+      setFreshIds(NO_FRESH_IDS);
+    }
+
+    const { baseline, fresh } = diffNewSlides(baselineRef.current, slideDeck.slides);
+    baselineRef.current = baseline;
+
+    let selectId: string | null = null;
     const pendingId = pendingSelectionRef.current;
-    if (!pendingId) return;
-    const index = slideDeck.slides.findIndex((s) => s.slide_id === pendingId);
-    if (index === -1) return;
-    pendingSelectionRef.current = null;
-    setCurrentIndex(index);
-  }, [slideDeck, setCurrentIndex]);
+    if (pendingId && slideDeck.slides.some((s) => s.slide_id === pendingId)) {
+      pendingSelectionRef.current = null;
+      selectId = pendingId;
+    } else if (fresh.length > 0) {
+      selectId = fresh[0];
+    }
+    if (selectId !== null) {
+      setCurrentIndex(slideDeck.slides.findIndex((s) => s.slide_id === selectId));
+    }
+
+    if (fresh.length > 0) {
+      stopTimer(freshTimerRef);
+      setFreshIds(new Set(fresh));
+      freshTimerRef.current = setTimeout(() => {
+        freshTimerRef.current = null;
+        setFreshIds(NO_FRESH_IDS);
+      }, NEW_SLIDE_INDICATOR_MS);
+    }
+  }, [slideDeck, deckKey, setCurrentIndex]);
+
+  // No timer outlives the viewer.
+  useEffect(() => () => stopTimer(freshTimerRef), []);
 
   // When the deck changes, reload persisted seen-state and clear transient dismissals.
   // dismissed must also reset: a finding dismissed in deck A must not suppress a
@@ -471,8 +522,18 @@ const ViewerBody = forwardRef<
 
   const currentSlide = slideDeck.slides[currentIndex];
 
+  // 1-based numbers of the slides still flagged new, for the screen-reader line.
+  const freshNumbers = slideDeck.slides.flatMap((s, i) => (freshIds.has(s.slide_id) ? [i + 1] : []));
+
   return (
     <div data-testid="slide-viewer" className="flex h-full min-h-0 flex-1">
+      {freshNumbers.length > 0 && (
+        <span role="status" className="sr-only" data-testid="new-slide-status">
+          {freshNumbers.length === 1
+            ? `Slide ${freshNumbers[0]} added`
+            : `Slides ${freshNumbers.join(', ')} added`}
+        </span>
+      )}
       {/* Delete confirm dialog */}
       <ConfirmDialog
         open={showDeleteConfirm}
@@ -511,6 +572,7 @@ const ViewerBody = forwardRef<
         onReorder={onReorder}
         onInsert={readOnly || !onSlideChange ? undefined : handleInsertSlide}
         insertDisabled={insertDisabled || inserting}
+        newSlideIds={freshIds}
       />
       {/* min-w-0 is load-bearing: a flex item defaults to min-width:auto, so this
           column refused to shrink below its content width and overflowed past the

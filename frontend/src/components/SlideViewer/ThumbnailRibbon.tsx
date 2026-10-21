@@ -42,6 +42,8 @@ interface ThumbnailRibbonProps {
   onInsert?: (position: number) => void;
   /** Disables every insert gap (a turn is running, or an insert is already in flight). */
   insertDisabled?: boolean;
+  /** slide_ids of the slides the viewer just flagged as new (#314): each Thumb shows a "New" chip. */
+  newSlideIds?: ReadonlySet<string>;
 }
 
 interface InsertGapProps {
@@ -108,6 +110,8 @@ interface ThumbProps {
   previewDocument: (html: string) => string;
   isCurrent: boolean;
   hasUnseen: boolean;
+  /** Just added (the viewer's new-slide indicator): a ring and a "New" chip until it expires. */
+  isNew: boolean;
   onSelect: (index: number) => void;
 }
 
@@ -118,6 +122,7 @@ const Thumb: React.FC<ThumbProps> = ({
   previewDocument,
   isCurrent,
   hasUnseen,
+  isNew,
   onSelect,
 }) => {
   // useSortable provides setNodeRef for dnd-kit (droppable+draggable combined ref).
@@ -154,13 +159,16 @@ const Thumb: React.FC<ThumbProps> = ({
       type="button"
       data-testid={`ribbon-thumb-${index}`}
       data-current={isCurrent ? 'true' : 'false'}
+      data-new={isNew ? 'true' : undefined}
       aria-current={isCurrent ? 'true' : undefined}
       onClick={() => onSelect(index)}
       className={[
         'relative flex w-full flex-col gap-1 rounded-md border p-1 text-left transition',
         isCurrent
-          ? 'border-[#3b82f6] bg-[#3b82f6]/10 shadow-sm ring-1 ring-[#3b82f6]'
+          ? 'border-[#3b82f6] bg-[#3b82f6]/10 shadow-sm'
           : 'border-border hover:bg-muted/50',
+        // One ring class set, so a new slide's ring never fights the current slide's for precedence.
+        isNew ? 'ring-2 ring-emerald-500' : isCurrent ? 'ring-1 ring-[#3b82f6]' : '',
       ].join(' ')}
     >
       {/* Scaled slide preview: 1280×720 iframe shrunk to fit the ribbon width. */}
@@ -196,6 +204,14 @@ const Thumb: React.FC<ThumbProps> = ({
       {/* Slide label row with unseen indicator. */}
       <div className="flex items-center gap-1 px-1">
         <span className="truncate text-xs text-muted-foreground">Slide {index + 1}</span>
+        {isNew && (
+          <span
+            data-testid={`ribbon-new-${index}`}
+            className="shrink-0 rounded-full bg-emerald-500 px-1.5 text-[10px] font-medium leading-4 text-white"
+          >
+            New
+          </span>
+        )}
         {hasUnseen && (
           // Unseen dot: amber to avoid colour collision with the blue current-slide border.
           <span
@@ -215,6 +231,7 @@ export const ThumbnailRibbon: React.FC<ThumbnailRibbonProps> = ({
   onReorder,
   onInsert,
   insertDisabled = false,
+  newSlideIds,
 }) => {
   const { currentIndex, setCurrentIndex } = useViewer();
   // True from drag start to drop/cancel: the insert gaps hide (invisible + inert, still laid out).
@@ -316,6 +333,7 @@ export const ThumbnailRibbon: React.FC<ThumbnailRibbonProps> = ({
                 previewDocument={previewDocument}
                 isCurrent={index === currentIndex}
                 hasUnseen={unseenSlideIndices.has(index)}
+                isNew={newSlideIds?.has(slide.slide_id) ?? false}
                 onSelect={setCurrentIndex}
               />
             </React.Fragment>

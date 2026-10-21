@@ -53,6 +53,10 @@ interface ChatPanelProps {
   /** E0: called for each slide_ready event; position + content arrive one slide at a
    *  time as the graph's reorder buffer releases them.  Called before `complete`. */
   onSlideReady?: (position: number, html: string, scripts: string) => void;
+  /** #314: the deck the server holds, refetched after an ERRORED turn so the viewer does not keep a
+   *  stale mid-turn view (synthetic `build-N` slides). Deliberately not `onSlidesGenerated`: that is
+   *  the success path (survey trigger, "saved just now", versions reload). */
+  onDeckRefetched?: (slideDeck: SlideDeck) => void;
   ensureGraphCapableRoot: () => Promise<boolean>;
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
@@ -69,6 +73,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   onSlidesGenerated,
   onGenerationStart,
   onSlideReady,
+  onDeckRefetched,
   ensureGraphCapableRoot,
   disabled = false,
   previewMessages = null,
@@ -236,6 +241,27 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       .catch(() => { /* the ids arrive with the next load; the delete action waits for them */ });
   };
 
+  // #314: after an errored turn, refetch the deck and hand it to `onDeckRefetched`. Called from BOTH
+  // failure paths: an SSE `error` event, and the transport's onError callback (polling, the production
+  // transport, never emits an `error` event: a failed job calls onError). The target is computed inside
+  // the promise chain, so a throw there is swallowed by the catch like a failed request. Dropped after a
+  // newer send and after a session switch, as refreshMessageIds does (the guard compares the session the
+  // turn was sent to). A failed or empty refetch changes nothing.
+  const refetchDeckAfterError = (sentTo: string | null, seq: number) => {
+    if (!onDeckRefetched) return;
+    Promise.resolve()
+      .then(() => {
+        const target = api.getCurrentSessionId() ?? sentTo;
+        return target ? api.getSlides(target) : null;
+      })
+      .then(result => {
+        if (!result?.slide_deck) return;
+        if (sendSeqRef.current !== seq || currentSessionIdRef.current !== sentTo) return;
+        onDeckRefetched(result.slide_deck);
+      })
+      .catch(() => { /* the viewer keeps what it has; the next turn's refetch corrects it */ });
+  };
+
   const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | string[], maybeImageIds?: string[]) => {
     // Support two calling conventions:
     // 1. From ChatInput: (content, imageIds)
@@ -367,6 +393,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           setIsLoading(false);
           setIsGenerating(false);
           refreshMessageIds(sentTo, seq);
+          // A per-slide notice (metadata.position: one slide became a placeholder) is
+          // emitted MID-turn and the turn carries on to `complete`, whose own refetch is
+          // the right one. Refetching here could race it with a pre-completion deck.
+          if (event.metadata?.position == null) {
+            refetchDeckAfterError(sentTo, seq);
+          }
           break;
 
         case 'complete':
@@ -461,6 +493,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         setIsLoading(false);
         setIsGenerating(false);
         refreshMessageIds(sentTo, seq);
+        refetchDeckAfterError(sentTo, seq);
       },
       imageIds,
       configIsForThisSession ? agentConfig : undefined,
