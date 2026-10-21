@@ -529,6 +529,49 @@ If the agent's HTML has empty slides, out-of-range indices, or references canvas
 
 ---
 
+## Graph Path: Slide Numbers and Positions
+
+Users say "slide 2"; the graph keys everything on `SlideSpec.position` (0-based). Issue #313 maps one to the other in code (`src/domain/slide_numbering.py`, pure, no I/O) so the architect model copies positions instead of computing them. The module docstring is the authoritative statement of the rules, and `tests/unit/test_slide_numbering.py` pins them. Glossary: **Slide Number**, **Slide Position** and **Slide Reference** in `CONTEXT.md`.
+
+**What "slide N" means.** Slide N is the N-th slide of the current deck in ascending position order: the number the slide panel shows (list index + 1 over the rows), not `N - 1`.
+- `architect_node` numbers over the committed rows' positions when there are rows, else the persisted spec's positions, else nothing (`_deck_positions` in `src/services/graph/nodes.py`). Rows win even if the spec disagrees: an edit whose spec and rows disagree is refused anyway (`_persisted_spec_describes_these_rows`).
+- Positions are contiguous from 0 in practice, so Position = Number - 1. Every deck mutation (insert, delete, duplicate, reorder) re-stamps the spec through `ChatService._rewrite_deck_spec_slides` and the rows through `save_slide_deck`, which renumbers from 0 and prunes the rest. A gap can only come from an architect build spec that has one (for example positions 0, 2, 5 give slides 1, 2, 3, and "slide 3" is position 5).
+
+**Payload keys.** Two literal keys on the architect payload, both always lists:
+- `slide_numbering`: `[{"slide_number": 1, "position": 0}, ...]`, one entry per slide in presentation order. Empty when there is no deck.
+- `slide_references`: `[{"text": "slides 2-4", "slide_numbers": [2, 3, 4], "positions": [1, 2, 3], "out_of_range": []}, ...]`, one entry per reference in the user's message, in order of appearance. `text` is the matched substring. `slide_numbers` holds every number the phrase names, sorted and deduplicated; `positions` holds the in-range ones mapped through the numbering; `out_of_range` holds numbers below 1 or above the slide count. Numbers are reported, never clamped. Empty when there is no deck.
+
+**Reference grammar (as shipped).** Case-insensitive, at word boundaries, left to right, longest form wins. Numbers are 1-3 digits or the words one to twenty; ordinals are 1-3 digits plus `st`/`nd`/`rd`/`th` (suffix unchecked) or first to twentieth.
+- Resolved: "slide 2", "slide #2", "slide number 2", "slide two", "slide 2-4", "slide 2 and 3"; "slides 2-4", "slides 2 to 4", "slides 2, 3 and 5", "slides 2-4 and 6"; an ordinal before a singular `slide` ("the second slide", "the 4th slide", "last slide: ...", "the final slide"). `last`/`final` are the slide count; "penultimate" and "second-to-last" are the count minus one. Ranges are inclusive, in either order; one spanning more than 100 numbers drops the reference.
+- Abstain rule: the architect copies `target_positions` from these references, so a wrong or truncated one is worse than none. A singular `slide` whose item list is followed by a continuation the form cannot read gives NO reference for that phrase, never a shorter "slide 2": a dash and a digit with or without spaces ("slide 2 - 4", "slide 2 -4"), `to`/`through`/`thru` and a number ("slide 2 through 5", "move slide 2 to 5"), or a comma list (a comma, a number, then `,`, `and` or `&`: "Slide 2, 3 and 4"). A continuation that is not a number keeps the reference ("Change slide 2 to a chart", "Compare slide 2 to slide 5", "On slide 2, 3 cards ..."). Other references in the same text are unaffected. "slide 2 through slide 5" (also "up to", "until", "till", "through to", with "#" or "number" prefixes, or a plural head) is read as one inclusive range (2-5), never as its two ends; "from slide 2 to slide 5" stays two references.
+- An ordinal before `slide` is not a reference when `slide` is a compound noun or begins a relative tail: followed by a hyphen and a word ("the second slide-deck"), by `deck`, `template`, `count` or `master` ("the last slide deck you made", "the final slide count"), by `from` plus an optional `the` and `end`, `last`, `back` or `bottom` ("the second slide from the end"), or by `but one` ("the last slide but one"). "the last slide.", "the last slide, please" and "the last slide's chart" are still references.
+- Volume: at most 20 references (`MAX_REFERENCES`) are returned, and an identical reference (same `text` and `slide_numbers`) appears once, at its first position. Duplicates are removed before the cap, so they never use it up.
+- Indefinite ordinals are not references: an ordinal right after `a`, `an`, `another`, `new`, `extra`, `additional`, `one` or `one more` names a slide that does not exist yet ("Add a final slide", "Add one last slide", "I need a third slide").
+- Unresolved on purpose, each pinned by a test: count-relative tails ("the third to last slide", "the next to last slide", "the second from last slide"; "put it next to the last slide" is still the last slide); hyphenated number words ("twenty-one", "twenty-first"); a digit dash range the grammar cannot read ("slides 1-1000"); count-relative or plural ordinals ("the last two slides", "the second and third slides"); deictic and semantic phrases ("this slide", "the next slide", "the cover"); slide counts ("a 10-slide deck", "10 slides"); and "or" as a separator. The model looks these up in `slide_numbering`.
+- Known limits, each pinned by a test: a bare-comma plural such as "On slides 2, 3 bullets each" resolves to slides 2 and 3, because a count cannot be told from a slide; and "Put 3 KPIs on slide 2 and 4 on slide 3" resolves "slide 2 and 4" (slides 2 and 4) plus "slide 3", because the singular form accepts `and` as a separator and reads the count as a slide.
+- References are lexical: they say which existing slide a phrase names, not that the user wants it changed.
+
+**Which text, and when none.** The latest user turn in `conversation` is resolved (falling back to `message`), not the analyst's synthesis that `message` holds on the pass after the analyst returns. On a describe-only turn (the sweeper's `ARC_REVIEW_MESSAGE`, which persists no user row) `slide_references` is `[]`, because the latest user turn predates the hand edit and its "slide 2" may name a different slide now; `slide_numbering` is still sent.
+
+**Guard (log only).** `edit_ignores_references` is true when an edit's `target_positions` share no position with the resolved in-range references. `architect_node` then logs a WARNING and changes nothing: an off-by-one model also revised the wrong `SlideSpec`, and legitimate edits can be disjoint from the named slides ("slide 2 is perfect; tighten the rest"). It does not run on a describe-only turn.
+
+**The prompt rule.** The architect's SLIDE NUMBERS rule tells the model to take `target_positions` from `slide_references`, to look any other number or ordinal up in `slide_numbering`, never to compute a position as the slide number minus one, and, when a reference has `out_of_range` numbers, not to edit but to discuss and say how many slides the deck has. It also says a reference does not by itself mean the user wants a change.
+
+**Rollout.** The Graph V1 manifest only seeds a fresh bootstrap: `bootstrap_v1` in `src/services/graph_configuration_bootstrap.py` returns early, validating the persisted history, when any Graph Release exists, and loads the manifest only when none does. An existing install therefore keeps its persisted architect prompt. It gets the two payload keys immediately (they are built in code), but the new SLIDE NUMBERS text only when an admin publishes a release carrying it, the same as earlier prompt promotions (for example 45ce906c).
+
+**Known limits.**
+- SpecView labels slides `position + 1` (`SpecView.tsx`), so on a gapped deck its label differs from the panel's number, which is what the graph follows.
+- On the SSE transport the image-attachment context is appended to the user message before it is persisted (`_inject_image_context`, `src/api/services/chat_service.py`), so an attachment filename such as "slide 3.png" can resolve as a reference. The polling transport persists the raw message, so it does not.
+
+**For #314 (add a slide to an existing deck).**
+- Inserting a slide shifts the Position, and so the Slide Number, of every later slide. The numbering is recomputed from the rows every turn, so nothing needs to be stored.
+- "after slide 3" resolves "slide 3" only; what the anchor means is for #314 to interpret.
+- Indefinite ordinals ("add a final slide") are deliberately left unresolved, also for #314 to interpret.
+- The indefinite exclusion covers ordinals only: "Insert a new slide 3" and "make a slide 3 about pricing" resolve the EXISTING slide 3 today. #314 must interpret insertion phrasing before trusting `slide_references`.
+- The architect's EDITING rule "adding or removing slides is not an edit" is the rule #314 changes.
+
+---
+
 ## Configuration, Secrets & Clients
 
 - **Agent configuration** (session-bound):
