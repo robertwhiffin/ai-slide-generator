@@ -49,8 +49,8 @@ Before starting:
 | Verification window | 0–14 | Monitor exports, restore, and slide operations |
 | Cutover | 14+ | Operator drops `deck_json` / `verification_map`; removes dual-write code |
 
-**The data backfill is automatic.** `backfill_unmigrated_decks()` runs in the
-FastAPI lifespan right after `init_db()`, alongside the existing
+**The data backfill is automatic.** `backfill_unmigrated_decks()` runs once,
+pre-fork, in `run.py::init_database` after `init_db()`, alongside the existing
 `migrate_profiles()` call, so deploying the code migrates historical decks by
 itself. Phases 2 and 3 below are **no longer required steps** — they are kept as
 tools for targeted re-runs and for verifying what the startup pass did.
@@ -68,6 +68,15 @@ scan of a small table — well below the OAuth token fetch and connection-pool
 setup already happening at startup. A deck whose `deck_json` cannot be parsed is
 logged and skipped rather than raised, so one bad deck cannot abort startup; it
 stays readable through the `deck_json` fallback.
+
+**First-pass cost.** The first boot against an unmigrated database is bounded by
+database round trips, not data volume, so the pass issues a fixed number per deck
+regardless of slide count: decks are loaded 200 at a time without `html_content`,
+each deck's slides go in as one batched INSERT inside the deck's own SAVEPOINT
+(no per-slide existence check, since the guard already proved the deck has no
+rows), and there is one COMMIT per batch. A deck that fails rolls back alone, with
+no partial rows. Expect one INFO progress line per batch. Every devloop deploy
+re-forks prod, so it pays this cost again until prod itself has been migrated.
 
 **Scope limit:** the startup pass finds decks with *no rows at all*. A
 *partially* backfilled deck is left to the CLI below — see "Exposure: decks
