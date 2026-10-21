@@ -1,0 +1,6 @@
+kind: mutation
+fault: 'a question that names slide 2 is a discuss turn: answer it, do not move slide
+  2'
+expect:
+  intent: discuss
+design_system_active: true

@@ -272,7 +272,7 @@ Toasts auto-dismiss after 5 seconds. Rendered at `fixed bottom-4 right-4` with `
 | `tests/routing.spec.ts` | 9 | URL → correct page content for all routes |
 | `tests/session-loading.spec.ts` | 4 | Session load from URL, 404 redirect, profile auto-switch, slide count |
 | `tests/navigation.spec.ts` | 4 | Nav buttons update URL, New Session nav, My Sessions restore |
-| `tests/viewer-readonly.spec.ts` | 4 | Disabled chat, read-only slides, hidden buttons, export available |
+| `tests/viewer-readonly.spec.ts` | 5 | Disabled chat, hidden session buttons, slides load, chat history shown, verification badge kept with mutating controls hidden; spec export on `/view` is covered by `spec-view.spec.ts` |
 | `tests/share-link.spec.ts` | 4 | Share button copies view URL, toast confirmation, link opens view mode |
 
 ### Test Utilities

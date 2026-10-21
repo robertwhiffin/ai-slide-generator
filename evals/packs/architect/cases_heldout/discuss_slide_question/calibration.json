@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll move slide 2 after the techniques.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [
+      1
+    ],
+    "proposed_design_contract": null
+  }
+}

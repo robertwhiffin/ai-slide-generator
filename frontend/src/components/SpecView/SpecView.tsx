@@ -28,9 +28,22 @@
  *    "tighten the arc" edits the spec and "make slide 5 bolder" edits the slide
  *    whichever panel happens to be open.  `SelectionContext` was deleted in ws6
  *    to stop UI state gating intent; do not walk that back.
+ *
+ * EXPORT SPEC AS MARKDOWN (#318) keeps all three. It is a <button>, not an input. It
+ * writes renderDeckSpecMarkdown(spec) only — that function takes a DeckSpec, never the
+ * deck, so `slideDeck.css` cannot reach the file (L3). It takes no view state, emits
+ * none and makes no request: it downloads the spec this component is already showing,
+ * computed at click time from the current props. Shown only when there is a spec.
  */
+import { FileDown } from 'lucide-react';
 import type { SlideDeck } from '../../types/slide';
 import { Button } from '@/ui/button';
+import {
+  DECK_SPEC_MARKDOWN_MIME,
+  deckSpecMarkdownFilename,
+  renderDeckSpecMarkdown,
+} from '../../services/deckSpecMarkdown';
+import { downloadTextFile } from '../../utils/downloadFile';
 
 interface SpecViewProps {
   /** The deck whose `deck_spec` is rendered; null before a deck exists. */
@@ -109,6 +122,25 @@ export function SpecView({ slideDeck, onDiscuss, reviewInProgress = false }: Spe
           <span className="hidden text-xs text-muted-foreground sm:inline">
             Read-only — edits go through the conversation
           </span>
+          {spec && (
+            <Button
+              data-testid="spec-export-markdown"
+              size="sm"
+              variant="outline"
+              aria-label="Export spec as Markdown"
+              title="Export spec as Markdown"
+              onClick={() =>
+                downloadTextFile(
+                  renderDeckSpecMarkdown(spec),
+                  deckSpecMarkdownFilename(spec.title),
+                  DECK_SPEC_MARKDOWN_MIME,
+                )
+              }
+            >
+              <FileDown aria-hidden="true" />
+              Export spec
+            </Button>
+          )}
           <Button
             data-testid="spec-discuss"
             size="sm"

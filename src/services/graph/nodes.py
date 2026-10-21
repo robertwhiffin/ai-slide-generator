@@ -67,6 +67,7 @@ from src.domain.finding import (
     make_finding_id,
 )
 from src.domain.slide_deck import SlideDeck
+from src.domain.slide_numbering import architect_slide_payload, edit_ignores_references
 from src.services.agent import SAFETY_RETRY_NOTICE
 from src.services.agent_runtime import (
     AgentAssemblyContext,
@@ -1010,6 +1011,25 @@ def _committed_slide_rows(session_id: str) -> List[Dict[str, Any]]:
         return []
 
 
+def _deck_positions(
+    committed_positions: Set[int], prior_spec: Optional[DeckSpec]
+) -> List[int]:
+    """The positions the user's slide numbers count over (#313, D1).
+
+    The committed rows' positions when there are any (the slide panel renders
+    the rows), else the persisted spec's slide positions (a deck described but
+    not yet built), else ``[]``.  Rows win over the spec even when the two
+    disagree: an edit whose spec and rows disagree is refused anyway
+    (``_persisted_spec_describes_these_rows``), and what the user reads their
+    numbers off is the panel.  Ascending; ``slide_numbering`` numbers them 1..n.
+    """
+    if committed_positions:
+        return sorted(committed_positions)
+    if prior_spec is not None:
+        return sorted(slide.position for slide in prior_spec.slides)
+    return []
+
+
 def _persisted_spec_describes_these_rows(
     prior_spec: DeckSpec, row_positions: Set[int]
 ) -> bool:
@@ -1022,12 +1042,15 @@ def _persisted_spec_describes_these_rows(
     constrain is an EDIT — the model revises the persisted spec, so an edit of
     a description written for a deck whose rows have since moved is refused.
 
-    ``session_slide_decks.deck_spec_json`` is renumbered on insert and on nothing
-    else (final review C1), so after a delete or a duplicate its ``position``
-    entries describe slides that have moved or gone, while the row-level
-    ``deck_spec_slide`` fragments travel correctly.  Comparing the two sets is
-    what makes the mismatch representable at the one consumer that acts on it,
-    rather than relying on four mutation routes to remember to renumber.
+    Every deck-mutation route (insert, delete, duplicate, reorder) now renumbers
+    ``session_slide_decks.deck_spec_json`` through
+    ``ChatService._rewrite_deck_spec_slides``, so the spec normally tracks the
+    rows (final review C1 was the earlier state, when only insert did).  A deck
+    changed any other way still leaves its ``position`` entries describing slides
+    that have moved or gone, while the row-level ``deck_spec_slide`` fragments
+    travel correctly.  Comparing the two sets is what makes that mismatch
+    representable at the one consumer that acts on it, rather than relying on
+    every writer to remember to renumber.
 
     **No rows means nothing to disagree with**, so an unbuilt deck is aligned by
     definition: the check exists to stop a stale brief reaching a slide a human
@@ -1037,12 +1060,13 @@ def _persisted_spec_describes_these_rows(
     reader does not mistake this for a total guarantee: reordering leaves the two
     position sets equal while every entry describes a different slide.  The two
     stronger predicates were both measured and rejected — comparing a row
-    fragment's own ``position`` to its row position fires after an INSERT (the one
-    route that renumbers the deck spec correctly, because fragments travel with
-    their slides and keep their original position), and comparing fragment CONTENT
+    fragment's own ``position`` to its row position fires after an INSERT (a route
+    that renumbers the deck spec correctly, because fragments travel with their
+    slides and keep their original position), and comparing fragment CONTENT
     to the deck-level entry fires after any §4.6 deck-level change, where the spec
-    is deliberately newer than the slides not yet rebuilt against it.  Closing the
-    reorder case means renumbering in the routes.
+    is deliberately newer than the slides not yet rebuilt against it.  The reorder
+    route now permutes the spec entries with the slides, which closes the case for
+    a reorder made through it; this check still cannot see one made any other way.
     """
     if not row_positions:
         return True
@@ -1529,16 +1553,34 @@ def architect_node(state: dict) -> Dict[str, Any]:
         inbound_contract = prior_spec.design_contract
     brand = _resolve_brand(inbound_contract)
 
+    # ``describe_only`` is read ahead of the payload because a describe-only turn
+    # resolves no slide references (#313, D4); it is the one definition the edit
+    # guards below also use.
+    describe_only = bool(scoped_vals(state, "describe_only"))
+    conversation = _conversation(session_id)
+    slide_payload = architect_slide_payload(
+        conversation,
+        state.get("architect_message"),
+        _deck_positions(committed_positions, prior_spec),
+        describe_only=describe_only,
+    )
+
     # The model-facing payload is content only (#258, user decision): no
     # session, user, turn or release identifier.  This dict is built for the
     # model alone, so it IS the architect's allowlist; ``session_id`` stays in
     # the node for the reads above and the writes below, and the trace gets the
     # root/actor pair through ``_assembly_context``.
     payload = {
-        "conversation": _conversation(session_id),
+        "conversation": conversation,
         "message": state.get("architect_message"),
         "current_deck_spec": persisted_spec_dict,
         "committed_slide_count": len(committed_htmls),
+        # #313: the user's 1-based slide numbers mapped to positions, and every
+        # slide reference in the user's latest message already resolved
+        # (src/domain/slide_numbering.py), so the model copies positions instead
+        # of computing them.
+        "slide_numbering": slide_payload["slide_numbering"],
+        "slide_references": slide_payload["slide_references"],
         "previous_deck_review": prior_review,
         "available_design_contract": (
             inbound_contract.model_dump() if inbound_contract else None
@@ -1633,7 +1675,6 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # re-description would leave the spec stale for good while the sweeper clears
     # its marker.  It still needs a spec to persist.
     spec = out.deck_spec
-    describe_only = bool(scoped_vals(state, "describe_only"))
     edit_degrade: Optional[Dict[str, str]] = None
     if intent == "edit":
         if prior_spec is None and (spec is None or not describe_only):
@@ -1777,6 +1818,25 @@ def architect_node(state: dict) -> Dict[str, Any]:
         }
         edit_targets = sorted(set(out.target_positions) | changed)
         updates["target_positions"] = list(edit_targets)
+        # #313 (D5), log only: the user named slides and the model's targets miss
+        # every one of them, the signature of an off-by-one.  Nothing is
+        # overridden or degraded — an off-by-one model also revised the wrong
+        # SlideSpec, and legitimate edits can be disjoint from the named slides
+        # ("slide 2 is perfect; tighten the rest").  Not on a describe-only turn,
+        # which resolves no references.
+        if not describe_only and edit_ignores_references(
+            out.target_positions, slide_payload["slide_references"]
+        ):
+            logger.warning(
+                "The edit targets positions %s but the user's message named %s; "
+                "the model may have read a slide number as a position",
+                sorted(out.target_positions),
+                "; ".join(
+                    f"{ref['text']!r} (positions {ref['positions']})"
+                    for ref in slide_payload["slide_references"]
+                ),
+                extra={"session_id": session_id},
+            )
 
     # ---- §4.6: what does this commit change about the DECK, not a slide? ----
     # Classified AFTER the edit turn's target_positions is set, so the

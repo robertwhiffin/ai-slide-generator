@@ -18,6 +18,7 @@ import ast
 import dataclasses
 import inspect
 import json
+import logging
 import queue
 import time
 import uuid
@@ -1446,6 +1447,366 @@ class TestArchitectReadsThePreviousArcVerdict:
         architect_node(graph_env.state())
 
         assert called == []
+
+
+def _numbering(positions):
+    """The ``slide_numbering`` value for a deck at *positions*, spelled out."""
+    return [
+        {"slide_number": number, "position": position}
+        for number, position in enumerate(positions, start=1)
+    ]
+
+
+def _reference(text, numbers, positions, out_of_range=()):
+    return {
+        "text": text,
+        "slide_numbers": list(numbers),
+        "positions": list(positions),
+        "out_of_range": list(out_of_range),
+    }
+
+
+class TestArchitectSlideNumbering:
+    """#313: the architect is handed the user's slide numbers already resolved.
+
+    Users say "slide 2" and mean the second slide the slide panel shows; the
+    model was left to compute the position and sometimes read it 0-indexed.
+    ``architect_node`` now sends ``slide_numbering`` (slide number -> position,
+    D1: committed rows first, else the persisted spec, else nothing) and
+    ``slide_references`` (every reference in the user's LATEST turn, resolved,
+    D4: none on a describe-only turn), and logs — never overrides — an edit
+    whose targets miss every slide the user named (D5).
+
+    Every assertion is on the full value, never on presence alone: a key that
+    is present but resolved against the wrong deck is the defect.
+    """
+
+    THREE = ["<div class='slide'>a</div>", "<div class='slide'>b</div>",
+             "<div class='slide'>c</div>"]
+    NODES_LOGGER = "src.services.graph.nodes"
+
+    def _persist(self, env, spec):
+        from src.api.services.deck_level_writer import write_deck_level_columns
+
+        write_deck_level_columns(env.session_id, deck_spec=spec.to_json())
+
+    def _payload(self, env):
+        calls = env.skills.calls_for("architect")
+        assert len(calls) == 1
+        return calls[0]["payload"]
+
+    def _warnings(self, caplog):
+        return [
+            r for r in caplog.records
+            if r.name == self.NODES_LOGGER and r.levelno >= logging.WARNING
+        ]
+
+    # -- (a) the payload carries both keys, resolved against the deck ---------
+
+    def test_a_three_slide_deck_resolves_slide_2_to_position_1(self, graph_env):
+        """(a) The A2 case: "slide 2" is position 1, not position 2."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Make slide 2 shorter"))
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == [
+            {"slide_number": 1, "position": 0},
+            {"slide_number": 2, "position": 1},
+            {"slide_number": 3, "position": 2},
+        ]
+        assert payload["slide_references"] == [
+            {
+                "text": "slide 2",
+                "slide_numbers": [2],
+                "positions": [1],
+                "out_of_range": [],
+            }
+        ]
+
+    # -- (b), (c), (d): where the numbering comes from (D1) -------------------
+
+    def test_b_a_build_with_no_deck_sends_both_keys_empty(self, graph_env):
+        """(b) No rows and no spec: there is no slide 2 to name yet, so the
+        reference in the message resolves nothing — both keys are ``[]``, still
+        present."""
+        graph_env.skills.set("architect", architect_build(make_spec((0, 1, 2))))
+
+        architect_node(
+            graph_env.state(
+                architect_message="Build a deck about pricing; slide 2 is the table"
+            )
+        )
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == []
+        assert payload["slide_references"] == []
+
+    @pytest.mark.parametrize(
+        "positions, expected_positions",
+        [((0, 1, 2), [1]), ((0, 2, 5), [2])],
+        ids=["contiguous-spec", "gapped-spec"],
+    )
+    def test_c_with_no_rows_the_numbering_comes_from_the_persisted_spec(
+        self, graph_env, positions, expected_positions
+    ):
+        """(c) A deck described but not yet built: the persisted spec's
+        POSITIONS number it (the gapped case shows they are read, not counted)."""
+        self._persist(graph_env, make_spec(positions))
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Make slide 2 shorter"))
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == _numbering(positions)
+        assert payload["slide_references"] == [
+            _reference("slide 2", [2], expected_positions)
+        ]
+
+    def test_d_gapped_rows_number_in_position_order(self, graph_env, monkeypatch):
+        """(d) Rows at 0, 2, 5 are slides 1, 2, 3, so "slide 3" is position 5 —
+        not 2 (N - 1) and not out of range."""
+        monkeypatch.setattr(
+            nodes,
+            "_committed_slide_rows",
+            lambda session_id: [
+                {"position": p, "html": f"<div class='slide'>{p}</div>"}
+                for p in (0, 2, 5)
+            ],
+        )
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Make slide 3 shorter"))
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == _numbering((0, 2, 5))
+        assert payload["slide_references"] == [_reference("slide 3", [3], [5])]
+
+    def test_d_committed_rows_win_over_a_persisted_spec(self, graph_env, monkeypatch):
+        """D1's order: the rows are what the slide panel shows, so they number
+        the deck even when a persisted spec describes other positions.
+
+        Rows at 0, 2, 5 against a spec at 0, 1, 2: "slide 3" is the row at
+        position 5.  Numbering from the spec first would give position 2."""
+        monkeypatch.setattr(
+            nodes,
+            "_committed_slide_rows",
+            lambda session_id: [
+                {"position": p, "html": f"<div class='slide'>{p}</div>"}
+                for p in (0, 2, 5)
+            ],
+        )
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Make slide 3 shorter"))
+
+        payload = self._payload(graph_env)
+        assert payload["slide_numbering"] == _numbering((0, 2, 5))
+        assert payload["slide_references"] == [_reference("slide 3", [3], [5])]
+
+    # -- (e) which text is resolved (D4) --------------------------------------
+
+    def test_e_the_latest_user_turn_wins_over_the_analysts_synthesis(
+        self, graph_env, monkeypatch
+    ):
+        """(e) After the analyst returns, ``architect_message`` is its synthesis;
+        the user's "slide 4" is in the latest USER turn and must still resolve.
+
+        Sabotage: resolve ``message`` instead and this goes red."""
+        conversation = [
+            {"role": "user", "content": "Put our figures on slide 4"},
+            {"role": "assistant", "content": "Fetching the figures first."},
+        ]
+        monkeypatch.setattr(nodes, "_conversation", lambda session_id: conversation)
+        graph_env.seed_slides([f"<div class='slide'>{p}</div>" for p in range(5)])
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Sure.")
+        )
+
+        architect_node(graph_env.state(architect_message="Q3 revenue was 10"))
+
+        payload = self._payload(graph_env)
+        assert payload["conversation"] == conversation
+        assert payload["message"] == "Q3 revenue was 10"
+        assert payload["slide_numbering"] == _numbering(range(5))
+        assert payload["slide_references"] == [_reference("slide 4", [4], [3])]
+
+    # -- (f) the log-only guard (D5) ------------------------------------------
+
+    def test_f_an_edit_that_misses_the_named_slide_logs_one_warning_only(
+        self, graph_env, caplog
+    ):
+        """(f) The user named slide 2 (position 1); the model edited position 2.
+
+        The off-by-one is logged — once, naming the reference, with the session
+        id — and nothing else changes: the edit still targets [2], because the
+        model also revised that slide's spec and overriding the targets would
+        rebuild a slide whose brief did not change.
+
+        Sabotage: remove the log call and this goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(
+                _revised(make_spec((0, 1, 2)), {2: "revised brief-2"}),
+                [2],
+                message="Editing slide 3.",
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            updates = architect_node(
+                graph_env.state(architect_message="Make slide 2 shorter")
+            )
+
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert warnings[0].levelno == logging.WARNING
+        assert "slide 2" in warnings[0].getMessage()
+        assert getattr(warnings[0], "session_id", None) == graph_env.session_id
+        # Log only: the turn is exactly the edit the model asked for.
+        assert updates["architect_intent"] == "edit"
+        assert updates["error_state"] is None
+        assert updates["target_positions"] == [2]
+        assert updates["architect_message"] == "Editing slide 3."
+
+    def test_f_an_edit_on_the_named_slide_logs_nothing(self, graph_env, caplog):
+        """(f) The user named slide 2 (position 1) and the model edited 1."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(
+                _revised(make_spec((0, 1, 2)), {1: "revised brief-1"}),
+                [1],
+                message="Editing slide 2.",
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            updates = architect_node(
+                graph_env.state(architect_message="Make slide 2 shorter")
+            )
+
+        assert self._warnings(caplog) == []
+        assert updates["target_positions"] == [1]
+
+    def test_f_a_describe_only_turn_logs_nothing(self, graph_env, caplog):
+        """(f) The same off-by-one edit on a describe-only (sweeper) turn: the
+        text it would be checked against predates the hand edit, so there is
+        nothing to warn about."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(_revised(make_spec((0, 1, 2)), {2: "revised brief-2"}), [2]),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            architect_node(
+                graph_env.state(
+                    architect_message="Make slide 2 shorter",
+                    describe_only=scoped(TURN, True),
+                )
+            )
+
+        assert self._warnings(caplog) == []
+
+    def test_f_the_guard_reads_the_models_targets_not_the_rebuilt_set(
+        self, graph_env, caplog
+    ):
+        """(f) D5's trigger is the MODEL's ``target_positions``, not the rebuilt
+        set: the model revised the named slide's spec (position 1) but targeted
+        position 2.  The rebuild still covers both (every changed slide is
+        rebuilt), and the warning still fires, because the model's targets missed
+        the slide the user named.  Checking the union instead would hide it.
+
+        Sabotage: pass ``edit_targets`` to ``edit_ignores_references`` and this
+        goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect",
+            _edit_out(_revised(make_spec((0, 1, 2)), {1: "revised brief-1"}), [2]),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            updates = architect_node(
+                graph_env.state(architect_message="Make slide 2 shorter")
+            )
+
+        assert updates["target_positions"] == [1, 2]
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert "slide 2" in warnings[0].getMessage()
+
+    def test_f_a_degraded_edit_logs_nothing(self, graph_env, caplog):
+        """(f) The guard sits on the path an ACCEPTED edit takes.  An edit the
+        node refuses (here its spec adds a slide: ``edit_spec_positions_changed``)
+        is degraded to a discussion and rebuilds nothing, so its targets are not
+        an edit to warn about, off-by-one or not.
+
+        Sabotage: move the guard above the degrade return and this goes red."""
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set("architect", _edit_out(make_spec((0, 1, 2, 3)), [2]))
+
+        with caplog.at_level(logging.WARNING, logger=self.NODES_LOGGER):
+            updates = architect_node(
+                graph_env.state(architect_message="Make slide 2 shorter")
+            )
+
+        assert updates["architect_intent"] == "discuss"
+        assert updates["error_state"]["code"] == "edit_spec_positions_changed"
+        assert self._warnings(caplog) == []
+
+    # -- (g) describe-only resolves no references (D4) ------------------------
+
+    def test_g_a_describe_only_turn_sends_no_references_but_the_numbering(
+        self, graph_env, monkeypatch
+    ):
+        """(g) The sweeper persists no user row, so the latest user turn is from
+        before the hand edit that triggered the sweep and its "slide 2" may now
+        name another slide: no references.  The numbering still describes the
+        deck as it is, so it is sent.
+
+        Sabotage: drop the ``describe_only=`` argument and this goes red."""
+        from src.services.spec_sync import ARC_REVIEW_MESSAGE
+
+        conversation = [
+            {"role": "assistant", "content": "Here is your deck."},
+            {"role": "user", "content": "Make slide 2 shorter"},
+        ]
+        monkeypatch.setattr(nodes, "_conversation", lambda session_id: conversation)
+        graph_env.seed_slides(self.THREE)
+        self._persist(graph_env, make_spec((0, 1, 2)))
+        graph_env.skills.set(
+            "architect", ArchitectOutput(intent="discuss", message="Described.")
+        )
+
+        architect_node(
+            graph_env.state(
+                architect_message=ARC_REVIEW_MESSAGE,
+                describe_only=scoped(TURN, True),
+            )
+        )
+
+        payload = self._payload(graph_env)
+        assert payload["conversation"] == conversation
+        assert payload["slide_references"] == []
+        assert payload["slide_numbering"] == _numbering((0, 1, 2))
 
 
 # ===========================================================================
