@@ -24,9 +24,9 @@ from sqlalchemy import and_
 
 from src.api.services.session_manager import (
     SessionManager,
-    SlideAttribution,
-    _attribution_from,
-    _rewrite_slide_rows,
+    SlideRowsChangedError,
+    _snapshot_row,  # noqa: F401 — re-exported; it moved to session_manager
+    _splice_slide_rows,
     get_session_manager,
 )
 from src.core.database import get_db_session
@@ -121,10 +121,6 @@ def placeholder_slide(
         }
     }
     return html, record
-
-
-class SlideRowsChangedError(RuntimeError):
-    """The committed rows are not the rows the caller planned against."""
 
 
 class SlideWriter:
@@ -469,7 +465,8 @@ class SlideWriter:
            EXACT old-row map, never the attribution heuristic, and with
            ``now_dt=None``/``author_fallback=None``, so a moved row with a NULL
            author or timestamp stays NULL and no moved row gets a fresh
-           ``modified_at``.
+           ``modified_at``.  Steps 2-4 are ``session_manager._splice_slide_rows``,
+           the one shift primitive, shared with ``SessionManager.insert_slide``.
         5. ``deck_spec_json`` is set to *deck_spec*, ``version`` is bumped (which
            invalidates every worker's deck cache) and ``last_activity`` touched.
            ``slide_count`` is NOT written: its single writer is the post-commit
@@ -563,54 +560,33 @@ class SlideWriter:
             new_ids: List[str] = []
             now = datetime.utcnow()
             if old_rows:
-                # 2. Snapshots and attributions from the ORM rows BEFORE any
-                #    write: _upsert_slide_row mutates these objects in place.
-                snapshots = [_snapshot_row(row) for row in old_rows]
-                attributions = [_attribution_from(row) for row in old_rows]
-
-                # 3. Splice a pending placeholder in at each inserted index.
+                # 2-4. A pending placeholder at each inserted index, spliced in
+                #      through THE shift (session_manager._splice_slide_rows):
+                #      snapshots and attributions before any write, then the
+                #      whole-deck rewrite with the exact old-row map.
                 pending_html, pending_record = placeholder_slide(
                     PENDING_SLIDE_MESSAGE, text=PENDING_SLIDE_TEXT
                 )
-                inserted = set(insert_at)
-                slides: List[Dict[str, Any]] = []
-                attribution: Dict[int, SlideAttribution] = {}
-                incoming: Dict[int, Dict[str, Any]] = {}
-                old_index = 0
-                for new_index in range(new_count):
-                    if new_index in inserted:
-                        slide_id = str(uuid.uuid4())
-                        new_ids.append(slide_id)
-                        slides.append(
-                            {
-                                "html": pending_html,
-                                "scripts": "",
-                                "slide_id": slide_id,
-                                "created_by": created_by,
-                                "created_at": now,
-                                "modified_by": created_by,
-                                "modified_at": now,
-                            }
-                        )
-                        incoming[new_index] = {
+                new_slides: Dict[int, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
+                for new_index in insert_at:
+                    slide_id = str(uuid.uuid4())
+                    new_ids.append(slide_id)
+                    new_slides[new_index] = (
+                        {
+                            "html": pending_html,
+                            "scripts": "",
+                            "slide_id": slide_id,
+                            "created_by": created_by,
+                            "created_at": now,
+                            "modified_by": created_by,
+                            "modified_at": now,
+                        },
+                        {
                             content_hash: dict(verdict)
                             for content_hash, verdict in pending_record.items()
-                        }
-                    else:
-                        slides.append(snapshots[old_index])
-                        attribution[new_index] = attributions[old_index]
-                        old_index += 1
-
-                # 4. THE whole-deck rewrite, with the exact map.
-                _rewrite_slide_rows(
-                    db,
-                    deck_owner.id,
-                    slides,
-                    now_dt=None,
-                    author_fallback=None,
-                    attribution=attribution,
-                    incoming=incoming,
-                )
+                        },
+                    )
+                _splice_slide_rows(db, deck_owner.id, old_rows, new_slides)
 
             # 5. Deck columns, in the same transaction as the rows.
             deck.deck_spec_json = deck_spec
@@ -637,25 +613,6 @@ class SlideWriter:
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
-
-
-def _snapshot_row(row: SessionSlide) -> Dict[str, Any]:
-    """The slide a row holds, as the plain dict ``_upsert_slide_row`` writes back.
-
-    Raw column values (never display names or re-parsed timestamps), so a slide
-    moved to another position is rewritten with exactly what it had.  The
-    verification record and spec fragment travel separately, as its
-    ``SlideAttribution``.
-    """
-    return {
-        "html": row.html,
-        "scripts": row.scripts,
-        "slide_id": row.slide_id,
-        "created_by": row.created_by,
-        "created_at": row.created_at,
-        "modified_by": row.modified_by,
-        "modified_at": row.modified_at,
-    }
 
 
 def _row_to_dict(row: SessionSlide) -> Dict[str, Any]:
