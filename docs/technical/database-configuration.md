@@ -55,6 +55,9 @@ The database holds **28 tables**, every `__tablename__` declared under `src/data
 27. **`app_identities`** - Databricks UC identity cache (users/groups seen by the app)
 28. **`encryption_keys`** - Single-row (`id = 1`) Fernet master key for Google OAuth credential and token encryption. In Lakebase-backed deployments (the default) the key lives here, held in the ACL-governed data schema rather than `app.yaml`. In secret-backed deployments the key lives in a Databricks secret and this table stays empty — see `docs/technical/databricks-app-deployment.md`.
 
+**Migration Tables:**
+29. **`data_migrations`** - One row per one-time data migration that has completed (`name`, `applied_at`), written in the same transaction as the migration. Later boots skip a recorded migration after one indexed lookup instead of re-scanning the data it targets, and a fork of a migrated database inherits the record. Its first user is the deck `{{image:<id>}}` → `{{image:<token>}}` rewrite (`deck_image_placeholders_to_tokens`).
+
 ### Entity Relationships
 
 **Configuration Tables:**
