@@ -11,13 +11,15 @@ verdicts, and the idempotency guard then skipped it permanently.
 ``backfill_unmigrated_decks`` closes that window by running on boot, guarded by a
 per-deck NOT EXISTS anti-join so it is a no-op scan once every deck has rows.
 """
+import contextlib
 import json
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from src.core import backfill_session_slides_startup
 from src.core.backfill_session_slides_startup import backfill_unmigrated_decks
 from src.core.database import Base
 from src.database.models.session import SessionSlide, SessionSlideDeck, UserSession
@@ -85,6 +87,42 @@ def _rows(factory, owner_pk):
     finally:
         db.close()
 
+
+@contextlib.contextmanager
+def _capture(engine, event_name):
+    """Record every ``event_name`` engine event fired inside the block.
+
+    ``before_cursor_execute`` fires once per statement sent to the driver (an
+    executemany counts once), so on PostgreSQL its count is the round-trip count.
+    """
+    seen = []
+
+    def _record(*args):
+        seen.append(args[2] if event_name == "before_cursor_execute" else event_name)
+
+    event.listen(engine, event_name, _record)
+    try:
+        yield seen
+    finally:
+        event.remove(engine, event_name, _record)
+
+
+def _statements_to_backfill(slides_per_deck, decks=3):
+    """Statements the startup pass issues to migrate ``decks`` legacy decks."""
+    engine = _make_engine()
+    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    try:
+        for d in range(decks):
+            _seed_legacy_deck(
+                factory,
+                f"sess-shape-{d}",
+                [(f"<p>{d}-{s}</p>", f"id-{d}-{s}") for s in range(slides_per_deck)],
+            )
+        with _capture(engine, "before_cursor_execute") as statements:
+            assert backfill_unmigrated_decks(factory) == decks
+        return statements
+    finally:
+        engine.dispose()
 
 class TestStartupAutoBackfill:
     def setup_method(self):
@@ -221,3 +259,106 @@ class TestStartupAutoBackfill:
 
         assert migrated >= 1, "the good deck should still have been migrated"
         assert len(_rows(self.factory, good_pk)) == 1
+
+
+class TestStartupBackfillCost:
+    """The startup pass is bounded by round trips, not by data volume.
+
+    Measured on a prod fork (2026-10-21): 5,183 decks / ~57k slides took ~7.5 min
+    at ~3 round trips per slide plus ~5 per deck — two existence SELECTs that the
+    NOT EXISTS guard had already answered, the INSERT, a full-row deck load, an
+    orphan-prune SELECT and a COMMIT per deck.  These tests pin the shape that
+    replaced it.
+    """
+
+    def setup_method(self):
+        self.engine = _make_engine()
+        self.factory = sessionmaker(
+            autocommit=False, autoflush=False, bind=self.engine
+        )
+
+    def teardown_method(self):
+        Base.metadata.drop_all(bind=self.engine)
+        self.engine.dispose()
+
+    def test_statement_count_does_not_grow_with_slide_count(self):
+        """No per-slide round trip: a 20-slide deck costs what a 2-slide deck does."""
+        few = _statements_to_backfill(slides_per_deck=2)
+        many = _statements_to_backfill(slides_per_deck=20)
+
+        assert len(many) == len(few), (
+            f"{len(few)} statements for 2 slides/deck but {len(many)} for 20 — "
+            "the startup pass is issuing per-slide statements again"
+        )
+
+    def test_does_not_load_the_full_knitted_html(self):
+        """html_content (~180 MB across prod) is never read by the backfill."""
+        _seed_legacy_deck(self.factory, "sess-cols", [("<p>One</p>", "id-1")])
+
+        with _capture(self.engine, "before_cursor_execute") as statements:
+            backfill_unmigrated_decks(self.factory)
+
+        readers = [s for s in statements if "html_content" in s]
+        assert readers == [], f"backfill read html_content: {readers}"
+
+    def test_commits_once_per_batch_and_migrates_across_batch_boundaries(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(backfill_session_slides_startup, "_STARTUP_BATCH_DECKS", 2)
+        pks = [
+            _seed_legacy_deck(self.factory, f"sess-batch-{i}", [(f"<p>{i}</p>", f"id-{i}")])
+            for i in range(5)
+        ]
+
+        with _capture(self.engine, "commit") as commits:
+            migrated = backfill_unmigrated_decks(self.factory)
+
+        assert migrated == 5
+        assert all(len(_rows(self.factory, pk)) == 1 for pk in pks)
+        assert len(commits) == 3, f"expected 3 commits for 5 decks in batches of 2, got {len(commits)}"
+
+    def test_a_deck_that_fails_midway_leaves_no_partial_rows(self):
+        """Batching must not cost per-deck isolation.
+
+        The bad deck's first slide is valid and its second is not, so the failure
+        happens after a row was already added.  That row must be discarded — a
+        deck with SOME rows is invisible to the NOT EXISTS guard and would never be
+        retried — while the good decks either side of it in the same batch commit.
+        """
+        before_pk = _seed_legacy_deck(self.factory, "sess-before", [("<p>A</p>", "id-a")])
+        db = self.factory()
+        try:
+            us = UserSession(session_id="sess-midway", created_by="x@example.com")
+            db.add(us)
+            db.flush()
+            bad_pk = us.id
+            db.add(
+                SessionSlideDeck(
+                    session_id=bad_pk,
+                    title="Half bad",
+                    deck_json=json.dumps(
+                        {"css": DECK_CSS, "slides": [{"html": "<p>ok</p>"}, "not-a-slide"]}
+                    ),
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+        after_pk = _seed_legacy_deck(self.factory, "sess-after", [("<p>C</p>", "id-c")])
+
+        migrated = backfill_unmigrated_decks(self.factory)
+
+        assert migrated == 2
+        assert len(_rows(self.factory, before_pk)) == 1
+        assert len(_rows(self.factory, after_pk)) == 1
+        assert _rows(self.factory, bad_pk) == [], "the failed deck kept a partial row"
+        db = self.factory()
+        try:
+            bad_deck = (
+                db.query(SessionSlideDeck)
+                .filter(SessionSlideDeck.session_id == bad_pk)
+                .one()
+            )
+            assert bad_deck.css is None, "the failed deck's css lift was not rolled back"
+        finally:
+            db.close()
