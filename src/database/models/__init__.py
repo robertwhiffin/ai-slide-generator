@@ -1,5 +1,6 @@
 """Database models."""
 
+from src.database.models.data_migration import DataMigration
 from src.database.models.deck_contributor import DeckContributor
 from src.database.models.deck_review import DeckReview
 from src.database.models.design_system import (
@@ -59,6 +60,7 @@ __all__ = [
     "AgentTestRun",
     "ChatRequest",
     "ConfigGenieSpace",
+    "DataMigration",
     "DeckContributor",
     "DeckReview",
     "EncryptionKey",
