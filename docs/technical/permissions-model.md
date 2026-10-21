@@ -71,8 +71,16 @@ Conversations (chat messages) are **always private** to the session creator.
 | View chat messages | ✅ | ❌ |
 | Send chat messages | ✅ | ❌ (uses own contributor session) |
 | View other users' conversations | ❌ | ❌ |
+| Clear chat | ✅ with CAN_EDIT or above | ❌ (they clear only their own contributor session) |
 
 > When a CAN_EDIT contributor uses chat to modify slides, they do so through their own **contributor session** — a private session that shares the parent's slide deck but has its own chat history.
+
+**Clear chat** (`DELETE /api/sessions/{id}/context`) applies two gates, in this order:
+
+1. **Deck permission:** `_check_deck_permission_for_session(session_id, CAN_EDIT)`. It requires CAN_EDIT or CAN_MANAGE, resolved on the **root** deck, so a viewer is refused (403).
+2. **Conversation creator:** `_require_conversation_creator(session_id)` (`routes/_authz.py`). The caller must be the session's `created_by`. No authenticated user is a 401, an unknown session a 404, and anyone else a 403. CAN_MANAGE does not bypass it. The deck gate alone would let any editor of a shared deck clear the owner's private conversation by passing the owner's session id.
+
+A contributor's clear therefore touches only their own contributor session (its own transcript and its own graph thread). The owner's transcript, and the engine that is resolved from the owner's first message, are untouched. The route then takes the session lock and answers 409 while a turn or slide operation holds it; see [Multi-User Concurrency](./multi-user-concurrency.md). Each clear is recorded as a `context_cleared` row in `usage_events` under the caller's username; see [Usage Analytics](./usage-analytics.md).
 
 ---
 
@@ -451,6 +459,7 @@ GET    /api/sessions/shared                    # Shared decks (slides only, no c
 POST   /api/sessions/{id}/contribute           # Get/create contributor session
 GET    /api/sessions/{id}                      # Session detail — messages only if you are the creator
 GET    /api/sessions/{id}/messages             # 403 unless you are the session creator
+DELETE /api/sessions/{id}/context              # Clear chat: CAN_EDIT + session creator; 409 while a turn runs
 ```
 
 ### Editing Lock

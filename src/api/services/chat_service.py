@@ -29,6 +29,7 @@ from src.core.databricks_client import (
 )
 from src.domain.conversation_engine import (
     AGENT_MODE_PHRASE as AGENT_MODE_PHRASE,
+    ENGINE_MODE_MARKER_MESSAGE_TYPE,
     LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
     selects_graph_engine,
 )
@@ -316,6 +317,50 @@ class GraphTurnFailedError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(GRAPH_TURN_FAILED_MESSAGE)
+
+
+class ArcReviewInFlightError(RuntimeError):
+    """The deck's arc review is running a graph turn on this session's thread.
+
+    Raised by :meth:`ChatService.clear_context` before anything changes; the
+    route answers 409 with ``CONVERSATION_BUSY_DETAIL``.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"An arc review is running on session {session_id}")
+        self.session_id = session_id
+
+
+def _refuse_during_an_arc_review(db: Any, session: Any) -> None:
+    """Raise :class:`ArcReviewInFlightError` while an arc review runs on *session*.
+
+    The arc-review sweeper (``spec_sync.run_arc_review``) runs a whole graph
+    turn on the deck OWNER's thread (``thread_id`` is the session id) and takes
+    no session lock, so the lock the clear route checks does not exclude it.
+    That turn loaded the thread before its architect ran and writes a checkpoint
+    after every superstep, each carrying every channel it holds; a thread
+    deleted under it comes back with the pre-clear ``findings``, turn-scoped
+    state and a reply written from the cleared conversation, and the next turn
+    resumes it.  So a clear waits for the review, and the review's claim is the
+    signal: :func:`spec_sync.review_in_flight`.
+
+    The deck row is read ``FOR UPDATE`` (a no-op on SQLite, which serialises
+    writers anyway): on PostgreSQL a claim that commits first is seen here, and
+    a claim that comes second blocks on this row until the clear commits, so
+    its review loads the already-deleted thread.  A contributor session owns no
+    deck row and the sweeper never runs on its thread, so it is never refused.
+    """
+    from src.database.models.session import SessionSlideDeck
+    from src.services.spec_sync import review_in_flight
+
+    deck = (
+        db.query(SessionSlideDeck)
+        .filter(SessionSlideDeck.session_id == session.id)
+        .with_for_update()
+        .first()
+    )
+    if deck is not None and review_in_flight(deck, datetime.utcnow()):
+        raise ArcReviewInFlightError(session.session_id)
 
 
 def _pinned_graph_configuration_error_event() -> StreamEvent:
@@ -2143,7 +2188,7 @@ class ChatService:
                     session_title=title_container["title"],
                 )
 
-    def clear_context(self, session_id: str) -> Dict[str, Any]:
+    def clear_context(self, session_id: str, *, cleared_by: str) -> Dict[str, Any]:
         """Drop this session's conversation context, keeping the deck and its spec.
 
         The deck spec is a structured compaction of the conversation: once it
@@ -2155,10 +2200,25 @@ class ChatService:
         from it (:func:`resolve_engine_mode`), so deleting it would silently
         revert a graph-mode deck to the monolith on the next turn — the two
         halves of this PR would contradict each other.  There is precedent:
-        ``restore_version`` also prunes messages selectively, and preserving the
-        first user row is safe for that pruning too because it predates every
-        save point.  It is preserved unconditionally, in both modes, so clearing
-        never *changes* the mode in either direction.
+        ``restore_version`` also prunes messages selectively -- it deletes this
+        session's rows created after the save point, so the kept row survives a
+        restore whenever it predates that save point (always true for a root
+        deck's own first turn).  A contributor's kept row can be removed by a
+        restore; that is harmless, because engine mode resolves on the deck
+        OWNER's rows.  It is preserved unconditionally, in both modes, so
+        clearing never *changes* the mode in either direction.
+
+        **The kept row is re-typed and hidden.**  Its ``message_type`` becomes
+        :data:`ENGINE_MODE_MARKER_MESSAGE_TYPE`, which every transcript read
+        drops (:meth:`SessionManager.get_messages` -- and so the chat panel,
+        ``GET /messages``, the architect's conversation and the monolith's
+        history -- and save-point capture), so a cleared conversation is empty
+        to every reader and the old first prompt is never replayed.  The
+        engine-mode, Conversation Pin and duplicate-carry reads go by ``role``
+        only, so they still see the row and nothing about the engine changes;
+        ``message_count`` still counts it, so the next turn is not a "first
+        message" and the deck's title is not regenerated.  The re-type is part of
+        this transaction.
 
         **The graph thread is deleted** through the repo's own
         ``SqlAlchemyCheckpointSaver.delete_thread``, whose ``thread_id`` is the
@@ -2167,27 +2227,31 @@ class ChatService:
         cannot delete surfaces as a 500 on the route rather than skipping
         quietly.
 
-        **This is not one transaction, and the skew has a direction.**
-        ``delete_thread`` opens ``self._session()``
-        (``core/checkpointer.py:226``), which **commits on success** — its own
-        transaction, committed while this one is still open.  So:
+        **The clear is one transaction.**  The transcript prune, the attribution
+        row and the thread delete all run on this method's own ``db`` session:
+        ``delete_thread(session_id, session=db)`` executes its two DELETEs on that
+        session and does not commit, so they commit or roll back together with the
+        rest.  Any failure -- a raise from ``delete_thread``, a failed insert, a
+        failed commit -- leaves the transcript, the graph thread and the
+        attribution exactly as they were, and the route 500s.  There is no
+        half-state to recover from, and a retry is safe (deleting an absent thread
+        is a no-op DELETE).
 
-        * a **raise** from ``delete_thread`` propagates out of this ``with``
-          block and the transcript prune is rolled back: nothing is lost, and the
-          route 500s.  That direction is safe, and it is why the call sits inside
-          the block rather than after it;
-        * a failure of **this** transaction's commit, after ``delete_thread``
-          returned, leaves the graph thread **deleted and the transcript intact**.
-          Recoverable rather than corrupting — the next graph turn starts a fresh
-          thread and the user can clear again — but it is a real half-state, and
-          no ordering of these two writes removes it while they are two
-          transactions.  Do not read the placement as atomicity.
+        The earlier shape was two transactions, and that is why this is one:
+        ``delete_thread`` used to open its own session and commit while this one
+        was still open.  The bulk ``delete(synchronize_session=False)`` below emits
+        its DELETE immediately, so this connection held a write lock while the
+        checkpointer wrote on a second connection -- on SQLite that
+        self-deadlocks (``database is locked``), and on any database it left a
+        real skew if this transaction's commit then failed (thread gone,
+        transcript intact).  The ``db.flush()`` after the attribution insert
+        makes a failed insert raise before the thread is touched.
 
-        A second consequence of the two connections: the bulk
-        ``delete(synchronize_session=False)`` below emits its DELETE immediately,
-        so the transcript rows are locked on this connection while the
-        checkpointer deletes on another.  Different tables, so there is no
-        ordering cycle today; worth not deepening.
+        **Who cleared is recorded** as one ``usage_events`` row
+        (``EVENT_CONTEXT_CLEARED``, ``username=cleared_by``, the session's internal
+        id) written in the same transaction, so the row exists if and only if the
+        clear committed.  ``cleared_by`` is required: a falsy value is refused
+        before anything changes.
 
         No hidden agent state can survive: every non-architect agent is built
         fresh per invocation and the monolith's history is hydrated from these
@@ -2197,20 +2261,33 @@ class ChatService:
             session_id: The session to clear.  A contributor session clears its
                 own transcript; the owner's marker (and so the deck's mode) is
                 untouched, because a contributor's rows are its own.
+            cleared_by: Username of the caller doing the clear; recorded in
+                ``usage_events`` and the log line.  Required and non-empty.
 
         Returns:
             ``{"status": "cleared", "session_id": ..., "deleted_messages": N,
             "preserved_message_id": id-or-None}``
 
         Raises:
+            ValueError: ``cleared_by`` is empty or None (nothing is changed).
             SessionNotFoundError: session_id does not exist.
+            ArcReviewInFlightError: the deck's arc review holds a live claim and
+                is running a graph turn on this thread (nothing is changed); see
+                :func:`_refuse_during_an_arc_review`.
         """
+        if not cleared_by:
+            raise ValueError("clear_context requires cleared_by: who cleared must be recorded")
+
         from src.core.database import get_db_session
         from src.database.models.session import SessionMessage
+        from src.database.models.usage_event import EVENT_CONTEXT_CLEARED, UsageEvent
 
         session_manager = get_session_manager()
         with get_db_session() as db:
             session = session_manager._get_session_or_raise(db, session_id)
+            # Before anything changes: an arc review in flight would write the
+            # thread back after the delete below.
+            _refuse_during_an_arc_review(db, session)
 
             marker = (
                 db.query(SessionMessage)
@@ -2229,16 +2306,30 @@ class ChatService:
             if marker_id is not None:
                 doomed = doomed.filter(SessionMessage.id != marker_id)
             deleted_messages = doomed.delete(synchronize_session=False)
+            if marker is not None:
+                marker.message_type = ENGINE_MODE_MARKER_MESSAGE_TYPE
 
-            # Inside the transaction on purpose — see the docstring.
+            db.add(
+                UsageEvent(
+                    username=cleared_by,
+                    event_type=EVENT_CONTEXT_CLEARED,
+                    session_id=session.id,
+                )
+            )
+            # A failed insert raises here, before the thread is touched.
+            db.flush()
+
+            # On THIS session, so it commits or rolls back with the rest — see
+            # the docstring.
             from src.core.checkpointer import get_checkpointer
 
-            get_checkpointer().delete_thread(session_id)
+            get_checkpointer().delete_thread(session_id, session=db)
 
         logger.info(
             "Cleared session context",
             extra={
                 "session_id": session_id,
+                "cleared_by": cleared_by,
                 "deleted_messages": deleted_messages,
                 "preserved_message_id": marker_id,
             },

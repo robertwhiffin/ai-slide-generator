@@ -319,7 +319,7 @@ interface SlideStyle {
 
 | Path | Responsibility | Backend Touchpoints |
 |------|----------------|---------------------|
-| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
+| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages. Its header carries the **Clear chat** button and `ConfirmDialog` (copy in `clearChatCopy.ts`) | `api.sendChatMessage`, `api.getSession` (also supplies `my_permission`), `conversationApi.clearChat` |
 | `src/components/ChatPanel/ChatInput.tsx` | Textarea for composing prompts; accepts an optional `badge?: React.ReactNode` slot above the textarea (currently no caller supplies one) | None (props only) |
 | `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
 | `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides. Still exists but is no longer the primary slide surface — `SlideViewer` fulfils that role. | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
@@ -527,6 +527,20 @@ The `configApi` module provides a separate API client for profile and settings m
 - **Deck Contributors** – manage sharing permissions for decks (sessions)
 
 Errors are thrown as `ConfigApiError` (status + message), separate from the main `ApiError` class.
+
+### Conversation API (`src/api/conversation.ts`)
+
+The `conversationApi` module holds calls that change a session's **conversation** and never its deck. It throws the main `ApiError` (status + message; the message is the response's `detail` string, or `detail.message`, when it has one), not `ConfigApiError`, so later conversation calls share one error type.
+
+| Method | HTTP | Path | Returns |
+|--------|------|------|---------|
+| `clearChat(sessionId)` | DELETE | `/api/sessions/{id}/context` | `{ status: 'cleared', session_id, deleted_messages, preserved_message_id }` |
+
+**Clear chat** is wired in `ChatPanel`:
+- **Visibility:** the button shows only when the session is persisted, the live deck has a Spec (`hasDeckSpec`, which `AppLayout` passes as `!!slideDeck?.deck_spec`), and `canEditConversation(my_permission)` (`src/utils/conversationPermissions.ts`: `CAN_EDIT` or `CAN_MANAGE`) is true. `my_permission` comes from `api.getSession` and is re-read when a browser-local session becomes persisted. After restoring a save point in the same tab the restored deck object carries no Spec, so the button can stay hidden until a reload (see [Save Points](save-points-versioning.md)).
+- **Disabled** while a turn is loading, a clear is running, the panel is read-only (`disabled`), a save point is being previewed, or there are no messages. A send is ignored while a clear is running.
+- **On confirm** it calls `conversationApi.clearChat(sessionId)` and empties the panel's local messages (and its last-replacement feedback). It never calls `onSlidesGenerated` and never refetches slides or resets the Spec. A response that arrives after the user switched session is dropped.
+- **Errors** map by HTTP status through `clearChatErrorMessage` (`clearChatCopy.ts`), never by matching the server's detail text: 409 shows the "still running" copy, 403 the "only editors" copy, anything else (including 404) the generic "Couldn't clear the chat" copy. The conversation stays in the panel on any failure.
 
 ### Error Handling
 

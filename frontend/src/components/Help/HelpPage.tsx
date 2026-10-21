@@ -160,6 +160,7 @@ const GeneratorTab: React.FC = () => (
         <li>Type requests to generate or edit slides</li>
         <li>Shows AI responses and Genie data queries</li>
         <li>Selection badge appears when slides are selected for editing</li>
+        <li><span className="font-medium">Clear chat</span> (top of the panel) deletes your conversation and keeps the deck, its Spec and save points</li>
       </ul>
     </section>
 

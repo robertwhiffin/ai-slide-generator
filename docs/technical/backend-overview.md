@@ -66,8 +66,9 @@ delete of all users' expired sessions) and `POST /api/sessions/{id}/export`
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `GET` | `/api/sessions/{id}/messages` | Get messages (creator only, conversations are private) | `routes/sessions.get_session_messages` |
+| `GET` | `/api/sessions/{id}/messages` | Get messages (creator only, conversations are private). Never returns the `engine_mode_marker` row a clear keeps | `routes/sessions.get_session_messages` |
 | `POST` | `/api/sessions/{id}/messages` | Add a message (creator only) | `routes/sessions.add_message` |
+| `DELETE` | `/api/sessions/{id}/context` | Clear chat. Requires CAN_EDIT on the deck and being the session's creator; 409 while a turn or slide operation holds the session lock. In one transaction, deletes the session's transcript and graph thread and writes a `context_cleared` usage event. Keeps the deck, its Spec (`deck_spec_json`), save points, the Conversation Pin, and the earliest user message (re-typed `engine_mode_marker`; `SessionManager.get_messages` and save-point capture drop it, the per-request `get_messages_for_request` does not) | `routes/sessions.clear_session_context` |
 
 ### Session Editing Lock Endpoints
 
@@ -502,6 +503,7 @@ When a contributor opens a shared deck:
 2. The contributor session shares the parent's slide deck but has its own private conversation (chat messages are never shared).
 3. **Editing locks** (`POST/DELETE/GET /api/sessions/{id}/lock`) enforce exclusive editing -- only one user can edit a shared deck at a time; others see a read-only banner.
 4. Lock heartbeats (`PUT /api/sessions/{id}/lock/heartbeat`) keep the lock alive while the session is open.
+5. Clearing the chat (`DELETE /api/sessions/{id}/context`) affects only the caller's own session. A contributor clears their own contributor session's transcript and graph thread, never the owner's; the deck's engine is resolved on the owner's rows and does not change.
 
 The `PermissionService` (`src/services/permission_service.py`) evaluates permissions by checking:
 - Session ownership (creator always has CAN_MANAGE on the root deck)
