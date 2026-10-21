@@ -105,6 +105,9 @@ const B_FINDING: SlideFinding = {
   category: 'content',
   criterion: 'source_contradiction',
   message: 'The lag figure is not supported by the cited table.',
+  // #334's read-time copy (src/domain/finding_copy.py) for this criterion and status.
+  plainMessage: 'A figure on this slide does not match the source data. This was not fixed automatically.',
+  plainIssue: 'A figure on this slide does not match the source data.',
   objective: true,
   status: 'open',
   seen: false,

@@ -255,7 +255,8 @@ def test_b_a_transient_review_failure_at_a_pending_position_keeps_the_draft(
     )
     assert len(env.skills.calls_for("deck_reviewer")) == 1
     info = [m for m in env.messages() if m["message_type"] == "info"]
-    assert any("Slide 1" in m["content"] for m in info)
+    # #321 numbers the notice 1-based: position 1 is "Slide 2".
+    assert any("Slide 2" in m["content"] for m in info), info
 
 
 # ---------------------------------------------------------------------------

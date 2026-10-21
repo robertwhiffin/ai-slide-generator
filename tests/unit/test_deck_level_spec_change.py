@@ -953,6 +953,50 @@ def test_the_user_is_told_what_was_re_checked_and_what_is_being_rebuilt(graph_en
         }
     ]
     assert "re-checked all 3" in notices[0].content
+    # #321: the UI's 1-based number, not a 0-based Python list.
+    assert "Rebuilding slide 3." in notices[0].content
+    assert "[" not in notices[0].content
+
+
+@pytest.mark.parametrize(
+    "failing, phrase",
+    [({2}, "slide 3"), ({0, 2}, "slides 1 and 3")],
+    ids=["one", "two"],
+)
+def test_the_rebuild_summary_numbers_slides_as_the_ui_does(graph_env, failing, phrase):
+    """#321: "Rebuilding 1: [2]." told the user to expect slide 2 (the UI's second
+    slide) while position 2 — the THIRD — was rebuilt, in a Python list.
+
+    The summary is persisted as the architect's own ``llm_response`` and replayed
+    to it next turn, so the persisted row is asserted alongside the emit: both
+    must read in the UI's 1-based numbers.  ``metadata["rebuilding"]`` stays
+    0-based.
+    """
+    env = graph_env
+    _persist(env, make_spec(positions=(0, 1, 2)))
+    _seed_rows(env, ["<div>zero</div>", "<div>one</div>", "<div>two</div>"])
+    env.skills.set("build_reviewer", brief_aware_reviewer(failing))
+    emitter = queue.Queue()
+
+    _run_architect(env, _audience_changed(), emitter=emitter)
+
+    notices = [
+        e
+        for e in _drain(emitter)
+        if (e.metadata or {}).get("spec_change") == "deck_level"
+    ]
+    assert len(notices) == 1
+    # ENTRY: exactly the failing positions are rebuilt, still 0-based in data.
+    assert notices[0].metadata["rebuilding"] == sorted(failing)
+    persisted = [
+        m["content"]
+        for m in env.messages()
+        if "re-checked all" in (m.get("content") or "")
+    ]
+    assert persisted == [notices[0].content], persisted
+    for summary in (notices[0].content, persisted[0]):
+        assert summary.endswith(f"Rebuilding {phrase}."), summary
+        assert "[" not in summary, summary
 
 
 def test_a_pass_that_could_judge_nothing_says_so_and_records_the_deck_as_stale(

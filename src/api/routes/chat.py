@@ -847,7 +847,8 @@ async def poll_chat(
 
     **The slides do NOT come through ``msg_to_stream_event``.**  ws4d D3 does not
     persist slide-ready as a ``SessionMessage``: that converter returns a fixed
-    six-key dict with nowhere to put ``position``/``html``/``scripts``, so a
+    message projection that carries no slide payload, with nowhere to put
+    ``position``/``html``/``scripts``, so a
     converter that learned the type still could not carry the data — and build
     mechanics in the transcript pollute a view that is now user-visible and
     clearable.  This reads **committed rows** instead, via

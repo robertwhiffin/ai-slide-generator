@@ -10,7 +10,9 @@ frontend/sidecars but NOT ``scripts``).  Importing this from ``scripts`` would
 raise ``ModuleNotFoundError`` at startup in production.
 
 ``scripts/backfill_session_slides.py`` remains the operator CLI and imports from
-here, so there is exactly ONE implementation of the row mapping.
+here, so there is exactly ONE implementation of the row mapping
+(:func:`_backfill_deck`), shared by the CLI's :func:`backfill_session` and the
+startup pass :func:`backfill_unmigrated_decks`.
 
 Idempotent: a row already present at ``(session_id, position)`` is skipped.
 Also lifts deck-level presentation fields (``css``, ``external_scripts``) out of
@@ -23,16 +25,46 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Collection, Dict, Optional
 
 from sqlalchemy import and_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from src.api.services.session_manager import _prune_slide_rows_beyond, _upsert_slide_row
 from src.database.models.session import SessionSlide, SessionSlideDeck
 from src.utils.slide_hash import compute_slide_hash
 
 logger = logging.getLogger(__name__)
+
+#: Decks the startup pass loads, migrates and commits per transaction.  Each deck
+#: still gets its own SAVEPOINT, so a bad deck rolls back alone; the batch only
+#: amortises the deck SELECT and the COMMIT.
+_STARTUP_BATCH_DECKS = 200
+
+#: The only deck columns the backfill reads or writes (the primary key is always
+#: loaded too).  Deliberately excludes ``html_content`` — the full knitted HTML,
+#: ~180 MB across prod — which the backfill never touches.
+_BACKFILL_DECK_COLUMNS = (
+    SessionSlideDeck.session_id,
+    SessionSlideDeck.deck_json,
+    SessionSlideDeck.verification_map,
+    SessionSlideDeck.css,
+    SessionSlideDeck.external_scripts_json,
+    SessionSlideDeck.head_meta_json,
+)
+
+
+def _empty_result(session_id: int) -> Dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "slides_inserted": 0,
+        "slides_skipped": 0,
+        "verification_migrated": 0,
+        "css_backfilled": 0,
+        "external_scripts_backfilled": 0,
+        "head_meta_backfilled": 0,
+        "orphans_pruned": 0,
+    }
 
 
 def backfill_session(
@@ -61,20 +93,12 @@ def backfill_session(
             head_meta_backfilled  – 1 if head_meta_json was (or would be) set
             orphans_pruned        – rows deleted (or that would be deleted) above slide count
     """
-    result: Dict[str, Any] = {
-        "session_id": session_id,
-        "slides_inserted": 0,
-        "slides_skipped": 0,
-        "verification_migrated": 0,
-        "css_backfilled": 0,
-        "external_scripts_backfilled": 0,
-        "head_meta_backfilled": 0,
-        "orphans_pruned": 0,
-    }
+    result = _empty_result(session_id)
 
     # Load the deck for this session.
     deck = (
         db.query(SessionSlideDeck)
+        .options(load_only(*_BACKFILL_DECK_COLUMNS))
         .filter(SessionSlideDeck.session_id == session_id)
         .one_or_none()
     )
@@ -82,15 +106,49 @@ def backfill_session(
         logger.info("Session %d has no slide deck — skipping", session_id)
         return result
 
+    # One query for the positions that already have rows, instead of one per slide.
+    existing_positions = {
+        position
+        for (position,) in db.query(SessionSlide.position).filter(
+            SessionSlide.session_id == session_id
+        )
+    }
+
+    _backfill_deck(db, deck, result, dry_run=dry_run, existing_positions=existing_positions)
+
+    if not dry_run:
+        db.commit()
+
+    return result
+
+
+def _backfill_deck(
+    db: Session,
+    deck: SessionSlideDeck,
+    result: Dict[str, Any],
+    *,
+    dry_run: bool,
+    existing_positions: Collection[int],
+    prune: bool = True,
+) -> None:
+    """Map one loaded deck's ``deck_json`` onto rows, accumulating into *result*.
+
+    The caller owns the transaction.  *existing_positions* are the positions that
+    already have a row; every other position is INSERTed without an existence
+    SELECT.  ``prune=False`` skips the orphan prune — only for a caller that knows
+    the deck had no rows at all, so there is nothing above the slide count to prune.
+    """
+    session_id = deck.session_id
+
     if not deck.deck_json:
         logger.info("Session %d deck_json is empty — skipping", session_id)
-        return result
+        return
 
     try:
         deck_dict = json.loads(deck.deck_json)
     except json.JSONDecodeError as exc:
         logger.error("Session %d deck_json is invalid JSON: %s", session_id, exc)
-        return result
+        return
 
     # Parse verification_map (keyed by content_hash → findings dict).
     verification_map: Dict[str, Any] = {}
@@ -106,17 +164,7 @@ def backfill_session(
     # Per-slide inserts
     # -------------------------------------------------------------------------
     for position, slide_dict in enumerate(slides):
-        existing = (
-            db.query(SessionSlide)
-            .filter(
-                and_(
-                    SessionSlide.session_id == session_id,
-                    SessionSlide.position == position,
-                )
-            )
-            .one_or_none()
-        )
-        if existing is not None:
+        if position in existing_positions:
             logger.debug(
                 "Session %d position %d already has a row — skipping",
                 session_id,
@@ -151,6 +199,8 @@ def backfill_session(
             # writer identity, so created_by/modified_by stay NULL when the slide
             # dict has none.  The live dual-write DOES pass a fallback.  This
             # divergence is intentional — do not "harmonise" it.
+            #
+            # insert_only: existing_positions already says this position is free.
             _upsert_slide_row(
                 db,
                 session_id,
@@ -159,10 +209,11 @@ def backfill_session(
                 now_dt=None,
                 author_fallback=None,
                 verification=verification,
+                insert_only=True,
             )
 
         result["slides_inserted"] += 1
-        logger.info(
+        logger.debug(
             "Session %d position %d: %s (html_len=%d, verification=%s)",
             session_id,
             position,
@@ -211,6 +262,8 @@ def backfill_session(
     # would return MORE slides than the deck actually has — and PR3's
     # all-committed predicates would wait forever on phantom positions.
     # -------------------------------------------------------------------------
+    if not prune:
+        return
     if not dry_run:
         # Shared prune strategy — see session_manager._prune_slide_rows_beyond.
         result["orphans_pruned"] = _prune_slide_rows_beyond(
@@ -228,11 +281,6 @@ def backfill_session(
             .count()
         )
         result["orphans_pruned"] = orphan_count
-
-    if not dry_run:
-        db.commit()
-
-    return result
 
 
 def backfill_unmigrated_decks(session_factory) -> int:
@@ -255,6 +303,24 @@ def backfill_unmigrated_decks(session_factory) -> int:
     the query returns zero rows, making later boots a single cheap scan of a
     small table — far below the cost of the OAuth token fetch and pool setup that
     already happen at startup.
+
+    COST.  The first pass over a real database is bounded by round trips, so it
+    is shaped to issue a fixed number per deck, independent of slide count.  The
+    guard already proved each deck has no rows, so there is no per-slide
+    existence SELECT (``insert_only``) and no orphan prune; a deck's slides reach
+    the database as one batched INSERT when its savepoint flushes; decks are
+    loaded ``_STARTUP_BATCH_DECKS`` at a time without ``html_content``; and there
+    is one COMMIT per batch, not per deck.  The previous shape — ~3 round trips per
+    slide plus ~5 per deck — took ~7.5 minutes for 5,183 decks / ~57k slides on a
+    prod fork, and every devloop deploy re-forks prod and pays it again until prod
+    itself has run it.
+
+    ISOLATION.  Each deck runs inside its own SAVEPOINT, so a deck that raises —
+    unparseable slide data, or an IntegrityError because a live writer gave it rows
+    after the guard ran — rolls back alone, leaving no partial rows (a deck with
+    some rows is invisible to the guard and would never be retried).  The batch's
+    other decks still commit.  Progress is durable per batch: a crash loses at most
+    the batch in flight, and the next boot's guard picks it up.
 
     NOTE ON SCOPE: this finds decks with no rows AT ALL.  A *partially*
     backfilled deck (some positions have rows) is deliberately left to the CLI —
@@ -286,24 +352,47 @@ def backfill_unmigrated_decks(session_factory) -> int:
 
         migrated = 0
         failed: list[int] = []
-        for session_pk in unmigrated:
-            # One transaction per deck: a bad deck_json cannot abort the others,
-            # and a re-run resumes cleanly because the guard re-evaluates.
-            try:
-                result = backfill_session(db, session_pk, dry_run=False)
+        for start in range(0, len(unmigrated), _STARTUP_BATCH_DECKS):
+            batch = unmigrated[start:start + _STARTUP_BATCH_DECKS]
+            decks = (
+                db.query(SessionSlideDeck)
+                .options(load_only(*_BACKFILL_DECK_COLUMNS))
+                .filter(SessionSlideDeck.session_id.in_(batch))
+                .all()
+            )
+            for deck in decks:
+                session_pk = deck.session_id
+                result = _empty_result(session_pk)
+                try:
+                    with db.begin_nested():
+                        _backfill_deck(
+                            db,
+                            deck,
+                            result,
+                            dry_run=False,
+                            existing_positions=(),
+                            prune=False,
+                        )
+                except Exception:
+                    # Deliberately not raised: a deck we cannot migrate must not
+                    # block app startup, and its deck_json is still readable via
+                    # the fallback path.
+                    failed.append(session_pk)
+                    logger.exception(
+                        "Row-per-slide backfill failed for session pk=%d; continuing",
+                        session_pk,
+                    )
+                    continue
                 if result["slides_inserted"]:
                     migrated += 1
-            except Exception:
-                db.rollback()
-                failed.append(session_pk)
-                logger.exception(
-                    "Row-per-slide backfill failed for session pk=%d; continuing",
-                    session_pk,
-                )
+            db.commit()
+            logger.info(
+                "Row-per-slide backfill: %d/%d deck(s) processed",
+                min(start + _STARTUP_BATCH_DECKS, len(unmigrated)),
+                len(unmigrated),
+            )
 
         if failed:
-            # Deliberately not raised: a deck we cannot parse must not block app
-            # startup, and its deck_json is still readable via the fallback path.
             logger.error(
                 "Row-per-slide backfill: %d deck(s) failed and remain on deck_json: %s",
                 len(failed),

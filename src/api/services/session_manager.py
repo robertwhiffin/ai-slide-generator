@@ -31,6 +31,7 @@ from src.database.models.session import (
 )
 from src.domain.conversation_engine import is_transcript_message
 from src.domain.finding import findings_from_record
+from src.domain.finding_copy import plain_finding_issue, plain_finding_message
 from src.services.conversation_pins import (
     get_conversation_graph_version,
     get_conversation_graph_versions,
@@ -201,11 +202,21 @@ def _finding_to_camel(finding: Any) -> Dict[str, Any]:
     added to ``Finding`` mirrors automatically;
     ``tests/unit/test_finding_conformance.py`` is the guard that the TypeScript
     declaration gained the same field.
+
+    ``plainMessage`` and ``plainIssue`` are the two projection-only keys: they are
+    derived here at read time (``src/domain/finding_copy.py``), are not ``Finding``
+    fields, and are never persisted.  ``PROJECTION_ONLY_FIELDS`` in
+    ``tests/unit/test_finding_conformance.py`` pins them.
     """
     camel: Dict[str, Any] = {}
     for key, value in finding.model_dump().items():
         head, *rest = key.split("_")
         camel[head + "".join(part.capitalize() for part in rest)] = value
+    # Derived, read-time only (#316): never Finding fields (that would move the
+    # reviewers' output-schema digests) and never persisted.  See
+    # src/domain/finding_copy.py.
+    camel["plainMessage"] = plain_finding_message(finding)
+    camel["plainIssue"] = plain_finding_issue(finding)
     return camel
 
 
@@ -508,6 +519,7 @@ def _upsert_slide_row(
     base_spec: Optional[str] = None,
     deck_spec_slide: Optional[Dict[str, Any]] = None,
     partial: bool = False,
+    insert_only: bool = False,
 ) -> SessionSlide:
     """Insert or update THE session_slides row for ``(owner_id, position)``.
 
@@ -556,6 +568,12 @@ def _upsert_slide_row(
             PR3 relies on these semantics (a reviewer rewrites HTML without
             touching the verdict; the foreman attaches a spec fragment without
             disturbing verification).
+        insert_only: the caller has already established that no row exists at
+            ``(owner_id, position)``, so skip the existence SELECT and INSERT.
+            Used by the row-per-slide backfill, which knows it from its own
+            guard; that SELECT was a round trip per slide on ~57k slides at
+            startup.  If the claim is wrong the composite primary key rejects
+            the INSERT at flush — a loud IntegrityError, never a silent overwrite.
 
     Returns:
         The inserted or updated SessionSlide row.
@@ -572,7 +590,7 @@ def _upsert_slide_row(
 
     spec_json = json.dumps(deck_spec_slide) if deck_spec_slide is not None else None
 
-    existing = (
+    existing = None if insert_only else (
         db.query(SessionSlide)
         .filter(
             and_(
@@ -3561,6 +3579,7 @@ class SessionManager:
             event_type = "assistant"  # User messages use assistant type for display
 
         metadata = msg.get("metadata") or {}
+        details = metadata.get("details")
 
         return {
             "type": event_type,
@@ -3569,6 +3588,12 @@ class SessionManager:
             "tool_input": metadata.get("tool_input"),
             "tool_output": msg["content"] if event_type == "tool_result" else None,
             "message_id": msg["id"],
+            # Only a failure notice's technical detail (#321) — never the row's whole
+            # metadata, which for a tool row carries its input. None on every other
+            # row, including every row persisted before notices had details.
+            "metadata": (
+                {"details": details} if isinstance(details, dict) and details else None
+            ),
         }
 
     def cleanup_stale_requests(self, max_age_hours: int = 24) -> int:

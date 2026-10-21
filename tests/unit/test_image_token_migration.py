@@ -3,7 +3,7 @@ import os
 import tempfile
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base
@@ -80,6 +80,37 @@ class TestTokenBackfillMigration:
             second = conn.execute(text("SELECT token FROM image_assets WHERE id=1")).scalar()
 
         assert first == second
+
+    def test_backfill_is_one_statement_not_one_per_row(self, sqlite_engine):
+        # One UPDATE per image row took ~28 s for 3,408 images on a prod fork.
+        with sqlite_engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE image_assets (id INTEGER PRIMARY KEY, filename TEXT)"
+            ))
+            conn.execute(text(
+                "INSERT INTO image_assets (id, filename) VALUES "
+                "(1, 'a.png'), (2, 'b.png'), (3, 'c.png'), (4, 'd.png'), (5, 'e.png')"
+            ))
+
+        updates: list[str] = []
+
+        def _before(conn, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("UPDATE"):
+                updates.append(statement)
+
+        event.listen(sqlite_engine, "before_cursor_execute", _before)
+        try:
+            with sqlite_engine.begin() as conn:
+                _migrate_image_assets_add_token(
+                    conn, inspect(conn), None, _qual, is_sqlite=True
+                )
+        finally:
+            event.remove(sqlite_engine, "before_cursor_execute", _before)
+
+        assert len(updates) == 1, f"expected one backfill statement, got {len(updates)}"
+        with sqlite_engine.connect() as conn:
+            tokens = conn.execute(text("SELECT token FROM image_assets")).scalars().all()
+        assert len(set(tokens)) == 5 and all(tokens)
 
     def test_run_migrations_leaves_token_present_on_fresh_schema(self, sqlite_engine):
         # Fresh create_all already includes the token column; migrations must not error.

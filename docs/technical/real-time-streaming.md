@@ -316,6 +316,8 @@ X-Accel-Buffering: no
 }
 ```
 
+An event built from a chat message also carries `metadata`: `{"details": {"stage", "error", "request_id"}}` for a graph failure notice (see [Graph failure notices](#graph-failure-notices-agent-mode)), and `null` for every other message. Only `details` is forwarded, never the row's whole metadata.
+
 `turn_progress` is the graph turn's latest stage summary (see [Turn progress](#turn-progress-graph-engine-319)). It is `null` once the request is `completed` or `error`, for a request that has not reported yet, and for the legacy (monolith) engine, which never reports.
 
 ### Turn progress (graph engine, #319)
@@ -575,7 +577,7 @@ if (message.tool_call) {
 | `role` | VARCHAR | `user`, `assistant`, `system` |
 | `content` | TEXT | Message content |
 | `message_type` | VARCHAR | `user_input`, `user_query`, `reasoning`, `tool_call`, `tool_result`, `llm_response`, `clarification`, `info`, `error`, `engine_mode_marker` (the one row a clear keeps; `SessionManager.get_messages` and save-point capture drop it, so the chat panel and the agents never see it. The per-request `get_messages_for_request` does not filter it; see [MCP Server](./mcp-server.md)) |
-| `metadata_json` | TEXT | JSON with `tool_name`, `tool_input` |
+| `metadata_json` | TEXT | JSON with `tool_name`, `tool_input`; on graph failure notices, `details` (`stage`, `error` and, when the turn has one, `request_id`) (#321) |
 | `request_id` | VARCHAR(64) | Links to async chat request (for polling) |
 | `created_at` | TIMESTAMP | Message timestamp |
 
@@ -620,6 +622,24 @@ A delete removes a turn's rows by role and order (the user message and the rows 
 | Session lock conflict | 409 returned, stream not started |
 | Network disconnect | `AbortController` cancels stream |
 | Tool error | `error` event with tool name |
+
+---
+
+## Graph failure notices (agent mode)
+
+When part of a graph turn fails (a slide cannot be built, checked or saved, or the deck-level update fails), the chat gets a plain-language `info` message that names the slide, says what happened and says what to do, for example "Slide 3 couldn't be built, so it's shown as a placeholder — ask me to regenerate slide 3." All wording lives in `src/services/graph/user_notices.py`; the technical side never appears in the headline.
+
+- **Row** – An `info` message stamped with the turn's `request_id` (so polling finds it) and excluded from the architect's replayed conversation. Its `metadata_json` is `{"details": {"stage", "error", "request_id"}}`; `request_id` is omitted when the turn has none (SSE). `error` is an exception class name or a fixed marker (`model_temporarily_unavailable` for a transient model fault), never exception text and never a persisted-runtime error name.
+- **Numbers** – 1-based in text (matching the slide ribbon); 0-based in event metadata (`position`, `positions`) and in the log's `positions=`. `details` carries no slide numbers.
+- **Log** – One WARNING per notice, with every field in the message because `extra=` is not rendered by the deployed log format: `graph_failure_notice kind=build_failed stage=builder error=RuntimeError positions=[2] request_id=... session_id=...`.
+
+| Transport | What the client receives |
+|-----------|--------------------------|
+| Polling | An `assistant` event with `metadata.details` (the persisted row) |
+| SSE | `info` rows are not streamed. A failed slide emits an `error` event whose `error` is a short headline, shown in the error banner (its `metadata.details` is not rendered); unfinished slides emit an `error` event with the full text; a skipped or failed deck review emits an `assistant` event with `metadata.details`. A slide kept as built after a brief AI-service fault, and a failed deck-level write on its own, emit no event (row only) |
+| Reload | `GET /api/sessions/{id}` returns `messages[].metadata.details` |
+
+`Message.tsx` shows `details` in a collapsed **Details** disclosure under assistant messages only. The save-point preview and the MCP transcript deliberately drop `details`. Rows written before this change keep their old text and have no disclosure.
 
 ---
 

@@ -62,6 +62,17 @@ Refine slides through follow-up messages in the same session:
 | Edit slide contents | "Change title to 'Q4 Results'" |
 | Add a slide | "Add a new slide about \{X\} after this one" |
 | Regenerate all | "Regenerate all slides with more data" |
+| Regenerate one slide | "Regenerate slide 3" |
+
+### If a slide can't be generated
+
+Occasionally one slide fails while the rest of the deck is built. When that happens:
+
+- The chat tells you which slide it was, in plain words, and what to do next. Slide numbers match the thumbnail ribbon, so the first slide is slide 1.
+- The failed slide appears in its place as a placeholder, and the other slides are not affected.
+- To try again, ask the AI to regenerate it, for example "Regenerate slide 3".
+- If the message says a slide is shown without its automatic fix, the slide is still there as first built. Open the **AI feedback** drawer under the slide and choose **Apply** next to an issue to try the fix again.
+- Some messages have a collapsed **Details** line underneath. Expand it to see technical information (stage, error and request ID) to share with support.
 
 ## Clearing the Chat
 
@@ -117,6 +128,22 @@ To remove one exchange from the conversation, hover over one of your messages in
 Click any thumbnail in the ribbon on the left to jump to that slide. You can also use the arrow buttons on the stage, or keyboard arrow keys when the viewer is focused. The current slide is always kept in view in the ribbon.
 
 To refine a specific slide, navigate to it and describe the change in the chat panel — the AI will target the slide you are currently viewing.
+
+## Review Feedback
+
+Each slide is checked as it lands. Anything the review finds appears in the feedback drawer under the slide, and the slide's thumbnail shows an amber dot until you have seen it.
+
+Each point is explained in plain words, with a note on what happened to it: it was fixed automatically, it was not fixed automatically, or it is a judgement call left to you. Click **Show details** under a point to read the reviewer's technical note, and **Hide details** to fold it away again.
+
+For a point that was not fixed, choose what happens next:
+
+- **Apply** asks the agents to fix it.
+- **Dismiss** hides it.
+- **Discuss** moves it to the chat so you can talk it through first.
+
+Apply and Discuss send the technical note along with your request so the agents have what they need, but the chat keeps it folded under **Reviewer's details**. Click it to read it.
+
+Points about the deck as a whole, such as a gap in the story, repeated points or a missing conclusion, appear as a chat message instead. The reviewer's specifics are folded underneath, under **Reviewer's details**.
 
 ## Returning to a Previous Session
 

@@ -49,7 +49,7 @@ import logging
 import threading
 import time
 from contextvars import ContextVar
-from typing import Any, Dict, List, Optional, Set, get_type_hints
+from typing import Any, Dict, List, Literal, Optional, Set, get_type_hints
 
 from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
@@ -71,10 +71,17 @@ from src.domain.finding import (
     build_verification_record,
     make_finding_id,
 )
+from src.domain.finding_copy import (
+    DECK_ADVISORY_CLOSING,
+    DECK_ADVISORY_HEADER_PREFIX,
+    DECK_ADVISORY_HEADER_SUFFIX,
+    REVIEWER_DETAILS_SEPARATOR,
+    deck_advisory_issue,
+)
 from src.domain.slide_alignment import AlignmentRefused, SlideAlignment, align_slides
 from src.domain.slide_deck import SlideDeck
 from src.domain.slide_numbering import architect_slide_payload, edit_ignores_references
-from src.services.agent import SAFETY_RETRY_NOTICE
+from src.services.agent import SAFETY_RETRY_NOTICE, UnsafeContentError
 from src.services.agent_runtime import (
     AgentAssemblyContext,
     get_agent_runtime,
@@ -110,6 +117,16 @@ from src.services.graph.progress import (
     report_slides,
 )
 from src.services.graph.state import GraphState, scoped, scoped_vals
+from src.services.graph.user_notices import (
+    FailureNotice,
+    deck_not_updated_notice,
+    deck_review_failed_notice,
+    placeholder_notice,
+    slide_number,
+    slides_phrase,
+    unfinished_slides_notice,
+    unreviewed_slide_notice,
+)
 from src.services.persisted_graph_release import PersistedRuntimeError
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
@@ -1196,7 +1213,9 @@ def _write_reviewed_row(
     return content_hash
 
 
-def _surface_notice(session_id: str, message: str) -> None:
+def _surface_notice(
+    session_id: str, message: str, *, details: Optional[Dict[str, str]] = None
+) -> None:
     """Persist a machine-generated advisory as an ``info`` chat message.
 
     The shipped channel for advisories the user must see, and the graph's ONE
@@ -1230,6 +1249,11 @@ def _surface_notice(session_id: str, message: str) -> None:
     the SSE path and the sweeper.  The ``info`` TYPE is unchanged and must stay:
     it is what keeps these notices out of ``_conversation``, so the architect
     never reads a machine advisory back as its own prose.
+
+    ``details`` is the technical half of a plain-language notice (#321): the
+    stage, the error class or code, and the request id.  It is persisted as the
+    row's ``metadata["details"]`` and shown behind a collapsed disclosure in chat,
+    never as the headline.  It never carries exception text.
     """
     try:
         get_session_manager().add_message(
@@ -1238,9 +1262,55 @@ def _surface_notice(session_id: str, message: str) -> None:
             content=message,
             message_type="info",
             request_id=get_chat_request_id(),
+            metadata={"details": dict(details)} if details else None,
         )
     except Exception:
         logger.warning("Could not surface a failure notice", exc_info=True)
+
+
+def _surface_failure_notice(session_id: str, notice: FailureNotice) -> None:
+    """Log and persist a plain-language failure notice (#321).
+
+    The only sanctioned way to write a details-bearing notice: it writes the one
+    ``graph_failure_notice`` WARNING for the failure, then the ``info`` chat row
+    through :func:`_surface_notice` with the notice's ``details`` as the row's
+    metadata.  A site that called ``_surface_notice(..., details=...)`` directly
+    would skip the log line, which is why an AST test forbids it.
+
+    The log fields go in the **message**, not only in ``extra``: the production
+    root logger formats the message alone, so a field that lived only in ``extra``
+    would never reach the deployed log.  ``extra`` is kept for any structured
+    handler wired later.  ``positions=`` is labelled as positions because the
+    values are **0-based**; nobody should read them as slide numbers.  The
+    ``request_id`` is the repo's own key for the turn's id.
+
+    Never raises.  A failed log line must not cost the chat row, and
+    :func:`_surface_notice` already swallows its own write failure.
+    """
+    try:
+        request_id = notice.details.get("request_id")
+        positions = list(notice.positions)
+        logger.warning(
+            "graph_failure_notice kind=%s stage=%s error=%s positions=%s "
+            "request_id=%s session_id=%s",
+            notice.kind,
+            notice.stage,
+            notice.error,
+            positions,
+            request_id,
+            session_id,
+            extra={
+                "notice_kind": notice.kind,
+                "graph_stage": notice.stage,
+                "error_class": notice.error,
+                "positions": positions,
+                "request_id": request_id,
+                "session_id": session_id,
+            },
+        )
+    except Exception:
+        logger.warning("Could not log a failure notice", exc_info=True)
+    _surface_notice(session_id, notice.text, details=notice.details)
 
 
 def _placehold_failed_position(
@@ -1250,6 +1320,7 @@ def _placehold_failed_position(
     node: str,
     reason: str,
     mutation: DeckMutationContext,
+    error: Optional[BaseException] = None,
 ) -> bool:
     """Commit a terminal placeholder for one failed branch, visibly.
 
@@ -1267,7 +1338,8 @@ def _placehold_failed_position(
 
     **Every path that placeholds a position takes this one function and gets the
     same three surfaces**: the row's error marker, an ``ERROR`` stream event, and
-    a durable ``info`` chat line.  All four of them — the three pipeline stages
+    a durable ``info`` chat line (plain language, through
+    :func:`_surface_failure_notice`).  All four of them — the three pipeline stages
     (``builder``, ``build_reviewer``, ``fix_reviewer``'s undeliverable-row
     path) and ``placeholder_node``'s stall path.  There is no flag to make one quieter
     than another, deliberately: the emitter is optional and is ``None`` on the
@@ -1294,13 +1366,34 @@ def _placehold_failed_position(
     So the failure is never silent, whichever node hit it, and the exception is
     logged with its traceback either way.
 
+    **What the user reads (#321).**  The chat line and the event are plain
+    language from :func:`placeholder_notice`, numbered 1-based as the UI numbers
+    slides, with the technical side (``stage``, ``error``, ``request_id``) behind
+    ``details``.  ``position`` is the 0-based position everywhere in data (event
+    metadata, the row marker, the log).  The event is emitted before the commit,
+    when no placeholder exists yet, so it carries the notice's ``headline``, which
+    claims nothing about the slide's state; the chat line, written only after the
+    placeholder reads back, carries the full ``text`` and the one
+    ``graph_failure_notice`` log record.  ``reason`` is the row's error marker and
+    goes to ``commit_placeholder`` verbatim.  ``error`` is the caught exception,
+    when there is one: it is used only to recognise a safety-gate block
+    (``UnsafeContentError``), and only its class name, never its text, can reach
+    the notice.
+
     ``commit_placeholder`` takes neither ``modified_by`` nor ``deck_spec_slide``
     (Ruling C-15), so these rows ship with a NULL author here too.
     """
+    notice = placeholder_notice(
+        position,
+        stage=node,
+        error=reason,
+        unsafe=isinstance(error, UnsafeContentError),
+        request_id=get_chat_request_id(),
+    )
     _emit(
         StreamEventType.ERROR,
-        error=f"Slide {position} could not be generated.",
-        metadata={"node": node, "position": position},
+        error=notice.headline,
+        metadata={"node": node, "position": position, "details": dict(notice.details)},
     )
     writer = SlideWriter()
     try:
@@ -1325,33 +1418,48 @@ def _placehold_failed_position(
             position,
         )
         return False
-    _surface_notice(
-        session_id,
-        f"Slide {position} could not be generated and has been left as a "
-        f"placeholder ({node}: {reason}). The rest of the deck is unaffected.",
-    )
+    _surface_failure_notice(session_id, notice)
     return True
 
 
 def _advisory_text(findings: List[Finding]) -> str:
     """Compose the deck-review advisory from findings alone (§5, Ruling C-3).
 
-    ``DeckReviewOutput`` declares ``findings`` and nothing else — no verdict
-    field and no prose field — so the message is composed here rather than read
-    off the model output.  An empty list gets an explicit "no issues" line: a
-    silent absence is indistinguishable from a review that never ran.
+    ``DeckReviewOutput`` declares ``findings`` and nothing else, so the message is
+    composed here.  Shape (#316): plain lines from src/domain/finding_copy.py
+    (never a criterion slug), one closing line, then the REVIEWER_DETAILS_SEPARATOR
+    section with each reviewer message verbatim — the only actionable slide
+    references.  frontend/src/utils/findingText.ts matches exactly this shape to
+    collapse the details; the strings are pinned equal by
+    tests/unit/test_finding_conformance.py.  This is an ``info`` row, so neither
+    replay path (``_conversation``, ``_hydrate_chat_history``) feeds it back to the
+    architect.  The empty-list line is byte-identical to before (pinned by
+    tests/unit/test_graph_nodes.py::TestDeckAdvisoryIsPlain::
+    test_no_findings_line_is_byte_identical; the tour fixture's copy of it is
+    pinned separately by tests/unit/test_tour_fixture_script.py), and a silent
+    absence is indistinguishable from a review that never ran.
     """
     if not findings:
         return (
             "Deck review complete: no narrative issues found across the deck."
         )
-    lines = [
-        f"Deck review found {len(findings)} narrative "
-        f"{'issue' if len(findings) == 1 else 'issues'}:"
-    ]
+    counts: Dict[str, int] = {}
     for finding in findings:
-        lines.append(f"- {finding.criterion}: {finding.message}")
-    return "\n".join(lines)
+        line = deck_advisory_issue(finding.criterion)
+        counts[line] = counts.get(line, 0) + 1
+    total = len(findings)
+    lines = [
+        f"{DECK_ADVISORY_HEADER_PREFIX}{total} "
+        f"{'thing' if total == 1 else 'things'}{DECK_ADVISORY_HEADER_SUFFIX}"
+    ]
+    for line, count in counts.items():  # first-seen order
+        lines.append(f"- {line[:-1]} (noted {count} times)." if count > 1 else f"- {line}")
+    lines.append(DECK_ADVISORY_CLOSING)
+    text = "\n".join(lines)
+    details = [f"- {finding.message}" for finding in findings if finding.message.strip()]
+    if details:
+        text += REVIEWER_DETAILS_SEPARATOR + "\n".join(details)
+    return text
 
 
 def _skill_findings(output: Any) -> List[Finding]:
@@ -2174,7 +2282,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     f"The deck's brief changed, so I re-checked all "
                     f"{len(verdicts['committed'])} slide(s) against it. "
                     + (
-                        f"Rebuilding {len(rebuild)}: {rebuild}."
+                        f"Rebuilding {slides_phrase(rebuild)}."
                         if rebuild
                         else "Every slide still fits, so I am rebuilding none."
                     )
@@ -2492,13 +2600,31 @@ def foreman_node(state: dict) -> Dict[str, Any]:
         f"positions {outstanding}."
     )
     logger.error("Foreman reached END with uncommitted positions: %s", outstanding)
-    _emit(StreamEventType.ERROR, error=message, metadata={"node": "foreman"})
-    # Through `_surface_notice`, the shipped ungated writer, rather than a
-    # hand-rolled `add_message`: that is where the request-id tag lives, and an
-    # untagged row never reaches `GET /chat/poll`.  NOT through `_say` — this
-    # notice is a machine advisory that must be durable on every turn, and `_say`
-    # suppresses a describe-only one.
-    _surface_notice(state["session_id"], message)
+    # The technical `message` above stays for the log and `error_state`; the user
+    # reads the plain-language notice instead (#321).  Guarded on `outstanding`:
+    # the catalogue refuses an empty position list, and the foreman must never
+    # crash the turn over the wording of its own failure notice.  `error_state` is
+    # set either way.
+    if outstanding:
+        notice = unfinished_slides_notice(
+            outstanding, request_id=get_chat_request_id()
+        )
+        _emit(
+            StreamEventType.ERROR,
+            error=notice.text,
+            metadata={
+                "node": "foreman",
+                "positions": outstanding,
+                "details": dict(notice.details),
+            },
+        )
+        # Through `_surface_failure_notice` -> `_surface_notice`, the shipped
+        # ungated writer, rather than a hand-rolled `add_message`: that is where
+        # the request-id tag lives, and an untagged row never reaches
+        # `GET /chat/poll`.  NOT through `_say` — this notice is a machine
+        # advisory that must be durable on every turn, and `_say` suppresses a
+        # describe-only one.
+        _surface_failure_notice(state["session_id"], notice)
     updates["error_state"] = {
         "node": "foreman",
         "code": "end_with_outstanding_positions",
@@ -2634,6 +2760,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="builder",
             reason=type(exc).__name__,
+            error=exc,
             mutation=mutation,
         ):
             return {}
@@ -2773,7 +2900,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             )
             _emit(
                 StreamEventType.ASSISTANT,
-                content=f"Slide {position} reviewed: {verdict}.",
+                content=f"Slide {slide_number(position)} reviewed: {verdict}.",
                 metadata={"node": "build_reviewer", "position": position,
                           "verdict": verdict},
             )
@@ -2806,6 +2933,7 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="build_reviewer",
             reason=type(exc).__name__,
+            error=exc,
             mutation=mutation,
         ):
             return {}
@@ -3242,6 +3370,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             session_id=session_id,
             node="fix_reviewer",
             reason=type(exc).__name__,
+            error=exc,
             mutation=mutation,
         ):
             updates["placeheld_positions"] = scoped(turn_id, {position})
@@ -3249,7 +3378,7 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
 
     _emit(
         StreamEventType.ASSISTANT,
-        content=f"Slide {position} fix reviewed: {verdict}.",
+        content=f"Slide {slide_number(position)} fix reviewed: {verdict}.",
         metadata={"node": "fix_reviewer", "position": position, "verdict": verdict},
     )
 
@@ -3311,12 +3440,30 @@ def _fix_slots() -> threading.BoundedSemaphore:
     return _fix_slots_var.get() or _DEFAULT_FIX_SLOTS
 
 
-def _transient_failure_notice(session_id: str, position: int, what: str) -> None:
-    """Say in chat which slide could not be finished because a model call failed."""
-    _surface_notice(
+def _transient_failure_notice(
+    session_id: str, position: int, *, during: Literal["review", "fix"]
+) -> None:
+    """Say in chat which slide was kept as built because a model call failed.
+
+    Plain language (#321): :func:`unreviewed_slide_notice` names the slide by its
+    1-based number (*position* is the 0-based position), says the AI service was
+    briefly unavailable, and offers one action.  ``during`` is the literal
+    ``"review"`` (the slide was not checked) or ``"fix"`` (its automatic fix was
+    skipped); anything else raises in the catalogue, so callers pass only those
+    two literals.  The notice carries ``details`` (stage, the fixed error code and
+    the request id) and is logged once through :func:`_surface_failure_notice`.
+
+    The caught exception is deliberately **not** a parameter: a transient fault
+    is always a ``PersistedRuntimeError`` subclass, whose name must never reach a
+    user-visible disclosure (#271), and ``str(exc)`` can echo model output.  The
+    useful cause is on the ``raise ... from`` chain, which the caller's
+    ``logger.warning(..., exc_info=True)`` already logs.
+    """
+    _surface_failure_notice(
         session_id,
-        f"Slide {position}: the model was briefly unavailable while it was being "
-        f"{what}, so it is shown as built.",
+        unreviewed_slide_notice(
+            position, during=during, request_id=get_chat_request_id()
+        ),
     )
 
 
@@ -3498,7 +3645,7 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
             position,
             exc_info=True,
         )
-        _transient_failure_notice(session_id, position, "reviewed")
+        _transient_failure_notice(session_id, position, during="review")
         _fold(
             acc,
             {
@@ -3541,7 +3688,7 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
                     position,
                     exc_info=True,
                 )
-                _transient_failure_notice(session_id, position, "fixed")
+                _transient_failure_notice(session_id, position, during="fix")
                 _fold(
                     acc,
                     {
@@ -3727,6 +3874,10 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
     # ("leave the stored value alone"), so omitting one erases nothing.
     deck_write: Dict[str, Any] = {}
     derivation_error: Optional[str] = None
+    # Set on the two paths whose advisory is a plain-language failure notice
+    # (derivation failed, review failed); `None` on the success path, whose
+    # advisory text (#316) and metadata stay exactly as they were.
+    advisory_notice: Optional[FailureNotice] = None
     try:
         deck_dict = manager.get_slide_deck(session_id) or {}
         deck = SlideDeck.from_dict(deck_dict)
@@ -3785,11 +3936,13 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 "code": "deck_level_write_failed",
                 "message": type(exc).__name__,
             }
-            _surface_notice(
+            _surface_failure_notice(
                 session_id,
-                "The deck's slides were saved, but the deck's own record of them "
-                "could not be updated this turn "
-                f"(deck_reviewer: {type(exc).__name__}).",
+                deck_not_updated_notice(
+                    review_skipped=False,
+                    error=type(exc).__name__,
+                    request_id=get_chat_request_id(),
+                ),
             )
 
     if derivation_error is not None:
@@ -3798,11 +3951,12 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
         # user "no narrative issues found across the deck" about a deck this node
         # could not read — the misleading half of the F1b outcome.  The advisory
         # IS the notice on this path, so the user gets exactly one honest line.
-        advisory = (
-            "Your slides were saved, but the deck's own record of them could not "
-            "be updated this turn, so the deck-level review was skipped "
-            f"(deck_reviewer: {derivation_error})."
+        advisory_notice = deck_not_updated_notice(
+            review_skipped=True,
+            error=derivation_error,
+            request_id=get_chat_request_id(),
         )
+        advisory = advisory_notice.text
     else:
         try:
             digest = compute_deck_digest(slide_htmls)
@@ -3846,30 +4000,43 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
         except Exception as exc:
             _raise_if_persisted_runtime_failure(exc)
             logger.exception("Deck review failed; the delivered deck stands")
-            advisory = (
-                "The deck is complete, but the deck-level review could not be "
-                "completed this turn."
+            advisory_notice = deck_review_failed_notice(
+                error=type(exc).__name__,
+                request_id=get_chat_request_id(),
             )
+            advisory = advisory_notice.text
             updates["error_state"] = {
                 "node": "deck_reviewer",
                 "code": "deck_review_failed",
                 "message": type(exc).__name__,
             }
 
-    # Through `_surface_notice`, the shipped ungated writer, rather than a
-    # hand-rolled `add_message`: that is where the request-id tag lives, and an
-    # untagged row never reaches `GET /chat/poll`.  NOT through `_say`, which
-    # suppresses a describe-only turn's write — a describe-only turn cannot reach
-    # this node today (`architect_router` ends it first) but the unit suite calls
-    # this node directly with the flag set and PINS that the advisory still lands,
+    # Through `_surface_notice` (a failure notice through `_surface_failure_notice`,
+    # which calls it), the shipped ungated writer, rather than a hand-rolled
+    # `add_message`: that is where the request-id tag lives, and an untagged row
+    # never reaches `GET /chat/poll`.  NOT through `_say`, which suppresses a
+    # describe-only turn's write — a describe-only turn cannot reach this node
+    # today (`architect_router` ends it first) but the unit suite calls this node
+    # directly with the flag set and PINS that the advisory still lands,
     # deliberately: "gating the advisory is a change to what the user is told".
     # The `info` TYPE is load-bearing and unchanged — its exclusion from
     # `_AI_TYPES` keeps this advisory out of the architect's replayed conversation.
-    _surface_notice(session_id, advisory)
+    # The success path's advisory (`_advisory_text`, #316) carries no `details`.
+    if advisory_notice is not None:
+        _surface_failure_notice(session_id, advisory_notice)
+    else:
+        _surface_notice(session_id, advisory)
     _emit(
         StreamEventType.ASSISTANT,
         content=advisory,
-        metadata={"node": "deck_reviewer"},
+        metadata={
+            "node": "deck_reviewer",
+            **(
+                {"details": dict(advisory_notice.details)}
+                if advisory_notice is not None
+                else {}
+            ),
+        },
     )
 
     return updates

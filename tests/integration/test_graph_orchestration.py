@@ -402,10 +402,19 @@ def test_deck_review_fires_once_on_a_turn_where_two_builders_fail(graph_turn_env
 
     # The two failed builders' own notices are separate, durable, and outside
     # the count above — the failure paths are symmetric with the reviewer's.
+    # Since #321 the stage rides the row's details, not its text.
+    from src.services.graph.user_notices import placeholder_notice
+
     builder_notices = [
-        m for m in messages if "(builder:" in (m.get("content") or "")
+        m
+        for m in messages
+        if ((m.get("metadata") or {}).get("details") or {}).get("stage") == "builder"
     ]
     assert len(builder_notices) == 2
+    assert sorted(m["content"] for m in builder_notices) == sorted(
+        placeholder_notice(p, stage="builder", error="RuntimeError").text
+        for p in (1, 4)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -478,15 +487,21 @@ def test_a_terminal_failure_is_placeheld_and_release_proceeds_past_it(graph_turn
     assert deck.slide_count == 3
     assert deck.html_content, "the post-commit deck-level write did not happen"
 
+    from src.services.graph.user_notices import placeholder_notice
+
     notices = [
         m
         for m in env.messages()
-        if "Slide 1" in (m.get("content") or "") and "(builder:" in m["content"]
+        if ((m.get("metadata") or {}).get("details") or {}).get("stage") == "builder"
     ]
     assert len(notices) == 1, (
         "a terminal builder failure must leave a durable notice, not only a "
         f"stream event; info messages were {[m.get('content') for m in env.messages()]}"
     )
+    # Position 1 is the deck's second slide: the notice says "Slide 2".
+    assert notices[0]["content"] == placeholder_notice(
+        1, stage="builder", error="RuntimeError"
+    ).text
 
 
 # ---------------------------------------------------------------------------

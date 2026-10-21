@@ -28,11 +28,18 @@ from typing import Any, Dict, List
 
 from src.api.services.session_manager import SessionManager
 from src.domain.finding import (
+    VERDICT_KEY,
     Finding,
     build_verification_record,
     make_finding_id,
 )
+from src.domain.finding_copy import (
+    FIXED_AUTOMATICALLY,
+    NOT_FIXED_AUTOMATICALLY,
+    PLAIN_ISSUES,
+)
 from src.utils.slide_hash import compute_slide_hash
+from tests.unit.test_finding_copy import ISSUE_316_MESSAGE
 
 # ---------------------------------------------------------------------------
 # Measured pre-change key sets (see module docstring).
@@ -89,7 +96,9 @@ _ROW_SLIDE_BASELINE_KEYS = {
     "verification",
 }
 
-# The frontend SlideFinding declaration, field for field.
+# The frontend SlideFinding declaration, field for field.  ``plainMessage`` and
+# ``plainIssue`` are derived by the read path (#316), not Finding fields; see
+# PROJECTION_ONLY_FIELDS in tests/unit/test_finding_conformance.py.
 _SLIDE_FINDING_KEYS = {
     "id",
     "slideIndex",
@@ -99,6 +108,8 @@ _SLIDE_FINDING_KEYS = {
     "objective",
     "status",
     "seen",
+    "plainMessage",
+    "plainIssue",
 }
 
 
@@ -527,6 +538,178 @@ class TestAllThreePathsAgree:
 
 
 # ---------------------------------------------------------------------------
+# #316 — every read path derives the plain-language keys, at read time only
+# ---------------------------------------------------------------------------
+
+#: ``_write_findings`` stores open, objective ``overflow`` findings, so each one
+#: must read as the present-tense overflow sentence plus the "not fixed
+#: automatically" status sentence.  Composed from the copy module's constants,
+#: never from the helpers that derive them.
+EXPECTED_MESSAGE = f"{PLAIN_ISSUES['overflow'].present} {NOT_FIXED_AUTOMATICALLY}"
+EXPECTED_ISSUE = PLAIN_ISSUES["overflow"].present
+
+#: Every spelling a write-back of the derived keys could take.
+_PLAIN_KEY_SPELLINGS = ("plainMessage", "plain_message", "plainIssue", "plain_issue")
+
+
+def _write_record(fixture: Any, session_id: str, position: int, record: Dict[str, Any]) -> None:
+    """Persist a hand-built verification record through the production writer."""
+    with fixture._patched():
+        SessionManager().write_slide_verification(
+            session_id=session_id,
+            position=position,
+            verification_record=record,
+        )
+
+
+class TestPlainMessage:
+    """``plainMessage`` / ``plainIssue`` on every path; ``message`` untouched."""
+
+    @staticmethod
+    def _assert_plain_overflow(findings: List[Dict[str, Any]], html: str, position: int,
+                               count: int, context: str) -> None:
+        expected_messages = [f.message for f in _findings_for(html, position, count)]
+        assert [f["message"] for f in findings] == expected_messages, (
+            f"{context}: the reviewer's message must reach the frontend unchanged; "
+            f"got {[f['message'] for f in findings]!r}"
+        )
+        for entry in findings:
+            assert entry["plainMessage"] == EXPECTED_MESSAGE, f"{context}: {entry!r}"
+            assert entry["plainIssue"] == EXPECTED_ISSUE, f"{context}: {entry!r}"
+
+    def test_row_read_path_derives_the_plain_keys(self, deck_with_spec):
+        rows = deck_with_spec.rows()
+        _write_findings(deck_with_spec, deck_with_spec.session_id, 0, rows[0].html, count=2)
+
+        result = deck_with_spec.get_slide_deck()
+
+        assert len(result["slides"]) == 3, "expected the row-read path"
+        self._assert_plain_overflow(result["findings"], rows[0].html, 0, 2, "row-read path")
+
+    def test_blob_path_derives_the_plain_keys(self, deck_with_spec_but_no_rows):
+        fixture = deck_with_spec_but_no_rows
+        html = fixture.get_slide_deck()["slides"][1]["html"]
+        _write_findings(fixture, fixture.session_id, 1, html, count=2)
+
+        result = fixture.get_slide_deck()
+
+        self._assert_plain_overflow(result["findings"], html, 1, 2, "deck_json blob path")
+
+    def test_legacy_fallback_derives_the_plain_keys(self, contributor_session_with_spec):
+        """Also the shared-deck contributor read: the owner's findings, plain."""
+        fixture = contributor_session_with_spec
+        html = "<div class='slide'><h1>Legacy</h1></div>"
+        _write_findings(fixture, fixture.contributor_session_id, 0, html, count=2)
+
+        result = fixture.get_slide_deck_as_contributor()
+
+        assert "slides" not in result, "expected the legacy fallback"
+        self._assert_plain_overflow(result["findings"], html, 0, 2, "legacy fallback path")
+
+    def test_a_fixed_finding_reads_in_the_past_tense(self, deck_with_spec):
+        """An auto-fixed objective finding: past-tense issue, "fixed automatically"."""
+        rows = deck_with_spec.rows()
+        content_hash = compute_slide_hash(rows[1].html)
+        fixed = Finding(
+            id=make_finding_id("contrast_failure", content_hash, 0),
+            slide_index=1,
+            category="design",
+            criterion="contrast_failure",
+            message=ISSUE_316_MESSAGE,
+            objective=True,
+            status="fixed",
+        )
+        _write_record(
+            deck_with_spec,
+            deck_with_spec.session_id,
+            1,
+            build_verification_record(
+                content_hash=content_hash, findings=[fixed], verdict="fixed"
+            ),
+        )
+
+        (entry,) = deck_with_spec.get_slide_deck()["findings"]
+
+        assert entry["status"] == "fixed"
+        assert entry["plainMessage"] == (
+            f"{PLAIN_ISSUES['contrast_failure'].past} {FIXED_AUTOMATICALLY}"
+        )
+        assert entry["plainIssue"] == PLAIN_ISSUES["contrast_failure"].past
+        assert entry["message"] == ISSUE_316_MESSAGE
+
+    def test_a_record_written_before_plain_messages_existed_still_renders(self, deck_with_spec):
+        """A record from an older writer (no ``status``, no ``seen``) needs no
+        migration: the plain keys are derived on read, with the Finding defaults."""
+        rows = deck_with_spec.rows()
+        content_hash = compute_slide_hash(rows[0].html)
+        legacy_record = {
+            content_hash: {
+                VERDICT_KEY: {
+                    "verdict": "surfaced",
+                    "findings": [
+                        {
+                            "id": f"contrast_failure:{content_hash}:0",
+                            "slide_index": 0,
+                            "category": "design",
+                            "criterion": "contrast_failure",
+                            "message": ISSUE_316_MESSAGE,
+                            "objective": True,
+                        }
+                    ],
+                }
+            }
+        }
+        _write_record(deck_with_spec, deck_with_spec.session_id, 0, legacy_record)
+
+        (entry,) = deck_with_spec.get_slide_deck()["findings"]
+
+        assert entry["status"] == "open" and entry["seen"] is False
+        assert entry["plainMessage"] == (
+            f"{PLAIN_ISSUES['contrast_failure'].present} {NOT_FIXED_AUTOMATICALLY}"
+        )
+        assert entry["plainIssue"] == PLAIN_ISSUES["contrast_failure"].present
+        assert entry["message"] == ISSUE_316_MESSAGE
+
+    def test_the_plain_keys_are_never_written_back(
+        self, deck_with_spec, deck_with_spec_but_no_rows
+    ):
+        """Derived on read, so never persisted under any spelling, in any store a
+        read could write back to.  Each read first proves the keys WERE served,
+        so the absence below is not just "the keys never existed"."""
+        # Row path: findings live on the slide row's verification_record.
+        rows = deck_with_spec.rows()
+        _write_findings(deck_with_spec, deck_with_spec.session_id, 0, rows[0].html, count=2)
+        served = deck_with_spec.get_slide_deck()["findings"]
+        assert [f["plainMessage"] for f in served] == [EXPECTED_MESSAGE] * 2
+
+        stored_record = deck_with_spec.rows()[0].verification_record
+        assert stored_record, "row path: no verification_record was stored"
+        for spelling in _PLAIN_KEY_SPELLINGS:
+            assert spelling not in stored_record, (
+                f"row path: {spelling!r} was written into verification_record"
+            )
+
+        # Blob path: findings live on the deck's verification_map; the blob path
+        # can also re-dump its deck dict into deck_json.  Check both.
+        fixture = deck_with_spec_but_no_rows
+        html = fixture.get_slide_deck()["slides"][1]["html"]
+        _write_findings(fixture, fixture.session_id, 1, html, count=2)
+        served = fixture.get_slide_deck()["findings"]
+        assert [f["plainMessage"] for f in served] == [EXPECTED_MESSAGE] * 2
+
+        stored_deck_json = json.dumps(_stored_deck_json(fixture))
+        stored_map = _stored_verification_map(fixture)
+        assert stored_map, "blob path: no verification_map was stored"
+        for spelling in _PLAIN_KEY_SPELLINGS:
+            assert spelling not in stored_deck_json, (
+                f"blob path: {spelling!r} was written into deck_json"
+            )
+            assert spelling not in stored_map, (
+                f"blob path: {spelling!r} was written into verification_map"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Small raw-SQL-free DB helpers, kept out of the fixtures (frozen surface).
 # ---------------------------------------------------------------------------
 
@@ -552,5 +735,16 @@ def _stored_deck_json(fixture: Any) -> Dict[str, Any]:
     try:
         raw = db.query(SessionSlideDeck).one().deck_json
         return json.loads(raw) if raw else {}
+    finally:
+        db.close()
+
+
+def _stored_verification_map(fixture: Any) -> str:
+    """Return the deck's persisted ``verification_map`` column, raw ('' if NULL)."""
+    from src.database.models.session import SessionSlideDeck
+
+    db = fixture._factory()
+    try:
+        return db.query(SessionSlideDeck).one().verification_map or ""
     finally:
         db.close()

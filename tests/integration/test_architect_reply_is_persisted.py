@@ -556,15 +556,35 @@ def test_a_placeholder_notice_from_a_fanned_node_reaches_the_polling_client(
     env.architect_builds(BUILD_REPLY)
 
     request_id = env.run()
-    delivered = [event["content"] for event in env.poll(request_id)["events"]]
+    events = env.poll(request_id)["events"]
+    delivered = [event["content"] for event in events]
 
     assert env.is_placeholder(1), "position 1 was not placeheld; the scenario changed"
-    notices = [text for text in delivered if "left as a placeholder" in text]
-    assert notices, (
+    # #321: the notice is found by its technical half, which rides the poll
+    # event as `metadata.details`; its text is plain language.
+    notices = [
+        event
+        for event in events
+        if ((event.get("metadata") or {}).get("details") or {}).get("stage")
+        == "builder"
+    ]
+    assert len(notices) == 1, (
         "the placeholder notice never reached the polling client: "
         f"{delivered!r}"
     )
-    assert "Slide 1" in notices[0]
+    # Position 1 is the deck's second slide, and the action names it the same way.
+    from src.services.graph.user_notices import placeholder_notice
+
+    assert notices[0]["content"] == placeholder_notice(
+        1, stage="builder", error="RuntimeError", request_id=request_id
+    ).text
+    assert "Slide 2" in notices[0]["content"]
+    assert "regenerate slide 2" in notices[0]["content"]
+    # The request id survived the `Send` fan-out all the way into the details.
+    assert notices[0]["metadata"]["details"]["request_id"] == request_id
+    assert notices[0]["metadata"] == {
+        "details": {"stage": "builder", "error": "RuntimeError", "request_id": request_id}
+    }
 
 
 # ===========================================================================
