@@ -3485,6 +3485,7 @@ class SessionManager:
             event_type = "assistant"  # User messages use assistant type for display
 
         metadata = msg.get("metadata") or {}
+        details = metadata.get("details")
 
         return {
             "type": event_type,
@@ -3493,6 +3494,12 @@ class SessionManager:
             "tool_input": metadata.get("tool_input"),
             "tool_output": msg["content"] if event_type == "tool_result" else None,
             "message_id": msg["id"],
+            # Only a failure notice's technical detail (#321) — never the row's whole
+            # metadata, which for a tool row carries its input. None on every other
+            # row, including every row persisted before notices had details.
+            "metadata": (
+                {"details": details} if isinstance(details, dict) and details else None
+            ),
         }
 
     def cleanup_stale_requests(self, max_age_hours: int = 24) -> int:

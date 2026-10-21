@@ -3,6 +3,13 @@ import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
 import { splitDeckAdvisory, splitFindingRequest } from '../../utils/findingText';
 
+// Human labels for the keys a failure notice's details carry; unknown keys render as-is.
+const DETAIL_LABELS: Record<string, string> = {
+  stage: 'Stage',
+  error: 'Error',
+  request_id: 'Request ID',
+};
+
 interface MessageProps {
   message: MessageType;
 }
@@ -126,6 +133,11 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
 
   // Regular user/assistant messages with v0 styling
   const isUser = message.role === 'user';
+  // #321: a failure notice's technical half (metadata.details), assistant messages only.
+  const detailEntries =
+    message.role === 'assistant' && message.details
+      ? Object.entries(message.details)
+      : [];
   // #316: collapse the reviewer's technical section of exactly the two shapes this
   // PR writes (Apply/Discuss requests from the user; the deck-review advisory from
   // the assistant).  Strict match, role-bound; any other content renders verbatim.
@@ -157,6 +169,19 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
               Reviewer's details
             </summary>
             <div className="mt-1 whitespace-pre-wrap break-words">{split.details}</div>
+          </details>
+        )}
+        {detailEntries.length > 0 && (
+          <details className="mt-2 text-xs text-muted-foreground" data-testid="message-details">
+            <summary className="cursor-pointer select-none">Details</summary>
+            <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 font-mono">
+              {detailEntries.map(([key, value]) => (
+                <React.Fragment key={key}>
+                  <dt>{DETAIL_LABELS[key] ?? key}</dt>
+                  <dd className="break-all">{value}</dd>
+                </React.Fragment>
+              ))}
+            </dl>
           </details>
         )}
       </div>

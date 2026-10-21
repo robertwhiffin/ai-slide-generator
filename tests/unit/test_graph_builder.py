@@ -31,6 +31,7 @@ from src.services.graph.event_emitter import (
     get_event_emitter,
     set_event_emitter,
 )
+from src.services.graph.user_notices import placeholder_notice
 from tests.unit.conftest_graph import (  # noqa: F401 — fixtures
     architect_build,
     builder_out,
@@ -767,9 +768,19 @@ class TestARealTurn:
         assert env.deck_row().slide_count == 3
         assert env.deck_row().scripts_content == final["scripts_content"]
         assert len(env.skills.calls_for("deck_reviewer")) == 1
-        # …and the failure is visible in chat, not swallowed.
+        # …and the failure is visible in chat, not swallowed — in plain words and
+        # the UI's numbering (position 1 is "Slide 2"), with its stage behind it.
         info = [m for m in env.messages() if m["message_type"] == "info"]
-        assert any("Slide 1" in m["content"] for m in info)
+        notices = [
+            m
+            for m in info
+            if ((m.get("metadata") or {}).get("details") or {}).get("stage")
+            == "build_reviewer"
+        ]
+        assert [m["content"] for m in notices] == [
+            placeholder_notice(1, stage="build_reviewer", error="RuntimeError").text
+        ], [m["content"] for m in info]
+        assert "Slide 2" in notices[0]["content"]
 
     def test_two_reviewers_failing_in_one_superstep_do_not_kill_the_turn(
         self, graph_env_threadsafe

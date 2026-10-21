@@ -482,4 +482,6 @@ def test_both_of_the_architects_utterances_are_persisted_on_a_deck_level_turn(
     assert summaries, (
         f"the deck-level re-review summary was never persisted: {replayed!r}"
     )
-    assert "Rebuilding 1: [2]" in summaries[0], summaries[0]
+    # #321: position 2 is the deck's THIRD slide, named as the UI names it.
+    assert "Rebuilding slide 3." in summaries[0], summaries[0]
+    assert "[" not in summaries[0], summaries[0]

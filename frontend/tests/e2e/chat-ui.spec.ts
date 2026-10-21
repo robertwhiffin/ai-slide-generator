@@ -57,6 +57,13 @@ function createStreamingResponseWithDeck(slideDeck: typeof mockSlideDeck): strin
   return events.join('');
 }
 
+/** Body of `GET /api/sessions/{id}` (`api.getSession`): an empty, editable session. */
+const mockIndividualSession = {
+  session_id: 'test-session-id',
+  messages: [] as unknown[],
+  my_permission: 'CAN_MANAGE',
+};
+
 // ============================================
 // Setup Helpers
 // ============================================
@@ -160,11 +167,7 @@ async function setupMocks(page: Page) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          session_id: 'test-session-id',
-          messages: [],
-          my_permission: 'CAN_MANAGE',
-        }),
+        body: JSON.stringify(mockIndividualSession),
       });
     }
   });
@@ -696,5 +699,81 @@ test.describe('ChatPanel Header', () => {
   test('shows input hint text', async ({ page }) => {
     await goToGenerator(page);
     await expect(page.getByText(/Press Enter to send/i)).toBeVisible();
+  });
+});
+
+// ============================================
+// Failure Notice Details Tests
+// ============================================
+
+/**
+ * A plain-language failure notice carries its technical detail on `metadata.details`
+ * (`GET /api/sessions/{id}` -> `messages[].metadata.details`). The chat renders it as a
+ * collapsed native Details disclosure under that notice only; an older notice without
+ * details renders exactly as before.
+ */
+test.describe('Failure notice details', () => {
+  const NEW_NOTICE =
+    "Slide 2 couldn't be built, so it's shown as a placeholder. Ask me to regenerate slide 2.";
+  const OLD_NOTICE = 'Slide at position 1 could not be built (an older notice).';
+
+  test.beforeEach(async ({ page }) => {
+    await setupMocks(page);
+    // Registered after setupMocks, so Playwright tries it first. It owns ONLY the GET of one
+    // session (api.getSession); anything else under that URL (PATCH/DELETE) falls back to
+    // setupMocks. The regex runs on the full URL, so sub-resources (/slides, /lock,
+    // /agent-config) and query-string lists (?limit=, /shared?limit=) never reach it.
+    await page.route(/\/api\/sessions\/[^/?]+$/, (route) => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ...mockIndividualSession,
+          messages: [
+            {
+              id: 1,
+              role: 'assistant',
+              content: OLD_NOTICE,
+              message_type: 'info',
+              created_at: '2026-10-19T10:00:00Z',
+              metadata: null,
+            },
+            {
+              id: 2,
+              role: 'assistant',
+              content: NEW_NOTICE,
+              message_type: 'info',
+              created_at: '2026-10-19T10:01:00Z',
+              metadata: {
+                details: { stage: 'builder', error: 'RuntimeError', request_id: 'req-e2e-1' },
+              },
+            },
+          ],
+        }),
+      });
+    });
+  });
+
+  test('shows a collapsed Details disclosure under the notice that carries details', async ({ page }) => {
+    await goToGenerator(page);
+
+    await expect(page.getByText(NEW_NOTICE)).toBeVisible();
+    await expect(page.getByText(OLD_NOTICE)).toBeVisible();
+
+    const disclosure = page.getByTestId('message-details');
+    await expect(disclosure).toHaveCount(1);
+
+    // Present in the DOM but collapsed: the label and value are hidden until opened.
+    const requestIdLabel = disclosure.getByText('Request ID', { exact: true });
+    const requestIdValue = disclosure.getByText('req-e2e-1', { exact: true });
+    await expect(requestIdLabel).toHaveCount(1);
+    await expect(requestIdLabel).toBeHidden();
+    await expect(requestIdValue).toBeHidden();
+
+    await page.locator('summary', { hasText: /^Details$/ }).click();
+
+    await expect(requestIdLabel).toBeVisible();
+    await expect(requestIdValue).toBeVisible();
   });
 });

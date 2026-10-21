@@ -27,6 +27,7 @@ import {
 } from './deleteMessageCopy';
 import { withoutTurn, withPersistedUserIds } from '../../utils/conversationTurns';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
+import { readMessageDetails } from '../../utils/messageDetails';
 import { describeTurnProgress, newerTurnProgress, parseTurnProgress } from '../../utils/turnProgress';
 import type { TurnProgress } from '../../types/turnProgress';
 import { ReplacementFeedback } from './ReplacementFeedback';
@@ -152,6 +153,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             name: msg.metadata.tool_name,
             arguments: msg.metadata.tool_input || {},
           } : undefined,
+          details: readMessageDetails(msg.metadata?.details),
         }));
         setMessages(uiMessages);
       } else {
@@ -306,6 +308,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
                 role: 'assistant',
                 content: event.content!,
                 timestamp: new Date().toISOString(),
+                details: readMessageDetails(event.metadata?.details),
               },
             ]);
           }
