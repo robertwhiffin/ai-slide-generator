@@ -1,0 +1,73 @@
+{
+  "title": "Renewal risk, Q3 — EMEA/APAC",
+  "audience": "The regional sales leadership team,\twho own the renewal number.",
+  "purpose": "Get the early-warning pipeline funded before the Q4\u00a0renewal wave.",
+  "argument": "Churn is predictable a quarter ahead — and today nobody looks at <b>any</b> of it.",
+  "call_to_action": "Approve two engineers for one quarter: our #1 priority.",
+  "narrative_arc": [
+    "Frame the problem: renewals are slipping and nobody can say which accounts.",
+    "2024. The signal existed, but it arrived after the renewal date.",
+    "- Close on the ask: fund the *early-warning* pipeline this quarter."
+  ],
+  "design_contract": {
+    "design_system_id": 7,
+    "template_id": 3,
+    "slide_style_id": null
+  },
+  "resolved_data": {
+    "synthesis": "Three quarters of churn history | aggregated by region & segment.",
+    "figures": [
+      {
+        "key": "churn_rate",
+        "value": "11.4%",
+        "source": "warehouse.renewals"
+      },
+      {
+        "key": "arr_at_risk",
+        "value": "$4.2M (~30% of Q4)",
+        "source": "finance.arr_snapshot"
+      }
+    ],
+    "gaps": [
+      "No data before FY23.",
+      "The APAC `tier` column is unpopulated."
+    ]
+  },
+  "slides": [
+    {
+      "position": 0,
+      "purpose": "Open on the number nobody can explain.",
+      "content_brief": "Title slide: the headline churn rate\r\nand the quarter it lands in.",
+      "assumes": "Nothing. This is the first slide.",
+      "hands_off": "The reader knows the number\u2028and wants to know why.",
+      "data_references": [
+        "churn_rate"
+      ],
+      "slide_type": "Cover",
+      "template_section_index": 0
+    },
+    {
+      "position": 1,
+      "purpose": "Show the money\u001f at stake.",
+      "content_brief": "One stat: ARR at risk, with its share of Q4.",
+      "assumes": "The reader accepts the churn number from\u0085slide 1.",
+      "hands_off": "The reader wants to know what fixing it costs.",
+      "data_references": [
+        "churn_rate",
+        "arr_at_risk"
+      ],
+      "slide_type": "Stats",
+      "template_section_index": 12
+    },
+    {
+      "position": 3,
+      "purpose": "Land the ask while the cause is still fresh.",
+      "content_brief": "Closing slide: the two-engineer ask, scoped to one quarter.",
+      "assumes": "",
+      "hands_off": "The deck ends on a decision the reader can make in the room.",
+      "data_references": [],
+      "slide_type": null,
+      "template_section_index": null
+    }
+  ]
+}

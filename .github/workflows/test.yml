@@ -462,6 +462,8 @@ jobs:
             tests/integration/test_graph_lifecycle_acceptance_postgres.py \
             tests/integration/test_graph_lifecycle_runtime_postgres.py \
             tests/integration/test_lakebase_contract_failures_postgres.py \
+            tests/integration/test_clear_context_graph_turn.py \
+            tests/integration/test_delete_message_graph_turn.py \
             -v --tb=short --junitxml=test-results/graph-results.xml -m "not live" \
             -o faulthandler_timeout=120
       - uses: actions/upload-artifact@v4
@@ -550,7 +552,9 @@ jobs:
           DATABRICKS_TOKEN: ""
         run: |
           pytest \
+            tests/integration/test_clear_chat_routes.py \
             tests/integration/test_comments_removed.py \
+            tests/integration/test_delete_message_routes.py \
             tests/integration/test_export_parity.py \
             tests/integration/test_get_slide_deck_row_read.py \
             tests/integration/test_image_api.py \
@@ -696,12 +700,14 @@ jobs:
           - api-route-matcher
           - app-tour
           - chat-ui
+          - clear-chat
           - conversation-graph-version
           - css-bg-export
           - deck-integrity
           - deck-review-flag
           - deck-prompts-integration
           - deck-prompts-ui
+          - delete-message
           - design-system-brand-text-uncapped
           - design-system-selector
           - design-systems-ui
