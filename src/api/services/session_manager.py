@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import and_, delete, func, or_
+from sqlalchemy import and_, delete, func, or_, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_SESSION_TITLE_LEN = 255
 _DUPLICATE_TITLE_PREFIX = "Copy of "
+
+#: How long a turn-progress write waits for its request row's lock on PostgreSQL
+#: before giving up (#319).  A progress write is a side channel running on a
+#: slide's own thread; it must never hold that slide up for long.
+_PROGRESS_LOCK_TIMEOUT = "2s"
 
 
 def _truncate_session_title(title: str, max_len: int = _MAX_SESSION_TITLE_LEN) -> str:
@@ -3395,6 +3400,40 @@ class SessionManager:
 
             chat_request.result_json = json.dumps(result) if result else None
 
+    def record_chat_request_progress(
+        self, request_id: str, seq: int, progress: Dict[str, Any]
+    ) -> bool:
+        """Store *progress* as this request's stage summary iff *seq* is newer.
+
+        The predicate is the whole concurrency story: several slide pipelines report
+        from several threads and their commits land in any order, so an older
+        snapshot must be a no-op rather than a regression.  On PostgreSQL a
+        concurrent UPDATE of the same row waits for the first commit and then
+        re-evaluates this WHERE against the new row (READ COMMITTED), so two
+        writers cannot both win.  Core ``update`` on ``__table__``, as
+        ``spec_sync``'s claim does (``src/services/spec_sync.py:475-487``).
+
+        On PostgreSQL the wait for the row lock is bounded by ``SET LOCAL
+        lock_timeout``: ``get_db_session`` runs one transaction per ``with`` block,
+        so the setting covers exactly the UPDATE below.  A timeout raises
+        ``sqlalchemy.exc.OperationalError``; the only production caller
+        (``progress._persist``) logs it and the next report carries a newer snapshot.
+
+        Returns True when this snapshot was stored, False when a newer (or equal)
+        one already was or the request does not exist.
+        """
+        table = ChatRequest.__table__
+        statement = (
+            update(table)
+            .where(table.c.request_id == request_id)
+            .where(or_(table.c.progress_seq.is_(None), table.c.progress_seq < seq))
+            .values(progress_json=json.dumps(progress), progress_seq=seq)
+        )
+        with get_db_session() as db:
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(text(f"SET LOCAL lock_timeout = '{_PROGRESS_LOCK_TIMEOUT}'"))
+            return db.execute(statement).rowcount == 1
+
     def get_chat_request(self, request_id: str) -> Optional[Dict[str, Any]]:
         """Get request status and result.
 
@@ -3428,6 +3467,11 @@ class SessionManager:
                 "result": (
                     json.loads(chat_request.result_json)
                     if chat_request.result_json
+                    else None
+                ),
+                "turn_progress": (
+                    json.loads(chat_request.progress_json)
+                    if chat_request.progress_json
                     else None
                 ),
             }

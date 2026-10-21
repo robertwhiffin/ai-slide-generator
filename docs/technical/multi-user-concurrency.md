@@ -141,10 +141,14 @@ For polling-based streaming, async requests are tracked in the `chat_requests` t
 | `session_id` | `INTEGER FK` | Links to user_sessions |
 | `status` | `VARCHAR(20)` | `pending`/`running`/`completed`/`error` |
 | `result_json` | `TEXT` | Final result (slides, raw_html) |
+| `progress_json` | `TEXT NULL` | Graph turn's latest stage summary (#319) |
+| `progress_seq` | `INTEGER NULL` | `seq` of the stored `progress_json` (#319) |
 | `created_at` | `TIMESTAMP` | Request creation time |
 | `completed_at` | `TIMESTAMP` | Request completion time |
 
 Messages are linked to requests via `session_messages.request_id` for efficient polling.
+
+The graph turn's stage summary is written to the request's row (`progress_json`, `progress_seq`) by a conditional `UPDATE ... WHERE progress_seq IS NULL OR progress_seq < :seq`, so concurrent slide pipelines cannot move it backwards, and on PostgreSQL the write sets `lock_timeout` to 2 seconds so it waits at most 2 seconds for the row lock. The poll reads that row rather than in-process state, so any worker serves the same stage. See [Real-Time Streaming](real-time-streaming.md#turn-progress-graph-engine-319).
 
 ### 3. Per-Request Tool Binding
 

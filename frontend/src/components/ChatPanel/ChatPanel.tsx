@@ -27,6 +27,8 @@ import {
 } from './deleteMessageCopy';
 import { withoutTurn, withPersistedUserIds } from '../../utils/conversationTurns';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
+import { describeTurnProgress, newerTurnProgress, parseTurnProgress } from '../../utils/turnProgress';
+import type { TurnProgress } from '../../types/turnProgress';
 import { ReplacementFeedback } from './ReplacementFeedback';
 import { ErrorDisplay } from './ErrorDisplay';
 import { LoadingIndicator } from './LoadingIndicator';
@@ -75,6 +77,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
+  const [turnProgress, setTurnProgress] = useState<TurnProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastReplacement, setLastReplacement] = useState<ReplacementInfo | null>(
     null,
@@ -264,6 +267,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     const sentTo = sessionId;
 
     setIsLoading(true);
+    setTurnProgress(null);
     setIsGenerating(true);
     onGenerationStart?.();
     setError(null);
@@ -410,6 +414,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           refreshConfig();
           refreshMessageIds(sentTo, seq);
           break;
+
+        // #319 — the graph's stage summary.  Never a chat message: it only feeds
+        // the placeholder.  Older, repeated and malformed snapshots are ignored,
+        // so the label never steps backwards.
+        case 'turn_progress': {
+          const incoming = parseTurnProgress(event.turn_progress);
+          if (incoming) setTurnProgress(prev => newerTurnProgress(prev, incoming));
+          break;
+        }
 
         // E0: ws4d D3 — one committed slide released by the graph's reorder buffer,
         // delivered before `complete`.  Forwards position + content to AppLayout so
@@ -572,6 +585,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         <MessageList
           messages={previewMessages ?? messages}
           isLoading={isLoading && !previewMessages}
+          progressLabel={describeTurnProgress(turnProgress)}
           deleteAction={canDeleteMessages ? { disabled: deleteMessageDisabled, onDelete: setPendingDeleteId } : undefined}
         />
       </div>

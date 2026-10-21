@@ -3,6 +3,7 @@ import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
 import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse } from '../types/agentConfig';
+import type { TurnProgress } from '../types/turnProgress';
 
 // Use relative URLs in production, explicit IPv4 in development
 // Note: Using 127.0.0.1 instead of localhost to avoid IPv6 resolution issues in CI
@@ -59,7 +60,7 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready' | 'turn_progress';
 
 export interface StreamEvent {
   type: StreamEventType;
@@ -87,6 +88,8 @@ export interface StreamEvent {
   agent?: string;
   /** Next slide position not yet released; hand back as `slide_cursor` when polling. */
   slide_cursor?: number;
+  /** #319: the graph turn's stage summary, on a 'turn_progress' event. */
+  turn_progress?: TurnProgress | null;
 }
 
 export interface SessionMessage {
@@ -218,6 +221,8 @@ interface PollResponse {
   slide_revisions?: Array<{ position: number; html: string; scripts: string; agent?: string }>;
   /** Hand back as `revisions_after` on the next poll. */
   revision_mark?: number;
+  /** #319: the running turn's latest stage summary; null when finished or legacy. */
+  turn_progress?: TurnProgress | null;
   result?: {
     slides?: SlideDeck;
     raw_html?: string;
@@ -1093,6 +1098,8 @@ export const api = {
         let slidesCursor = 0;
         // The server's revision_mark from the last poll; undefined until one arrives.
         let revisionMark: number | undefined;
+        // #319: the highest turn_progress seq forwarded so far.
+        let lastProgressSeq = 0;
 
         pollInterval = setInterval(async () => {
           if (cancelled) {
@@ -1155,6 +1162,14 @@ export const api = {
             }
             if (response.revision_mark != null) {
               revisionMark = response.revision_mark;
+            }
+
+            // #319: the graph's stage summary.  Re-sent on every poll while the turn
+            // runs; forward it only when it is newer than the last one forwarded.
+            const progress = response.turn_progress;
+            if (progress && typeof progress.seq === 'number' && progress.seq > lastProgressSeq) {
+              lastProgressSeq = progress.seq;
+              onEvent({ type: 'turn_progress', turn_progress: progress });
             }
 
             lastMessageId = response.last_message_id;

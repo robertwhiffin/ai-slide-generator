@@ -4,6 +4,7 @@ import type { Message as MessageType } from '../../types/message';
 import { Message } from './Message';
 import { ChatWelcome } from './ChatWelcome';
 import { Button } from '@/ui/button';
+import { DEFAULT_TURN_LABEL } from '../../utils/turnProgress';
 import { DELETE_MESSAGE_TOOLTIP } from './deleteMessageCopy';
 
 /** #317: the per-message delete action. Offered on the user's own persisted messages only. */
@@ -15,11 +16,18 @@ export interface MessageDeleteAction {
 interface MessageListProps {
   messages: MessageType[];
   isLoading: boolean;
+  /** #319: the stage label; defaults to the generic text. */
+  progressLabel?: string;
   /** Absent: no message offers delete (a viewer, an unsaved session, a save-point preview). */
   deleteAction?: MessageDeleteAction;
 }
 
-export const MessageList: React.FC<MessageListProps> = ({ messages, isLoading, deleteAction }) => {
+export const MessageList: React.FC<MessageListProps> = ({
+  messages,
+  isLoading,
+  progressLabel = DEFAULT_TURN_LABEL,
+  deleteAction,
+}) => {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom when new messages arrive
@@ -57,9 +65,14 @@ export const MessageList: React.FC<MessageListProps> = ({ messages, isLoading, d
       ))}
       
       {isLoading && (
-        <div className="flex items-center space-x-2 text-gray-500">
+        <div
+          className="flex items-center space-x-2 text-gray-500"
+          data-testid="chat-turn-progress"
+          aria-live="polite"
+          aria-atomic="true"
+        >
           <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-500"></div>
-          <span className="text-sm">Generating slides...</span>
+          <span className="text-sm">{progressLabel}</span>
         </div>
       )}
       
