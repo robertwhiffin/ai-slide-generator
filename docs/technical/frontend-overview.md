@@ -368,6 +368,9 @@ interface SlideStyle {
 | `src/components/config/ContributorsManager.tsx` | Profile sharing UI; add/update/remove contributors (users/groups) with permission levels | `configApi.listContributors`, `configApi.addContributor`, `configApi.updateContributor`, `configApi.removeContributor`, `configApi.searchIdentities` |
 | `src/components/DeckContributorsManager.tsx` | Deck (session) sharing UI; add/update/remove contributors with CAN_VIEW/CAN_EDIT/CAN_MANAGE permissions | `configApi.listDeckContributors`, `configApi.addDeckContributor`, `configApi.updateDeckContributor`, `configApi.removeDeckContributor` |
 | `src/components/PresentationMode/PresentationMode.tsx` | Full-window slide presentation (opt-in browser fullscreen via F/toolbar) with keyboard navigation; snapshots deck on mount to immunize against parent re-renders; wraps scripts in try/catch for graceful chart failures | None (renders slide HTML in iframe) |
+| `src/components/SpecView/SpecView.tsx` | Read-only view of `deck_spec`, toggled with Slides; Discuss hands off to the chat; Export spec downloads Markdown | None (reads the deck in hand) |
+| `src/services/deckSpecMarkdown.ts` | Pure, deterministic `DeckSpec` → Markdown, plus the filename | None (pure) |
+| `src/utils/downloadFile.ts` | Saves a string as a file through an object URL, with a deferred revoke | None (browser DOM only; no request) |
 
 ---
 

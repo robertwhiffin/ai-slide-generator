@@ -73,6 +73,14 @@ To refine a specific slide, navigate to it and describe the change in the chat p
 
 To get back to a previous session, click **My Sessions** in the navigation bar. Any session with slides has a **Restore** button that loads it back into the editor.
 
+## Reviewing the Deck Spec
+
+Click **Spec** above the slide viewer to see the plan the agents work from.
+
+It is read-only; click **Discuss** to change it in the chat.
+
+Click **Export spec** to download it as a Markdown file, for review or sharing outside Tellr. The file is named after the title the agents gave the plan, which can differ from the deck name in the header. It holds everything in the Spec view, plus that title, each slide's type and data references, and the data the agents resolved: a summary, each figure with its source, and any gaps they recorded.
+
 ## Tips
 
 - **Be specific**: Include topic, audience, and desired outcomes in your prompt
