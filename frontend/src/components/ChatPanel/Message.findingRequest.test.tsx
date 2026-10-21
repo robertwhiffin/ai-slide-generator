@@ -75,8 +75,16 @@ const LEGACY_ADVISORY =
   `- missing_conclusion: ${M2}`;
 /** Byte-identical to before #316 (D5); the tour and integration suites pin it. */
 const NO_FINDINGS = 'Deck review complete: no narrative issues found across the deck.';
-const FAILURE_ADVISORY =
+const LEGACY_FAILURE_ADVISORY =
   'The deck is complete, but the deck-level review could not be completed this turn.';
+/** #321's deck_review_failed and deck_not_updated(review_skipped=True) notices (user_notices.py). */
+const REVIEW_FAILED_NOTICE =
+  "The deck is ready, but the review of the deck as a whole couldn't run this time. " +
+  'It will run again the next time I build or edit slides.';
+const REVIEW_SKIPPED_NOTICE =
+  "Your slides were saved, but the deck couldn't be fully updated, so its slide count and " +
+  'exports may be out of date, and the review of the deck as a whole was skipped. ' +
+  'Both will run again the next time I build or edit slides.';
 
 function renderMessage(role: MessageRole, content: string, extra: Partial<MessageType> = {}) {
   return render(<Message message={{ role, content, timestamp: '', ...extra }} />);
@@ -214,7 +222,9 @@ describe('Message — everything else renders verbatim, never parsed (D6, D14, C
     ['the legacy Discuss request', 'user', LEGACY_DISCUSS],
     ['the legacy slug advisory', 'assistant', LEGACY_ADVISORY],
     ['the no-findings advisory', 'assistant', NO_FINDINGS],
-    ['the deck-review failure advisory', 'assistant', FAILURE_ADVISORY],
+    ['the legacy deck-review failure advisory', 'assistant', LEGACY_FAILURE_ADVISORY],
+    ['the deck-review-failed notice', 'assistant', REVIEW_FAILED_NOTICE],
+    ['the deck-review-skipped notice', 'assistant', REVIEW_SKIPPED_NOTICE],
     ['an ordinary multi-line user message', 'user', 'Line one\n\n  Line two, indented\nLine three'],
   ])('%s', (_label, role, content) => {
     const { container } = renderMessage(role, content);

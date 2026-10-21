@@ -494,7 +494,10 @@ describe('splitDeckAdvisory — rejects everything else (D14: strict, legacy nev
     ['the all-blank-messages advisory (no details section)', ALL_BLANK_ADVISORY],
     ['the legacy slug advisory', LEGACY_ADVISORY],
     ['the legacy slug advisory with a real separator tail', `${LEGACY_ADVISORY}${tail}`],
-    ['the failure advisory', 'The deck is complete, but the deck-level review could not be completed this turn.'],
+    ['the legacy failure advisory', 'The deck is complete, but the deck-level review could not be completed this turn.'],
+    // #321's deck_review_failed and deck_not_updated(review_skipped=True) notices (user_notices.py).
+    ['the deck-review-failed notice', "The deck is ready, but the review of the deck as a whole couldn't run this time. It will run again the next time I build or edit slides."],
+    ['the deck-review-skipped notice', "Your slides were saved, but the deck couldn't be fully updated, so its slide count and exports may be out of date, and the review of the deck as a whole was skipped. Both will run again the next time I build or edit slides."],
     ['a valid plain block, the separator, then nothing', `${SAMPLE_DECK_LEAD}${LITERAL_SEPARATOR}`],
     ['a valid plain block, the separator, then spaces', `${SAMPLE_DECK_LEAD}${LITERAL_SEPARATOR}   `],
     ['the closing line altered', `${LITERAL_DECK_PREFIX}2 things${LITERAL_DECK_SUFFIX}\n- A.\n- B.\nNone of these were changed.${tail}`],
