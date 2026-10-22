@@ -9,7 +9,8 @@
  *   - the viewer holds 4 slides;
  *   - the ribbon shows NEW at the second slot and B at the third;
  *   - the Spec view labels NEW's brief "Slide 2";
- *   - B's finding follows B to the third slide and leaves the second.
+ *   - B's finding follows B to the third slide and leaves the second;
+ *   - (#314 D10) the new slide is marked "New" and selected; no other slide is.
  *
  * Start: a 3-slide deck [A, B, C] with one finding stamped on B (slideIndex 1).
  * The turn "Add a slide after slide 1" delivers `slide_ready` for position 1,
@@ -30,7 +31,8 @@
  * from ChatPanel's `complete` handler. The client then keeps its mid-turn view,
  * [A, NEW, C] with B's finding still on the second slide, and this spec goes
  * red. Swapping the refetch for `event.slides` stays green by design: both are
- * the server's final deck.
+ * the server's final deck. Disabling the new-slide indicator (SlideViewer's
+ * `diffNewSlides` flags nothing) turns the "New" chip block red.
  */
 import { test, expect } from '../fixtures/base-test';
 import type { Page } from '@playwright/test';
@@ -256,6 +258,9 @@ test.describe('#314 — the deck after an insert turn (SSE)', () => {
     await expect(thumbMarker(page, 1, 'B')).toHaveCount(1);
     await goToSlide(page, 1);
     await expect(page.getByTestId(`finding-${B_FINDING_ID}`)).toBeVisible();
+    // Back to slide 1, so landing on the new slide below is a move the
+    // indicator made, not where the user already was.
+    await goToSlide(page, 0);
 
     await page.getByTestId('chat-input').fill('Add a slide after slide 1');
     await page.getByRole('button', { name: 'Send' }).click();
@@ -263,6 +268,14 @@ test.describe('#314 — the deck after an insert turn (SSE)', () => {
     // 4 slides. Before `complete` the client holds 3 (slide_ready replaced B
     // at index 1), so 4 is only reachable through the end-of-turn refetch.
     await expect(allThumbs(page)).toHaveCount(4, { timeout: 15000 });
+
+    // #314 D10, checked first (the chip lasts 5 s): the slide the turn added is
+    // marked New and selected; no other slide is.
+    await expect(page.getByTestId('ribbon-new-1')).toBeVisible();
+    await expect(page.getByTestId('ribbon-thumb-1')).toHaveAttribute('data-new', 'true');
+    for (const i of [0, 2, 3]) await expect(page.getByTestId(`ribbon-new-${i}`)).toHaveCount(0);
+    await expect(page.getByTestId('ribbon-thumb-1')).toHaveAttribute('data-current', 'true');
+    await expect(page.getByTestId('new-slide-status')).toHaveText('Slide 2 added');
 
     // The ribbon: NEW at the second slot, B at the third, C at the fourth.
     await expect(thumbMarker(page, 1, 'NEW')).toHaveCount(1);
