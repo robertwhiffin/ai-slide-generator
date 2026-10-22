@@ -227,7 +227,11 @@ A fresh Opus reviewer applied the `tellr-code-review` checklist to `git diff c84
 - R1 df1ec985: run 39745638308, Frontend Unit Tests failed on the unrelated workbench test; rerun of
   the failed jobs green. R2 4e1119e1: the same test failed again on first attempt -> diagnosed and
   fixed (82fee536).
-- (final rounds filled in below)
+- R3 a08fbfb0 (every task through Task 5): run 39753378219 green on the first attempt. Unit 11521
+  passed, including all 5 `test_manual_insert_writer_postgres.py` tests on the job's Postgres; the new
+  `E2E - manual-insert-slide` job and every integration job passed.
+- R4 c15b49f1 (whole-branch review fixes and these notes): run 39761205052 green on the first
+  attempt (69 passed, 1 skipped by design).
 
 ## Process note
 
