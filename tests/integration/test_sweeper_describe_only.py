@@ -492,9 +492,12 @@ class TestTheArcReviewDoesNotInvalidateTheClientsVersionToken:
         held = self._a_deck_the_human_is_editing(env)
 
         # Make the re-described spec DIFFER from the committed one, so "the spec
-        # was written" cannot be satisfied by a turn that wrote nothing.
+        # was written" cannot be satisfied by a turn that wrote nothing.  Same
+        # positions, another description (#314 follow-up: an aligned deck's
+        # describe-only turn may not change the position set, so growth no longer
+        # persists).
         spec_before = env.deck_row().deck_spec_json
-        env.recorder.slide_count = 4
+        env.recorder.redescribed_positions = {1}
         architect_before = env.recorder.counts("architect")
 
         assert run_arc_review(env.session_id, _AUTHOR) is True
@@ -622,9 +625,11 @@ class TestTheDecksClientVisibleModifiedTimestamp:
         mark_dirty(env.session_id, _AUTHOR)
 
         # Make the re-described spec DIFFER, so "the timestamp did not move" is
-        # not equally true of a turn that wrote nothing at all.
+        # not equally true of a turn that wrote nothing at all.  Same positions,
+        # another description (#314 follow-up: an aligned deck's describe-only
+        # turn may not change the position set, so growth no longer persists).
         spec_before = env.deck_row().deck_spec_json
-        env.recorder.slide_count = 4
+        env.recorder.redescribed_positions = {1}
         planted = self._backdate(env)
 
         assert run_arc_review(env.session_id, _AUTHOR) is True
@@ -707,8 +712,11 @@ class TestTheHumansSessionListOrdering:
         env.run()
         mark_dirty(env.session_id, _AUTHOR)
 
+        # Same positions, another description (#314 follow-up: an aligned deck's
+        # describe-only turn may not change the position set, so growth no longer
+        # persists).
         spec_before = env.deck_row().deck_spec_json
-        env.recorder.slide_count = 4
+        env.recorder.redescribed_positions = {1}
         planted = self._backdate_sessions(env)
 
         assert run_arc_review(env.session_id, _AUTHOR) is True

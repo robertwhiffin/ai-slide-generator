@@ -65,6 +65,7 @@ from src.core.database import get_db_session
 from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
+from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
 from src.domain.finding import (
     CRITERIA,
     Finding,
@@ -625,9 +626,19 @@ def rereview_committed_slides(
     that nothing ever supersedes.  This is a decision procedure, not a review of
     record.
 
+    **A blank entry is not judged either** (#314 follow-up, m2).  An entry with
+    no purpose and no brief (``is_blank_slide_spec``) has nothing a slide could
+    contradict, and a "failing" verdict would rebuild the user's blank from an
+    empty brief.  It is counted in ``committed`` and in ``blank``, never in
+    ``reviewed`` or ``failing``, and costs no model call.  Entry-based, like the
+    architect's N1, so a blank someone typed into is spared too.  The check runs
+    AFTER the placeholder check: a pending row at a blank entry (an agent insert,
+    #337) is still placeheld and failing.  This also spares a blank on a
+    deck-level BUILD turn.
+
     Returns a dict of plain sets: ``committed`` (positions the spec covers that
     have a row), ``reviewed`` (positions a model actually scored), ``failing``,
-    ``unreviewable``, ``placeheld``.
+    ``unreviewable``, ``placeheld``, ``blank``.
     """
     empty = {
         "committed": set(),
@@ -635,6 +646,7 @@ def rereview_committed_slides(
         "failing": set(),
         "unreviewable": set(),
         "placeheld": set(),
+        "blank": set(),
         "surfaced": [],
     }
     try:
@@ -668,6 +680,7 @@ def rereview_committed_slides(
     failing: set = set()
     unreviewable: set = set()
     placeheld: set = set()
+    blank: set = set()
     surfaced: List[dict] = []
 
     for position in sorted(by_position):
@@ -681,6 +694,9 @@ def rereview_committed_slides(
 
         slide_spec = spec.slide_at(position)
         if slide_spec is None:  # unreachable: by_position is filtered to the spec
+            continue
+        if is_blank_slide_spec(slide_spec):
+            blank.add(position)
             continue
 
         html = row.get("html") or ""
@@ -772,6 +788,7 @@ def rereview_committed_slides(
         "failing": failing,
         "unreviewable": unreviewable,
         "placeheld": placeheld,
+        "blank": blank,
         "surfaced": surfaced,
     }
 
@@ -1065,8 +1082,10 @@ def _persisted_spec_describes_these_rows(
     constrain is an EDIT — the model revises the persisted spec, so an edit of
     a description written for a deck whose rows have since moved is refused.
 
-    Every deck-mutation route (insert, delete, duplicate, reorder) now renumbers
-    ``session_slide_decks.deck_spec_json`` through
+    Every deck-mutation route now moves ``session_slide_decks.deck_spec_json``
+    with the rows: the manual insert splices its entry inside
+    ``SessionManager.insert_slide``'s own transaction (#314 follow-up), and delete,
+    duplicate and reorder renumber it through
     ``ChatService._rewrite_deck_spec_slides``, so the spec normally tracks the
     rows (final review C1 was the earlier state, when only insert did).  A deck
     changed any other way still leaves its ``position`` entries describing slides
@@ -1094,6 +1113,161 @@ def _persisted_spec_describes_these_rows(
     if not row_positions:
         return True
     return {slide.position for slide in prior_spec.slides} == set(row_positions)
+
+
+def _description_keeps_what_it_cannot_see(
+    spec: DeckSpec, prior_spec: DeckSpec, committed_rows: List[Dict[str, Any]]
+) -> DeckSpec:
+    """A describe-only re-description, less what it cannot have seen (#314, N2).
+
+    The arc-review sweeper's architect is shown the persisted spec and no slide
+    HTML.  On a deck whose persisted spec still describes its rows (the caller's
+    gate: ``_persisted_spec_describes_these_rows``), two things in its answer
+    cannot be a reading of the deck:
+
+    * **(a) Another position set.**  A describe-only turn moves no row, so an
+      answer that drops or adds an entry describes slides that are not there.
+      The persisted spec is kept whole, on every deck, and as a DEEP copy: the
+      caller mutates what this returns (``complete_index_only_bindings``) before
+      it compares it with ``prior_spec``.  WARNING
+      ``describe_spec_positions_changed``.
+    * **(b) A description of a blank.**  Where the committed row is still an
+      empty frame (``is_blank_slide_html``) and the persisted entry is still
+      blank (``is_blank_slide_spec``), a purpose or brief is invention, and an
+      invented brief would later fail re-review and rebuild the blank.  A copy of
+      the persisted entry replaces the model's; the rest of the answer is the
+      model's.  A blank someone has typed into is no longer an empty row, so
+      describing it is reading, and the model's entry stands.  INFO
+      ``describe_kept_blank_slides``.
+
+    ``committed_rows`` are read for ``"position"`` and ``"html"`` only.
+    """
+    spec_positions = sorted(slide.position for slide in spec.slides)
+    prior_positions = sorted(slide.position for slide in prior_spec.slides)
+    if set(spec_positions) != set(prior_positions):
+        logger.warning(
+            "describe_spec_positions_changed: the describe-only deck_spec has slide "
+            "positions %s but the persisted deck_spec, which describes the rows, has "
+            "%s; a describe-only turn moves no row, so the persisted spec is kept",
+            spec_positions,
+            prior_positions,
+        )
+        return prior_spec.model_copy(deep=True)
+
+    empty_rows = {
+        row.get("position")
+        for row in committed_rows
+        if is_blank_slide_html(row.get("html"))
+    }
+    kept: List[int] = []
+    slides: List[SlideSpec] = []
+    for slide in spec.slides:
+        persisted = prior_spec.slide_at(slide.position)
+        if (
+            slide.position in empty_rows
+            and persisted is not None
+            and is_blank_slide_spec(persisted)
+            and slide != persisted
+        ):
+            slides.append(persisted.model_copy(deep=True))
+            kept.append(slide.position)
+        else:
+            slides.append(slide)
+    if not kept:
+        return spec
+    logger.info(
+        "describe_kept_blank_slides: positions %s are still blank slides with blank "
+        "entries; the describe-only turn's descriptions of them are discarded",
+        kept,
+    )
+    return spec.model_copy(update={"slides": slides})
+
+
+def _untouched_blank_positions(
+    spec: DeckSpec, alignment: Optional[SlideAlignment], inserting: bool
+) -> Set[int]:
+    """The final spec's blank entries this edit neither added nor revised (#314, N1).
+
+    A blank entry (``is_blank_slide_spec``: no purpose, no brief) gives a builder
+    nothing to build from, so building or re-judging one nobody touched can only
+    replace the user's blank, or what they have since typed into it, with
+    something invented from an empty brief.  Entry-based on purpose: the row is
+    not read, which is what keeps a hand-typed blank safe.
+
+    Decided on the FINAL spec (after an insert's re-stamp), so a blank that an
+    insert moved is found at its new position.  Touched means
+    ``inserted_indices | revised_indices`` on an insert turn, where the spec is
+    re-stamped to exactly those indices, and ``alignment.revised`` otherwise
+    (positions, correct on a gapped deck).  An inserted blank entry (#337) is
+    touched, so it is still built.
+
+    ``set()`` when there is no alignment: only an edit that is not describe-only
+    is aligned, so a build turn (a build replaces the deck by request) and the
+    arc-review sweeper are outside this.
+    """
+    if alignment is None:
+        return set()
+    if inserting:
+        touched = set(alignment.inserted_indices) | set(alignment.revised_indices)
+    else:
+        touched = set(alignment.revised)
+    blank = {slide.position for slide in spec.slides if is_blank_slide_spec(slide)}
+    return blank - touched
+
+
+def _drop_untouched_blanks(
+    session_id: str,
+    positions: List[int],
+    untouched: Set[int],
+    slide_references: List[Dict[str, Any]],
+    slide_numbering: List[Dict[str, int]],
+    notified: Set[int],
+) -> List[int]:
+    """*positions* without the *untouched* blanks, in their order (#314, N1).
+
+    The one filter for the three lists an edit turn builds from: its targets,
+    the design-contract rebuild-all and the deck-level ``rebuild`` set.
+
+    A dropped blank the user's message NAMED is said, because "fill slide 4"
+    answered by a model that left slide 4's entry blank would otherwise build
+    nothing and say nothing: one WARNING ``blank_named_but_not_described`` and
+    one notice, at most once per blank per turn however many lists drop it
+    (*notified* is the turn's shared record).  The number is the user's own, from
+    ``slide_numbering``.  The caller passes no references on an insert turn:
+    they are numbered before the insert, and there a named slide is the anchor
+    ("after slide 3"), not a request to fill it.
+    """
+    if not untouched:
+        return list(positions)
+    named = {
+        position
+        for reference in slide_references
+        for position in reference.get("positions") or ()
+    }
+    numbers = {entry["position"]: entry["slide_number"] for entry in slide_numbering}
+    kept: List[int] = []
+    for position in positions:
+        if position not in untouched:
+            kept.append(position)
+            continue
+        if position not in named or position in notified:
+            continue
+        notified.add(position)
+        # A named position is always numbered: both come from the same positions.
+        number = numbers.get(position, position + 1)
+        logger.warning(
+            "blank_named_but_not_described: the user's message names slide %s "
+            "(position %s) but the edit left its spec entry blank, so it is not built",
+            number,
+            position,
+            extra={"session_id": session_id},
+        )
+        _surface_notice(
+            session_id,
+            f"Slide {number} is still blank, so I left it as it is. "
+            "Tell me what to put on it.",
+        )
+    return kept
 
 
 def _resolve_deck_id(db, session_id: str) -> Optional[int]:
@@ -1939,6 +2113,19 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 "user": _POSITIONS_CHANGED_TEXT,
             }
 
+    # #314 follow-up (N2): a describe-only turn sees no HTML, so on a deck its
+    # persisted spec describes, it keeps what it cannot see.
+    if (
+        describe_only
+        and intent in ("build", "edit")
+        and spec is not None
+        and prior_spec is not None
+        and edit_degrade is None
+        and committed_positions
+        and _persisted_spec_describes_these_rows(prior_spec, committed_positions)
+    ):
+        spec = _description_keeps_what_it_cannot_see(spec, prior_spec, committed_rows)
+
     # The spec's pinned template, not the inbound payload's: a turn that pins or
     # changes the contract binds against the template it will actually use.
     # Resolved here, before the degrade decision, so an invalid pair is refused
@@ -2085,6 +2272,18 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 extra={"session_id": session_id},
             )
 
+    # #314 follow-up (N1): an untouched blank is never built.  Insert-turn
+    # references count the pre-insert deck and name an anchor, so none is passed.
+    untouched_blanks = _untouched_blank_positions(spec, alignment, inserting)
+    blank_refs = [] if inserting else slide_payload["slide_references"]
+    numbering = slide_payload["slide_numbering"]
+    blanks_said: Set[int] = set()
+    if untouched_blanks:
+        edit_targets = _drop_untouched_blanks(
+            session_id, edit_targets, untouched_blanks, blank_refs, numbering, blanks_said
+        )
+        updates["target_positions"] = list(edit_targets)
+
     # A BUILD answer to an add rebuilds every position in place, so identity and
     # records stay by position and every slide after the new one is
     # mis-attributed (pre-existing build semantics, D1).  Diagnostic only: it
@@ -2201,7 +2400,11 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # list also covers the EDIT turn, and only the explicit list is visible
         # in final state, so "confirming rebuilt every position" is observable
         # rather than inferred from an absence.
-        updates["target_positions"] = [slide.position for slide in spec.slides]
+        updates["target_positions"] = _drop_untouched_blanks(
+            session_id,
+            [slide.position for slide in spec.slides],
+            untouched_blanks, blank_refs, numbering, blanks_said,
+        )
         logger.info(
             "Design-contract change committed; rebuilding every position",
             extra={"session_id": session_id},
@@ -2246,7 +2449,11 @@ def architect_node(state: dict) -> Dict[str, Any]:
             # user asked for that slide, so "it still fits the brief" is not a
             # reason to refuse.
             requested = set(edit_targets)
-            rebuild = sorted(verdicts["failing"] | uncovered | requested)
+            rebuild = _drop_untouched_blanks(
+                session_id,
+                sorted(verdicts["failing"] | uncovered | requested),
+                untouched_blanks, blank_refs, numbering, blanks_said,
+            )
             updates["target_positions"] = rebuild
 
             # Could the pass judge ANYTHING?  Every position unreviewable means
@@ -2256,7 +2463,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
             # re-review: it is recorded on error_state (single-writer, and this
             # node is its writer) and SAID in the notice, rather than reported as
             # "every slide still fits".
-            judged_nothing = bool(verdicts["committed"]) and not verdicts["reviewed"]
+            # A blank is never judged (m2), so it is not a review that failed.
+            judged_nothing = (
+                bool(verdicts["committed"] - verdicts["blank"]) and not verdicts["reviewed"]
+            )
             if judged_nothing:
                 message = (
                     f"The deck's brief changed, but I could not check any of its "

@@ -1097,14 +1097,17 @@ class TestTheAlignmentSeesTheCompletedBindings:
 
 
 class TestPathsThatDoNotShift:
-    def test_a_describe_only_growth_persists_the_spec_and_shifts_nothing(
+    def test_a_describe_only_growth_is_not_persisted_and_shifts_nothing(
         self, graph_env, monkeypatch
     ):
         """The arc-review sweeper dispatches no builder: no alignment, no shift,
-        and (as on every describe-only turn) no version bump.
+        and (as on every describe-only turn) no version bump.  It sees no HTML
+        either, so a re-description with another position set describes slides
+        that are not there: the persisted spec is kept (#314 follow-up, N2(a),
+        on every deck — PLAN-REVIEW m4).
 
-        Green before Task 5 on purpose.  Sabotage: shift on describe-only -> rows
-        gain a pending row and the version moves.
+        Sabotage: shift on describe-only -> rows gain a pending row and the
+        version moves; N2(a) removed -> the grown spec is persisted.
         """
         prior, _ = _three_slide_deck(graph_env)
         a, b, c = prior.slides
@@ -1118,7 +1121,7 @@ class TestPathsThatDoNotShift:
 
         assert updates["error_state"] is None
         assert updates["architect_intent"] == "edit"
-        assert _persisted_spec(graph_env) == grown
+        assert _persisted_spec(graph_env) == prior
         assert calls == []
         assert _rows(graph_env) == rows_before
         assert graph_env.deck_row().version == version_before

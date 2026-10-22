@@ -187,6 +187,14 @@ class SkillRecorder:
         ``target_positions``, so a test of "only the target was rebuilt" is not
         widened by the changed-slide union.  Empty (the default) means a build
         turn.
+    redescribed_positions
+        A BUILD answer's spec has :func:`edited_brief` applied at these
+        positions: the same positions as ``slide_count`` declares, described
+        differently.  It is how a describe-only (arc-review) turn is made to
+        persist a NEW spec without growing it — #314 follow-up: on a deck whose
+        persisted spec describes its rows, a describe-only turn may not change
+        the position set (``_description_keeps_what_it_cannot_see``), so growth
+        no longer persists.  Empty (the default) leaves the spec untouched.
 
     There is deliberately no deck-findings knob: what the deck reviewer DOES with
     its findings (they never enter the ``findings`` channel — §9) is pinned by
@@ -218,6 +226,7 @@ class SkillRecorder:
         self.objective_findings_at: Set[int] = set()
         self.surviving_defect_at: Set[int] = set()
         self.edit_target_positions: Set[int] = set()
+        self.redescribed_positions: Set[int] = set()
 
         self.calls: List[Dict[str, Any]] = []
         self.peak_concurrent: int = 0
@@ -238,6 +247,7 @@ class SkillRecorder:
         objective_findings_at: Iterable[int] = (),
         surviving_defect_at: Iterable[int] = (),
         edit_target_positions: Iterable[int] = (),
+        redescribed_positions: Iterable[int] = (),
         slow_seconds: Optional[float] = None,
     ) -> "SkillRecorder":
         """Set every knob in one call and return self, for readable tests."""
@@ -250,6 +260,7 @@ class SkillRecorder:
         self.objective_findings_at = set(objective_findings_at)
         self.surviving_defect_at = set(surviving_defect_at)
         self.edit_target_positions = set(edit_target_positions)
+        self.redescribed_positions = set(redescribed_positions)
         return self
 
     def reset_observations(self) -> None:
@@ -340,7 +351,9 @@ class SkillRecorder:
         return ArchitectOutput(
             intent="build",
             message=f"Building {self.slide_count} slide(s).",
-            deck_spec=make_deck_spec(self.slide_count),
+            deck_spec=revise_briefs(
+                make_deck_spec(self.slide_count), self.redescribed_positions
+            ),
         )
 
     def _skill_builder(self, payload: dict) -> BuilderOutput:
