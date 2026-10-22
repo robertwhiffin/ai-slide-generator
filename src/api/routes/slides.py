@@ -11,7 +11,10 @@ Slide access is controlled by session permissions:
 The spec-dirty trigger lives in THIS module and nowhere else
 ------------------------------------------------------------
 Five handlers below call ``spec_sync.mark_dirty`` after their mutation commits:
-insert, reorder, update, duplicate and delete.  That is the whole of the trigger surface —
+insert, reorder, update, duplicate and delete.  Insert marks only when it carries
+``html``: a blank insert (the viewer's "New slide") splices a spec entry that is
+already the exact description of the blank, in the same transaction as the rows, so
+there is nothing for the sweeper to describe.  That is the whole of the trigger surface —
 the LangGraph deck build calls the ``chat_service`` / ``slide_repository`` /
 ``deck_level_writer`` methods these handlers wrap, and never issues an HTTP
 request, so "arrived via a route" *means* "a human did this" by construction.  No
@@ -41,9 +44,12 @@ from src.api.routes._authz import (
     _check_deck_permission_for_session,
     _require_slide_permission,
 )
-from src.api.services.chat_service import get_chat_service
+from src.api.routes.sessions import CONVERSATION_BUSY_DETAIL
+from src.api.services.chat_service import ArcReviewInFlightError, get_chat_service
 from src.api.services.session_manager import (
+    DeckBusyError,
     SessionNotFoundError,
+    SlideRowsChangedError,
     VersionConflictError,
     get_session_manager,
 )
@@ -57,6 +63,12 @@ from src.services.spec_sync import mark_dirty
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/slides", tags=["slides"])
+
+# The insert's rows moved between the viewer's deck and the write (another editor, or
+# a stale worker cache): nothing was written, and a refresh followed by a retry works.
+DECK_CHANGED_DETAIL = (
+    "The deck changed while the slide was being added. Refresh and try again."
+)
 
 
 class ReorderRequest(BaseModel):
@@ -93,8 +105,8 @@ class InsertSlideRequest(BaseModel):
     as counting backwards from the end and land the slide somewhere the caller did
     not ask for.
 
-    ``html`` is optional: omitted, an empty slide is inserted for a human or the
-    architect to fill.
+    ``html`` is optional: omitted, the deck's blank shell (its own slide frame with
+    nothing on it) is inserted for a human or the architect to fill.
     """
 
     session_id: str
@@ -168,12 +180,15 @@ async def insert_slide(request: InsertSlideRequest, db: Session = Depends(get_db
         request: InsertSlideRequest with session_id, position and optional html
 
     Returns:
-        Updated slide deck
+        Updated slide deck, plus ``inserted_slide_id`` and ``inserted_position``
+        (the viewer selects the slide it just inserted from them)
 
     Raises:
         HTTPException: 403 if no permission, 400 for validation errors, 409 if
-            session busy or version conflict, 423 if another user holds the
-            editing lock, 500 on error
+            something is running on the deck (``CONVERSATION_BUSY_DETAIL``), the
+            deck's rows moved under the insert (``DECK_CHANGED_DETAIL``) or the
+            version is stale, 423 if another user holds the editing lock, 500 on
+            error
     """
     _require_slide_permission(request.session_id, db, PermissionLevel.CAN_EDIT)
 
@@ -189,10 +204,8 @@ async def insert_slide(request: InsertSlideRequest, db: Session = Depends(get_db
         request.session_id,
     )
     if not locked:
-        raise HTTPException(
-            status_code=409,
-            detail="Session is currently processing another request. Please wait.",
-        )
+        # The lock belongs to whoever holds it: do not release it.
+        raise HTTPException(status_code=409, detail=CONVERSATION_BUSY_DETAIL)
 
     try:
         chat_service = get_chat_service()
@@ -202,6 +215,7 @@ async def insert_slide(request: InsertSlideRequest, db: Session = Depends(get_db
             request.position,
             html=request.html,
             expected_version=request.expected_version,
+            inserted_by=get_current_user(),
         )
 
         logger.info(
@@ -209,11 +223,20 @@ async def insert_slide(request: InsertSlideRequest, db: Session = Depends(get_db
             extra={"position": request.position, "session_id": request.session_id},
         )
         # A slide was added: the deck's slide list no longer matches the spec's.
-        # The service gave the new position a PLACEHOLDER spec entry with no
-        # purpose, so this is also what schedules the description of it.
-        await asyncio.to_thread(mark_dirty, request.session_id, get_current_user())
+        # An insert that carries HTML has no description yet (the spliced spec entry
+        # is blank), so this is what schedules the arc review of it.  A blank insert
+        # (no html) is already exactly described by that blank entry, so it
+        # schedules nothing.
+        if request.html is not None:
+            await asyncio.to_thread(mark_dirty, request.session_id, get_current_user())
         return result
 
+    except (ArcReviewInFlightError, DeckBusyError):
+        # An arc review holds a claim on the deck, or a turn is running on another
+        # session of it; nothing was written and the insert can be retried.
+        raise HTTPException(status_code=409, detail=CONVERSATION_BUSY_DETAIL)
+    except SlideRowsChangedError:
+        raise HTTPException(status_code=409, detail=DECK_CHANGED_DETAIL)
     except VersionConflictError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except PermissionError as e:

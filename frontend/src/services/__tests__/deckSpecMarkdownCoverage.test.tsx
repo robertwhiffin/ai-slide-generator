@@ -29,6 +29,8 @@
  *   (b) rename the renderer's `## Narrative arc`         -> every fixture
  *       reword `No design system or slide style pinned`  -> EMPTY
  *       render slide.template_section_index in SpecView  -> GOLDEN (via `12`)
+ *       SpecView labels a blank entry "Blank slide", the export still prints two `Not set.` -> BLANK (#314 M1)
+ *       the export prints `Blank slide.` but SpecView does not label it -> BLANK's MUST_SEE precondition
  * Showing slide_type or resolved_data.synthesis in SpecView stays GREEN: the export carries both,
  * which is what shows that (b) compares content, not structure.
  */
@@ -371,13 +373,19 @@ const SLIDE_STYLE: DeckSpec = {
   ...golden(),
   design_contract: { design_system_id: null, template_id: null, slide_style_id: 5 },
 };
-const FIXTURES: Array<[string, DeckSpec]> = [['GOLDEN', GOLDEN], ['EMPTY', EMPTY], ['SLIDE_STYLE', SLIDE_STYLE]];
+/** GOLDEN with one entry's purpose and content brief emptied: a blank slide (#314 M1), shown as "Blank slide". */
+const BLANK: DeckSpec = {
+  ...golden(),
+  slides: golden().slides.map((slide, i) => (i === 1 ? { ...slide, purpose: '', content_brief: '' } : slide)),
+};
+const FIXTURES: Array<[string, DeckSpec]> = [['GOLDEN', GOLDEN], ['EMPTY', EMPTY], ['SLIDE_STYLE', SLIDE_STYLE], ['BLANK', BLANK]];
 
 /** Texts the collector must see, per fixture, so a broken collector cannot pass vacuously. */
 const MUST_SEE: Record<string, string[]> = {
   GOLDEN: [normaliseText(GOLDEN.audience), 'Slide 4', 'Design system #7', 'Narrative arc', 'Assumes:', 'Hands off:'],
   EMPTY: [EMPTY.audience, 'Narrative arc', 'No design system or slide style pinned'],
   SLIDE_STYLE: ['Slide style #5', 'Slide 4'],
+  BLANK: ['Blank slide'],
 };
 
 const deckOf = (spec: DeckSpec): SlideDeck => ({

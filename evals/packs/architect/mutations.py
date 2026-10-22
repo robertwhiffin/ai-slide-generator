@@ -7,6 +7,7 @@ import yaml
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
 from src.domain.deck_spec import DeckSpec, DesignContractRef
+from src.domain.deck_spec_slides import spec_json_with_blank_entry
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_numbering import architect_slide_payload
 from src.services.agent_model_payload import model_payload_for
@@ -66,13 +67,47 @@ MESSAGES = {
     ),
     "edit_multi_slide": "Slides 4-6 are too text-heavy; cut the wording on each by about half",
     "discuss_slide_question": "Why is the accessibility point on slide 7?",
+    # #314: add a slide to the existing deck.
+    "add_slide_anchor": (
+        "Add a slide after slide 3 that compares Reveal.js, Slidev and Marp side by side"
+    ),
+    "add_slide_end": "Add a final slide that lists the sources behind the evidence",
+    "add_slide_as_number": "Insert a new slide 2 with an agenda for the talk",
+    "add_slide_and_revise": (
+        "Add a slide after slide 8 on offline use and security, and add it to the summary on the "
+        "last slide"
+    ),
+    # #314 follow-up: the same deck with a manually inserted blank slide.
+    "fill_blank_slide": (
+        "Use slide 6 to show that one stylesheet restyles the whole deck, so a rebrand is a "
+        "single edit"
+    ),
+    "edit_beside_blank": (
+        "Trim slide 7 to live code demos, embedded video and interactive charts; drop the rest"
+    ),
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
 HAS_DECK = (
     "edit_request", "confirm_design", "discuss",
     "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
+    "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
+    "fill_blank_slide", "edit_beside_blank",
 )
+# The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
+BLANK_CASES = ("fill_blank_slide", "edit_beside_blank")
+BLANK_AT = 5
+
+
+def _blank_deck(deck: dict, at: int) -> dict:
+    """``deck`` with a blank slide inserted at ``at``, exactly as production persists it.
+
+    The same splice as a manual insert: ``spec_json_with_blank_entry`` on the persisted spec
+    column, which adds ``BLANK_DECK_SPEC_ENTRY`` and re-stamps every position.
+    """
+    spliced = json.loads(spec_json_with_blank_entry(json.dumps(deck), at))
+    DeckSpec.model_validate(spliced)  # fail fast
+    return spliced
 
 
 def _dump(path, obj):
@@ -93,6 +128,8 @@ def _payload(cid):
         design_system_id=MERIDIAN_ID, template_id=MERIDIAN_TEMPLATE
     ).model_dump(mode="json")
     deck = case.gold_deck_spec() if has_deck else None
+    if cid in BLANK_CASES:
+        deck = _blank_deck(deck, BLANK_AT)
     slide_keys = architect_slide_payload(
         conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else []
     )
@@ -100,7 +137,7 @@ def _payload(cid):
         "conversation": conversation,
         "message": msg,
         "current_deck_spec": deck,
-        "committed_slide_count": 10 if has_deck else 0,
+        "committed_slide_count": len(deck["slides"]) if has_deck else 0,
         **slide_keys,
         "previous_deck_review": None,
         "available_design_contract": contract,
@@ -168,6 +205,155 @@ def _revised_spec(
             spec["slides"][position][field] = text
     DeckSpec.model_validate(spec)  # fail fast
     return spec
+
+
+# #314: the new slides, by case. Each is the text of one SlideSpec; ``_inserted_spec`` adds the
+# position and the empty data / slide-type / template-section fields.
+ANCHOR_SLIDE = {
+    "purpose": "Compare the leading HTML slide frameworks side by side",
+    "content_brief": (
+        "Comparison table of Reveal.js, Slidev and Marp across authoring format, interactivity, "
+        "theming and export options, one column per framework"
+    ),
+    "assumes": "The audience has just met HTML slides and heard the leading frameworks named",
+    "hands_off": "Whichever framework a team picks, the case for HTML slides holds",
+}
+# The judge-only calibration: right place and right targets, but a slide nobody asked for.
+OFF_REQUEST_SLIDE = {
+    "purpose": "Recount the history of PowerPoint",
+    "content_brief": (
+        "Timeline of PowerPoint releases from 1987 to today, one milestone per version"
+    ),
+}
+END_SLIDE = {
+    "purpose": "Appendix — the sources behind the evidence",
+    "content_brief": (
+        "Bulleted list of the sources behind the five evidence beats, one line per beat: "
+        "responsiveness, typography, interactivity, accessibility and collaboration"
+    ),
+    "assumes": "The audience has heard the verdict and may want to check the evidence",
+    "hands_off": "Every claim in the deck can be traced to a source",
+}
+AS_NUMBER_SLIDE = {
+    "purpose": "Set out the agenda for the talk",
+    "content_brief": (
+        "Agenda slide listing the five narrative beats in order: why the tool matters, "
+        "PowerPoint's limits, the evidence for HTML slides, the objections, and the verdict"
+    ),
+    "assumes": "The audience has seen the title and knows the topic",
+    "hands_off": "The talk moves from the problem, through the evidence, to a verdict",
+}
+AND_REVISE_SLIDE = {
+    "purpose": "Evidence beat 6 — Offline use and security",
+    "content_brief": (
+        "Show that HTML slides run offline as one self-contained file and can be served from an "
+        "access-controlled internal site, with no macros or embedded executables, as three short "
+        "bullets and a callout"
+    ),
+    "assumes": "The audience has seen the collaboration and distribution advantages",
+    "hands_off": "HTML slides are safe to share and work without a network",
+}
+# The one revision, by wording: the gold summary brief (gold position 9) with this phrase swapped.
+SUMMARY_DIMENSIONS = (
+    "five advantage dimensions — responsiveness, typography, interactivity, accessibility, "
+    "collaboration —",
+    "six advantage dimensions — responsiveness, typography, interactivity, accessibility, "
+    "collaboration, and offline use and security —",
+)
+
+# #314 follow-up (manual insert): the blank-slide cases. The payload deck is the gold spec with a
+# manually inserted blank at BLANK_AT, so gold positions 5..9 shift to 6..10 and the user's slide
+# numbers count the blank. ``positions`` / ``inserted: []`` are in that blank deck's numbering.
+BESIDE_POS = BLANK_AT + 1  # the slide edit_beside_blank names: just after the blank
+# fill_blank_slide's reference: the blank filled in place with these text fields.
+FILLED_SLIDE = {
+    "purpose": "Theming — one stylesheet restyles the whole deck",
+    "content_brief": (
+        "Show that one CSS stylesheet sets the colours, fonts and spacing of every slide, so a "
+        "rebrand is a single edit, where PowerPoint needs each slide master and layout changed by "
+        "hand. Three short bullets and a callout"
+    ),
+    "assumes": "The audience has just seen that CSS controls typography precisely",
+    "hands_off": "With HTML slides, the whole deck's look lives in one place",
+}
+# edit_beside_blank's one revision: BESIDE_POS's brief with the first phrase swapped for the second.
+BESIDE_REVISION = (
+    "live code demos, embedded videos, interactive charts (D3, Chart.js), scroll-triggered "
+    "animations, and audience polling",
+    "live code demos, embedded videos and interactive charts (D3, Chart.js)",
+)
+# edit_beside_blank's should_fail fills the untouched blank with invented text.
+INVENTED_FILL = {
+    "purpose": "Bridge from design fidelity to interactivity",
+    "content_brief": (
+        "Transition slide with one line linking precise typography to the interactive features "
+        "that follow"
+    ),
+    "assumes": "The audience has seen the typography evidence",
+    "hands_off": "Design fidelity is only half the story",
+}
+
+# Every new slide carries no data and no slide type or template section.
+NEW_SLIDE_DEFAULTS = {"data_references": [], "slide_type": None, "template_section_index": None}
+
+
+def _new_slide(position: int, fields: dict) -> dict:
+    return {"position": position, **fields, **NEW_SLIDE_DEFAULTS}
+
+
+def _inserted_spec(
+    deck: dict, inserts: dict[int, dict], briefs: dict[int, str] | None = None
+) -> dict:
+    """``deck`` with new slides spliced in and every slide re-stamped to its index.
+
+    ``inserts`` maps each new slide's FINAL position (its place in the returned deck) to its text
+    fields; ``briefs`` maps a FINAL position to a revised ``content_brief``. Nothing else changes.
+    """
+    spec = copy.deepcopy(deck)
+    slides = spec["slides"]
+    for final in sorted(inserts):
+        slides.insert(final, _new_slide(final, inserts[final]))
+    for index, slide in enumerate(slides):
+        slide["position"] = index
+    for final, brief in (briefs or {}).items():
+        slides[final]["content_brief"] = brief
+    DeckSpec.model_validate(spec)  # fail fast
+    return spec
+
+
+def _replaced_spec(deck: dict, replacements: dict[int, dict]) -> dict:
+    """``deck`` with the slides at the named positions replaced by new slides (count kept)."""
+    spec = copy.deepcopy(deck)
+    for position, fields in replacements.items():
+        spec["slides"][position] = _new_slide(position, fields)
+    DeckSpec.model_validate(spec)  # fail fast
+    return spec
+
+
+def _retargeted(reference: dict, targets: list[int], deck_spec: dict | None = None) -> dict:
+    """``reference`` with its ``target_positions`` (and, if given, its ``deck_spec``) replaced."""
+    bad = copy.deepcopy(reference)
+    bad["target_positions"] = list(targets)
+    if deck_spec is not None:
+        bad["deck_spec"] = deck_spec
+    ArchitectOutput.model_validate(bad)  # fail fast
+    return bad
+
+
+def _summary_brief(deck: dict, position: int) -> str:
+    """The brief at ``position`` with the dimensions phrase swapped for the six-dimension one."""
+    old, new = SUMMARY_DIMENSIONS
+    brief = deck["slides"][position]["content_brief"]
+    assert brief.count(old) == 1, position
+    return brief.replace(old, new)
+
+
+def _beside_brief(deck: dict, position: int) -> str:
+    """The brief at ``position`` with the interactivity phrase swapped for the trimmed one."""
+    old, new = BESIDE_REVISION
+    brief = deck["slides"][position]["content_brief"]
+    assert brief.count(old) == 1, position
+    return brief.replace(old, new)
 
 
 def _slipped(reference: dict) -> dict:
@@ -288,6 +474,98 @@ def generate(out_dir: pathlib.Path | None = None):
              "interactivity, it shows that HTML is accessible by design, and it sets up the "
              "collaboration beat on slide 8. I can move or reword it if you like."),
         _out("edit", "I'll rework the accessibility point on slide 7.", target_positions=[6]),
+    )
+
+    # #314: add a slide to the existing deck. ``positions`` and ``inserted`` are in the revised
+    # deck's numbering; the references are the gold spec with the new slide spliced in.
+    anchor = _out(
+        "edit",
+        "I'll add a new slide 4 comparing Reveal.js, Slidev and Marp side by side, straight "
+        "after slide 3.",
+        target_positions=[3], deck_spec=_inserted_spec(gold, {3: ANCHOR_SLIDE}),
+    )
+    _write(
+        out, "add_slide_anchor", "mutation",
+        "add after slide 3 (position 2): the new slide is position 3, only it is built, and the "
+        "later slides shift unchanged",
+        {"intent": "edit", "positions": [3], "inserted": [3]},
+        anchor,
+        _retargeted(anchor, [3], _inserted_spec(gold, {3: {**ANCHOR_SLIDE, **OFF_REQUEST_SLIDE}})),
+    )
+    end = _out(
+        "edit", "I'll add a final slide, slide 11, listing the sources behind the evidence.",
+        target_positions=[10], deck_spec=_inserted_spec(gold, {10: END_SLIDE}),
+    )
+    _write(
+        out, "add_slide_end", "mutation",
+        "add a final slide to a deck of ten (new slide at position 10): append it; replacing the "
+        "last slide (position 9) loses the closing slide",
+        {"intent": "edit", "positions": [10], "inserted": [10]},
+        end,
+        _retargeted(end, [9], _replaced_spec(gold, {9: END_SLIDE})),
+    )
+    as_number = _out(
+        "edit",
+        "I'll insert a new slide 2 with the agenda for the talk; the current slide 2 becomes "
+        "slide 3.",
+        target_positions=[1], deck_spec=_inserted_spec(gold, {1: AS_NUMBER_SLIDE}),
+    )
+    _write(
+        out, "add_slide_as_number", "mutation",
+        "insert a new slide 2 (position 1): the new slide takes position 1 and the old slide 2 "
+        "shifts to position 2, one place late is wrong",
+        {"intent": "edit", "positions": [1], "inserted": [1]},
+        as_number,
+        _retargeted(as_number, [2], _inserted_spec(gold, {2: AS_NUMBER_SLIDE})),
+    )
+    and_revise = _out(
+        "edit",
+        "I'll add slide 9 on offline use and security after slide 8, and add it to the summary "
+        "on the last slide, now slide 11.",
+        target_positions=[8, 10],
+        deck_spec=_inserted_spec(gold, {8: AND_REVISE_SLIDE}, {10: _summary_brief(gold, 9)}),
+    )
+    _write(
+        out, "add_slide_and_revise", "mutation",
+        "add after slide 8 (position 7): the new slide is position 8 and the summary on the last "
+        "slide (now position 10) must be revised to include it; the gold narrative_arc lists five "
+        "dimensions and must stay unchanged",
+        {"intent": "edit", "positions": [8, 10], "inserted": [8]},
+        and_revise,
+        _retargeted(and_revise, [8], _inserted_spec(gold, {8: AND_REVISE_SLIDE})),
+    )
+
+    # #314 follow-up (manual insert): the same deck with a blank slide at BLANK_AT. The references
+    # leave every other slide exactly as the payload has it (the blank included, unless filled).
+    blank_deck = _blank_deck(gold, BLANK_AT)
+    fill = _out(
+        "edit", "I'll use the blank slide 6 to show that one stylesheet restyles the whole deck.",
+        target_positions=[BLANK_AT], deck_spec=_replaced_spec(blank_deck, {BLANK_AT: FILLED_SLIDE}),
+    )
+    _write(
+        out, "fill_blank_slide", "mutation",
+        "fill the blank slide 6 (position 5) in place: a new slide beside it leaves the blank "
+        "empty and every later slide one place on",
+        {"intent": "edit", "positions": [BLANK_AT], "inserted": []},
+        fill,
+        _retargeted(fill, [BLANK_AT], _inserted_spec(blank_deck, {BLANK_AT: FILLED_SLIDE})),
+    )
+    beside = _out(
+        "edit",
+        "I'll trim slide 7 to live code demos, embedded video and interactive charts.",
+        target_positions=[BESIDE_POS],
+        deck_spec=_revised_spec(blank_deck, {BESIDE_POS: _beside_brief(blank_deck, BESIDE_POS)}),
+    )
+    _write(
+        out, "edit_beside_blank", "mutation",
+        "edit of slide 7 (position 6), the slide after the blank slide 6 (position 5): change "
+        "only slide 7; filling the blank too builds a slide nobody asked for",
+        {"intent": "edit", "positions": [BESIDE_POS], "inserted": []},
+        beside,
+        _retargeted(
+            beside, [BLANK_AT, BESIDE_POS],
+            _replaced_spec(beside["deck_spec"], {BLANK_AT: INVENTED_FILL}),
+        ),
     )
 
 

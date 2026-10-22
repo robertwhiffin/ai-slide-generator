@@ -9,11 +9,25 @@ Real-model runs; results are logged to MLflow.
 - **Configs** (`evals/configs/`). A config is a named variant of one agent's v1 definition.
   `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
   settings. Each config carries a `content_hash`, logged with every run.
-- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (nine for the architect), 39 in total across the seven
+- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (fifteen for the architect), 45 in total across the seven
   roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
   `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
   `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
-  and `calibration.json` (a `should_fail` output).
+  and `calibration.json` (a `should_fail` output). The architect's two newest cases,
+  `fill_blank_slide` (the user names a manually inserted blank slide by its number and asks for
+  content on it: it is filled in place, with no new slide beside it) and `edit_beside_blank` (the
+  user asks to change the slide after the blank: only that slide changes and the blank stays blank),
+  run on a deck that holds the blank.
+  - *Calibrated 2026-10-22.* The judge is trusted on `edit_beside_blank` on both splits. On
+    `fill_blank_slide` it cannot separate the should_fail (a new slide inserted beside the blank)
+    from the reference on either split. So `fill_blank_slide` is scored by its deterministic checks:
+    the intent is `edit`, production's alignment revises exactly the blank, and it inserts nothing.
+    Its judge verdict is reported, not counted. The harness does not apply this rule (a row fails
+    on any failing scorer, the judge included), so read that case's result from `contract` and
+    `expected_category`. A judge-visible should_fail for it is a follow-up.
+  - *Measured before any prompt change*, on `v1-baseline` (the shipped `add-slide-b` architect
+    prompt): train ×3 6/6 (run `630beeaf`), held-out ×1 2/2 (run `6b2e4ab4`, aggregate only),
+    0 production binding refusals. No prompt change was needed.
 - **Scorers** (`evals/harness/scorers.py`, `mlflow_run.py`). Every row is scored by:
   - `contract`: the output validated against the agent's schema. An `incomplete` run, such as a model
     inventing a criterion name outside the schema, fails here.
@@ -22,6 +36,20 @@ Real-model runs; results are logged to MLflow.
   - `expected_category`, for the architect, data_analyst and the three reviewers: deterministic
     match on intent/outcome, or on expected findings (criterion, position). Any objective criterion
     not listed in `expect.criteria` fails the row. A fix_reviewer also checks `verdict`.
+    - *Architect insert cases* (#314). A case whose `expect` has `inserted` is scored with
+      production's own semantics, not by the model's `target_positions`, because `architect_node`
+      ignores those targets on an insert and derives the turn from `align_slides` (see "Adding a
+      slide (#314)" in `docs/technical/backend-overview.md`). `build_dataset` adds
+      `expectations["current_deck_spec"]` (the payload's deck) for architect cases that have one,
+      and omits the key when the deck is `None`. The row passes only if all of these hold:
+      the intent is `edit`; the output carries a valid `deck_spec`;
+      `align_slides(current_deck_spec, output)` does not refuse; `inserted_indices` equals
+      `expect.inserted`; `revised_indices` equals `expect.positions` minus `inserted`; and the
+      deck-level fields (`audience`, `purpose`, `argument`, `call_to_action`, `narrative_arc`) and
+      the design contract equal the reference's. The five fields are `scorers.DECK_LEVEL_FIELDS`, a
+      test pins them equal to `nodes._DECK_LEVEL_FIELDS`. A model whose own `target_positions`
+      differ is noted in the rationale and not failed. A missing `reference` or `current_deck_spec`
+      fails the row with an explicit rationale. Every other case scores exactly as before.
   - `render_measures`, for the builder and fixer: the slide is rendered in a browser (Meridian section
     CSS). It must have zero overflow, contrast of at least 4.5, no off-palette colours, no console
     errors and no `<style>` tag.
@@ -46,6 +74,10 @@ Real-model runs; results are logged to MLflow.
     with no output counts as wrong (and is also reported as `no_output`).
   - *Position accuracy*: over the rows whose expected and got intent are both `edit`, the share whose
     `set(target_positions)` equals the expected set.
+  - On an insert row (`expect.inserted`, #314) position accuracy compares the model's own
+    `target_positions` with the expected set. Production ignores those targets on an insert, so
+    there it is a signal about the prompt, not a measure of what production builds.
+    `expected_category` (above) is the production measure.
   - A held-out run prints one aggregate line, never a case id.
   - It reads the per-worktree `mlflow.db` unless `--tracking-uri` is given, and writes nothing.
 
@@ -67,7 +99,7 @@ python -m evals.run_eval --agent all --config v1-baseline --repeats 3
 | `--config` | `v1-baseline` | `v1-baseline` or a path to a YAML config. A YAML config targets one agent, so `--agent all` only works with `v1-baseline`. |
 | `--repeats` | 3 | Repeats per case. |
 | `--max-workers` | 8 | Parallelism of `mlflow.genai.evaluate`. |
-| `--cases` | all | Comma-separated case ids, for example `gold_chart,overflow`. |
+| `--cases` | all | Comma-separated case ids, for example `gold_chart,overflow`. Also applies to `--calibrate`. |
 | `--judge-endpoint` | `databricks-claude-sonnet-5` | Serving endpoint used as the judge. |
 | `--split` | `train` | `train` or `heldout`. Selects the case set; see Held-out set below. Also applies to `--calibrate`. |
 | `--calibrate` | off | Calibrate the judge instead of sweeping (see below). |
@@ -83,7 +115,7 @@ data_analyst prompt mentions Genie and a vector index, but neither is available 
 
 ## Held-out set
 
-Each agent has a second, separate set of cases (five per agent, nine for the architect; 39 in total) in `evals/packs/<agent>/cases_heldout/`,
+Each agent has a second, separate set of cases (five per agent, fifteen for the architect; 45 in total) in `evals/packs/<agent>/cases_heldout/`,
 built from a different source deck than the train cases. It has the same four files per case and
 shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
 cases generalises, rather than having been fitted to them.
@@ -157,6 +189,12 @@ For each case, the judge must **pass** `reference.json` and **fail** `calibratio
 both hold. A case the judge cannot separate from its mutation gives pass rates that mean nothing,
 so re-calibrate after changing a judge prompt, the judge endpoint or any case. All 35 cases were
 trusted when the v1 baseline below was recorded.
+
+To calibrate only some cases (for example the ones you just added), add `--cases`:
+`python -m evals.run_eval --agent architect --calibrate --cases add_slide_anchor,add_slide_end`.
+It honours `--split`. An id that matches no case for the chosen agents and split exits non-zero,
+naming the unknown id(s), so a typo cannot calibrate nothing and read as a pass. The ids that do
+match are still calibrated and printed before the exit.
 
 Calibration proves the judge can discriminate on these cases. It does not prove the deterministic
 scorers' expectations are reasonable for the live agent (see the baseline notes).
@@ -433,3 +471,113 @@ What it showed:
   Release exists), so an existing install keeps its persisted architect prompt: it gets the two payload
   keys immediately, but the new SLIDE NUMBERS text only when an admin publishes a release carrying it
   (see "Rollout" in `docs/technical/backend-overview.md`).
+
+## Architect: add a slide (#314), 2026-10-20
+
+Issue #314 reported that a user on the graph path cannot ask for a new slide in an existing deck. The
+shipped architect prompt told the model that adding or removing slides is not an edit, and the node
+refused any change of the slide-position set. This pass makes the yardstick score an insert the way
+production builds it, adds four insert cases per split, measures the shipped prompt, searches for a
+better one on train only, and promotes the finalist. The node behaviour is in
+`docs/technical/backend-overview.md`, "Adding a slide (#314)".
+
+- **New cases, four per split** (same ids in both; held-out words them differently on its own deck, and
+  its messages are not reproduced here).
+
+  | Case id | Tests |
+  |---|---|
+  | `add_slide_anchor` | a new slide placed after a named slide: only it is built, and the later slides shift unchanged |
+  | `add_slide_end` | a new slide appended at the end of the deck, not written over the last slide |
+  | `add_slide_as_number` | a new slide given a named slide's number: it takes that place and the named slide moves one place on |
+  | `add_slide_and_revise` | a new slide plus a requested change to a later slide: both are built, nothing else changes, and the deck-level fields stay as they were |
+
+  The architect now has thirteen cases per split, 43 across the harness. They are scored by the
+  production-semantics insert check (see Scorers). Each case's `should_fail` output, used at
+  calibration, is one wrong way to do it: for `add_slide_anchor`, the right place and targets but a
+  new slide that is off-request (only the judge can fail it); for `add_slide_end`, the last slide
+  replaced instead of a slide added; for `add_slide_as_number`, the slide inserted one place late;
+  for `add_slide_and_revise`, the slide added and the requested change forgotten. All eight cases were
+  trusted at calibration; one held-out reference needed a re-judge after a judge `KeyError: 'result'`.
+- **Setup.** Agent `system.ai.claude-opus-5`, judge `databricks-claude-sonnet-5`. As in #313, cost is
+  estimated from tokens at USD 5 / 25 per million input / output for the agent plus about USD 0.035 per
+  judge call, because `prices.yaml` has no opus-5 entry.
+
+"v1-baseline" is the architect prompt as shipped before this issue, `slide-refs` (`ffc3074d`, promoted
+in #313). `add-slide` (`e5caefa8`) and `add-slide-b` (`b5a4cba6`) are the two candidates
+(`evals/configs/architect/add-slide.md`, `add-slide-b.md`); `add-slide-b` is the finalist and was
+promoted. B is before, S is the search on train, F is the finalist. Pass rate is the harness's, over
+scored rows (judge errors are skipped); intent and position accuracy are `evals/intent_report.py`'s,
+and a dash means no edit rows or, on held-out, not reported. Run ids are from the issue-314 worktree's
+local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Intent acc. | Position acc. | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| B1 8e5f7755 | v1-baseline (ffc3074d) | train | 4 insert | 2 | 8 | 0.00 | 0/8 | – | 0 | 13.1k / 0.4k | 0.89 |
+| B2 82ed0000 | v1-baseline | train | 9 existing | 1 | 9 | 1.00 | 9/9 | 4/4 | 0 | 12.2k / 3.1k | 1.57 |
+| B3 4a3dd928 | v1-baseline | held-out | 4 insert | 1 | 4 | 0.00 | 0/4 | – | 0 | 11.2k / 0.4k | 0.41 |
+| S1 c26f6789 | add-slide (e5caefa8) | train | 4 insert | 1 | 4 | 1.00 | 4/4 | 4/4 | 0 | 13.7k / 5.1k | 0.93 |
+| S2 9b7cd603 | add-slide-b (b5a4cba6) | train | 4 insert, `build_request`, `edit_request` | 1 | 6 | 1.00 | 6/6 | 5/5 | 0 | 13.1k / 4.9k | 1.34 |
+| F1 146133de | add-slide-b | train | 4 insert | 3 | 12 | 1.00 | 12/12 | 12/12 | 0 | 13.8k / 4.7k | 2.67 |
+| F2 9a15c202 | add-slide-b | train | 9 existing | 1 | 9 | 1.00 | 9/9 | 4/4 | 0 | 12.8k / 2.8k | 1.53 |
+| F3 f54dd66b | add-slide-b | held-out | all 13 | 1 | 13 | 1.00 (9 scored) | 13/13 | – | 4 | 11.5k / 2.3k | 1.95 |
+| F3b ffaa27ab | add-slide-b | held-out | the 4 judge-error rows of F3 | 1 | 4 | 1.00 | 4/4 | – | 0 | 11.8k / 2.1k | 0.59 |
+
+The runs and two calibration passes (about USD 0.63) sum to **about USD 12.51**, inside the USD 15 cap.
+Held-out results are aggregates only (B3, F3, F3b). F3 scored nine rows and four judge-errored; F3b
+re-ran only those four. Combined, the held-out insert cases pass 4/4 (B3: 0/4) and the nine existing
+held-out cases pass 9/9.
+
+What it showed:
+
+- **The shipped prompt answers every add with `discuss`.** B1 is at the floor: intent wrong on 8/8 rows,
+  every one `discuss`. Held-out gives 0/4 (B3). The cause is a single sentence, the EDITING rule
+  that adding or removing slides is not an edit. The nine existing train cases are untouched by it
+  (B2, 9/9), so this is not a regression elsewhere.
+- **Candidate `add-slide` placed the slides but bound them in a way production refuses.** It rewrote the
+  EDITING block (adding is an edit, with the new slide, the unchanged later slides and the targets
+  stated) and added an anchor exception to SLIDE NUMBERS (a named slide on an add is the anchor, not a
+  target). S1 passed 4/4. But the yardstick does not check template bindings. The fixture's
+  `template_sections` all have a null `label`, and the prompt says to copy `label` into `slide_type` and
+  `index` into `template_section_index`, so the model emits an index-only pair (`slide_type` null,
+  index set). Production's validators (`complete_index_only_bindings`, `invalid_slide_bindings`, run in
+  `architect_node`) refuse the whole turn on an index-only pair whose section has no label, because it cannot be
+  completed from the inventory (`invalid_slide_type_binding`). A diagnostic ran those two functions over each run's outputs and the
+  payload's `template_sections`: **3 of the 4 S1 insert rows would be refused.**
+- **That gap is pre-existing.** The same diagnostic on the shipped prompt (B2) refuses 2 of its 5
+  spec-bearing rows (`build_request` and `edit_request`) on this fixture. It is not introduced by #314,
+  and the yardstick is deliberately not changed after the BEFORE runs.
+- **Candidate `add-slide-b` fixes it.** It is `add-slide` plus a BINDING sentence (an entry whose
+  `label` is null cannot be bound, and `slide_type` and `template_section_index` are set together or not
+  at all), and the EDITING new-slide sentence defers binding to those rules. S2 passed 6/6 with 0/6
+  production binding refusals. The finalist rule added a supplementary condition before the F runs: the
+  finalist's production binding refusals must not exceed v1's on the same cases. F1 0/12, F2 0/5 (v1:
+  2/5), F3 0/9 scored rows.
+- **Insert cost.** An insert returns the full deck spec, so output tokens rise from about 0.4k (a
+  `discuss`) to about 4.7k per row. A row costs about USD 0.22.
+- **Accept rule** (fixed before any F run). All three held, and the finalist was accepted:
+  1. F1: pass rate at least 0.75, every insert case at least 2 of 3, and above B1's. Got 1.00, every
+     insert case 3/3, B1 0.00.
+  2. F2: at least 8 of 9 and at least B2's passes minus one, with no `contract` failure. Got 9/9 (B2 9/9).
+  3. F3: the 4 held-out inserts at least 3 of 4 and above B3, and the 9 existing at least 8 of 9. Got 4/4
+     (B3 0/4) and 9/9.
+
+  Had no finalist been accepted, the fallback was to ship the code and cases with the unchanged prompt
+  and leave the issue open; that branch was not taken.
+- **Overrides of `optimise-agent-prompt`**, taken for budget (USD 15 at about USD 0.2 per row): the
+  finalist was confirmed at 3 repeats on the insert cases plus 1 repeat on the nine existing train cases
+  (the skill says 5 repeats on all train); held-out ran at 1 repeat (the skill says 3; the #313
+  precedent); and the candidate author, who saw train only, ran no sweeps.
+- **Branch shipped.** `add-slide-b` is the v1 default in `src/core/skills/architect.py`
+  (`b5a4cba61121`, previously `ffc3074dc920`), promoted with `evals.harness.promote`. The architect
+  prompt rows in the earlier baseline tables describe previous prompts.
+- **Still open.**
+  - The yardstick should run production's binding validation. The diagnostic was run by hand, and the
+    fixture's template sections are unlabelled.
+  - No eval case measures the no-place product rule (a new slide with no stated place goes where it fits
+    the argument, before a closing slide). The layer-3 RC2 test exercises it, but it is not run in CI.
+  - Insert rows' position accuracy (above) measures targets production ignores.
+- **Rollout caveat.** The Graph V1 manifest only seeds a fresh bootstrap (it is not read once any Graph
+  Release exists), so an existing install keeps its persisted architect prompt. It gets the node
+  behaviour at once (alignment, the shift and the refusals) but keeps answering an add with `discuss`
+  until an admin publishes a release carrying the new prompt (see "Rollout" in
+  `docs/technical/backend-overview.md`).

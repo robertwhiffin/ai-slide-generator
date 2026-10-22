@@ -1,0 +1,6 @@
+# Architect v1 prompt (#314): adding a slide to an existing deck is an edit; later slides
+# shift unchanged, and a slide named as the insert anchor is not a target.
+agent_key: architect
+name: add-slide
+base: v1
+prompt_file: add-slide.md

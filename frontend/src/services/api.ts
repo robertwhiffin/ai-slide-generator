@@ -873,6 +873,48 @@ export const api = {
   },
 
   /**
+   * Insert a blank slide at `position` (0..n; n appends).
+   *
+   * No `html` is sent: the server builds the deck's own blank shell. The response is the deck plus
+   * `inserted_slide_id` / `inserted_position`, which the viewer uses to select the new slide once the
+   * refetched deck has rendered.
+   *
+   * On a failure the server's own text is surfaced when it sent one (FastAPI's 409 / 423 body is
+   * `{"detail": "<sentence>"}`); a validation list, an object, or a non-JSON body (a proxy page)
+   * falls back to a generic message.
+   */
+  async insertSlide(
+    position: number,
+    sessionId: string,
+    expectedVersion?: number
+  ): Promise<SlideDeck & { inserted_slide_id?: string; inserted_position?: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/slides`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        position,
+        expected_version: expectedVersion,
+      }),
+    });
+
+    if (!response.ok) {
+      let detail: unknown;
+      try {
+        detail = (await response.json())?.detail;
+      } catch {
+        detail = undefined;
+      }
+      throw new ApiError(
+        response.status,
+        typeof detail === 'string' ? detail : 'Failed to insert slide'
+      );
+    }
+
+    return response.json();
+  },
+
+  /**
    * Update a slide's verification result
    * Persists verification with the session so it survives refresh/restore
    */

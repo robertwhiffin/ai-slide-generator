@@ -53,3 +53,15 @@ _Avoid_: Slide number, list index
 **Slide Reference**:
 A phrase naming existing slides by number or ordinal ("slide 2", "slides 4-6", "the last slide"). `src/domain/slide_numbering.py` resolves it to Slide Positions before the architect runs. It does not decide the intent, and an indefinite ordinal ("a final slide") is not one.
 _Avoid_: Slide context (the monolith's UI selection)
+
+**Slide Insertion**:
+An edit whose revised spec has more slides than the deck. New slides go where the user asked, later slides take a higher Slide Position and Slide Number (by the number of slides inserted before them) but keep their identity and records, and only new and revised slides are built. `architect_node` derives it by aligning the revised spec to the current one (`src/domain/slide_alignment.py`), never from the model's targets, and refuses when the alignment is ambiguous.
+_Avoid_: Add intent, build
+
+**Pending Slide**:
+The placeholder row an insertion commits at a new Slide Position until its slide lands. It reads "New slide — not built yet." If the build fails it becomes the failed placeholder.
+_Avoid_: Blank slide
+
+**Blank Slide**:
+A slide a person inserts by hand. Its HTML is the deck's own frame: the most common root-to-`.slide` wrapper chain among the deck's slides, with only `class`, `data-label` and `style` kept and no content (the bare `<div class="slide"></div>` when no slide offers a usable frame). Its spec entry has no purpose and no brief. The architect fills it when asked; no turn builds, re-reviews or re-describes it otherwise.
+_Avoid_: Pending Slide, empty slide

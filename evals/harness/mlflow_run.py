@@ -111,14 +111,16 @@ def build_dataset(cases: list[Case], repeats: int, split: str = "train") -> list
             inputs = {"agent_key": c.agent_key, "case_id": c.case_id, "repeat": r}
             if split != "train":
                 inputs["split"] = split  # train rows omit the key; readers use inputs.get("split", "train")
-            rows.append({
-                "inputs": inputs,
-                "expectations": {
-                    "expect": c.expect,
-                    "reference": c.reference,
-                    "design_system_active": c.design_system_active,
-                },
-            })
+            expectations = {
+                "expect": c.expect,
+                "reference": c.reference,
+                "design_system_active": c.design_system_active,
+            }
+            deck = (c.payload or {}).get("current_deck_spec")
+            if c.agent_key == "architect" and deck is not None:
+                # The insert scorer aligns the output against the deck the turn started from.
+                expectations["current_deck_spec"] = deck
+            rows.append({"inputs": inputs, "expectations": expectations})
     return rows
 
 
@@ -189,7 +191,9 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
         if outputs.get("infra_error"):
             return _skip("infra error")
         return _fb(*det.expected_category_score(
-            inputs["agent_key"], outputs.get("structured"), expectations.get("expect") or {}))
+            inputs["agent_key"], outputs.get("structured"), expectations.get("expect") or {},
+            reference=expectations.get("reference"),
+            current_deck_spec=expectations.get("current_deck_spec")))
 
     @scorer(name="render_measures")
     def render_measures(inputs, outputs, expectations):

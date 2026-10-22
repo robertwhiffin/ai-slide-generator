@@ -41,13 +41,32 @@ MESSAGES = {
     "edit_last_slide": "The final slide should open with the call to action, before the checklist",
     "edit_multi_slide": "Slides 2 and 3 are too dense — drop the callouts on both",
     "discuss_slide_question": "Why does slide 2 come before the techniques?",
+    # #314: add a slide to deck 2.
+    "add_slide_anchor": (
+        "Could you add a slide before slide 5 with a worked before-and-after prompt example?"
+    ),
+    "add_slide_end": "Add one more slide at the end with a glossary of the prompt terms",
+    "add_slide_as_number": "Add a new fourth slide on common prompt anti-patterns",
+    "add_slide_and_revise": (
+        "Add a slide after slide 3 on versioning prompts, and add it to the checklist on the "
+        "final slide"
+    ),
+    # #314 follow-up: deck 2 with a manually inserted blank slide.
+    "fill_blank_slide": (
+        "Please make slide 4 a quick guide to which of the four patterns fits which kind of task"
+    ),
+    "edit_beside_blank": "Can you add a one-line takeaway beneath the stats on the fifth slide?",
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
 HAS_DECK = (
     "edit_request", "confirm_design", "discuss",
     "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
+    "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
+    "fill_blank_slide", "edit_beside_blank",
 )
+# The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
+BLANK_AT = 3
 
 EDIT_BRIEF = (
     "Four cards in place of the bullet list covering the four key patterns — system-prompt framing, "
@@ -70,6 +89,8 @@ def _payload(cid):
         design_system_id=m.MERIDIAN_ID, template_id=m.MERIDIAN_TEMPLATE
     ).model_dump(mode="json")
     deck = case.gold_deck_spec(DECK) if has_deck else None
+    if cid in m.BLANK_CASES:
+        deck = m._blank_deck(deck, BLANK_AT)
     slide_keys = architect_slide_payload(
         conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else []
     )
@@ -77,7 +98,7 @@ def _payload(cid):
         "conversation": conversation,
         "message": msg,
         "current_deck_spec": deck,
-        "committed_slide_count": 6 if has_deck else 0,
+        "committed_slide_count": len(deck["slides"]) if has_deck else 0,
         **slide_keys,
         "previous_deck_review": None,
         "available_design_contract": contract,
@@ -110,6 +131,111 @@ MULTI_BRIEFS = {
         "chain-of-thought reasoning, and structured output formatting — with no callout"
     ),
 }
+
+
+# #314: the new slides, by case (deck 2). ``m._inserted_spec`` adds the position and the empty
+# data / slide-type / template-section fields.
+ANCHOR_SLIDE = {
+    "purpose": "Make the techniques concrete with one worked example",
+    "content_brief": (
+        "Two-column slide with an ad-hoc prompt on the left and its optimised version on the "
+        "right, labelling where system-prompt framing, a few-shot example and a structured "
+        "output format were applied"
+    ),
+    "assumes": (
+        "Audience has seen the measured gains and wants to see what a better prompt looks like"
+    ),
+    "hands_off": "Applying the patterns to one real prompt is quick and visibly improves it",
+}
+# The judge-only calibration: right place and right targets, but a slide nobody asked for.
+OFF_REQUEST_SLIDE = {
+    "purpose": "Point the team at upcoming AI conferences",
+    "content_brief": (
+        "Bullet slide listing three upcoming AI conferences the team could attend, with dates "
+        "and locations"
+    ),
+}
+END_SLIDE = {
+    "purpose": "Appendix — a glossary of the prompt terms used in the deck",
+    "content_brief": (
+        "Two-column glossary defining system prompt, few-shot example, chain-of-thought, "
+        "structured output, eval criteria and test suite in one line each"
+    ),
+    "assumes": "Audience has heard each term during the talk",
+    "hands_off": "Everyone leaves with the same vocabulary for prompt work",
+}
+AS_NUMBER_SLIDE = {
+    "purpose": "Warn against the habits that undo prompt optimisation",
+    "content_brief": (
+        "Bullet slide listing four common prompt anti-patterns — vague instructions, "
+        "contradictory constraints, examples that leak the answer, and unbounded output — each "
+        "with a one-line fix"
+    ),
+    "assumes": "Audience knows the four core patterns from the previous slide",
+    "hands_off": "Most bad outputs come from a handful of avoidable prompt habits",
+}
+AND_REVISE_SLIDE = {
+    "purpose": "Show how to keep prompts under version control",
+    "content_brief": (
+        "Bullet slide explaining that every prompt change gets a version, a change note and a "
+        "link to its eval results, so a regression can be traced and rolled back"
+    ),
+    "assumes": "Audience knows the four core patterns and that prompts change often",
+    "hands_off": "A versioned prompt can be compared, reviewed and rolled back like code",
+}
+# The one revision, by wording: the gold checklist brief (gold position 5) with this phrase swapped.
+CHECKLIST_ITEMS = (
+    "five-item prompt optimisation checklist (define task scope, choose patterns, write eval "
+    "criteria,",
+    "six-item prompt optimisation checklist (define task scope, choose patterns, version every "
+    "prompt, write eval criteria,",
+)
+
+
+# #314 follow-up (manual insert): the blank-slide cases on deck 2. The payload deck is the deck-2
+# gold spec with a manually inserted blank at BLANK_AT, so gold positions 3..5 shift to 4..6 and
+# the user's slide numbers count the blank.
+BESIDE_POS = BLANK_AT + 1  # the slide edit_beside_blank names: just after the blank
+# fill_blank_slide's reference: the blank filled in place with these text fields.
+FILLED_SLIDE = {
+    "purpose": "Help the audience choose the right pattern for a task",
+    "content_brief": (
+        "Table mapping four common task types — extraction, classification, multi-step reasoning "
+        "and open-ended writing — to the pattern that fits each best, with one line on why"
+    ),
+    "assumes": "Audience has just met the four core patterns",
+    "hands_off": "Each kind of task has a pattern that fits it best",
+}
+# edit_beside_blank's one revision: BESIDE_POS's brief with the first phrase swapped for the second.
+BESIDE_REVISION = (
+    "typical iteration cycles to production quality (3-5 rounds)",
+    "typical iteration cycles to production quality (3-5 rounds), with a one-line takeaway "
+    "beneath the stats: structured prompting pays for itself in fewer tokens and fewer rounds",
+)
+# edit_beside_blank's should_fail fills the untouched blank with invented text.
+INVENTED_FILL = {
+    "purpose": "Bridge from the techniques to the evidence",
+    "content_brief": (
+        "Transition slide with one line asking whether the four patterns really pay off, setting "
+        "up the numbers that follow"
+    ),
+    "assumes": "Audience has just met the four core patterns",
+    "hands_off": "The patterns are only worth adopting if the gains are real",
+}
+
+
+def _checklist_brief(deck: dict, position: int) -> str:
+    old, new = CHECKLIST_ITEMS
+    brief = deck["slides"][position]["content_brief"]
+    assert brief.count(old) == 1, position
+    return brief.replace(old, new)
+
+
+def _beside_brief(deck: dict, position: int) -> str:
+    old, new = BESIDE_REVISION
+    brief = deck["slides"][position]["content_brief"]
+    assert brief.count(old) == 1, position
+    return brief.replace(old, new)
 
 
 def _edited_deck_spec():
@@ -225,6 +351,99 @@ def generate(out_dir: pathlib.Path | None = None):
                "land as the answer to a problem the audience already feels. I can swap them if "
                "you prefer."),
         m._out("edit", "I'll move slide 2 after the techniques.", target_positions=[1]),
+    )
+
+    # #314: add a slide to the same deck. ``positions`` and ``inserted`` are in the revised
+    # deck's numbering; the references are the gold spec with the new slide spliced in.
+    anchor = m._out(
+        "edit",
+        "I'll add a new slide 5 with a worked before-and-after prompt example, just before the "
+        "workflow slide.",
+        target_positions=[4], deck_spec=m._inserted_spec(gold, {4: ANCHOR_SLIDE}),
+    )
+    _write(
+        out, "add_slide_anchor", "mutation",
+        "add before slide 5 (position 4): the new slide takes position 4, only it is built, and "
+        "the old slide 5 shifts unchanged",
+        {"intent": "edit", "positions": [4], "inserted": [4]},
+        anchor,
+        m._retargeted(
+            anchor, [4], m._inserted_spec(gold, {4: {**ANCHOR_SLIDE, **OFF_REQUEST_SLIDE}})
+        ),
+    )
+    end = m._out(
+        "edit", "I'll add a glossary of the prompt terms as a new final slide, slide 7.",
+        target_positions=[6], deck_spec=m._inserted_spec(gold, {6: END_SLIDE}),
+    )
+    _write(
+        out, "add_slide_end", "mutation",
+        "add a final slide to a deck of six (new slide at position 6): append it; replacing the "
+        "last slide (position 5) loses the closing slide",
+        {"intent": "edit", "positions": [6], "inserted": [6]},
+        end,
+        m._retargeted(end, [5], m._replaced_spec(gold, {5: END_SLIDE})),
+    )
+    as_number = m._out(
+        "edit",
+        "I'll add a new slide 4 on common prompt anti-patterns; the impact slide moves to slide 5.",
+        target_positions=[3], deck_spec=m._inserted_spec(gold, {3: AS_NUMBER_SLIDE}),
+    )
+    _write(
+        out, "add_slide_as_number", "mutation",
+        "a new fourth slide (position 3): it takes position 3 and the old slide 4 shifts up, one "
+        "place late is wrong",
+        {"intent": "edit", "positions": [3], "inserted": [3]},
+        as_number,
+        m._retargeted(as_number, [4], m._inserted_spec(gold, {4: AS_NUMBER_SLIDE})),
+    )
+    and_revise = m._out(
+        "edit",
+        "I'll add slide 4 on versioning prompts after slide 3, and add versioning to the "
+        "checklist on the final slide, now slide 7.",
+        target_positions=[3, 6],
+        deck_spec=m._inserted_spec(gold, {3: AND_REVISE_SLIDE}, {6: _checklist_brief(gold, 5)}),
+    )
+    _write(
+        out, "add_slide_and_revise", "mutation",
+        "add after slide 3 (position 2): the new slide is position 3 and the checklist on the "
+        "final slide (now position 6) must be revised to include it",
+        {"intent": "edit", "positions": [3, 6], "inserted": [3]},
+        and_revise,
+        m._retargeted(and_revise, [3], m._inserted_spec(gold, {3: AND_REVISE_SLIDE})),
+    )
+
+    # #314 follow-up (manual insert): deck 2 with a blank slide at BLANK_AT. The references leave
+    # every other slide exactly as the payload has it (the blank included, unless filled).
+    blank_deck = m._blank_deck(gold, BLANK_AT)
+    fill = m._out(
+        "edit",
+        "I'll make the blank slide 4 a quick guide to which pattern fits which kind of task.",
+        target_positions=[BLANK_AT],
+        deck_spec=m._replaced_spec(blank_deck, {BLANK_AT: FILLED_SLIDE}),
+    )
+    _write(
+        out, "fill_blank_slide", "mutation",
+        "fill the blank slide 4 (position 3) in place: a new slide beside it leaves the blank "
+        "empty and every later slide one place on",
+        {"intent": "edit", "positions": [BLANK_AT], "inserted": []},
+        fill,
+        m._retargeted(fill, [BLANK_AT], m._inserted_spec(blank_deck, {BLANK_AT: FILLED_SLIDE})),
+    )
+    beside = m._out(
+        "edit", "I'll add a one-line takeaway beneath the three stats on the fifth slide.",
+        target_positions=[BESIDE_POS],
+        deck_spec=m._revised_spec(blank_deck, {BESIDE_POS: _beside_brief(blank_deck, BESIDE_POS)}),
+    )
+    _write(
+        out, "edit_beside_blank", "mutation",
+        "edit of the fifth slide (position 4), the slide after the blank slide 4 (position 3): "
+        "change only the fifth slide; filling the blank too builds a slide nobody asked for",
+        {"intent": "edit", "positions": [BESIDE_POS], "inserted": []},
+        beside,
+        m._retargeted(
+            beside, [BLANK_AT, BESIDE_POS],
+            m._replaced_spec(beside["deck_spec"], {BLANK_AT: INVENTED_FILL}),
+        ),
     )
 
 

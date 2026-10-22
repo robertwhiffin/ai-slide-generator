@@ -88,9 +88,12 @@ def _verdict(judge, case: Case, candidate, measures=None) -> tuple[str, str]:
 
 
 def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT, render_fn=None,
-              split: str = "train") -> list[dict]:
+              split: str = "train", case_filter: list[str] | None = None) -> list[dict]:
     kw = split_kwargs(split)
     cases = load_cases(agent_key, **kw)
+    if case_filter:
+        wanted = {str(c) for c in case_filter}
+        cases = [c for c in cases if c.case_id in wanted]
     if not cases:
         return []  # empty pack: no judge_prompt.md needed, nothing to calibrate
     judge = build_judge(agent_key, model=model)

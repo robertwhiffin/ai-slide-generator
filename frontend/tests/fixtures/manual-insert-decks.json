@@ -1,0 +1,47 @@
+{
+  "about": "#314 manual 'insert blank slide' fixtures, read by BOTH frontend/tests/e2e/manual-insert-slide.spec.ts (the mocked POST /api/slides answers with these blanks) and tests/unit/test_manual_insert_e2e_fixture.py (which asserts each blank_html_by_position[p] == blank_slide_shell(slides, p), busy_detail == CONVERSATION_BUSY_DETAIL and blank_spec_entry == BLANK_DECK_SPEC_ENTRY). Edit a value here and the pytest decides whether the mock is still the server; never hand-copy these strings into the spec. Deck W paints its ground on a <section> wrapper (the .slide is transparent); deck I carries it as an inline style on the .slide (unpinned graph deck). On both a bare <div class=\"slide\"></div> would be a transparent root, so the e2e root-background check tells the deck's frame from the fallback.",
+  "busy_detail": "Something is still running on this deck. Wait for it to finish, then try again.",
+  "blank_spec_entry": {
+    "purpose": "",
+    "content_brief": "",
+    "assumes": "",
+    "hands_off": "",
+    "data_references": []
+  },
+  "decks": {
+    "W": {
+      "about": "Section wrapper (pinned design system shape): the ground is on <section>, .slide is absolutely positioned and transparent.",
+      "css": "section { background: rgb(18, 52, 86); color: #fff } .slide { position: absolute; inset: 0 }",
+      "ground": "rgb(18, 52, 86)",
+      "markers": ["A", "B", "C"],
+      "slides": [
+        "<section data-label=\"Ground\"><div class=\"slide\"><h1 data-marker=\"A\">Churn is up</h1></div></section>",
+        "<section data-label=\"Ground\"><div class=\"slide\"><h1 data-marker=\"B\">The signal arrives late</h1></div></section>",
+        "<section data-label=\"Ground\"><div class=\"slide\"><h1 data-marker=\"C\">Fund the pipeline</h1></div></section>"
+      ],
+      "blank_html_by_position": [
+        "<section data-label=\"Ground\"><div class=\"slide\"></div></section>",
+        "<section data-label=\"Ground\"><div class=\"slide\"></div></section>",
+        "<section data-label=\"Ground\"><div class=\"slide\"></div></section>",
+        "<section data-label=\"Ground\"><div class=\"slide\"></div></section>"
+      ]
+    },
+    "I": {
+      "about": "Inline-styled (unpinned graph deck): no deck CSS; the ground is an inline style on each .slide.",
+      "css": "",
+      "ground": "rgb(11, 31, 58)",
+      "markers": ["A", "B", "C"],
+      "slides": [
+        "<div class=\"slide\" style=\"background: rgb(11, 31, 58); color: #fff\"><h1 data-marker=\"A\">Churn is up</h1></div>",
+        "<div class=\"slide\" style=\"background: rgb(11, 31, 58); color: #fff\"><h1 data-marker=\"B\">The signal arrives late</h1></div>",
+        "<div class=\"slide\" style=\"background: rgb(11, 31, 58); color: #fff\"><h1 data-marker=\"C\">Fund the pipeline</h1></div>"
+      ],
+      "blank_html_by_position": [
+        "<div class=\"slide\" style=\"background: rgb(11, 31, 58); color: #fff\"></div>",
+        "<div class=\"slide\" style=\"background: rgb(11, 31, 58); color: #fff\"></div>",
+        "<div class=\"slide\" style=\"background: rgb(11, 31, 58); color: #fff\"></div>",
+        "<div class=\"slide\" style=\"background: rgb(11, 31, 58); color: #fff\"></div>"
+      ]
+    }
+  }
+}

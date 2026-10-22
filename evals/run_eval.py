@@ -112,18 +112,30 @@ def main(argv: list[str] | None = None) -> None:
         # Before any model call: pin host/credentials so the .env's DATABRICKS_* cannot win.
         apply_profile(args.profile)
 
+    case_filter = [c.strip() for c in args.cases.split(",") if c.strip()] if args.cases else None
+
     if args.calibrate:
+        calibrated: set[str] = set()
         for a in agents:
             rows = judge.calibrate(
                 a, model=args.judge_endpoint,
                 render_fn=_calibration_render_fn if a in HTML_ROLES else None,
+                case_filter=case_filter,
                 **split_kwargs(args.split))
+            calibrated.update(r["case_id"] for r in rows)
+            if case_filter and not rows:
+                print(f"{a}: skipped - no case matches --cases {case_filter}")
+                continue
             _print_trust_table(a, rows)
+        unknown = [c for c in case_filter or [] if c not in calibrated]
+        if unknown:
+            # A typo must not silently calibrate nothing (or fewer cases than named).
+            raise SystemExit(
+                f"--cases names no case to calibrate for {agents}: unknown id(s) {unknown}")
         return
 
     if args.agent == "all" and args.config != "v1-baseline":
         raise SystemExit("--agent all requires --config v1-baseline (a YAML config targets one agent)")
-    case_filter = [c.strip() for c in args.cases.split(",") if c.strip()] if args.cases else None
     ran = 0
     for a in agents:
         cfg = _load(a, args.config)

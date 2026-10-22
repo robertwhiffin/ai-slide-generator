@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Plus } from 'lucide-react';
 import {
   DndContext,
   closestCenter,
@@ -34,7 +35,73 @@ interface ThumbnailRibbonProps {
   slideDeck: SlideDeck;
   unseenSlideIndices: Set<number>;
   onReorder: (from: number, to: number) => void;
+  /**
+   * Insert a blank slide at `position` (0..n). Absent for read-only viewers and surfaces with no
+   * deck-change callback: then no insert gap is rendered at all.
+   */
+  onInsert?: (position: number) => void;
+  /** Disables every insert gap (a turn is running, or an insert is already in flight). */
+  insertDisabled?: boolean;
+  /** slide_ids of the slides the viewer just flagged as new (#314): each Thumb shows a "New" chip. */
+  newSlideIds?: ReadonlySet<string>;
 }
+
+interface InsertGapProps {
+  position: number;
+  /** A drag is active: the gap stays mounted and laid out, but is invisible and inert. */
+  dragging: boolean;
+  disabled: boolean;
+  onInsert: (position: number) => void;
+}
+
+/**
+ * The strip between two thumbnails (and before the first / after the last) with a "+" that inserts a
+ * blank slide where the new one will land. A SIBLING of the sortable thumbnail buttons, never nested in
+ * one (a nested button is invalid HTML, and its click would also select that slide).
+ *
+ * Layout: the strip is 8px tall with -8px vertical margins, so together with the ribbon's own gap-2 it
+ * takes no more room than the bare gap did before the strips existed; the thumbnails do not move.
+ *
+ * Hidden during a drag with `invisible pointer-events-none`, NOT unmounted or `display:none`: dnd-kit
+ * measures the sortable rects at drag start, and collapsing the strips then would shift every thumbnail
+ * under the pointer. The drag state must also win over the hover reveal, so the hover rule
+ * (`group-hover:visible`) is simply not applied while dragging.
+ *
+ * `tabIndex={-1}`: the gaps are pointer affordances. The keyboard path is the stage toolbar's
+ * "New slide" (after the current slide); there is no keyboard "insert before slide 1".
+ */
+const InsertGap: React.FC<InsertGapProps> = ({ position, dragging, disabled, onInsert }) => (
+  <div
+    className={[
+      'group relative z-10 -my-2 h-2 shrink-0',
+      dragging ? 'invisible pointer-events-none' : '',
+    ].join(' ')}
+  >
+    <button
+      type="button"
+      tabIndex={-1}
+      data-testid={`ribbon-insert-${position}`}
+      aria-label={`Insert blank slide at position ${position + 1}`}
+      title="Insert blank slide"
+      disabled={disabled}
+      onClick={() => onInsert(position)}
+      className={[
+        // Centred on the strip, except before the first thumbnail: that strip sits in the ribbon's 8px
+        // top padding, so a centred 20px button would poke 6px above the scroll container and be
+        // clipped. There it hangs from the strip's top edge instead (measured in Chrome, #314 Task 6).
+        position === 0 ? 'top-0' : 'top-1/2 -translate-y-1/2',
+        'absolute left-1/2 flex size-5 -translate-x-1/2 items-center justify-center',
+        'rounded-full bg-[#3b82f6] text-white shadow-sm transition-colors hover:bg-[#2563eb]',
+        'disabled:cursor-not-allowed disabled:opacity-50',
+        // Shown on hover of the strip. Idle and mid-drag it is `visibility: hidden`, so it never
+        // swallows clicks aimed at the thumbnail edges around it.
+        dragging ? 'invisible' : 'invisible group-hover:visible focus-visible:visible',
+      ].join(' ')}
+    >
+      <Plus className="size-3" />
+    </button>
+  </div>
+);
 
 interface ThumbProps {
   id: string;
@@ -43,6 +110,8 @@ interface ThumbProps {
   previewDocument: (html: string) => string;
   isCurrent: boolean;
   hasUnseen: boolean;
+  /** Just added (the viewer's new-slide indicator): a ring and a "New" chip until it expires. */
+  isNew: boolean;
   onSelect: (index: number) => void;
 }
 
@@ -53,6 +122,7 @@ const Thumb: React.FC<ThumbProps> = ({
   previewDocument,
   isCurrent,
   hasUnseen,
+  isNew,
   onSelect,
 }) => {
   // useSortable provides setNodeRef for dnd-kit (droppable+draggable combined ref).
@@ -89,13 +159,16 @@ const Thumb: React.FC<ThumbProps> = ({
       type="button"
       data-testid={`ribbon-thumb-${index}`}
       data-current={isCurrent ? 'true' : 'false'}
+      data-new={isNew ? 'true' : undefined}
       aria-current={isCurrent ? 'true' : undefined}
       onClick={() => onSelect(index)}
       className={[
         'relative flex w-full flex-col gap-1 rounded-md border p-1 text-left transition',
         isCurrent
-          ? 'border-[#3b82f6] bg-[#3b82f6]/10 shadow-sm ring-1 ring-[#3b82f6]'
+          ? 'border-[#3b82f6] bg-[#3b82f6]/10 shadow-sm'
           : 'border-border hover:bg-muted/50',
+        // One ring class set, so a new slide's ring never fights the current slide's for precedence.
+        isNew ? 'ring-2 ring-emerald-500' : isCurrent ? 'ring-1 ring-[#3b82f6]' : '',
       ].join(' ')}
     >
       {/* Scaled slide preview: 1280×720 iframe shrunk to fit the ribbon width. */}
@@ -131,6 +204,14 @@ const Thumb: React.FC<ThumbProps> = ({
       {/* Slide label row with unseen indicator. */}
       <div className="flex items-center gap-1 px-1">
         <span className="truncate text-xs text-muted-foreground">Slide {index + 1}</span>
+        {isNew && (
+          <span
+            data-testid={`ribbon-new-${index}`}
+            className="shrink-0 rounded-full bg-emerald-500 px-1.5 text-[10px] font-medium leading-4 text-white"
+          >
+            New
+          </span>
+        )}
         {hasUnseen && (
           // Unseen dot: amber to avoid colour collision with the blue current-slide border.
           <span
@@ -148,8 +229,13 @@ export const ThumbnailRibbon: React.FC<ThumbnailRibbonProps> = ({
   slideDeck,
   unseenSlideIndices,
   onReorder,
+  onInsert,
+  insertDisabled = false,
+  newSlideIds,
 }) => {
   const { currentIndex, setCurrentIndex } = useViewer();
+  // True from drag start to drop/cancel: the insert gaps hide (invisible + inert, still laid out).
+  const [dragging, setDragging] = useState(false);
 
   // Mirror SlidePanel.tsx:83-88 exactly: PointerSensor + KeyboardSensor with
   // sortableKeyboardCoordinates. No modifiers in SlidePanel, so none here either.
@@ -203,6 +289,7 @@ export const ThumbnailRibbon: React.FC<ThumbnailRibbonProps> = ({
   const ids = slideDeck.slides.map((s) => s.slide_id);
 
   const handleDragEnd = (event: DragEndEvent) => {
+    setDragging(false);
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const from = ids.indexOf(String(active.id));
@@ -223,21 +310,43 @@ export const ThumbnailRibbon: React.FC<ThumbnailRibbonProps> = ({
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
+        onDragStart={() => setDragging(true)}
         onDragEnd={handleDragEnd}
+        onDragCancel={() => setDragging(false)}
       >
         <SortableContext items={ids} strategy={verticalListSortingStrategy}>
           {slideDeck.slides.map((slide, index) => (
-            <Thumb
-              key={slide.slide_id}
-              id={slide.slide_id}
-              index={index}
-              slideHtml={slide.html}
-              previewDocument={previewDocument}
-              isCurrent={index === currentIndex}
-              hasUnseen={unseenSlideIndices.has(index)}
-              onSelect={setCurrentIndex}
-            />
+            <React.Fragment key={slide.slide_id}>
+              {/* Gap k sits where slide k will land: before every thumbnail ... */}
+              {onInsert && (
+                <InsertGap
+                  position={index}
+                  dragging={dragging}
+                  disabled={insertDisabled}
+                  onInsert={onInsert}
+                />
+              )}
+              <Thumb
+                id={slide.slide_id}
+                index={index}
+                slideHtml={slide.html}
+                previewDocument={previewDocument}
+                isCurrent={index === currentIndex}
+                hasUnseen={unseenSlideIndices.has(index)}
+                isNew={newSlideIds?.has(slide.slide_id) ?? false}
+                onSelect={setCurrentIndex}
+              />
+            </React.Fragment>
           ))}
+          {/* ... and one after the last (append). */}
+          {onInsert && (
+            <InsertGap
+              position={slideDeck.slides.length}
+              dragging={dragging}
+              disabled={insertDisabled}
+              onInsert={onInsert}
+            />
+          )}
         </SortableContext>
       </DndContext>
     </div>

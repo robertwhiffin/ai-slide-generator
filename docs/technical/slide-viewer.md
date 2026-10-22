@@ -6,7 +6,7 @@ A flip-through viewer that shows one slide at a time, a vertical thumbnail ribbo
 
 ## Stack & Entry Points
 
-- **Components:** `frontend/src/components/SlideViewer/` (five files — see component table below)
+- **Components:** `frontend/src/components/SlideViewer/` (six files — see component table below)
 - **Context:** `frontend/src/contexts/ViewerContext.tsx` — current-slide index, drawer open/height/tab
 - **Types:** `frontend/src/types/finding.ts` — `SlideFinding`, `DrawerCallbacks`
 - **Finding text:** `frontend/src/utils/findingText.ts` — plain-language drawer text, the Apply/Discuss chat text, and the parsers that fold the reviewer's details in chat. Its copy is derived server-side by `src/domain/finding_copy.py`.
@@ -23,9 +23,9 @@ A flip-through viewer that shows one slide at a time, a vertical thumbnail ribbo
 AppLayout
 ├── ChatPanel (32% width, collapsible)          ← chat history, slide generation
 └── SlideViewer (flex-1)
-    ├── ThumbnailRibbon (w-40, fixed left)       ← thumbnails, drag-reorder, unseen dots
+    ├── ThumbnailRibbon (w-40, fixed left)       ← thumbnails, drag-reorder, unseen dots, insert gaps, New chips
     └── [stage column]
-        ├── stage toolbar                        ← verify / edit HTML / delete (edit mode only)
+        ├── stage toolbar                        ← verify / new slide / edit HTML / delete (edit mode only)
         ├── SlideStage (flex-1)                  ← single slide iframe + prev/next arrows
         └── FeedbackDrawer (collapsible bottom)  ← AI findings tabbed shell
 ```
@@ -172,10 +172,11 @@ A reviewer's `message` is written for the fixer and is technical (hex codes, siz
 
 | File | Responsibility |
 |------|----------------|
-| `frontend/src/components/SlideViewer/SlideViewer.tsx` | Public entry point. Wraps `ViewerProvider`. Renders empty state when deck is null or has no slides. Owns keyboard listener, seen-state lifecycle, stage CRUD, presentation-mode handle (`SlideViewerHandle` ref). |
+| `frontend/src/components/SlideViewer/SlideViewer.tsx` | Public entry point. Wraps `ViewerProvider`. Renders empty state when deck is null or has no slides. Owns keyboard listener, seen-state lifecycle, stage CRUD (including the manual insert), the new-slide indicator effect, presentation-mode handle (`SlideViewerHandle` ref). |
 | `frontend/src/components/SlideViewer/SlideStage.tsx` | Renders the single current slide in a sandboxed iframe via `buildSlideDocument`. Handles wheel-paging (threshold + cooldown). Shows prev/next arrow controls and slide position counter. |
-| `frontend/src/components/SlideViewer/ThumbnailRibbon.tsx` | Vertical ribbon of scaled slide thumbnails (each at `134/1280 ≈ 10.5%` scale). Drives current-slide selection on click. Supports drag-reorder via `@dnd-kit`. Shows amber unseen dot per slide. Wheel events scroll the list only. |
+| `frontend/src/components/SlideViewer/ThumbnailRibbon.tsx` | Vertical ribbon of scaled slide thumbnails (each at `134/1280 ≈ 10.5%` scale). Drives current-slide selection on click. Supports drag-reorder via `@dnd-kit`. Shows amber unseen dot per slide, the insert gaps ("+") between thumbnails, and the "New" chip and ring on slides the indicator flags. Wheel events scroll the list only. |
 | `frontend/src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer docked to the bottom of the stage column. One `feedback` tab today; tabbed shell ready for `notes`. Drag-resize handle (pointer capture). Shows per-slide findings led by their plain message, with a per-finding Show details toggle and Apply / Dismiss / Discuss actions. |
+| `frontend/src/components/SlideViewer/newSlides.ts` | Pure half of the new-slide indicator: `diffNewSlides`, `syntheticSlideId`, `NEW_SLIDE_INDICATOR_MS`. |
 | `frontend/src/components/SlideViewer/seenState.ts` | `localStorage` read/write for seen finding IDs. Exports `loadSeen(deckKey)` and `markSeen(deckKey, ids[])`. Enforces `MAX_DECKS = 50` growth bound. |
 | `frontend/src/contexts/ViewerContext.tsx` | Current-slide index (with deck-shrink clamping), next/prev/first/last helpers, drawer open/height/tab. Height clamped to 96–480 px. Persists drawer state to `localStorage`. |
 | `frontend/src/types/finding.ts` | `SlideFinding` and `DrawerCallbacks` type definitions. |
@@ -209,10 +210,41 @@ When the drawer is open on the `feedback` tab and the current slide changes, the
 The stage toolbar (visible only when `readOnly=false`) provides:
 
 - **Verify** — calls `api.verifySlide(sessionId, currentIndex)`, updates the verification badge.
+- **New slide** (`stage-insert-slide`) — inserts a blank slide after the current one: `api.insertSlide(currentIndex + 1, sessionId)` posts to `POST /api/slides` with no HTML, so the server builds the deck's own blank frame (see [Backend Overview](backend-overview.md), "Inserting a blank slide by hand"). The viewer then refetches the deck with `api.getSlides`, hands it up through `onSlideChange`, and selects the new slide (see "New-slide indicator" below).
 - **Edit HTML** — opens `HTMLEditorModal`; on save calls `api.updateSlide(currentIndex, html, sessionId)`, then refreshes the deck.
 - **Delete** — confirms via `ConfirmDialog`, calls `api.deleteSlide(currentIndex, sessionId)`, then refreshes the deck.
 
-All CRUD handlers guard against concurrent edits with a monotonic `deckEditCounterRef` and surface 409 conflicts to the user with a refresh.
+All CRUD handlers guard against concurrent edits with a monotonic `deckEditCounterRef` and surface 409 conflicts to the user with a refresh. A `deckKey` change (a session switch) and unmounting the viewer also move the counter on, so an in-flight refetch never hands the old session's deck to the new one (AppLayout's version gate resets on a switch and would accept it).
+
+**Ribbon "+" gaps.** `ThumbnailRibbon` renders an insert gap before every thumbnail and after the last (`ribbon-insert-0` to `ribbon-insert-n`; gap k inserts at position k, so the new slide lands where the gap is). The "+" shows when the pointer is over the gap. While a drag-reorder is active the gaps are hidden but still laid out (`invisible pointer-events-none`, never unmounted: `@dnd-kit` measures the sortable rects at drag start, and collapsing the gaps then would shift every thumbnail under the pointer). The gaps are `tabIndex={-1}`: they are pointer affordances. The keyboard path is the toolbar's **New slide**, which inserts after the current slide, so there is no keyboard way to insert before slide 1.
+
+**Who sees them, and when they are off.** Both controls are for editors only: they render when `readOnly` is false and `onSlideChange` is supplied, so they are hidden for read-only viewers, view-only access, a version preview, and anyone who does not hold the editing lock (AppLayout's `isReadOnly`). They are disabled while a turn is running (`insertDisabled`, which AppLayout sets to `isGenerating`) or while an insert is in flight (`inserting` state, plus a synchronous `insertingRef` so two clicks in one tick make one insert).
+
+**Refusals.** The server can refuse an insert with a 409 (something is still running on the deck, or the deck changed under the insert) or a 423 (another user holds the editing lock). The viewer shows the server's own sentence in a toast and refetches the deck so the view is not stale; any other failure of the insert request shows "Failed to insert slide". Once the insert has succeeded the slide is in the deck, so a failed refetch is never reported as a failed insert (the user would click again and get a second blank): the refetch is retried once, and if that fails too the viewer shows "Slide added. Refresh to see it." (an `info` toast), keeps the inserted slide's id pending so the next deck that holds it selects it, and never re-sends the insert. An insert superseded by a later deck edit, a session switch or an unmount is dropped, like the other handlers'.
+
+### New-slide indicator
+
+Slides that just appeared are marked so the eye finds them: a green "New" chip on the thumbnail (`ribbon-new-${index}`), a ring around it, and a screen-reader status line (`new-slide-status`, "Slide 4 added" or "Slides 2, 4 added"). It runs for every way a slide can appear: a manual insert, the assistant's insert, a duplicate, and a deck growing under a read-only viewer. Nothing in it looks at `readOnly`.
+
+**What counts as new.** `diffNewSlides(baseline, slides)` (`newSlides.ts`, pure) is the only place that decides. The baseline is the `slide_id`s of the last server deck the viewer saw.
+- A mid-turn view (built from `slide_ready` events, with synthetic `build-N` ids) flags nothing and does not replace the baseline, so the end-of-turn refetch is diffed against the deck from before the turn.
+- With no baseline (first load) or an empty one (a first generation, 0 to N slides), nothing is flagged and the deck becomes the baseline. A `deckKey` change (a session switch) resets the baseline in the same effect, before diffing, and drops any pending selection and the current chips: nothing is new in a deck you have only just switched to.
+- Only pure growth flags: every baseline id is still present, and the new ids are flagged in deck order. If a baseline id is gone (a replace or a shrink), nothing is flagged. Null or empty ids are ignored.
+
+**Selection.** One effect in `SlideViewer`, after the new deck has rendered (the viewer's `setCurrentIndex` clamps to the slide count of the render it was created in, so selecting from the insert handler would clamp an append to the old last slide). The slide a manual insert just created wins whenever it is in the deck: its `slide_id` comes from the insert response and is held in a pending ref that is set only once the refetched deck is handed up (or once the refetch has failed twice, so a later deck can select it); a superseded insert never sets it. Otherwise the first new slide is selected.
+
+**How long.** The chips, ring and status line last `NEW_SLIDE_INDICATOR_MS` (5 s) from the latest growth. The timer is cleared when the viewer unmounts.
+
+**Both transports.** SSE and polling both deliver mid-turn slides through `handleSlideReady` (synthetic ids) and both end in the same `complete` refetch, so the indicator behaves the same on each.
+
+**An errored turn.** `ChatPanel` refetches the deck after a failed turn (`refetchDeckAfterError`) and hands it to its optional `onDeckRefetched` prop, so the viewer does not keep a stale mid-turn view. It is called from the SSE `error` event and from the transport's `onError` callback, because polling, the production transport, never emits an `error` event. AppLayout wires it to `setSlideDeckGated(deck, deck.version)` and nothing else; it is deliberately not `onSlidesGenerated`, the success path (survey trigger, "saved just now", versions reload). A per-slide mid-turn error notice (an `error` event carrying `metadata.position`) does not refetch: the turn carries on to `complete`, whose own refetch is the right one. A newer send or a session switch drops the result, and a failed or empty refetch changes nothing.
+
+### Blank slides in the frontend
+
+A blank slide is decided structurally by `frontend/src/services/blankSlide.ts` (`isBlankSlideHtml` for a row, `isBlankSlideSpec` for a spec entry), the twin of the backend predicates. `tests/fixtures/blank_slide_cases.json` is the case table both languages are tested against.
+- **Auto-verification** skips a blank slide (`useAutoVerification`, judged on the slide's current HTML): there is nothing on it to check against an empty brief. A blank the assistant later fills in place is verified then.
+- **Spec view** labels a blank entry "Blank slide" (`spec-slide-blank-${position}`) in place of its empty purpose and brief, which would read as a broken plan.
+- **Spec export** prints "Blank slide." in place of the entry's Purpose and Content brief lines. The view and the export use the same predicate, so they always agree on which slides are blank.
 
 ---
 

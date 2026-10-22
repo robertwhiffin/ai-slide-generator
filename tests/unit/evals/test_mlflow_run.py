@@ -973,3 +973,132 @@ def test_run_sweep_contract_assessment_rationale_contains_validation_error(monke
     for location in ("\nposition\n  Field required", "\nhtml\n  Field required",
                      "\nzzz_not_a_field_marker\n  Extra inputs are not permitted"):
         assert location in rationale
+
+
+# ---------------------------------------------------------------------------
+# #314 Task 8 (D10): the insert scorer gets the reference and the current spec
+#
+# Names fixed here: ``build_dataset`` adds ``expectations["current_deck_spec"]``
+# (the payload's ``current_deck_spec``) for an architect case that has a deck,
+# and omits the key otherwise. The ``expected_category`` wrapper calls
+# ``det.expected_category_score(agent_key, structured, expect,
+# reference=expectations.get("reference"),
+# current_deck_spec=expectations.get("current_deck_spec"))``.
+# ---------------------------------------------------------------------------
+
+def _ins_slide(token, position):
+    name, *rewritten = token.split("~")
+    slide = {
+        "position": position, "purpose": f"{name} purpose", "content_brief": f"{name} brief",
+        "assumes": f"{name} assumes", "hands_off": f"{name} hands off",
+        "data_references": [], "slide_type": None, "template_section_index": None,
+    }
+    for field in rewritten:
+        slide[field] = f"{slide[field]} (rewritten)"
+    return slide
+
+
+def _ins_spec(tokens):
+    return {
+        "title": "T", "audience": "Leads", "purpose": "Decide", "argument": "HTML wins",
+        "call_to_action": "Pilot it", "narrative_arc": ["Problem", "Evidence", "Verdict"],
+        "design_contract": {"design_system_id": 7, "template_id": None, "slide_style_id": None},
+        "resolved_data": {"synthesis": "s", "figures": [], "gaps": []},
+        "slides": [_ins_slide(t, i) for i, t in enumerate(tokens)],
+    }
+
+
+def _ins_out(tokens, targets):
+    return {"intent": "edit", "message": "I'll add it.", "deck_spec": _ins_spec(tokens),
+            "data_request": None, "target_positions": list(targets),
+            "proposed_design_contract": None}
+
+
+def _architect_insert_case(cid="add_one"):
+    """Current deck A B C; add X after A and rewrite C (now at 3)."""
+    return Case(
+        cid, "architect", "mutation", True, "f",
+        payload={"message": "Add a slide after slide 1 and rewrite the last slide",
+                 "current_deck_spec": _ins_spec(["A", "B", "C"])},
+        reference=_ins_out(["A", "X", "B", "C~content_brief"], [1, 3]),
+        expect={"intent": "edit", "positions": [1, 3], "inserted": [1]},
+    )
+
+
+def _deckless_architect_case(cid="first_build"):
+    return Case(cid, "architect", "positive", False, "f",
+                payload={"message": "Build me a deck", "current_deck_spec": None},
+                reference={"intent": "build"}, expect={"intent": "build"})
+
+
+def test_build_dataset_carries_current_deck_spec_only_for_an_architect_case_with_a_deck():
+    with_deck = _architect_insert_case("with_deck")
+    deckless = _deckless_architect_case("deckless")
+    keyless = Case("keyless", "architect", "positive", False, "f",
+                   payload={"message": "hi"}, reference={"intent": "discuss"},
+                   expect={"intent": "discuss"})
+    # A non-architect payload that happens to carry a deck still gets no key:
+    # only the architect insert scorer reads it.
+    other_role = Case("other_role", "deck_reviewer", "positive", True, "f",
+                      payload={"current_deck_spec": _ins_spec(["A", "B"])},
+                      reference={}, expect={"criteria": []})
+    rows = mlflow_run.build_dataset(
+        [with_deck, deckless, keyless, other_role, _builder_case("b"),
+         _case("r", {"criteria": []})], repeats=2)
+    assert len(rows) == 12
+    for r in rows:
+        exp = r["expectations"]
+        if r["inputs"]["case_id"] == "with_deck":
+            assert exp["current_deck_spec"] == with_deck.payload["current_deck_spec"]
+            assert exp["reference"] == with_deck.reference
+        else:
+            assert "current_deck_spec" not in exp, r["inputs"]["case_id"]
+        assert set(exp).isdisjoint(SCORER_NAMES), set(exp) & SCORER_NAMES
+
+
+def test_expected_category_scorer_scores_an_insert_with_the_reference_and_current_spec(monkeypatch):
+    _patch_judge(monkeypatch, StubJudge(lambda o, e: "pass"))
+    c = _architect_insert_case()
+    _patch_cases(monkeypatch, [c])
+    row = _row(c)
+    s = _scorer(mlflow_run.build_scorers("architect", judge_endpoint=JUDGE_EP), "expected_category")
+    kw = dict(inputs=row["inputs"], expectations=row["expectations"])
+
+    exact = s.run(outputs=_outputs(c.reference), **kw)
+    assert exact.value == "pass", exact.rationale
+
+    # targets in the OLD numbering (C was slide 2): production ignores them
+    old_numbering = s.run(
+        outputs=_outputs(_ins_out(["A", "X", "B", "C~content_brief"], [1, 2])), **kw)
+    assert old_numbering.value == "pass", old_numbering.rationale
+    assert "production ignores them on an insert" in old_numbering.rationale
+
+    # the right targets, but the requested rewrite of C is missing from the spec
+    forgot = s.run(outputs=_outputs(_ins_out(["A", "X", "B", "C"], [1, 3])), **kw)
+    assert forgot.value == "fail"
+    assert forgot.rationale.startswith("Insert: ") and "revised" in forgot.rationale
+
+
+def test_expected_category_scorer_passes_reference_and_current_spec_by_keyword(monkeypatch):
+    _patch_judge(monkeypatch, StubJudge(lambda o, e: "pass"))
+    with_deck, deckless = _architect_insert_case(), _deckless_architect_case()
+    _patch_cases(monkeypatch, [with_deck, deckless])
+    seen = []
+
+    def spy(agent_key, structured, expect, **kwargs):
+        seen.append((agent_key, expect, kwargs))
+        return True, "spy"
+
+    monkeypatch.setattr(mlflow_run.det, "expected_category_score", spy)
+    s = _scorer(mlflow_run.build_scorers("architect", judge_endpoint=JUDGE_EP), "expected_category")
+    for c in (with_deck, deckless):
+        row = _row(c)
+        assert s.run(inputs=row["inputs"], outputs=_outputs({"intent": "edit"}),
+                     expectations=row["expectations"]).value == "pass"
+    assert seen == [
+        ("architect", with_deck.expect,
+         {"reference": with_deck.reference,
+          "current_deck_spec": with_deck.payload["current_deck_spec"]}),
+        ("architect", deckless.expect,
+         {"reference": deckless.reference, "current_deck_spec": None}),
+    ]

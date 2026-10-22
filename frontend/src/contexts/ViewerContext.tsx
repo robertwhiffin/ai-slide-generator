@@ -70,11 +70,16 @@ export const ViewerProvider: React.FC<{ slideCount: number; children: React.Reac
   }, [drawerOpen, drawerHeight, activeTab]);
 
   // Keep the index addressable when the deck shrinks (delete/reorder).
+  //
+  // Functional on purpose: this effect runs AFTER its children's effects in the same commit, so a
+  // child that selected a slide for the new deck (the viewer's pending selection after a manual
+  // insert, #314) has already queued its setIndex. A plain `setIndex(slideCount - 1)` computed from
+  // this render's stale `currentIndex` would overwrite that choice; clamping the latest value keeps it.
   useEffect(() => {
     if (slideCount === 0) {
       setIndex(0);
     } else if (currentIndex > slideCount - 1) {
-      setIndex(slideCount - 1);
+      setIndex((i) => Math.min(i, slideCount - 1));
     }
   }, [slideCount, currentIndex]);
 

@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Edit3, LayoutGrid, Loader2, Trash2 } from 'lucide-react';
+import { Edit3, LayoutGrid, Loader2, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { SlideDeck } from '../../types/slide';
@@ -18,16 +18,28 @@ import { SlideStage } from './SlideStage';
 import { ThumbnailRibbon } from './ThumbnailRibbon';
 import { FeedbackDrawer } from './FeedbackDrawer';
 import { loadSeen, markSeen } from './seenState';
+import { diffNewSlides, NEW_SLIDE_INDICATOR_MS } from './newSlides';
 import { HTMLEditorModal } from '../SlidePanel/HTMLEditorModal';
 import { VerificationBadge } from '../SlidePanel/VerificationBadge';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
+import { useToast } from '../../contexts/ToastContext';
 import { useAutoVerification } from '../../hooks/useAutoVerification';
 
 interface SlideContext {
   indices: number[];
   slide_htmls: string[];
+}
+
+/** Stable empty set: clearing the chips with it is a no-op render when nothing was flagged. */
+const NO_FRESH_IDS: ReadonlySet<string> = new Set();
+
+function stopTimer(timer: { current: ReturnType<typeof setTimeout> | null }) {
+  if (timer.current !== null) {
+    clearTimeout(timer.current);
+    timer.current = null;
+  }
 }
 
 interface SlideViewerProps {
@@ -43,6 +55,8 @@ interface SlideViewerProps {
   lockedBy?: string | null;
   onVerificationComplete?: () => void;
   sessionId?: string | null;
+  /** Disables the insert controls (AppLayout passes `isGenerating`: a turn is running on this deck). */
+  insertDisabled?: boolean;
 }
 
 export interface SlideViewerHandle {
@@ -89,8 +103,9 @@ const ViewerBody = forwardRef<
 >(({
   slideDeck, deckKey, findings, callbacks, onReorder,
   onSlideChange, onSendMessage, readOnly = false, lockedBy = null,
-  onVerificationComplete, sessionId,
+  onVerificationComplete, sessionId, insertDisabled = false,
 }, ref) => {
+  const { showToast } = useToast();
   const {
     currentIndex, next, prev, first, last, activeTab, drawerOpen,
     setCurrentIndex, setDrawerOpen, setActiveTab,
@@ -136,6 +151,19 @@ const ViewerBody = forwardRef<
   const [staleSlideIds, setStaleSlideIds] = useState<Set<string>>(new Set());
   const [isPresentationMode, setIsPresentationMode] = useState(false);
   const deckEditCounterRef = useRef(0);
+  // Manual "insert blank slide": `inserting` drives the disabled state, the ref is the synchronous
+  // re-entry guard (two clicks inside one tick both see the pre-render state).
+  const [inserting, setInserting] = useState(false);
+  const insertingRef = useRef(false);
+  // The slide_id of the slide a manual insert just created. Set only once the insert's refetched deck
+  // is about to be handed up, consumed by the effect below after that deck has rendered.
+  const pendingSelectionRef = useRef<string | null>(null);
+  // New-slide indicator (#314 D10). The baseline is the last SERVER deck's slide_ids (mid-turn views
+  // with synthetic ids never replace it); `lastDeckKeyRef` detects a session switch.
+  const baselineRef = useRef<ReadonlySet<string> | null>(null);
+  const lastDeckKeyRef = useRef(deckKey);
+  const [freshIds, setFreshIds] = useState<ReadonlySet<string>>(NO_FRESH_IDS);
+  const freshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const slideDeckRef = useRef(slideDeck);
   slideDeckRef.current = slideDeck;
 
@@ -162,6 +190,62 @@ const ViewerBody = forwardRef<
     // rather than a timer so the control stays disabled for the whole run.
     setIsOptimizing(false);
   }, [slideDeck]);
+
+  // The new-slide indicator and the selection that goes with it, in ONE effect so the order is fixed.
+  // Runs after the deck has rendered (a child effect, before ViewerProvider's own): `setCurrentIndex`
+  // clamps to the slide count of the render it was created in, so selecting from the insert handler
+  // would clamp an append (index n) to the old last slide.
+  //   1. A deckKey change (session switch, e.g. to a duplicate sharing slide_ids) resets the baseline
+  //      BEFORE diffing, drops a pending selection and the current chips: nothing is new in a deck we
+  //      have only just switched to. It also supersedes every in-flight CRUD refetch (insert, delete,
+  //      update, auto-verify): the old session's deck must not reach the new one, and AppLayout's
+  //      version gate, reset on a switch, would accept it.
+  //   2. Diff against the baseline (newSlides.ts). Mid-turn views and non-growth flag nothing.
+  //   3. Select: the slide a manual insert just created whenever it is in the deck (matched by slide_id,
+  //      whatever else the refetch changed; cleared only once found), else the first new slide.
+  //   4. Chips for every new slide, for NEW_SLIDE_INDICATOR_MS from the latest growth.
+  useEffect(() => {
+    if (deckKey !== lastDeckKeyRef.current) {
+      lastDeckKeyRef.current = deckKey;
+      deckEditCounterRef.current += 1;
+      baselineRef.current = null;
+      pendingSelectionRef.current = null;
+      stopTimer(freshTimerRef);
+      setFreshIds(NO_FRESH_IDS);
+    }
+
+    const { baseline, fresh } = diffNewSlides(baselineRef.current, slideDeck.slides);
+    baselineRef.current = baseline;
+
+    let selectId: string | null = null;
+    const pendingId = pendingSelectionRef.current;
+    if (pendingId && slideDeck.slides.some((s) => s.slide_id === pendingId)) {
+      pendingSelectionRef.current = null;
+      selectId = pendingId;
+    } else if (fresh.length > 0) {
+      selectId = fresh[0];
+    }
+    if (selectId !== null) {
+      setCurrentIndex(slideDeck.slides.findIndex((s) => s.slide_id === selectId));
+    }
+
+    if (fresh.length > 0) {
+      stopTimer(freshTimerRef);
+      setFreshIds(new Set(fresh));
+      freshTimerRef.current = setTimeout(() => {
+        freshTimerRef.current = null;
+        setFreshIds(NO_FRESH_IDS);
+      }, NEW_SLIDE_INDICATOR_MS);
+    }
+  }, [slideDeck, deckKey, setCurrentIndex]);
+
+  // No timer outlives the viewer.
+  useEffect(() => () => stopTimer(freshTimerRef), []);
+
+  // Nor does an in-flight CRUD refetch: unmounting supersedes it, as a later deck edit does.
+  useEffect(() => () => {
+    deckEditCounterRef.current += 1;
+  }, []);
 
   // When the deck changes, reload persisted seen-state and clear transient dismissals.
   // dismissed must also reset: a finding dismissed in deck A must not suppress a
@@ -278,6 +362,65 @@ const ViewerBody = forwardRef<
       } else {
         alert('Failed to delete slide');
       }
+    }
+  };
+
+  // Insert a blank slide at `position` (0..n). The server builds the deck's blank shell; the viewer
+  // refetches and hands the refetched deck up, like delete/update. Same drop-if-superseded rule as
+  // those handlers: a later deck edit (or a session switch, or unmount) makes this refetch stale.
+  const handleInsertSlide = async (position: number) => {
+    if (readOnly || !sessionId || !onSlideChange || insertingRef.current) return;
+    insertingRef.current = true;
+    setInserting(true);
+    const editId = ++deckEditCounterRef.current;
+    try {
+      let inserted: Awaited<ReturnType<typeof api.insertSlide>>;
+      try {
+        inserted = await api.insertSlide(position, sessionId);
+      } catch (error) {
+        console.error('Failed to insert slide:', error);
+        const status = error instanceof Error && 'status' in error
+          ? (error as { status: unknown }).status
+          : undefined;
+        if (status === 409 || status === 423) {
+          // Busy / deck changed / locked: the server's own sentence says what to do. Refetch so the
+          // view is not stale.
+          showToast((error as Error).message, 'error');
+          try {
+            await refreshDeck();
+          } catch (refreshError) {
+            console.error('Failed to refresh after insert refusal:', refreshError);
+          }
+        } else {
+          showToast('Failed to insert slide', 'error');
+        }
+        return;
+      }
+
+      // The slide is in the deck from here on. A failed refetch must not read as a failed insert: the
+      // user would click again and get a second blank. Retry the refetch once; never re-send the insert.
+      let result: Awaited<ReturnType<typeof api.getSlides>> | null = null;
+      for (let attempt = 1; attempt <= 2 && result === null; attempt += 1) {
+        try {
+          result = await api.getSlides(sessionId);
+        } catch (refetchError) {
+          console.error(`Failed to refetch the deck after an insert (attempt ${attempt} of 2):`, refetchError);
+        }
+      }
+      if (deckEditCounterRef.current !== editId) return;
+      if (result === null) {
+        // Keep the pending selection: the next deck that holds the slide selects it.
+        pendingSelectionRef.current = inserted.inserted_slide_id ?? null;
+        showToast('Slide added. Refresh to see it.', 'info');
+      } else if (result.slide_deck) {
+        // Only now, immediately before the deck goes up: a superseded insert never leaves a pending
+        // id behind, and an unrelated deck arriving earlier cannot consume it.
+        pendingSelectionRef.current = inserted.inserted_slide_id ?? null;
+        onSlideChange(result.slide_deck);
+      }
+    } finally {
+      insertingRef.current = false;
+      setInserting(false);
     }
   };
 
@@ -406,8 +549,18 @@ const ViewerBody = forwardRef<
 
   const currentSlide = slideDeck.slides[currentIndex];
 
+  // 1-based numbers of the slides still flagged new, for the screen-reader line.
+  const freshNumbers = slideDeck.slides.flatMap((s, i) => (freshIds.has(s.slide_id) ? [i + 1] : []));
+
   return (
     <div data-testid="slide-viewer" className="flex h-full min-h-0 flex-1">
+      {freshNumbers.length > 0 && (
+        <span role="status" className="sr-only" data-testid="new-slide-status">
+          {freshNumbers.length === 1
+            ? `Slide ${freshNumbers[0]} added`
+            : `Slides ${freshNumbers.join(', ')} added`}
+        </span>
+      )}
       {/* Delete confirm dialog */}
       <ConfirmDialog
         open={showDeleteConfirm}
@@ -444,6 +597,9 @@ const ViewerBody = forwardRef<
         slideDeck={slideDeck}
         unseenSlideIndices={unseenSlideIndices}
         onReorder={onReorder}
+        onInsert={readOnly || !onSlideChange ? undefined : handleInsertSlide}
+        insertDisabled={insertDisabled || inserting}
+        newSlideIds={freshIds}
       />
       {/* min-w-0 is load-bearing: a flex item defaults to min-width:auto, so this
           column refused to shrink below its content width and overflowed past the
@@ -498,6 +654,22 @@ const ViewerBody = forwardRef<
               )}
               {!readOnly && (
                 <>
+                  {onSlideChange && (
+                    <Tooltip text="New slide after this one">
+                      <Button
+                        data-testid="stage-insert-slide"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleInsertSlide(currentIndex + 1)}
+                        disabled={insertDisabled || inserting}
+                        className="h-7 gap-1 px-2 text-xs"
+                        aria-label="New slide after this one"
+                      >
+                        <Plus className="size-3.5" />
+                        New slide
+                      </Button>
+                    </Tooltip>
+                  )}
                   <Tooltip text="Edit slide HTML">
                     <Button
                       data-testid="stage-edit-slide"

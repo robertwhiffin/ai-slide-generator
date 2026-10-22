@@ -5,11 +5,13 @@
  *   • content_hash dedupe via autoVerifyTriggeredRef (never re-verify the same hash)
  *   • deckEditCounterRef / editId staleness check (discard if deck mutated mid-flight)
  *   • isAutoVerifying re-entry guard (only one batch runs at a time)
+ *   • blank slides (isBlankSlideHtml on the slide's current html) are never sent for verification
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { SlideDeck } from '../types/slide';
 import { api } from '../services/api';
+import { isBlankSlideHtml } from '../services/blankSlide';
 import { useToast } from '../contexts/ToastContext';
 
 interface UseAutoVerificationOptions {
@@ -165,6 +167,10 @@ export function useAutoVerification({
       .filter(({ slide, contentHash }) => {
         if (slide.verification) return false;
         if (!contentHash) return false;
+        // A blank slide (the bare fallback or a deck-derived shell) has a hash and no verdict, like a
+        // freshly built slide, but there is nothing on it to verify against its (empty) brief. Judged on
+        // the slide's CURRENT html, so a blank the agent later fills in place is verified then.
+        if (isBlankSlideHtml(slide.html)) return false;
         if (autoVerifyTriggeredRef.current.has(contentHash)) return false;
         return true;
       });
