@@ -8,6 +8,7 @@ its scripts are automatically replaced with it - no separate cleanup needed.
 """
 
 import contextvars
+import copy
 import logging
 import queue
 import re
@@ -44,6 +45,7 @@ from src.domain.conversation_turns import turn_message_ids
 from src.domain.deck_spec_slides import (
     BLANK_DECK_SPEC_ENTRY,
     BLANK_SLIDE_HTML as BLANK_SLIDE_HTML,
+    blank_slide_shell,
     renumber_spec_slides,
 )
 from src.domain.slide import Slide, has_slide_wrapper
@@ -68,6 +70,7 @@ from src.utils.ds_asset_utils import (
     substitute_ds_asset_placeholders,
 )
 from src.utils.image_utils import substitute_deck_dict_images, substitute_image_placeholders
+from src.utils.slide_hash import compute_slide_hash
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,8 @@ logger = logging.getLogger(__name__)
 # src.domain.deck_spec_slides): contiguous with its neighbours (`DeckSpec.slide_at`
 # depends on that) and deliberately undescribed.  The spliced entry is the blank's
 # description; inventing a purpose here would put words in the architect's mouth.
+# SessionManager.insert_slide splices it, in the same transaction as the rows; this
+# alias stays so there is one definition and callers that import it from here work.
 _BLANK_DECK_SPEC_ENTRY = BLANK_DECK_SPEC_ENTRY
 
 
@@ -3933,13 +3938,30 @@ class ChatService:
         *,
         html: Optional[str] = None,
         expected_version: Optional[int] = None,
+        inserted_by: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Insert a new slide at *position*, shifting every higher slide up.
 
-        Follows ``duplicate_slide``'s shape (insert, ``_reindex_slide_ids``,
-        ``save_slide_deck``, ONE save point) and adds the deck-spec half: the spec
-        gains an entry for the new position and every entry above it shifts, so
-        spec positions stay contiguous and keep describing the right slides.
+        The write is ONE transaction in :meth:`SessionManager.insert_slide`: the
+        rows (moved with the exact old-row map, so every existing slide keeps its
+        identity, attribution, verdict and fragment), the deck spec's blank entry,
+        the deck columns, one version bump and the evidence.  This method plans
+        the insert against a COPY of the cached deck and hands the writer the rows
+        it planned against (``expected_rows``): a cache that has drifted from the
+        database is a ``SlideRowsChangedError`` (a 409 at the route) and writes
+        nothing, never a write-back of the stale deck.
+
+        WHAT THE NEW SLIDE IS
+        ---------------------
+        With *html* it is stored verbatim.  Without it, it is the deck's blank
+        shell (:func:`blank_slide_shell` over this deck's slides at the landing
+        position): the deck's own frame with nothing on it, so it looks like a
+        blank slide of THIS deck.  Its ``slide_id`` is minted here, and it is
+        stamped with the current user and one explicit ``created_at`` /
+        ``modified_at``: the writer fabricates no timestamps, so a slide inserted
+        while the username lookup fails still carries its creation time.  The
+        other slides' ids are left alone (no reindex): an id-less legacy row stays
+        id-less, and the writer's map depends on it.
 
         WHICH LAYER OWNS THE OUT-OF-RANGE CLAMP
         ---------------------------------------
@@ -3952,27 +3974,46 @@ class ChatService:
         (``insert(-1, x)`` lands second-to-last, not last).  A negative position is
         therefore rejected rather than clamped: it almost certainly means the
         caller computed it wrongly, and quietly inserting somewhere else is worse
-        than a 400.
+        than a 400.  The check comes BEFORE ``landed`` and the shell are computed:
+        ``min(-1, n)`` is -1, which would feed the shell a negative scan index.
 
-        ``landed_at`` is computed BEFORE the insert precisely because of that
-        clamp — after it, ``position`` may not be where the slide actually is, and
-        the deck-spec entry has to go where the slide really landed.
+        ``landed`` is computed BEFORE the insert precisely because of that clamp —
+        after it, ``position`` may not be where the slide actually is, and the
+        shell is derived for where the slide really goes.
+
+        THE CACHE
+        ---------
+        The cached deck is never mutated before the write (the insert is built on a
+        ``copy.deepcopy``), and it is invalidated on EVERY exit, so a refused write
+        leaves no ghost slide in this worker's cache and a stale-rows 409 heals on
+        the next try.  After a successful write the deck is reloaded from the
+        database, and that reloaded deck is what the save point snapshots and the
+        response carries.
 
         Args:
             session_id: Session ID.  A contributor session resolves to its deck
                 owner in the layers below, exactly as every other mutation does.
             position: 0-based position to insert at.  Beyond the end appends.
             html: HTML for the new slide.  Must carry a ``<div class="slide">``
-                wrapper.  Omitted, an empty slide is inserted for a human or the
-                architect to fill.
+                wrapper.  Omitted, the deck's blank shell is inserted for a human
+                or the architect to fill.
             expected_version: If provided, reject the write when the deck has moved on.
+            inserted_by: The editor, for the ``slide_inserted`` usage event; None
+                writes none.
 
         Returns:
-            Updated slide deck dictionary.
+            The reloaded slide deck dictionary plus ``inserted_slide_id`` and
+            ``inserted_position`` (where the slide landed), which the viewer uses
+            to select the slide it just inserted.
 
         Raises:
             ValueError: If no slide deck exists, position is negative, or the
                 supplied HTML has no slide wrapper.
+            VersionConflictError: *expected_version* is stale.
+            SlideRowsChangedError: The committed rows are not the rows this insert
+                planned against (the cache was stale).
+            ArcReviewInFlightError: The deck's arc review holds a live claim.
+            DeckBusyError: A turn holds another session of this deck.
         """
         current_deck = self._get_or_load_deck(session_id)
         if not current_deck:
@@ -3981,14 +4022,34 @@ class ChatService:
         if position < 0:
             raise ValueError(f"Invalid slide position: {position}")
 
-        slide_html = html if html is not None else BLANK_SLIDE_HTML
+        # Where the slide will ACTUALLY be, given the domain's clamp.
+        landed = min(position, len(current_deck.slides))
+
+        slide_html = (
+            html
+            if html is not None
+            else blank_slide_shell([s.html for s in current_deck.slides], landed)
+        )
         if not has_slide_wrapper(slide_html):
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
-        # Where the slide will ACTUALLY be, given the domain's clamp.
-        landed_at = min(position, len(current_deck.slides))
+        # The rows this insert plans against, read off the cached deck BEFORE the
+        # copy: the writer re-reads the committed rows and refuses (409) unless
+        # they are exactly these.  The cached html equals the row's html.
+        expected_rows = [
+            (s.slide_id, compute_slide_hash(s.html or "")) for s in current_deck.slides
+        ]
 
-        new_slide = Slide(html=slide_html)
+        # Never mutate the cached deck before the write: build on a copy.
+        working = copy.deepcopy(current_deck)
+
+        created = datetime.utcnow().isoformat() + "Z"
+        new_slide = Slide(
+            html=slide_html,
+            slide_id=str(uuid.uuid4()),
+            created_at=created,
+            modified_at=created,
+        )
         try:
             _user = get_current_username()
         except Exception:
@@ -3996,36 +4057,42 @@ class ChatService:
         if _user:
             new_slide.stamp_created(_user)
 
-        current_deck.insert_slide(new_slide, position)
+        working.insert_slide(new_slide, position)
 
-        self._reindex_slide_ids(current_deck)
-
-        # Persist to database
-        deck_dict = current_deck.to_dict()
+        deck_dict = working.to_dict()
         session_manager = get_session_manager()
-        save_result = session_manager.save_slide_deck(
-            session_id=session_id,
-            title=current_deck.title,
-            html_content=current_deck.knit(),
-            scripts_content=current_deck.scripts,
-            slide_count=len(current_deck.slides),
-            deck_dict=deck_dict,
-            expected_version=expected_version,
-            mutation=session_manager.deck_mutation_context(
+        try:
+            write_result = session_manager.insert_slide(
                 session_id,
-                operation="insert_slide",
-                object_type="deck",
-                object_id=new_slide.slide_id,
-            ),
-        )
-        self._record_deck_version(session_id, save_result)
+                position,
+                slide=deck_dict["slides"][landed],
+                expected_rows=expected_rows,
+                deck_dict=deck_dict,
+                title=working.title,
+                html_content=working.knit(),
+                scripts_content=working.scripts,
+                mutation=session_manager.deck_mutation_context(
+                    session_id,
+                    operation="insert_slide",
+                    object_type="deck",
+                    object_id=new_slide.slide_id,
+                ),
+                expected_version=expected_version,
+                inserted_by=inserted_by,
+            )
+        finally:
+            # On every exit: a refused write leaves no ghost, and after a commit
+            # the next load is the database's deck, not a plan.
+            self._invalidate_deck_cache(session_id)
 
-        # The deck spec's slide list has to move with the deck's.  AFTER
-        # save_slide_deck, never before: the spec write bumps deck.version, which
-        # would make the caller's expected_version stale and 409 a legitimate save.
-        spec_result = self._insert_deck_spec_slide(session_id, landed_at)
-        if spec_result:
-            self._record_deck_version(session_id, spec_result)
+        # Prefer the writer's position: it is where the row actually landed.
+        landed_at = write_result.get("position", landed)
+
+        reloaded: Optional[SlideDeck] = None
+        try:
+            reloaded = self._get_or_load_deck(session_id)
+        except Exception as e:
+            logger.warning(f"Failed to reload deck after insert_slide: {e}")
 
         # ONE save point for the whole operation, after the work commits.
         # VERSION_LIMIT evicts the OLDEST version, so a save point per shifted
@@ -4034,7 +4101,7 @@ class ChatService:
             self.create_save_point(
                 session_id=session_id,
                 description=f"Inserted slide {landed_at + 1}",
-                deck=current_deck,
+                deck=reloaded if reloaded is not None else working,
             )
         except Exception as e:
             logger.warning(f"Failed to create save point (insert_slide): {e}")
@@ -4044,13 +4111,16 @@ class ChatService:
             extra={
                 "requested_position": position,
                 "position": landed_at,
-                "new_count": len(current_deck.slides),
+                "new_count": write_result.get("slide_count", len(working.slides)),
                 "session_id": session_id,
             },
         )
 
-        deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
-        return deck_dict
+        result = reloaded.to_dict() if reloaded is not None else deck_dict
+        result, _ = self._substitute_images_for_response(result, session_id=session_id)
+        result["inserted_slide_id"] = new_slide.slide_id
+        result["inserted_position"] = landed_at
+        return result
 
     def _rewrite_deck_spec_slides(
         self,
@@ -4079,9 +4149,13 @@ class ChatService:
         --------------------------------------
         Four hand-copied row-writers diverging is the defect class the previous
         workstream's final review found, and C1 is itself an instance of it — insert
-        renumbered, its three siblings did not.  So the four routes supply only
-        *which entries end up in which order*; the position stamping, the raw-dict
-        handling, the author stamp and the failure policy live here once.
+        renumbered, its three siblings did not.  So the three routes that still use
+        this method (delete, duplicate, reorder) supply only *which entries end up in
+        which order*; the position stamping, the raw-dict handling, the author stamp
+        and the failure policy live here once.  The fourth, insert, no longer writes
+        the spec through this method at all: ``SessionManager.insert_slide`` splices
+        its blank entry in the same transaction as the rows, through the same pure
+        core (``renumber_spec_slides``), so the two cannot disagree on the renumber.
 
         *reorder* receives the positioned entries **in position order** and returns
         the new list in the new order — it does not touch ``position`` at all, which
@@ -4176,33 +4250,6 @@ class ChatService:
         except Exception as e:
             logger.warning(f"Failed to write deck spec ({label}): {e}")
             return None
-
-    def _insert_deck_spec_slide(
-        self,
-        session_id: str,
-        position: int,
-    ) -> Optional[Dict[str, Any]]:
-        """Give the deck spec a placeholder entry at *position*, shifting the rest up.
-
-        *position* is where the slide ACTUALLY landed, which the caller computes
-        before the insert: ``SlideDeck.insert_slide`` delegates to ``list.insert``,
-        which clamps a too-large position into an append, so the requested position
-        and the real one diverge on an append.  The clamp is re-applied here against
-        the spec's own length rather than trusted, because a spec shorter than the
-        deck would otherwise leave a hole.
-        """
-
-        def _splice(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            landed = min(position, len(entries))
-            return (
-                entries[:landed]
-                + [dict(_BLANK_DECK_SPEC_ENTRY)]
-                + entries[landed:]
-            )
-
-        return self._rewrite_deck_spec_slides(
-            session_id, _splice, label="insert_slide"
-        )
 
     def _delete_deck_spec_slide(
         self,
