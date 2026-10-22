@@ -1528,6 +1528,10 @@ describe('AgentDefinitionWorkbench protected assembly upgrade', () => {
       expect(block.kind).toBe('custom_text');
     }
     expect(new Set((sent?.custom_blocks ?? []).map((block) => block.block_id)).size).toBe(2);
+    // Let the Save land before the Delete: a save response that resolves inside the
+    // Delete's act re-renders the saved two-block draft over the deletion (seen on
+    // slow CI runners). #268's readiness read after the Save is the landing signal.
+    await waitFor(() => expect(readinessGets(fetchMock)).toHaveLength(3));
 
     fireEvent.click(within(assemblyPanel())
       .getAllByRole('button', { name: 'Delete' })[0]);
