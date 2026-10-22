@@ -61,3 +61,7 @@ _Avoid_: Add intent, build
 **Pending Slide**:
 The placeholder row an insertion commits at a new Slide Position until its slide lands. It reads "New slide — not built yet." If the build fails it becomes the failed placeholder.
 _Avoid_: Blank slide
+
+**Blank Slide**:
+A slide a person inserts by hand. Its HTML is the deck's own frame: the most common root-to-`.slide` wrapper chain among the deck's slides, with only `class`, `data-label` and `style` kept and no content (the bare `<div class="slide"></div>` when no slide offers a usable frame). Its spec entry has no purpose and no brief. The architect fills it when asked; no turn builds, re-reviews or re-describes it otherwise.
+_Avoid_: Pending Slide, empty slide

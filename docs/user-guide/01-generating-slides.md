@@ -129,6 +129,14 @@ Click any thumbnail in the ribbon on the left to jump to that slide. You can als
 
 To refine a specific slide, navigate to it and describe the change in the chat panel — the AI will target the slide you are currently viewing.
 
+### Adding a blank slide
+
+To add a slide yourself, click **New slide** in the toolbar above the slide to put a blank one straight after the slide you are viewing. You can also hover between two thumbnails in the ribbon (or below the last one) and click the **+** that appears, to add a blank slide at that spot. The blank slide uses the deck's own look, so it matches the slides around it, and it is selected as soon as it is added. Both controls appear only when you can edit the deck.
+
+To fill it, ask the assistant, for example "put our pricing on slide 4". The assistant leaves a blank slide as it is until you ask for something on it. While the assistant is working, the buttons are greyed out. If something else is still running on the deck, you will see a message asking you to wait; try again when it has finished.
+
+Slides that have just appeared, whether you added them or the assistant did, are marked **New** for a few seconds.
+
 ## Review Feedback
 
 Each slide is checked as it lands. Anything the review finds appears in the feedback drawer under the slide, and the slide's thumbnail shows an amber dot until you have seen it.
