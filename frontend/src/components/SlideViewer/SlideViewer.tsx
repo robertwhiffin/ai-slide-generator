@@ -197,7 +197,9 @@ const ViewerBody = forwardRef<
   // would clamp an append (index n) to the old last slide.
   //   1. A deckKey change (session switch, e.g. to a duplicate sharing slide_ids) resets the baseline
   //      BEFORE diffing, drops a pending selection and the current chips: nothing is new in a deck we
-  //      have only just switched to.
+  //      have only just switched to. It also supersedes every in-flight CRUD refetch (insert, delete,
+  //      update, auto-verify): the old session's deck must not reach the new one, and AppLayout's
+  //      version gate, reset on a switch, would accept it.
   //   2. Diff against the baseline (newSlides.ts). Mid-turn views and non-growth flag nothing.
   //   3. Select: the slide a manual insert just created whenever it is in the deck (matched by slide_id,
   //      whatever else the refetch changed; cleared only once found), else the first new slide.
@@ -205,6 +207,7 @@ const ViewerBody = forwardRef<
   useEffect(() => {
     if (deckKey !== lastDeckKeyRef.current) {
       lastDeckKeyRef.current = deckKey;
+      deckEditCounterRef.current += 1;
       baselineRef.current = null;
       pendingSelectionRef.current = null;
       stopTimer(freshTimerRef);
@@ -238,6 +241,11 @@ const ViewerBody = forwardRef<
 
   // No timer outlives the viewer.
   useEffect(() => () => stopTimer(freshTimerRef), []);
+
+  // Nor does an in-flight CRUD refetch: unmounting supersedes it, as a later deck edit does.
+  useEffect(() => () => {
+    deckEditCounterRef.current += 1;
+  }, []);
 
   // When the deck changes, reload persisted seen-state and clear transient dismissals.
   // dismissed must also reset: a finding dismissed in deck A must not suppress a
@@ -359,37 +367,56 @@ const ViewerBody = forwardRef<
 
   // Insert a blank slide at `position` (0..n). The server builds the deck's blank shell; the viewer
   // refetches and hands the refetched deck up, like delete/update. Same drop-if-superseded rule as
-  // those handlers: a later deck edit makes this refetch stale.
+  // those handlers: a later deck edit (or a session switch, or unmount) makes this refetch stale.
   const handleInsertSlide = async (position: number) => {
     if (readOnly || !sessionId || !onSlideChange || insertingRef.current) return;
     insertingRef.current = true;
     setInserting(true);
     const editId = ++deckEditCounterRef.current;
     try {
-      const inserted = await api.insertSlide(position, sessionId);
-      const result = await api.getSlides(sessionId);
-      if (result.slide_deck && deckEditCounterRef.current === editId) {
+      let inserted: Awaited<ReturnType<typeof api.insertSlide>>;
+      try {
+        inserted = await api.insertSlide(position, sessionId);
+      } catch (error) {
+        console.error('Failed to insert slide:', error);
+        const status = error instanceof Error && 'status' in error
+          ? (error as { status: unknown }).status
+          : undefined;
+        if (status === 409 || status === 423) {
+          // Busy / deck changed / locked: the server's own sentence says what to do. Refetch so the
+          // view is not stale.
+          showToast((error as Error).message, 'error');
+          try {
+            await refreshDeck();
+          } catch (refreshError) {
+            console.error('Failed to refresh after insert refusal:', refreshError);
+          }
+        } else {
+          showToast('Failed to insert slide', 'error');
+        }
+        return;
+      }
+
+      // The slide is in the deck from here on. A failed refetch must not read as a failed insert: the
+      // user would click again and get a second blank. Retry the refetch once; never re-send the insert.
+      let result: Awaited<ReturnType<typeof api.getSlides>> | null = null;
+      for (let attempt = 1; attempt <= 2 && result === null; attempt += 1) {
+        try {
+          result = await api.getSlides(sessionId);
+        } catch (refetchError) {
+          console.error(`Failed to refetch the deck after an insert (attempt ${attempt} of 2):`, refetchError);
+        }
+      }
+      if (deckEditCounterRef.current !== editId) return;
+      if (result === null) {
+        // Keep the pending selection: the next deck that holds the slide selects it.
+        pendingSelectionRef.current = inserted.inserted_slide_id ?? null;
+        showToast('Slide added. Refresh to see it.', 'info');
+      } else if (result.slide_deck) {
         // Only now, immediately before the deck goes up: a superseded insert never leaves a pending
         // id behind, and an unrelated deck arriving earlier cannot consume it.
         pendingSelectionRef.current = inserted.inserted_slide_id ?? null;
         onSlideChange(result.slide_deck);
-      }
-    } catch (error) {
-      console.error('Failed to insert slide:', error);
-      const status = error instanceof Error && 'status' in error
-        ? (error as { status: unknown }).status
-        : undefined;
-      if (status === 409 || status === 423) {
-        // Busy / deck changed / locked: the server's own sentence says what to do. Refetch so the
-        // view is not stale.
-        showToast((error as Error).message, 'error');
-        try {
-          await refreshDeck();
-        } catch (refreshError) {
-          console.error('Failed to refresh after insert refusal:', refreshError);
-        }
-      } else {
-        showToast('Failed to insert slide', 'error');
       }
     } finally {
       insertingRef.current = false;

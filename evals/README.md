@@ -17,7 +17,17 @@ Real-model runs; results are logged to MLflow.
   `fill_blank_slide` (the user names a manually inserted blank slide by its number and asks for
   content on it: it is filled in place, with no new slide beside it) and `edit_beside_blank` (the
   user asks to change the slide after the blank: only that slide changes and the blank stays blank),
-  run on a deck that holds the blank; they have not been calibrated or measured yet.
+  run on a deck that holds the blank.
+  - *Calibrated 2026-10-22.* The judge is trusted on `edit_beside_blank` on both splits. On
+    `fill_blank_slide` it cannot separate the should_fail (a new slide inserted beside the blank)
+    from the reference on either split. So `fill_blank_slide` is scored by its deterministic checks:
+    the intent is `edit`, production's alignment revises exactly the blank, and it inserts nothing.
+    Its judge verdict is reported, not counted. The harness does not apply this rule (a row fails
+    on any failing scorer, the judge included), so read that case's result from `contract` and
+    `expected_category`. A judge-visible should_fail for it is a follow-up.
+  - *Measured before any prompt change*, on `v1-baseline` (the shipped `add-slide-b` architect
+    prompt): train ×3 6/6 (run `630beeaf`), held-out ×1 2/2 (run `6b2e4ab4`, aggregate only),
+    0 production binding refusals. No prompt change was needed.
 - **Scorers** (`evals/harness/scorers.py`, `mlflow_run.py`). Every row is scored by:
   - `contract`: the output validated against the agent's schema. An `incomplete` run, such as a model
     inventing a criterion name outside the schema, fails here.

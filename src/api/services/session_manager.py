@@ -2029,13 +2029,18 @@ class SessionManager:
         3. The request is validated: the deck exists, *expected_version* is
            current, *position* is not negative and *mutation* is an
            ``insert_slide``/``deck`` context.
-        4. The rows are re-read in position order.  A deck with NO rows (a
-           legacy ``deck_json`` deck the startup backfill has not reached) is
+        4. The rows are re-read in position order and ``[(slide_id,
+           content_hash)]`` must equal *expected_rows*.  A deck with NO rows (a
+           legacy ``deck_json`` deck the startup backfill has not reached, or a
+           duplicate: ``duplicate_session`` copies ``deck_json`` and no rows) is
            first materialised exactly as that backfill does it (raw emails, NULL
            timestamps kept, verdicts migrated from ``verification_map``,
            css/external_scripts/head_meta lifted into their columns) and
-           re-read.  ``[(slide_id, content_hash)]`` must equal *expected_rows*.
-           The slide lands at ``min(position, len(rows))`` and is spliced in.
+           re-read; there only the content hashes, in order, must equal
+           *expected_rows*' (the rows were made from this blob just now, and a
+           blob slide with no ``slide_id`` key is minted ``slide_{i}`` by
+           ``SlideDeck.from_dict`` but written NULL by the backfill).  The slide
+           lands at ``min(position, len(rows))`` and is spliced in.
         5. ``deck_spec_json`` gains a blank entry at the landed index
            (``spec_json_with_blank_entry``); a legacy or unreadable spec is left
            alone.
@@ -2134,10 +2139,18 @@ class SessionManager:
 
             # 4. The rows the caller planned against, or nothing is written.
             rows = self._slide_rows_in_position_order(db, deck_owner.id)
-            if not rows:
-                # A legacy deck the startup backfill has not reached: materialise
-                # its rows the way that backfill does, in THIS transaction (the
-                # non-committing core, so a refusal below rolls it back too).
+            # (slide_id, hash) pairs on the rows path, bare hashes on the row-less one.
+            committed: List[Any]
+            planned: List[Any]
+            if rows:
+                committed = [(row.slide_id, compute_slide_hash(row.html or "")) for row in rows]
+                planned = expected
+            else:
+                # A row-less deck: a legacy deck the startup backfill has not
+                # reached, or a duplicate (duplicate_session copies deck_json and
+                # no rows).  Materialise its rows the way that backfill does, in
+                # THIS transaction (the non-committing core, so a refusal below
+                # rolls it back too).
                 from src.core.backfill_session_slides_startup import (
                     _backfill_deck,
                     _empty_result,
@@ -2153,8 +2166,14 @@ class SessionManager:
                 # autoflush is off: without this the re-read sees no rows.
                 db.flush()
                 rows = self._slide_rows_in_position_order(db, deck_owner.id)
-            committed = [(row.slide_id, compute_slide_hash(row.html or "")) for row in rows]
-            if committed != expected:
+                # Content hashes, in order, only.  These rows were made from this
+                # very blob just now, so order and hash are exact; the ids are not:
+                # a blob slide with no slide_id key is minted slide_{i} by
+                # SlideDeck.from_dict (the cache the caller planned on) while the
+                # backfill writes NULL.
+                committed = [compute_slide_hash(row.html or "") for row in rows]
+                planned = [content_hash for _, content_hash in expected]
+            if committed != planned:
                 raise SlideRowsChangedError(
                     f"the committed rows of session {session_id} are not the rows "
                     f"the insert planned against ({len(committed)} committed, "

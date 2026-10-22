@@ -22,6 +22,11 @@
  *   - A refetch superseded by a later deck edit (`deckEditCounterRef` moved on) is dropped AND the
  *     pending selection is cleared (C18), so a later deck holding the inserted slide does not yank the
  *     selection.
+ *   - Once the insert succeeded, a failed refetch is retried once; a second failure shows "Slide added.
+ *     Refresh to see it." (not an error), keeps the pending selection and never re-sends the insert
+ *     (whole-branch review MINOR-1).
+ *   - A session switch (deckKey change) or an unmount supersedes an in-flight insert's refetch, and its
+ *     pending selection never fires in the new session (MINOR-3).
  *
  * Harness: the api module is mocked (ApiError stays the real class); `localStorage` is stubbed with
  * `vi.stubGlobal` because local Node 26 has none (the env baseline of SlideViewer.test.tsx); the viewer
@@ -52,6 +57,14 @@
  *   - the gap button never revealed (bare `invisible`)                     -> "drag" RED (idle check).
  *   - ViewerProvider's shrink clamp back to `setIndex(slideCount - 1)`     -> "shrank the deck" RED.
  *   - `insertDisabled={isGenerating}` dropped from AppLayout               -> "AppLayout wiring" RED.
+ * Added after the whole-branch review (each run against the real implementation, then restored):
+ *   - no refetch retry                                                     -> both "refetch that fails" RED.
+ *   - no pending selection after the second refetch failure                -> "fails twice" RED.
+ *   - "Failed to insert slide" (error) instead of the added notice         -> "fails twice" RED.
+ *   - the added notice as an `error` toast                                 -> "fails twice" RED.
+ *   - no counter bump on a deckKey change                                  -> "session's refetch" RED.
+ *   - no counter bump on unmount                                           -> "unmounts" RED.
+ *   - the pending id set before the supersession check                     -> "session's refetch" RED.
  */
 import { useState } from 'react';
 import type { Mock } from 'vitest';
@@ -99,6 +112,10 @@ class MemoryStorage implements Storage {
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
 const SID = 'sess-314';
+/** Another session the user switches to (a duplicate of SID's deck: duplicate_session copies slide ids). */
+const OTHER_SID = 'sess-314-duplicate';
+/** The notice for an insert that committed but whose deck could not be refetched (MINOR-1). */
+const ADDED_NOTICE = 'Slide added. Refresh to see it.';
 const BUSY_DETAIL = 'Something is still running on this deck. Wait for it to finish, then try again.';
 const LOCKED_DETAIL = 'Session is locked by Alice Example';
 const NO_FINDINGS: SlideFinding[] = [];
@@ -155,6 +172,15 @@ function deferred<T>() {
 const onSlideChangeSpy = vi.fn();
 const onReorder = vi.fn();
 
+/**
+ * The parent hands the viewer a deck of its own (another refetch, an agent turn), and for a session
+ * switch a new session, in ONE update: AppLayout's switchSession commits sessionId and deck in one
+ * batch. Set by the mounted Harness.
+ */
+let deliver: (deck: SlideDeck, sessionId?: string) => void = () => {
+  throw new Error('harness not mounted');
+};
+
 interface HarnessProps {
   initial: SlideDeck;
   readOnly?: boolean;
@@ -162,23 +188,28 @@ interface HarnessProps {
   insertDisabled?: boolean;
 }
 
-/** Like AppLayout: owns the deck, re-renders the viewer with whatever `onSlideChange` receives. */
+/**
+ * Like AppLayout: owns the deck and the session, re-renders the viewer with whatever `onSlideChange`
+ * receives (into whichever session is current, as setSlideDeckGated does). `deckKey` and `sessionId`
+ * are both the session id, as in AppLayout.
+ */
 function Harness({ initial, readOnly = false, withOnSlideChange = true, insertDisabled = false }: HarnessProps) {
-  const [deck, setDeck] = useState<SlideDeck>(initial);
+  const [view, setView] = useState({ deck: initial, sid: SID });
+  deliver = (deck, sid) => setView((prev) => ({ deck, sid: sid ?? prev.sid }));
   const onSlideChange = (next: SlideDeck) => {
     onSlideChangeSpy(next);
-    setDeck(next);
+    setView((prev) => ({ ...prev, deck: next }));
   };
   return (
     <SlideViewer
-      slideDeck={deck}
-      deckKey={SID}
+      slideDeck={view.deck}
+      deckKey={view.sid}
       findings={NO_FINDINGS}
       callbacks={callbacks}
       onReorder={onReorder}
       onSlideChange={withOnSlideChange ? onSlideChange : undefined}
       readOnly={readOnly}
-      sessionId={SID}
+      sessionId={view.sid}
       insertDisabled={insertDisabled}
     />
   );
@@ -642,6 +673,121 @@ describe('in flight and superseded', () => {
     await flush();
     expectCurrent(2);
     expect(thumb(1)).toHaveAttribute('data-current', 'false');
+  });
+});
+
+// ── the insert committed, the refetch failed (whole-branch review MINOR-1) ────
+//
+// Once `insertSlide` resolves the slide IS in the deck. Reporting "Failed to insert slide" for a failed
+// refetch makes the user click again and get a second blank (the server guards the same hazard after its
+// commit), so the refetch is retried once, and a second failure says the slide was added.
+
+describe('a refetch that fails after the insert committed', () => {
+  it('is retried once: the refetched deck goes up, the inserted slide is selected, no failure is reported', async () => {
+    // Another editor's slide X arrived first in deck order: the selection must come from the inserted id.
+    const refetched = deckOf(['X', 'A', 'NEW', 'B', 'C'], 'from-refetch');
+    mockedApi.insertSlide.mockResolvedValue(insertResponse(['X', 'A', 'NEW', 'B', 'C'], 'NEW', 2));
+    mockedApi.getSlides
+      .mockRejectedValueOnce(new ApiError(502, 'Failed to fetch slides'))
+      .mockResolvedValueOnce(slidesResponse(refetched));
+    renderHarness({ initial: deckOf(['A', 'B', 'C']) });
+
+    fireEvent.click(gap(1));
+
+    await waitFor(() => expect(onSlideChangeSpy).toHaveBeenCalledTimes(1));
+    expect(onSlideChangeSpy.mock.calls[0][0]).toBe(refetched);
+    expect(mockedApi.getSlides).toHaveBeenCalledTimes(2);
+    expect(mockedApi.getSlides).toHaveBeenNthCalledWith(2, SID);
+    await waitFor(() => expectCurrent(2));
+    expect(screen.queryByText('Failed to insert slide')).not.toBeInTheDocument();
+    expect(screen.queryByText(ADDED_NOTICE)).not.toBeInTheDocument();
+    expect(mockedApi.insertSlide).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(newSlideButton()).not.toBeDisabled());
+  });
+
+  it('fails twice: says the slide was added, never re-sends the insert, and selects it in the next deck holding it', async () => {
+    mockedApi.insertSlide.mockResolvedValue(insertResponse(['A', 'NEW', 'B', 'C'], 'NEW', 1));
+    mockedApi.getSlides.mockRejectedValue(new TypeError('Failed to fetch'));
+    renderHarness({ initial: deckOf(['A', 'B', 'C']) });
+
+    fireEvent.click(gap(1));
+
+    await waitFor(() => expect(within(toastContainer()).getByText(ADDED_NOTICE)).toBeInTheDocument());
+    expect(screen.queryByText('Failed to insert slide')).not.toBeInTheDocument();
+    // An info/success notice, not an error one (ToastContext paints `error` red).
+    const toast = within(toastContainer()).getByText(ADDED_NOTICE).closest('[data-testid="toast"]');
+    expect(toast).not.toBeNull();
+    expect(toast).not.toHaveClass('bg-red-600');
+    await waitFor(() => expect(newSlideButton()).not.toBeDisabled());
+    await flush();
+    // The first refetch and ONE retry; the insert itself exactly once.
+    expect(mockedApi.getSlides).toHaveBeenCalledTimes(2);
+    expect(mockedApi.insertSlide).toHaveBeenCalledTimes(1);
+    expect(onSlideChangeSpy).not.toHaveBeenCalled();
+    expectCurrent(0);
+
+    // The pending selection is kept: the next deck that holds the inserted slide selects it, even with
+    // another new slide (X) first in deck order.
+    act(() => deliver(deckOf(['X', 'A', 'NEW', 'B', 'C'], 'next-deck')));
+    await waitFor(() => expectCurrent(2));
+  });
+});
+
+// ── a session switch while an insert is in flight (whole-branch review MINOR-3) ──
+//
+// A deckKey change supersedes every in-flight CRUD refetch, like a later deck edit does, so an old
+// session's deck never reaches the new session (AppLayout's version gate resets on a switch, so it
+// would accept it).
+
+describe('a session switch or unmount while an insert is in flight', () => {
+  it("drops the old session's refetch, and its pending selection never fires in the new session", async () => {
+    const insertCall = deferred<ReturnType<typeof insertResponse>>();
+    const oldSessionDeck = deckOf(['A', 'NEW', 'B', 'C'], 'old-session-refetch');
+    mockedApi.insertSlide.mockReturnValueOnce(insertCall.promise);
+    mockedApi.getSlides.mockResolvedValue(slidesResponse(oldSessionDeck));
+    renderHarness({ initial: deckOf(['A', 'B', 'C']) });
+
+    fireEvent.click(gap(1));
+    expect(mockedApi.insertSlide).toHaveBeenCalledWith(1, SID);
+
+    // Before the insert answers, the user switches to a duplicate taken after the insert committed: it
+    // holds the inserted id (duplicate_session copies slide ids).
+    act(() => deliver(deckOf(['A', 'B', 'NEW', 'C', 'D'], 'duplicate'), OTHER_SID));
+    expectCurrent(0);
+
+    await act(async () => {
+      insertCall.resolve(insertResponse(['A', 'NEW', 'B', 'C'], 'NEW', 1));
+    });
+    await flush();
+    expect(onSlideChangeSpy).not.toHaveBeenCalledWith(oldSessionDeck);
+    expect(onSlideChangeSpy).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId(/^ribbon-thumb-\d+$/)).toHaveLength(5);
+    expectCurrent(0);
+
+    // A later deck of the new session holding that id does not take the selection...
+    act(() => deliver(deckOf(['A', 'B', 'NEW', 'C', 'D'], 'duplicate-again')));
+    await flush();
+    expectCurrent(0);
+    // ...while growth there still selects (positive in the same test).
+    act(() => deliver(deckOf(['A', 'B', 'NEW', 'C', 'D', 'E'], 'duplicate-grown')));
+    await waitFor(() => expectCurrent(5));
+  });
+
+  it('drops the refetch of an insert still in flight when the viewer unmounts', async () => {
+    const insertCall = deferred<ReturnType<typeof insertResponse>>();
+    mockedApi.insertSlide.mockReturnValueOnce(insertCall.promise);
+    mockedApi.getSlides.mockResolvedValue(slidesResponse(deckOf(['A', 'NEW', 'B', 'C'], 'from-refetch')));
+    const { unmount } = renderHarness({ initial: deckOf(['A', 'B', 'C']) });
+
+    fireEvent.click(gap(1));
+    expect(mockedApi.insertSlide).toHaveBeenCalledTimes(1);
+    unmount();
+
+    await act(async () => {
+      insertCall.resolve(insertResponse(['A', 'NEW', 'B', 'C'], 'NEW', 1));
+    });
+    await flush();
+    expect(onSlideChangeSpy).not.toHaveBeenCalled();
   });
 });
 

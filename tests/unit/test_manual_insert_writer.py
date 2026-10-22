@@ -22,8 +22,10 @@ How the assertions are made:
 The row-less legacy deck (D13) follows the supervisor's ruling on C7: it is
 materialised the way the startup backfill materialises it (raw emails, NULL
 timestamps kept, verdicts migrated from ``verification_map``, css/external_scripts/
-head_meta lifted into their columns), then takes the rows path.  Its refusals must
-leave no rows behind either.
+head_meta lifted into their columns), then takes the rows path, except that its
+fresh rows are compared with ``expected_rows`` by content hash, in order, only (the
+whole-branch review's MINOR-2: a blob slide with no ``slide_id`` key).  Its refusals
+must leave no rows behind either.
 
 New symbols are read off their module at use (``session_manager.DeckBusyError``,
 ``usage_event.EVENT_SLIDE_INSERTED``), so before the implementation each test is red
@@ -1896,6 +1898,139 @@ def test_a_legacy_deck_that_is_not_the_expected_rows_refuses_and_leaves_no_rows(
     with pytest.raises(session_manager.SlideRowsChangedError):
         _insert_legacy(factory, 2, seed, cached, expected_rows=stale)
     assert _rows(factory, seed["owner_pk"]) == []
+    _assert_unchanged(factory, state)
+
+
+# MINOR-2 (whole-branch review): a row-less deck is reachable at RUNTIME, because
+# duplicate_session copies deck_json and no rows, so a duplicated deck stays row-less
+# until its first write.  A blob slide that LACKS the ``slide_id`` key is minted
+# ``slide_{i}`` by SlideDeck.from_dict (the cached deck the caller plans against, so
+# expected_rows carries ``slide_i``) but written NULL by the backfill.  The rows were
+# materialised from this very blob inside this transaction, so on that path the
+# writer compares content hashes, in order, only.  The rows path keeps the full
+# (slide_id, content_hash) comparison: test_rows_that_are_not_the_expected_rows_refuse
+# [one-slide-id-differs].
+
+#: The ids SlideDeck.from_dict mints for blob slides with no ``slide_id`` key
+#: (written out, not computed by the code under test).
+MINTED_IDS = ("slide_0", "slide_1", "slide_2")
+
+
+def _id_less_legacy_slides() -> List[Dict[str, Any]]:
+    """``_legacy_slides()`` with the ``slide_id`` KEY removed (absent, not None)."""
+    slides = _legacy_slides()
+    for s in slides:
+        del s["slide_id"]
+    return slides
+
+
+def _seed_id_less_legacy(factory) -> Dict[str, Any]:
+    blob = {
+        "title": "Legacy deck",
+        "css": LEGACY_CSS,
+        "external_scripts": LEGACY_EXT,
+        "head_meta": LEGACY_HEAD,
+        "scripts": "",
+        "slides": _id_less_legacy_slides(),
+    }
+    return _seed_legacy(factory, deck_columns={"deck_json": json.dumps(blob)})
+
+
+def _minted_expected_rows() -> List[Tuple[Optional[str], str]]:
+    """What ChatService reads off its cached (from_dict) deck: minted ids, real hashes."""
+    return [
+        (sid, compute_slide_hash(s["html"]))
+        for sid, s in zip(MINTED_IDS, _id_less_legacy_slides())
+    ]
+
+
+def _insert_id_less_legacy(factory, position: int, seed, cached, **kw) -> Dict[str, Any]:
+    deck_dict = _legacy_deck_dict(cached, position)
+    # The planned deck is the cached (from_dict) deck plus the blank: it carries the minted ids.
+    minted = iter(MINTED_IDS)
+    for s in deck_dict["slides"]:
+        if s["slide_id"] != NEW_SID:
+            s["slide_id"] = next(minted)
+    return _insert(
+        factory,
+        position,
+        before=[],
+        release_id=seed["release_id"],
+        expected_rows=kw.pop("expected_rows", _minted_expected_rows()),
+        deck_dict=deck_dict,
+        names=DISPLAY_NAMES,
+        **kw,
+    )
+
+
+def test_a_row_less_deck_whose_blob_slides_have_no_slide_id_inserts_by_content_hash(factory):
+    seed = _seed_id_less_legacy(factory)
+    blob = json.loads(_deck(factory, seed["owner_pk"]).deck_json)
+    assert [s.get("slide_id", "<absent>") for s in blob["slides"]] == ["<absent>"] * 3, (
+        "fixture check: the blob slides must lack the slide_id key"
+    )
+    cached = _cached_legacy_deck(factory)
+
+    result = _insert_id_less_legacy(factory, 2, seed, cached)
+    after = _rows(factory, seed["owner_pk"])
+
+    # Materialised in blob order, the blank at 2.
+    assert _layout(after) == ["MK-LEGACYONE", "MK-LEGACYTWO", "NEW", "MK-LEGACYTHREE"]
+    assert [r["position"] for r in after] == [0, 1, 2, 3]
+    # The backfill's rows, ids NULL as it writes them (never the minted ids).
+    expected = _expected_legacy_rows(seed["owner_pk"])
+    for marker in ("MK-LEGACYONE", "MK-LEGACYTHREE"):
+        expected[marker]["slide_id"] = None
+    for marker, row in _by_marker(after).items():
+        assert _identity(row) == expected[marker], (
+            f"{marker} was not materialised as the backfill writes it:\n"
+            f" expected {expected[marker]}\n got      {_identity(row)}"
+        )
+    _assert_new_row(after[2])
+    assert result["position"] == 2 and result["slide_count"] == 4
+
+    # The spec spliced at the landed index.
+    spec = json.loads(_deck(factory, seed["owner_pk"]).deck_spec_json)
+    assert [e["position"] for e in spec["slides"]] == [0, 1, 2, 3]
+    assert spec["slides"][2] == _blank_entry(2)
+    assert [e["purpose"] for e in spec["slides"]] == [
+        "SPEC-MK-LEGACYONE", "SPEC-MK-LEGACYTWO", "", "SPEC-MK-LEGACYTHREE",
+    ]
+    deck = _deck(factory, seed["owner_pk"])
+    assert deck.version == 6 and deck.slide_count == 4
+    assert _mutation_events(factory) == [
+        ("insert_slide", "deck", seed["owner_pk"], seed["owner_pk"], seed["release_id"], NEW_SID)
+    ]
+
+
+def _stale_hash(rows):
+    rows[1] = (rows[1][0], compute_slide_hash("<p>an edit the cache never saw</p>"))
+    return rows
+
+
+def _stale_order(rows):
+    rows[0], rows[2] = rows[2], rows[0]
+    return rows
+
+
+@pytest.mark.parametrize(
+    "stale_of",
+    [
+        pytest.param(_stale_hash, id="one-content-hash-differs"),
+        pytest.param(_stale_order, id="slides-reordered"),
+        pytest.param(lambda rows: rows[:-1], id="one-slide-fewer"),
+    ],
+)
+def test_a_row_less_id_less_deck_whose_blob_changed_is_still_refused(factory, stale_of):
+    seed = _seed_id_less_legacy(factory)
+    cached = _cached_legacy_deck(factory)
+    state = _db_state(factory)
+
+    with pytest.raises(session_manager.SlideRowsChangedError):
+        _insert_id_less_legacy(
+            factory, 2, seed, cached, expected_rows=stale_of(_minted_expected_rows())
+        )
+    assert _rows(factory, seed["owner_pk"]) == [], "a refused insert left materialised rows"
     _assert_unchanged(factory, state)
 
 

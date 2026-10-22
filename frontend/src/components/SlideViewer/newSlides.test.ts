@@ -15,6 +15,7 @@
  *                                                                  flags nothing).
  *   - null / empty ids                                         -> ignored on both sides.
  *   - unchanged (or only reordered)                            -> nothing new.
+ *   - reordered and grown                                      -> the new ids only (growth compares sets).
  * Whenever the deck is not synthetic it becomes the next baseline.
  *
  * `syntheticSlideId(p)` is the one place a synthetic id is minted (AppLayout.handleSlideReady uses it), and
@@ -30,6 +31,8 @@
  *   - baseline not replaced on a non-growth deck          -> "the next growth after a replace" RED.
  *   - null ids kept in the baseline / flagged             -> "null and empty ids" RED.
  *   - AppLayout keeps the `build-${position}` literal     -> the AppLayout pin RED.
+ * Added after the whole-branch review (NIT-1), sabotaged on the REAL implementation:
+ *   - any order change treated as not-growth              -> "reordered AND grown" RED.
  */
 import ts from 'typescript';
 import appLayoutSource from '../Layout/AppLayout.tsx?raw';
@@ -163,6 +166,14 @@ const ROWS: Row[] = [
     slides: ['C', 'A', 'B'],
     fresh: [],
     next: ['A', 'B', 'C'],
+  },
+  {
+    // Growth is set-based: a refetch that also moved existing slides still flags the added one.
+    rule: 'reordered AND grown: only the new id is flagged',
+    baseline: set('A', 'B', 'C'),
+    slides: ['C', 'A', 'NEW', 'B'],
+    fresh: ['NEW'],
+    next: ['A', 'B', 'C', 'NEW'],
   },
 ];
 
