@@ -51,6 +51,11 @@ MESSAGES = {
         "Add a slide after slide 3 on versioning prompts, and add it to the checklist on the "
         "final slide"
     ),
+    # #314 follow-up: deck 2 with a manually inserted blank slide.
+    "fill_blank_slide": (
+        "Please make slide 4 a quick guide to which of the four patterns fits which kind of task"
+    ),
+    "edit_beside_blank": "Can you add a one-line takeaway beneath the stats on the fifth slide?",
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
@@ -58,7 +63,10 @@ HAS_DECK = (
     "edit_request", "confirm_design", "discuss",
     "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
     "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
+    "fill_blank_slide", "edit_beside_blank",
 )
+# The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
+BLANK_AT = 3
 
 EDIT_BRIEF = (
     "Four cards in place of the bullet list covering the four key patterns — system-prompt framing, "
@@ -81,6 +89,8 @@ def _payload(cid):
         design_system_id=m.MERIDIAN_ID, template_id=m.MERIDIAN_TEMPLATE
     ).model_dump(mode="json")
     deck = case.gold_deck_spec(DECK) if has_deck else None
+    if cid in m.BLANK_CASES:
+        deck = m._blank_deck(deck, BLANK_AT)
     slide_keys = architect_slide_payload(
         conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else []
     )
@@ -88,7 +98,7 @@ def _payload(cid):
         "conversation": conversation,
         "message": msg,
         "current_deck_spec": deck,
-        "committed_slide_count": 6 if has_deck else 0,
+        "committed_slide_count": len(deck["slides"]) if has_deck else 0,
         **slide_keys,
         "previous_deck_review": None,
         "available_design_contract": contract,
@@ -182,8 +192,47 @@ CHECKLIST_ITEMS = (
 )
 
 
+# #314 follow-up (manual insert): the blank-slide cases on deck 2. The payload deck is the deck-2
+# gold spec with a manually inserted blank at BLANK_AT, so gold positions 3..5 shift to 4..6 and
+# the user's slide numbers count the blank.
+BESIDE_POS = BLANK_AT + 1  # the slide edit_beside_blank names: just after the blank
+# fill_blank_slide's reference: the blank filled in place with these text fields.
+FILLED_SLIDE = {
+    "purpose": "Help the audience choose the right pattern for a task",
+    "content_brief": (
+        "Table mapping four common task types — extraction, classification, multi-step reasoning "
+        "and open-ended writing — to the pattern that fits each best, with one line on why"
+    ),
+    "assumes": "Audience has just met the four core patterns",
+    "hands_off": "Each kind of task has a pattern that fits it best",
+}
+# edit_beside_blank's one revision: BESIDE_POS's brief with the first phrase swapped for the second.
+BESIDE_REVISION = (
+    "typical iteration cycles to production quality (3-5 rounds)",
+    "typical iteration cycles to production quality (3-5 rounds), with a one-line takeaway "
+    "beneath the stats: structured prompting pays for itself in fewer tokens and fewer rounds",
+)
+# edit_beside_blank's should_fail fills the untouched blank with invented text.
+INVENTED_FILL = {
+    "purpose": "Bridge from the techniques to the evidence",
+    "content_brief": (
+        "Transition slide with one line asking whether the four patterns really pay off, setting "
+        "up the numbers that follow"
+    ),
+    "assumes": "Audience has just met the four core patterns",
+    "hands_off": "The patterns are only worth adopting if the gains are real",
+}
+
+
 def _checklist_brief(deck: dict, position: int) -> str:
     old, new = CHECKLIST_ITEMS
+    brief = deck["slides"][position]["content_brief"]
+    assert brief.count(old) == 1, position
+    return brief.replace(old, new)
+
+
+def _beside_brief(deck: dict, position: int) -> str:
+    old, new = BESIDE_REVISION
     brief = deck["slides"][position]["content_brief"]
     assert brief.count(old) == 1, position
     return brief.replace(old, new)
@@ -361,6 +410,40 @@ def generate(out_dir: pathlib.Path | None = None):
         {"intent": "edit", "positions": [3, 6], "inserted": [3]},
         and_revise,
         m._retargeted(and_revise, [3], m._inserted_spec(gold, {3: AND_REVISE_SLIDE})),
+    )
+
+    # #314 follow-up (manual insert): deck 2 with a blank slide at BLANK_AT. The references leave
+    # every other slide exactly as the payload has it (the blank included, unless filled).
+    blank_deck = m._blank_deck(gold, BLANK_AT)
+    fill = m._out(
+        "edit",
+        "I'll make the blank slide 4 a quick guide to which pattern fits which kind of task.",
+        target_positions=[BLANK_AT],
+        deck_spec=m._replaced_spec(blank_deck, {BLANK_AT: FILLED_SLIDE}),
+    )
+    _write(
+        out, "fill_blank_slide", "mutation",
+        "fill the blank slide 4 (position 3) in place: a new slide beside it leaves the blank "
+        "empty and every later slide one place on",
+        {"intent": "edit", "positions": [BLANK_AT], "inserted": []},
+        fill,
+        m._retargeted(fill, [BLANK_AT], m._inserted_spec(blank_deck, {BLANK_AT: FILLED_SLIDE})),
+    )
+    beside = m._out(
+        "edit", "I'll add a one-line takeaway beneath the three stats on the fifth slide.",
+        target_positions=[BESIDE_POS],
+        deck_spec=m._revised_spec(blank_deck, {BESIDE_POS: _beside_brief(blank_deck, BESIDE_POS)}),
+    )
+    _write(
+        out, "edit_beside_blank", "mutation",
+        "edit of the fifth slide (position 4), the slide after the blank slide 4 (position 3): "
+        "change only the fifth slide; filling the blank too builds a slide nobody asked for",
+        {"intent": "edit", "positions": [BESIDE_POS], "inserted": []},
+        beside,
+        m._retargeted(
+            beside, [BLANK_AT, BESIDE_POS],
+            m._replaced_spec(beside["deck_spec"], {BLANK_AT: INVENTED_FILL}),
+        ),
     )
 
 

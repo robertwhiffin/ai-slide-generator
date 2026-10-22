@@ -8,6 +8,11 @@ import pytest
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
 from src.domain.deck_spec import DeckSpec
+from src.domain.deck_spec_slides import (
+    BLANK_DECK_SPEC_ENTRY,
+    is_blank_slide_spec,
+    spec_json_with_blank_entry,
+)
 from src.domain.skill_io import ArchitectOutput, DataRequest
 from src.domain.slide_alignment import align_slides
 from src.domain.slide_numbering import architect_slide_payload
@@ -25,7 +30,10 @@ CASES_313 = ["edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "disc
 # #314: add-a-slide cases on deck 2 (plan Appendix H). They are folded into NEW_CASE_IDS, so
 # MUTATIONS, HAS_DECK, CASE_IDS and EDIT_CASES all carry them (C19).
 INSERT_CASES = ["add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise"]
-NEW_CASE_IDS = CASES_313 + INSERT_CASES
+# #314 follow-up (manual insert, plan Task 11): deck 2 with a manually inserted blank slide
+# spliced into its spec at BLANK_AT. Folded into NEW_CASE_IDS like the insert cases.
+BLANK_CASES = ["fill_blank_slide", "edit_beside_blank"]
+NEW_CASE_IDS = CASES_313 + INSERT_CASES + BLANK_CASES
 CASE_IDS = EXISTING_CASE_IDS + NEW_CASE_IDS
 MUTATIONS = ["edit_request", "ask_data", "confirm_design"] + NEW_CASE_IDS
 EXPECT = {
@@ -43,6 +51,10 @@ EXPECT = {
     "add_slide_end": {"intent": "edit", "positions": [6], "inserted": [6]},
     "add_slide_as_number": {"intent": "edit", "positions": [3], "inserted": [3]},
     "add_slide_and_revise": {"intent": "edit", "positions": [3, 6], "inserted": [3]},
+    # #314 follow-up: positions in the blank deck's numbering. ``inserted: []`` routes scoring
+    # through production's alignment, so a new slide beside the blank fails (D10).
+    "fill_blank_slide": {"intent": "edit", "positions": [3], "inserted": []},
+    "edit_beside_blank": {"intent": "edit", "positions": [4], "inserted": []},
 }
 HAS_DECK = {"edit_request", "confirm_design", "discuss"} | set(NEW_CASE_IDS)
 EDIT_CASES = [c for c in CASE_IDS if EXPECT[c]["intent"] == "edit"]
@@ -112,6 +124,42 @@ CASES_313_SHA256 = {
     "discuss_slide_question/reference.json":
         "374f8c4f8a8a3f7ccfb6d214b9c6f52d67d6f9d6481031d3f6ecd747b06d0c3d",
 }
+# #314 follow-up (Task 11): adding the blank cases rewrites none of the four insert cases. Digests
+# of the whole files at ca7f9508 (unchanged at df1ec985).
+INSERT_CASES_SHA256 = {
+    "add_slide_anchor/calibration.json":
+        "fd1b26f0c1249178a2325c5457eb2b3e92f4b8714e80be6e28415d45d857a8ef",
+    "add_slide_anchor/case.yaml":
+        "f4b06495679b5112d904f5cea3e7be730a3ebcff0cd0ecac02c8ad435e7d1359",
+    "add_slide_anchor/payload.json":
+        "db4c23f719e6afa88029c2d2cedf3449e2f71ce92e1cceb13acfacdf269c8e4e",
+    "add_slide_anchor/reference.json":
+        "55c9cb5683ee7cad3d931ea5968b82f21da34229788709b52823aa05616f3241",
+    "add_slide_end/calibration.json":
+        "41a6a5a7bf6a0874606cc187b1e5d6a76b32292118a6b9d68f8bda2ef8eb7454",
+    "add_slide_end/case.yaml":
+        "b58e0cb0a36a58e14bc484e6fcbc125ef185edd1c1d4f1cc6544d48d79ac9ffe",
+    "add_slide_end/payload.json":
+        "f3cf7e8992b095d10195bea420368da91d780c759b8e1ebd6310952fafdf2bcf",
+    "add_slide_end/reference.json":
+        "df8fad3750213b56033740fcf22654ff495109b5c1ffb7646ec21306b1f04ae8",
+    "add_slide_as_number/calibration.json":
+        "9686a0c05c25a313554dbf8eb1d390c3b2e6b581e44e45ba40710dc09b28d6d8",
+    "add_slide_as_number/case.yaml":
+        "2f9b2c0319000fdea1e82dd007c33e602eed6cee97d34b9f36ab63b67dd78604",
+    "add_slide_as_number/payload.json":
+        "0bd9b45da2a652b3863dfa6cd46ef4ade257f48cf5455ad0845ca25e0e5155d8",
+    "add_slide_as_number/reference.json":
+        "b3441b939e15a961720c5c49beb05e577dddea0b8456f44a11581c665db6bf24",
+    "add_slide_and_revise/calibration.json":
+        "d46f9a9fd9827e1950f9043b3f93befaa4aad90a96187d80641c16b38046adde",
+    "add_slide_and_revise/case.yaml":
+        "5786ff54caff1fd9a9c9f2411ea6848bb6085f504269494800ce1aa72232b538",
+    "add_slide_and_revise/payload.json":
+        "9fc7d624031c6be867922391fdd69a783632e3f8c7c81c12f3c421fa57aaf0ac",
+    "add_slide_and_revise/reference.json":
+        "f4e48d4176487df3e0063d7bb64630c596c97be952c7e606fa5abc37ba384af3",
+}
 FILES = ("case.yaml", "payload.json", "reference.json", "calibration.json")
 PACK_DIR = case.PACKS_DIR / AGENT
 # The production architect payload keys, in architect_node's order (src/services/graph/nodes.py).
@@ -157,6 +205,13 @@ SLIDE_REFERENCES = {
     "add_slide_and_revise": [
         {"text": "slide 3", "slide_numbers": [3], "positions": [2], "out_of_range": []},
         {"text": "final slide", "slide_numbers": [6], "positions": [5], "out_of_range": []},
+    ],
+    # #314 follow-up: numbered over the blank deck, so the blank is slide 4 and gold slide 4 is 5.
+    "fill_blank_slide": [
+        {"text": "slide 4", "slide_numbers": [4], "positions": [3], "out_of_range": []},
+    ],
+    "edit_beside_blank": [
+        {"text": "fifth slide", "slide_numbers": [5], "positions": [4], "out_of_range": []},
     ],
 }
 LAYOUT = case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
@@ -250,6 +305,54 @@ OFF_REQUEST_SLIDE = {
         "locations"
     ),
 }
+
+# ---- #314 follow-up (manual insert, plan Task 11): the blank-slide cases on deck 2, pinned ----
+# The payload deck is the deck-2 gold spec with a manually inserted blank at BLANK_AT, exactly as
+# production persists it (``spec_json_with_blank_entry``): gold positions 3..5 shift to 4..6.
+BLANK_AT = 3
+BLANK_DECK_SLIDES = DECK_SLIDES + 1
+# The slide edit_beside_blank names: just after the blank (gold position 3, the impact stats).
+BESIDE_POS = 4
+BLANK_MESSAGES = {
+    "fill_blank_slide": (
+        "Please make slide 4 a quick guide to which of the four patterns fits which kind of task"
+    ),
+    "edit_beside_blank": "Can you add a one-line takeaway beneath the stats on the fifth slide?",
+}
+BLANK_REFERENCE_MESSAGES = {
+    "fill_blank_slide": (
+        "I'll make the blank slide 4 a quick guide to which pattern fits which kind of task."
+    ),
+    "edit_beside_blank": (
+        "I'll add a one-line takeaway beneath the three stats on the fifth slide."
+    ),
+}
+# fill_blank_slide's reference: the blank at BLANK_AT filled in place with these text fields.
+FILLED_SLIDE = {
+    "purpose": "Help the audience choose the right pattern for a task",
+    "content_brief": (
+        "Table mapping four common task types — extraction, classification, multi-step reasoning "
+        "and open-ended writing — to the pattern that fits each best, with one line on why"
+    ),
+    "assumes": "Audience has just met the four core patterns",
+    "hands_off": "Each kind of task has a pattern that fits it best",
+}
+# edit_beside_blank's one revision: BESIDE_POS's brief with this substring replaced.
+BESIDE_REVISION = (
+    "typical iteration cycles to production quality (3-5 rounds)",
+    "typical iteration cycles to production quality (3-5 rounds), with a one-line takeaway "
+    "beneath the stats: structured prompting pays for itself in fewer tokens and fewer rounds",
+)
+# edit_beside_blank's should_fail: the edit, plus the untouched blank filled with invented text.
+INVENTED_FILL = {
+    "purpose": "Bridge from the techniques to the evidence",
+    "content_brief": (
+        "Transition slide with one line asking whether the four patterns really pay off, setting "
+        "up the numbers that follow"
+    ),
+    "assumes": "Audience has just met the four core patterns",
+    "hands_off": "The patterns are only worth adopting if the gains are real",
+}
 COMMITTED = PACK_DIR / "cases_heldout"
 CASES = None  # set by the autouse fixture: the tmp tree generated for this module
 CONFIRM_DESIGN_MESSAGE = "Can you re-theme this deck with the Acme design system instead?"
@@ -331,8 +434,13 @@ def test_payload_is_the_production_shape(cid):
     assert len(p["template_sections"]) == 4
     if cid in HAS_DECK:
         DeckSpec.model_validate(p["current_deck_spec"])
-        assert p["current_deck_spec"] == gold
-        assert p["committed_slide_count"] == 6
+        if cid in BLANK_CASES:
+            # #314 follow-up: the gold deck plus the blank (test_blank_payload_splices_the_blank).
+            assert p["current_deck_spec"] == _blank_deck(gold)
+            assert p["committed_slide_count"] == BLANK_DECK_SLIDES == 7
+        else:
+            assert p["current_deck_spec"] == gold
+            assert p["committed_slide_count"] == 6
         assert len(p["conversation"]) == 3
         assert p["conversation"][0]["role"] == "user"
         assert p["conversation"][1]["role"] == "assistant"
@@ -410,6 +518,14 @@ def test_messages():
         "final slide"
     )
     assert {cid: _msg(cid) for cid in INSERT_CASES} == INSERT_MESSAGES
+    # #314 follow-up: the two blank-slide messages, exactly.
+    assert _msg("fill_blank_slide") == (
+        "Please make slide 4 a quick guide to which of the four patterns fits which kind of task"
+    )
+    assert _msg("edit_beside_blank") == (
+        "Can you add a one-line takeaway beneath the stats on the fifth slide?"
+    )
+    assert {cid: _msg(cid) for cid in BLANK_CASES} == BLANK_MESSAGES
 
 
 @pytest.mark.parametrize("cid", NEW_CASE_IDS)
@@ -480,8 +596,11 @@ def _by_position(spec):
 
 
 # #314: an insert reference changes the slide count, so it is checked by alignment instead
-# (test_insert_references_are_unambiguous_to_production).
-@pytest.mark.parametrize("cid", [c for c in EDIT_CASES if c not in INSERT_CASES])
+# (test_insert_references_are_unambiguous_to_production). A blank case's deck is not the gold
+# (test_blank_references_align_to_production).
+@pytest.mark.parametrize(
+    "cid", [c for c in EDIT_CASES if c not in INSERT_CASES and c not in BLANK_CASES]
+)
 def test_edit_references_revise_only_their_targets(cid):
     ref = _load(cid).reference
     assert ref["intent"] == "edit"
@@ -540,7 +659,9 @@ def test_new_cases_are_fair_on_the_gold():
 def test_slide_numbering_is_the_deck(cid):
     numbering = _load(cid).payload["slide_numbering"]
     if cid in HAS_DECK:
-        want = [{"slide_number": n, "position": n - 1} for n in range(1, DECK_SLIDES + 1)]
+        # #314 follow-up: the numbering counts the blank (production numbers the rows).
+        count = BLANK_DECK_SLIDES if cid in BLANK_CASES else DECK_SLIDES
+        want = [{"slide_number": n, "position": n - 1} for n in range(1, count + 1)]
         assert numbering == want
     else:
         assert numbering == []
@@ -634,8 +755,10 @@ def test_calibration_should_fail_is_wrong_and_valid(cid):
         assert not ok, f"calibration should_fail unexpectedly passes: {why}"
 
 
+# #314 follow-up: a blank case's should_fail is an edit too (test_blank_calibration_is_pinned).
 @pytest.mark.parametrize(
-    "cid", [c for c in CASE_IDS if c not in ("edit_request", *SLIPPED, *INSERT_CASES)]
+    "cid",
+    [c for c in CASE_IDS if c not in ("edit_request", *SLIPPED, *INSERT_CASES, *BLANK_CASES)],
 )
 def test_calibration_has_the_wrong_intent(cid):
     assert _cal(cid)["should_fail"]["intent"] != EXPECT[cid]["intent"]
@@ -714,6 +837,16 @@ def test_the_313_cases_are_byte_identical(generated):
         if path.split("/")[0] in CASES_313
     }
     assert got == CASES_313_SHA256
+
+
+def test_the_insert_cases_are_byte_identical(generated):
+    """#314 follow-up (Task 11): adding the blank cases rewrites none of the four insert case files."""
+    got = {
+        path: hashlib.sha256(data).hexdigest()
+        for path, data in generated.items()
+        if path.split("/")[0] in INSERT_CASES
+    }
+    assert got == INSERT_CASES_SHA256
 
 
 def test_generator_is_idempotent(generated):
@@ -983,3 +1116,227 @@ def test_insert_faults_name_the_trap(cid):
     c = _load(cid)
     for position in c.expect["inserted"]:
         assert f"position {position}" in c.fault, c.fault
+
+
+# ---- #314 follow-up (manual insert, plan Task 11, D5): the blank-slide cases on deck 2 ----
+
+def _restamped(spec):
+    for index, slide in enumerate(spec["slides"]):
+        slide["position"] = index
+    return spec
+
+
+def _blank_deck(gold):
+    """Oracle: ``gold`` with a blank entry spliced in at BLANK_AT, every slide re-stamped.
+
+    Written out by hand, so it is independent of the production splice it is checked against
+    (test_blank_payload_splices_the_blank).
+    """
+    spec = copy.deepcopy(gold)
+    assert [s["position"] for s in spec["slides"]] == list(range(len(spec["slides"])))
+    spec["slides"].insert(BLANK_AT, {
+        "purpose": "", "content_brief": "", "assumes": "", "hands_off": "", "data_references": [],
+    })
+    return _restamped(spec)
+
+
+def _expected_blank_reference(cid):
+    """fill: the blank filled in place. beside: only BESIDE_POS's brief revised, blank untouched."""
+    deck = _blank_deck(case.gold_deck_spec(DECK))
+    if cid == "fill_blank_slide":
+        deck["slides"][BLANK_AT] = _new_slide(BLANK_AT, FILLED_SLIDE)
+    elif cid == "edit_beside_blank":
+        old, new = BESIDE_REVISION
+        slide = deck["slides"][BESIDE_POS]
+        assert slide["content_brief"].count(old) == 1
+        slide["content_brief"] = slide["content_brief"].replace(old, new)
+    else:
+        raise AssertionError(f"no reference pinned for {cid}")
+    return {
+        "intent": "edit",
+        "message": BLANK_REFERENCE_MESSAGES[cid],
+        "deck_spec": deck,
+        "data_request": None,
+        "target_positions": EXPECT[cid]["positions"],
+        "proposed_design_contract": None,
+    }
+
+
+def _expected_blank_should_fail(cid):
+    ref = _expected_blank_reference(cid)
+    if cid == "fill_blank_slide":
+        # The named number read as "a new slide 4": the slide is inserted at BLANK_AT and the
+        # blank, left blank, shifts to BLANK_AT + 1. Same message and targets as the reference.
+        deck = _blank_deck(case.gold_deck_spec(DECK))
+        deck["slides"].insert(BLANK_AT, _new_slide(BLANK_AT, FILLED_SLIDE))
+        return {**ref, "deck_spec": _restamped(deck)}
+    if cid == "edit_beside_blank":
+        # The requested edit, plus the untouched blank filled with invented text.
+        deck = copy.deepcopy(ref["deck_spec"])
+        deck["slides"][BLANK_AT] = _new_slide(BLANK_AT, INVENTED_FILL)
+        return {**ref, "target_positions": [BLANK_AT, BESIDE_POS], "deck_spec": deck}
+    raise AssertionError(f"no should_fail pinned for {cid}")
+
+
+@pytest.mark.parametrize("cid", BLANK_CASES)
+def test_blank_payload_splices_the_blank(cid):
+    """The payload is what architect_node sends after a manual insert at BLANK_AT: the persisted
+    spec with production's blank entry spliced in, a committed count and numbering that count it."""
+    p = _load(cid).payload
+    gold = case.gold_deck_spec(DECK)
+    spec = p["current_deck_spec"]
+    DeckSpec.model_validate(spec)
+    assert spec == _blank_deck(gold)
+    # Production's own manual-insert splice of the persisted spec column.
+    assert spec == json.loads(spec_json_with_blank_entry(json.dumps(gold), BLANK_AT))
+    assert spec["slides"][BLANK_AT] == {**BLANK_DECK_SPEC_ENTRY, "position": BLANK_AT}
+    assert [i for i, s in enumerate(spec["slides"]) if is_blank_slide_spec(s)] == [BLANK_AT]
+    assert [s["position"] for s in spec["slides"]] == list(range(BLANK_DECK_SLIDES))
+    assert _deck_level(spec) == _deck_level(gold)
+    # One committed row per spec entry, the blank's row included (production rejects a mismatch).
+    assert p["committed_slide_count"] == len(spec["slides"]) == DECK_SLIDES + 1
+    numbering = p["slide_numbering"]
+    assert len(numbering) == BLANK_DECK_SLIDES
+    assert numbering[BLANK_AT] == {"slide_number": BLANK_AT + 1, "position": BLANK_AT}
+    assert p["conversation"][:2] == _load("edit_request").payload["conversation"][:2]
+
+
+def test_blank_slide_numbers_name_the_blank_and_its_neighbour():
+    """The user names the blank by its slide number; edit_beside_blank names the slide after it,
+    whose number counts the blank (gold slide 4 is now slide 5)."""
+    assert _resolved_positions("fill_blank_slide") == [BLANK_AT] == EXPECT["fill_blank_slide"][
+        "positions"
+    ]
+    assert _resolved_positions("edit_beside_blank") == [BESIDE_POS] == EXPECT[
+        "edit_beside_blank"
+    ]["positions"]
+    assert BESIDE_POS == BLANK_AT + 1
+    gold = case.gold_deck_spec(DECK)
+    payload_deck = _load("edit_beside_blank").payload["current_deck_spec"]
+    assert _without_position(payload_deck["slides"][BESIDE_POS]) == _without_position(
+        gold["slides"][BESIDE_POS - 1]
+    )
+
+
+@pytest.mark.parametrize("cid", BLANK_CASES)
+def test_blank_reference_is_pinned(cid):
+    """The whole reference: the blank deck with only the requested slide changed."""
+    assert _load(cid).reference == _expected_blank_reference(cid)
+
+
+@pytest.mark.parametrize("cid", BLANK_CASES)
+def test_blank_calibration_is_pinned(cid):
+    bad = _cal(cid)["should_fail"]
+    ArchitectOutput.model_validate(bad)
+    assert bad == _expected_blank_should_fail(cid)
+
+
+def test_blank_pins_are_literal():
+    """The oracles' targets, lengths and where the blank ends up, written out."""
+    ref = {cid: _expected_blank_reference(cid) for cid in BLANK_CASES}
+    bad = {cid: _expected_blank_should_fail(cid) for cid in BLANK_CASES}
+    assert {cid: r["target_positions"] for cid, r in ref.items()} == {
+        "fill_blank_slide": [3], "edit_beside_blank": [4],
+    }
+    assert {cid: b["target_positions"] for cid, b in bad.items()} == {
+        "fill_blank_slide": [3], "edit_beside_blank": [3, 4],
+    }
+    assert {cid: len(r["deck_spec"]["slides"]) for cid, r in ref.items()} == dict.fromkeys(
+        BLANK_CASES, 7
+    )
+    assert {cid: len(b["deck_spec"]["slides"]) for cid, b in bad.items()} == {
+        "fill_blank_slide": 8, "edit_beside_blank": 7,
+    }
+
+    def blanks(spec):
+        return [i for i, s in enumerate(spec["slides"]) if is_blank_slide_spec(s)]
+
+    assert blanks(ref["fill_blank_slide"]["deck_spec"]) == []
+    assert blanks(ref["edit_beside_blank"]["deck_spec"]) == [3]
+    assert blanks(bad["fill_blank_slide"]["deck_spec"]) == [4]  # left blank, one place later
+    assert blanks(bad["edit_beside_blank"]["deck_spec"]) == []  # the blank filled too
+
+
+@pytest.mark.parametrize("cid", BLANK_CASES)
+def test_blank_references_align_to_production(cid):
+    """D10: production's alignment of the payload deck to the reference is an equal-length edit
+    that revises exactly ``positions``; every other slide, the blank included unless filled, is
+    the payload's slide unchanged."""
+    c = _load(cid)
+    current = c.payload["current_deck_spec"]
+    spec = c.reference["deck_spec"]
+    positions = c.expect["positions"]
+    assert c.expect["inserted"] == []
+    alignment = align_slides(
+        DeckSpec.model_validate(current).slides, DeckSpec.model_validate(spec).slides
+    )
+    assert list(alignment.inserted_indices) == []
+    assert list(alignment.revised_indices) == positions
+    assert dict(alignment.old_to_new_index) == {i: i for i in range(BLANK_DECK_SLIDES)}
+    for index, slide in enumerate(spec["slides"]):
+        if index not in positions:
+            assert slide == current["slides"][index], index
+    assert _deck_level(spec) == _deck_level(current)
+    filled = not is_blank_slide_spec(spec["slides"][BLANK_AT])
+    assert filled == (cid == "fill_blank_slide")
+
+
+# Which production check each blank should_fail trips (D10's fail rationales).
+BLANK_CALIBRATION_TRAP = {
+    "fill_blank_slide": "inserted [3] != []",
+    "edit_beside_blank": "revised [3, 4] != [4]",
+}
+
+
+@pytest.mark.parametrize("cid", BLANK_CASES)
+def test_blank_calibration_fails_production_scoring_on_its_trap(cid):
+    """Each should_fail is a spec production would apply; it fails on its planted trap only."""
+    c = _load(cid)
+    bad = _cal(cid)["should_fail"]
+    current = DeckSpec.model_validate(c.payload["current_deck_spec"])
+    alignment = align_slides(current.slides, DeckSpec.model_validate(bad["deck_spec"]).slides)
+    if cid == "fill_blank_slide":
+        assert list(alignment.inserted_indices) == [BLANK_AT]
+        assert list(alignment.revised_indices) == []
+    else:
+        assert list(alignment.inserted_indices) == []
+        assert list(alignment.revised_indices) == [BLANK_AT, BESIDE_POS]
+    ok, why = expected_category_score(
+        AGENT, bad, c.expect,
+        reference=c.reference, current_deck_spec=c.payload["current_deck_spec"],
+    )
+    assert not ok, why
+    assert why.startswith("Insert: "), why
+    assert BLANK_CALIBRATION_TRAP[cid] in why, why
+
+
+@pytest.mark.parametrize("cid", BLANK_CASES)
+def test_blank_faults_name_the_trap(cid):
+    c = _load(cid)
+    assert "blank" in c.fault, c.fault
+    assert f"position {BLANK_AT}" in c.fault, c.fault
+    if cid == "edit_beside_blank":
+        assert f"position {BESIDE_POS}" in c.fault, c.fault
+
+
+def test_blank_markers():
+    filled = _ref_slide("fill_blank_slide", BLANK_AT)
+    assert "task types" in filled["content_brief"], filled
+    stats = _ref_slide("edit_beside_blank", BESIDE_POS)["content_brief"]
+    assert "one-line takeaway" in stats and stats.startswith("Three-stat card slide"), stats
+    invented = _cal("edit_beside_blank")["should_fail"]["deck_spec"]["slides"][BLANK_AT]
+    assert invented["purpose"].startswith("Bridge") and not is_blank_slide_spec(invented)
+
+
+def test_blank_cases_are_fair_on_the_gold():
+    """The fill asks for a slide deck 2 does not hold; the edit asks for a real change."""
+    gold = case.gold_deck_spec(DECK)
+    slides = _by_position(gold)
+    assert not any(is_blank_slide_spec(s) for s in gold["slides"])
+    # The blank sits between the techniques and the impact stats; the slide after it is the stats.
+    assert "techniques" in slides[BLANK_AT - 1]["purpose"]
+    assert slides[BESIDE_POS - 1]["content_brief"].startswith("Three-stat card slide")
+    assert "takeaway" not in slides[BESIDE_POS - 1]["content_brief"]
+    for slide in gold["slides"]:
+        text = (slide["purpose"] + " " + slide["content_brief"]).lower()
+        assert "task type" not in text and "which pattern" not in text, text

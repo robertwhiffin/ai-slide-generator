@@ -9,11 +9,15 @@ Real-model runs; results are logged to MLflow.
 - **Configs** (`evals/configs/`). A config is a named variant of one agent's v1 definition.
   `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
   settings. Each config carries a `content_hash`, logged with every run.
-- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (thirteen for the architect), 43 in total across the seven
+- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (fifteen for the architect), 45 in total across the seven
   roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
   `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
   `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
-  and `calibration.json` (a `should_fail` output).
+  and `calibration.json` (a `should_fail` output). The architect's two newest cases,
+  `fill_blank_slide` (the user names a manually inserted blank slide by its number and asks for
+  content on it: it is filled in place, with no new slide beside it) and `edit_beside_blank` (the
+  user asks to change the slide after the blank: only that slide changes and the blank stays blank),
+  run on a deck that holds the blank; they have not been calibrated or measured yet.
 - **Scorers** (`evals/harness/scorers.py`, `mlflow_run.py`). Every row is scored by:
   - `contract`: the output validated against the agent's schema. An `incomplete` run, such as a model
     inventing a criterion name outside the schema, fails here.
@@ -101,7 +105,7 @@ data_analyst prompt mentions Genie and a vector index, but neither is available 
 
 ## Held-out set
 
-Each agent has a second, separate set of cases (five per agent, thirteen for the architect; 43 in total) in `evals/packs/<agent>/cases_heldout/`,
+Each agent has a second, separate set of cases (five per agent, fifteen for the architect; 45 in total) in `evals/packs/<agent>/cases_heldout/`,
 built from a different source deck than the train cases. It has the same four files per case and
 shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
 cases generalises, rather than having been fitted to them.

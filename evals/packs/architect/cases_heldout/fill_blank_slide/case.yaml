@@ -1,0 +1,9 @@
+kind: mutation
+fault: 'fill the blank slide 4 (position 3) in place: a new slide beside it leaves
+  the blank empty and every later slide one place on'
+expect:
+  intent: edit
+  positions:
+  - 3
+  inserted: []
+design_system_active: true
