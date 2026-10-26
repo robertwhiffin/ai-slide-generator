@@ -734,6 +734,7 @@ jobs:
           - session-loading
           - slide-operations-ui
           - slide-security
+          - slide-style-preview
           - slide-styles-integration
           - slide-styles-ui
           - slide-surface-fidelity
