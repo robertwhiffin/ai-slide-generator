@@ -487,6 +487,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         graph_version: sessionInfo.graph_version,
         active_graph_version: sessionInfo.active_graph_version,
         is_older_than_active: sessionInfo.is_older_than_active,
+        deck_mode: sessionInfo.deck_mode,
       },
       isCancelled,
     );

@@ -100,7 +100,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const sendSeqRef = useRef(0);  // #317: the send a turn-end id read belongs to
   const navigate = useNavigate();
-  const { sessionId, isSessionPersisted, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle } = useSession();
+  const { sessionId, isSessionPersisted, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle, storedDeckMode, selectedDeckMode, setStoredDeckMode } = useSession();
   const { agentConfig, refreshConfig, configOwnerSessionId, isPreSession } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
@@ -262,6 +262,21 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       .catch(() => { /* the viewer keeps what it has; the next turn's refetch corrects it */ });
   };
 
+  // After a failed send the optimistic mode lock may be wrong (the server may have rejected the
+  // mode with a 409, or never locked). Re-read the session and take its mode as the truth. Guarded
+  // like refetchDeckAfterError, but with no onDeckRefetched early return. If the re-read fails,
+  // nothing changes: the optimistic lock stays and the turn's error is already showing.
+  const reconcileDeckModeAfterError = (sentTo: string | null, seq: number) => {
+    Promise.resolve()
+      .then(() => (sentTo ? api.getSession(sentTo) : null))
+      .then(session => {
+        if (!session) return;
+        if (sendSeqRef.current !== seq || currentSessionIdRef.current !== sentTo) return;
+        setStoredDeckMode(session.deck_mode ?? null);
+      })
+      .catch(() => { /* keep the optimistic lock */ });
+  };
+
   const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | string[], maybeImageIds?: string[]) => {
     // Support two calling conventions:
     // 1. From ChatInput: (content, imageIds)
@@ -293,6 +308,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       return;
     }
     const sentTo = sessionId;
+
+    // The stored mode wins on a locked deck; otherwise lock optimistically with the selection.
+    // Set only now: a send that never goes out must not lock the deck.
+    const deckMode = storedDeckMode ?? selectedDeckMode;
+    if (storedDeckMode === null) {
+      setStoredDeckMode(deckMode);
+    }
 
     setIsLoading(true);
     setTurnProgress(null);
@@ -398,6 +420,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           // the right one. Refetching here could race it with a pre-completion deck.
           if (event.metadata?.position == null) {
             refetchDeckAfterError(sentTo, seq);
+            reconcileDeckModeAfterError(sentTo, seq);
           }
           break;
 
@@ -494,9 +517,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         setIsGenerating(false);
         refreshMessageIds(sentTo, seq);
         refetchDeckAfterError(sentTo, seq);
+        reconcileDeckModeAfterError(sentTo, seq);
       },
       imageIds,
       configIsForThisSession ? agentConfig : undefined,
+      deckMode,
     );
   };
 
