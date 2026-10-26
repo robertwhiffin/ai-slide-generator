@@ -8,6 +8,20 @@ graph only if its first user message contained :data:`AGENT_MODE_PHRASE`.)
 
 from __future__ import annotations
 
+#: Deck Mode: the stored ``user_sessions.deck_mode`` values (NULL = not chosen yet).
+DECK_MODE_AGENT = "agent"
+DECK_MODE_LEGACY = "legacy"
+DECK_MODES: frozenset[str] = frozenset({DECK_MODE_AGENT, DECK_MODE_LEGACY})
+
+
+def engine_mode_for_deck_mode(deck_mode: str | None) -> str:
+    """Map a stored Deck Mode to the job payload's ``engine_mode``.
+
+    ``legacy`` -> ``"monolith"``; ``agent`` and NULL -> ``"graph"`` (the default).
+    """
+    return "monolith" if deck_mode == DECK_MODE_LEGACY else "graph"
+
+
 LEGACY_MODE_PHRASE = "USE LEGACY MODE"
 
 # The pre-2026-10-12 opt-IN marker.  It no longer selects anything on its own

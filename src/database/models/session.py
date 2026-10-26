@@ -180,6 +180,10 @@ class UserSession(Base):
         index=True,
     )
 
+    # Deck Mode: 'agent' | 'legacy'; NULL = not chosen yet (unlocked). No default:
+    # the run-once migration marks pre-existing rows 'legacy', new rows stay NULL.
+    deck_mode = Column(String(16), nullable=True)
+
     # Session metadata
     title = Column(String(255))  # Optional session title/name
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -11,13 +11,15 @@ import os
 import tempfile
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import String, create_engine, inspect, text
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from unittest.mock import patch
 
 import src.database.models  # noqa: F401 - register models with Base
 import src.core.database as database_module
 from src.core.database import Base, _run_migrations, init_db
+from src.database.models.session import UserSession
 
 
 # ---------------------------------------------------------------------------
@@ -526,3 +528,270 @@ def test_collaboration_identity_backfill_and_default_on_the_legacy_alter_path(
     with sqlite_engine.connect() as conn:
         assert _identities(conn, "user_sessions") == sessions_after
         assert _identities(conn, "session_slide_decks") == decks_after
+
+
+# ---------------------------------------------------------------------------
+# Deck Mode: user_sessions.deck_mode (spec 2026-10-22 §5.1, §6)
+# ---------------------------------------------------------------------------
+#
+# NULL = not chosen yet (unlocked); 'agent' / 'legacy' = chosen and locked.  The
+# run-once migration marks every row that predates the column 'legacy', and must
+# never touch a row again: re-filling on a later boot would flip agent decks back to
+# legacy and lock every unlocked deck as legacy (spec anti-goal 2).
+#
+# The helper tests hand-build the pre-column table and call the helper directly with
+# a fresh inspector per run.  Going through create_all would prove nothing: the column
+# would come from the ORM model, not the migration.
+
+_DECK_MODE_QUAL = lambda table: f'"{table}"'  # noqa: E731 — what _run_migrations builds with no schema
+
+
+def _deck_mode_migration():
+    migration = getattr(database_module, "_migrate_deck_mode_schema", None)
+    assert migration is not None, (
+        "src.core.database._migrate_deck_mode_schema does not exist"
+    )
+    return migration
+
+
+def _create_pre_deck_mode_sessions(engine, qualified_table: str = '"user_sessions"'):
+    """A user_sessions table from before the column, holding two existing decks."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"CREATE TABLE {qualified_table} ("
+                "id INTEGER PRIMARY KEY, session_id VARCHAR(64) NOT NULL)"
+            )
+        )
+        conn.execute(
+            text(
+                f"INSERT INTO {qualified_table} (id, session_id) VALUES "
+                "(1, 'old-deck-1'), (2, 'old-deck-2')"
+            )
+        )
+
+
+def _run_deck_mode_migration(engine, migration, schema=None, qual=_DECK_MODE_QUAL):
+    """One boot's worth of the helper: its own transaction and a fresh inspector."""
+    with engine.begin() as conn:
+        migration(conn, inspect(conn), schema, qual, True)
+
+
+def _deck_modes_by_id(engine, qualified_table: str = '"user_sessions"') -> dict:
+    with engine.connect() as conn:
+        return dict(
+            conn.execute(
+                text(f"SELECT id, deck_mode FROM {qualified_table} ORDER BY id")
+            ).fetchall()
+        )
+
+
+def _deck_mode_column(engine, schema=None):
+    """The reflected ``deck_mode`` column of user_sessions, or None if absent."""
+    return next(
+        (
+            column
+            for column in inspect(engine).get_columns("user_sessions", schema=schema)
+            if column["name"] == "deck_mode"
+        ),
+        None,
+    )
+
+
+def _assert_deck_mode_column_shape(column) -> None:
+    assert column is not None, "user_sessions has no deck_mode column"
+    assert column["nullable"] is True, "deck_mode must be nullable (NULL = unlocked)"
+    assert isinstance(column["type"], String) and column["type"].length == 16, (
+        f"deck_mode is {column['type']!r}, expected VARCHAR(16)"
+    )
+
+
+def test_deck_mode_migration_fills_existing_rows_with_legacy_and_leaves_new_rows_null(
+    sqlite_engine,
+):
+    """Break caught: decks that predate the column are left unchosen (their next
+    message would lock them as agent), or the fill outlives the migration as a
+    default, so every deck created afterwards is born legacy and locked."""
+    migration = _deck_mode_migration()
+    _create_pre_deck_mode_sessions(sqlite_engine)
+
+    _run_deck_mode_migration(sqlite_engine, migration)
+
+    assert _deck_modes_by_id(sqlite_engine) == {1: "legacy", 2: "legacy"}
+
+    # A deck created after the migration, by a writer that does not name the column.
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO user_sessions (id, session_id) VALUES (3, 'new-deck')")
+        )
+
+    assert _deck_modes_by_id(sqlite_engine) == {1: "legacy", 2: "legacy", 3: None}
+    _assert_deck_mode_column_shape(_deck_mode_column(sqlite_engine))
+
+
+def test_deck_mode_migration_second_run_is_a_noop(sqlite_engine):
+    """Break caught: the legacy fill runs outside the missing-column branch, so every
+    boot flips agent decks back to legacy, or locks unlocked (NULL) decks as legacy."""
+    migration = _deck_mode_migration()
+    _create_pre_deck_mode_sessions(sqlite_engine)
+    _run_deck_mode_migration(sqlite_engine, migration)
+
+    # Between boots: deck 1 is chosen as agent, and an unchosen deck appears.
+    with sqlite_engine.begin() as conn:
+        conn.execute(text("UPDATE user_sessions SET deck_mode = 'agent' WHERE id = 1"))
+        conn.execute(
+            text(
+                "INSERT INTO user_sessions (id, session_id) VALUES (3, 'unlocked-deck')"
+            )
+        )
+
+    _run_deck_mode_migration(sqlite_engine, migration)  # the next boot
+
+    assert _deck_modes_by_id(sqlite_engine) == {1: "agent", 2: "legacy", 3: None}
+
+
+def test_deck_mode_is_null_on_a_fresh_create_all_schema(sqlite_engine):
+    """Break caught: the ORM column carries a default/server default (new decks are
+    born chosen), or the legacy fill runs even when the column already exists, so a
+    fresh database's decks turn legacy on the next boot."""
+    Base.metadata.create_all(bind=sqlite_engine)
+    factory = sessionmaker(bind=sqlite_engine, expire_on_commit=False)
+    with factory() as db:
+        db.add(UserSession(session_id="orm-deck", created_by="owner@example.com"))
+        db.commit()
+    with sqlite_engine.begin() as conn:
+        _raw_insert_session(conn, "raw-sql-deck")
+
+    # Two boots over the fresh schema: the column exists, so neither may fill it.
+    _run_migrations(sqlite_engine, schema=None)
+    _run_migrations(sqlite_engine, schema=None)
+
+    with factory() as db:
+        reloaded = db.query(UserSession).filter_by(session_id="orm-deck").one()
+        assert reloaded.deck_mode is None
+    with sqlite_engine.connect() as conn:
+        stored = dict(
+            conn.execute(
+                text("SELECT session_id, deck_mode FROM user_sessions")
+            ).fetchall()
+        )
+    assert stored == {"orm-deck": None, "raw-sql-deck": None}
+
+    column = _deck_mode_column(sqlite_engine)
+    _assert_deck_mode_column_shape(column)
+    assert column["default"] is None, (
+        f"create_all gave deck_mode a server default: {column['default']!r}"
+    )
+    # The migration adds no index, so a create_all schema must not carry one either.
+    indexed_columns = {
+        name
+        for index in inspect(sqlite_engine).get_indexes("user_sessions")
+        for name in index["column_names"]
+    }
+    assert "deck_mode" not in indexed_columns
+
+
+def test_run_migrations_wires_the_deck_mode_helper(sqlite_engine):
+    """Break caught: the helper works when called directly but _run_migrations never
+    calls it, so no existing database ever gains the column."""
+    Base.metadata.create_all(bind=sqlite_engine)
+    _run_migrations(sqlite_engine, schema=None)
+    assert _deck_mode_column(sqlite_engine) is not None, (
+        "create_all built no user_sessions.deck_mode: UserSession.deck_mode is missing"
+    )
+    with sqlite_engine.begin() as conn:
+        _raw_insert_session(conn, "pre-column-deck-1")
+        _raw_insert_session(conn, "pre-column-deck-2")
+
+    # Return the table to its pre-column shape, keeping its rows.
+    with sqlite_engine.begin() as conn:
+        conn.execute(text("ALTER TABLE user_sessions DROP COLUMN deck_mode"))
+    assert _deck_mode_column(sqlite_engine) is None, "DROP COLUMN left deck_mode"
+
+    _run_migrations(sqlite_engine, schema=None)
+
+    assert _deck_mode_column(sqlite_engine) is not None, (
+        "_run_migrations did not re-add deck_mode: the helper is not wired in"
+    )
+    _assert_deck_mode_column_shape(_deck_mode_column(sqlite_engine))
+    with sqlite_engine.connect() as conn:
+        stored = dict(
+            conn.execute(
+                text("SELECT session_id, deck_mode FROM user_sessions")
+            ).fetchall()
+        )
+    assert stored == {"pre-column-deck-1": "legacy", "pre-column-deck-2": "legacy"}
+
+
+def test_deck_mode_migration_targets_the_configured_schema(sqlite_engine, tmp_path):
+    """Break caught: the helper ignores ``schema``/``_qual`` and reads or writes a bare
+    ``user_sessions``. Production passes LAKEBASE_SCHEMA and its qualifier, as for every
+    sibling step, and one database can hold several environments' schemas.
+
+    An attached SQLite database stands in for the configured schema.  The main database
+    holds a second, already-migrated ``user_sessions`` (another environment's), which a
+    bare name resolves to first: reading it says "nothing to do", ALTERing it fails, and
+    UPDATEing it rewrites someone else's decks."""
+    migration = _deck_mode_migration()
+    with sqlite_engine.begin() as conn:
+        conn.execute(
+            text(
+                'CREATE TABLE "user_sessions" (id INTEGER PRIMARY KEY, '
+                "session_id VARCHAR(64) NOT NULL, deck_mode VARCHAR(16))"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO \"user_sessions\" (id, session_id, deck_mode) VALUES "
+                "(1, 'other-env-unlocked', NULL), (2, 'other-env-agent', 'agent')"
+            )
+        )
+    with sqlite_engine.connect() as conn:
+        conn.execute(text(f"ATTACH DATABASE '{tmp_path / 'app.db'}' AS app_data"))
+        conn.commit()
+    schema_qual = lambda table: f'"app_data"."{table}"'  # noqa: E731
+    _create_pre_deck_mode_sessions(sqlite_engine, schema_qual("user_sessions"))
+
+    _run_deck_mode_migration(sqlite_engine, migration, "app_data", schema_qual)
+
+    _assert_deck_mode_column_shape(_deck_mode_column(sqlite_engine, schema="app_data"))
+    assert _deck_modes_by_id(sqlite_engine, schema_qual("user_sessions")) == {
+        1: "legacy",
+        2: "legacy",
+    }
+    # The other schema's decks are untouched.
+    assert _deck_modes_by_id(sqlite_engine, '"main"."user_sessions"') == {
+        1: None,
+        2: "agent",
+    }
+
+
+def test_deck_mode_migration_rereads_the_live_schema_not_a_cached_inspector(
+    sqlite_engine,
+):
+    """Break caught: the helper decides "column missing" from the caller's shared
+    inspector. _run_migrations creates that inspector once per transaction and it
+    caches columns, so after any earlier ALTER it can report deck_mode missing when
+    it is not, re-running the ALTER (error) or the fill (agent decks become legacy)."""
+    migration = _deck_mode_migration()
+    _create_pre_deck_mode_sessions(sqlite_engine)
+
+    with sqlite_engine.begin() as conn:
+        shared = inspect(conn)
+        shared.get_columns("user_sessions")  # caches the pre-column shape
+        migration(conn, shared, None, _DECK_MODE_QUAL, True)
+        conn.execute(text("UPDATE user_sessions SET deck_mode = 'agent' WHERE id = 1"))
+        # The shared inspector still says deck_mode is missing; the table says not.
+        migration(conn, shared, None, _DECK_MODE_QUAL, True)
+
+    assert _deck_modes_by_id(sqlite_engine) == {1: "agent", 2: "legacy"}
+
+
+def test_deck_mode_migration_is_a_noop_without_a_user_sessions_table(sqlite_engine):
+    """Break caught: the helper lacks its siblings' reflection guards and raises when
+    user_sessions cannot be reflected, aborting the whole migration transaction."""
+    migration = _deck_mode_migration()
+
+    _run_deck_mode_migration(sqlite_engine, migration)
+
+    assert "user_sessions" not in inspect(sqlite_engine).get_table_names()
