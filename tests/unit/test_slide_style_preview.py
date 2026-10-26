@@ -186,6 +186,16 @@ class TestFingerprint:
         with db_factory() as s:
             assert fixture.current_builder_definition(s) is None
 
+    def test_a_superseded_release_is_not_read(self, db_factory, graph_release):
+        from src.database.models.graph_configuration import GraphRelease
+
+        with db_factory() as s:
+            release = s.get(GraphRelease, graph_release.graph_release_id)
+            release.effective_to = datetime.utcnow()
+            s.commit()
+        with db_factory() as s:
+            assert fixture.current_builder_definition(s) is None
+
 
 # ---------------------------------------------------------------------------
 # Dedup enqueue
@@ -244,6 +254,25 @@ class TestAbandonedJobs:
         assert datetime.utcnow() - style.preview_attempted_at < timedelta(minutes=1)
         s.close()
 
+    @pytest.mark.parametrize(
+        "status,age,abandoned",
+        [
+            ("queued", timedelta(minutes=1), False),
+            ("generating", timedelta(minutes=1), False),
+            ("queued", timedelta(minutes=31), True),
+            ("generating", timedelta(minutes=31), True),
+            ("ready", timedelta(days=1), False),
+            ("failed", timedelta(days=1), False),
+        ],
+    )
+    def test_is_abandoned(self, status, age, abandoned):
+        from src.api.services import slide_style_preview_queue as q
+
+        style = SlideStyleLibrary(
+            preview_status=status, preview_attempted_at=datetime.utcnow() - age
+        )
+        assert q.is_abandoned(style) is abandoned
+
     @pytest.mark.parametrize("status", ["queued", "generating"])
     def test_live_in_flight_row_is_not_reclaimed(self, patched_db, db_factory, status):
         from src.api.services import slide_style_preview_queue as q
@@ -294,8 +323,13 @@ class TestAbandonedJobs:
         """try_enqueue runs on threadpool threads; the queue belongs to the loop.
 
         Run in asyncio debug mode, which raises on a non-thread-safe call from
-        another thread instead of leaving the wakeup to chance.
+        another thread instead of leaving the wakeup to chance. A non-thread-safe
+        put can also strand the waiting getter for good (its future is marked
+        done but its wakeup is never scheduled), so the loop runs in a daemon
+        thread with a bounded join: the bug fails the test instead of hanging it.
         """
+        import threading
+
         from src.api.services import slide_style_preview_queue as q
 
         async def _main():
@@ -306,7 +340,19 @@ class TestAbandonedJobs:
             await asyncio.to_thread(q._dispatch, 7)
             return await asyncio.wait_for(getter, timeout=2)
 
-        assert asyncio.run(_main(), debug=True) == 7
+        outcome = {}
+
+        def _run():
+            try:
+                outcome["value"] = asyncio.run(_main(), debug=True)
+            except BaseException as exc:  # noqa: BLE001 — reported below
+                outcome["error"] = exc
+
+        runner = threading.Thread(target=_run, daemon=True)
+        runner.start()
+        runner.join(timeout=10)
+        assert not runner.is_alive(), "the dispatched job never reached the worker loop"
+        assert outcome == {"value": 7}
 
     def test_dispatch_without_a_worker_leaves_the_row_queued(self, monkeypatch):
         from src.api.services import slide_style_preview_queue as q
@@ -785,6 +831,63 @@ class TestPreviewEndpoints:
         )
         dep_calls = [d.call for d in route.dependant.dependencies]
         assert require_admin not in dep_calls
+
+    def _status(self, db_factory, style_id):
+        with db_factory() as s:
+            return s.get(SlideStyleLibrary, style_id).preview_status
+
+    def test_regenerate_leaves_a_live_job_alone(self, patched_db, db_factory):
+        """No duplicate generation: the docstring's in-flight no-op."""
+        from src.api.routes.settings.slide_styles import regenerate_slide_style_preview
+
+        style_id = _make_style(db_factory)
+        _set_in_flight(db_factory, style_id, "generating", timedelta(minutes=1))
+        with db_factory() as db:
+            resp = regenerate_slide_style_preview(style_id, db=db)
+        assert resp.status == "generating"
+        assert self._status(db_factory, style_id) == "generating"
+
+    def test_regenerate_reclaims_an_abandoned_job(self, patched_db, db_factory):
+        from src.api.routes.settings.slide_styles import regenerate_slide_style_preview
+        from src.api.services import slide_style_preview_queue as q
+
+        style_id = _make_style(db_factory)
+        _set_in_flight(
+            db_factory, style_id, "generating", q.PREVIEW_STALE_AFTER + timedelta(minutes=1)
+        )
+        with db_factory() as db:
+            resp = regenerate_slide_style_preview(style_id, db=db)
+        assert resp.status == "queued"
+        assert self._status(db_factory, style_id) == "queued"
+
+    def test_regenerate_forces_a_ready_and_current_preview(
+        self, patched_db, db_factory, graph_release
+    ):
+        from src.api.routes.settings.slide_styles import regenerate_slide_style_preview
+
+        style_id = _make_style(db_factory)
+        with db_factory() as s:
+            style = s.get(SlideStyleLibrary, style_id)
+            style.preview_status = "ready"
+            style.preview_fingerprint = _current_fingerprint(db_factory, style)
+            s.commit()
+        with db_factory() as db:
+            resp = regenerate_slide_style_preview(style_id, db=db)
+        assert resp.status == "queued"
+
+    def test_get_preview_recovers_an_abandoned_job(self, patched_db, db_factory):
+        from src.api.routes.settings.slide_styles import get_slide_style_preview
+        from src.api.services import slide_style_preview_queue as q
+
+        style_id = _make_style(db_factory)
+        _set_in_flight(
+            db_factory, style_id, "queued", q.PREVIEW_STALE_AFTER + timedelta(minutes=1)
+        )
+        with db_factory() as db:
+            get_slide_style_preview(style_id, db=db)
+        with db_factory() as s:
+            attempted = s.get(SlideStyleLibrary, style_id).preview_attempted_at
+        assert datetime.utcnow() - attempted < timedelta(minutes=1)
 
     def test_get_preview_404_when_style_missing(self):
         """Read endpoint 404s for an unknown style (visibility parity)."""
