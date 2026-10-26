@@ -921,6 +921,19 @@ class SessionNotFoundError(Exception):
     pass
 
 
+class DeckModeLockedError(Exception):
+    """A message asked for a Deck Mode other than the one its deck is locked to.
+
+    Raised by ``SessionManager.add_user_message`` before anything is written, so
+    the message is not saved.  ``deck_mode`` is the STORED mode (the deck owner's
+    column), which the route reports back to the caller.
+    """
+
+    def __init__(self, deck_mode: str):
+        self.deck_mode = deck_mode
+        super().__init__(f"This deck's Deck Mode is locked to {deck_mode!r}")
+
+
 class MessageNotFoundError(Exception):
     """A message id is not a deletable message of the session.
 
@@ -1185,7 +1198,12 @@ class SessionManager:
                     "created_at": existing.created_at.isoformat(),
                 }
 
-            graph_release_id = lock_active_graph_release(db).release_id
+            # A legacy deck never uses a Graph Release, so its new contributor is
+            # unpinned (spec §5.5).  An unlocked deck may still lock agent, so its
+            # contributor is pinned as today; a later legacy lock clears that pin.
+            graph_release_id = None
+            if parent.deck_mode != DECK_MODE_LEGACY:
+                graph_release_id = lock_active_graph_release(db).release_id
             contributor = UserSession(
                 session_id=secrets.token_urlsafe(32),
                 created_by=created_by,
@@ -1766,20 +1784,15 @@ class SessionManager:
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
-
-            message = SessionMessage(
-                session_id=session.id,
+            message = self._insert_user_message(
+                db,
+                session,
                 role=role,
                 content=content,
                 message_type=message_type,
-                metadata_json=json.dumps(metadata) if metadata else None,
+                metadata=metadata,
                 request_id=request_id,
             )
-            db.add(message)
-            db.flush()
-
-            # Update session activity
-            session.last_activity = datetime.utcnow()
 
             return {
                 "id": message.id,
@@ -1787,6 +1800,156 @@ class SessionManager:
                 "content": message.content,
                 "created_at": message.created_at.isoformat(),
             }
+
+    def add_user_message(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        message_type: str,
+        request_id: Optional[str] = None,
+        requested_deck_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Save a user message, locking the deck's Deck Mode if it is still unlocked.
+
+        One ``get_db_session`` block, so the lock, the pin change and the message
+        insert commit together or not at all (spec §5.2):
+
+        - **Unlocked deck** (owner ``deck_mode IS NULL``): a conditional
+          ``UPDATE … WHERE deck_mode IS NULL`` on the OWNER row writes
+          *requested_deck_mode*, or ``"agent"`` when none is sent.  Winning it
+          also changes the deck's pins (§5.5): ``legacy`` clears the owner's and
+          every contributor's pin; ``agent`` pins an unpinned owner to the
+          locked active Graph Release and never moves an existing pin.  Losing
+          it (another first message locked the deck in between) re-reads the
+          stored mode and continues as on a locked deck.
+        - **Locked deck:** the same mode, or none, saves the message; a
+          different mode raises ``DeckModeLockedError`` and saves nothing.  Pins
+          are never touched outside the locking transaction.
+
+        Args:
+            session_id: The caller's session (owner or contributor).
+            content: Message content.
+            message_type: Message type classification.
+            request_id: Optional chat request ID for async polling.
+            requested_deck_mode: ``"agent"``, ``"legacy"`` or None (no choice sent).
+
+        Returns:
+            ``add_message``'s keys plus ``deck_mode`` (the deck's mode after the
+            call) and ``locked_now`` (True only when this call set the lock).
+
+        Raises:
+            ValueError: If *requested_deck_mode* is neither None nor in ``DECK_MODES``.
+            SessionNotFoundError: If the session (or a contributor's owner) is missing.
+            DeckModeLockedError: If the deck is locked to a different mode.
+            ActiveGraphReleaseUnavailableError: If an agent lock must pin the owner
+                and there is no active Graph Release.
+        """
+        # Before any write: there is no DB CHECK, so a stray value would be stored
+        # forever (and resolve as the graph).
+        if requested_deck_mode is not None and requested_deck_mode not in DECK_MODES:
+            raise ValueError(f"Unknown deck_mode: {requested_deck_mode!r}")
+
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            owner = self._get_deck_owner_session(db, session)
+
+            locked_now = False
+            deck_mode = owner.deck_mode
+            if deck_mode is None:
+                chosen = requested_deck_mode or DECK_MODE_AGENT
+                won = (
+                    db.execute(
+                        update(UserSession)
+                        .where(
+                            UserSession.id == owner.id,
+                            UserSession.deck_mode.is_(None),
+                        )
+                        .values(deck_mode=chosen)
+                    ).rowcount
+                    == 1
+                )
+                if won:
+                    locked_now = True
+                    deck_mode = chosen
+                    if chosen == DECK_MODE_LEGACY:
+                        db.execute(
+                            update(UserSession)
+                            .where(
+                                or_(
+                                    UserSession.id == owner.id,
+                                    UserSession.parent_session_id == owner.id,
+                                )
+                            )
+                            .values(graph_release_id=None)
+                        )
+                    elif owner.graph_release_id is None:
+                        owner.graph_release_id = lock_active_graph_release(db).release_id
+                        db.flush()
+                else:
+                    # Another first message locked the deck between our read and
+                    # the UPDATE.  Re-read the column: the ORM update's 'evaluate'
+                    # synchronisation has written OUR ``chosen`` into the identity
+                    # map even though no row matched, so the attribute is wrong.
+                    db.refresh(owner, attribute_names=["deck_mode"])
+                    deck_mode = owner.deck_mode
+
+            if requested_deck_mode is not None and requested_deck_mode != deck_mode:
+                raise DeckModeLockedError(deck_mode)
+
+            # On THIS db, never via ``add_message`` (its own transaction would
+            # split the lock from the insert).
+            message = self._insert_user_message(
+                db,
+                session,
+                role="user",
+                content=content,
+                message_type=message_type,
+                metadata=None,
+                request_id=request_id,
+            )
+
+            return {
+                "id": message.id,
+                "role": message.role,
+                "content": message.content,
+                "created_at": message.created_at.isoformat(),
+                "deck_mode": deck_mode,
+                "locked_now": locked_now,
+            }
+
+    def _insert_user_message(
+        self,
+        db: Session,
+        session: UserSession,
+        *,
+        role: str,
+        content: str,
+        message_type: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        request_id: Optional[str],
+    ) -> SessionMessage:
+        """Insert one message on *session* in the CALLER's transaction.
+
+        Flushes explicitly (the app's session factory has autoflush off), so the
+        returned row carries its ``id`` and ``created_at``, and bumps the session's
+        ``last_activity``.  Never commits: the caller's ``get_db_session`` does.
+        """
+        message = SessionMessage(
+            session_id=session.id,
+            role=role,
+            content=content,
+            message_type=message_type,
+            metadata_json=json.dumps(metadata) if metadata else None,
+            request_id=request_id,
+        )
+        db.add(message)
+        db.flush()
+
+        # Update session activity
+        session.last_activity = datetime.utcnow()
+
+        return message
 
     def get_messages(
         self,
