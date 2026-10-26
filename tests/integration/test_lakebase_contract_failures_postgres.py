@@ -79,7 +79,6 @@ from src.database.models.session import (
     SessionSlideDeck,
     UserSession,
 )
-from src.domain.conversation_engine import AGENT_MODE_PHRASE
 from src.services import agent_schema_registry
 from src.services.agent_runtime import AgentRuntime, ModelProviderUnavailableError
 from src.services.agent_runtime_identity import LoggingAgentInvocationIdentitySink
@@ -838,7 +837,7 @@ def _seed_legacy_sources(factory) -> None:
             SessionMessage(
                 session_id=duplicate_source.id,
                 role="user",
-                content=f"{AGENT_MODE_PHRASE} duplicate",
+                content="USE AGENT MODE duplicate",
             )
         )
         db.add(
@@ -911,13 +910,13 @@ ROUTE_CREATORS = {
     "chat-generated-id": (
         "POST",
         "/api/chat/stream",
-        {"message": f"{AGENT_MODE_PHRASE} go"},
+        {"message": "USE AGENT MODE go"},
         _NO_ACTIVE,
     ),
     "chat-supplied-id": (
         "POST",
         "/api/chat/async",
-        {"session_id": "route-supplied", "message": f"{AGENT_MODE_PHRASE} go"},
+        {"session_id": "route-supplied", "message": "USE AGENT MODE go"},
         _NO_ACTIVE,
     ),
     # Fix round 1 (was a FINDING pinned at 500): the contribute route reads the

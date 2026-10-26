@@ -45,10 +45,7 @@ import pytest
 from sqlalchemy import text
 
 import src.api.services.session_manager as session_manager_module
-from src.api.services.chat_service import (
-    LEGACY_MODE_PHRASE,
-    ChatService,
-)
+from src.api.services.chat_service import ChatService
 from src.api.services.session_manager import SessionManager
 from src.database.models.session import SessionMessage, UserSession
 from src.domain.conversation_engine import ENGINE_MODE_MARKER_MESSAGE_TYPE
@@ -60,7 +57,8 @@ from tests.unit.test_clear_context import (
     _session_pk,
 )
 
-_PHRASE_MESSAGE = f"{LEGACY_MODE_PHRASE} and build me a deck about puffins"
+# Two distinguishable first asks: which row a caller kept is read off its content.
+_OTHER_MESSAGE = "Build me a deck about gannets"
 _PLAIN_MESSAGE = "Build me a deck about puffins"
 
 # A fixed instant long before any fixture's ``datetime.utcnow()`` row, so the
@@ -252,7 +250,7 @@ def test_a_hidden_marker_is_still_the_earliest_user_row(_session_unit_engine):
     sid, pk = _new_session(factory)
     marker_id, _, later_id = _add_rows(
         factory, pk,
-        _row("user", _PHRASE_MESSAGE, _at(0), message_type=ENGINE_MODE_MARKER_MESSAGE_TYPE),
+        _row("user", _OTHER_MESSAGE, _at(0), message_type=ENGINE_MODE_MARKER_MESSAGE_TYPE),
         _row("assistant", "a reply", _at(5), message_type="llm_response"),
         _row("user", "make slide 2 blue", _at(10), message_type="user_input"),
     )
@@ -263,7 +261,7 @@ def test_a_hidden_marker_is_still_the_earliest_user_row(_session_unit_engine):
     )
 
     assert _earliest(factory, pk) == (
-        marker_id, "user", _PHRASE_MESSAGE, ENGINE_MODE_MARKER_MESSAGE_TYPE
+        marker_id, "user", _OTHER_MESSAGE, ENGINE_MODE_MARKER_MESSAGE_TYPE
     )
 
 
@@ -346,14 +344,14 @@ def _clear_context_reads_the_sessions_own_row(
     """``clear_context`` asks for the cleared session's own pk -- a
     contributor's, never its deck owner's -- and keeps the row the helper
     answers with."""
-    # (a) A contributor session: its own pk, not the deck owner's (the owner's
-    # first row is the deck's engine and a contributor's clear never touches it).
+    # (a) A contributor session: its own pk, not the deck owner's (a
+    # contributor's clear never touches the owner's transcript).
     c_factory = contributor_session._factory
     owner_pk = _session_pk(c_factory, contributor_session._owner_session_id)
     contrib_sid = contributor_session.contributor_session_id
     contrib_pk = _session_pk(c_factory, contrib_sid)
     _add_rows(c_factory, owner_pk,
-              _row("user", _PHRASE_MESSAGE, _at(0), message_type="user_input"))
+              _row("user", _OTHER_MESSAGE, _at(0), message_type="user_input"))
     _add_rows(c_factory, contrib_pk,
               _row("user", _PLAIN_MESSAGE, _at(10), message_type="user_query"))
 
@@ -429,13 +427,13 @@ def test_every_caller_reads_the_row_through_the_helper(
 # ---------------------------------------------------------------------------
 
 
-def _seed_tie(factory, pk: int, *, phrase_on: str) -> tuple[int, int]:
-    """Two user rows sharing one ``created_at``; the opt-out on the "lower" or
-    "higher" id.  The higher id is inserted first.  Returns (lower, higher)."""
+def _seed_tie(factory, pk: int, *, other_on: str) -> tuple[int, int]:
+    """Two user rows sharing one ``created_at``; ``_OTHER_MESSAGE`` on the
+    "lower" or "higher" id.  The higher id is inserted first.  Returns (lower, higher)."""
     lower = _next_free_id(factory)
     higher = lower + 1
-    lower_content = _PHRASE_MESSAGE if phrase_on == "lower" else _PLAIN_MESSAGE
-    higher_content = _PHRASE_MESSAGE if phrase_on == "higher" else _PLAIN_MESSAGE
+    lower_content = _OTHER_MESSAGE if other_on == "lower" else _PLAIN_MESSAGE
+    higher_content = _OTHER_MESSAGE if other_on == "higher" else _PLAIN_MESSAGE
     _add_rows(
         factory, pk,
         _row("user", higher_content, _at(0), message_type="user_input", id=higher),
@@ -446,7 +444,7 @@ def _seed_tie(factory, pk: int, *, phrase_on: str) -> tuple[int, int]:
 
 def _clear_context_keeps_the_lower_id(*, factory, **_):
     sid, pk = _new_session(factory)
-    lower, higher = _seed_tie(factory, pk, phrase_on="lower")
+    lower, higher = _seed_tie(factory, pk, other_on="lower")
     _add_rows(factory, pk, _row("assistant", "deck built", _at(5), message_type="llm_response"))
 
     with _patched(factory, _RecordingSaver()):
@@ -456,7 +454,7 @@ def _clear_context_keeps_the_lower_id(*, factory, **_):
     assert result["deleted_messages"] == 2
     [kept] = _messages_of(factory, sid)
     assert (kept.id, kept.content, kept.message_type) == (
-        lower, _PHRASE_MESSAGE, ENGINE_MODE_MARKER_MESSAGE_TYPE
+        lower, _OTHER_MESSAGE, ENGINE_MODE_MARKER_MESSAGE_TYPE
     )
 
 

@@ -60,7 +60,6 @@ from src.api.routes.chat import ENGINE_MODE_UNAVAILABLE_DETAIL
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services import job_queue
 from src.api.services.chat_service import (
-    LEGACY_MODE_PHRASE,
     ChatService,
     resolve_engine_mode_or_unavailable,
 )
@@ -75,8 +74,6 @@ from tests.unit.conftest import _make_factory, _make_fake_db
 _DB_SOURCE = "src.core.database.get_db_session"
 _MANAGER_DB = "src.api.services.session_manager.get_db_session"
 
-# Since 2026-10-12 the phrase is the LEGACY opt-out; the graph is the default.
-_PHRASE_MESSAGE = f"{LEGACY_MODE_PHRASE} build me a deck about puffins"
 _PLAIN_MESSAGE = "and now add a slide about eider ducks"
 
 
@@ -243,12 +240,6 @@ class TestStreamingRoute:
         call = self._post(route_env, sid, _PLAIN_MESSAGE)
         assert call.kwargs["engine_mode"] == "monolith"
 
-    def test_a_later_phrase_does_not_switch_a_graph_deck(self, route_env):
-        """The opt-out in THIS turn's text must not flip an established deck."""
-        sid = _seed_session(route_env["factory"], ["build me a deck"])
-        call = self._post(route_env, sid, _PHRASE_MESSAGE)
-        assert call.kwargs["engine_mode"] == "graph"
-
     def test_the_engine_mode_is_always_passed_explicitly(self, route_env):
         """Never omitted and left to the default — the route decides."""
         sid = _seed_session(route_env["factory"], ["build me a deck"])
@@ -288,10 +279,6 @@ class TestAsyncRoute:
             == "monolith"
         )
 
-    def test_a_later_phrase_does_not_switch_a_graph_deck(self, route_env):
-        sid = _seed_session(route_env["factory"], ["build me a deck"])
-        assert self._payload(route_env, sid, _PHRASE_MESSAGE)["engine_mode"] == "graph"
-
     def test_a_monolith_session_is_enqueued_as_monolith(self, route_env):
         sid = _seed_session(route_env["factory"], ["build me a deck"], deck_mode="legacy")
         payload = self._payload(route_env, sid, _PLAIN_MESSAGE)
@@ -302,7 +289,7 @@ class TestTheKeyIsEngineModeNotMode:
     """`mode` is MCP's generate/edit flag. Conflating the two ships a defect."""
 
     def test_the_async_payload_carries_engine_mode(self, route_env):
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
         route_env["client"].post(
             "/api/chat/async", json={"session_id": sid, "message": _PLAIN_MESSAGE}
         )
@@ -310,7 +297,7 @@ class TestTheKeyIsEngineModeNotMode:
         assert "engine_mode" in payload
 
     def test_the_async_payload_does_not_reuse_the_mode_key(self, route_env):
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
         route_env["client"].post(
             "/api/chat/async", json={"session_id": sid, "message": _PLAIN_MESSAGE}
         )
@@ -596,7 +583,7 @@ class TestResolutionFailureFailsTheTurnClosed:
         generator's ``finally`` never runs: the route itself must release the
         lock it took, exactly once.
         """
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
 
         with patch(self._BOOM, self._boom):
             response = route_env["client"].post(
@@ -619,7 +606,7 @@ class TestResolutionFailureFailsTheTurnClosed:
         message and the ``chat_requests`` row were persisted before resolution
         and remain.
         """
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
 
         with patch(self._BOOM, self._boom):
             response = route_env["client"].post(
@@ -638,7 +625,7 @@ class TestResolutionFailureFailsTheTurnClosed:
         """The typed 503 is scoped to resolution: the same error class raised by any
         other step of the route's ``try`` (here, persisting the user message) is the
         route's generic 500, not a mislabelled ``lakebase_unavailable``."""
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
         route_env["manager"].add_user_message.side_effect = PersistedConfigurationUnavailableError(
             code="lakebase_unavailable"
         )

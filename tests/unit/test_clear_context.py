@@ -1,12 +1,11 @@
 """`clear_context` (ws4d D1 / spec §7.2): the service, and the route's gates and lock.
 
-Real sqlite for the service half — the defect this code exists to prevent (a
-clear that takes the engine-mode marker with it, silently switching the deck's
-engine on the next turn; since 2026-10-12 the marker is the LEGACY opt-out, so
-a lost marker moves a legacy deck onto the graph) is invisible to a mock, and so is the one that
-keeps the spec's row but loses the graph thread.  Every assertion reads rows
-back, and mode is re-derived through `resolve_engine_mode` rather than asserted
-on a string.
+Real sqlite for the service half — the defects this code exists to prevent (a
+clear that unlocks the deck's Deck Mode, or that takes the kept first row with
+it so the next turn counts as a "first message" and regenerates the title) are
+invisible to a mock, and so is the one that keeps the spec's row but loses the
+graph thread.  Every assertion reads rows back, and mode is re-derived through
+`resolve_engine_mode` rather than asserted on a string.
 
 Patch targets: `clear_context` imports `get_db_session` and `get_checkpointer`
 lazily inside the method (importing `src.core.checkpointer` at module scope
@@ -24,11 +23,13 @@ SQLite's write lock (``database is locked``) — and, in CI, a real PostgreSQL
 with a ``do_connect`` listener counting the connections the engine issues.
 
 The kept row is hidden (#323, D1).  ``clear_context`` keeps the earliest user
-row because engine mode is read off it, and re-types it to
-``ENGINE_MODE_MARKER_MESSAGE_TYPE``.  Every transcript read -- the chat panel's
-``get_messages``, the architect's ``conversation``, the monolith's history, a
-save point's ``chat_history`` -- must then see an empty conversation, while
-every mode read still sees the row.  Those tests seed the transcript with the
+row, so ``message_count`` stays above zero and the deck's title is not
+regenerated, and re-types it to ``ENGINE_MODE_MARKER_MESSAGE_TYPE``.  (The
+engine is read off the deck owner's ``deck_mode`` column, never off this row.)
+Every transcript read -- the chat panel's ``get_messages``, the architect's
+``conversation``, the monolith's history, a save point's ``chat_history`` --
+must then see an empty conversation, while ``message_count`` still counts the
+row.  Those tests seed the transcript with the
 types the live paths write (``user_input`` / ``llm_response``): with the
 fixtures' default ``None`` type the architect's and the monolith's own type
 filters would already drop the row, and the tests would pass before the fix.
@@ -59,7 +60,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
 from src.api.services.chat_service import (
-    LEGACY_MODE_PHRASE,
     ChatService,
     resolve_engine_mode,
 )
@@ -83,7 +83,6 @@ _MANAGER_DB = "src.api.services.session_manager.get_db_session"
 _WRITER_DB = "src.api.services.deck_level_writer.get_db_session"
 _CHECKPOINTER = "src.core.checkpointer.get_checkpointer"
 
-_PHRASE_MESSAGE = f"{LEGACY_MODE_PHRASE} and build me a deck about puffins"
 _PLAIN_MESSAGE = "Build me a deck about puffins"
 
 # The value stored in ``usage_events.event_type`` for a clear (plan D5:
@@ -508,7 +507,7 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
         ``test_a_failed_commit_rolls_back_the_thread_delete_too``.
         """
         sid = session_with_messages(
-            [_PHRASE_MESSAGE, "turn two", "turn three"], message_type="user_input"
+            [_PLAIN_MESSAGE, "turn two", "turn three"], message_type="user_input"
         )
         factory = _make_factory(_session_unit_engine)
         before = [r.content for r in _messages_of(factory, sid)]
@@ -678,7 +677,7 @@ class TestTheClearIsAttributed:
         """An unattributable clear must not happen at all."""
         factory = _make_factory(_session_unit_engine)
         sid = session_with_messages(
-            [_PHRASE_MESSAGE, "turn two", "turn three"], message_type="user_input"
+            [_PLAIN_MESSAGE, "turn two", "turn three"], message_type="user_input"
         )
         before = [(r.id, r.content, r.message_type) for r in _messages_of(factory, sid)]
         assert len(before) == 3
@@ -700,7 +699,7 @@ class TestTheClearIsAttributed:
         """The row exists if and only if the clear committed."""
         factory = _make_factory(_session_unit_engine)
         sid = session_with_messages(
-            [_PHRASE_MESSAGE, "turn two", "turn three"], message_type="user_input"
+            [_PLAIN_MESSAGE, "turn two", "turn three"], message_type="user_input"
         )
         before = [r.content for r in _messages_of(factory, sid)]
 
@@ -879,8 +878,8 @@ class TestAClearedConversationIsEmptyToEveryReader:
         """The chat panel (on load AND on reload) and ``GET /messages`` read this.
 
         Before #323 the kept row came back here, so a reload after a clear
-        showed the deck's first prompt again.  The row itself must stay: engine
-        mode is read off it.
+        showed the deck's first prompt again.  The row itself must stay:
+        ``message_count`` counts it, which keeps the title from regenerating.
         """
         factory = _make_factory(_session_unit_engine)
         sid = _seed_transcript(factory)
@@ -1015,25 +1014,6 @@ class TestAClearedConversationIsEmptyToEveryReader:
 
             assert hydrated() == (1, [(HumanMessage, _NEW_ASK)])
 
-    def test_a_later_legacy_phrase_after_a_clear_does_not_move_a_graph_deck(
-        self, _session_unit_engine
-    ):
-        """The kept row is what stops a later ``USE LEGACY MODE`` becoming the
-        deck's earliest user row, and so its engine (plan D1's rejected
-        alternative: delete the row on graph decks)."""
-        factory = _make_factory(_session_unit_engine)
-        sid = _seed_transcript(factory)
-
-        with _patched(factory, _RecordingSaver()):
-            assert resolve_engine_mode(sid) == "graph", "precondition: a graph deck"
-
-            ChatService().clear_context(sid, cleared_by="owner@example.com")
-            _add_message(factory, sid, role="user",
-                         content=f"{LEGACY_MODE_PHRASE} from now on, please",
-                         message_type="user_input", offset_seconds=30)
-
-            assert resolve_engine_mode(sid) == "graph"
-
     def test_message_count_still_counts_the_marker(self, _session_unit_engine):
         """Deliberately NOT filtered: ``is_first_message = message_count == 0``
         gates title generation, and a cleared deck's next turn is not its first."""
@@ -1048,6 +1028,60 @@ class TestAClearedConversationIsEmptyToEveryReader:
             ChatService().clear_context(sid, cleared_by="owner@example.com")
 
             assert SessionManager().get_session(sid)["message_count"] == 1
+
+    def test_clear_chat_keeps_the_deck_locked_and_its_title(self, _session_unit_engine):
+        """Clearing the chat empties it; it does not unlock the deck's Deck Mode.
+
+        The deck is locked to legacy by its first message through the real lock
+        (``add_user_message``).  After the clear:
+
+        - a message asking for agent mode is refused with ``DeckModeLockedError``.
+          An unlocked deck would take it and lock to agent instead.  An active
+          Graph Release is seeded, so that agent lock could not fail for another
+          reason (no release to pin to) and hide a lost lock;
+        - the stored mode is still legacy;
+        - ``message_count`` is above zero.  ``is_first_message = message_count
+          == 0`` gates title generation, so this is what keeps the title.
+          ``clear_context`` never writes the title itself, so comparing titles
+          would prove nothing.  The transcript is one turn, so a clear that also
+          took the kept row would leave the count at zero.
+        """
+        from src.api.services.session_manager import DeckModeLockedError
+        from src.services.graph_configuration import bootstrap_graph_configuration
+
+        factory = _make_factory(_session_unit_engine)
+        bootstrap_graph_configuration(factory)  # the active release; get_session projects it
+        sid = f"clear-{uuid.uuid4().hex[:12]}"
+        db = factory()
+        try:
+            db.add(UserSession(session_id=sid, created_by="owner@example.com"))
+            db.commit()
+        finally:
+            db.close()
+
+        with _patched(factory, _RecordingSaver()):
+            manager = SessionManager()
+            first = manager.add_user_message(
+                sid, _PLAIN_MESSAGE, message_type="user_input", requested_deck_mode="legacy"
+            )
+            assert (first["deck_mode"], first["locked_now"]) == ("legacy", True), (
+                "precondition: the first message locked the deck to legacy"
+            )
+            _add_message(factory, sid, role="assistant", content="deck built",
+                         message_type="llm_response", offset_seconds=5)
+
+            ChatService().clear_context(sid, cleared_by="owner@example.com")
+
+            with pytest.raises(DeckModeLockedError) as refused:
+                manager.add_user_message(
+                    sid, "now switch to agent", message_type="user_input",
+                    requested_deck_mode="agent",
+                )
+            assert refused.value.deck_mode == "legacy"
+
+            after = manager.get_session(sid)
+            assert after["deck_mode"] == "legacy"
+            assert after["message_count"] > 0
 
     def test_clearing_twice_keeps_the_same_marker(self, _session_unit_engine):
         factory = _make_factory(_session_unit_engine)
@@ -1131,7 +1165,7 @@ class TestAClearedConversationIsEmptyToEveryReader:
         always is.
         """
         factory = _make_factory(_session_unit_engine)
-        sid = _seed_transcript(factory, session_with_spec_and_messages, first=_PHRASE_MESSAGE)
+        sid = _seed_transcript(factory, session_with_spec_and_messages)
         _set_deck_mode(factory, sid, "legacy")
 
         with _patched(factory, _RecordingSaver()):

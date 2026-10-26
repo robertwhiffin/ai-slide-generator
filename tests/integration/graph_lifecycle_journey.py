@@ -79,7 +79,6 @@ from src.core.user_context import set_current_user
 from src.database.models.deck_contributor import DeckContributor
 from src.database.models.graph_configuration import GraphDraftAgent, GraphRelease
 from src.database.models.session import UserSession
-from src.domain.conversation_engine import AGENT_MODE_PHRASE
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
 from src.services.model_endpoint_catalog import (
     FakeModelEndpointCatalog,
@@ -610,7 +609,7 @@ def _seed_old_root_deck(j: LifecycleJourney) -> None:
     """C2: old-root carries a deck and an agent-mode marker, as a graph turn leaves it."""
     with _session_manager_on(j.factory) as manager:
         manager.add_message(
-            "old-root", role="user", content=f"{AGENT_MODE_PHRASE} build the lifecycle deck"
+            "old-root", role="user", content="USE AGENT MODE build the lifecycle deck"
         )
         manager.save_slide_deck(
             "old-root",

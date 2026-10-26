@@ -27,7 +27,6 @@ from src.database.models.session import (
     SessionSlideDeck,
     UserSession,
 )
-from src.domain.conversation_engine import AGENT_MODE_PHRASE, LEGACY_MODE_PHRASE
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 
 
@@ -93,8 +92,8 @@ def _database_context(factory):
         # Since Deck Mode no message text decides the pin: every chat-created root
         # is graph-capable, and a legacy first message clears the pin when it locks.
         ("make a deck without the marker", True),
-        (f"{AGENT_MODE_PHRASE} make a deck", True),
-        (f"{LEGACY_MODE_PHRASE} make a deck", True),
+        ("USE AGENT MODE make a deck", True),
+        ("USE LEGACY MODE make a deck", True),
     ],
     ids=["non-marker", "old-agent-marker", "legacy-marker"],
 )
@@ -128,12 +127,12 @@ class _StopAfterCreation(RuntimeError):
 @pytest.mark.parametrize(
     ("method_name", "message", "expected_capable"),
     [
-        ("send_message", f"{AGENT_MODE_PHRASE} sync", True),
+        ("send_message", "USE AGENT MODE sync", True),
         ("send_message", "plain sync", True),
-        ("send_message", f"{LEGACY_MODE_PHRASE} sync", True),
-        ("send_message_streaming", f"{AGENT_MODE_PHRASE} stream", True),
+        ("send_message", "USE LEGACY MODE sync", True),
+        ("send_message_streaming", "USE AGENT MODE stream", True),
         ("send_message_streaming", "plain stream", True),
-        ("send_message_streaming", f"{LEGACY_MODE_PHRASE} stream", True),
+        ("send_message_streaming", "USE LEGACY MODE stream", True),
         # Empty first message: the graph default, so pinned.
         ("send_message_streaming", "", True),
     ],
@@ -371,7 +370,7 @@ def test_chat_creation_unavailability_maps_to_exact_503(route_name):
         with pytest.raises(HTTPException) as exc_info:
             asyncio.run(
                 route(
-                    ChatRequest(message=f"{AGENT_MODE_PHRASE} create"),
+                    ChatRequest(message="USE AGENT MODE create"),
                     MagicMock(),
                 )
             )

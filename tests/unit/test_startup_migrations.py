@@ -38,11 +38,6 @@ def test_init_database_runs_profile_and_session_migrations(monkeypatch):
         lambda sf: calls.append(("bootstrap_graph_configuration", sf))
         or SimpleNamespace(release_id=1, version_number=1, created=True),
     )
-    monkeypatch.setattr(
-        "src.services.conversation_pins.backfill_conversation_pins",
-        lambda sf: calls.append(("backfill_conversation_pins", sf))
-        or SimpleNamespace(graph_release_id=1, graph_version=1, pinned_count=3),
-    )
     # These two record into `calls` as well, so the ORDER assertion at the end is
     # real: with them silent, "the strip ran last" held even when the strip was moved
     # ahead of both — an assertion that could not fail.
@@ -83,7 +78,6 @@ def test_init_database_runs_profile_and_session_migrations(monkeypatch):
     assert calls == [
         ("init_db", None),
         ("bootstrap_graph_configuration", "SESSION_FACTORY"),
-        ("backfill_conversation_pins", "SESSION_FACTORY"),
         ("migrate_profiles", "SESSION_FACTORY"),
         ("backfill_sessions", "SESSION_FACTORY"),
         ("backfill_unmigrated_decks", "SESSION_FACTORY"),
@@ -125,44 +119,6 @@ def test_init_database_bootstrap_failure_aborts_before_later_stages(monkeypatch)
     ]
 
 
-def test_init_database_backfill_failure_aborts_before_later_stages(monkeypatch):
-    import pytest
-
-    run = _load_run_module()
-    calls = []
-    monkeypatch.setattr(
-        "src.core.database.init_db", lambda: calls.append(("init_db", None))
-    )
-    monkeypatch.setattr("src.core.database.get_session_local", lambda: "SESSION_FACTORY")
-    monkeypatch.setattr(
-        "src.services.graph_configuration.bootstrap_graph_configuration",
-        lambda sf: calls.append(("bootstrap_graph_configuration", sf))
-        or SimpleNamespace(release_id=1, version_number=1, created=False),
-    )
-
-    def fail_backfill(sf):
-        calls.append(("backfill_conversation_pins", sf))
-        raise RuntimeError("pin backfill failed")
-
-    monkeypatch.setattr(
-        "src.services.conversation_pins.backfill_conversation_pins", fail_backfill
-    )
-    monkeypatch.setattr(
-        "src.core.migrate_profiles_to_agent_config.migrate_profiles",
-        lambda sf: calls.append(("migrate_profiles", sf)),
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        run.init_database()
-
-    assert exc.value.code == 1
-    assert calls == [
-        ("init_db", None),
-        ("bootstrap_graph_configuration", "SESSION_FACTORY"),
-        ("backfill_conversation_pins", "SESSION_FACTORY"),
-    ]
-
-
 def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):
     """A profile-migration failure must abort the boot command (set -e), so a
     broken migration can never leave workers serving against a half-migrated DB."""
@@ -175,12 +131,6 @@ def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):
     monkeypatch.setattr(
         "src.services.graph_configuration.bootstrap_graph_configuration",
         lambda sf: SimpleNamespace(release_id=1, version_number=1, created=False),
-    )
-    monkeypatch.setattr(
-        "src.services.conversation_pins.backfill_conversation_pins",
-        lambda sf: SimpleNamespace(
-            graph_release_id=1, graph_version=1, pinned_count=0
-        ),
     )
     monkeypatch.setattr(
         "src.core.init_default_profile.seed_defaults", lambda include_databricks: None
@@ -199,6 +149,93 @@ def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):
     assert exc.value.code == 1
     assert isinstance(exc.value.__cause__, RuntimeError)
     assert str(exc.value.__cause__) == "migration failed"
+
+
+def test_init_database_no_longer_backfills_pins(monkeypatch):
+    """Boot pins no conversation (spec 2026-10-22 §5.5: there is no backfill).
+
+    A deck gets a Conversation Pin only when it locks to agent mode, and a
+    legacy deck has none.  The row here is the one the old startup backfill
+    pinned: an unpinned root whose first message carries the old opt-in text.
+    It is ``legacy``, as Task 1's migration made every pre-existing deck.  Every
+    boot stage except that one is stubbed, and the session factory is real, so a
+    boot that still pins shows up in the row.  V1, the release the backfill
+    pinned to, exists.
+    """
+    from src.database.models.session import SessionMessage, UserSession
+    from src.services.graph_configuration import bootstrap_graph_configuration
+    from tests.unit.conftest import _make_factory, _make_in_memory_engine
+
+    engine = _make_in_memory_engine()
+    try:
+        factory = _make_factory(engine)
+        v1 = bootstrap_graph_configuration(factory)
+        assert v1.version_number == 1, "precondition: V1 is the active release"
+        with factory.begin() as db:
+            root = UserSession(
+                session_id="historical-root",
+                created_by="owner@example.com",
+                deck_mode="legacy",
+            )
+            db.add(root)
+            db.flush()
+            db.add(
+                SessionMessage(
+                    session_id=root.id,
+                    role="user",
+                    content="USE AGENT MODE build a deck about puffins",
+                    message_type="user_input",
+                )
+            )
+
+        run = _load_run_module()
+        calls = []
+        monkeypatch.setattr("src.core.database.init_db", lambda: calls.append("init_db"))
+        monkeypatch.setattr("src.core.database.get_session_local", lambda: factory)
+        monkeypatch.setattr(
+            "src.services.graph_configuration.bootstrap_graph_configuration",
+            lambda sf: calls.append("bootstrap_graph_configuration")
+            or SimpleNamespace(release_id=v1.release_id, version_number=1, created=False),
+        )
+        for target in (
+            "src.core.migrate_profiles_to_agent_config.migrate_profiles",
+            "src.core.migrate_profiles_to_agent_config.backfill_sessions",
+            "src.core.backfill_session_slides_startup.backfill_unmigrated_decks",
+            "src.core.strip_retired_prompt_keys.strip_retired_prompt_keys",
+        ):
+            monkeypatch.setattr(
+                target, lambda sf, _name=target.rsplit(".", 1)[1]: calls.append(_name) or 0
+            )
+        monkeypatch.setattr(
+            "src.core.init_default_profile.seed_defaults",
+            lambda include_databricks: calls.append("seed_defaults"),
+        )
+        monkeypatch.setattr(
+            "src.core.encryption.ensure_encryption_key",
+            lambda: calls.append("ensure_encryption_key"),
+        )
+
+        run.init_database()
+
+        assert calls == [
+            "init_db",
+            "bootstrap_graph_configuration",
+            "migrate_profiles",
+            "backfill_sessions",
+            "backfill_unmigrated_decks",
+            "seed_defaults",
+            "ensure_encryption_key",
+            "strip_retired_prompt_keys",
+        ], "precondition: every other boot stage ran, stubbed"
+        with factory() as db:
+            pin = (
+                db.query(UserSession.graph_release_id)
+                .filter(UserSession.session_id == "historical-root")
+                .scalar()
+            )
+        assert pin is None, f"boot pinned a legacy deck to Graph Release {pin}"
+    finally:
+        engine.dispose()
 
 
 def test_lifespan_module_does_not_run_migrations_in_workers():

@@ -35,11 +35,8 @@ from src.core.databricks_client import (
     get_system_client,
 )
 from src.domain.conversation_engine import (
-    AGENT_MODE_PHRASE as AGENT_MODE_PHRASE,
     ENGINE_MODE_MARKER_MESSAGE_TYPE,
-    LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
     engine_mode_for_deck_mode,
-    selects_graph_engine,
 )
 from src.domain.conversation_turns import turn_message_ids
 # BLANK_SLIDE_HTML is re-exported: callers and tests import it from here.
@@ -144,29 +141,6 @@ def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Op
 # ---------------------------------------------------------------------------
 # Engine-mode selection (ws4d D1)
 # ---------------------------------------------------------------------------
-
-# The chat-input trigger that keeps a deck OFF the LangGraph engine.
-#
-# Since 2026-10-12 (agent-mode beta) the graph is the default: a deck runs on
-# the graph unless its first user message contains LEGACY_MODE_PHRASE.
-# Deliberately NOT hardened (plan D0): a loose, case-sensitive substring match
-# anywhere in the deck's first user message, with no authorisation check.  The
-# switch exists so the legacy monolith stays reachable during the beta; if it
-# ever outlives that it needs a strict form (exact prefix, first message only)
-# plus an authorisation check, because a phrase matched anywhere in user text
-# can be tripped by pasted content.  Recorded, not built.
-def _selects_agent_mode(content: Optional[str]) -> bool:
-    """Whether a deck whose first user message is ``content`` runs on the graph.
-
-    True unless ``content`` carries :data:`LEGACY_MODE_PHRASE`; ``None`` (no
-    user message yet) and ``""`` are the graph.
-
-    The single authority for the match, shared with
-    ``SessionManager.duplicate_session``'s marker carry so the two cannot
-    disagree about what a marker is.
-    """
-    return selects_graph_engine(content)
-
 
 def resolve_engine_mode(session_id: Optional[str]) -> str:
     """Return the engine this deck's turns run on: ``"graph"`` or ``"monolith"``.
@@ -1192,7 +1166,7 @@ class ChatService:
             )
 
         # ws4d D2 — the graph branch.  Placed AFTER the user message is
-        # persisted (the resolver upstream reads that row) and BEFORE anything
+        # persisted (the resolver upstream reads the owner's deck_mode column) and BEFORE anything
         # monolith-specific runs, so intent detection, the clarification
         # checks and `_build_agent_for_session` are all skipped on a graph turn
         # and the monolith path below is left byte-identical: it is this PR's
@@ -2133,26 +2107,23 @@ class ChatService:
         there.  So clearing drops the transcript and the graph thread, keeps the
         deck and ``deck_spec_json``, and loses nothing that was agreed.
 
-        **The earliest ``role='user'`` row survives.**  Engine mode is derived
-        from it (:func:`resolve_engine_mode`), so deleting it would silently
-        revert a graph-mode deck to the monolith on the next turn — the two
-        halves of this PR would contradict each other.  There is precedent:
+        **The earliest ``role='user'`` row survives.**  The deck's Deck Mode is
+        stored on ``user_sessions.deck_mode`` and is unaffected by a clear; the
+        row is kept so the deck still counts as started (``message_count``) and
+        its title is not regenerated.  There is precedent:
         ``restore_version`` also prunes messages selectively -- it deletes this
         session's rows created after the save point, so the kept row survives a
         restore whenever it predates that save point (always true for a root
         deck's own first turn).  A contributor's kept row can be removed by a
-        restore; that is harmless, because engine mode resolves on the deck
-        OWNER's rows.  It is preserved unconditionally, in both modes, so
-        clearing never *changes* the mode in either direction.
+        restore; that is harmless, because the mode lives on the deck OWNER's
+        ``deck_mode`` column, not on any row.
 
         **The kept row is re-typed and hidden.**  Its ``message_type`` becomes
         :data:`ENGINE_MODE_MARKER_MESSAGE_TYPE`, which every transcript read
         drops (:meth:`SessionManager.get_messages` -- and so the chat panel,
         ``GET /messages``, the architect's conversation and the monolith's
         history -- and save-point capture), so a cleared conversation is empty
-        to every reader and the old first prompt is never replayed.  The
-        engine-mode, Conversation Pin and duplicate-carry reads go by ``role``
-        only, so they still see the row and nothing about the engine changes;
+        to every reader and the old first prompt is never replayed.  
         ``message_count`` still counts it, so the next turn is not a "first
         message" and the deck's title is not regenerated.  The re-type is part of
         this transaction.
@@ -2282,8 +2253,9 @@ class ChatService:
         Deleting a prompt but keeping its reply would leave the architect an
         orphan reply in ``conversation``; the turn goes whole.
 
-        **The session's earliest user row is never deleted** (#323): engine mode
-        is read off it.  When the turn starts there, that row is re-typed
+        **The session's earliest user row is never deleted** (#323): it keeps
+        the deck started and its title stable (the mode is the ``deck_mode``
+        column).  When the turn starts there, that row is re-typed
         ``ENGINE_MODE_MARKER_MESSAGE_TYPE`` (hidden from every transcript read)
         and the rest of its turn is deleted; ``hidden_message_id`` says so.
 

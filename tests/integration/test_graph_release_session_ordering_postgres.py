@@ -33,7 +33,6 @@ from sqlalchemy.orm import sessionmaker
 from src.api.services.session_manager import SessionManager
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SessionMessage, SessionSlideDeck, UserSession
-from src.domain.conversation_engine import AGENT_MODE_PHRASE
 from src.services.conversation_pins import (
     ConversationGraphVersion,
     get_conversation_graph_version,
@@ -119,7 +118,7 @@ def _seed(postgres_engine, creator):
                     SessionMessage(
                         session_id=source.id,
                         role="user",
-                        content=f"{AGENT_MODE_PHRASE} duplicate",
+                        content="USE AGENT MODE duplicate",
                     )
                 )
     return factory, v1_id, saved.draft.lock_version
@@ -730,7 +729,7 @@ def _seed_v4(postgres_engine, creator):
                     SessionMessage(
                         session_id=source.id,
                         role="user",
-                        content=f"{AGENT_MODE_PHRASE} duplicate",
+                        content="USE AGENT MODE duplicate",
                     )
                 )
     return factory, v2_id, v4_id, lock

@@ -886,7 +886,7 @@ def _splice_slide_rows(
 
 
 def earliest_user_message(db: Session, session_pk: int) -> Optional[SessionMessage]:
-    """The session's earliest ``role='user'`` row: the row engine mode is read off.
+    """The session's earliest ``role='user'`` row.
 
     THE one copy of this rule (#317).  Earliest means ``created_at``, then
     ``id``.  ``role`` only, never ``message_type``: the live paths write
@@ -895,12 +895,9 @@ def earliest_user_message(db: Session, session_pk: int) -> Optional[SessionMessa
     message delete keeps is re-typed ``engine_mode_marker`` but is still this
     row.
 
-    Callers: ``resolve_engine_mode`` (on the deck OWNER's session),
-    ``ChatService.clear_context`` and ``ChatService.delete_message`` (the row
-    they keep), ``SessionManager.duplicate_session`` (the marker it carries).
-    The startup pin backfill (``conversation_pins._backfill_in_transaction``)
-    applies the same rule set-based, over every root at once, with
-    ``row_number()`` over the same two columns; keep the two in step.
+    Callers: ``ChatService.clear_context`` and ``ChatService.delete_message``
+    (the row they keep).  The engine is no longer read off this row; it is the
+    deck's ``deck_mode`` column.
 
     ``session_pk`` is ``UserSession.id`` (the integer key), not the string id.
     """
