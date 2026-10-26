@@ -241,12 +241,13 @@ export const SlideStyleList: React.FC = () => {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="size-8 p-0"
+                        className="h-8 gap-1 px-2 text-xs text-muted-foreground"
                         onClick={() => toggleExpanded(style.id)}
-                        aria-label={expandedStyleId === style.id ? 'Hide' : 'Preview'}
+                        aria-expanded={expandedStyleId === style.id}
                       >
+                        {expandedStyleId === style.id ? 'Hide' : 'Preview'}
                         <ChevronDown
-                          className={`size-4 text-muted-foreground transition-transform ${
+                          className={`size-4 transition-transform ${
                             expandedStyleId === style.id ? 'rotate-180' : ''
                           }`}
                         />

@@ -236,6 +236,9 @@ test.describe('SlideStyleList', () => {
     const previewButtons = page.getByRole('button', { name: 'Preview' });
     await expect(previewButtons.first()).toBeVisible();
     expect(await previewButtons.count()).toBe(3);
+    // The word is visible on the button, not only its accessible name: an
+    // icon-only chevron left users unaware that a preview exists.
+    await expect(previewButtons.first()).toHaveText('Preview');
   });
 
   test('Preview button toggles to Hide when clicked', async ({ page }) => {
@@ -246,7 +249,10 @@ test.describe('SlideStyleList', () => {
     await previewButton.click();
 
     // Button should now say Hide
-    await expect(page.getByRole('button', { name: 'Hide' }).first()).toBeVisible();
+    const hideButton = page.getByRole('button', { name: 'Hide' }).first();
+    await expect(hideButton).toBeVisible();
+    await expect(hideButton).toHaveText('Hide');
+    await expect(hideButton).toHaveAttribute('aria-expanded', 'true');
   });
 
   test('expanded view shows visual preview and toggles raw style content', async ({ page }) => {
