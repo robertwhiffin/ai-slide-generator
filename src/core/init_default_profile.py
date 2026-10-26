@@ -356,9 +356,6 @@ def init_default_profile() -> None:
         except Exception as e:
             logger.warning(f"Failed to load YAML settings, using defaults: {e}")
             config = DEFAULT_CONFIG
-        
-        # Prompts always come from defaults (visual styling from slide_style_library)
-        prompts = DEFAULT_CONFIG["prompts"]
 
         with get_db_session() as db:
             # Check if default profile already exists
@@ -408,8 +405,6 @@ def init_default_profile() -> None:
             prompts_config = ConfigPrompts(
                 profile_id=profile.id,
                 selected_slide_style_id=default_style_id,
-                system_prompt=prompts["system_prompt"],
-                slide_editing_instructions=prompts["slide_editing_instructions"],
             )
             db.add(prompts_config)
             logger.info("Created prompts settings")

@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 # Only needs to work within a single process.
 export_queue: asyncio.Queue = asyncio.Queue()
 
+EXPORT_CLEANUP_INTERVAL_SECONDS = 300
+EXPORT_JOB_MAX_AGE_MINUTES = 30
+
 
 def generate_job_id() -> str:
     """Generate a unique job ID."""
@@ -212,7 +215,9 @@ async def process_export_job(job_id: str, payload: dict) -> None:
         from src.core.database import get_db_session
         ds_id = resolve_active_design_system_id(session_id)
         with get_db_session() as db:
-            substitute_deck_dict_images(slide_deck, db)
+            substitute_deck_dict_images(
+                slide_deck, db, requesting_user=payload.get("user_identity")
+            )
             substitute_deck_dict_ds_assets(slide_deck, db, design_system_id=ds_id)
 
         slides = slide_deck.get("slides", [])
@@ -508,6 +513,34 @@ async def start_export_worker() -> asyncio.Task:
         The worker task handle
     """
     return asyncio.create_task(export_worker())
+
+
+async def export_cleanup_loop() -> None:
+    """Periodically remove terminal export jobs that have exceeded their TTL."""
+    logger.info("Export job cleanup worker started")
+    while True:
+        try:
+            await asyncio.sleep(EXPORT_CLEANUP_INTERVAL_SECONDS)
+            cleaned = await asyncio.to_thread(
+                cleanup_stale_jobs,
+                EXPORT_JOB_MAX_AGE_MINUTES,
+            )
+            if cleaned:
+                logger.info("Cleaned up %d stale export job(s)", cleaned)
+        except asyncio.CancelledError:
+            logger.info("Export job cleanup worker shutting down")
+            raise
+        except Exception as e:
+            logger.warning(
+                "Export job cleanup iteration failed",
+                exc_info=True,
+                extra={"error": str(e)},
+            )
+
+
+async def start_export_cleanup_worker() -> asyncio.Task:
+    """Start the background export job cleanup task."""
+    return asyncio.create_task(export_cleanup_loop())
 
 
 def cleanup_export_job(job_id: str) -> None:

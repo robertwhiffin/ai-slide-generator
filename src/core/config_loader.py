@@ -125,17 +125,10 @@ def load_prompts() -> dict[str, Any]:
     prompts_path = get_config_path("prompts.yaml")
     prompts = load_yaml_file(prompts_path)
 
-    # Validate required prompts
-    required_prompts = [
-        "system_prompt"
-    ]
-    missing_prompts = [key for key in required_prompts if key not in prompts]
-
-    if missing_prompts:
-        raise ConfigurationError(
-            f"Missing required prompts: {', '.join(missing_prompts)}"
-        )
-
+    # No required keys. ``system_prompt`` was the sole requirement and it is the
+    # RETIRED per-profile override; prompts are assembled from
+    # ``src.core.prompt_modules``, so demanding one here would demand a value
+    # nothing consumes.
     return prompts
 
 

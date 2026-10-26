@@ -74,6 +74,7 @@ from src.database.models.design_system import (
     DesignSystemToken,
 )
 from src.services.design_system_compiler import recompute_compiled_style_content
+from src.services.svg_sanitizer import looks_like_svg, sanitize_svg
 
 logger = logging.getLogger(__name__)
 
@@ -784,6 +785,24 @@ def import_bundle(
     from src.services.design_system_templates import materialize_templates
 
     materialize_templates(design_system)
+    # Every slide root of a NEW template must declare a non-empty data-label so
+    # the architect can bind slide types to it. Gated here (not in lazy
+    # materialize_templates) so existing rows are never rewritten or refused.
+    # Zero-root layouts have nothing to label and import unchanged.
+    from src.services.template_sections import section_inventory
+
+    for template in design_system.templates:
+        unlabeled = [
+            entry["index"]
+            for entry in section_inventory(template.layout_html or "")
+            if entry.get("label") is None
+        ]
+        if unlabeled:
+            raise DesignSystemImportError(
+                f"Template {template.entry_path!r} has unlabeled slide roots at "
+                f"indexes {unlabeled}; each slide root must declare a non-empty "
+                "data-label"
+            )
     recompute_compiled_style_content(design_system)
     # The flush above normally raises first, but the index is only DEFINITELY
     # exercised at the commit (a deferrable constraint, a different flush order), so
@@ -2164,6 +2183,20 @@ def _collect_assets_and_files(
                 mime = sniffed
             else:
                 mime = _guess_mime(rel)
+                if mime == "image/svg+xml":
+                    try:
+                        data = sanitize_svg(data)
+                    except ValueError as exc:
+                        raise DesignSystemImportError(
+                            f"Bundle entry '{rel}' is not a valid SVG: {exc}"
+                        ) from exc
+                elif looks_like_svg(data):
+                    # Extension says raster/font/etc. but the bytes are SVG:
+                    # never trust the name to skip sanitization.
+                    raise DesignSystemImportError(
+                        f"Bundle entry '{rel}' contains SVG content but does not "
+                        "have an .svg extension"
+                    )
             width, height = _image_dimensions(data, mime)
             asset = DesignSystemAsset(
                 kind=kind,

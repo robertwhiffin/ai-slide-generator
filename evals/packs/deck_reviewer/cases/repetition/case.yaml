@@ -1,0 +1,8 @@
+kind: mutation
+fault: slide 5 replaced with a slide containing gold 7's bullet list
+expect:
+  criteria:
+  - cross_slide_repetition
+  positions:
+  - -1
+design_system_active: true

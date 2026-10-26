@@ -88,6 +88,35 @@ def _was_truncated(response: object) -> bool:
     return False
 
 
+def build_session_title_model():
+    """The title model: Gateway-routed, on the app service principal.
+
+    Titles run as the service principal (``get_system_client``), the same
+    identity the graph runtime uses for every model call
+    (``DatabricksModelAdapter._default_client_factory``). They are not OBO:
+    Unity AI Gateway refuses a user token that lacks the ``ai-gateway`` scope
+    (403 "Provided OAuth token does not have required scopes: ai-gateway"),
+    and the app's ``user_api_scopes`` do not include it. The graph already
+    sends the same user message to the Gateway as the service principal, so
+    this adds no new data exposure. Per-user identity on Gateway calls is
+    workstream 2b (it needs the ``ai-gateway`` user scope and user re-consent).
+
+    No sampling parameter is sent: newer Claude models on the Gateway reject
+    ``temperature`` with a 400 (ws2a follow-up A).
+    """
+    from databricks_langchain import ChatDatabricks
+
+    from src.core.databricks_client import get_system_client
+    from src.core.defaults import SESSION_TITLE_MODEL
+
+    return ChatDatabricks(
+        model=SESSION_TITLE_MODEL,
+        use_ai_gateway=True,
+        max_tokens=50,
+        workspace_client=get_system_client(),
+    )
+
+
 def generate_session_title(
     user_message: str,
     model,

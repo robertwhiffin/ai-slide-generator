@@ -5,6 +5,7 @@ import { AdminDesignSystemDefault } from './AdminDesignSystemDefault';
 import { AdminJudgeSettings } from './AdminJudgeSettings';
 import { AdminSlideStyleDefault } from './AdminSlideStyleDefault';
 import { UsageDashboard } from './UsageDashboard';
+import { AgentDefinitionWorkbench } from './AgentDefinitionWorkbench';
 
 type TabId =
   | 'usage'
@@ -12,14 +13,16 @@ type TabId =
   | 'google_slides'
   | 'design_system'
   | 'slide_style'
-  | 'judge';
+  | 'judge'
+  | 'agent_definitions';
 
 export const AdminPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('usage');
+  const [hasVisitedAgentDefinitions, setHasVisitedAgentDefinitions] = useState(false);
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="max-w-6xl mx-auto p-6">
+      <div className={`mx-auto p-6 ${activeTab === 'agent_definitions' ? 'max-w-[90rem]' : 'max-w-6xl'}`}>
         <header className="mb-6">
           <h1 className="text-2xl font-bold text-gray-900">Admin</h1>
           <p className="text-sm text-gray-500 mt-1">
@@ -116,6 +119,23 @@ export const AdminPage: React.FC = () => {
           >
             Judge
           </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'agent_definitions'}
+            aria-controls="agent-definitions-panel"
+            id="agent-definitions-tab"
+            onClick={() => {
+              setHasVisitedAgentDefinitions(true);
+              setActiveTab('agent_definitions');
+            }}
+            className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors -mb-px ${
+              activeTab === 'agent_definitions'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+            }`}
+          >
+            Agent Definitions
+          </button>
         </div>
 
         <div
@@ -176,6 +196,16 @@ export const AdminPage: React.FC = () => {
           className={activeTab !== 'judge' ? 'sr-only' : ''}
         >
           <AdminJudgeSettings />
+        </div>
+
+        <div
+          role="tabpanel"
+          id="agent-definitions-panel"
+          aria-labelledby="agent-definitions-tab"
+          hidden={activeTab !== 'agent_definitions'}
+          className={activeTab !== 'agent_definitions' ? 'sr-only' : ''}
+        >
+          {hasVisitedAgentDefinitions && <AgentDefinitionWorkbench />}
         </div>
       </div>
     </div>

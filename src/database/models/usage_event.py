@@ -13,10 +13,14 @@ from src.core.database import Base
 EVENT_LOGIN = "login"
 EVENT_DECK_CREATED = "deck_created"
 EVENT_DECK_RETRIEVED = "deck_retrieved"
+EVENT_CONTEXT_CLEARED = "context_cleared"
+EVENT_MESSAGE_DELETED = "message_deleted"
+EVENT_SLIDE_INSERTED = "slide_inserted"
 
 
 class UsageEvent(Base):
-    """A single usage event (login, deck created, deck retrieved)."""
+    """A single usage event (login, deck created, deck retrieved, context cleared,
+    message deleted, slide inserted)."""
 
     __tablename__ = "usage_events"
 

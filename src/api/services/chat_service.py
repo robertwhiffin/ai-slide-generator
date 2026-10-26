@@ -8,28 +8,58 @@ its scripts are automatically replaced with it - no separate cleanup needed.
 """
 
 import contextvars
+import copy
 import logging
 import queue
 import re
 import threading
+import uuid
 from datetime import datetime
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
-from src.api.services.session_manager import SessionNotFoundError, VersionConflictError, get_session_manager
+from src.api.services.session_manager import (
+    MessageNotFoundError,
+    SessionNotFoundError,
+    VersionConflictError,
+    earliest_user_message,
+    get_session_manager,
+)
 from src.api.services.session_naming import generate_session_title
 from src.core.databricks_client import (
     get_current_username,
     get_service_principal_folder,
     get_system_client,
 )
+from src.domain.conversation_engine import (
+    AGENT_MODE_PHRASE as AGENT_MODE_PHRASE,
+    ENGINE_MODE_MARKER_MESSAGE_TYPE,
+    LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
+    selects_graph_engine,
+)
+from src.domain.conversation_turns import turn_message_ids
+# BLANK_SLIDE_HTML is re-exported: callers and tests import it from here.
+from src.domain.deck_spec_slides import (
+    BLANK_DECK_SPEC_ENTRY,
+    BLANK_SLIDE_HTML as BLANK_SLIDE_HTML,
+    blank_slide_shell,
+    renumber_spec_slides,
+)
 from src.domain.slide import Slide, has_slide_wrapper
 from src.domain.slide_deck import SlideDeck
 from src.api.schemas.agent_config import resolve_agent_config
 from src.services.agent_factory import build_agent_for_request
+from src.services.conversation_pins import (
+    ConversationPinMissingError,
+    ConversationSessionNotFoundError,
+)
+from src.services.persisted_graph_release import (
+    PersistedConfigurationUnavailableError,
+    PersistedRuntimeError,
+)
 from src.services.streaming_callback import StreamingCallbackHandler
 from src.utils.html_utils import (
     extract_canvas_ids_from_html,
@@ -40,8 +70,35 @@ from src.utils.ds_asset_utils import (
     substitute_ds_asset_placeholders,
 )
 from src.utils.image_utils import substitute_deck_dict_images, substitute_image_placeholders
+from src.utils.slide_hash import compute_slide_hash
 
 logger = logging.getLogger(__name__)
+
+# The deck-spec entry a newly inserted slide gets (defined in
+# src.domain.deck_spec_slides): contiguous with its neighbours (`DeckSpec.slide_at`
+# depends on that) and deliberately undescribed.  The spliced entry is the blank's
+# description; inventing a purpose here would put words in the architect's mouth.
+# SessionManager.insert_slide splices it, in the same transaction as the rows; this
+# alias stays so there is one definition and callers that import it from here work.
+_BLANK_DECK_SPEC_ENTRY = BLANK_DECK_SPEC_ENTRY
+
+
+def _pinned_graph_failure_release_id(
+    exc: PersistedRuntimeError,
+    session_id: str,
+) -> Optional[int]:
+    release_id = getattr(exc, "graph_release_id", None)
+    if isinstance(release_id, int):
+        return release_id
+    if exc.args and isinstance(exc.args[0], int):
+        return exc.args[0]
+    try:
+        from src.core.database import get_session_local
+        from src.services.conversation_pins import load_conversation_pin
+
+        return load_conversation_pin(get_session_local(), session_id)
+    except Exception:
+        return None
 
 
 def resolve_active_design_system_id(session_id: Optional[str]) -> Optional[int]:
@@ -81,6 +138,237 @@ def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Op
         if k != "replacement_slides"
     }
     return sanitized
+
+
+# ---------------------------------------------------------------------------
+# Engine-mode selection (ws4d D1)
+# ---------------------------------------------------------------------------
+
+# The chat-input trigger that keeps a deck OFF the LangGraph engine.
+#
+# Since 2026-10-12 (agent-mode beta) the graph is the default: a deck runs on
+# the graph unless its first user message contains LEGACY_MODE_PHRASE.
+# Deliberately NOT hardened (plan D0): a loose, case-sensitive substring match
+# anywhere in the deck's first user message, with no authorisation check.  The
+# switch exists so the legacy monolith stays reachable during the beta; if it
+# ever outlives that it needs a strict form (exact prefix, first message only)
+# plus an authorisation check, because a phrase matched anywhere in user text
+# can be tripped by pasted content.  Recorded, not built.
+def _selects_agent_mode(content: Optional[str]) -> bool:
+    """Whether a deck whose first user message is ``content`` runs on the graph.
+
+    True unless ``content`` carries :data:`LEGACY_MODE_PHRASE`; ``None`` (no
+    user message yet) and ``""`` are the graph.
+
+    The single authority for the match, shared with
+    ``SessionManager.duplicate_session``'s marker carry so the two cannot
+    disagree about what a marker is.
+    """
+    return selects_graph_engine(content)
+
+
+def resolve_engine_mode(session_id: Optional[str]) -> str:
+    """Return the engine this deck's turns run on: ``"graph"`` or ``"monolith"``.
+
+    **Sticky, and derived from the transcript.**  Evaluated per message, only
+    turn 1 would carry the phrase and turn 2 would fall back — a deck written
+    alternately by both engines diverges between ``session_slides`` rows and
+    ``deck_json``, and the graph's checkpoint thread, keyed by the session id,
+    would be resumed by one engine and ignored by the other.  So the answer is
+    a property of the deck, read off the **earliest** ``role='user'`` message.
+    A later message carrying the phrase must not switch a monolith deck, and
+    assistant messages are ignored so echoed tool output cannot flip the
+    engine.  (Since the 2026-10-12 inversion the graph is the default and the
+    phrase is the LEGACY opt-out: a later ``USE LEGACY MODE`` must not switch a
+    graph deck.)
+
+    **Resolved on the OWNER DECK's session, not the calling session** (ruling
+    W-3).  Decks are shared through ``UserSession.parent_session_id``; mode is
+    per-session while divergence is per-DECK, so a contributor carrying the
+    phrase would write rows while a contributor without it wrote ``deck_json``
+    on the same deck — exactly the divergence stickiness exists to prevent.
+    The owner is resolved with the same ``_get_deck_owner_session`` hop
+    ``read_deck_spec`` uses, so a contributor inherits the owner's engine.
+
+    **Filters on ``role`` only, never on ``message_type``.**  The two live
+    paths write different types for the same user turn (``"user_input"`` on the
+    sync/streaming path, ``"user_query"`` on the async route and MCP), so a
+    ``message_type`` filter would see half the traffic.
+
+    Nothing about mode is stored: the answer is derived from the database on
+    every call, so there is nothing to keep in sync and it is multi-worker safe
+    by construction.
+
+    Args:
+        session_id: The session whose turn is about to run.  May be a
+            contributor session, an owner session, or ``None``.
+
+    Returns:
+        ``"monolith"`` when the owner deck's first user message carries
+        :data:`LEGACY_MODE_PHRASE`, else ``"graph"``.  A deck with no user turn
+        yet and an empty first message resolve to ``"graph"`` (the default,
+        matching the pin every creator takes for such a deck); a missing
+        session or no session id resolves to ``"monolith"`` -- there is no
+        deck and no pin to run a graph turn on, and on the SSE path the turn-1
+        re-resolve in :meth:`ChatService.send_message_streaming` runs after the
+        auto-create, so it is never the answer a turn actually executes on.
+        Those are answers.  An unexpected database error is not
+        an answer and propagates; every call site goes through
+        :func:`resolve_engine_mode_or_unavailable`, which fails the turn
+        explicitly (#271 C24).
+    """
+    from src.core.database import get_db_session
+
+    if not session_id:
+        return "monolith"
+
+    session_manager = get_session_manager()
+    try:
+        with get_db_session() as db:
+            session = session_manager._get_session_or_raise(db, session_id)
+            deck_owner = session_manager._get_deck_owner_session(db, session)
+            earliest = earliest_user_message(db, deck_owner.id)
+            content = earliest.content if earliest else None
+            owner_session_id = deck_owner.session_id
+    except SessionNotFoundError:
+        logger.warning(
+            "Engine-mode resolution found no session; defaulting to monolith",
+            extra={"session_id": session_id},
+        )
+        return "monolith"
+
+    mode = "graph" if _selects_agent_mode(content) else "monolith"
+    logger.info(
+        "Resolved engine mode",
+        extra={
+            "session_id": session_id,
+            "deck_owner_session_id": owner_session_id,
+            "engine_mode": mode,
+        },
+    )
+    return mode
+
+
+def resolve_engine_mode_or_unavailable(session_id: Optional[str]) -> str:
+    """:func:`resolve_engine_mode`, where a FAILURE to resolve fails the turn closed.
+
+    ``resolve_engine_mode`` answers its three "no answer" cases itself (a
+    missing session: ``"monolith"``; a deck with no user turn or an empty first
+    message: ``"graph"``); those are answers and pass straight through.  Any other
+    exception is a failure to read the database, and it is NOT an answer.
+
+    ws4d shipped this wrapper as a fail-OPEN (``resolve_engine_mode_or``, which
+    kept "the mode already in hand" -- ``"monolith"`` at both routes).  That ran
+    a pinned graph conversation on the legacy monolith, with code-owned prompts
+    and ``DEFAULT_CONFIG["llm"]``, whenever Lakebase blipped: the exact path
+    spec §15 forbids ("Lakebase unavailable | Fail explicitly; no code defaults
+    or latest-release substitution").  Failing only when the session is pinned
+    is unimplementable, because the pin is behind the same read that just
+    failed.  So every call site now fails explicitly (#271 C24/C47):
+
+    * ``POST /chat/stream`` and ``POST /chat/async`` release the session lock
+      and answer a typed 503 (``ENGINE_MODE_UNAVAILABLE_DETAIL``);
+    * the SSE turn-1 re-resolve in :meth:`ChatService.send_message_streaming`
+      yields the safe ``pinned_graph_configuration_unavailable`` event, then
+      raises.
+
+    The persisted user message (and the async ``chat_requests`` row) written
+    before resolution stay: nothing else about the conversation changes.
+
+    Raises:
+        PersistedConfigurationUnavailableError: ``code="lakebase_unavailable"``,
+            chained from the original error, which is logged by class only.
+    """
+    try:
+        return resolve_engine_mode(session_id)
+    except Exception as exc:
+        logger.error(
+            "Engine-mode resolution failed; failing the turn closed",
+            extra={"session_id": session_id, "error_class": type(exc).__name__},
+        )
+        # The cause, for operators: DEBUG only, so the ERROR record stays redacted.
+        logger.debug(
+            "Engine-mode resolution failure cause",
+            extra={"session_id": session_id},
+            exc_info=True,
+        )
+        raise PersistedConfigurationUnavailableError(
+            code="lakebase_unavailable"
+        ) from exc
+
+
+#: The one client-facing text for a graph turn that failed for any reason other
+#: than a typed pinned-configuration failure.  Code-owned: the exception's own
+#: text can carry model output (a parser error names the provider-chosen tool,
+#: a ``ValidationError`` echoes the provider's arguments), so it never reaches
+#: the stream event, the re-raised error or a route's error text (ws2a
+#: follow-up A, fix round 1).
+GRAPH_TURN_FAILED_MESSAGE = "The request could not be completed. Please try again."
+
+
+class GraphTurnFailedError(RuntimeError):
+    """A failed graph turn, re-raised with a code-owned message.
+
+    The original exception is kept only as ``__cause__`` (for server logs).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(GRAPH_TURN_FAILED_MESSAGE)
+
+
+class ArcReviewInFlightError(RuntimeError):
+    """The deck's arc review is running a graph turn on this session's thread.
+
+    Raised by :meth:`ChatService.clear_context` and
+    :meth:`ChatService.delete_message` before anything changes; their routes
+    answer 409 with ``CONVERSATION_BUSY_DETAIL``.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"An arc review is running on session {session_id}")
+        self.session_id = session_id
+
+
+def _refuse_during_an_arc_review(db: Any, session: Any) -> None:
+    """Raise :class:`ArcReviewInFlightError` while an arc review runs on *session*.
+
+    The arc-review sweeper (``spec_sync.run_arc_review``) runs a whole graph
+    turn on the deck OWNER's thread (``thread_id`` is the session id) and takes
+    no session lock, so the lock the clear route checks does not exclude it.
+    That turn loaded the thread before its architect ran and writes a checkpoint
+    after every superstep, each carrying every channel it holds; a thread
+    deleted under it comes back with the pre-clear ``findings``, turn-scoped
+    state and a reply written from the cleared conversation, and the next turn
+    resumes it.  So a clear (or a message delete, which deletes the thread
+    too) waits for the review, and the review's claim is the signal:
+    :func:`spec_sync.review_in_flight`.
+
+    The deck row is read ``FOR UPDATE`` (a no-op on SQLite, which serialises
+    writers anyway): on PostgreSQL a claim that commits first is seen here, and
+    a claim that comes second blocks on this row until the clear commits, so
+    its review loads the already-deleted thread.  A contributor session owns no
+    deck row and the sweeper never runs on its thread, so it is never refused.
+    """
+    from src.database.models.session import SessionSlideDeck
+    from src.services.spec_sync import review_in_flight
+
+    deck = (
+        db.query(SessionSlideDeck)
+        .filter(SessionSlideDeck.session_id == session.id)
+        .with_for_update()
+        .first()
+    )
+    if deck is not None and review_in_flight(deck, datetime.utcnow()):
+        raise ArcReviewInFlightError(session.session_id)
+
+
+def _pinned_graph_configuration_error_event() -> StreamEvent:
+    """The one safe, typed event for an unavailable pinned graph configuration."""
+    return StreamEvent(
+        type=StreamEventType.ERROR,
+        error="Pinned graph configuration is unavailable",
+        metadata={"code": "pinned_graph_configuration_unavailable"},
+    )
 
 
 class ChatService:
@@ -388,6 +676,7 @@ class ChatService:
             # Auto-create session on first message
             db_session = session_manager.create_session(
                 session_id=session_id,
+                graph_capable=selects_graph_engine(message),
             )
             logger.info(
                 "Auto-created session on first message",
@@ -611,7 +900,12 @@ class ChatService:
                             _add_user = None
 
                         for idx, slide in enumerate(new_deck.slides):
-                            slide.slide_id = f"slide_{insert_position + idx}"
+                            # A NEW slide gets no id here: _reindex_slide_ids
+                            # below mints a unique one.  A POSITIONAL id would
+                            # collide with a real slide further down the deck
+                            # and, being earlier in the list, would WIN the
+                            # collision and steal that slide's verdict.
+                            slide.slide_id = None
                             if _add_user:
                                 slide.stamp_created(_add_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
@@ -830,6 +1124,7 @@ class ChatService:
         request_id: Optional[str] = None,
         image_ids: Optional[List[str]] = None,
         is_first_message_override: Optional[bool] = None,
+        engine_mode: str = "monolith",
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -847,6 +1142,12 @@ class ChatService:
             is_first_message_override: If set, overrides the DB-based first-message
                 detection. Used by the async path where the user message is
                 persisted before the job runs.
+            engine_mode: ``"graph"`` runs the turn on the LangGraph engine,
+                ``"monolith"`` (the default) on the shipped agent. Resolved by
+                the CHAT ROUTES and passed in — never resolved here. The default
+                is what keeps MCP on the monolith: MCP reaches this method
+                through the same job queue as ``POST /chat/async`` but builds a
+                payload with no ``engine_mode`` key.
 
         Yields:
             StreamEvent objects for real-time display
@@ -880,6 +1181,7 @@ class ChatService:
         except SessionNotFoundError:
             db_session = session_manager.create_session(
                 session_id=session_id,
+                graph_capable=selects_graph_engine(message),
             )
             logger.info(
                 "Auto-created session on first streaming message",
@@ -906,6 +1208,72 @@ class ChatService:
                 "Persisted user message",
                 extra={"session_id": session_id, "message_id": user_msg.get("id")},
             )
+
+        # ws4d D2, seventh edit point — the SSE path RE-RESOLVES here, and only
+        # the SSE path.  Resolving a mode in this method is otherwise forbidden
+        # (that is what keeps MCP off the graph), so the guard is the whole point
+        # of these three lines:
+        #
+        # `POST /chat/stream` does NOT persist the user message — the block
+        # immediately above does it on the route's behalf.  So the streaming
+        # route's own resolution necessarily ran BEFORE the deck had any
+        # `role='user'` row, and `resolve_engine_mode` answers the DEFAULT for a
+        # deck with no user turn (graph since 2026-10-12; monolith before):
+        # without this, turn 1 of a new SSE session would run the default
+        # however the message read -- e.g. a `USE LEGACY MODE` first message
+        # would run turn 1 on the graph and turn 2 onward on the monolith.
+        # One deck written by both engines is the divergence stickiness exists
+        # to prevent.
+        #
+        # `not request_id` IS the SSE path, structurally:
+        # `job_queue._run_streaming_generator` always passes
+        # `request_id=request_id`, and `enqueue_job(request_id: str, ...)` types
+        # it non-optional and keys `jobs[request_id]` on it — so the async route
+        # and MCP can never reach this branch, and neither can ever be
+        # re-resolved onto the graph.
+        #
+        # IDEMPOTENT on turn 2 and after: the resolver reads the deck's EARLIEST
+        # `role='user'` row, which the insert above cannot change once one
+        # exists.  A re-resolve able to flip an established deck's engine would
+        # be worse than the gap it closes.
+        #
+        # The plan contradicts itself here — D1 asserts the row exists before
+        # mode resolution on this path while D0 mandates resolving in the route —
+        # so this resolves a plan defect rather than deviating from the plan.
+        #
+        # FAIL CLOSED (#271 C24/C47): a failure to re-resolve used to keep the
+        # route's `monolith` and run the legacy path on a graph deck.  It now
+        # yields the safe typed event and raises; the lock is released by the
+        # route's SSE generator `finally`, and the user message persisted just
+        # above stays (C47(e)).
+        if not request_id:
+            try:
+                engine_mode = resolve_engine_mode_or_unavailable(session_id)
+            except PersistedConfigurationUnavailableError:
+                yield _pinned_graph_configuration_error_event()
+                raise
+
+        # ws4d D2 — the graph branch.  Placed AFTER the user message is
+        # persisted (the resolver upstream reads that row) and BEFORE anything
+        # monolith-specific runs, so intent detection, the clarification
+        # checks and `_build_agent_for_session` are all skipped on a graph turn
+        # and the monolith path below is left byte-identical: it is this PR's
+        # comparison baseline.
+        #
+        # `engine_mode` arrives as a parameter and is never resolved here.  It
+        # defaults to "monolith", which is what excludes MCP structurally.
+        if engine_mode == "graph":
+            logger.info(
+                "Routing this turn through the LangGraph engine",
+                extra={"session_id": session_id, "request_id": request_id},
+            )
+            yield from self._send_message_streaming_graph(
+                session_id,
+                message,
+                is_first_message=is_first_message,
+                request_id=request_id,
+            )
+            return
 
         # Issue 2 FIX: Detect intent ONCE and store for reuse throughout the function
         _is_edit = self._detect_edit_intent(message)
@@ -1155,16 +1523,9 @@ class ChatService:
         def run_title_gen():
             """Generate a session title in parallel with the main agent."""
             try:
-                from databricks_langchain import ChatDatabricks
-                from src.core.databricks_client import get_user_client
+                from src.api.services.session_naming import build_session_title_model
 
-                from src.core.defaults import DEFAULT_CONFIG
-                naming_model = ChatDatabricks(
-                    endpoint=DEFAULT_CONFIG["llm"]["endpoint"],
-                    max_tokens=50,
-                    temperature=0.3,
-                    workspace_client=get_user_client(),
-                )
+                naming_model = build_session_title_model()
                 generated_title = generate_session_title(message, naming_model)
                 if generated_title:
                     session_manager.rename_session(session_id, generated_title)
@@ -1348,7 +1709,9 @@ class ChatService:
                             _rc9_user = None
                         
                         for idx, slide in enumerate(new_deck.slides):
-                            slide.slide_id = f"slide_{insert_position + idx}"
+                            # A NEW slide gets no id here (see _reindex_slide_ids):
+                            # a positional id can impersonate an existing slide.
+                            slide.slide_id = None
                             if _rc9_user:
                                 slide.stamp_created(_rc9_user)
                             existing_deck.insert_slide(slide, insert_position + idx)
@@ -1400,7 +1763,9 @@ class ChatService:
                         _stream_add_user = None
                     
                     for idx, slide in enumerate(new_deck.slides):
-                        slide.slide_id = f"slide_{insert_position + idx}"
+                        # A NEW slide gets no id here (see _reindex_slide_ids):
+                        # a positional id can impersonate an existing slide.
+                        slide.slide_id = None
                         if _stream_add_user:
                             slide.stamp_created(_stream_add_user)
                         existing_deck.insert_slide(slide, insert_position + idx)
@@ -1564,6 +1929,541 @@ class ChatService:
                     type=StreamEventType.SESSION_TITLE,
                     session_title=title_container["title"],
                 )
+
+    def _send_message_streaming_graph(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        is_first_message: bool = False,
+        request_id: Optional[str] = None,
+    ) -> Generator[StreamEvent, None, None]:
+        """Run one turn on the LangGraph engine, yielding events as they arrive.
+
+        The graph limb of :meth:`send_message_streaming` (ws4d D2), reached only
+        when the caller resolved ``engine_mode == "graph"``.
+
+        Three things here are load-bearing, and each of the three fails
+        SILENTLY when it is dropped — no exception, nothing in the logs:
+
+        **``invoke_graph`` runs in a worker thread.**  It is synchronous and
+        blocks until the whole turn completes, so calling it inline would mean
+        this generator could yield nothing at all until the deck was finished:
+        no event could reach the client as it happened, and incremental slide
+        delivery would be impossible by construction.  The thread pushes into
+        ``event_queue`` and signals completion with a ``None`` sentinel, which
+        is exactly the shape the monolith's ``run_agent`` uses.
+
+        **The context is copied BEFORE the thread is spawned.**  ``contextvars``
+        do not cross a bare ``threading.Thread``, so without the copy
+        ``get_current_user()`` inside ``invoke_graph`` returns ``None``,
+        ``initiated_by`` is ``None``, and every ``session_slides`` row this turn
+        INSERTs carries a NULL author.  (An UPDATE would *preserve* the author
+        already on the row, so only a fresh INSERT shows the damage.)
+        ``copy_context()`` snapshots at SPAWN — anything set after it is
+        invisible inside the thread.
+
+        **The title thread takes its OWN copy.**  One ``Context`` object cannot
+        be entered by two threads at once, which is why the monolith takes a
+        second copy for precisely this thread.
+
+        The queue is created HERE and handed in as ``invoke_graph(emitter=...)``
+        rather than installed in the ContextVar directly: ``invoke_graph`` owns
+        that var's lifecycle and resets it on every invocation.  A
+        ``queue.Queue`` also cannot travel through ``GraphState`` — it is not
+        serialisable through the checkpointer, and undeclared state keys are
+        silently dropped.
+
+        Args:
+            session_id: Session whose deck this turn builds.  Also the
+                checkpointer's ``thread_id``.
+            message: The user's request, seeded onto ``architect_message`` — the
+                ONLY key this path puts in the initial state.  ``GraphState`` is
+                an exhaustive contract: an undeclared key would be discarded
+                silently, and nothing brand-related is resolved here because
+                ``architect_node`` is the sole resolver of the design contract
+                and the template bytes.
+            is_first_message: Whether to generate a session title this turn.
+            request_id: The async transport's ``ChatRequest.request_id``, handed
+                to ``invoke_graph`` so a node persisting a chat message tags the
+                row with it.  ``GET /chat/poll`` reads assistant text through
+                ``get_messages_for_request``, which filters on that column, so
+                without it the architect's reply is written but no polling client
+                can see it — and polling is the transport the deployed app uses.
+                ``None`` on the SSE path, which persists no request row: that
+                client is reading the yielded events instead.
+
+        Yields:
+            Every ``StreamEvent`` the graph emits, then ``COMPLETE`` carrying
+            the deck, then ``SESSION_TITLE`` when a title was generated.
+        """
+        from src.services.graph.builder import invoke_graph
+
+        session_manager = get_session_manager()
+
+        event_queue: queue.Queue = queue.Queue()
+        error_container: Dict[str, Exception] = {}
+        title_container: Dict[str, str] = {}
+
+        # Capture context BEFORE starting thread to preserve user auth
+        ctx = contextvars.copy_context()
+
+        def run_graph():
+            """Run the graph in a separate thread, pushing events to the queue."""
+            try:
+                invoke_graph(
+                    session_id,
+                    {"architect_message": message},
+                    emitter=event_queue,
+                    request_id=request_id,
+                )
+            except (
+                PersistedRuntimeError,
+                ConversationPinMissingError,
+                ConversationSessionNotFoundError,
+            ) as e:
+                graph_release_id = (
+                    _pinned_graph_failure_release_id(e, session_id)
+                    if isinstance(e, PersistedRuntimeError)
+                    else None
+                )
+                logger.error(
+                    "pinned_graph_configuration_unavailable",
+                    extra={
+                        "error_class": type(e).__name__,
+                        "graph_release_id": graph_release_id,
+                    },
+                )
+                if isinstance(
+                    e,
+                    (ConversationPinMissingError, ConversationSessionNotFoundError),
+                ):
+                    graph_error: PersistedRuntimeError = (
+                        PersistedConfigurationUnavailableError(
+                            code="conversation_pin_unavailable"
+                        )
+                    )
+                else:
+                    graph_error = e
+                error_container["error"] = graph_error
+                event_queue.put(_pinned_graph_configuration_error_event())
+            except Exception as e:
+                # The traceback (server-side only) keeps the cause; the client
+                # gets the code-owned message, never ``str(e)``.
+                logger.error(
+                    "Graph turn failed",
+                    extra={"session_id": session_id, "error_class": type(e).__name__},
+                    exc_info=True,
+                )
+                if isinstance(e, SessionNotFoundError):
+                    # The routes map this type to their own code-owned text.
+                    error_container["error"] = e
+                else:
+                    failure = GraphTurnFailedError()
+                    failure.__cause__ = e
+                    error_container["error"] = failure
+                event_queue.put(
+                    StreamEvent(
+                        type=StreamEventType.ERROR, error=GRAPH_TURN_FAILED_MESSAGE
+                    )
+                )
+            finally:
+                # Signal completion by putting None
+                event_queue.put(None)
+
+        def run_title_gen():
+            """Generate a session title in parallel with the graph turn.
+
+            The same step the monolith runs at its own first message.  Without
+            it a graph-mode session would stay untitled forever, because the
+            graph branch bypasses the monolith entirely.  Failing to name a
+            session must never fail the turn, so this catches and logs.
+            """
+            try:
+                from src.api.services.session_naming import build_session_title_model
+
+                naming_model = build_session_title_model()
+                generated_title = generate_session_title(message, naming_model)
+                if generated_title:
+                    session_manager.rename_session(session_id, generated_title)
+                    title_container["title"] = generated_title
+                    logger.info(
+                        "Auto-named graph-mode session from first message",
+                        extra={
+                            "session_id": session_id,
+                            "generated_title": generated_title,
+                        },
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to auto-name session",
+                    extra={"session_id": session_id},
+                    exc_info=True,
+                )
+
+        # Start the graph thread with context preserved for user auth
+        graph_thread = threading.Thread(
+            target=lambda: ctx.run(run_graph), daemon=True
+        )
+        graph_thread.start()
+
+        # Start title generation in parallel on first message.
+        # Uses a separate context copy since ctx.run() can only be entered by
+        # one thread at a time.
+        title_thread: Optional[threading.Thread] = None
+        if is_first_message:
+            title_ctx = contextvars.copy_context()
+            title_thread = threading.Thread(
+                target=lambda: title_ctx.run(run_title_gen), daemon=True
+            )
+            title_thread.start()
+
+        # Yield events as they arrive
+        while True:
+            event = event_queue.get()
+            if event is None:
+                break
+            yield event
+
+        # Check for errors
+        if "error" in error_container:
+            raise error_container["error"]
+
+        # The graph wrote session_slides rows behind this process's deck cache,
+        # so drop the cached deck rather than serve a deck that predates the turn.
+        self._invalidate_deck_cache(session_id)
+
+        # ONE save point per completed turn, matching the monolith — which makes
+        # one here too, at `send_message_streaming`'s own post-persist step.
+        # Without it a graph-built deck has EMPTY version history: nothing under
+        # `src/services/graph/` touches `create_save_point`, `create_version` or
+        # `SlideDeckVersion`, against eight call sites in this module.  Same class
+        # of silent end-of-turn bypass as the title, and the plan names only the
+        # title, so nobody owned it.  Task 6's "restore cancels a pending review"
+        # would pass VACUOUSLY on a graph deck that has no versions to restore.
+        #
+        # PLACEMENT IS LOAD-BEARING: here, after the worker thread has finished
+        # and the deck is committed — never inside a node.  Nodes fan out per
+        # slide, so a save point in one would mint a version PER SLIDE, and
+        # `SessionManager.VERSION_LIMIT` is 40: three turns of a 15-slide deck
+        # would exhaust the whole history and start evicting the oldest.
+        #
+        # A save-point failure must not fail the turn, exactly as on the monolith
+        # path — the deck is already committed by the time this runs.
+        try:
+            deck_for_save_point = self._get_or_load_deck(session_id)
+            if deck_for_save_point is not None:
+                self.create_save_point(
+                    session_id=session_id,
+                    description=(
+                        f"Generated {len(deck_for_save_point.slides)} slide(s)"
+                    ),
+                    deck=deck_for_save_point,
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to create save point (graph): {e}",
+                extra={"session_id": session_id},
+                exc_info=True,
+            )
+
+        yield StreamEvent(
+            type=StreamEventType.COMPLETE,
+            slides=self.get_slides(session_id),
+            metadata={"engine_mode": "graph"},
+        )
+
+        logger.info(
+            "Graph-mode streaming message completed",
+            extra={"session_id": session_id},
+        )
+
+        # Collect title generated in parallel (if applicable)
+        if title_thread is not None:
+            title_thread.join(timeout=10)
+            if "title" in title_container:
+                yield StreamEvent(
+                    type=StreamEventType.SESSION_TITLE,
+                    session_title=title_container["title"],
+                )
+
+    def clear_context(self, session_id: str, *, cleared_by: str) -> Dict[str, Any]:
+        """Drop this session's conversation context, keeping the deck and its spec.
+
+        The deck spec is a structured compaction of the conversation: once it
+        holds what was decided, the transcript is only the path taken to get
+        there.  So clearing drops the transcript and the graph thread, keeps the
+        deck and ``deck_spec_json``, and loses nothing that was agreed.
+
+        **The earliest ``role='user'`` row survives.**  Engine mode is derived
+        from it (:func:`resolve_engine_mode`), so deleting it would silently
+        revert a graph-mode deck to the monolith on the next turn — the two
+        halves of this PR would contradict each other.  There is precedent:
+        ``restore_version`` also prunes messages selectively -- it deletes this
+        session's rows created after the save point, so the kept row survives a
+        restore whenever it predates that save point (always true for a root
+        deck's own first turn).  A contributor's kept row can be removed by a
+        restore; that is harmless, because engine mode resolves on the deck
+        OWNER's rows.  It is preserved unconditionally, in both modes, so
+        clearing never *changes* the mode in either direction.
+
+        **The kept row is re-typed and hidden.**  Its ``message_type`` becomes
+        :data:`ENGINE_MODE_MARKER_MESSAGE_TYPE`, which every transcript read
+        drops (:meth:`SessionManager.get_messages` -- and so the chat panel,
+        ``GET /messages``, the architect's conversation and the monolith's
+        history -- and save-point capture), so a cleared conversation is empty
+        to every reader and the old first prompt is never replayed.  The
+        engine-mode, Conversation Pin and duplicate-carry reads go by ``role``
+        only, so they still see the row and nothing about the engine changes;
+        ``message_count`` still counts it, so the next turn is not a "first
+        message" and the deck's title is not regenerated.  The re-type is part of
+        this transaction.
+
+        **The graph thread is deleted** through the repo's own
+        ``SqlAlchemyCheckpointSaver.delete_thread``, whose ``thread_id`` is the
+        session id ``invoke_graph`` runs under.  ``BaseCheckpointSaver``'s method
+        body is ``raise NotImplementedError``, not a no-op, so a saver that
+        cannot delete surfaces as a 500 on the route rather than skipping
+        quietly.
+
+        **The clear is one transaction.**  The transcript prune, the attribution
+        row and the thread delete all run on this method's own ``db`` session:
+        ``delete_thread(session_id, session=db)`` executes its two DELETEs on that
+        session and does not commit, so they commit or roll back together with the
+        rest.  Any failure -- a raise from ``delete_thread``, a failed insert, a
+        failed commit -- leaves the transcript, the graph thread and the
+        attribution exactly as they were, and the route 500s.  There is no
+        half-state to recover from, and a retry is safe (deleting an absent thread
+        is a no-op DELETE).
+
+        The earlier shape was two transactions, and that is why this is one:
+        ``delete_thread`` used to open its own session and commit while this one
+        was still open.  The bulk ``delete(synchronize_session=False)`` below emits
+        its DELETE immediately, so this connection held a write lock while the
+        checkpointer wrote on a second connection -- on SQLite that
+        self-deadlocks (``database is locked``), and on any database it left a
+        real skew if this transaction's commit then failed (thread gone,
+        transcript intact).  The ``db.flush()`` after the attribution insert
+        makes a failed insert raise before the thread is touched.
+
+        **Who cleared is recorded** as one ``usage_events`` row
+        (``EVENT_CONTEXT_CLEARED``, ``username=cleared_by``, the session's internal
+        id) written in the same transaction, so the row exists if and only if the
+        clear committed.  ``cleared_by`` is required: a falsy value is refused
+        before anything changes.
+
+        No hidden agent state can survive: every non-architect agent is built
+        fresh per invocation and the monolith's history is hydrated from these
+        rows.
+
+        Args:
+            session_id: The session to clear.  A contributor session clears its
+                own transcript; the owner's marker (and so the deck's mode) is
+                untouched, because a contributor's rows are its own.
+            cleared_by: Username of the caller doing the clear; recorded in
+                ``usage_events`` and the log line.  Required and non-empty.
+
+        Returns:
+            ``{"status": "cleared", "session_id": ..., "deleted_messages": N,
+            "preserved_message_id": id-or-None}``
+
+        Raises:
+            ValueError: ``cleared_by`` is empty or None (nothing is changed).
+            SessionNotFoundError: session_id does not exist.
+            ArcReviewInFlightError: the deck's arc review holds a live claim and
+                is running a graph turn on this thread (nothing is changed); see
+                :func:`_refuse_during_an_arc_review`.
+        """
+        if not cleared_by:
+            raise ValueError("clear_context requires cleared_by: who cleared must be recorded")
+
+        from src.core.database import get_db_session
+        from src.database.models.session import SessionMessage
+        from src.database.models.usage_event import EVENT_CONTEXT_CLEARED, UsageEvent
+
+        session_manager = get_session_manager()
+        with get_db_session() as db:
+            session = session_manager._get_session_or_raise(db, session_id)
+            # Before anything changes: an arc review in flight would write the
+            # thread back after the delete below.
+            _refuse_during_an_arc_review(db, session)
+
+            marker = earliest_user_message(db, session.id)
+            marker_id = marker.id if marker is not None else None
+
+            doomed = db.query(SessionMessage).filter(
+                SessionMessage.session_id == session.id
+            )
+            if marker_id is not None:
+                doomed = doomed.filter(SessionMessage.id != marker_id)
+            deleted_messages = doomed.delete(synchronize_session=False)
+            if marker is not None:
+                marker.message_type = ENGINE_MODE_MARKER_MESSAGE_TYPE
+
+            db.add(
+                UsageEvent(
+                    username=cleared_by,
+                    event_type=EVENT_CONTEXT_CLEARED,
+                    session_id=session.id,
+                )
+            )
+            # A failed insert raises here, before the thread is touched.
+            db.flush()
+
+            # On THIS session, so it commits or rolls back with the rest — see
+            # the docstring.
+            from src.core.checkpointer import get_checkpointer
+
+            get_checkpointer().delete_thread(session_id, session=db)
+
+        logger.info(
+            "Cleared session context",
+            extra={
+                "session_id": session_id,
+                "cleared_by": cleared_by,
+                "deleted_messages": deleted_messages,
+                "preserved_message_id": marker_id,
+            },
+        )
+
+        return {
+            "status": "cleared",
+            "session_id": session_id,
+            "deleted_messages": deleted_messages,
+            "preserved_message_id": marker_id,
+        }
+
+    def delete_message(
+        self, session_id: str, message_id: int, *, deleted_by: str
+    ) -> Dict[str, Any]:
+        """Delete one turn of this session's conversation: a user message and its replies.
+
+        The turn is ``message_id`` (a user row of THIS session) and every later
+        row up to the next ``role='user'`` row (``turn_message_ids``): replies,
+        notices, reasoning and tool rows, whatever their type or request id.
+        Deleting a prompt but keeping its reply would leave the architect an
+        orphan reply in ``conversation``; the turn goes whole.
+
+        **The session's earliest user row is never deleted** (#323): engine mode
+        is read off it.  When the turn starts there, that row is re-typed
+        ``ENGINE_MODE_MARKER_MESSAGE_TYPE`` (hidden from every transcript read)
+        and the rest of its turn is deleted; ``hidden_message_id`` says so.
+
+        **The graph thread is deleted.**  The checkpointer keeps every
+        checkpoint of every turn, and each stores that turn's user message
+        (``__start__``, ``architect_message``) and the architect's reply
+        (``architect_message``).  Nothing replays them, but a deletion the
+        checkpoint still holds is not a deletion.  The next turn starts a new
+        thread and builds its payload from the database.
+
+        **The deck is not rolled back**: slides, the Spec, save points and the
+        Conversation Pin are untouched.
+
+        **One transaction**, as in :meth:`clear_context`: the row delete, the
+        re-type, the ``usage_events`` row and ``delete_thread(session=db)``
+        commit or roll back together.
+
+        Args:
+            session_id: The session whose conversation to edit.  A contributor
+                session edits only its own rows.
+            message_id: The user message that starts the turn.
+            deleted_by: Username of the caller; recorded in ``usage_events`` and
+                the log line.  Required and non-empty.
+
+        Returns:
+            ``{"status": "deleted", "session_id", "message_id",
+            "deleted_messages": N, "hidden_message_id": id-or-None}``
+
+        Raises:
+            ValueError: ``deleted_by`` is empty or None (nothing is changed).
+            SessionNotFoundError: session_id does not exist.
+            MessageNotFoundError: ``message_id`` is not a visible user message
+                of this session (nothing is changed).
+            ArcReviewInFlightError: the deck's arc review is running a graph
+                turn on this thread (nothing is changed); see
+                :func:`_refuse_during_an_arc_review`.
+        """
+        if not deleted_by:
+            raise ValueError(
+                "delete_message requires deleted_by: who deleted must be recorded"
+            )
+
+        from src.core.database import get_db_session
+        from src.database.models.session import SessionMessage
+        from src.database.models.usage_event import EVENT_MESSAGE_DELETED, UsageEvent
+
+        session_manager = get_session_manager()
+        with get_db_session() as db:
+            session = session_manager._get_session_or_raise(db, session_id)
+            # Before anything changes: an arc review in flight would write the
+            # thread back after the delete below, as for a clear.
+            _refuse_during_an_arc_review(db, session)
+
+            # Columns only, in transcript order: grouping needs no content, and a
+            # tool_result row's content can be large.
+            rows = (
+                db.query(
+                    SessionMessage.id, SessionMessage.role, SessionMessage.message_type
+                )
+                .filter(SessionMessage.session_id == session.id)
+                .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+                .all()
+            )
+            turn = turn_message_ids(rows, message_id)
+            if not turn:
+                raise MessageNotFoundError(message_id)
+
+            doomed = list(turn)
+            hidden_message_id = None
+            earliest = earliest_user_message(db, session.id)
+            if earliest is not None and earliest.id == message_id:
+                # Never delete the engine-mode row: hide it, as a clear does.
+                earliest.message_type = ENGINE_MODE_MARKER_MESSAGE_TYPE
+                hidden_message_id = earliest.id
+                doomed = turn[1:]
+
+            deleted_messages = 0
+            if doomed:
+                deleted_messages = (
+                    db.query(SessionMessage)
+                    .filter(
+                        SessionMessage.session_id == session.id,
+                        SessionMessage.id.in_(doomed),
+                    )
+                    .delete(synchronize_session=False)
+                )
+
+            db.add(
+                UsageEvent(
+                    username=deleted_by,
+                    event_type=EVENT_MESSAGE_DELETED,
+                    session_id=session.id,
+                )
+            )
+            # A failed insert or re-type raises here, before the thread is touched.
+            db.flush()
+
+            from src.core.checkpointer import get_checkpointer
+
+            get_checkpointer().delete_thread(session_id, session=db)
+
+        logger.info(
+            "Deleted a conversation turn",
+            extra={
+                "session_id": session_id,
+                "message_id": message_id,
+                "deleted_by": deleted_by,
+                "deleted_messages": deleted_messages,
+                "hidden_message_id": hidden_message_id,
+            },
+        )
+        return {
+            "status": "deleted",
+            "session_id": session_id,
+            "message_id": message_id,
+            "deleted_messages": deleted_messages,
+            "hidden_message_id": hidden_message_id,
+        }
 
     def _ensure_user_experiment(
         self, session_id: str, username: str
@@ -2210,14 +3110,51 @@ class ChatService:
 
     @staticmethod
     def _reindex_slide_ids(deck: "SlideDeck") -> None:
-        """Ensure every slide has a unique, sequential slide_id.
+        """Ensure every slide has a UNIQUE slide_id, without taking one away.
 
         Must be called after ANY operation that changes the slide list
-        (add, delete, reorder, duplicate, replace). Prevents duplicate
-        React keys in the frontend thumbnail panel.
+        (add, delete, reorder, duplicate, replace).
+
+        UNIQUENESS IS THE INVARIANT.  SEQUENTIALITY WAS INCIDENTAL DAMAGE.
+        -----------------------------------------------------------------
+        This used to assign ``f"slide_{idx}"`` to every slide unconditionally, and
+        that one line defeated ``slide_id`` as identity everywhere downstream:
+
+        * ``session_manager._attribute_slide_records`` resolves which verdict and
+          which spec fragment belong to each slide by ``slide_id`` FIRST, documented
+          as "durable per-slide identity".  With positional ids on both sides of the
+          comparison, matching by identity WAS matching by position, so pass 3's
+          "unclaimed" guard — the whole of the F1/F2 fix — never ran and a reorder
+          handed slide A's verdict to slide B.  Measured end to end through
+          ``PUT /api/slides/reorder``: the HTML moved and the verdicts did not.
+        * ``SlideViewer.tsx`` keys its verification Map AND its per-slide staleness
+          Set on ``slide_id`` precisely "so deck mutations (delete, reorder) cannot
+          shift the index → result mapping"; ``AppLayout.tsx`` matches slides across
+          deck versions with ``findIndex(s => s.slide_id === ...)``.  Rewriting the
+          ids reshuffled the frontend's own state too.
+
+        Nothing in ``src/`` or ``frontend/src`` parses an index out of a slide_id, so
+        the positional FORM was never load-bearing.  What is load-bearing is
+        uniqueness — this function's original stated purpose (no duplicate React
+        keys), plus ``ThumbnailRibbon.tsx``'s use of the id as the dnd-kit sortable
+        item id, where a collision breaks drag-and-drop outright.
+
+        So: preserve an id a slide already has, and mint a fresh uuid4 ONLY where one
+        is missing, blank, or already taken by an earlier slide in this deck.  Ids
+        that merely LOOK positional (``SlideDeck.from_html_string`` assigns
+        ``slide_<idx>`` to freshly parsed slides) are left alone — they are unique,
+        and once they stop being rewritten they bind to their slide and become real
+        identities.
         """
-        for idx, slide in enumerate(deck.slides):
-            slide.slide_id = f"slide_{idx}"
+        seen: set = set()
+        for slide in deck.slides:
+            slide_id = (slide.slide_id or "").strip()
+            if not slide_id or slide_id in seen:
+                # Missing, blank, or a collision (a clone carries its source's id):
+                # this slide needs an identity of its own.
+                slide_id = str(uuid.uuid4())
+            slide.slide_id = slide_id
+            seen.add(slide_id)
 
     def _invalidate_deck_cache(self, session_id: str) -> None:
         """Remove the cached deck for a session so the next read hits the DB."""
@@ -2451,7 +3388,9 @@ class ChatService:
             
             # Insert new slides at the calculated position
             for idx, slide in enumerate(replacement_slides):
-                slide.slide_id = f"slide_{insert_position + idx}"
+                # A NEW slide gets no id here (see _reindex_slide_ids):
+                # a positional id can impersonate an existing slide.
+                slide.slide_id = None
                 if _user:
                     slide.stamp_created(_user)
                 current_deck.insert_slide(slide, insert_position + idx)
@@ -2490,12 +3429,19 @@ class ChatService:
 
         # Capture original authorship before removal so replacements inherit it
         original_authors = []
+        # The identities being replaced, captured index-wise alongside the authors and
+        # for the same reason: a REPLACEMENT of slide N is an edit of slide N, so it
+        # must carry slide N's identity forward.  Losing it orphans that slide's
+        # verdict, its spec fragment and the frontend's per-slide staleness flag —
+        # which is the whole point of the id being durable.
+        original_slide_ids = []
         for i in range(original_count):
             orig = current_deck.slides[start_idx + i]
             original_authors.append({
                 "created_by": orig.created_by,
                 "created_at": orig.created_at,
             })
+            original_slide_ids.append(orig.slide_id)
 
         # Preserve scripts from original slides before removal
         # Map canvas IDs to their scripts for later re-attachment
@@ -2527,7 +3473,14 @@ class ChatService:
         # Insert replacement slides and preserve scripts if canvas IDs match
         for idx, slide in enumerate(replacement_slides):
             # Update slide_id to reflect new position
-            slide.slide_id = f"slide_{start_idx + idx}"
+            # Carry the replaced slide's identity forward; a replacement beyond the
+            # originals is a genuinely new slide, so it gets no id here and
+            # _reindex_slide_ids mints a unique one below.  NEVER a positional id:
+            # that can collide with a real slide and, winning the collision by being
+            # earlier in the list, steal its verdict and spec fragment.
+            slide.slide_id = (
+                original_slide_ids[idx] if idx < len(original_slide_ids) else None
+            )
 
             # Preserve original creator, stamp current user as modifier
             if idx < len(original_authors):
@@ -2747,8 +3700,20 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="reorder_slides",
+                object_type="deck",
+            ),
         )
         self._record_deck_version(session_id, save_result)
+
+        # The deck spec's slide list has to move with the deck's.  AFTER
+        # save_slide_deck, never before: the spec write bumps deck.version, which
+        # would make the caller's expected_version stale and 409 a legitimate save.
+        spec_result = self._reorder_deck_spec_slides(session_id, new_order)
+        if spec_result:
+            self._record_deck_version(session_id, spec_result)
 
         # Create save point
         try:
@@ -2800,10 +3765,23 @@ class ChatService:
         original_slide = current_deck.slides[index]
         original_scripts = original_slide.scripts
 
-        # Update slide with preserved scripts and original creation metadata
+        # Update slide with preserved scripts, original creation metadata AND ITS
+        # OWN IDENTITY.  An edit is the same slide with new HTML, so it must keep its
+        # slide_id — this stamped `f"slide_{index}"` and was the most damaging of the
+        # positional stamps for two compounding reasons:
+        #
+        #   * this is the ONLY one of the ten `_reindex_slide_ids` call sites with no
+        #     reindex after it, so the stamp reached the database unresolved.  After an
+        #     insert has shifted the deck, `slide_{index}` is an id belonging to a
+        #     DIFFERENT slide further down: two rows then carried it, attribution
+        #     tier 1 handed the edited slide the other slide's verdict and spec
+        #     fragment, and that other slide lost both.  Measured end to end.
+        #   * `SlideViewer.tsx:117` tracks per-slide staleness in a Set of slide_ids
+        #     across exactly this operation, so renaming the slide mid-edit also drops
+        #     its "edited since last verified" flag.
         new_slide = Slide(
             html=html,
-            slide_id=f"slide_{index}",
+            slide_id=original_slide.slide_id,
             scripts=original_scripts,
             created_by=original_slide.created_by,
             created_at=original_slide.created_at,
@@ -2827,6 +3805,12 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="update_slide",
+                object_type="deck",
+                object_id=new_slide.slide_id,
+            ),
         )
         self._record_deck_version(session_id, save_result)
 
@@ -2845,7 +3829,9 @@ class ChatService:
             extra={"index": index, "session_id": session_id},
         )
 
-        return {"index": index, "slide_id": f"slide_{index}", "html": html}
+        # The slide's REAL id, not its position: a caller handed a positional id will
+        # store it and send it back, reintroducing the impersonation from outside.
+        return {"index": index, "slide_id": new_slide.slide_id, "html": html}
 
     def duplicate_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Duplicate a slide.
@@ -2869,6 +3855,20 @@ class ChatService:
 
         # Clone slide and stamp as newly created by current user
         cloned = current_deck.slides[index].clone()
+        # A clone is a NEW slide, so it gets an identity of its own.  `Slide.clone()`
+        # copies slide_id (deliberately — it is a deep copy, and two tests pin that),
+        # and this used to rely on `_reindex_slide_ids` rewriting every id to pull the
+        # two apart again, which is the rewrite that destroyed durability.
+        #
+        # MEASURED REDUNDANT, KEPT DELIBERATELY: removing this line reddens nothing,
+        # because the clone is inserted at index+1 and `_reindex_slide_ids` resolves a
+        # collision in favour of the FIRST holder — so the source keeps its id and the
+        # clone is minted anyway.  That outcome depends entirely on the clone landing
+        # AFTER its source: insert it before, and the collision pass would take the id
+        # off the existing slide and leave it on the copy.  Assigning here states the
+        # fact `duplicate_slide` actually knows — which of the two is new — instead of
+        # leaving it to be inferred from list order.
+        cloned.slide_id = str(uuid.uuid4())
         try:
             _user = get_current_username()
         except Exception:
@@ -2893,8 +3893,21 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="duplicate_slide",
+                object_type="deck",
+                object_id=cloned.slide_id,
+            ),
         )
         self._record_deck_version(session_id, save_result)
+
+        # The deck spec's slide list has to move with the deck's.  AFTER
+        # save_slide_deck, never before: the spec write bumps deck.version, which
+        # would make the caller's expected_version stale and 409 a legitimate save.
+        spec_result = self._duplicate_deck_spec_slide(session_id, index)
+        if spec_result:
+            self._record_deck_version(session_id, spec_result)
 
         # Create save point
         try:
@@ -2917,6 +3930,395 @@ class ChatService:
 
         deck_dict, _ = self._substitute_images_for_response(deck_dict, session_id=session_id)
         return deck_dict
+
+    def insert_slide(
+        self,
+        session_id: str,
+        position: int,
+        *,
+        html: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        inserted_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Insert a new slide at *position*, shifting every higher slide up.
+
+        The write is ONE transaction in :meth:`SessionManager.insert_slide`: the
+        rows (moved with the exact old-row map, so every existing slide keeps its
+        identity, attribution, verdict and fragment), the deck spec's blank entry,
+        the deck columns, one version bump and the evidence.  This method plans
+        the insert against a COPY of the cached deck and hands the writer the rows
+        it planned against (``expected_rows``): a cache that has drifted from the
+        database is a ``SlideRowsChangedError`` (a 409 at the route) and writes
+        nothing, never a write-back of the stale deck.
+
+        WHAT THE NEW SLIDE IS
+        ---------------------
+        With *html* it is stored verbatim.  Without it, it is the deck's blank
+        shell (:func:`blank_slide_shell` over this deck's slides at the landing
+        position): the deck's own frame with nothing on it, so it looks like a
+        blank slide of THIS deck.  Its ``slide_id`` is minted here, and it is
+        stamped with the current user and one explicit ``created_at`` /
+        ``modified_at``: the writer fabricates no timestamps, so a slide inserted
+        while the username lookup fails still carries its creation time.  The
+        other slides' ids are left alone (no reindex): an id-less legacy row stays
+        id-less, and the writer's map depends on it.
+
+        WHICH LAYER OWNS THE OUT-OF-RANGE CLAMP
+        ---------------------------------------
+        The DOMAIN does, and this method deliberately does not re-implement it.
+        ``SlideDeck.insert_slide`` delegates to ``list.insert``, which clamps: a
+        position past the end appends rather than raising, whatever that method's
+        docstring used to claim about ``IndexError``.  So "insert beyond the end
+        appends" is free, and the only thing left to decide here is the LOWER
+        bound — where ``list.insert`` would silently count backwards from the end
+        (``insert(-1, x)`` lands second-to-last, not last).  A negative position is
+        therefore rejected rather than clamped: it almost certainly means the
+        caller computed it wrongly, and quietly inserting somewhere else is worse
+        than a 400.  The check comes BEFORE ``landed`` and the shell are computed:
+        ``min(-1, n)`` is -1, which would feed the shell a negative scan index.
+
+        ``landed`` is computed BEFORE the insert precisely because of that clamp —
+        after it, ``position`` may not be where the slide actually is, and the
+        shell is derived for where the slide really goes.
+
+        THE CACHE
+        ---------
+        The cached deck is never mutated before the write (the insert is built on a
+        ``copy.deepcopy``), and it is invalidated on EVERY exit, so a refused write
+        leaves no ghost slide in this worker's cache and a stale-rows 409 heals on
+        the next try.  After a successful write the deck is reloaded from the
+        database, and that reloaded deck is what the save point snapshots and the
+        response carries.
+
+        Args:
+            session_id: Session ID.  A contributor session resolves to its deck
+                owner in the layers below, exactly as every other mutation does.
+            position: 0-based position to insert at.  Beyond the end appends.
+            html: HTML for the new slide.  Must carry a ``<div class="slide">``
+                wrapper.  Omitted, the deck's blank shell is inserted for a human
+                or the architect to fill.
+            expected_version: If provided, reject the write when the deck has moved on.
+            inserted_by: The editor, for the ``slide_inserted`` usage event; None
+                writes none.
+
+        Returns:
+            The reloaded slide deck dictionary plus ``inserted_slide_id`` and
+            ``inserted_position`` (where the slide landed), which the viewer uses
+            to select the slide it just inserted.
+
+        Raises:
+            ValueError: If no slide deck exists, position is negative, or the
+                supplied HTML has no slide wrapper.
+            VersionConflictError: *expected_version* is stale.
+            SlideRowsChangedError: The committed rows are not the rows this insert
+                planned against (the cache was stale).
+            ArcReviewInFlightError: The deck's arc review holds a live claim.
+            DeckBusyError: A turn holds another session of this deck.
+        """
+        current_deck = self._get_or_load_deck(session_id)
+        if not current_deck:
+            raise ValueError("No slide deck available")
+
+        if position < 0:
+            raise ValueError(f"Invalid slide position: {position}")
+
+        # Where the slide will ACTUALLY be, given the domain's clamp.
+        landed = min(position, len(current_deck.slides))
+
+        slide_html = (
+            html
+            if html is not None
+            else blank_slide_shell([s.html for s in current_deck.slides], landed)
+        )
+        if not has_slide_wrapper(slide_html):
+            raise ValueError("HTML must contain <div class='slide'> wrapper")
+
+        # The rows this insert plans against, read off the cached deck BEFORE the
+        # copy: the writer re-reads the committed rows and refuses (409) unless
+        # they are exactly these.  The cached html equals the row's html.
+        expected_rows = [
+            (s.slide_id, compute_slide_hash(s.html or "")) for s in current_deck.slides
+        ]
+
+        # Never mutate the cached deck before the write: build on a copy.
+        working = copy.deepcopy(current_deck)
+
+        created = datetime.utcnow().isoformat() + "Z"
+        new_slide = Slide(
+            html=slide_html,
+            slide_id=str(uuid.uuid4()),
+            created_at=created,
+            modified_at=created,
+        )
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+        if _user:
+            new_slide.stamp_created(_user)
+
+        working.insert_slide(new_slide, position)
+
+        deck_dict = working.to_dict()
+        session_manager = get_session_manager()
+        try:
+            write_result = session_manager.insert_slide(
+                session_id,
+                position,
+                slide=deck_dict["slides"][landed],
+                expected_rows=expected_rows,
+                deck_dict=deck_dict,
+                title=working.title,
+                html_content=working.knit(),
+                scripts_content=working.scripts,
+                mutation=session_manager.deck_mutation_context(
+                    session_id,
+                    operation="insert_slide",
+                    object_type="deck",
+                    object_id=new_slide.slide_id,
+                ),
+                expected_version=expected_version,
+                inserted_by=inserted_by,
+            )
+        finally:
+            # On every exit: a refused write leaves no ghost, and after a commit
+            # the next load is the database's deck, not a plan.
+            self._invalidate_deck_cache(session_id)
+
+        # Prefer the writer's position: it is where the row actually landed.
+        landed_at = write_result.get("position", landed)
+
+        reloaded: Optional[SlideDeck] = None
+        try:
+            reloaded = self._get_or_load_deck(session_id)
+        except Exception as e:
+            logger.warning(f"Failed to reload deck after insert_slide: {e}")
+
+        # ONE save point for the whole operation, after the work commits.
+        # VERSION_LIMIT evicts the OLDEST version, so a save point per shifted
+        # position would delete real history rather than merely bloat it.
+        try:
+            self.create_save_point(
+                session_id=session_id,
+                description=f"Inserted slide {landed_at + 1}",
+                deck=reloaded if reloaded is not None else working,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create save point (insert_slide): {e}")
+
+        logger.info(
+            "Inserted slide",
+            extra={
+                "requested_position": position,
+                "position": landed_at,
+                "new_count": write_result.get("slide_count", len(working.slides)),
+                "session_id": session_id,
+            },
+        )
+
+        result = reloaded.to_dict() if reloaded is not None else deck_dict
+        result, _ = self._substitute_images_for_response(result, session_id=session_id)
+        result["inserted_slide_id"] = new_slide.slide_id
+        result["inserted_position"] = landed_at
+        return result
+
+    def _rewrite_deck_spec_slides(
+        self,
+        session_id: str,
+        reorder: Callable[[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]],
+        *,
+        label: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Re-order the deck spec's slide entries and re-stamp their positions.
+
+        A deck spec describes the deck slide by slide, keyed on ``position``
+        (``SlideSpec.position`` is the canonical identity, looked up by
+        ``DeckSpec.slide_at`` and never by list index).  Any mutation that moves,
+        adds or removes a slide must move its spec entry with it, or every entry
+        past the change describes its neighbour.
+
+        Before this existed, ``deck_spec_json`` was renumbered on INSERT and on
+        nothing else (final review C1), so after a delete, a duplicate or a reorder
+        the deck-level spec and the per-row ``deck_spec_slide`` fragments — two
+        representations of the same thing — disagreed, and three consumers read the
+        deck-level one: the builder brief, §4.6's re-review and ``architect_node``'s
+        edit-turn fallback.  Measured: an edit turn dispatched a builder for a
+        position with no slide and the deck gained one nobody asked for.
+
+        WHY ONE PRIMITIVE AND NOT FOUR WRITERS
+        --------------------------------------
+        Four hand-copied row-writers diverging is the defect class the previous
+        workstream's final review found, and C1 is itself an instance of it — insert
+        renumbered, its three siblings did not.  So the three routes that still use
+        this method (delete, duplicate, reorder) supply only *which entries end up in
+        which order*; the position stamping, the raw-dict handling, the author stamp
+        and the failure policy live here once.  The fourth, insert, no longer writes
+        the spec through this method at all: ``SessionManager.insert_slide`` splices
+        its blank entry in the same transaction as the rows, through the same pure
+        core (``renumber_spec_slides``), so the two cannot disagree on the renumber.
+
+        *reorder* receives the positioned entries **in position order** and returns
+        the new list in the new order — it does not touch ``position`` at all, which
+        this method re-stamps contiguously from 0.  Returning ``None`` leaves the
+        spec untouched.
+
+        Operates on the RAW spec dict rather than parsing a ``DeckSpec``: a spec that
+        no longer validates (an older shape, a hand-edited column) must not be
+        destroyed by a renumber, and nothing here reads a field other than
+        ``position``.  Entries that are not dicts, or whose ``position`` is not an
+        int, cannot be identified with a slide, so they are carried through
+        **unchanged and last** rather than silently permuted.
+
+        A spec write that fails must never fail the mutation: the slide change is
+        already committed by the time this runs, and the route's spec-dirty marker
+        still fires, so the sweeper re-describes the deck either way.
+
+        Args:
+            session_id: The mutating session.  Resolves to the deck owner in the
+                layers below, exactly as every other mutation does.
+            reorder: Takes the positioned entries in position order, returns them in
+                their new order, or ``None`` to leave the spec alone.  Raises
+                ``IndexError`` when the spec cannot answer the mutation.
+            label: Route name, for the log lines only.
+
+        Returns:
+            The writer's result dict (carrying the new deck ``version``), or None
+            when there was no spec to renumber, the spec was unreadable, or
+            *reorder* declined — none of which is an error.  A deck built before the
+            spec column existed has no spec.
+        """
+        # Imported here, not at module scope: src.api.services.__init__ imports
+        # chat_service, so a module-level import of a sibling service is circular.
+        from src.api.services.deck_level_writer import (
+            read_deck_spec,
+            write_deck_level_columns,
+        )
+
+        try:
+            spec = read_deck_spec(session_id)
+        except Exception as e:
+            logger.warning(f"Failed to read deck spec ({label}): {e}")
+            return None
+
+        if not spec:
+            return None
+
+        slides = spec.get("slides")
+        if not isinstance(slides, list):
+            logger.warning(
+                "deck_spec_json has no slides list; leaving it untouched",
+                extra={"session_id": session_id, "route": label},
+            )
+            return None
+
+        # The split, the reorder and the re-stamp are the pure core, shared with the
+        # manual insert's transaction (src.domain.deck_spec_slides).
+        try:
+            spec = renumber_spec_slides(spec, reorder)
+        except IndexError:
+            # The route validated its index against the DECK, so an index the spec
+            # cannot answer means the two have already drifted.  Leaving a drifted
+            # spec alone is recoverable; renumbering it against the wrong slides is
+            # not.  The count is the entries renumber_spec_slides handed to reorder.
+            positioned = sum(
+                1
+                for entry in slides
+                if isinstance(entry, dict) and isinstance(entry.get("position"), int)
+            )
+            logger.warning(
+                "deck spec has %s entries and cannot answer this mutation; "
+                "leaving it untouched",
+                positioned,
+                extra={"session_id": session_id, "route": label},
+            )
+            return None
+
+        if spec is None:
+            return None
+
+        try:
+            _user = get_current_username()
+        except Exception:
+            _user = None
+
+        try:
+            return write_deck_level_columns(
+                session_id,
+                deck_spec=spec,
+                modified_by=_user,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write deck spec ({label}): {e}")
+            return None
+
+    def _delete_deck_spec_slide(
+        self,
+        session_id: str,
+        index: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Drop the deleted slide's spec entry and shift every higher entry down."""
+
+        def _drop(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if index >= len(entries):
+                raise IndexError(index)
+            return entries[:index] + entries[index + 1 :]
+
+        return self._rewrite_deck_spec_slides(
+            session_id, _drop, label="delete_slide"
+        )
+
+    def _duplicate_deck_spec_slide(
+        self,
+        session_id: str,
+        index: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Copy the duplicated slide's spec entry in beside it.
+
+        The clone gets its SOURCE's brief, not a blank one: a duplicate is a copy of
+        a slide we already have a description for, so that description is known to be
+        right, where insert's newcomer has none.  The route's spec-dirty marker fires
+        either way, so the sweeper re-describes both — this decides which starting
+        point is true, not who writes the final prose.
+        """
+
+        def _clone(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if index >= len(entries):
+                raise IndexError(index)
+            return (
+                entries[: index + 1]
+                + [dict(entries[index])]
+                + entries[index + 1 :]
+            )
+
+        return self._rewrite_deck_spec_slides(
+            session_id, _clone, label="duplicate_slide"
+        )
+
+    def _reorder_deck_spec_slides(
+        self,
+        session_id: str,
+        new_order: List[int],
+    ) -> Optional[Dict[str, Any]]:
+        """Permute the spec entries by the same permutation the slides took.
+
+        ``new_order[j]`` is the OLD index of the slide that now sits at *j* — the
+        route validates it is a true permutation of ``range(len(slides))`` before
+        reaching here.
+
+        This is the case the consumer-side guard structurally cannot cover: a reorder
+        preserves the position SET, so ``_persisted_spec_describes_these_rows`` reads
+        a reordered deck as aligned while every entry describes a different slide.
+        Renumbering in the route is the only thing that closes it.
+        """
+
+        def _permute(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if len(new_order) != len(entries):
+                raise IndexError(len(new_order))
+            return [entries[old] for old in new_order]
+
+        return self._rewrite_deck_spec_slides(
+            session_id, _permute, label="reorder_slides"
+        )
 
     def delete_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Delete a slide.
@@ -2941,6 +4343,8 @@ class ChatService:
         if len(current_deck.slides) <= 1:
             raise ValueError("Cannot delete last slide")
 
+        deleted_slide_id = current_deck.slides[index].slide_id
+
         # Remove slide
         current_deck.remove_slide(index)
 
@@ -2957,8 +4361,21 @@ class ChatService:
             slide_count=len(current_deck.slides),
             deck_dict=deck_dict,
             expected_version=expected_version,
+            mutation=session_manager.deck_mutation_context(
+                session_id,
+                operation="delete_slide",
+                object_type="deck",
+                object_id=deleted_slide_id,
+            ),
         )
         self._record_deck_version(session_id, save_result)
+
+        # The deck spec's slide list has to move with the deck's.  AFTER
+        # save_slide_deck, never before: the spec write bumps deck.version, which
+        # would make the caller's expected_version stale and 409 a legitimate save.
+        spec_result = self._delete_deck_spec_slide(session_id, index)
+        if spec_result:
+            self._record_deck_version(session_id, spec_result)
 
         # Create save point
         try:

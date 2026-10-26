@@ -17,6 +17,10 @@ from src.api.main import app
 from src.core.database import Base, get_db
 from src.api.schemas.streaming import StreamEventType
 
+# #271 C47(c): these tests are not about engine-mode resolution, which now
+# fails closed; they state the monolith answer they relied on.
+pytestmark = pytest.mark.usefixtures("engine_mode_resolves_to_monolith")
+
 
 # ============================================
 # Fixtures
@@ -482,18 +486,79 @@ class TestOrgDefaultDesignSystemPreselect:
         assert config["slide_style_id"] == 5
         assert config.get("design_system_id") is None
 
-    def test_org_default_ds_does_not_seed_a_template_pin(
+    def test_org_default_ds_without_a_default_template_seeds_no_pin(
         self, client, mock_session_manager, mock_chat_service
     ):
-        """A NEW session always starts with template = None: preselecting the
-        org-default DS must not smuggle in a pin."""
-        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7):
+        """A design system with no default template leaves the new session
+        unpinned: there is no fallback to an arbitrary template."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_template_id", return_value=None):
             config = self._created_config(
                 client, mock_session_manager, mock_chat_service,
                 {"message": "Create slides"},
             )
         assert config["design_system_id"] == 7
         assert config["template_id"] is None
+
+    def test_org_default_ds_seeds_its_default_template(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """The default template of the session's design system is pinned, so the
+        first turn already binds to that template's sections."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_template_id", return_value=70) as tmpl:
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides"},
+            )
+        assert config["design_system_id"] == 7
+        assert config["template_id"] == 70
+        tmpl.assert_called_with(7)
+
+    def test_explicit_design_system_seeds_its_own_default_template(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """The default is looked up on the design system the session actually
+        got (here the client's explicit choice), never the org default's."""
+        defaults = {3: 30, 7: 70}
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_template_id", side_effect=defaults.get):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides",
+                 "agent_config": {"tools": [], "design_system_id": 3}},
+            )
+        assert config["design_system_id"] == 3
+        assert config["template_id"] == 30
+
+    def test_carried_over_pin_is_replaced_by_the_default_template(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """A pin arriving on the creating request is another surface's carryover
+        and is still dropped; the session gets its design system's default."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_template_id", return_value=30):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides",
+                 "agent_config": {"tools": [], "design_system_id": 3, "template_id": 99}},
+            )
+        assert config["template_id"] == 30
+
+    def test_no_design_system_seeds_no_template(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """Templates belong to a design system: a slide-style session gets none."""
+        with patch("src.api.routes.chat.get_default_design_system_id", return_value=7), \
+             patch("src.api.routes.chat.get_default_slide_style_id", return_value=42), \
+             patch("src.api.routes.chat.get_default_template_id", return_value=70):
+            config = self._created_config(
+                client, mock_session_manager, mock_chat_service,
+                {"message": "Create slides",
+                 "agent_config": {"tools": [], "slide_style_id": 5}},
+            )
+        assert config.get("design_system_id") is None
+        assert config.get("template_id") is None
 
     def test_explicit_no_style_source_wins_on_a_new_session(
         self, client, mock_session_manager, mock_chat_service

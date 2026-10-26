@@ -1,0 +1,14 @@
+{
+  "findings": [
+    {
+      "id": "arc_gap:-1:0",
+      "slide_index": -1,
+      "category": "narrative",
+      "criterion": "arc_gap",
+      "message": "The deck drops the objections slide, creating a gap in the narrative arc where the audience's anticipated concerns are not addressed.",
+      "objective": false,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

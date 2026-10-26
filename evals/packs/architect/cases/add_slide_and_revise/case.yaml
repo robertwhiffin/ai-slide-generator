@@ -1,0 +1,12 @@
+kind: mutation
+fault: 'add after slide 8 (position 7): the new slide is position 8 and the summary
+  on the last slide (now position 10) must be revised to include it; the gold narrative_arc
+  lists five dimensions and must stay unchanged'
+expect:
+  intent: edit
+  positions:
+  - 8
+  - 10
+  inserted:
+  - 8
+design_system_active: true

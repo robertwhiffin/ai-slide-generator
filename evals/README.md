@@ -1,0 +1,583 @@
+# Agent-configuration eval harness
+
+Scores Tellr agent configurations (prompt and model settings) against a fixed pack of cases, so
+candidate configurations can be compared on evidence before one is promoted into Graph Version 1.
+Real-model runs; results are logged to MLflow.
+
+## What it does
+
+- **Configs** (`evals/configs/`). A config is a named variant of one agent's v1 definition.
+  `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
+  settings. Each config carries a `content_hash`, logged with every run.
+- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (fifteen for the architect), 45 in total across the seven
+  roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
+  `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
+  `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
+  and `calibration.json` (a `should_fail` output). The architect's two newest cases,
+  `fill_blank_slide` (the user names a manually inserted blank slide by its number and asks for
+  content on it: it is filled in place, with no new slide beside it) and `edit_beside_blank` (the
+  user asks to change the slide after the blank: only that slide changes and the blank stays blank),
+  run on a deck that holds the blank.
+  - *Calibrated 2026-10-22.* The judge is trusted on `edit_beside_blank` on both splits. On
+    `fill_blank_slide` it cannot separate the should_fail (a new slide inserted beside the blank)
+    from the reference on either split. So `fill_blank_slide` is scored by its deterministic checks:
+    the intent is `edit`, production's alignment revises exactly the blank, and it inserts nothing.
+    Its judge verdict is reported, not counted. The harness does not apply this rule (a row fails
+    on any failing scorer, the judge included), so read that case's result from `contract` and
+    `expected_category`. A judge-visible should_fail for it is a follow-up.
+  - *Measured before any prompt change*, on `v1-baseline` (the shipped `add-slide-b` architect
+    prompt): train ×3 6/6 (run `630beeaf`), held-out ×1 2/2 (run `6b2e4ab4`, aggregate only),
+    0 production binding refusals. No prompt change was needed.
+- **Scorers** (`evals/harness/scorers.py`, `mlflow_run.py`). Every row is scored by:
+  - `contract`: the output validated against the agent's schema. An `incomplete` run, such as a model
+    inventing a criterion name outside the schema, fails here.
+    Its rationale gives the run status and the reason, including the schema validation message (the
+    invalid field and value), truncated to 2000 characters.
+  - `expected_category`, for the architect, data_analyst and the three reviewers: deterministic
+    match on intent/outcome, or on expected findings (criterion, position). Any objective criterion
+    not listed in `expect.criteria` fails the row. A fix_reviewer also checks `verdict`.
+    - *Architect insert cases* (#314). A case whose `expect` has `inserted` is scored with
+      production's own semantics, not by the model's `target_positions`, because `architect_node`
+      ignores those targets on an insert and derives the turn from `align_slides` (see "Adding a
+      slide (#314)" in `docs/technical/backend-overview.md`). `build_dataset` adds
+      `expectations["current_deck_spec"]` (the payload's deck) for architect cases that have one,
+      and omits the key when the deck is `None`. The row passes only if all of these hold:
+      the intent is `edit`; the output carries a valid `deck_spec`;
+      `align_slides(current_deck_spec, output)` does not refuse; `inserted_indices` equals
+      `expect.inserted`; `revised_indices` equals `expect.positions` minus `inserted`; and the
+      deck-level fields (`audience`, `purpose`, `argument`, `call_to_action`, `narrative_arc`) and
+      the design contract equal the reference's. The five fields are `scorers.DECK_LEVEL_FIELDS`, a
+      test pins them equal to `nodes._DECK_LEVEL_FIELDS`. A model whose own `target_positions`
+      differ is noted in the rationale and not failed. A missing `reference` or `current_deck_spec`
+      fails the row with an explicit rationale. Every other case scores exactly as before.
+  - `render_measures`, for the builder and fixer: the slide is rendered in a browser (Meridian section
+    CSS). It must have zero overflow, contrast of at least 4.5, no off-palette colours, no console
+    errors and no `<style>` tag.
+  - `judge`: an LLM judge (`mlflow.genai.make_judge`) using the pack's `judge_prompt.md`. It compares
+    the candidate with the reference and the brief and returns pass or fail.
+- **Row outcome.** A row fails if any scorer fails. It is skipped if the judge is skipped, or if
+  every scorer is skipped. Skips cover infra errors (after 3 retries with backoff) and judge errors;
+  both are excluded from pass rate.
+- **MLflow.** One run per agent in experiment `tellr-agent-eval`, stored in the repo-root `mlflow.db`
+  (gitignored).
+  - Tags: `agent_key`, `config_name`, `content_hash`, `judge_endpoint`, `repeats`, `case_filter`,
+    plus `not_comparable` (infra errors above 10% of rows) and `judge_unavailable` (every judge
+    call errored).
+  - Metrics: `pass_rate`, `pass_rate/<case_id>`, `repeat_stddev`, `infra_error_count`,
+    `judge_error_count`, `mean_latency_ms`, `p95_latency_ms`, `mean_input_tokens`,
+    `mean_output_tokens`, `est_cost_usd`. Cost uses `evals/configs/prices.yaml`, in USD per 1k tokens.
+    An endpoint missing from that file is left unpriced.
+- **Intent report** (`evals/intent_report.py`). Read-only; recomputes two architect numbers from one
+  run's MLflow traces, because the `expected_category` scorer fails a row on a wrong intent *or* wrong
+  edit positions, and MLflow logs no run-level aggregate for either.
+  - *Intent accuracy*: the share of non-infra rows whose got intent equals the expected intent. A row
+    with no output counts as wrong (and is also reported as `no_output`).
+  - *Position accuracy*: over the rows whose expected and got intent are both `edit`, the share whose
+    `set(target_positions)` equals the expected set.
+  - On an insert row (`expect.inserted`, #314) position accuracy compares the model's own
+    `target_positions` with the expected set. Production ignores those targets on an insert, so
+    there it is a signal about the prompt, not a measure of what production builds.
+    `expected_category` (above) is the production measure.
+  - A held-out run prints one aggregate line, never a case id.
+  - It reads the per-worktree `mlflow.db` unless `--tracking-uri` is given, and writes nothing.
+
+  ```bash
+  python -m evals.intent_report --run-id ID [--cases a,b] [--json]
+  ```
+
+## Running a sweep
+
+Run from the repo root:
+
+```bash
+python -m evals.run_eval --agent all --config v1-baseline --repeats 3
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--agent` | `all` | `all` or one agent key. |
+| `--config` | `v1-baseline` | `v1-baseline` or a path to a YAML config. A YAML config targets one agent, so `--agent all` only works with `v1-baseline`. |
+| `--repeats` | 3 | Repeats per case. |
+| `--max-workers` | 8 | Parallelism of `mlflow.genai.evaluate`. |
+| `--cases` | all | Comma-separated case ids, for example `gold_chart,overflow`. Also applies to `--calibrate`. |
+| `--judge-endpoint` | `databricks-claude-sonnet-5` | Serving endpoint used as the judge. |
+| `--split` | `train` | `train` or `heldout`. Selects the case set; see Held-out set below. Also applies to `--calibrate`. |
+| `--calibrate` | off | Calibrate the judge instead of sweeping (see below). |
+| `--no-render` | off | Skip rendering for the builder and fixer, which drops `render_measures`. |
+| `--profile` | `tellr-dev` | Databricks CLI profile every live call uses. It overrides `.env` and `DATABRICKS_HOST`. `''` keeps the ambient environment. |
+
+The agent's endpoint is probed before each sweep; an unreachable endpoint aborts. The probe maps a
+`system.ai.<m>` gateway model name to its serving endpoint `databricks-<m>`; the agent call itself keeps the
+configured name.
+
+The harness runs each agent through `AgentRuntime.run_candidate` **without data tools bound**. The
+data_analyst prompt mentions Genie and a vector index, but neither is available in the harness.
+
+## Held-out set
+
+Each agent has a second, separate set of cases (five per agent, fifteen for the architect; 45 in total) in `evals/packs/<agent>/cases_heldout/`,
+built from a different source deck than the train cases. It has the same four files per case and
+shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
+cases generalises, rather than having been fitted to them.
+
+- **Selecting it.** Pass `--split heldout` (default `train`) to a sweep or to `--calibrate`. Train
+  behaviour is unchanged when the flag is omitted.
+- **Separate experiment.** Held-out sweeps log to the MLflow experiment `tellr-agent-eval-heldout`;
+  train sweeps stay in `tellr-agent-eval`. Held-out runs also carry `split=heldout` and their own
+  `cases_digest`.
+- **Aggregate-only CLI output.** A held-out sweep prints one line per agent: run id, pass rate, infra
+  error count and judge error count. It prints no case ids, rationales, payloads or references.
+  This limits what an operator or an optimiser sees by accident. It is not an access control: the
+  case files are in the repository, and the MLflow run still stores per-case metrics and judge
+  rationales. `--calibrate --split heldout` also prints its per-case trust table.
+- **Discipline, not a lock.** Nothing prevents anyone from reading the held-out cases or running
+  them often. The set is only useful if it stays unseen. An optimiser must tune against train only.
+  Held-out is scored on finalists, once a candidate has been chosen on train, and is not used to pick
+  between candidates iteratively. Every look at it spends some of its independence.
+- **Calibration is still required.** The judge must be shown to separate each held-out reference from
+  its mutation before the pass rates mean anything. Run `python -m evals.run_eval --agent all
+  --calibrate --split heldout` after any change to a judge prompt, the judge endpoint or a held-out
+  case.
+- **Regenerating.** `python -m evals.packs.<agent>.heldout` regenerates that agent's held-out cases.
+  A bare `generate()` writes to `cases_heldout` only.
+  The cross-split tests (`tests/unit/evals/test_cross_split.py`) guard that the split ids are pinned, no
+  held-out payload or reference duplicates a train one, and the generators cannot write to train.
+
+## Prompt optimisation
+
+To run an optimisation pass on one agent, load the `optimise-agent-prompt` project skill
+(`.claude/skills/optimise-agent-prompt/SKILL.md`). It sets the rules: train only during the search,
+held-out once on finalists, a spend cap, no edits to cases, judges or scorers, and no promote or
+commit.
+
+## Adding a config
+
+Create `evals/configs/<agent>/<name>.yaml`. The example is `evals/configs/builder/v1.yaml`.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `agent_key` | yes | One of the seven roles. |
+| `name` | no | Label, default `agent_key`. |
+| `base` | no | Only `v1` is supported. |
+| `prompt_text` | no | Inline replacement prompt. Takes precedence over `prompt_file`. |
+| `prompt_file` | no | Prompt file, path relative to the YAML. |
+| `endpoint_name`, `temperature`, `max_tokens`, `top_p` | no | Model overrides. |
+
+Run it with `python -m evals.run_eval --agent builder --config evals/configs/builder/<name>.yaml`.
+
+## Viewing and comparing runs
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db   # from the repo root
+```
+
+Open `tellr-agent-eval`, select runs of the same `agent_key` and use Compare. Check `content_hash`
+to confirm which definition a run used.
+
+**Compared configs must share one judge endpoint.** The judge is itself a model; a different judge
+shifts pass rates and makes comparison meaningless. Compare only runs with the same
+`judge_endpoint` tag, and never a run tagged `not_comparable` or `judge_unavailable`.
+
+## Calibration
+
+```bash
+python -m evals.run_eval --agent all --calibrate
+```
+
+For each case, the judge must **pass** `reference.json` and **fail** `calibration.json`'s
+`should_fail` output (builder and fixer outputs are rendered first). A case is *trusted* only when
+both hold. A case the judge cannot separate from its mutation gives pass rates that mean nothing,
+so re-calibrate after changing a judge prompt, the judge endpoint or any case. All 35 cases were
+trusted when the v1 baseline below was recorded.
+
+To calibrate only some cases (for example the ones you just added), add `--cases`:
+`python -m evals.run_eval --agent architect --calibrate --cases add_slide_anchor,add_slide_end`.
+It honours `--split`. An id that matches no case for the chosen agents and split exits non-zero,
+naming the unknown id(s), so a typo cannot calibrate nothing and read as a pass. The ids that do
+match are still calibrated and printed before the exit.
+
+Calibration proves the judge can discriminate on these cases. It does not prove the deterministic
+scorers' expectations are reasonable for the live agent (see the baseline notes).
+
+## Promotion
+
+`evals.harness.promote` has a CLI:
+
+```bash
+python -m evals.harness.promote --config ROLE=PATH [--run-id ROLE=ID] [--dry-run]
+```
+
+`--config` and `--run-id` repeat, once per role. It can also be called from Python:
+
+```python
+import src.core.database  # noqa: F401  (break the import cycle first)
+from evals.harness.config import load_config
+from evals.harness.promote import promote
+
+promote({"builder": load_config("evals/configs/builder/<name>.yaml")}, dry_run=True)
+```
+
+`promote(chosen, dry_run=False, repo_root=None, run_ids=None)` takes the chosen `{role: config}` and rewrites, in place:
+
+- `src/services/agent_definition_manifest_v1.py`, only the model fields and the prompt text that
+  changed, so unchanged roles stay byte-identical;
+- `PACKAGED_V1_CONTENT_HASHES` in `tests/unit/test_packaged_release_loader.py` and
+  `tests/unit/test_graph_definition_manifest.py`.
+
+It refuses, writing nothing, when:
+
+- the role is unknown or the config belongs to another role;
+- the config's `content_hash` does not match its content;
+- a role whose v1 prompt is the source of a `LegacyV1PromptTransition` has its `prompt_text` changed
+  (that needs a deliberate migration);
+- the promoted manifest's hash differs from the evaluated config's hash;
+- a pinned-hash entry is not found exactly once.
+
+`dry_run=True` computes everything without writing. After writing it prints the contract re-record
+command, which must be run because the frontend lifecycle contract embeds every v1 prompt and hash:
+
+```bash
+DATABASE_URL=sqlite:////tmp/tellr-contract-rerecord.db python -m tests.integration.graph_lifecycle_journey --write-contract frontend/tests/fixtures/graphLifecycleContract.json
+```
+
+It also warns if a promoted prompt no longer matches `src/core/skills/<role>.py` `INSTRUCTIONS`;
+`promote` does not edit skill files.
+
+## Regenerating fixtures and cases
+
+- Meridian gold slides: `python evals/fixtures/split_gold.py`. It reads the source deck from
+  `~/Downloads/html-slides-vs--powerpoint--a-better-way-to-present.html` and writes
+  `evals/fixtures/meridian/gold/<n>.html` and `.js`.
+- Pack cases: `python -m evals.packs.<agent>.mutations` (for example `evals.packs.builder.mutations`).
+  Generation is idempotent.
+
+## Tests
+
+The harness's own self-tests are in `tests/unit/evals/` and run in the normal unit suite. They use
+fakes. Real-model runs (`evals.run_eval`) are not collected by CI.
+
+## Baseline: v1-baseline, 2026-10-06
+
+`git_sha` 904b4153d10098e5bb1a3b5b137ab57b5d447151 for architect, data_analyst, deck_reviewer and
+fix_reviewer. builder, build_reviewer and fixer were re-swept at `git_sha`
+3d5848dd1dd60e455762d44b5087b0a4a0e43b3a after the gold chart fix (`gold/3.js` and `gold/6.js` still
+hard-coded the old muted colour `#6B7280`; it is now `#4B5563`). Agent endpoint `databricks-claude-opus-4-6`,
+judge `databricks-claude-sonnet-5`, 3 repeats, 5 cases per agent (15 rows each), 35 of 35 cases
+trusted at calibration (one `fix_reviewer` case needed a re-run after a malformed judge response).
+Total estimated cost **USD 16.81**. 0 infra errors in every agent. Each run carries `cases_digest`
+and `git_sha` tags, and the judge rationale is stored on each row.
+
+| Agent | Pass rate | Infra errors | Judge errors | Mean latency (s) | Est. cost (USD) |
+|---|---|---|---|---|---|
+| fixer | 1.00 | 0 | 0 | 14.0 | 2.27 |
+| build_reviewer | 1.00 | 0 | 1 | 21.2 | 2.56 |
+| deck_reviewer | 0.93 | 0 | 0 | 21.6 | 3.08 |
+| architect | 0.71 | 0 | 1 | 13.9 | 2.36 |
+| builder | 0.47 | 0 | 0 | 23.6 | 3.43 |
+| data_analyst | 0.40 | 0 | 0 | 10.4 | 0.78 |
+| fix_reviewer | 0.07 | 0 | 0 | 14.8 | 2.33 |
+| **Total** | | | | | **16.81** |
+
+A judge error is a row whose judge reply could not be parsed (`MlflowException: Failed to parse
+response from judge model`); the row is skipped, so the pass rate is over 14 rows, not 15.
+
+Failing cases (pass rate below 1.0), with the attribution and the stored rationale:
+
+- **architect/edit_request (0/3), AGENT.** The edit is right but `deck_spec` is null. Judge: "a
+  content-changing edit must be translated into an updated deck_spec ... the candidate returned
+  deck_spec: null".
+- **architect/build_request (2/3), AGENT (weak).** One repeat built 5 slides against the reference's
+  10. Judge: "the slide count (5) is far shorter than the reference's (10) ... not in the same
+  ballpark". The judgement is subjective.
+- **data_analyst/figures_inline (0/3), AGENT.** The request already states "98% on StatCounter"; the
+  agent answers `no_tool` or `missing_data`. Judge: "the analyst should simply pass it through
+  faithfully rather than treat it as requiring external retrieval".
+- **data_analyst/two_sources (0/3), AGENT.** Both conflicting figures are in the request; the agent
+  answers `missing_data`. Judge: "No external tool or additional data ... was actually needed".
+- **data_analyst/unsourced_public_stat (1/3), AGENT.** Expected `no_tool`, got `missing_data`.
+  Judge: "The candidate instead returned 'missing_data' ... claims to have tried tools". No tools are
+  bound in the harness.
+- **data_analyst/conflicting_figures (2/3), AGENT.** The agent averages the two surveys. Judge: it
+  "computes/invents a 'reasonable central estimate' of approximately 11-12 MB ... effectively
+  resolving the conflict".
+- **builder/chart_no_data (0/3), AGENT.** The agent invents a chart with specific scores when
+  `resolved_data.figures` is empty. Judge: "the candidate invents a specific device-by-device
+  fidelity chart ... despite figures being empty" (Laptop 98/85, Tablet 95/52, and so on).
+- **builder/gold_chart (1/3), too_much_content (1/3), gold_bullets (2/3), AGENT.** The slide
+  overflows or intrudes into the 88px/56px safe area (10 to 85px past it). `render_measures`:
+  "Overflow: 43.0px; Safe area intrusion: 84.0px past the 88px/56px safe area". Judge: "safe_area_px of
+  10.0 ... explicit hard-evidence grounds for failure". `gold_stats` passes 3/3. One `gold_bullets`
+  judge rationale also faults on-palette hard-coded hexes (`#4B5563`, `#374151`) in the chart script;
+  that is secondary to the safe-area failure.
+- **build_reviewer:** 1.00 (14 of 15 rows counted). The `source_contradiction` case now passes 3/3:
+  the earlier unplanted `rogue_colour` finding is gone with the fixture fix. The one judge error is a
+  `rogue_colour` row whose judge reply was unparseable.
+- **fix_reviewer/restyle_reject, content_broken_reject (0/3 each), fault_left_reject (1/3),
+  AGENT.** The reviewer invents criterion names and the output schema rejects the reply, so
+  `structured` is null. Reproduced once: "Unknown criterion 'brand-color'. Valid criteria: ['arc_gap',
+  ...]". Judge: "no candidate output to judge".
+- **fix_reviewer/good_fix_accept, good_contrast_fix_accept (0/3 each), AGENT.** The reviewer
+  accepts the fix (verdict `fixed`) but echoes the original finding with `status: fixed`.
+  Production `fix_reviewer_node` computes `still_open = [f for f in re_findings if f.criterion ==
+  criterion]` (`src/services/graph/nodes.py:2675`), which ignores `status`, so this reply would block
+  a good fix in production. The scorer matches production semantics: "Unplanted objective criteria
+  found: {'overflow'}". This is a fix_reviewer prompt ambiguity. Separately, the judge was
+  inconsistent between the two identical-shape cases (it passed `good_fix_accept`, failed
+  `good_contrast_fix_accept`).
+- **deck_reviewer/out_of_order (2/3), AGENT (variance).** One repeat did not place the `arc_gap`
+  finding where the case expects it: "Missing expected findings: {('arc_gap', -1)}".
+
+Earlier runs in the `tellr-agent-eval` experiment are tagged `superseded`, including the builder, build_reviewer and fixer runs from the first `904b4153d` sweep (gold chart colour): they predate the Meridian
+frame-rule fix (88px/72px padding, footer at 56px), the safe-area check in `render_measures`, the
+`slide_spec`/`resolved_data` judge inputs, the required architect edit `deck_spec`, the fixer's
+`resolved_data` input and its prompt change, and stored judge rationales.
+
+## Held-out baseline: v1-baseline, 2026-10-08
+
+`git_sha` fd29eb37f8ff65ce5358409134fbf683292e119a, experiment `tellr-agent-eval-heldout`
+(`--split heldout`). Agent endpoint `databricks-claude-opus-4-6`, judge `databricks-claude-sonnet-5`,
+3 repeats, 5 cases per agent (15 rows each). All 35 held-out cases were trusted at calibration; five
+cases needed a re-run after a malformed judge reply, a network drop or a `KeyError: 'result'`, and none
+was ever misclassified. Total estimated cost **USD 15.66**. 0 infra errors in every agent.
+
+| Agent | Held-out | Train (2026-10-06) | Judge errors (held-out) |
+|---|---|---|---|
+| fixer | 1.00 | 1.00 | 0 |
+| deck_reviewer | 0.93 | 0.93 | 0 |
+| build_reviewer | 0.87 | 1.00 | 0 |
+| architect | 0.77 | 0.71 | 2 |
+| builder | 0.40 | 0.47 | 0 |
+| data_analyst | 0.33 | 0.40 | 0 |
+| fix_reviewer | 0.00 | 0.07 | 0 |
+
+Held-out and train agree on the pass rates and on the causes of failure listed below, so the v1
+prompts are not overfitted to the train cases; the weak agents are weak on both sets. Differences are
+within repeat variance except `build_reviewer`, which scored lower on held-out.
+
+Distinct causes of failure, all attributed to the agent rather than the harness:
+
+- **fix_reviewer** rejects: the reply is rejected by the output schema (`structured=None`). The v1 prompt
+  says to use criterion names from the registry but does not list them. Accepts: the reviewer echoes the
+  original finding as `objective: true, status: fixed`, which production's `still_open` ignores `status`
+  for, so a good fix would be blocked in production too.
+- **data_analyst** answers `missing_data` for figures already in the request, and for requests with no
+  applicable tool, because the prompt advertises Genie and a vector index that the harness does not bind.
+- **builder** invents figures when `resolved_data.figures` is empty, and intrudes into the safe area on
+  an overloaded brief.
+- **architect** edits return `deck_spec: null`: the v1 prompt says DeckSpec construction is build-only,
+  while the judge rubric requires it on edits.
+- **Judge noise**: two architect `discuss` rows hit `KeyError: 'result'` and were skipped; one
+  deck_reviewer `clean` row's verdict contradicts its own rationale.
+
+Known limits: `evals/packs/deck_reviewer/judge_prompt.md` and the data_analyst judge prompt contain
+train-deck example figures, and eight held-out `calibration.json` negatives are byte-identical to train's.
+Neither changes a held-out payload or reference. `error_detail` is not stored for `incomplete` rows, so
+the exact invalid criterion name in fix_reviewer rejects is inferred from the train reproduction.
+
+## Architect re-baseline: edit returns the revised deck spec, 2026-10-08
+
+`git_sha` b893f5a363ddfabecfadd6e0b1488b764da4acad. The architect v1 prompt now requires an edit to return
+the full `deck_spec` with only the requested slides revised (the deck spec is the source of truth), and the
+graph refuses an edit without one instead of rebuilding from the old brief. Same endpoints, 3 repeats;
+all 10 architect cases trusted at calibration on both splits.
+
+| Split | Pass rate | Before | `edit_request` | `build_request` | Judge errors | Est. cost (USD) |
+|---|---|---|---|---|---|---|
+| train | 0.86 | 0.71 | 3/3 (was 0/3) | 1/3 (was 2/3) | 1 | 2.94 |
+| heldout | 1.00 | 0.77 | n/a | n/a | 1 | 2.58 |
+
+The `build_request` failures are the existing cause: the candidate builds a 5-slide deck where the
+reference has 10, and the judge fails the argument as too thin. It is unrelated to the edit change and
+within one repeat of the previous run. Held-out per-case results are left out, as for the held-out baseline. This re-baseline changes the architect's prompt, so the architect
+rows in the earlier baseline tables describe the previous v1 prompt.
+
+## Architect intent and slide references (#313), 2026-10-20
+
+Issue #313 reported two things: the architect picking the wrong intent for casual phrasings, and an
+off-by-one on edits that name a slide ("slide 2" read as position 2). This pass adds cases for both,
+fixes the endpoint probe so an architect sweep can run at all, and measures the architect before and
+after the graph began sending it resolved slide numbers.
+
+- **New cases, four per split** (same ids in both; held-out words them differently on its own deck, and
+  its messages are not reproduced here). Every one is unambiguous under the current rules.
+
+  | Case id | Tests |
+  |---|---|
+  | `edit_polite_ordinal` | an edit phrased as a polite question, with an ordinal reference |
+  | `edit_last_slide` | a last/final reference |
+  | `edit_multi_slide` | a multi-slide range or list |
+  | `discuss_slide_question` | a question naming a slide, which must not rebuild it |
+
+  The architect now has nine cases per split. The existing five differ from before only by the two
+  payload keys below.
+- **Payloads carry two new keys.** Every architect case payload now has `slide_numbering` and
+  `slide_references`, generated by the production helper (`architect_slide_payload` in
+  `src/domain/slide_numbering.py`). The judge sees only `message` and `current_deck_spec`, so
+  calibration is unaffected. See `docs/technical/backend-overview.md`, "Graph Path: Slide Numbers and
+  Positions".
+- **Probe fix.** The manifest's architect endpoint is `system.ai.claude-opus-5`, which is a gateway
+  model name and not a serving-endpoint name, so `_endpoint_reachable` failed and every architect
+  v1-baseline sweep aborted. The probe now looks up `databricks-<m>` (see Running a sweep).
+- **Setup.** Agent `system.ai.claude-opus-5`, judge `databricks-claude-sonnet-5`. `prices.yaml` has no
+  opus-5 entry, so cost is estimated from tokens at USD 5 / 25 per million input / output for the agent
+  and about USD 0.035 per judge call. All 9 train and all 9 held-out architect cases were trusted at
+  calibration; two held-out references needed a re-judge after `KeyError: 'result'` judge errors.
+
+"v1" is the architect prompt at HEAD before this issue (content hash 3ed38cb4); `slide-refs` is the
+candidate (`evals/configs/architect/slide-refs.md`, ffc3074d) that was promoted. S0 is the v1 prompt on
+the new payloads, run to isolate the effect of the keys alone. Pass rate is the harness's, over scored
+rows (judge errors are skipped); intent and position accuracy are `evals/intent_report.py`'s. Run ids
+are from the issue-313 worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Intent acc. | Position acc. | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| B1 b1cac4ff | v1 (3ed38cb4) | train | 4 new | 5 | 20 | 1.00 | 20/20 | 15/15 | 0 | 12.5k / 3.5k | 3.68 |
+| B2 a76ee18b | v1 | train | edit_request, confirm_design, discuss | 5 | 15 | 1.00 | 15/15 | 5/5 | 2 | 12.5k / 2.0k | 2.20 |
+| B3 5fb6440d | v1 | train | build_request, ask_data | 3 | 6 | 1.00 | 6/6 | – | 0 | 8.6k / 4.1k | 1.08 |
+| B4 5bf79a39 | v1 | held-out | all 9 | 1 | 9 | 1.00 | 9/9 | 4/4 | 0 | 10.2k / 2.3k | 1.29 |
+| S0 7d4f85ee | v1 prompt, new payloads | train | 4 new | 1 | 4 | 1.00 | 4/4 | 3/3 | 0 | 12.8k / 3.4k | 0.73 |
+| F1 5622ab66 | slide-refs (ffc3074d) | train | 4 new | 5 | 20 | 1.00 | 20/20 | 15/15 | 2 | 13.1k / 3.3k | 3.68 |
+| F2 84ab2df0 | slide-refs | train | edit_request, confirm_design, discuss | 5 | 15 | 0.92 | 15/15 | 5/5 | 2 | 13.1k / 1.9k | 2.23 |
+| F3 69ece733 | slide-refs | train | build_request, ask_data | 3 | 6 | 1.00 | 6/6 | – | 0 | 8.9k / 4.3k | 1.13 |
+| F4 417a9ec7 | slide-refs | held-out | all 9 | 1 | 9 | 1.00 | 9/9 | 4/4 | 1 | 10.7k / 2.4k | 1.33 |
+
+The nine runs sum to about USD 17.35. With a 2-row probe run (11c50057), calibration and the
+post-review diagnostic described below, the total is about USD 19.74. Held-out results are aggregates
+only (B4, F4), as for the earlier held-out baselines.
+
+What it showed:
+
+- **The reported off-by-one did not reproduce.** The v1 architect at HEAD was already at ceiling on every
+  case before any change: intent correct on 50/50 rows (B1-B4) and positions correct on 24/24 edit rows.
+  The issue's `edit_request` 3/5 off-by-one is not there. The issue (filed 2026-10-12) predates the
+  prompt's SLIDE NUMBERS rule, added 2026-10-13 in 5653f3ec, which is the most likely reason.
+- **The keys did not change the measured outcome.** S0 (v1 prompt, new payloads) and F1-F4 (`slide-refs`)
+  are equally exact: intent correct on every row (45/45 train, 9/9 held-out) and positions exact on every
+  edit row (23/23 train, 4/4 held-out).
+- **The one failed row** is F2's: a `discuss` row whose intent is right. The judge objected to an empty
+  `target_positions` list (the reference has one too) and to a follow-up offer. That is judge-subjective
+  and within one repeat.
+- **Why `slide-refs` was promoted.** It is the v1 default for its contract, not for a measured gain:
+  positions are copied from deterministic keys, it is robust on a gapped deck (where a slide number is
+  not position + 1), and an out-of-range reference becomes `discuss` instead of an edit. No train-driven
+  tuning happened.
+- **Multi-reference edits.** A post-review diagnostic ran `slide-refs` directly on three ad-hoc
+  multi-reference edits (a layout copied from one slide to another, a chart replaced with another slide's
+  chart): it targeted only the slide being changed in 3/3 (about USD 0.58, no judge). The two-reference
+  case is not yet an eval case; a follow-up.
+- **Branch shipped.** The payload keys are wired into `architect_node` and the `slide-refs` prompt is the
+  v1 default. The architect rows in the earlier baseline tables above describe previous prompts.
+- **Rollout caveat.** The Graph V1 manifest only seeds a fresh bootstrap (it is not read once any Graph
+  Release exists), so an existing install keeps its persisted architect prompt: it gets the two payload
+  keys immediately, but the new SLIDE NUMBERS text only when an admin publishes a release carrying it
+  (see "Rollout" in `docs/technical/backend-overview.md`).
+
+## Architect: add a slide (#314), 2026-10-20
+
+Issue #314 reported that a user on the graph path cannot ask for a new slide in an existing deck. The
+shipped architect prompt told the model that adding or removing slides is not an edit, and the node
+refused any change of the slide-position set. This pass makes the yardstick score an insert the way
+production builds it, adds four insert cases per split, measures the shipped prompt, searches for a
+better one on train only, and promotes the finalist. The node behaviour is in
+`docs/technical/backend-overview.md`, "Adding a slide (#314)".
+
+- **New cases, four per split** (same ids in both; held-out words them differently on its own deck, and
+  its messages are not reproduced here).
+
+  | Case id | Tests |
+  |---|---|
+  | `add_slide_anchor` | a new slide placed after a named slide: only it is built, and the later slides shift unchanged |
+  | `add_slide_end` | a new slide appended at the end of the deck, not written over the last slide |
+  | `add_slide_as_number` | a new slide given a named slide's number: it takes that place and the named slide moves one place on |
+  | `add_slide_and_revise` | a new slide plus a requested change to a later slide: both are built, nothing else changes, and the deck-level fields stay as they were |
+
+  The architect now has thirteen cases per split, 43 across the harness. They are scored by the
+  production-semantics insert check (see Scorers). Each case's `should_fail` output, used at
+  calibration, is one wrong way to do it: for `add_slide_anchor`, the right place and targets but a
+  new slide that is off-request (only the judge can fail it); for `add_slide_end`, the last slide
+  replaced instead of a slide added; for `add_slide_as_number`, the slide inserted one place late;
+  for `add_slide_and_revise`, the slide added and the requested change forgotten. All eight cases were
+  trusted at calibration; one held-out reference needed a re-judge after a judge `KeyError: 'result'`.
+- **Setup.** Agent `system.ai.claude-opus-5`, judge `databricks-claude-sonnet-5`. As in #313, cost is
+  estimated from tokens at USD 5 / 25 per million input / output for the agent plus about USD 0.035 per
+  judge call, because `prices.yaml` has no opus-5 entry.
+
+"v1-baseline" is the architect prompt as shipped before this issue, `slide-refs` (`ffc3074d`, promoted
+in #313). `add-slide` (`e5caefa8`) and `add-slide-b` (`b5a4cba6`) are the two candidates
+(`evals/configs/architect/add-slide.md`, `add-slide-b.md`); `add-slide-b` is the finalist and was
+promoted. B is before, S is the search on train, F is the finalist. Pass rate is the harness's, over
+scored rows (judge errors are skipped); intent and position accuracy are `evals/intent_report.py`'s,
+and a dash means no edit rows or, on held-out, not reported. Run ids are from the issue-314 worktree's
+local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Intent acc. | Position acc. | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| B1 8e5f7755 | v1-baseline (ffc3074d) | train | 4 insert | 2 | 8 | 0.00 | 0/8 | – | 0 | 13.1k / 0.4k | 0.89 |
+| B2 82ed0000 | v1-baseline | train | 9 existing | 1 | 9 | 1.00 | 9/9 | 4/4 | 0 | 12.2k / 3.1k | 1.57 |
+| B3 4a3dd928 | v1-baseline | held-out | 4 insert | 1 | 4 | 0.00 | 0/4 | – | 0 | 11.2k / 0.4k | 0.41 |
+| S1 c26f6789 | add-slide (e5caefa8) | train | 4 insert | 1 | 4 | 1.00 | 4/4 | 4/4 | 0 | 13.7k / 5.1k | 0.93 |
+| S2 9b7cd603 | add-slide-b (b5a4cba6) | train | 4 insert, `build_request`, `edit_request` | 1 | 6 | 1.00 | 6/6 | 5/5 | 0 | 13.1k / 4.9k | 1.34 |
+| F1 146133de | add-slide-b | train | 4 insert | 3 | 12 | 1.00 | 12/12 | 12/12 | 0 | 13.8k / 4.7k | 2.67 |
+| F2 9a15c202 | add-slide-b | train | 9 existing | 1 | 9 | 1.00 | 9/9 | 4/4 | 0 | 12.8k / 2.8k | 1.53 |
+| F3 f54dd66b | add-slide-b | held-out | all 13 | 1 | 13 | 1.00 (9 scored) | 13/13 | – | 4 | 11.5k / 2.3k | 1.95 |
+| F3b ffaa27ab | add-slide-b | held-out | the 4 judge-error rows of F3 | 1 | 4 | 1.00 | 4/4 | – | 0 | 11.8k / 2.1k | 0.59 |
+
+The runs and two calibration passes (about USD 0.63) sum to **about USD 12.51**, inside the USD 15 cap.
+Held-out results are aggregates only (B3, F3, F3b). F3 scored nine rows and four judge-errored; F3b
+re-ran only those four. Combined, the held-out insert cases pass 4/4 (B3: 0/4) and the nine existing
+held-out cases pass 9/9.
+
+What it showed:
+
+- **The shipped prompt answers every add with `discuss`.** B1 is at the floor: intent wrong on 8/8 rows,
+  every one `discuss`. Held-out gives 0/4 (B3). The cause is a single sentence, the EDITING rule
+  that adding or removing slides is not an edit. The nine existing train cases are untouched by it
+  (B2, 9/9), so this is not a regression elsewhere.
+- **Candidate `add-slide` placed the slides but bound them in a way production refuses.** It rewrote the
+  EDITING block (adding is an edit, with the new slide, the unchanged later slides and the targets
+  stated) and added an anchor exception to SLIDE NUMBERS (a named slide on an add is the anchor, not a
+  target). S1 passed 4/4. But the yardstick does not check template bindings. The fixture's
+  `template_sections` all have a null `label`, and the prompt says to copy `label` into `slide_type` and
+  `index` into `template_section_index`, so the model emits an index-only pair (`slide_type` null,
+  index set). Production's validators (`complete_index_only_bindings`, `invalid_slide_bindings`, run in
+  `architect_node`) refuse the whole turn on an index-only pair whose section has no label, because it cannot be
+  completed from the inventory (`invalid_slide_type_binding`). A diagnostic ran those two functions over each run's outputs and the
+  payload's `template_sections`: **3 of the 4 S1 insert rows would be refused.**
+- **That gap is pre-existing.** The same diagnostic on the shipped prompt (B2) refuses 2 of its 5
+  spec-bearing rows (`build_request` and `edit_request`) on this fixture. It is not introduced by #314,
+  and the yardstick is deliberately not changed after the BEFORE runs.
+- **Candidate `add-slide-b` fixes it.** It is `add-slide` plus a BINDING sentence (an entry whose
+  `label` is null cannot be bound, and `slide_type` and `template_section_index` are set together or not
+  at all), and the EDITING new-slide sentence defers binding to those rules. S2 passed 6/6 with 0/6
+  production binding refusals. The finalist rule added a supplementary condition before the F runs: the
+  finalist's production binding refusals must not exceed v1's on the same cases. F1 0/12, F2 0/5 (v1:
+  2/5), F3 0/9 scored rows.
+- **Insert cost.** An insert returns the full deck spec, so output tokens rise from about 0.4k (a
+  `discuss`) to about 4.7k per row. A row costs about USD 0.22.
+- **Accept rule** (fixed before any F run). All three held, and the finalist was accepted:
+  1. F1: pass rate at least 0.75, every insert case at least 2 of 3, and above B1's. Got 1.00, every
+     insert case 3/3, B1 0.00.
+  2. F2: at least 8 of 9 and at least B2's passes minus one, with no `contract` failure. Got 9/9 (B2 9/9).
+  3. F3: the 4 held-out inserts at least 3 of 4 and above B3, and the 9 existing at least 8 of 9. Got 4/4
+     (B3 0/4) and 9/9.
+
+  Had no finalist been accepted, the fallback was to ship the code and cases with the unchanged prompt
+  and leave the issue open; that branch was not taken.
+- **Overrides of `optimise-agent-prompt`**, taken for budget (USD 15 at about USD 0.2 per row): the
+  finalist was confirmed at 3 repeats on the insert cases plus 1 repeat on the nine existing train cases
+  (the skill says 5 repeats on all train); held-out ran at 1 repeat (the skill says 3; the #313
+  precedent); and the candidate author, who saw train only, ran no sweeps.
+- **Branch shipped.** `add-slide-b` is the v1 default in `src/core/skills/architect.py`
+  (`b5a4cba61121`, previously `ffc3074dc920`), promoted with `evals.harness.promote`. The architect
+  prompt rows in the earlier baseline tables describe previous prompts.
+- **Still open.**
+  - The yardstick should run production's binding validation. The diagnostic was run by hand, and the
+    fixture's template sections are unlabelled.
+  - No eval case measures the no-place product rule (a new slide with no stated place goes where it fits
+    the argument, before a closing slide). The layer-3 RC2 test exercises it, but it is not run in CI.
+  - Insert rows' position accuracy (above) measures targets production ignores.
+- **Rollout caveat.** The Graph V1 manifest only seeds a fresh bootstrap (it is not read once any Graph
+  Release exists), so an existing install keeps its persisted architect prompt. It gets the node
+  behaviour at once (alignment, the shift and the refusals) but keeps answering an add with `discuss`
+  until an admin publishes a release carrying the new prompt (see "Rollout" in
+  `docs/technical/backend-overview.md`).

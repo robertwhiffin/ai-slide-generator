@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base
 from src.core.database import (
+    _DECK_IMAGE_PLACEHOLDER_REWRITE,
     Base,
     _migrate_image_assets_add_token,
     _migrate_rewrite_deck_image_placeholders,
@@ -132,12 +133,8 @@ def _run_placeholder_migration(engine) -> None:
         )
 
 
-def _deck_updates_issued_by(engine, fn) -> list[str]:
-    """Run ``fn`` and return the UPDATE statements it issued against deck tables.
-
-    The migration runs on EVERY worker at EVERY startup, so once the one-time
-    rewrite is done it must not re-issue the expensive per-image UPDATEs.
-    """
+def _deck_statements_issued_by(engine, fn) -> list[str]:
+    """Run ``fn`` and return every statement it issued against the deck tables."""
     seen: list[str] = []
 
     def _before(conn, cursor, statement, parameters, context, executemany):
@@ -150,10 +147,25 @@ def _deck_updates_issued_by(engine, fn) -> list[str]:
         event.remove(engine, "before_cursor_execute", _before)
 
     return [
-        s for s in seen
-        if s.lstrip().upper().startswith("UPDATE")
-        and ("session_slide_decks" in s or "slide_deck_versions" in s)
+        s for s in seen if "session_slide_decks" in s or "slide_deck_versions" in s
     ]
+
+
+def _deck_updates_issued_by(engine, fn) -> list[str]:
+    """Run ``fn`` and return the UPDATE statements it issued against deck tables.
+
+    The migration runs on EVERY worker at EVERY startup, so once the one-time
+    rewrite is done it must not re-issue the expensive per-image UPDATEs.
+    """
+    return [
+        s for s in _deck_statements_issued_by(engine, fn)
+        if s.lstrip().upper().startswith("UPDATE")
+    ]
+
+
+def _recorded_data_migrations(engine) -> list[str]:
+    with engine.connect() as conn:
+        return conn.execute(text("SELECT name FROM data_migrations")).scalars().all()
 
 
 def _deck_json(engine, deck_id: int) -> str:
@@ -343,6 +355,33 @@ class TestDeckImagePlaceholderMigration:
             sqlite_engine, lambda: _run_placeholder_migration(sqlite_engine)
         )
         assert issued == [], f"expected no deck UPDATEs on an already-migrated DB, got: {issued}"
+
+    def test_a_completed_rewrite_is_not_rescanned_on_later_boots(
+        self, sqlite_engine, session_factory
+    ):
+        # Without a completion record every boot re-scans every deck and version
+        # blob (~30 s on a prod fork), and a placeholder whose image was
+        # hard-deleted ({{image:999}}) can never be rewritten, so it re-matched
+        # and re-UPDATEd its rows on every boot forever.
+        with session_factory() as s:
+            _make_image(s, 1, "TOK1_a")
+            _make_deck(
+                s, "sess-1",
+                json.dumps({"slides": [
+                    {"html": '<img src="{{image:1}}"><img src="{{image:999}}">'},
+                ]}),
+            )
+            s.commit()
+
+        _run_placeholder_migration(sqlite_engine)
+        assert _recorded_data_migrations(sqlite_engine) == [
+            _DECK_IMAGE_PLACEHOLDER_REWRITE
+        ]
+
+        later_boot = _deck_statements_issued_by(
+            sqlite_engine, lambda: _run_placeholder_migration(sqlite_engine)
+        )
+        assert later_boot == [], f"a later boot touched the deck tables: {later_boot}"
 
     def test_rewrite_runs_when_token_added_in_same_run_with_shared_inspector(
         self, bare_sqlite_engine

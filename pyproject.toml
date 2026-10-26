@@ -22,14 +22,19 @@ dependencies = [
     "jinja2>=3.1.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.0",
-    "mlflow>=3.11.0,<4",  # 3.11+ UC trace location; 3.6+ make_judge
+    "mlflow==3.14.0",
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
     "pandas>=2.0.0",
-    "databricks-langchain>=0.1.0",
+    "databricks-langchain>=0.19.0",
+    "databricks-openai>=0.14.0",
     "databricks-mcp>=0.1.0",
-    "langchain>=0.3.0",
-    "langchain-core>=0.3.0",
+    "langgraph==1.2.10",
+    "langgraph-checkpoint==4.1.1",
+    "langgraph-prebuilt==1.1.0",
+    "langgraph-sdk==0.4.2",
+    "langchain==1.3.14",
+    "langchain-core==1.5.3",
     "sqlalchemy>=2.0.0",
     "psycopg2-binary>=2.9.0",
     "databricks-sql-connector>=3.0.0",
@@ -42,6 +47,9 @@ dependencies = [
     "langchain-text-splitters>=0.0.1",
     "litellm==1.80.11",
     "mcp>=1.0.0",
+    # agent_runtime.py and model_endpoint_probe.py import openai at module level;
+    # databricks-langchain==0.9.0 requires openai>=1.99.9 directly.
+    "openai>=1.99.9",
     "python-pptx>=0.6.0",
     "playwright>=1.40.0",
     "Pillow>=10.0.0",
@@ -71,7 +79,7 @@ dev = [
 ]
 
 [tool.uv]
-index-url = "https://pypi-proxy.dev.databricks.com/simple/"
+index-url = "https://pypi-proxy.cloud.databricks.com/simple/"
 
 [tool.ruff]
 line-length = 100
@@ -92,6 +100,7 @@ write_to = "src/_version.py"
 fallback_version = "0.1.0.dev0"
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]

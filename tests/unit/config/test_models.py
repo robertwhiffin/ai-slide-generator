@@ -78,23 +78,11 @@ def test_genie_space_creation(db_session):
     assert profile.genie_spaces[0].space_name == "Space 1"
 
 
-def test_prompts_config(db_session):
-    """Test prompts configuration."""
-    profile = ConfigProfile(name="test", created_by="test")
-    db_session.add(profile)
-    db_session.flush()
-
-    prompts = ConfigPrompts(
-        profile_id=profile.id,
-        system_prompt="System prompt",
-        slide_editing_instructions="Editing instructions",
-    )
-    db_session.add(prompts)
-    db_session.commit()
-
-    # Test relationship
-    assert profile.prompts.system_prompt == "System prompt"
-    assert prompts.profile.name == "test"
+# DELETED with B2.4: test_prompts_config asserted that ConfigPrompts round-trips
+# ``system_prompt``/``slide_editing_instructions`` (its only substantive assertion
+# was ``profile.prompts.system_prompt == "System prompt"``). Both columns are
+# retired, so the assertion has no ground. The profile<->prompts relationship it
+# also touched is still covered by test_complete_profile_with_all_configs below.
 
 
 def test_profile_repr(db_session):
@@ -136,8 +124,6 @@ def test_complete_profile_with_all_configs(db_session):
     # Add prompts
     prompts = ConfigPrompts(
         profile_id=profile.id,
-        system_prompt="Test system prompt",
-        slide_editing_instructions="Test editing instructions",
     )
     db_session.add(prompts)
     
@@ -149,5 +135,5 @@ def test_complete_profile_with_all_configs(db_session):
 
     # Verify data
     assert profile.genie_spaces[0].space_name == "Test Space"
-    assert profile.prompts.system_prompt == "Test system prompt"
+    assert profile.prompts.profile_id == profile.id
 

@@ -80,8 +80,6 @@ export interface PromptsConfig {
   profile_id: number;
   selected_deck_prompt_id: number | null;
   selected_slide_style_id: number | null;
-  system_prompt: string;
-  slide_editing_instructions: string;
   created_at: string;
   updated_at: string;
 }
@@ -89,8 +87,6 @@ export interface PromptsConfig {
 export interface PromptsConfigUpdate {
   selected_deck_prompt_id?: number | null;
   selected_slide_style_id?: number | null;
-  system_prompt?: string;
-  slide_editing_instructions?: string;
 }
 
 // Deck Prompt Library types
@@ -259,6 +255,11 @@ export interface DesignSystemTemplate {
   entry_path: string;
   /** Template-scoped thumbnail endpoint, or null when no preview was retained. */
   thumbnail_url: string | null;
+  /**
+   * The design system's default template (at most one per system): new sessions
+   * on this design system are pinned to it. Set by an admin.
+   */
+  is_default: boolean;
 }
 
 export interface DesignSystemTemplateListResponse {
@@ -685,6 +686,24 @@ export const configApi = {
    */
   clearDesignSystemDefault: (dsId: number): Promise<DesignSystemDetail> =>
     fetchJson(`${API_BASE}/design-systems/${dsId}/clear-default`, {
+      method: 'POST',
+    }),
+
+  /** Make a template its design system's default. Admin-only and idempotent. */
+  setDesignSystemTemplateDefault: (
+    dsId: number,
+    templateId: number,
+  ): Promise<DesignSystemTemplateListResponse> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}/templates/${templateId}/set-default`, {
+      method: 'POST',
+    }),
+
+  /** Remove a design system's default template. Admin-only and idempotent. */
+  clearDesignSystemTemplateDefault: (
+    dsId: number,
+    templateId: number,
+  ): Promise<DesignSystemTemplateListResponse> =>
+    fetchJson(`${API_BASE}/design-systems/${dsId}/templates/${templateId}/clear-default`, {
       method: 'POST',
     }),
 

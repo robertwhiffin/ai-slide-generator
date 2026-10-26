@@ -7,7 +7,7 @@ How the React/Vite frontend is structured, how it communicates with backend APIs
 ## Stack & Entry Points
 
 - **Tooling:** Vite + React + TypeScript, Tailwind utility classes, `@dnd-kit` for drag/drop, `@monaco-editor/react` for HTML editing, standard Fetch for API calls.
-- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` checks setup status via `/api/setup/status` and shows `WelcomeSetup` if not configured; otherwise wraps the tree in `SessionProvider`, `GenerationProvider`, `SelectionProvider`, `ToastProvider`, `AgentConfigProvider` and defines routes via React Router v7 — each route renders `AppLayout` (which adds `ProfileProvider`) with `initialView` and optional `viewOnly` props.
+- **Entrypoint:** `src/main.tsx` wraps `<App />` in `<BrowserRouter>` and injects into `#root`. `src/App.tsx` checks setup status via `/api/setup/status` and shows `WelcomeSetup` if not configured; otherwise wraps the tree in `SessionProvider`, `GenerationProvider`, `ToastProvider`, `AgentConfigProvider`, `TourProvider` and defines routes via React Router v7 — each route renders `AppLayout` (which adds `ProfileProvider`) with `initialView` and optional `viewOnly` props.
 - **Env configuration:** `src/services/api.ts` reads `import.meta.env.VITE_API_URL` (defaults to `http://127.0.0.1:8000` in dev, relative URLs in production).
 
 ---
@@ -46,14 +46,10 @@ Each page has a dedicated URL. Navigation buttons use `useNavigate()` to change 
 The landing page (`/`) now shows the generator directly in pre-session mode.
 
 - **ChatPanel** owns chat history and calls backend APIs to generate or edit slides.
-- **SelectionRibbon** mirrors the current `SlideDeck` with dual interaction:
-  - **Click slide preview** – scrolls the main SlidePanel to that slide
-  - **Click checkbox** – toggles slide selection for chat context (contiguous only)
-- **SlidePanel** shows parsed slides, raw HTML render, or plain HTML text; exposes per-slide actions (edit, delete, reorder). Accepts `scrollToSlide` prop to navigate to a specific slide.
+- **SlideViewer** shows the current deck as a flip-through viewer: a thumbnail ribbon on the left selects a slide, the stage in the centre renders one slide at a time, and a collapsible drawer at the bottom surfaces per-slide AI feedback. See [Slide Viewer](slide-viewer.md) for full details.
 - **AppLayout** manages shared state:
   - `slideDeck: SlideDeck | null` – parsed slides plus CSS/script metadata
   - `rawHtml: string | null` – exact HTML from the AI for debugging views
-  - `scrollTarget: { index, key } | null` – coordinates ribbon-to-panel navigation
 
 ---
 
@@ -107,13 +103,16 @@ interface Slide {
 }
 ```
 
-Slides are HTML snippets embedded in iframes for preview. The optional `verification` field stores auto-verification checks (**MLflow LLM-as-judge** by default; **Direct** ChatDatabricks optional via Admin) against tool/source data from the session.
+Slides are HTML snippets embedded in iframes for preview. Preview and presentation frames use `sandbox="allow-scripts"` without `allow-same-origin`. Browser-side PDF, screenshot-PPTX, Chart.js canvas capture, and DOM-record export use the same opaque sandbox: capture runs inside the frame and returns over `postMessage` (`frontend/src/services/sandboxedExportFrame.ts`). The optional `verification` field stores auto-verification checks (**MLflow LLM-as-judge** by default; **Direct** ChatDatabricks optional via Admin) against tool/source data from the session.
 
-### 3. Selection Context (`src/contexts/SelectionContext.tsx`)
+### 3. Viewer Context (`src/contexts/ViewerContext.tsx`)
 
-- Stores `selectedIndices` and corresponding `Slide[]`
-- Enforces contiguous selections via `utils/slideReplacements.ts::isContiguous`
-- Shared by Chat + Slide panels so the assistant receives focused context
+- Stores `currentIndex` — the 0-based index of the slide currently displayed on the stage
+- Exposes `next`, `prev`, `first`, `last`, and `setCurrentIndex` helpers; index is clamped to deck bounds on every write and when the deck shrinks (delete / reorder)
+- Also owns drawer view state: `drawerOpen`, `drawerHeight` (clamped 96–480 px), and `activeTab` — all persisted to `localStorage`
+- Scoped to a single `SlideViewer` mount via `ViewerProvider`; ChatPanel and other panels do not consume it directly
+
+Conversational slide targeting (asking the AI "go to slide 3") arrives in PRD workstream 7 and will write `setCurrentIndex` from the chat pipeline.
 
 ### 4. Generation Context (`src/contexts/GenerationContext.tsx`)
 
@@ -287,7 +286,7 @@ const versionKey = previewVersion
 - Restoring deletes all newer versions permanently
 - `setSlideDeckGated` in AppLayout rejects stale `getSlides` responses using server deck version (`deckVersionRef`), preventing race conditions from overwriting edits
 - Version dropdown auto-refreshes after any operation that bumps the deck version
-- `SelectionRibbon` and `SlidePanel` use `key={versionKey}` to force remount on version preview switches
+- `SlideViewer` uses `key={versionKey}` to force remount on version preview switches
 
 See [Save Points / Versioning](save-points-versioning.md) for full architecture.
 
@@ -320,22 +319,23 @@ interface SlideStyle {
 
 | Path | Responsibility | Backend Touchpoints |
 |------|----------------|---------------------|
-| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages | `api.sendChatMessage`, `api.getSession` |
-| `src/components/ChatPanel/ChatInput.tsx` | Textarea with selection badge when context exists | None (props only) |
-| `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs | None |
-| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
-| `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal, displays verification badge | Prop callbacks to `SlidePanel` |
+| `src/components/ChatPanel/ChatPanel.tsx` | Sends prompts via SSE or polling, displays real-time events, loads persisted messages. Its header carries the **Clear chat** button and `ConfirmDialog` (copy in `clearChatCopy.ts`). Each of the user's persisted messages offers **delete** (copy in `deleteMessageCopy.ts`), and a turn-end read gives the panel's messages their ids | `api.sendChatMessage`, `api.getSession` (also supplies `my_permission`), `conversationApi.clearChat`, `conversationApi.deleteMessage`, `conversationApi.listMessages` |
+| `src/components/ChatPanel/ChatInput.tsx` | Textarea for composing prompts; accepts an optional `badge?: React.ReactNode` slot above the textarea (currently no caller supplies one) | None (props only) |
+| `src/components/ChatPanel/MessageList.tsx` & `Message.tsx` | Renders conversation, collapses HTML/tool outputs; collapses the reviewer's details section of finding requests and the deck-review advisory, and shows a collapsed **Details** disclosure (stage, error, request ID) under an assistant message that carries `details`. `MessageList` wraps each message in a `chat-message-row` and, when given a `deleteAction`, renders the trash button on the user's messages that have an id (the button lives in `MessageList`, not `Message.tsx`). While a turn runs, it shows the stage placeholder (the `progressLabel` from `ChatPanel`, default `Generating slides...`) | None |
+| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, auto-verification trigger for unverified slides. Still exists but is no longer the primary slide surface — `SlideViewer` fulfils that role. | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
+| `src/components/SlidePanel/SlideTile.tsx` | Slide preview tile used within `SlidePanel` for the tab-based view. Still exists; not the primary slide surface. | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/VerificationBadge.tsx` | Rating badge, details popup, feedback UI (thumbs up/down), manual re-verify option | `api.verifySlide`, `api.submitVerificationFeedback` |
-| `src/components/SlidePanel/SlidePanel.tsx` | Hosts drag/drop, tabs, per-slide CRUD, optimize layout handler | `api.getSlides`, `api.reorderSlides`, `api.updateSlide`, `api.deleteSlide`, `api.sendChatMessage` |
-| `src/components/SlidePanel/SlideTile.tsx` | Slide preview, selection button, editor modal trigger, optimize layout button | Prop callbacks to `SlidePanel` |
 | `src/components/SlidePanel/HTMLEditorModal.tsx` | Visual slide editor with tree-based text editing. Parses any HTML structure into editable nodes. Charts shown read-only. | Calls `api.updateSlide` then `api.getSlides` |
 | `src/components/SlidePanel/visualEditor.types.ts` | TypeScript interfaces for EditableNode and TreeState | None |
 | `src/components/SlidePanel/treeParser.ts` | HTML parsing utilities: buildEditableTree, applyTextChange, buildPreviewHtml | None |
 | `src/components/SlidePanel/ElementTreeView.tsx` | Tree view component with collapsible nodes and inline text editing | None |
 | `src/components/SlidePanel/VisualEditorPanel.tsx` | Split-pane visual editor with element tree and live preview | None |
-| `src/components/SlidePanel/SelectionRibbon.tsx` + `SlideSelection.tsx` | Thumbnail strip with dual interaction: preview click navigates main panel, checkbox toggles selection for chat context | `onSlideNavigate` callback to `AppLayout`, updates `SelectionContext` |
-| `src/hooks/useKeyboardShortcuts.ts` | `Esc` clears selection globally | None |
+| `src/components/SlideViewer/SlideViewer.tsx` | Public entry point for the flip-through viewer. Wraps `ViewerProvider`. Owns keyboard listener, seen-state lifecycle, stage CRUD, and presentation-mode handle. | `api.getSlides`, `api.updateSlide`, `api.deleteSlide`, `api.verifySlide` |
+| `src/components/SlideViewer/SlideStage.tsx` | Renders one slide at a time in a sandboxed iframe via `buildSlideDocument`. Handles wheel-paging. | None (renders via `buildSlideDocument`) |
+| `src/components/SlideViewer/ThumbnailRibbon.tsx` | Vertical ribbon of scaled thumbnails. Drives slide selection on click. Drag-reorder via `@dnd-kit`. Amber unseen dot per slide with unread findings. | `onReorder` callback to `AppLayout` |
+| `src/components/SlideViewer/FeedbackDrawer.tsx` | Collapsible tabbed drawer for per-slide AI findings. Drag-resize handle. Each finding leads with its plain-language message; a per-finding Show details toggle reveals the reviewer's technical note. Apply and Discuss send a chat message asking the AI to apply or discuss the finding (`AppLayout.tsx` `handleApplyFinding` / `handleDiscussFinding`); Dismiss is client-side only. | None (prop callbacks only) |
 | `src/utils/loadingMessages.ts` | Rotating messages during LLM calls | None |
+| `src/utils/turnProgress.ts` | Validates a graph turn's `turn_progress` snapshot, keeps the newest by `seq`, and computes the stage placeholder text (`describeTurnProgress`, e.g. `Reviewing slide 3…`); types in `src/types/turnProgress.ts` | None (fed by `turn_progress` events from SSE or `api.startPolling`) |
 | `src/components/common/Tooltip.tsx` | Lightweight hover tooltip wrapper using Tailwind; appears instantly on hover | None |
 | `src/components/AgentConfigBar/AgentConfigBar.tsx` | Session tool configuration bar; add/remove Genie spaces, select style/prompt, save/load profiles | `api.getAgentConfig`, `api.updateAgentConfig`, `api.patchTools` |
 | `src/components/AgentConfigBar/GenieDetailPanel.tsx` | Inline panel for viewing and editing a Genie space description before adding or after selecting a tool; supports add and edit modes | None (callback props via `AgentConfigBar`) |
@@ -357,16 +357,21 @@ interface SlideStyle {
 | `src/components/SavePoints/PreviewBanner.tsx` | Indigo banner during preview with revert/cancel actions | None (props only) |
 | `src/components/SavePoints/RevertConfirmModal.tsx` | Confirmation dialog before restore (warns about version deletion) | `api.restoreVersion` |
 | `src/components/Setup/WelcomeSetup.tsx` | Initial setup screen; collects workspace URL, triggers authentication, verifies configuration | `POST /api/setup/status` |
-| `src/components/Admin/AdminPage.tsx` | Admin page with tabs for feedback dashboard and Google Slides OAuth configuration | None (delegates to child components) |
+| `src/components/Admin/AdminPage.tsx` | Admin page with tabs including app-wide Google Slides OAuth **client** credentials | None (delegates to child components) |
 | `src/components/ChatPanel/PromptEditorModal.tsx` | Expanded modal editor for composing longer prompts with save and send actions | None (callback props) |
 | `src/components/ChatPanel/ErrorDisplay.tsx` | Inline error banner with dismiss button, shown below chat input on API errors | None (props only) |
 | `src/components/ChatPanel/LoadingIndicator.tsx` | Animated loading indicator with rotating message, shown during slide edits | None (props only) |
 | `src/components/ChatPanel/SelectionBadge.tsx` | Badge in ChatInput showing the current slide selection range with a clear button | None (props only) |
-| `src/components/config/GoogleSlidesAuthForm.tsx` | Google OAuth credentials upload and user authorization flow for Google Slides export | `configApi.uploadGoogleCredentials`, `configApi.getGoogleCredentialsStatus`, `configApi.deleteGoogleCredentials`, `api.getGoogleSlidesAuthUrl` |
+| `src/components/config/GoogleSlidesAuthForm.tsx` | Admin-only Google OAuth client credentials upload/remove | `configApi.uploadGoogleCredentials`, `configApi.getGoogleCredentialsStatus`, `configApi.deleteGoogleCredentials` |
+| `src/components/config/GoogleAccountConnection.tsx` | Per-user Google connect / disconnect on Settings | `api.checkGoogleSlidesAuth`, `api.getGoogleSlidesAuthUrl`, `api.revokeGoogleSlidesAuth` |
+| `src/components/config/SettingsPage.tsx` | User settings (`/settings`); Google account section | Delegates to `GoogleAccountConnection` |
 | `src/components/config/ConfirmDialog.tsx` | Reusable confirmation dialog for destructive actions (deleting profiles, changing defaults) | None (props only) |
 | `src/components/config/ContributorsManager.tsx` | Profile sharing UI; add/update/remove contributors (users/groups) with permission levels | `configApi.listContributors`, `configApi.addContributor`, `configApi.updateContributor`, `configApi.removeContributor`, `configApi.searchIdentities` |
 | `src/components/DeckContributorsManager.tsx` | Deck (session) sharing UI; add/update/remove contributors with CAN_VIEW/CAN_EDIT/CAN_MANAGE permissions | `configApi.listDeckContributors`, `configApi.addDeckContributor`, `configApi.updateDeckContributor`, `configApi.removeDeckContributor` |
 | `src/components/PresentationMode/PresentationMode.tsx` | Full-window slide presentation (opt-in browser fullscreen via F/toolbar) with keyboard navigation; snapshots deck on mount to immunize against parent re-renders; wraps scripts in try/catch for graceful chart failures | None (renders slide HTML in iframe) |
+| `src/components/SpecView/SpecView.tsx` | Read-only view of `deck_spec`, toggled with Slides; Discuss hands off to the chat; Export spec downloads Markdown | None (reads the deck in hand) |
+| `src/services/deckSpecMarkdown.ts` | Pure, deterministic `DeckSpec` → Markdown, plus the filename | None (pure) |
+| `src/utils/downloadFile.ts` | Saves a string as a file through an object URL, with a deferred revoke | None (browser DOM only; no request) |
 
 ---
 
@@ -375,17 +380,17 @@ interface SlideStyle {
 ### Initialization
 
 1. `AppLayout` renders with `slideDeck = null`
-2. `SelectionProvider` ensures any component can call `useSelection()`
-3. Session created on "New Session" click: `createNewSession()` → `api.createSession({ sessionId })` → `navigate()`
+2. Session created on "New Session" click: `createNewSession()` → `api.createSession({ sessionId })` → `navigate()`
 
 ### Generating / Editing Slides
 
 1. User enters prompt in `ChatInput`
-2. `handleSendMessage` packages text and optional `slideContext`:
+2. `handleSendMessage` in `AppLayout` forwards text and an optional `slideContext` supplied by the caller (e.g., a per-slide refine action):
    ```typescript
+   // slideContext is passed explicitly by the caller, not derived from SelectionContext
    slideContext = {
-     indices: selectedIndices,
-     slide_htmls: selectedSlides.map(s => s.html),
+     indices: [currentIndex],
+     slide_htmls: [currentSlide.html],
    };
    ```
 3. `api.sendMessage` POSTs to `/api/chat`:
@@ -400,16 +405,15 @@ interface SlideStyle {
    }
    ```
 4. Response updates `messages`, `slideDeck`, and `rawHtml`
-5. `SelectionContext` cleared after fresh slides arrive
+5. `SlideViewer` reflects the updated deck; `ViewerContext` clamps `currentIndex` to the new deck bounds if a slide was deleted
 
-### Selecting Slides and Navigation
+### Slide Navigation
 
-- **Ribbon navigation:** Clicking a slide preview in `SelectionRibbon` scrolls `SlidePanel` to that slide via `scrollToSlide` prop
-- **Ribbon selection:** Clicking a checkbox in `SelectionRibbon` toggles that slide's selection for chat context
-- `SelectionRibbon` recomputes on deck changes
-- Non-contiguous selections show warning and are ignored
-- `SlideTile` action button marks single slides
-- `SelectionBadge` in `ChatInput` shows current range with clear option
+- **Thumbnail click:** Clicking a thumbnail in `ThumbnailRibbon` sets `currentIndex` in `ViewerContext`; `SlideStage` immediately renders that slide.
+- **Wheel on stage:** Scrolling over the stage pages forward or backward one slide per gesture.
+- **Keyboard:** Arrow keys, Page Up/Down, Home, End — handled by a `window`-level listener in `SlideViewer` (see [Slide Viewer — Keyboard Model](slide-viewer.md#keyboard-model-and-focus-guard)).
+- **Auto-reveal:** When `currentIndex` changes, `ThumbnailRibbon` scrolls the active thumbnail into view.
+- **Conversational targeting** (navigate to a specific slide via chat) is forthcoming in PRD workstream 7.
 
 ### Slide Operations
 
@@ -525,6 +529,32 @@ The `configApi` module provides a separate API client for profile and settings m
 
 Errors are thrown as `ConfigApiError` (status + message), separate from the main `ApiError` class.
 
+### Conversation API (`src/api/conversation.ts`)
+
+The `conversationApi` module holds the calls that change or read a session's **conversation** and never change its deck. It throws the main `ApiError` (status + message; the message is the response's `detail` string, or `detail.message`, when it has one), not `ConfigApiError`, so later conversation calls share one error type.
+
+| Method | HTTP | Path | Returns |
+|--------|------|------|---------|
+| `clearChat(sessionId)` | DELETE | `/api/sessions/{id}/context` | `{ status: 'cleared', session_id, deleted_messages, preserved_message_id }` |
+| `deleteMessage(sessionId, messageId)` | DELETE | `/api/sessions/{id}/messages/{message_id}` | `{ status: 'deleted', session_id, message_id, deleted_messages, hidden_message_id }` |
+| `listMessages(sessionId, limit?)` | GET | `/api/sessions/{id}/messages` (with `limit`, `?limit=N`, which returns the newest N rows) | `{ session_id, messages: SessionMessage[], count }` |
+
+**Clear chat** is wired in `ChatPanel`:
+- **Visibility:** the button shows on every persisted session the user can edit: the session is persisted and `canEditConversation(my_permission)` (`src/utils/conversationPermissions.ts`: `CAN_EDIT` or `CAN_MANAGE`) is true. A Spec is not required. `hasDeckSpec` (which `AppLayout` passes as `!!slideDeck?.deck_spec`) chooses the wording: `CLEAR_CHAT_DIALOG_MESSAGE` and `CLEAR_CHAT_TOOLTIP` when the live deck has a Spec, `CLEAR_CHAT_DIALOG_MESSAGE_NO_SPEC` and `CLEAR_CHAT_TOOLTIP_NO_SPEC` when it has none. The Spec-less wording promises neither a Spec nor that the assistant "carries on" from the slides: on a graph deck with no Spec the architect refuses an edit (`edit_without_spec`). `my_permission` comes from `api.getSession` and is re-read when a browser-local session becomes persisted. After restoring a save point in the same tab the restored deck object carries no Spec, so the Spec-less wording shows until the deck is next loaded from the server (a page reload, or the next reply that returns slides) (see [Save Points](save-points-versioning.md)).
+- **Disabled** while a turn is loading, a clear or a message delete is running, the panel is read-only (`disabled`), a save point is being previewed, or there are no messages. A send is ignored while a clear is running.
+- **On confirm** it calls `conversationApi.clearChat(sessionId)` and empties the panel's local messages (and its last-replacement feedback). It never calls `onSlidesGenerated` and never refetches slides or resets the Spec. A response that arrives after the user switched session is dropped.
+- **Errors** map by HTTP status through `clearChatErrorMessage` (`clearChatCopy.ts`), never by matching the server's detail text: 409 shows the "still running" copy, 403 the "only editors" copy, anything else (including 404) the generic "Couldn't clear the chat" copy. The conversation stays in the panel on any failure.
+
+**Delete a message** is wired in `ChatPanel` and `MessageList`:
+- **Visibility:** each of the user's own messages that has an `id` gets a trash button (`data-testid="delete-message-button"`, tooltip and accessible name `DELETE_MESSAGE_TOOLTIP`), shown while its row is hovered or the button has keyboard focus. The action is offered only when the session is persisted and `canEditConversation(my_permission)` is true, and never while a save point is being previewed (there the button is absent, not disabled).
+- **Disabled** while a turn is loading, a clear or another delete is running, or the panel is read-only (`disabled`). A disabled button is invisible (`disabled:opacity-0`, which replaces `Button`'s own `disabled:opacity-50`) and shows greyed only while its row is hovered (`group-hover/row:disabled:opacity-50`). A send is ignored, and the chat input and Clear chat are disabled, while a delete is running.
+- **On confirm** (a second `ConfirmDialog`, copy in `deleteMessageCopy.ts`) it calls `conversationApi.deleteMessage(sessionId, messageId)` and removes the turn **locally** (`withoutTurn`, `src/utils/conversationTurns.ts`): the user message and every panel message up to the next user message, the same span the backend deletes. It also clears the last-replacement feedback. Nothing is refetched: no slides, no session, no `onSlidesGenerated`, because nothing is undone in the deck. A response that arrives after the user switched session is dropped.
+- **Errors** map by HTTP status through `deleteMessageErrorMessage` (`deleteMessageCopy.ts`), never by matching the server's detail text: 409 shows the "still running" copy, 403 the "only editors" copy, 404 the "no longer in this conversation" copy (a delete from a stale second tab is realistic), anything else the generic "Couldn't delete the message" copy. The conversation stays in the panel on any failure.
+- **Where the ids come from.** `loadSessionMessages` maps `id: msg.id` from `GET /api/sessions/{id}`. A message sent in this panel is shown before the server stores it, so it has no id until the panel reads the stored conversation when the turn ends: on `complete`, on an `error` event, or on the transport's `onError` (`refreshMessageIds`), on both SSE and polling. The read is `conversationApi.listMessages(sessionId, 200)`, `GET …/messages?limit=200`, which returns the newest 200 rows. `withPersistedUserIds` then gives each id-less user message the id of the persisted user row with identical content, pairing from the newest and never jumping behind a message that already has an id. Content shared by more unsent messages than stored rows is not paired: when more id-less user messages share a text than there are unclaimed persisted user rows with it, some of them were never stored (a send refused with 409, as a double-click on a review finding's **Apply** produces, since `AppLayout` sends the same text twice through the panel's `sendMessage` handle), and the panel cannot tell which. Pairing them anyway could give a refused copy the stored turn's id, and its delete would remove a turn the user did not pick. Those messages offer delete after the next full load. It only adds ids: it never changes content, order or an assistant message, and a failed read or a malformed body changes nothing. A message with no identical row (a send refused before it was stored, an SSE message with images, whose stored text includes the injected image context, or a message older than the newest 200 rows) keeps no id until the next full load, so it offers no delete until then.
+- **Known residual: a refused send across tabs.** Counting cannot tell this tab's refused message from the same text stored from another tab on the same session. With one id-less message and one unclaimed row, a send refused in this tab (likely, because the other tab's turn holds the session lock) can, in rare cases, take the other tab's row id, and its delete then removes that tab's turn. It needs two tabs on one session and identical text in both. The exact fix is for `POST /api/chat/async` to return the stored row's id (`user_message_id`) beside `request_id` (it already stores the row before it answers), so a stored send knows its own row and a refused one knows it has none. That touches `chat.py` and `api.ts` and is a follow-up.
+- **A late read is dropped.** Each send takes a sequence number (`sendSeqRef`), and a read carries the number of the send whose turn just ended. A read that resolves after a newer send started, or after a session switch, is dropped; otherwise a read for turn N could give turn N's id to turn N+1's message when the prompt is the same ("yes", "try again"), and a delete would then remove the wrong turn. Pairing is idempotent, so the next turn's read pairs everything that is not ambiguous.
+- **Upgrade path.** The turn-end read is the one mechanism that covers every ending, because a turn that ends in an `error` event or `onError` sends no `complete`. `complete.metadata` does reach the panel on both transports, so a `metadata.user_message_id` (SSE has the id when it stores the row; polling would look it up by `request_id`) is the upgrade if content pairing ever proves too weak. It does not cover a refused send, which gets no `complete`; `user_message_id` in the `POST /api/chat/async` response (above) does.
+
 ### Error Handling
 
 Errors bubble up as `ApiError` (status + message). Common statuses:
@@ -546,9 +576,9 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 1. **Start session** – Load app, session created on first interaction
 2. **Generate baseline deck** – Enter prompt, chat panel shows loading, slides appear
 3. **Auto-verification** – LLM as Judge automatically verifies each slide against Genie source data
-4. **Navigate slides** – Click slide preview in ribbon to scroll main panel to that slide
-5. **Review verification** – Click verification badge for details, provide feedback (👍/👎)
-6. **Refine slides** – Use checkbox in ribbon to select contiguous slides for chat context, provide instructions
+4. **Navigate slides** – Click a thumbnail in the ribbon, wheel over the stage, or use keyboard arrow keys to flip through slides
+5. **Review verification** – Click verification badge on the stage toolbar for details, provide feedback (👍/👎)
+6. **Refine slides** – Send a follow-up message in the chat panel to edit the deck; the stage reflects changes immediately
 7. **Manual adjustments** – Edit HTML via modal, delete/reorder (edited slides auto-re-verify)
 8. **View source data** – Click "Genie Data" button in header to open Genie conversation (supports multi-Genie dropdown)
 9. **QA raw output** – Compare raw HTML render vs parsed slides
@@ -558,7 +588,7 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 ## Notes for Contributors & AI Agents
 
 - **Single source of truth:** Backend responses are canonical. Refetch after mutations.
-- **Selection integrity:** Always preserve contiguity when setting selections programmatically.
+- **Slide rendering:** All slide iframes (stage and thumbnails) go through `buildSlideDocument` in `src/services/slideDocument.ts` — never build raw `srcDoc` strings that bypass it, as that function injects the CSP.
 - **Script safety:** `PresentationMode` wraps scripts in try/catch for graceful chart failures.
 - **Script preservation:** Backend automatically preserves chart scripts when canvas IDs match during slide replacement (e.g., optimize layout).
 - **Visual editing:** `HTMLEditorModal` provides tree-based text editing without HTML knowledge. Charts (canvas elements) are read-only to preserve Chart.js functionality.
@@ -571,15 +601,16 @@ Errors bubble up as `ApiError` (status + message). Common statuses:
 ## Extending / Debugging Checklist
 
 1. **New backend call?** Add to `api.ts`, type response in `src/types`, maintain `ApiError` semantics.
-2. **Adding shared state?** Use contexts/hooks like `SelectionContext` to avoid prop drilling.
+2. **Adding shared state?** Use contexts/hooks like `ViewerContext` to avoid prop drilling.
 3. **Instrumenting events?** `ChatPanel` is the choke point for AI interactions.
-4. **AI agent automation:** Favor SelectionRibbon for multi-select, obey view toggles.
+4. **AI agent automation:** Write `setCurrentIndex` on `ViewerContext` to target a slide programmatically.
 5. **Docs sync:** Update this file and related docs when introducing new paradigms.
 
 ---
 
 ## Cross-References
 
+- [Slide Viewer](slide-viewer.md) – flip-through stage, thumbnail ribbon, AI feedback drawer, keyboard model, scroll semantics
 - [Backend Overview](backend-overview.md) – FastAPI routes and agent lifecycle
 - [LLM as Judge Verification](llm-as-judge-verification.md) – Auto slide accuracy verification and human feedback collection
 - [Real-Time Streaming](real-time-streaming.md) – SSE events and conversation persistence

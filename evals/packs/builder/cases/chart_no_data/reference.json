@@ -1,0 +1,5 @@
+{
+  "position": 3,
+  "html": "<section class=\"slide\">\n  <p class=\"eyebrow\">Responsive design</p>\n  <h2 class=\"slide-title\">HTML slides adapt to every screen — PowerPoint doesn't</h2>\n  <p class=\"slide-subtitle\">One file reflows to fit a laptop, tablet, phone, or projector</p>\n  <div class=\"content\">\n    <ul class=\"bullets\">\n      <li><strong>Fluid layout:</strong> HTML reflows text, charts, and images to fit any viewport — laptop, tablet, phone, or projector</li>\n      <li><strong>Fixed canvas trap:</strong> PowerPoint locks every element to one fixed rectangle, cropping or stretching on non-standard screens</li>\n      <li><strong>Zero manual work:</strong> no duplicate decks for different devices — one file renders everywhere</li>\n    </ul>\n    <div class=\"callout\">HTML slides look right on every screen without manual resizing. A device-by-device comparison chart is left out until measured figures are available.</div>\n  </div>\n  <div class=\"slide-footer\"><span>Meridian</span><span>3</span></div>\n</section>\n",
+  "scripts": ""
+}

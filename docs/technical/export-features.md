@@ -2,12 +2,13 @@
 
 ## Overview
 
-The AI Slide Generator supports exporting slide decks in three formats:
+The AI Slide Generator supports exporting slide decks in three formats, plus the deck spec as Markdown:
 - **PDF**: Client-side generation using browser APIs
 - **PPTX**: Server-side render of the deck HTML via the huashu pipeline — `POST /api/export/pptx/editable/huashu/from-html`, with `/pptx/editable/from-records` as the fallback
 - **Google Slides**: Synchronous server-side export — the rendered PPTX is uploaded to Drive, which converts it to native editable Slides
+- **Deck spec (Markdown)**: client-side, from the Spec view — see *Deck spec as Markdown*.
 
-All export options are accessible through a unified dropdown menu in the slide panel.
+All export options are accessible through a unified dropdown menu in the slide panel (PDF, PPTX, Google Slides); the deck spec exports via a separate button in the Spec view header.
 
 ### The export routes, and which are live
 
@@ -72,12 +73,16 @@ PDF export is client-side and is not a route.
 - `jsPDF`: Generates PDF from canvas images
 
 **Process**:
-1. Each slide is rendered in a hidden iframe (1280×720px)
-2. Waits for Chart.js charts to fully render
-3. Converts slide HTML to canvas using `html2canvas`
-4. Adds canvas as image to PDF page (maintains 16:9 aspect ratio)
-5. Repeats for all slides
+1. Each slide is rendered in a hidden iframe (1280×720px) with `sandbox="allow-scripts"` (no `allow-same-origin`)
+2. A trusted bootstrap inside the frame waits for Chart.js, force-sizes the slide root, and rasterizes the slide
+3. The child returns a JPEG data URL over `postMessage`; the parent authenticates `event.source`, a per-frame channel ID, and the request ID
+
+html2canvas 1.4.1 is still bundled into the export `srcdoc` from the npm package (not a CDN). It cannot clone through a nested iframe here: nested frames inherit `sandbox="allow-scripts"` and become a different unique origin, so the library cannot read the clone document. Full-slide capture therefore inlines computed styles and draws via SVG `foreignObject` in the export frame itself. Chart canvases are still read with `canvas.toDataURL` in that same frame.
+4. Adds the image to a PDF page (maintains 16:9 aspect ratio)
+5. Repeats for all slides, tearing down each frame
 6. Downloads the complete PDF
+
+Persisted slide JavaScript can paint the export document but cannot read the Tellr SPA, call `/api` as the exporter, or fall back to an unsandboxed frame.
 
 **Features**:
 - ✅ No server load (runs entirely in browser)
@@ -173,10 +178,16 @@ PDF export is client-side and is not a route.
 - Error handling with user-friendly messages
 
 **PDF Service** (`frontend/src/services/pdf_client.ts`):
-- Handles iframe rendering and canvas conversion
-- Manages Chart.js rendering wait times
+- Builds the slide document (CSP first, then the trusted export runtime)
+- Asks `runSandboxedExportFrame` for a JPEG; does not read `iframe.contentDocument`
 - Optimizes image quality vs file size
-- Handles edge cases (first slide, canvas sizing)
+- Preserves subtitle spacing and canvas sizing inside the child runtime
+
+**Sandboxed export frame** (`frontend/src/services/sandboxedExportFrame.ts` + `exportFrameRuntime.ts`):
+- Shared controller for PDF, screenshot-PPTX, Chart.js canvas capture, and DOM-record export
+- Opaque origin (`sandbox="allow-scripts"` only)
+- html2canvas 1.4.1 is bundled from the npm package into the `srcdoc`; it is not loaded from a CDN
+- Child CSP remains `SLIDE_CSP` (`connect-src 'none'`, no `unsafe-eval`, no `blob:`)
 
 **API Client** (`frontend/src/services/api.ts`):
 - `startPPTXExport()` - Initiates async export job
@@ -199,7 +210,7 @@ PDF export is client-side and is not a route.
 - Background worker processes jobs in thread pool
 - Thread pool execution prevents blocking event loop during LLM calls
 - Progress tracking per job (slides completed / total) stored in DB
-- Job cleanup after download (deletes DB row + temp file)
+- Job cleanup is TTL-based: `GET /api/export/pptx/download/{job_id}` is idempotent and does not delete anything; a background sweep (`export_cleanup_loop`, every 5 min) removes completed/error jobs older than 30 min (DB row + temp file)
 - Multi-worker safe: any process can read job status from the shared database
 
 **PPTX Converter Service** (`src/services/html_to_pptx.py`):
@@ -300,12 +311,59 @@ The PPTX converter uses strict positioning constraints to prevent overlapping el
 
 ## File Naming
 
-Both export formats use timestamped filenames:
+PDF and PPTX filenames are timestamped; the deck spec's is not:
 
 - **PDF**: `{slide_deck_title}_{YYYY-MM-DDTHH-MM-SS}.pdf`
 - **PPTX**: `{slide_deck_title}_{YYYY-MM-DD}.pptx`
+- **Deck spec**: `{title-slug}-spec.md` (no timestamp; `deck-spec.md` when the title has no letters or digits)
 
-If the slide deck has no title, "slides" is used as the default.
+If the slide deck has no title, "slides" is used as the default for PDF and PPTX; see *Deck spec as Markdown* below for the spec's naming.
+
+## Deck spec as Markdown (client-side)
+
+**Where.** The Spec view header, **Export spec** button (accessible name "Export spec as Markdown"); shown only when the deck has a spec.
+
+**Who.** Anyone who can see the Spec view, including `/view` (read-only viewers). The export carries the full `deck_spec` object, which every viewer already receives in the `get_slides` JSON. The file includes the Data section with each figure's source (`(source: …)`), which the Spec view itself does not show.
+
+**Which spec.** The live deck's spec, as the Spec view shows it. A save-point preview carries no `deck_spec`, so the button is hidden while previewing.
+
+**What.** The spec is rendered in a fixed section order:
+1. Title (`# {title}`; `# Untitled deck spec` when blank)
+2. Audience (`## Audience`)
+3. Purpose (`## Purpose`)
+4. Argument (`## Argument`)
+5. Call to action (`## Call to action`)
+6. Narrative arc (`## Narrative arc`, as a numbered list in the given order)
+7. Design contract (`## Design contract`, ids only: `Design system #N`, `Template #N`, `Slide style #N`; `No design system or slide style pinned` when none is set)
+8. Slide briefs (`## Slide briefs`, then `### Slide N` per slide in the given order, with Purpose, Content brief, Assumes, Hands off, Slide type when set, and Data references)
+9. Data (`## Data`, with Synthesis, Figures, and Gaps)
+
+The field `template_section_index` is omitted: it is a 0-based machine index into a pinned template, while `slide_type` carries the same binding by its human-facing label. A bare index next to a 1-based "Slide 1" heading would mislead. An empty value renders as `Not set.` and an empty list as `None.`; absent `resolved_data` or `data_references` render the same way.
+
+**Known ambiguities.** A value that is literally `None.` or `Not set.` reads like the placeholder. Data references are joined with `, ` and figures are written `key: value`, so both are ambiguous when a value itself contains `, ` or `: `. The structure (headings, list items) stays unambiguous; only the human reading of those lines is.
+
+**Normalisation, by code point** (not `\s`: JavaScript and Python disagree on it):
+- Remove U+0000–U+0008, U+000E–U+001F, U+007F–U+0084 and U+0086–U+009F
+- Collapse each run of U+0009–U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F, U+205F, U+3000 and U+FEFF to one space
+- Trim
+
+**Escaping** (CommonMark §2.4):
+- Backslash before each of `` \ ` * _ [ ] < > # | ~ $ & @ ``
+- Also before a leading `-`/`+`/`=`, and before the `.`/`)` of a leading ordered-list marker: 1 to 9 digits, then `.` or `)`, then a space or the end of the value (e.g., `2024\. A year`; `11.4%` and a 10-digit number are left alone)
+- Integer ids are written verbatim, and an integer position as `position + 1`; any other value in a numeric slot is escaped as text, so a non-integer position gives `### Slide {escaped value}`, with no +1
+- **Pasting into GitHub.** GitHub honours the `\|` and `\~` escapes, so a pasted export forms no table or strikethrough. Its math, `@`-mention, `#N` issue-reference and bare-URL/email autolinking run after Markdown parsing and ignore backslash escapes (checked against GitHub's markdown API, 2026-10-20): a value like `$4 to $5` can render as inline math, `@name` still mentions, and the fixed `Design system #7` / `Template #3` lines link to issues 7 and 3 of the repo they are pasted into. None of these changes the document structure, and no link hides a target behind different text. `$` and `@` are still escaped because other renderers (e.g. pandoc's dollar-math and citations) honour the escape.
+
+**Determinism.** No clock, locale or randomness. Fixed section order; object keys read by name, never by iteration. `narrative_arc` and `slides` keep their given order. Blocks joined by exactly one blank line; LF only, no trailing whitespace, one trailing newline.
+
+**Filename.** `deckSpecMarkdownFilename(title)` → `{slug}-spec.md`, where slug is the title lowercased and normalized to NFC, with every run of characters that are not letters, digits or marks replaced by `-`, leading and trailing `-` stripped, truncated to 60 code points, trailing `-` stripped again. A title with nothing left after that yields `deck-spec.md`.
+
+**Download.** A `Blob`, an object URL and `<a download>`. The object URL is revoked 10 seconds (REVOKE_DELAY_MS) after the click, not synchronously, to avoid historical Safari/Firefox download failures. MIME type: `text/markdown;charset=utf-8`.
+
+**No route, no request.** The export computes on click from the spec the Spec view already holds, with no server round-trip.
+
+**The contract.** `frontend/tests/fixtures/deck-spec-markdown/full.deck-spec.json` → `full.md`, byte-exact. Any backend or MCP renderer must reproduce it; changing the format means updating both the code and this fixture in the same change.
+
+**Code.** `frontend/src/services/deckSpecMarkdown.ts` (renderer, section order, labels, escape sets, code-point constants CONTROL_CHARS / WHITESPACE_RUN, `deckSpecMarkdownFilename`, `DECK_SPEC_MARKDOWN_MIME`), `frontend/src/utils/downloadFile.ts` (downloadTextFile function, REVOKE_DELAY_MS constant), and `frontend/src/components/SpecView/SpecView.tsx` (Export spec button in the header's right-hand group).
 
 ## Troubleshooting
 

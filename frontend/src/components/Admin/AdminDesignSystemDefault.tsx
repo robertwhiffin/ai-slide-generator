@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { configApi } from '../../api/config';
-import type { DesignSystemSummary } from '../../api/config';
+import type { DesignSystemSummary, DesignSystemTemplate } from '../../api/config';
 import { useToast } from '../../contexts/ToastContext';
 
 /**
@@ -13,6 +13,71 @@ import { useToast } from '../../contexts/ToastContext';
  * design system also outranks the legacy default slide style, the copy says both
  * things explicitly rather than promising every new deck.
  */
+/**
+ * One design system's DEFAULT TEMPLATE. New sessions on that design system are
+ * pinned to it, and the architect falls back to it for an unpinned deck, so the
+ * deck is built from that template's sections instead of improvised markup.
+ * "No default" leaves new decks unpinned, as before.
+ */
+const DefaultTemplateSelect: React.FC<{ ds: DesignSystemSummary }> = ({ ds }) => {
+  const [templates, setTemplates] = useState<DesignSystemTemplate[] | null>(null);
+  const [saving, setSaving] = useState<boolean>(false);
+  const { showToast } = useToast();
+
+  useEffect(() => {
+    let cancelled = false;
+    configApi.listDesignSystemTemplates(ds.id)
+      .then(res => { if (!cancelled) setTemplates(res.templates); })
+      .catch(err => {
+        console.error('Failed to load design system templates:', err);
+        if (!cancelled) setTemplates([]);
+      });
+    return () => { cancelled = true; };
+  }, [ds.id]);
+
+  if (templates === null || templates.length === 0) return null;
+  const current = templates.find(t => t.is_default) ?? null;
+
+  const handleChange = async (value: string) => {
+    setSaving(true);
+    try {
+      const res = value === ''
+        ? current
+          ? await configApi.clearDesignSystemTemplateDefault(ds.id, current.id)
+          : null
+        : await configApi.setDesignSystemTemplateDefault(ds.id, Number(value));
+      if (res) setTemplates(res.templates);
+      showToast(
+        value === '' ? 'Default template cleared' : 'Default template updated',
+        'success',
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      showToast(`Failed to update default template: ${message}`, 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <label className="mt-1 flex items-center gap-2 text-xs text-gray-500">
+      Default template
+      <select
+        value={current ? String(current.id) : ''}
+        disabled={saving}
+        onChange={e => void handleChange(e.target.value)}
+        data-testid={`design-system-default-template-${ds.id}`}
+        className="rounded border border-gray-300 bg-white px-1.5 py-0.5 text-xs text-gray-900 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        <option value="">No default</option>
+        {templates.map(t => (
+          <option key={t.id} value={String(t.id)}>{t.name}</option>
+        ))}
+      </select>
+    </label>
+  );
+};
+
 export const AdminDesignSystemDefault: React.FC = () => {
   const [systems, setSystems] = useState<DesignSystemSummary[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -84,6 +149,11 @@ export const AdminDesignSystemDefault: React.FC = () => {
         Style library — gets that instead. Where the org default does apply, it
         outranks the default slide style, so those decks use the brand.
       </p>
+      <p className="text-sm text-gray-500 mb-4">
+        A design system's default template is pinned on every new deck that uses that
+        design system, so slides are built from the template's own sections. Users can
+        still pick a different template for their deck.
+      </p>
       {systems.length === 0 ? (
         <div className="text-sm text-gray-500">
           No design systems have been imported yet.
@@ -111,6 +181,7 @@ export const AdminDesignSystemDefault: React.FC = () => {
                 {ds.description && (
                   <div className="text-xs text-gray-500 mt-0.5">{ds.description}</div>
                 )}
+                {ds.is_active && <DefaultTemplateSelect ds={ds} />}
               </div>
               {(ds.is_default || ds.is_active) && (
                 <button

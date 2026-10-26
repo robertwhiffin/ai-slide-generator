@@ -28,7 +28,12 @@ from src.api.services.job_queue import enqueue_job, get_job_status
 from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
-from src.core.settings_db import get_default_design_system_id, get_default_slide_style_id
+from src.core.settings_db import (
+    get_default_design_system_id,
+    get_default_slide_style_id,
+    get_default_template_id,
+)
+from src.domain.conversation_engine import with_legacy_marker
 from src.domain.slide_deck import SlideDeck
 from src.services.permission_service import get_permission_service
 
@@ -230,11 +235,26 @@ async def enqueue_create_job(
 
         # Persist the user's prompt so MCP-initiated sessions have a chat
         # transcript identical in shape to browser-initiated ones.
+        #
+        # MCP stays on the legacy monolith (its worker payload carries no engine
+        # key, and the graph's one-shot path, spec §6.4, is not built).
+        # Since 2026-10-12 the graph is the DEFAULT engine, derived from the
+        # deck's first user message -- so a create_deck deck whose transcript
+        # did not say otherwise would resolve to the graph the first time
+        # someone chatted on it in the browser, and fail there
+        # (ConversationPinMissingError: MCP sessions are unpinned).  The
+        # persisted first message therefore carries the LEGACY opt-out; the
+        # prompt the worker runs (payload "message" below) is untouched.
+        persisted_prompt = (
+            with_legacy_marker(prompt)
+            if mode == "generate" and is_first_message
+            else prompt
+        )
         await asyncio.to_thread(
             session_manager.add_message,
             session_id=session_id,
             role="user",
-            content=prompt,
+            content=persisted_prompt,
             message_type="user_query",
             request_id=request_id,
         )
@@ -475,19 +495,23 @@ async def _create_deck_impl(
             if effective_ds_id is not None:
                 agent_config["design_system_id"] = effective_ds_id
                 # Templates belong to a design system, so a name is only
-                # meaningful here. Unresolvable -> no pin (logged), and the
-                # model soft-picks from the catalog the compiler injects.
+                # meaningful here. No name, or an unresolvable one (logged) ->
+                # the design system's default template; no default -> no pin,
+                # and the model soft-picks from the catalog the compiler injects.
+                template_id = None
                 if template_name and template_name.strip():
                     template_id = _resolve_template_name(effective_ds_id, template_name)
-                    if template_id is not None:
-                        agent_config["template_id"] = template_id
-                    else:
+                    if template_id is None:
                         logger.warning(
                             "MCP create_deck: template_name %r matched no template "
-                            "on design system %s; generating without a pin",
+                            "on design system %s; using its default template, if any",
                             template_name,
                             effective_ds_id,
                         )
+                if template_id is None:
+                    template_id = get_default_template_id(effective_ds_id)
+                if template_id is not None:
+                    agent_config["template_id"] = template_id
             else:
                 # No design system in play: fall back to the tellr-configured
                 # default slide style rather than the hardcoded
@@ -512,6 +536,10 @@ async def _create_deck_impl(
             session = session_manager.create_session(
                 created_by=identity.user_name,
                 agent_config=agent_config,
+                # Legacy deck: unpinned, and enqueue_create_job persists the
+                # first message with the USE LEGACY MODE opt-out so the
+                # transcript-derived engine agrees in every surface.
+                graph_capable=False,
             )
             # create_session returns a dict (see SessionManager.create_session);
             # guard against a model-object return defensively so this stays

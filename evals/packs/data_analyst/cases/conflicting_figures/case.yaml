@@ -1,0 +1,5 @@
+kind: mutation
+fault: two conflicting figures in the request (8 MB vs 15 MB) that should be flagged
+expect:
+  outcome: success
+design_system_active: true

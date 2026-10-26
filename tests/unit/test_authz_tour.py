@@ -14,16 +14,19 @@ def client():
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_add_demo_slides_requires_can_edit(client, monkeypatch):
+@pytest.mark.parametrize("stage", ["plan", "build", "review", "edit"])
+def test_run_stage_requires_can_edit(client, monkeypatch, stage):
     calls = []
 
     def gate(session_id, min_permission=PermissionLevel.CAN_VIEW):
         calls.append((session_id, min_permission))
         raise HTTPException(status_code=403, detail="denied")
 
-    monkeypatch.setattr(
-        "src.api.routes.tour._check_deck_permission_for_session", gate
-    )
-    resp = client.post("/api/tour/demo-deck/victim-session/slides")
+    monkeypatch.setattr("src.api.routes.tour._check_deck_permission_for_session", gate)
+    resp = client.post(f"/api/tour/demo-deck/victim-session/stages/{stage}")
     assert resp.status_code == 403
     assert calls == [("victim-session", PermissionLevel.CAN_EDIT)]
+
+
+def test_legacy_slides_route_is_gone(client):
+    assert client.post("/api/tour/demo-deck/any/slides").status_code in (404, 405)

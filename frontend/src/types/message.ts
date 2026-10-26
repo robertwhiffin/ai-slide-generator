@@ -7,12 +7,20 @@ export interface ToolCall {
   arguments: Record<string, any>;
 }
 
+/** Technical detail behind a plain-language notice (stage, error, request id), keyed by name. */
+export type MessageDetails = Record<string, string>;
+
 export interface Message {
+  /** Persisted SessionMessage.id. Absent on a message this panel has shown but not yet matched
+   *  to its row (a just-sent or streamed one); only messages with an id can be deleted (#317). */
+  id?: number;
   role: MessageRole;
   content: string;
   timestamp: string;
   tool_call?: ToolCall;
   tool_call_id?: string;
+  /** Technical detail behind a plain-language notice; never the headline. */
+  details?: MessageDetails;
 }
 
 export interface ChatMetadata {

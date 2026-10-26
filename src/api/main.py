@@ -16,14 +16,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import admin, admin_usage, agent_config, chat, export, feedback, images, profiles, sessions, slides, tools, tour, verification, version, google_slides, setup, local_version
-from src.api.routes.deck_contributors import router as deck_contributors_router
-from src.core.databricks_client import get_or_create_user_client, set_user_client
-from src.core.user_context import get_current_user as get_ctx_user, set_current_user
-from src.core.permission_context import (
-    build_permission_context,
-    set_permission_context,
+from src.api.routes import (
+    admin,
+    admin_usage,
+    agent_config,
+    agent_definitions,
+    chat,
+    export,
+    feedback,
+    google_slides,
+    images,
+    local_version,
+    profiles,
+    sessions,
+    setup,
+    slides,
+    tools,
+    tour,
+    verification,
+    version,
 )
+from src.api.routes.deck_contributors import router as deck_contributors_router
 from src.api.routes.settings import (
     contributors_router,
     deck_prompts_router,
@@ -31,7 +44,10 @@ from src.api.routes.settings import (
     identities_router,
     slide_styles_router,
 )
-from src.api.services.export_job_queue import start_export_worker
+from src.api.services.export_job_queue import (
+    start_export_cleanup_worker,
+    start_export_worker,
+)
 from src.api.services.job_queue import recover_stuck_requests, start_worker
 from src.api.services.slide_style_preview_queue import start_preview_worker
 from src.core.database import (
@@ -39,6 +55,10 @@ from src.core.database import (
     start_token_refresh,
     stop_token_refresh,
 )
+from src.core.databricks_client import get_or_create_user_client, set_user_client
+from src.core.permission_context import build_permission_context, set_permission_context
+from src.core.user_context import get_current_user as get_ctx_user
+from src.core.user_context import set_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -50,16 +70,19 @@ IS_TESTING = ENVIRONMENT == "test"
 # Worker task references for cleanup
 _worker_task = None
 _export_worker_task = None
+_export_cleanup_task: asyncio.Task | None = None
 _preview_worker_task = None
 _cleanup_task = None
 _timeout_task = None
+_spec_sweeper_task = None
 _frontend_assets_stack: ExitStack | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task, _export_worker_task, _preview_worker_task, _cleanup_task, _timeout_task, _frontend_assets_stack
+    global _worker_task, _export_worker_task, _export_cleanup_task, _preview_worker_task
+    global _cleanup_task, _timeout_task, _spec_sweeper_task, _frontend_assets_stack
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
@@ -126,6 +149,10 @@ async def lifespan(app: FastAPI):
         _export_worker_task = await start_export_worker()
         logger.info("Export job queue worker started")
 
+        # Start the export job TTL cleanup worker
+        _export_cleanup_task = await start_export_cleanup_worker()
+        logger.info("Export job cleanup worker started")
+
         # Start the slide-style preview generation worker
         _preview_worker_task = await start_preview_worker()
         logger.info("Slide-style preview worker started")
@@ -149,6 +176,16 @@ async def lifespan(app: FastAPI):
         from src.api.middleware.request_logging import request_log_cleanup_loop
         _cleanup_task = asyncio.create_task(request_log_cleanup_loop())
         logger.info("Request log cleanup task started")
+
+        # Start the spec-dirty arc-review sweeper. A PERIODIC LOOP, so it belongs
+        # here beside the two above and NOT in run.py::init_database: the
+        # pre-fork rule there is for migrations and backfills, which must run
+        # exactly once, and a loop started in that step would die with it. It
+        # runs in every uvicorn worker (UVICORN_WORKERS defaults to 4), which is
+        # why claim_due_marker takes an atomic lease rather than trusting a read.
+        from src.services.spec_sync import spec_review_sweeper_loop
+        _spec_sweeper_task = asyncio.create_task(spec_review_sweeper_loop())
+        logger.info("Spec-review arc sweeper started")
 
         # Recover any stuck requests from previous crashes
         try:
@@ -185,6 +222,14 @@ async def lifespan(app: FastAPI):
             pass
         logger.info("Export job queue worker stopped")
 
+    if _export_cleanup_task:
+        _export_cleanup_task.cancel()
+        try:
+            await _export_cleanup_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Export job cleanup worker stopped")
+
     if _preview_worker_task:
         _preview_worker_task.cancel()
         try:
@@ -208,6 +253,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("MCP job timeout sweeper stopped")
+
+    if _spec_sweeper_task:
+        _spec_sweeper_task.cancel()
+        try:
+            await _spec_sweeper_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Spec-review arc sweeper stopped")
 
     # Tear down the FastMCP session manager's task group. Safe to call
     # unconditionally — the stack was entered unconditionally at startup.
@@ -469,6 +522,7 @@ async def user_client_required_handler(request: Request, exc: UserClientRequired
 app.include_router(admin.router)
 app.include_router(admin_usage.router)
 app.include_router(agent_config.router)
+app.include_router(agent_definitions.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)
 app.include_router(images.router)
@@ -506,6 +560,7 @@ app.include_router(design_systems_router, prefix="/api/settings", tags=["setting
 # default internal route would be ``/mcp`` and external requests would
 # need to hit ``/mcp/mcp``.
 from src.api.mcp_server import mcp as tellr_mcp  # noqa: E402
+
 tellr_mcp.settings.streamable_http_path = "/"
 app.mount("/mcp", tellr_mcp.streamable_http_app())
 logger.info("MCP server mounted at /mcp")

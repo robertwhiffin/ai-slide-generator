@@ -1,0 +1,10 @@
+kind: mutation
+fault: 'add a final slide to a deck of six (new slide at position 6): append it; replacing
+  the last slide (position 5) loses the closing slide'
+expect:
+  intent: edit
+  positions:
+  - 6
+  inserted:
+  - 6
+design_system_active: true

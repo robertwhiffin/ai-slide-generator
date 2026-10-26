@@ -139,6 +139,12 @@ print('  ✓ Tables created')
 seed_defaults()
 print('  ✓ Default deck prompts and slide styles seeded')
 
+# Publish Graph Version 1, as run.py::init_database does on Apps: every new
+# conversation is pinned to the active Graph Release (agent mode is the default).
+from src.core.database import get_session_local
+from src.services.graph_configuration import bootstrap_graph_configuration
+print('  ✓ Graph Configuration:', bootstrap_graph_configuration(get_session_local()))
+
 # Create a minimal default profile for E2E tests (same as CI)
 with get_db_session() as db:
     existing = db.query(ConfigProfile).filter_by(name='default').first()
@@ -159,9 +165,7 @@ with get_db_session() as db:
         # Create prompts config
         prompts = ConfigPrompts(
             profile_id=profile.id,
-            selected_slide_style_id=style_id,
-            system_prompt='You are a helpful assistant.',
-            slide_editing_instructions='Edit slides as requested.'
+            selected_slide_style_id=style_id
         )
         db.add(prompts)
         

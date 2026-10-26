@@ -1,0 +1,10 @@
+{
+  "should_fail": {
+    "outcome": "missing_data",
+    "synthesis": null,
+    "sources": null,
+    "gap": "Token efficiency data unavailable",
+    "tried_tools": [],
+    "reason": null
+  }
+}

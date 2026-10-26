@@ -1,0 +1,5 @@
+agent_key: builder
+name: haiku-data-check-general
+base: v1
+endpoint_name: databricks-claude-haiku-5-5
+prompt_file: haiku-data-check-general.md

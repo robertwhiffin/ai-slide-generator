@@ -1,0 +1,11 @@
+kind: mutation
+fault: 'add after slide 3 (position 2): the new slide is position 3 and the checklist
+  on the final slide (now position 6) must be revised to include it'
+expect:
+  intent: edit
+  positions:
+  - 3
+  - 6
+  inserted:
+  - 3
+design_system_active: true

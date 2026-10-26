@@ -174,17 +174,59 @@ TEMPLATED_TEMPLATE_HTML = b"""<!doctype html>
 .hero { background-image: url("../assets/backgrounds/hero-bg.png"); }
 </style>
 </head><body>
-<section class="slide cover">
+<section class="slide cover" data-label="Cover">
   <img src="../assets/logo.svg" alt="Acme logo" />
   <h1>Sample cover title</h1>
 </section>
-<section class="slide content">
+<section class="slide content" data-label="Content">
   <img src="assets/logo.svg" alt="Acme logo root-relative" />
   <img src="../assets/missing-art.png" alt="Ghost asset" />
 </section>
 <script>window.__acmePreviewChrome = true;</script>
 </body></html>
 """
+
+
+def slide_roots_html(labels, *, wrapped: bool = False) -> bytes:
+    """A synthetic template entry with one ``.slide`` root per ``labels`` item.
+
+    Each item is the root's ``data-label`` value, or ``None`` to omit the
+    attribute. With ``wrapped=True`` every root is the Corporate shape: a bare
+    ``<section>`` whose only child is ``div.slide``, which ``find_slide_roots``
+    promotes, so the label goes on the outer ``<section>``.
+    """
+    parts = []
+    for index, label in enumerate(labels):
+        attr = "" if label is None else f' data-label="{label}"'
+        body = f"<h1>Synthetic section {index}</h1>"
+        if wrapped:
+            parts.append(f'<section{attr}><div class="slide dark">{body}</div></section>')
+        else:
+            parts.append(f'<div class="slide"{attr}>{body}</div>')
+    return ("<!doctype html><html><body>" + "".join(parts) + "</body></html>").encode()
+
+
+def single_template_bundle_zip(entry_html: bytes, *, slug: str = "corporate") -> bytes:
+    """A bundle declaring exactly one template, ``templates/<slug>/index.html``."""
+    manifest = default_manifest()
+    manifest["templates"] = [
+        {
+            "name": f"Acme {slug}",
+            "description": "Synthetic single template.",
+            "folder": f"templates/{slug}",
+            "entryPath": f"templates/{slug}/index.html",
+        },
+    ]
+    return make_bundle_zip(
+        manifest=manifest,
+        files={
+            "fonts/acme-sans.woff2": b"OTTO synthetic-font-bytes",
+            "assets/logo.svg": SVG_LOGO,
+            "README.md": SYNTHETIC_README,
+            "SKILL.md": SYNTHETIC_SKILL,
+            f"templates/{slug}/index.html": entry_html,
+        },
+    )
 
 
 def template_preview_png() -> bytes:

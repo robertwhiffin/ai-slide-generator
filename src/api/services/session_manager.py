@@ -7,10 +7,12 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
-from sqlalchemy import func, or_
+from sqlalchemy import and_, delete, func, or_, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from src.api.schemas.agent_config import (
@@ -23,14 +25,35 @@ from src.database.models.session import (
     ChatRequest,
     SessionMessage,
     SessionSlideDeck,
+    SessionSlide,
     SlideDeckVersion,
     UserSession,
+)
+from src.domain.conversation_engine import is_transcript_message
+from src.domain.finding import findings_from_record
+from src.domain.finding_copy import plain_finding_issue, plain_finding_message
+from src.services.conversation_pins import (
+    get_conversation_graph_version,
+    get_conversation_graph_versions,
+    lock_active_graph_release,
+)
+from src.services.shared_deck_attribution import (
+    DeckMutationContext,
+    MutationActor,
+    MutationObjectType,
+    MutationOperation,
+    record_shared_deck_mutation,
 )
 
 logger = logging.getLogger(__name__)
 
 _MAX_SESSION_TITLE_LEN = 255
 _DUPLICATE_TITLE_PREFIX = "Copy of "
+
+#: How long a turn-progress write waits for its request row's lock on PostgreSQL
+#: before giving up (#319).  A progress write is a side channel running on a
+#: slide's own thread; it must never hold that slide up for long.
+_PROGRESS_LOCK_TIMEOUT = "2s"
 
 
 def _truncate_session_title(title: str, max_len: int = _MAX_SESSION_TITLE_LEN) -> str:
@@ -63,10 +86,843 @@ def _deck_content_fields_from_dict(deck_dict: Dict[str, Any]) -> tuple[str, Opti
     return html_content, scripts_content, slide_count
 
 
+# ---------------------------------------------------------------------------
+# Shared session_slides row writer
+#
+# ONE helper owns writing a session_slides row for a (deck_owner.id, position)
+# pair.  Before this existed there were four hand-copied row-writers
+# (save_slide_deck's dual-write, backfill_session, restore_version and
+# SlideWriter.write_slide), and the whole-branch final review found five
+# divergences between them — four of them defects, one a merge blocker (F1/F2).
+#
+# THE INVARIANT THIS HELPER ENFORCES
+# ----------------------------------
+# A row describes the slide CURRENTLY AT that position.  Every identity field
+# (slide_id, created_by, created_at) and the verification record therefore move
+# WITH the slide, never stay behind with the position.  The old dual-write
+# UPDATE branch rewrote only html/scripts/modified_*, which is correct only if a
+# position always holds the same slide — but reorder, insert-at-front and
+# delete-middle are all first-class mutations (spec §4.4) that shift slides
+# between positions.
+# ---------------------------------------------------------------------------
+
+
+def _to_naive_utc(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string (or pass through a datetime) as NAIVE UTC.
+
+    ``SessionSlide.created_at``/``modified_at`` are ``TIMESTAMP WITHOUT TIME
+    ZONE`` and the rest of the codebase writes ``datetime.utcnow()`` (naive UTC,
+    57 call sites in ``src/``).  A tz-aware value must therefore be converted to
+    the same instant in UTC and stripped of tzinfo, not stored verbatim.
+
+    Before F10 was fixed only the backfill did this, so the same input
+    ``2026-03-04T05:06:07+05:30`` was stored as ``05:06:07`` by the dual-write
+    and ``23:36:07`` by the backfill — a 5.5h skew in one column.
+
+    Returns None when *value* is empty or unparseable, so callers can apply
+    their own fallback.
+    """
+    if value is None or value == "":
+        return None
+
+    dt: Optional[datetime] = None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _read_head_meta(deck: Any) -> Dict[str, str]:
+    """Read a deck's ``head_meta`` for the row read path (F5).
+
+    Prefers the dedicated ``head_meta_json`` column.  When that is NULL — a deck
+    backfilled before this column existed, or one whose rows were written by an
+    older build — falls back to the ``head_meta`` still inside ``deck_json`` so
+    the first row-path read does not silently drop it.  Returns ``{}`` when
+    neither carries it, matching ``SlideDeck.head_meta``'s default.
+
+    ``getattr`` is used for the column so that pre-existing unit-test mocks of
+    ``SessionSlideDeck`` (which predate this column) keep working.
+    """
+    raw = getattr(deck, "head_meta_json", None)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            logger.warning("Invalid head_meta_json — falling back to deck_json")
+
+    deck_json = getattr(deck, "deck_json", None)
+    if deck_json:
+        try:
+            blob = json.loads(deck_json)
+            if isinstance(blob, dict) and isinstance(blob.get("head_meta"), dict):
+                return blob["head_meta"]
+        except json.JSONDecodeError:
+            pass
+
+    return {}
+
+
+def _read_deck_spec(deck: Any) -> Optional[Dict[str, Any]]:
+    """Read a deck's parsed ``deck_spec`` for the read paths (B3.2).
+
+    Returns ``None`` when ``deck_spec_json`` is absent, empty, not valid JSON, or
+    does not parse to a JSON object.  It NEVER raises, for the same reason
+    ``_read_head_meta`` never raises: this runs on every deck read, and a
+    malformed spec blob must degrade the spec view alone, not fail the whole
+    deck read for every consumer of the dict.
+
+    ``getattr`` is used for the column so that pre-existing unit-test mocks of
+    ``SessionSlideDeck`` (which predate this column) keep working.
+    """
+    raw = getattr(deck, "deck_spec_json", None)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):  # ValueError covers json.JSONDecodeError
+        logger.warning("Invalid deck_spec_json — serving deck_spec as None")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _finding_to_camel(finding: Any) -> Dict[str, Any]:
+    """Project one domain ``Finding`` onto the frontend ``SlideFinding`` shape.
+
+    snake_case -> camelCase is done generically over ``model_dump()`` so a field
+    added to ``Finding`` mirrors automatically;
+    ``tests/unit/test_finding_conformance.py`` is the guard that the TypeScript
+    declaration gained the same field.
+
+    ``plainMessage`` and ``plainIssue`` are the two projection-only keys: they are
+    derived here at read time (``src/domain/finding_copy.py``), are not ``Finding``
+    fields, and are never persisted.  ``PROJECTION_ONLY_FIELDS`` in
+    ``tests/unit/test_finding_conformance.py`` pins them.
+    """
+    camel: Dict[str, Any] = {}
+    for key, value in finding.model_dump().items():
+        head, *rest = key.split("_")
+        camel[head + "".join(part.capitalize() for part in rest)] = value
+    # Derived, read-time only (#316): never Finding fields (that would move the
+    # reviewers' output-schema digests) and never persisted.  See
+    # src/domain/finding_copy.py.
+    camel["plainMessage"] = plain_finding_message(finding)
+    camel["plainIssue"] = plain_finding_issue(finding)
+    return camel
+
+
+def _deck_findings(
+    pairs: List[Tuple[Any, str]],
+    *,
+    slide_indices: Optional[List[int]] = None,
+) -> List[Dict[str, Any]]:
+    """Flatten review findings out of ``(record, content_hash)`` pairs (B3.2).
+
+    Returns ONE FLAT deck-level list of ``SlideFinding``-shaped dicts, never a
+    per-position index.  The flat shape is forced three ways: each entry already
+    carries its own ``slideIndex`` (``Finding.slide_index``), the legacy read
+    path has no ``slides`` array to key an index against, and the feedback drawer
+    holds a single flat list which it filters by ``slideIndex``.
+
+    ``slide_indices`` is given on the ROW path only: the list index of each
+    pair's row, parallel to *pairs*.  A finding is minted for a slide's content
+    and lives in that content hash's slot of the row's record, so the row it was
+    read from IS its slide; the stamped ``slideIndex`` is only where the reviewer
+    saw it.  Each finding with ``slide_index != -1`` is therefore projected with
+    ``slide_index`` replaced by its row's list index, BEFORE ``_finding_to_camel``
+    (#314, D7), so an insert, reorder, delete or duplicate shows a slide's
+    findings on that slide.  A deck-level finding's ``-1`` sentinel survives the
+    projection, and the stored record is never rewritten.
+
+    On the blob and no-rows paths ``slide_indices`` is not given and ``slideIndex``
+    is projected verbatim from what the reviewer stamped.  A consequence, stated
+    because it is a real limit rather than a measured behaviour of any current
+    writer: on those two paths a finding whose slide was reordered after the
+    review carries the index it was stamped with.
+
+    Two slides with identical HTML share a content hash, so on the ``deck_json``
+    blob path (where one deck-wide ``verification_map`` is consulted per slide)
+    their findings appear once per such slide.
+
+    It NEVER raises: an unreadable record contributes nothing rather than failing
+    the deck read.
+    """
+    findings: List[Dict[str, Any]] = []
+    for pair_index, (record, content_hash) in enumerate(pairs):
+        try:
+            for finding in findings_from_record(record, content_hash):
+                if slide_indices is not None and finding.slide_index != -1:
+                    finding = finding.model_copy(
+                        update={"slide_index": slide_indices[pair_index]}
+                    )
+                findings.append(_finding_to_camel(finding))
+        except Exception:
+            logger.warning("findings: unreadable verification record, skipping")
+    return findings
+
+
+def _parse_record(raw: Optional[str]) -> Dict[str, Any]:
+    """Parse a verification_record JSON string into a dict; {} on anything odd."""
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("verification_record: invalid JSON in row, treating as empty")
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _merge_verdict_slots(
+    base: Optional[Dict[str, Any]],
+    incoming: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Merge ``{content_hash: verdict}`` dicts ONE LEVEL DEEPER than ``dict.update``.
+
+    THE PER-HASH SLOT IS SHARED, AND THAT IS WHY THIS IS NOT A PLAIN UPDATE
+    -----------------------------------------------------------------------
+    Two independent producers write into ``record[content_hash]``:
+
+    * the LLM judge, whose verdict is the flat payload the frontend requires —
+      ``score``, ``rating``, ``explanation``, ``issues``, ``duration_ms``,
+      ``error`` (``frontend/src/types/verification.ts``); and
+    * the graph reviewer, whose payload is ``{VERDICT_KEY: {...}}``
+      (``build_verification_record`` in ``src/domain/finding.py``).
+
+    The read path assigns the WHOLE per-hash dict to ``slide["verification"]``,
+    so both producers' keys have to survive in it.  A hash-level
+    ``merged.update(incoming)`` replaced the whole slot, so a review write
+    deleted the judge's ``rating`` and a judge write deleted ``tellr_review``
+    (and every finding with it) — silently, and in whichever order the two
+    arrived.  Merging the slot's keys instead makes the slot genuinely shared:
+    each producer overwrites only what it actually emits.
+
+    The nesting under VERDICT_KEY is deliberately NOT flattened: it is what keeps
+    ``is_placeholder_record`` — which scans each verdict value for ``error is
+    True`` — from reading a review as a placeholder.
+
+    Within one hash the incoming keys win, which preserves the old
+    last-writer-wins semantics per key (same HTML → same judge result).  A
+    non-dict on either side is not merged, it is replaced, so a corrupt slot
+    cannot make this raise.
+
+    Returns a new dict; neither argument is mutated.
+    """
+    merged: Dict[str, Any] = dict(base or {})
+    for content_hash, verdict in (incoming or {}).items():
+        current = merged.get(content_hash)
+        if isinstance(current, dict) and isinstance(verdict, dict):
+            slot = dict(current)
+            slot.update(verdict)
+            merged[content_hash] = slot
+        else:
+            merged[content_hash] = verdict
+    return merged
+
+
+def _merge_verification_record(
+    base_raw: Optional[str],
+    incoming: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Merge ``incoming`` ``{content_hash: verdict}`` entries into ``base_raw``.
+
+    MERGE, never assign — this is load-bearing and unchanged from Task 7's
+    semantics.  Entries at other content-hash keys survive, so editing a slide
+    (new hash) and reverting it (old hash) still finds the original verdict; and
+    two concurrent verification writes for the same slide cannot lose each
+    other's work beyond a single key of a single hash's verdict.
+
+    The merge runs one level deeper than the content hash — see
+    :func:`_merge_verdict_slots` — because the per-hash slot is SHARED between
+    the LLM judge's flat payload and the graph reviewer's ``VERDICT_KEY`` entry.
+
+    ``base_raw`` is the record ATTRIBUTED TO THIS SLIDE by
+    ``_attribute_slide_records`` — not simply whatever happened to be sitting on
+    this position's row.  That distinction is the whole of the F2 fix; see that
+    function's docstring.
+
+    Returns:
+        JSON string, or None when the result is empty (column stays NULL rather
+        than holding ``"{}"``).
+    """
+    merged = _merge_verdict_slots(_parse_record(base_raw), incoming)
+    return json.dumps(merged) if merged else None
+
+
+class SlideAttribution(NamedTuple):
+    """The per-slide state that FOLLOWED a slide to its new position.
+
+    Both fields are raw column values (JSON strings or None), not parsed objects:
+    they are carried from an old row to ``_upsert_slide_row`` untouched, and
+    re-encoding them would be a chance to change them.
+
+    Two fields, not one, because both answer the same question — "which slide does
+    this belong to?" — and the answer must be the same for both.  When only the
+    verification record was mapped, a shift moved the verdict and left the spec
+    fragment behind on the position, where it then described a different slide.
+    """
+
+    verification_record: Optional[str]
+    deck_spec_slide: Optional[str]
+
+
+#: What a position with no attributable predecessor gets: nothing, in both fields.
+#: Used as the ``.get`` default so a caller cannot accidentally read a missing
+#: attribution as "leave whatever is there alone".
+NO_ATTRIBUTION = SlideAttribution(verification_record=None, deck_spec_slide=None)
+
+
+def _attribution_from(row: SessionSlide) -> SlideAttribution:
+    """Everything that belongs to the SLIDE this row currently holds.
+
+    One function, called by all three attribution passes, so a field can never be
+    carried by one pass and dropped by another.
+    """
+    return SlideAttribution(
+        verification_record=row.verification_record,
+        deck_spec_slide=row.deck_spec_slide,
+    )
+
+
+def _attribute_slide_records(
+    old_rows: List[SessionSlide],
+    new_slides: List[Dict[str, Any]],
+) -> Dict[int, SlideAttribution]:
+    """Decide which existing row's per-slide state belongs to each NEW position.
+
+    THE VERDICT-VS-POSITION PROBLEM (F2), AND HOW THIS RESOLVES IT
+    --------------------------------------------------------------
+    Two requirements pull in opposite directions:
+
+    1. **Hash-keyed history must be preserved** (spec §5.2.4 / PRD §12.1): a
+       verdict survives regeneration because entries are keyed by content hash,
+       so editing a slide and reverting it finds the original verdict again.
+       That argues for never dropping entries.
+
+    2. **A reorder must not mis-attribute** (F2): if the previous occupant's
+       record simply stays on the position's row, slide A's verdict ends up on
+       slide B's row.  ``get_slide_deck`` resolves via
+       ``.get(compute_slide_hash(row.html))``, so A's verdict reads back as None
+       (user-visibly LOST) while B's row silently carries a stranded entry.
+
+    They are reconciled by observing that **a verification record belongs to a
+    SLIDE, not to a position.**  So instead of pruning entries (which would
+    destroy the revert history) or leaving them put (which mis-attributes), this
+    function re-attaches each whole record to the slide it belongs to, wherever
+    that slide has moved to.  The record then travels intact, history and all.
+
+    ``deck_spec_slide`` IS THE SAME PROBLEM AND TRAVELS THE SAME WAY
+    ----------------------------------------------------------------
+    A per-slide spec fragment is no more a property of a position than a verdict
+    is, so it is attributed by the same three passes and returned in the same
+    :class:`SlideAttribution` — one decision per slide, never two that can
+    disagree.  Before this it was not mapped at all: a shift moved the verdict and
+    left the fragment on the position, describing whichever slide had arrived
+    there.  That was live behaviour, not a latent risk — ``graph/nodes.py``
+    writes the column on every reviewed slide, so every graph-built deck carried
+    fragments that any reorder, duplicate or insert mis-attributed.
+
+    Note this only works because ``_upsert_slide_row`` writes the attributed
+    fragment even when it is None on its full-identity path: "no fragment
+    followed this slide" has to CLEAR the displaced occupant's fragment, not be
+    read as "leave it alone".
+
+    Attribution runs in three passes, most reliable evidence first.  Each old row
+    can be claimed at most once, and a later pass may only claim a row no earlier
+    pass took:
+
+      1. **By ``slide_id``** — durable per-slide identity.  Survives content
+         edits, so an edited slide keeps its own revert history.
+      2. **By content hash** — for slides with no usable ``slide_id`` (legacy
+         decks store ``slide_id: null`` widely).  Identical content is the same
+         slide; this alone makes reorder correct for id-less decks.
+      3. **By position** — last resort, and ONLY onto an old row that neither
+         earlier pass claimed.  That "unclaimed" guard is precisely what stops
+         the F1/F2 mis-attribution: on a reorder, old position 0's row has
+         already been claimed by whichever new position now holds its slide, so
+         pass 3 cannot hand it to the newcomer.  On a plain in-place edit
+         nothing else claims it, so the slide keeps its history.
+
+    Returns:
+        ``{new_position: SlideAttribution}``.  Positions absent from the mapping
+        have no attributable predecessor at all; read them through
+        ``.get(position, NO_ATTRIBUTION)`` so the absence stays explicit.
+    """
+    from src.utils.slide_hash import compute_slide_hash
+
+    claimed: set[int] = set()  # indices into old_rows
+    result: Dict[int, SlideAttribution] = {}
+
+    old_by_slide_id: Dict[str, List[int]] = {}
+    old_by_hash: Dict[str, List[int]] = {}
+    for idx, row in enumerate(old_rows):
+        if row.slide_id:
+            old_by_slide_id.setdefault(row.slide_id, []).append(idx)
+        old_by_hash.setdefault(compute_slide_hash(row.html or ""), []).append(idx)
+
+    old_by_position = {row.position: idx for idx, row in enumerate(old_rows)}
+
+    new_hashes = [compute_slide_hash(s.get("html") or "") for s in new_slides]
+
+    # Pass 1: durable slide_id. Ambiguous ids (the same slide_id on more than one
+    # old row — possible via duplicate-slide flows) are skipped, not guessed.
+    for position, slide in enumerate(new_slides):
+        slide_id = slide.get("slide_id")
+        if not slide_id:
+            continue
+        candidates = old_by_slide_id.get(slide_id) or []
+        if len(candidates) == 1 and candidates[0] not in claimed:
+            claimed.add(candidates[0])
+            result[position] = _attribution_from(old_rows[candidates[0]])
+
+    # Pass 2: identical content.
+    for position, slide_hash in enumerate(new_hashes):
+        if position in result:
+            continue
+        for idx in old_by_hash.get(slide_hash) or []:
+            if idx not in claimed:
+                claimed.add(idx)
+                result[position] = _attribution_from(old_rows[idx])
+                break
+
+    # Pass 3: same position, but only if unclaimed (the in-place-edit case).
+    for position in range(len(new_slides)):
+        if position in result:
+            continue
+        idx = old_by_position.get(position)
+        if idx is not None and idx not in claimed:
+            claimed.add(idx)
+            result[position] = _attribution_from(old_rows[idx])
+
+    return result
+
+
+def _upsert_slide_row(
+    db: Session,
+    owner_id: int,
+    position: int,
+    slide_dict: Dict[str, Any],
+    *,
+    now_dt: Optional[datetime],
+    author_fallback: Optional[str] = None,
+    verification: Optional[Dict[str, Any]] = None,
+    base_record: Optional[str] = None,
+    base_spec: Optional[str] = None,
+    deck_spec_slide: Optional[Dict[str, Any]] = None,
+    partial: bool = False,
+    insert_only: bool = False,
+) -> SessionSlide:
+    """Insert or update THE session_slides row for ``(owner_id, position)``.
+
+    This is the single writer of a session_slides row.  On UPDATE it rewrites the
+    FULL identity field set — ``slide_id``, ``created_by``, ``created_at``
+    included — so the row always describes the slide currently at *position*.
+
+    Args:
+        db: live SQLAlchemy session (caller owns the transaction).
+        owner_id: ``deck_owner.id`` — the Integer FK to ``user_sessions.id``,
+            never the string business key.
+        position: 0-based slide position.
+        slide_dict: the slide's fields (``html``, ``slide_id``, ``scripts``,
+            ``created_by``, ``created_at``, ``modified_by``, ``modified_at``).
+        now_dt: naive-UTC timestamp to use when the slide carries none.  Pass None
+            to leave the timestamp NULL instead — the backfill does this, because
+            fabricating "now" for a historical slide would misreport when it was
+            authored.
+        author_fallback: used for ``created_by``/``modified_by`` when the slide
+            dict omits them.  DELIBERATE DIVERGENCE, do not "harmonise": a live
+            write (save_slide_deck) knows who is writing and passes
+            ``modified_by`` here, while the backfill has no writer identity and
+            passes None so the columns stay NULL.
+        verification: ``{content_hash: verdict}`` entries to merge in (e.g. from a
+            save point's verification_map).
+        base_record: the verification_record JSON this slide is entitled to,
+            as decided by ``_attribute_slide_records`` — the record that FOLLOWED
+            THE SLIDE here, which is not necessarily the one already sitting on
+            this position's row.  Callers that mutate deck order MUST pass this;
+            omitting it means "this slide brings no prior record".
+        base_spec: the ``deck_spec_slide`` JSON this slide is entitled to, from the
+            same attribution decision as ``base_record`` — a RAW column string,
+            not a parsed fragment.  On the full-identity path it is written even
+            when None, because "no fragment followed this slide" must CLEAR the
+            fragment the position's previous occupant left behind; a caller that
+            mutates deck order and omits it silently keeps the stale one.
+            ``deck_spec_slide`` wins over it when both are supplied.
+        deck_spec_slide: parsed spec fragment to store, or None.
+        partial: PARTIAL-UPDATE MODE, used only by ``SlideWriter.write_slide``.
+            When True:
+              * ``verification=None`` means "leave the record unchanged";
+              * ``base_record`` is ignored (the row's own record is the base);
+              * ``deck_spec_slide=None`` means "leave unchanged";
+              * absent ``slide_id``/``created_by``/``modified_by`` keys leave the
+                existing values intact instead of clearing them.
+            PR3 relies on these semantics (a reviewer rewrites HTML without
+            touching the verdict; the foreman attaches a spec fragment without
+            disturbing verification).
+        insert_only: the caller has already established that no row exists at
+            ``(owner_id, position)``, so skip the existence SELECT and INSERT.
+            Used by the row-per-slide backfill, which knows it from its own
+            guard; that SELECT was a round trip per slide on ~57k slides at
+            startup.  If the claim is wrong the composite primary key rejects
+            the INSERT at flush — a loud IntegrityError, never a silent overwrite.
+
+    Returns:
+        The inserted or updated SessionSlide row.
+    """
+    html = slide_dict.get("html") or ""
+    scripts = slide_dict.get("scripts") or ""
+
+    created_at = _to_naive_utc(slide_dict.get("created_at")) or now_dt
+    modified_at = _to_naive_utc(slide_dict.get("modified_at")) or now_dt
+
+    created_by = slide_dict.get("created_by") or author_fallback
+    modified_by = slide_dict.get("modified_by") or author_fallback
+    slide_id = slide_dict.get("slide_id")
+
+    spec_json = json.dumps(deck_spec_slide) if deck_spec_slide is not None else None
+
+    existing = None if insert_only else (
+        db.query(SessionSlide)
+        .filter(
+            and_(
+                SessionSlide.session_id == owner_id,
+                SessionSlide.position == position,
+            )
+        )
+        .one_or_none()
+    )
+
+    if existing is not None:
+        existing.html = html
+        existing.scripts = scripts
+        existing.modified_at = modified_at
+
+        if partial:
+            # SlideWriter semantics: only overwrite what the caller supplied.
+            if slide_id is not None:
+                existing.slide_id = slide_id
+            if created_by:
+                existing.created_by = created_by
+            if modified_by:
+                existing.modified_by = modified_by
+            if verification is not None:
+                existing.verification_record = _merge_verification_record(
+                    existing.verification_record, verification
+                )
+            if spec_json is not None:
+                existing.deck_spec_slide = spec_json
+        else:
+            # Full-identity rewrite: the row describes the slide now at this
+            # position, so identity AND the verification record move with the
+            # slide (F1/F2) rather than staying behind with the position.
+            existing.slide_id = slide_id
+            existing.created_by = created_by
+            existing.created_at = created_at
+            existing.modified_by = modified_by
+            existing.verification_record = _merge_verification_record(
+                base_record, verification
+            )
+            # UNCONDITIONAL, unlike the partial branch above: this row now
+            # describes a different slide, so an attributed None means "this slide
+            # brought no fragment" and MUST clear the previous occupant's.
+            # Treating None as "leave unchanged" here is precisely how a shift
+            # stranded a fragment on the slide that replaced its owner.
+            existing.deck_spec_slide = spec_json if spec_json is not None else base_spec
+        return existing
+
+    # INSERT.  id is a fresh uuid4, NOT slide_id: `id` is String(64) UNIQUE
+    # globally, and two sessions' decks can legitimately carry the same slide_id
+    # (duplicate-slide and restore flows), which would abort the write.
+    row = SessionSlide(
+        session_id=owner_id,
+        position=position,
+        id=str(uuid.uuid4()),
+        html=html,
+        slide_id=slide_id,
+        scripts=scripts,
+        created_by=created_by,
+        created_at=created_at,
+        modified_by=modified_by,
+        modified_at=modified_at,
+        verification_record=_merge_verification_record(base_record, verification),
+        deck_spec_slide=spec_json if spec_json is not None else base_spec,
+    )
+    db.add(row)
+    return row
+
+
+def _prune_slide_rows_beyond(db: Session, owner_id: int, slide_count: int) -> int:
+    """Delete orphan session_slides rows at ``position >= slide_count``.
+
+    THE single orphan-prune strategy.  Before this there were three (bulk
+    ``delete(synchronize_session=False)`` in the dual-write and backfill,
+    per-row ``db.delete()`` in restore, none at all in SlideWriter) — F12.
+
+    Per-row ``db.delete()`` is used deliberately: existing unit-test mocks in
+    ``tests/unit/test_save_points.py`` count ``query.delete()`` invocations via
+    ``side_effect``, and restore_version's newer-version / newer-message deletes
+    consume that sequence.  A bulk delete here would steal one of those values.
+    Row counts per deck are small (tens), so the cost is immaterial.
+
+    Must run in the SAME transaction as the writes: a shorter deck otherwise
+    leaves phantom rows that the read path serves as extra slides, and PR3's
+    releasable_positions predicate waits forever on positions no builder fills.
+
+    Returns:
+        Number of rows deleted.
+    """
+    orphans = (
+        db.query(SessionSlide)
+        .filter(
+            and_(
+                SessionSlide.session_id == owner_id,
+                SessionSlide.position >= slide_count,
+            )
+        )
+        .all()
+    )
+    for orphan in orphans:
+        db.delete(orphan)
+    return len(orphans)
+
+
+def _rewrite_slide_rows(
+    db: Session,
+    owner_id: int,
+    slides: List[Dict[str, Any]],
+    *,
+    now_dt: Optional[datetime],
+    author_fallback: Optional[str],
+    attribution: Optional[Dict[int, SlideAttribution]] = None,
+    incoming: Optional[Dict[int, Dict[str, Any]]] = None,
+) -> None:
+    """THE per-slide rewrite of a whole deck: one copy, so its callers cannot diverge.
+
+    ``save_slide_deck``, ``restore_version`` and ``SlideWriter.insert_pending_slides``
+    all rewrite every row of a deck through here.  Hand-copied versions of this
+    block once drifted apart, and a reorder then attached slide identity and
+    verdicts to the wrong slide.
+
+    Steps, in this order:
+
+    1. **Attribution, before any write.**  Unless the caller passes the exact
+       ``attribution`` map, the current rows are read and attributed to the new
+       positions by ``_attribute_slide_records`` (slide_id, then content hash, then
+       unclaimed position).  It must run before the first upsert, because the
+       upsert rewrites those ORM rows in place.  A caller that already knows which
+       old row moves where (the graph's shift) passes the map and skips the
+       heuristic, which could only be wrong there.
+    2. **``_upsert_slide_row`` on the full-identity path for every position**, with
+       the attributed record and spec fragment as its base, and ``incoming[position]``
+       (``{content_hash: verdict}``) merged in.
+    3. **``_prune_slide_rows_beyond``** the new slide count.
+
+    Args:
+        db: live SQLAlchemy session.  The caller owns the transaction; nothing
+            here commits or relies on an implicit flush.
+        owner_id: ``deck_owner.id``.
+        slides: the deck's slide dicts in position order.
+        now_dt: timestamp for a slide that carries none, or None to leave it NULL.
+        author_fallback: author for a slide that names none, or None to leave it
+            NULL.  See ``_upsert_slide_row`` for why callers differ.
+        attribution: ``{new_position: SlideAttribution}``, or None to compute it.
+            A position absent from the map brings no prior record or fragment.
+        incoming: ``{position: {content_hash: verdict}}`` to merge per position.
+    """
+    if attribution is None:
+        old_rows = (
+            db.query(SessionSlide)
+            .filter(SessionSlide.session_id == owner_id)
+            .order_by(SessionSlide.position)
+            .all()
+        )
+        attribution = _attribute_slide_records(old_rows, slides)
+    incoming = incoming or {}
+
+    for position, slide_dict in enumerate(slides):
+        attributed = attribution.get(position, NO_ATTRIBUTION)
+        _upsert_slide_row(
+            db,
+            owner_id,
+            position,
+            slide_dict,
+            now_dt=now_dt,
+            author_fallback=author_fallback,
+            verification=incoming.get(position),
+            base_record=attributed.verification_record,
+            # Both halves of the attribution, or the spec fragment stays on the
+            # position while the verdict moves.
+            base_spec=attributed.deck_spec_slide,
+        )
+
+    _prune_slide_rows_beyond(db, owner_id, len(slides))
+
+
+#: How long a turn's processing lock (``UserSession.is_processing``) counts as
+#: live.  ``acquire_session_lock``'s default and the manual insert's busy check
+#: (``SessionManager.insert_slide``) both read it, so the two cannot drift.  Module
+#: level, above ``SessionManager``: a default value is evaluated at ``def`` time.
+SESSION_LOCK_TIMEOUT_SECONDS = 300
+
+
+class SlideRowsChangedError(RuntimeError):
+    """The committed rows are not the rows the caller planned against."""
+
+
+class DeckBusyError(RuntimeError):
+    """A turn holds another session of this deck, so its rows must not shift now.
+
+    Raised by :meth:`SessionManager.insert_slide` when the deck owner's session,
+    or any contributor session of the deck other than the requester, holds a
+    live processing lock (younger than :data:`SESSION_LOCK_TIMEOUT_SECONDS`).
+    """
+
+
+def _snapshot_row(row: SessionSlide) -> Dict[str, Any]:
+    """The slide a row holds, as the plain dict ``_upsert_slide_row`` writes back.
+
+    Raw column values (never display names or re-parsed timestamps), so a slide
+    moved to another position is rewritten with exactly what it had.  The
+    verification record and spec fragment travel separately, as its
+    ``SlideAttribution``.
+    """
+    return {
+        "html": row.html,
+        "scripts": row.scripts,
+        "slide_id": row.slide_id,
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+        "modified_by": row.modified_by,
+        "modified_at": row.modified_at,
+    }
+
+
+def _splice_slide_rows(
+    db: Session,
+    owner_id: int,
+    old_rows: List[SessionSlide],
+    new_slides: Mapping[int, Tuple[Dict[str, Any], Dict[str, Any]]],
+) -> None:
+    """THE shift: splice new slides in among a deck's rows with the EXACT old-row map.
+
+    Shared by the graph's ``SlideWriter.insert_pending_slides`` and the manual
+    ``SessionManager.insert_slide``, so there is one shift primitive and one row
+    writer.
+
+    1. Every old row is snapshotted (:func:`_snapshot_row`) and attributed
+       (:func:`_attribution_from`) BEFORE any write: ``_upsert_slide_row``
+       rewrites those ORM rows in place.
+    2. ``len(old_rows) + len(new_slides)`` positions are laid out: position ``i``
+       holds ``new_slides[i]``'s slide when ``i`` is a key, otherwise the next old
+       row in order.
+    3. Every position is rewritten through ``_rewrite_slide_rows`` with that map,
+       never the attribution heuristic, and with ``now_dt=None`` /
+       ``author_fallback=None``, so a moved row with a NULL author or timestamp
+       stays NULL and no moved row gets a fresh ``modified_at``.
+
+    Args:
+        db: live SQLAlchemy session; the caller owns the transaction.
+        owner_id: ``deck_owner.id``.
+        old_rows: the deck's current rows, in position order.
+        new_slides: ``{new_index: (slide_dict, incoming_record)}``.  The slide dict
+            carries its own ``slide_id``, authorship and timestamps; the record is
+            ``{content_hash: verdict}`` merged onto the new row (``{}`` for none).
+
+    Raises:
+        ValueError: a new index is outside ``range(len(old_rows) + len(new_slides))``.
+            Raised before anything is written.
+    """
+    new_count = len(old_rows) + len(new_slides)
+    outside = sorted(index for index in new_slides if not 0 <= index < new_count)
+    if outside:
+        raise ValueError(
+            f"new slide indices {outside} are outside the shifted deck's "
+            f"{new_count} positions"
+        )
+
+    # 1. Snapshots and attributions from the ORM rows BEFORE any write.
+    snapshots = [_snapshot_row(row) for row in old_rows]
+    attributions = [_attribution_from(row) for row in old_rows]
+
+    # 2. The layout: each new slide at its index, the old rows in order around them.
+    slides: List[Dict[str, Any]] = []
+    attribution: Dict[int, SlideAttribution] = {}
+    incoming: Dict[int, Dict[str, Any]] = {}
+    old_index = 0
+    for new_index in range(new_count):
+        if new_index in new_slides:
+            slide_dict, record = new_slides[new_index]
+            slides.append(slide_dict)
+            incoming[new_index] = record
+        else:
+            slides.append(snapshots[old_index])
+            attribution[new_index] = attributions[old_index]
+            old_index += 1
+
+    # 3. THE whole-deck rewrite, with the exact map.
+    _rewrite_slide_rows(
+        db,
+        owner_id,
+        slides,
+        now_dt=None,
+        author_fallback=None,
+        attribution=attribution,
+        incoming=incoming,
+    )
+
+
+def earliest_user_message(db: Session, session_pk: int) -> Optional[SessionMessage]:
+    """The session's earliest ``role='user'`` row: the row engine mode is read off.
+
+    THE one copy of this rule (#317).  Earliest means ``created_at``, then
+    ``id``.  ``role`` only, never ``message_type``: the live paths write
+    different types for one user turn (``user_input`` on SSE, ``user_query`` on
+    the async route and MCP, ``chat`` on the tour), and the row a clear or a
+    message delete keeps is re-typed ``engine_mode_marker`` but is still this
+    row.
+
+    Callers: ``resolve_engine_mode`` (on the deck OWNER's session),
+    ``ChatService.clear_context`` and ``ChatService.delete_message`` (the row
+    they keep), ``SessionManager.duplicate_session`` (the marker it carries).
+    The startup pin backfill (``conversation_pins._backfill_in_transaction``)
+    applies the same rule set-based, over every root at once, with
+    ``row_number()`` over the same two columns; keep the two in step.
+
+    ``session_pk`` is ``UserSession.id`` (the integer key), not the string id.
+    """
+    return (
+        db.query(SessionMessage)
+        .filter(
+            SessionMessage.session_id == session_pk,
+            SessionMessage.role == "user",
+        )
+        .order_by(SessionMessage.created_at.asc(), SessionMessage.id.asc())
+        .first()
+    )
+
+
 class SessionNotFoundError(Exception):
     """Raised when a session is not found."""
 
     pass
+
+
+class MessageNotFoundError(Exception):
+    """A message id is not a deletable message of the session.
+
+    One error for every case (absent, another session's, not a user message,
+    the hidden engine-mode marker), so the route's 404 is no oracle for ids in
+    other sessions.
+    """
 
 
 class SessionAccessDeniedError(Exception):
@@ -116,6 +972,7 @@ class SessionManager:
         session_id: Optional[str] = None,
         created_by: Optional[str] = None,
         agent_config: Optional[Dict[str, Any]] = None,
+        graph_capable: bool = False,
     ) -> Dict[str, Any]:
         """Create a new session.
 
@@ -128,6 +985,7 @@ class SessionManager:
                 Normalized through the shared persistence serializer before storage
                 (see below), so a caller cannot persist a config that carries BOTH
                 style authorities.
+            graph_capable: Whether this explicit root pins the active graph release.
 
         Returns:
             Dictionary with session info including session_id
@@ -150,13 +1008,21 @@ class SessionManager:
                 .first()
             )
             if existing:
+                graph_version = get_conversation_graph_version(db, existing)
                 return {
                     "session_id": existing.session_id,
                     "user_id": existing.user_id,
                     "created_by": existing.created_by,
                     "title": existing.title,
                     "created_at": existing.created_at.isoformat(),
+                    "graph_version": graph_version.graph_version,
+                    "active_graph_version": graph_version.active_graph_version,
+                    "is_older_than_active": graph_version.is_older_than_active,
                 }
+
+            graph_release_id = None
+            if graph_capable:
+                graph_release_id = lock_active_graph_release(db).release_id
 
             session = UserSession(
                 session_id=session_id,
@@ -164,6 +1030,7 @@ class SessionManager:
                 created_by=created_by,
                 title=title or f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
                 agent_config=agent_config,
+                graph_release_id=graph_release_id,
             )
             db.add(session)
             db.flush()
@@ -176,12 +1043,16 @@ class SessionManager:
                 },
             )
 
+            graph_version = get_conversation_graph_version(db, session)
             return {
                 "session_id": session_id,
                 "user_id": user_id,
                 "created_by": created_by,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
+                "graph_version": graph_version.graph_version,
+                "active_graph_version": graph_version.active_graph_version,
+                "is_older_than_active": graph_version.is_older_than_active,
             }
 
     def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -216,6 +1087,7 @@ class SessionManager:
                 .scalar()
                 or 0
             )
+            graph_version = get_conversation_graph_version(db, session)
 
             return {
                 "id": session.id,
@@ -237,6 +1109,9 @@ class SessionManager:
                 "parent_session_id": parent_session_id_str,
                 "parent_session_internal_id": session.parent_session_id,
                 "global_permission": deck_owner.global_permission,
+                "graph_version": graph_version.graph_version,
+                "active_graph_version": graph_version.active_graph_version,
+                "is_older_than_active": graph_version.is_older_than_active,
             }
 
     def get_or_create_contributor_session(
@@ -285,11 +1160,13 @@ class SessionManager:
                     "created_at": existing.created_at.isoformat(),
                 }
 
+            graph_release_id = lock_active_graph_release(db).release_id
             contributor = UserSession(
                 session_id=secrets.token_urlsafe(32),
                 created_by=created_by,
                 title=parent.title,
                 parent_session_id=parent.id,
+                graph_release_id=graph_release_id,
             )
             db.add(contributor)
             db.flush()
@@ -428,6 +1305,9 @@ class SessionManager:
                 .limit(limit)
                 .all()
             )
+            graph_versions = get_conversation_graph_versions(
+                db, [session for session, _message_count in sessions]
+            )
 
             return [
                 {
@@ -441,6 +1321,9 @@ class SessionManager:
                     "has_slide_deck": s.slide_deck is not None,
                     "slide_count": s.slide_deck.slide_count if s.slide_deck is not None else 0,
                     "global_permission": s.global_permission,
+                    "graph_version": graph_versions[s.id].graph_version,
+                    "active_graph_version": graph_versions[s.id].active_graph_version,
+                    "is_older_than_active": graph_versions[s.id].is_older_than_active,
                 }
                 for s, message_count in sessions
             ]
@@ -561,6 +1444,12 @@ class SessionManager:
             SessionAccessDeniedError: If ``min_permission`` is not satisfied
             ValueError: If source has no slide deck or version not found
         """
+        # Imported here, not at module level: chat_service imports this module,
+        # so a module-level import back would be a cycle — and this module is
+        # what pulls chat_service into the unit suite's collection chain, where
+        # an ImportError stops the suite COLLECTING rather than failing a test.
+        from src.api.services.chat_service import _selects_agent_mode
+
         with get_db_session() as db:
             source = self._get_session_or_raise(db, source_session_id)
             if min_permission is not None:
@@ -588,6 +1477,7 @@ class SessionManager:
                 )
                 deck_json = version.deck_json
                 verification_map = version.verification_map_json
+                deck_spec_json = version.deck_spec_json
             else:
                 source_deck = deck_owner.slide_deck
                 html_content = source_deck.html_content
@@ -595,12 +1485,31 @@ class SessionManager:
                 slide_count = source_deck.slide_count
                 deck_json = source_deck.deck_json
                 verification_map = source_deck.verification_map
+                deck_spec_json = source_deck.deck_spec_json
 
             base_title = deck_owner.title or "Untitled"
             if title and title.strip():
                 new_title = _truncate_session_title(title.strip())
             else:
                 new_title = _default_duplicate_title(base_title)
+
+            # Determine graph capability before constructing the new actor. The
+            # duplicate owns a fresh immutable pin selected under the active-row
+            # lock; the source's older pin is never copied or rewritten.
+            marker = earliest_user_message(db, deck_owner.id)
+            # The duplicate keeps its SOURCE deck's engine.  Since 2026-10-12
+            # the graph is the default and the marker is the LEGACY opt-out:
+            # a graph source (no first user message, or one without
+            # LEGACY_MODE_PHRASE) gives a duplicate with NO user message --
+            # which itself resolves to the graph -- so it must be pinned; a
+            # legacy source gives an unpinned duplicate carrying the opt-out.
+            source_is_graph = _selects_agent_mode(
+                marker.content if marker is not None else None
+            )
+            carried_marker = not source_is_graph
+            graph_release_id = None
+            if source_is_graph:
+                graph_release_id = lock_active_graph_release(db).release_id
 
             new_session = UserSession(
                 session_id=secrets.token_urlsafe(32),
@@ -613,10 +1522,15 @@ class SessionManager:
                 experiment_id=None,
                 google_slides_presentation_id=None,
                 google_slides_url=None,
+                graph_release_id=graph_release_id,
             )
             db.add(new_session)
             db.flush()
 
+            # deck_spec_json is copied directly from the source (version snapshot on the
+            # version branch, live deck spec on the else branch), so it is already correct
+            # for the HTML it carries.  This route is deliberately absent from ws4d's
+            # mark_dirty trigger list: a duplicate never starts with a stale spec.
             new_deck = SessionSlideDeck(
                 session_id=new_session.id,
                 title=new_title,
@@ -629,9 +1543,37 @@ class SessionManager:
                 modified_by=created_by,
                 locked_by=None,
                 locked_at=None,
+                deck_spec_json=deck_spec_json,
             )
             db.add(new_deck)
             db.flush()
+
+            # ws4d D1: carry the engine-mode marker, and NOTHING else.
+            #
+            # Engine mode is derived from the deck's earliest role='user'
+            # message, and no SessionMessage row is copied by a duplicate — so
+            # without this a duplicate of a LEGACY deck silently moves to the
+            # graph (the default since 2026-10-12).  Only a marker that
+            # actually selects the legacy engine is carried: copying the first
+            # message of every graph duplicate would change the graph path
+            # (message_count is a live COUNT, so a copy makes is_first_message
+            # False and suppresses title generation on the duplicate's first
+            # real turn) and would break the standing guarantee that a
+            # duplicate carries no chat history.  For a legacy duplicate that
+            # title suppression is accepted: the carried row is metadata, not
+            # conversation, and the title should come from the new
+            # conversation.
+            if carried_marker:
+                db.add(
+                    SessionMessage(
+                        session_id=new_session.id,
+                        role="user",
+                        content=marker.content,
+                        message_type=marker.message_type,
+                        created_at=marker.created_at,
+                    )
+                )
+                db.flush()
 
             logger.info(
                 "Duplicated session",
@@ -641,6 +1583,7 @@ class SessionManager:
                     "created_by": created_by,
                     "slide_count": slide_count,
                     "source_version_number": version_number,
+                    "carried_engine_mode_marker": carried_marker,
                 },
             )
 
@@ -837,7 +1780,11 @@ class SessionManager:
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
 
-            messages = session.messages
+            # The row a clear keeps (engine-mode marker) is not part of the
+            # conversation; drop it BEFORE ``limit`` so it never uses a slot.
+            messages = [
+                m for m in session.messages if is_transcript_message(m.message_type)
+            ]
             if limit:
                 messages = messages[-limit:]
 
@@ -864,6 +1811,7 @@ class SessionManager:
         deck_dict: Optional[Dict[str, Any]] = None,
         modified_by: Optional[str] = None,
         expected_version: Optional[int] = None,
+        mutation: Optional[DeckMutationContext] = None,
     ) -> Dict[str, Any]:
         """Save or update slide deck for a session.
 
@@ -952,10 +1900,82 @@ class SessionManager:
                 except Exception:
                     logger.debug("Failed to record deck_created event", exc_info=True)
 
+            # ------------------------------------------------------------------
+            # Dual-write: session_slides rows + deck-level presentation columns
+            #
+            # Runs in the SAME transaction as the deck_json write above so both
+            # representations stay consistent.  Task 5 reads from session_slides
+            # when any rows exist; Task 3 backfill uses identical field mapping.
+            # ------------------------------------------------------------------
+            if deck_dict:
+                slides = deck_dict.get("slides") or []
+                now_dt = datetime.utcnow()
+
+                # 1. Deck-level presentation columns (css, external_scripts_json,
+                #    head_meta_json).  The Task 5 read path reconstructs the deck
+                #    dict from columns, not from deck_json, so these MUST stay in
+                #    sync.  Missing css/external_scripts costs every export its
+                #    stylesheet and the Chart.js CDN; missing head_meta reverts a
+                #    custom viewport to SlideDeck.knit()'s hardcoded default (F5).
+                deck.css = deck_dict.get("css") or ""
+                deck.external_scripts_json = json.dumps(
+                    deck_dict.get("external_scripts") or []
+                )
+                deck.head_meta_json = json.dumps(deck_dict.get("head_meta") or {})
+
+                # 2. Per-slide rewrite through THE whole-deck writer: attribution
+                #    first (a reorder/insert/delete moves slides between positions
+                #    and each record must follow its slide, F1/F2), then every
+                #    position upserted, then orphan rows pruned.
+                _rewrite_slide_rows(
+                    db,
+                    deck_owner.id,
+                    slides,
+                    now_dt=now_dt,
+                    # Deliberate divergence from backfill_session_slides.py: the
+                    # backfill leaves created_by=None when absent (it has no writer
+                    # identity); a live save always knows who is writing.  Do NOT
+                    # "harmonise" these to None.
+                    author_fallback=modified_by,
+                )
+
             # Update activity on both the requesting session and the deck owner
             session.last_activity = datetime.utcnow()
             if session.id != deck_owner.id:
                 deck_owner.last_activity = datetime.utcnow()
+
+            db.flush()
+            generic_actor = MutationActor(
+                session.session_id, session.graph_release_id
+            )
+            contexts = [mutation] if mutation is not None else []
+            if mutation is None or not mutation.suppress_nested_events:
+                contexts.append(
+                    DeckMutationContext(
+                        actor=generic_actor,
+                        operation="save_deck",
+                        object_type="deck",
+                    )
+                )
+            if deck_dict and (mutation is None or not mutation.suppress_nested_events):
+                contexts.append(
+                    DeckMutationContext(
+                        actor=generic_actor,
+                        operation="save_deck_slides",
+                        object_type="deck",
+                    )
+                )
+            for context in contexts:
+                record_shared_deck_mutation(
+                    db,
+                    requesting_session=session,
+                    deck_owner=deck_owner,
+                    deck=deck,
+                    actor=context.actor,
+                    operation=context.operation,
+                    object_type=context.object_type,
+                    object_id=context.object_id,
+                )
 
             logger.info(
                 "Saved slide deck",
@@ -974,6 +1994,266 @@ class SessionManager:
                 "updated_at": deck.updated_at.isoformat(),
                 "version": deck.version,
             }
+
+    def insert_slide(
+        self,
+        session_id: str,
+        position: int,
+        *,
+        slide: Dict[str, Any],
+        expected_rows: Sequence[Tuple[Optional[str], str]],
+        deck_dict: Dict[str, Any],
+        title: Optional[str],
+        html_content: str,
+        scripts_content: Optional[str],
+        mutation: DeckMutationContext,
+        expected_version: Optional[int] = None,
+        inserted_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Insert one slide (the viewer's manual insert) in ONE transaction.
+
+        The manual insert shifts every later slide by one, so it moves rows with
+        the EXACT old-row map (:func:`_splice_slide_rows`, shared with the graph's
+        ``SlideWriter.insert_pending_slides``), never ``save_slide_deck``'s
+        attribution heuristic.  Rows, spec, deck columns and evidence are written
+        in one ``get_db_session()``, in this order:
+
+        1. The session and the deck OWNER are resolved, and a live arc-review
+           claim on the owner's deck refuses (``_refuse_during_an_arc_review``,
+           which reads the deck row ``FOR UPDATE``).
+        2. A live turn on any OTHER session of the deck (the owner's, or any
+           contributor's) refuses: ``is_processing`` with a
+           ``processing_started_at`` younger than
+           :data:`SESSION_LOCK_TIMEOUT_SECONDS`, in naive UTC.  The requester's own
+           lock (the route's) does not count.
+        3. The request is validated: the deck exists, *expected_version* is
+           current, *position* is not negative and *mutation* is an
+           ``insert_slide``/``deck`` context.
+        4. The rows are re-read in position order and ``[(slide_id,
+           content_hash)]`` must equal *expected_rows*.  A deck with NO rows (a
+           legacy ``deck_json`` deck the startup backfill has not reached, or a
+           duplicate: ``duplicate_session`` copies ``deck_json`` and no rows) is
+           first materialised exactly as that backfill does it (raw emails, NULL
+           timestamps kept, verdicts migrated from ``verification_map``,
+           css/external_scripts/head_meta lifted into their columns) and
+           re-read; there only the content hashes, in order, must equal
+           *expected_rows*' (the rows were made from this blob just now, and a
+           blob slide with no ``slide_id`` key is minted ``slide_{i}`` by
+           ``SlideDeck.from_dict`` but written NULL by the backfill).  The slide
+           lands at ``min(position, len(rows))`` and is spliced in.
+        5. ``deck_spec_json`` gains a blank entry at the landed index
+           (``spec_json_with_blank_entry``); a legacy or unreadable spec is left
+           alone.
+        6. ``title``, ``html_content``, ``scripts_content``, ``slide_count``,
+           ``deck_json``, one ``version`` bump, ``modified_by`` (the slide's
+           ``created_by``, when it has one) and ``last_activity`` are written.  On
+           the rows path css, external_scripts and head_meta are NOT touched.
+        7. Evidence: one ``slide_inserted`` usage event when *inserted_by* is
+           given, and exactly one ``insert_slide``/``deck`` mutation event.
+
+        Nothing is written on any raise: every refusal, and every failure of the
+        evidence write, rolls the whole transaction back, the materialisation
+        included.
+
+        Args:
+            session_id: the requesting session (a contributor writes the owner's deck).
+            position: the requested index; past the end appends.
+            slide: the new slide as a dict (``html``, ``slide_id``, ``scripts``,
+                ``created_by``/``created_at``, ``modified_by``/``modified_at``).
+            expected_rows: ``[(slide_id, content_hash)]`` of the deck the caller
+                planned against, in position order.
+            deck_dict: the whole deck after the insert, written to ``deck_json``.
+            title: the deck title after the insert.
+            html_content: the knitted deck after the insert.
+            scripts_content: the deck's scripts after the insert.
+            mutation: provenance; ``insert_slide`` on object type ``deck``, its
+                ``object_id`` the new slide's id.
+            expected_version: when given, the deck's version must still be this.
+            inserted_by: the editor, for the usage event; None writes none.
+
+        Returns:
+            ``{"session_id", "version", "position", "slide_id", "slide_count"}``,
+            where ``position`` is the index the slide landed at.
+
+        Raises:
+            SessionNotFoundError: *session_id* does not match any session.
+            ArcReviewInFlightError: the deck's arc review holds a live claim.
+            DeckBusyError: a turn holds another session of this deck.
+            ValueError: no deck, a negative position or a wrong mutation context,
+                or the evidence write refuses the actor.
+            VersionConflictError: *expected_version* is stale.
+            SlideRowsChangedError: the committed rows are not *expected_rows*.
+        """
+        # Lazy: chat_service imports this module.
+        from src.api.services.chat_service import _refuse_during_an_arc_review
+        from src.domain.deck_spec_slides import spec_json_with_blank_entry
+        from src.utils.slide_hash import compute_slide_hash
+
+        expected = [(slide_id, content_hash) for slide_id, content_hash in expected_rows]
+
+        with get_db_session() as db:
+            # 1. Session, deck owner, and the arc review's claim on the OWNER's deck.
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+            _refuse_during_an_arc_review(db, deck_owner)
+
+            # 2. A turn on any other session of this deck.  No FOR UPDATE on the
+            #    session rows: the deck row is already locked above, and other
+            #    writers flush user_sessions before the deck row, so locking them
+            #    here would invert the lock order.
+            cutoff = datetime.utcnow() - timedelta(seconds=SESSION_LOCK_TIMEOUT_SECONDS)
+            busy = (
+                db.query(UserSession.session_id)
+                .filter(
+                    or_(
+                        UserSession.id == deck_owner.id,
+                        UserSession.parent_session_id == deck_owner.id,
+                    ),
+                    UserSession.id != session.id,
+                    UserSession.is_processing.is_(True),
+                    UserSession.processing_started_at > cutoff,
+                )
+                .first()
+            )
+            if busy is not None:
+                raise DeckBusyError(
+                    f"session {busy.session_id} of this deck is running a turn"
+                )
+
+            # 3. Validate.
+            deck = deck_owner.slide_deck
+            if deck is None:
+                raise ValueError("No slide deck available")
+            if expected_version is not None and deck.version != expected_version:
+                raise VersionConflictError(
+                    current_version=deck.version,
+                    expected_version=expected_version,
+                )
+            if position < 0:
+                raise ValueError(f"position must be non-negative: {position}")
+            if mutation.operation != "insert_slide" or mutation.object_type != "deck":
+                raise ValueError(
+                    "insert_slide records an insert_slide/deck mutation, not "
+                    f"{mutation.operation}/{mutation.object_type}"
+                )
+
+            # 4. The rows the caller planned against, or nothing is written.
+            rows = self._slide_rows_in_position_order(db, deck_owner.id)
+            # (slide_id, hash) pairs on the rows path, bare hashes on the row-less one.
+            committed: List[Any]
+            planned: List[Any]
+            if rows:
+                committed = [(row.slide_id, compute_slide_hash(row.html or "")) for row in rows]
+                planned = expected
+            else:
+                # A row-less deck: a legacy deck the startup backfill has not
+                # reached, or a duplicate (duplicate_session copies deck_json and
+                # no rows).  Materialise its rows the way that backfill does, in
+                # THIS transaction (the non-committing core, so a refusal below
+                # rolls it back too).
+                from src.core.backfill_session_slides_startup import (
+                    _backfill_deck,
+                    _empty_result,
+                )
+
+                _backfill_deck(
+                    db,
+                    deck,
+                    _empty_result(deck_owner.id),
+                    dry_run=False,
+                    existing_positions=set(),
+                )
+                # autoflush is off: without this the re-read sees no rows.
+                db.flush()
+                rows = self._slide_rows_in_position_order(db, deck_owner.id)
+                # Content hashes, in order, only.  These rows were made from this
+                # very blob just now, so order and hash are exact; the ids are not:
+                # a blob slide with no slide_id key is minted slide_{i} by
+                # SlideDeck.from_dict (the cache the caller planned on) while the
+                # backfill writes NULL.
+                committed = [compute_slide_hash(row.html or "") for row in rows]
+                planned = [content_hash for _, content_hash in expected]
+            if committed != planned:
+                raise SlideRowsChangedError(
+                    f"the committed rows of session {session_id} are not the rows "
+                    f"the insert planned against ({len(committed)} committed, "
+                    f"{len(expected)} expected)"
+                )
+            landed = min(position, len(rows))
+            _splice_slide_rows(db, deck_owner.id, rows, {landed: (slide, {})})
+
+            # 5. The spec, in the same transaction as the rows.
+            spec_json = spec_json_with_blank_entry(deck.deck_spec_json, landed)
+            if spec_json is not None:
+                deck.deck_spec_json = spec_json
+
+            # 6. Deck columns.  css, external_scripts and head_meta are left alone.
+            now = datetime.utcnow()
+            deck.title = title
+            deck.html_content = html_content
+            deck.scripts_content = scripts_content
+            deck.slide_count = len(rows) + 1
+            deck.deck_json = json.dumps(deck_dict)
+            deck.version = (deck.version or 0) + 1
+            if slide.get("created_by"):
+                deck.modified_by = slide["created_by"]
+            session.last_activity = now
+            if session.id != deck_owner.id:
+                deck_owner.last_activity = now
+
+            # 7. Evidence; a refusal here rolls the whole insert back.
+            if inserted_by:
+                from src.database.models.usage_event import (
+                    EVENT_SLIDE_INSERTED,
+                    UsageEvent,
+                )
+
+                db.add(
+                    UsageEvent(
+                        username=inserted_by,
+                        event_type=EVENT_SLIDE_INSERTED,
+                        session_id=session.id,
+                    )
+                )
+            db.flush()
+            record_shared_deck_mutation(
+                db,
+                requesting_session=session,
+                deck_owner=deck_owner,
+                deck=deck,
+                actor=mutation.actor,
+                operation="insert_slide",
+                object_type="deck",
+                object_id=mutation.object_id,
+            )
+
+            logger.info(
+                "Inserted slide",
+                extra={
+                    "session_id": session_id,
+                    "deck_owner_session_id": deck_owner.session_id,
+                    "position": landed,
+                    "version": deck.version,
+                },
+            )
+
+            return {
+                "session_id": session_id,
+                "version": deck.version,
+                "position": landed,
+                "slide_id": slide.get("slide_id"),
+                "slide_count": deck.slide_count,
+            }
+
+    @staticmethod
+    def _slide_rows_in_position_order(db: Session, owner_id: int) -> List[SessionSlide]:
+        """The deck owner's ``session_slides`` rows, in position order."""
+        return (
+            db.query(SessionSlide)
+            .filter(SessionSlide.session_id == owner_id)
+            .order_by(SessionSlide.position)
+            .all()
+        )
 
     def get_slide_deck_version(self, session_id: str) -> Optional[int]:
         """Return only the deck's current version number.
@@ -1005,17 +2285,34 @@ class SessionManager:
     def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get slide deck for a session with verification merged by content hash.
 
+        Read path (dual-read period):
+          1. If session_slides rows exist for the deck owner, reconstruct the
+             deck dict from those rows + deck-level columns. This is the
+             authoritative path once the dual-write has populated the rows.
+          2. Otherwise fall back to the legacy deck_json blob. This covers
+             sessions written before the dual-write landed and any edge cases
+             where the dual-write was skipped (e.g. deck_dict=None saves).
+
         For contributor sessions, follows parent_session_id to read the
         shared slide deck from the owner's session.
+
+        All THREE dict-returning paths — row-read, deck_json blob, and the legacy
+        row-less fallback — emit ``deck_spec`` and ``findings`` unconditionally.
+        Omitting either on one path would make the shape of the dict depend on
+        which path a given deck happens to take, and a consumer would see
+        ``undefined`` for a deck it can read perfectly well.
 
         Args:
             session_id: Session to get deck for
 
         Returns:
-            Full SlideDeck dictionary (with slides array and verification) or None
+            Full SlideDeck dictionary (with slides array and verification) or
+            None.  ``deck_spec`` is the parsed deck_spec_json (``None`` when
+            absent or unparseable) and ``findings`` is one flat deck-level list of
+            SlideFinding-shaped dicts (``[]`` when there are none).
         """
         from src.utils.slide_hash import compute_slide_hash
-        
+
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
@@ -1024,7 +2321,122 @@ class SessionManager:
                 return None
 
             deck = deck_owner.slide_deck
-            
+
+            # ------------------------------------------------------------------
+            # NEW: Try to read from session_slides rows first.
+            # Any rows at all means the dual-write has run; use rows as truth.
+            # ------------------------------------------------------------------
+            slides_from_rows = (
+                db.query(SessionSlide)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .order_by(SessionSlide.position)
+                .all()
+            )
+
+            if slides_from_rows:
+                slides_list = []
+                # (record, content_hash) per slide, feeding the deck-level
+                # `findings` key below.  Collected here because this is the only
+                # place both halves are in hand.
+                row_finding_pairs: List[Tuple[Any, str]] = []
+                row_finding_indices: List[int] = []
+                for list_index, slide_row in enumerate(slides_from_rows):
+                    content_hash = compute_slide_hash(slide_row.html or "")
+                    slide_dict: Dict[str, Any] = {
+                        # `index` is part of SlideDeck.to_dict()'s per-slide shape
+                        # and the frontend Slide type declares it non-optional.
+                        # Derived from list order, not from row.position, so it is
+                        # always a dense 0..n-1 sequence (F5 key audit).
+                        "index": list_index,
+                        "html": slide_row.html or "",
+                        "slide_id": slide_row.slide_id,
+                        "scripts": slide_row.scripts or "",
+                        "created_by": slide_row.created_by,
+                        "created_at": (
+                            slide_row.created_at.isoformat() + "Z"
+                            if slide_row.created_at
+                            else None
+                        ),
+                        "modified_by": slide_row.modified_by,
+                        "modified_at": (
+                            slide_row.modified_at.isoformat() + "Z"
+                            if slide_row.modified_at
+                            else None
+                        ),
+                        "content_hash": content_hash,
+                        "verification": None,
+                    }
+
+                    # Per-slide verification: keyed by content_hash inside the
+                    # row's JSON blob. verification_record is Task 7's domain;
+                    # we read it read-only here.
+                    if slide_row.verification_record:
+                        try:
+                            verification_data = json.loads(slide_row.verification_record)
+                            slide_dict["verification"] = verification_data.get(content_hash)
+                        except json.JSONDecodeError:
+                            pass  # leave verification=None
+
+                    # `verification` above stays canonical and per-slide; this is
+                    # a second, additive projection of the same blob into the
+                    # SlideFinding shape the drawer consumes.  _parse_record
+                    # never raises, so a corrupt record yields no findings.
+                    row_finding_pairs.append(
+                        (_parse_record(slide_row.verification_record), content_hash)
+                    )
+                    row_finding_indices.append(list_index)
+
+                    slides_list.append(slide_dict)
+
+                deck_dict: Dict[str, Any] = {
+                    "title": deck.title,
+                    "slide_count": len(slides_list),
+                    "css": deck.css or "",
+                    "external_scripts": json.loads(deck.external_scripts_json or "[]"),
+                    # F5: head_meta is a real deck field (charset/viewport and any
+                    # other named metas). Dropping it reverted custom viewports to
+                    # SlideDeck.knit()'s hardcoded default and deleted other metas,
+                    # permanently, because chat_service round-trips this dict back
+                    # into deck_json.
+                    "head_meta": _read_head_meta(deck),
+                    "scripts": deck.scripts_content or "",
+                    "slides": slides_list,
+                    "created_by": deck_owner.created_by,
+                    "created_at": (
+                        deck.created_at.isoformat() + "Z"
+                        if deck.created_at
+                        else None
+                    ),
+                    "modified_by": deck.modified_by or deck_owner.created_by,
+                    "modified_at": (
+                        deck.updated_at.isoformat() + "Z"
+                        if deck.updated_at
+                        else None
+                    ),
+                    "version": deck.version,
+                    # B3.2: both keys are emitted on EVERY dict-returning path of
+                    # this method, unconditionally, so no consumer ever sees
+                    # `undefined` — a specless deck reports None, a findingless
+                    # deck reports [].
+                    "deck_spec": _read_deck_spec(deck),
+                    # Row path: each finding is shown on the row it was read
+                    # from, so it follows its slide through a shift (#314, D7).
+                    "findings": _deck_findings(
+                        row_finding_pairs,
+                        slide_indices=row_finding_indices,
+                    ),
+                }
+                if deck.html_content:
+                    deck_dict["html_content"] = deck.html_content
+
+                self._resolve_deck_display_names(deck_dict)
+                return deck_dict
+
+            # ------------------------------------------------------------------
+            # LEGACY: No rows yet — fall back to deck_json blob path.
+            # Behaviour unchanged from pre-Task-5 code.
+            # ------------------------------------------------------------------
+
             # Load verification map (separate from deck_json)
             verification_map = {}
             if deck.verification_map:
@@ -1032,28 +2444,42 @@ class SessionManager:
                     verification_map = json.loads(deck.verification_map)
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid verification_map JSON for session {session_id}")
-            
+
             # Return full deck structure if available
             if deck.deck_json:
                 deck_dict = json.loads(deck.deck_json)
                 # Ensure it has required fields
                 deck_dict.setdefault("title", deck.title)
                 deck_dict.setdefault("slide_count", deck.slide_count)
+                # F5 key parity: both read paths must emit the same key set, or the
+                # path a deck happens to take changes its shape.  head_meta is part
+                # of SlideDeck.to_dict()'s contract, so guarantee it here too for
+                # blobs written before it was persisted.
+                deck_dict.setdefault("head_meta", _read_head_meta(deck))
                 # Include html_content for raw HTML debug view
                 if deck.html_content:
                     deck_dict["html_content"] = deck.html_content
-                
+
                 # Backfill missing per-slide authorship from the deck owner
                 fallback_user = deck_owner.created_by
                 needs_persist = False
                 created_at_fallback = deck.created_at.isoformat() + "Z" if deck.created_at else None
 
+                # (record, content_hash) per slide for the deck-level `findings`
+                # key.  There are no slide rows on this path, so the record IS the
+                # deck-wide verification_map — itself a {content_hash: verdict}
+                # dict, exactly the shape findings_from_record expects.
+                blob_finding_pairs: List[Tuple[Any, str]] = []
+
                 # Merge verification and backfill metadata
-                for slide in deck_dict.get("slides", []):
+                for slide_index, slide in enumerate(deck_dict.get("slides", [])):
+                    # F5 key parity: `index` is part of the per-slide contract.
+                    slide.setdefault("index", slide_index)
                     if slide.get("html"):
                         content_hash = compute_slide_hash(slide["html"])
                         slide["verification"] = verification_map.get(content_hash)
                         slide["content_hash"] = content_hash
+                        blob_finding_pairs.append((verification_map, content_hash))
 
                     if not slide.get("created_by") and fallback_user:
                         slide["created_by"] = fallback_user
@@ -1075,10 +2501,23 @@ class SessionManager:
                 deck_dict["modified_by"] = deck.modified_by or deck_owner.created_by
                 deck_dict["modified_at"] = deck.updated_at.isoformat() + "Z" if deck.updated_at else None
                 deck_dict["version"] = deck.version
-                
+
+                # B3.2 key parity, the same requirement the head_meta setdefault
+                # above serves — but by ASSIGNMENT, not setdefault.  head_meta
+                # genuinely lives inside the blob, so a blob copy is authoritative
+                # for it.  These two do not: deck_spec's authority is the
+                # deck_spec_json column and findings' is the verification records.
+                # A setdefault would let a stale copy inside deck_json win — and a
+                # stale copy is reachable, because the needs_persist branch a few
+                # lines up re-dumps this very dict back into deck.deck_json.  These
+                # assignments run AFTER that write so the derived keys are never
+                # persisted into the blob in the first place.
+                deck_dict["deck_spec"] = _read_deck_spec(deck)
+                deck_dict["findings"] = _deck_findings(blob_finding_pairs)
+
                 self._resolve_deck_display_names(deck_dict)
                 return deck_dict
-            
+
             # Legacy: return basic info without slides array
             result = {
                 "title": deck.title,
@@ -1090,6 +2529,20 @@ class SessionManager:
                 "modified_by": deck.modified_by or deck_owner.created_by,
                 "modified_at": deck.updated_at.isoformat() + "Z" if deck.updated_at else None,
                 "version": deck.version,
+                # B3.2: the third dict-returning path, and the one the parity
+                # comment above does NOT already cover.  It is reachable on a live
+                # session — the pre-fan-out deck write creates a deck row with no
+                # deck_json and no slide rows, so the first read after the
+                # architecture turn lands here and the spec view would render null.
+                #
+                # There is no `slides` array here to key a per-position index
+                # against, which is the concrete reason `findings` is a flat
+                # deck-level list: every content hash in the verification_map is
+                # consulted, and each finding carries its own slideIndex.
+                "deck_spec": _read_deck_spec(deck),
+                "findings": _deck_findings(
+                    [(verification_map, content_hash) for content_hash in verification_map]
+                ),
             }
             self._resolve_deck_display_names(result)
             return result
@@ -1120,57 +2573,372 @@ class SessionManager:
                 if slide.get(key) and slide[key] in name_map:
                     slide[key] = name_map[slide[key]]
 
-    def save_verification(
+    def write_slide_verification(
         self,
         session_id: str,
-        content_hash: str,
-        verification: Dict[str, Any],
+        position: int,
+        verification_record: Dict[str, Any],
     ) -> None:
-        """Save verification result for a slide by content hash.
+        """Write (merge) a verification record into the session_slides row at *position*.
 
-        Verification is stored separately from deck_json so it survives
-        deck regeneration when chat modifies slides.
+        The *verification_record* argument MUST be shaped ``{content_hash: verdict}``
+        — the same shape that ``get_slide_deck``'s row branch reads back:
+        ``json.loads(row.verification_record).get(content_hash)``.
+
+        Merge semantics (not assign): existing entries at other content-hash keys
+        survive.  This is load-bearing: if the slide HTML is edited (new hash) and
+        then reverted (old hash), the verdict for the original hash is still present
+        in the row, so the reverted slide's verification is not lost.
+
+        A whole-field assignment would also create a lost-update race when two
+        verification writes arrive concurrently for the same slide (e.g. the user
+        clicks Verify while an auto-verify is running).  The merge limits the damage
+        to a single KEY of a single hash's verdict — the per-hash slot is merged too
+        (``_merge_verdict_slots``), because it is shared between the LLM judge's flat
+        payload and the graph reviewer's ``tellr_review`` entry.  The last writer for
+        a given key wins, which is acceptable because the two producers write
+        disjoint keys, and a repeat from the same producer is identical anyway
+        (same HTML → same judge result).
+
+        The target row follows the content verified (#314, D8): *position* is only
+        a hint, read before the judge ran.  If a shift has since moved the slide,
+        the verdict lands on the unique row whose HTML hashes to the record's key.
 
         Args:
             session_id: Session to save verification for
-            content_hash: Hash of the slide content
-            verification: Verification result dictionary
+            position: 0-based slide position (index) the verdict was read at
+            verification_record: Dict shaped ``{content_hash: verdict}``
         """
         with get_db_session() as db:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
             if not deck_owner.slide_deck:
-                logger.warning(f"No slide deck for session {session_id}, cannot save verification")
+                logger.warning(
+                    "write_slide_verification: no slide deck for session %s", session_id
+                )
                 return
 
-            deck = deck_owner.slide_deck
-            
-            # Load existing verification map
-            verification_map = {}
-            if deck.verification_map:
+            # C2 fix: detect legacy/pre-backfill sessions (deck exists but no rows).
+            # The read path falls back to the blob for row-less sessions; the write
+            # path must mirror that so verdicts are not silently discarded.
+            any_row_exists = (
+                db.query(SessionSlide.position)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .first()
+            ) is not None
+
+            if not any_row_exists:
+                # Legacy fallback: write to the blob (SessionSlideDeck.verification_map)
+                # so get_verification_map's legacy branch can read it back.
+                deck = deck_owner.slide_deck
+                blob: Dict[str, Any] = {}
+                if deck.verification_map:
+                    try:
+                        blob = json.loads(deck.verification_map)
+                    except json.JSONDecodeError:
+                        pass
+                # Per-hash slot merge, not dict.update: the slot is shared with
+                # the other producer's payload (_merge_verdict_slots).
+                blob = _merge_verdict_slots(blob, verification_record)
+                deck.verification_map = json.dumps(blob)
+                logger.info(
+                    "write_slide_verification: legacy session — wrote to blob",
+                    extra={"session_id": session_id, "position": position},
+                )
+                return
+
+            row = (
+                db.query(SessionSlide)
+                .filter(
+                    and_(
+                        SessionSlide.session_id == deck_owner.id,
+                        SessionSlide.position == position,
+                    )
+                )
+                .one_or_none()
+            )
+
+            # D8 (#314): a verdict follows the content it verified.  *position*
+            # was read before the judge ran, and a shift (an agent insert, a UI
+            # reorder) may have landed since.  The record's single key IS the
+            # content hash the verdict is about, so: the row at *position* if its
+            # HTML hashes to that key; else the one other row whose HTML does;
+            # else *position*, as before.  A record with != 1 key has no single
+            # subject to follow, and two rows sharing the hash have no unique one.
+            if len(verification_record) == 1:
+                from src.utils.slide_hash import compute_slide_hash
+
+                subject_hash = next(iter(verification_record))
+                if row is None or compute_slide_hash(row.html or "") != subject_hash:
+                    matching = [
+                        candidate
+                        for candidate in db.query(SessionSlide)
+                        .filter(SessionSlide.session_id == deck_owner.id)
+                        .order_by(SessionSlide.position)
+                        .all()
+                        if compute_slide_hash(candidate.html or "") == subject_hash
+                    ]
+                    if len(matching) == 1:
+                        logger.info(
+                            "write_slide_verification: verification followed its "
+                            "slide (position %d -> %d) for session %s",
+                            position,
+                            matching[0].position,
+                            session_id,
+                        )
+                        row = matching[0]
+
+            if row is None:
+                # Deck has rows but not at this position — genuine caller error.
+                logger.warning(
+                    "write_slide_verification: no row at position %d for session %s "
+                    "(deck has %d rows; position out of range)",
+                    position,
+                    session_id,
+                    db.query(SessionSlide)
+                    .filter(SessionSlide.session_id == deck_owner.id)
+                    .count(),
+                )
+                return
+
+            # Merge: load existing JSON blob, update with new entries, write back.
+            existing: Dict[str, Any] = {}
+            if row.verification_record:
                 try:
-                    verification_map = json.loads(deck.verification_map)
+                    existing = json.loads(row.verification_record)
                 except json.JSONDecodeError:
-                    logger.warning(f"Invalid verification_map JSON, starting fresh")
-            
-            # Update with new verification
-            verification_map[content_hash] = verification
-            
-            # Save back to database
-            deck.verification_map = json.dumps(verification_map)
-            
+                    logger.warning(
+                        "write_slide_verification: invalid JSON in row, starting fresh"
+                    )
+
+            # Per-hash slot merge, not dict.update: a review write must not
+            # delete the judge's rating, nor a judge write the reviewer's
+            # findings (_merge_verdict_slots).
+            existing = _merge_verdict_slots(existing, verification_record)
+            row.verification_record = json.dumps(existing)
+
+            content_hash = next(iter(verification_record), None)
+            verdict = verification_record.get(content_hash, {}) if content_hash else {}
             logger.info(
-                "Saved verification",
+                "Wrote slide verification (merged)",
                 extra={
                     "session_id": session_id,
+                    "position": position,
                     "content_hash": content_hash,
-                    "score": verification.get("score"),
+                    "score": verdict.get("score") if isinstance(verdict, dict) else None,
                 },
             )
 
+    def slides_since_cursor(
+        self, session_id: str, cursor: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Committed slides the reorder buffer has released at or above *cursor*.
+
+        **The reorder buffer is a query, not a data structure** (spec §6.2):
+        position *n* is released once every position below *n* is committed.  The
+        truth is the ``session_slides`` rows, so this is inherently multi-worker
+        safe — an in-process buffer would be invisible to the worker serving the
+        next poll, and ``poll_chat`` may well be served by a different uvicorn
+        worker from the one running the graph.
+
+        **The prefix scan always starts at position 0, never at ``cursor``**, and
+        that is the whole correctness argument.  Filtering to ``position >=
+        cursor`` first and *then* scanning would make the first surviving row look
+        like the start of the deck: with rows at 0, 1 and 3 and a cursor of 3,
+        position 3 would be released while position 2 is still missing — a slide
+        arriving out of order, which is exactly what this query exists to prevent.
+        So the contiguous committed prefix is computed over every row, and
+        ``cursor`` only decides how much of that prefix the caller has already
+        seen.
+
+        A **placeholder releases like any other position**: ``commit_placeholder``
+        writes a real ``session_slides`` row, so it is committed here by exactly
+        the same test as a real slide (the row's existence) with no special case.
+
+        This re-implements the prefix rule that ``foreman_service``'s
+        ``releasable_positions`` applies to GRAPH STATE; it does not and cannot
+        call it.  ``releasable_positions(state)`` reads ``landed_positions`` /
+        ``placeheld_positions`` off a turn's state, and the polling path has no
+        graph state at all.  ``test_slide_release.py::TestTheTwoPrefixRulesAgree``
+        drives the same position set through both and compares.
+
+        **They agree over a turn's covered positions, and deliberately differ on
+        an EDIT turn** — the scope, stated here because "the two must agree" read
+        as unqualified and the guard did not establish it.  ``releasable_positions``
+        is turn-scoped: an edit turn's coverage is ``target_positions``, so it
+        releases only ``[5, 6]`` while this query releases 0..9 on a deck whose ten
+        rows exist.  That is this query's whole purpose — a poll knows nothing
+        about which turn built which row, and a client that reconnects must be able
+        to fetch everything committed.  The relationship the two hold, pinned by
+        that suite, is that THIS release narrowed to a turn's covered positions is
+        the state-derived one.  Do not "fix" either side into the other.
+
+        Cursor semantics: ``cursor`` is the lowest position the caller has **not**
+        yet been sent, so ``0`` (the default) means "send me everything released".
+        A negative cursor is treated as ``0``.  Positions are 0-based, so a caller
+        that mirrors ``after_message_id``'s exclusive-after convention and passes
+        the last position it received would lose position 0 — hence the inclusive
+        reading, which is correct for both ``0`` and ``-1`` as an initial value.
+
+        Args:
+            session_id: Session (a contributor session resolves to the deck owner).
+            cursor: Lowest position not yet delivered to this caller.
+
+        Returns:
+            Ascending list of ``{"position", "html", "scripts", "agent"}`` dicts —
+            JSON-native scalars only, so the same value serialises onto a
+            ``poll_chat`` response and a ``StreamEvent``.
+
+        Raises:
+            SessionNotFoundError: if session_id does not match any session.
+        """
+        floor = max(0, int(cursor))
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+
+            # PHASE 1 — positions only.  The contiguity scan must start at
+            # position 0 to find a gap, but it does not need a single byte of
+            # payload to do it: this is an int column covered by
+            # ``ix_session_slides_session_position``.  Selecting whole rows here
+            # (the first form of this method) pulled every slide's HTML on every
+            # poll and then discarded the sub-cursor ones in Python — a whole deck
+            # over the wire every three seconds, on an app already timing out
+            # under load.  A SQL ``position >= cursor`` filter would be WRONG, not
+            # merely different: the lowest surviving row would read as the start of
+            # the deck and release over a gap.
+            positions = [
+                position
+                for (position,) in db.query(SessionSlide.position)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .order_by(SessionSlide.position)
+                .all()
+            ]
+
+            window: List[int] = []
+            expected = 0
+            for position in positions:
+                if position != expected:
+                    break  # gap: nothing past this point is releasable
+                expected += 1
+                if position < floor:
+                    continue  # already delivered to this caller
+                window.append(position)
+
+            if not window:
+                return []
+
+            # PHASE 2 — payloads for the released window ONLY.  A client re-polling
+            # a finished 31-slide deck now costs 31 integers and no payload at all.
+            rows = {
+                row.position: row
+                for row in db.query(SessionSlide)
+                .filter(
+                    SessionSlide.session_id == deck_owner.id,
+                    SessionSlide.position.in_(window),
+                )
+                .all()
+            }
+
+            released: List[Dict[str, Any]] = []
+            for position in window:
+                row = rows.get(position)
+                if row is None:
+                    # Phase 1 saw it and phase 2 did not.  STOP rather than skip:
+                    # returning the next position would deliver it out of order,
+                    # which is the one thing this query exists to prevent.
+                    break
+                released.append(
+                    {
+                        "position": row.position,
+                        "html": row.html or "",
+                        "scripts": row.scripts or "",
+                        "agent": row.modified_by or row.created_by,
+                    }
+                )
+            return released
+
+    #: How far before the client's mark a revision is still returned.  The mark
+    #: is taken before this poll's reads, but a row stamped just before the mark
+    #: may commit just after it; returning a revision twice is harmless (the
+    #: client replaces a slide by position), missing one is not.
+    REVISION_OVERLAP_S = 2.0
+
+    def slide_revisions_since(
+        self, session_id: str, cursor: int, since: Optional[float]
+    ) -> List[Dict[str, Any]]:
+        """Already-delivered slides whose row was rewritten after *since*.
+
+        The reorder buffer (:meth:`slides_since_cursor`) releases each position
+        ONCE.  Since a slide's builder draft is committed before its review
+        (``slide_pipeline_node``), the row a client received may later be
+        replaced by its reviewed or fixed version within the same turn; this is
+        how a polling client learns of that.
+
+        Only positions BELOW *cursor* are considered — anything at or above it
+        is still the reorder buffer's to release, with its latest content.
+        *since* is the ``revision_mark`` the previous poll returned (epoch
+        seconds, naive UTC like ``modified_at``); ``None`` means the client has
+        no mark yet, so it has received nothing that could have been revised.
+
+        Args:
+            session_id: Session (a contributor session resolves to the deck owner).
+            cursor: Lowest position not yet delivered to this caller.
+            since: The previous poll's ``revision_mark``, or ``None``.
+
+        Returns:
+            Ascending list shaped exactly like :meth:`slides_since_cursor`'s.
+
+        Raises:
+            SessionNotFoundError: if session_id does not match any session.
+        """
+        ceiling = max(0, int(cursor))
+        if since is None or ceiling == 0:
+            return []
+        threshold = datetime.utcfromtimestamp(float(since) - self.REVISION_OVERLAP_S)
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            deck_owner = self._get_deck_owner_session(db, session)
+            rows = (
+                db.query(SessionSlide)
+                .filter(
+                    SessionSlide.session_id == deck_owner.id,
+                    SessionSlide.position < ceiling,
+                    SessionSlide.modified_at > threshold,
+                )
+                .order_by(SessionSlide.position)
+                .all()
+            )
+            return [
+                {
+                    "position": row.position,
+                    "html": row.html or "",
+                    "scripts": row.scripts or "",
+                    "agent": row.modified_by or row.created_by,
+                }
+                for row in rows
+            ]
+
     def get_verification_map(self, session_id: str) -> Dict[str, Any]:
-        """Get the verification map for a session.
+        """Aggregate the verification map from per-row session_slides records.
+
+        Preferred path (dual-read): if any ``session_slides`` rows exist for
+        the deck owner, walk them in position order, parse each row's
+        ``verification_record`` (shaped ``{content_hash: verdict}``), and merge
+        all entries into one flat ``{content_hash: verdict}`` dict.  A single
+        row may carry multiple hashes (edit → new hash, revert → old hash both
+        survive in the same row), so all keys are merged, not just the
+        current-hash entry.
+
+        Legacy fallback: if no rows exist yet (pre-backfill sessions), fall back
+        to reading ``SessionSlideDeck.verification_map`` exactly as before.
+        This mirrors Task 5's get_slide_deck behaviour (prefers rows, falls back
+        to blob) so that mixed-state deployments keep working.
+
+        Callers: ``chat_service.py:2150`` (feeds create_version) and
+        ``slides.py:639`` (feeds update_version_verification).  Both expect the
+        flat ``{content_hash: verdict}`` shape, which this returns.
 
         Args:
             session_id: Session to get verification map for
@@ -1182,9 +2950,35 @@ class SessionManager:
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
-            if not deck_owner.slide_deck or not deck_owner.slide_deck.verification_map:
+            if not deck_owner.slide_deck:
                 return {}
 
+            # Preferred: aggregate from per-row records.
+            slides_rows = (
+                db.query(SessionSlide)
+                .filter(SessionSlide.session_id == deck_owner.id)
+                .order_by(SessionSlide.position)
+                .all()
+            )
+
+            if slides_rows:
+                merged: Dict[str, Any] = {}
+                for row in slides_rows:
+                    if row.verification_record:
+                        try:
+                            row_data = json.loads(row.verification_record)
+                            if isinstance(row_data, dict):
+                                merged.update(row_data)
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "get_verification_map: invalid JSON in row at position %d",
+                                row.position,
+                            )
+                return merged
+
+            # Legacy fallback: no rows yet, read the blob.
+            if not deck_owner.slide_deck.verification_map:
+                return {}
             try:
                 return json.loads(deck_owner.slide_deck.verification_map)
             except json.JSONDecodeError:
@@ -1265,9 +3059,19 @@ class SessionManager:
                         "created_at": m.created_at.isoformat(),
                     }
                     for m in session.messages
+                    if is_transcript_message(m.message_type)
                 ]
 
-            # Create new version on the deck owner's session
+            # Create new version on the deck owner's session.
+            # deck_spec_json is snapshotted so that restore_version can copy it
+            # back (C9): a restored deck must be paired with the spec that
+            # described it, or PR3's §4.4 trigger would "correct" the slides to
+            # match a stale spec, silently undoing the restore.
+            deck_spec_json_snapshot = (
+                deck_owner.slide_deck.deck_spec_json
+                if deck_owner.slide_deck
+                else None
+            )
             version = SlideDeckVersion(
                 session_id=deck_owner.id,
                 version_number=next_version,
@@ -1275,6 +3079,7 @@ class SessionManager:
                 deck_json=json.dumps(deck_dict),
                 verification_map_json=json.dumps(verification_map) if verification_map else None,
                 chat_history_json=json.dumps(chat_history) if chat_history else None,
+                deck_spec_json=deck_spec_json_snapshot,
             )
             db.add(version)
             db.flush()
@@ -1538,13 +3343,95 @@ class SessionManager:
                 )
 
             # Update the current slide deck in database (use deck_owner for
-            # contributor sessions whose own slide_deck is None)
+            # contributor sessions whose own slide_deck is None).
+            #
+            # C7: re-materialise session_slides rows from the restored deck.
+            # Task 5's read path prefers rows whenever ANY exist, so writing
+            # only deck_json (the old behaviour) leaves the read path serving
+            # stale rows — the user clicks Restore and the deck does not change.
+            #
+            # C9: copy deck_spec_json back so the restored deck is paired with
+            # the spec that described it.  Without this, PR3's §4.4 trigger
+            # would "correct" the slides to match a stale spec, undoing the
+            # restore silently.
             if deck_owner.slide_deck:
-                deck_owner.slide_deck.deck_json = version.deck_json
-                deck_owner.slide_deck.verification_map = version.verification_map_json
-                deck_owner.slide_deck.title = deck_dict.get("title")
-                deck_owner.slide_deck.slide_count = len(deck_dict.get("slides", []))
-                deck_owner.slide_deck.updated_at = datetime.utcnow()
+                deck = deck_owner.slide_deck
+
+                # --- deck-level columns ---
+                deck.deck_json = version.deck_json
+                deck.verification_map = version.verification_map_json
+                deck.title = deck_dict.get("title")
+                deck.slide_count = len(deck_dict.get("slides", []))
+                deck.updated_at = datetime.utcnow()
+                deck.version = (getattr(deck, "version", None) or 0) + 1
+
+                # C9 — spec copy-back.
+                # Use getattr for compatibility with mock objects in existing tests
+                # that predate the deck_spec_json column addition (Task 1).
+                deck.deck_spec_json = getattr(version, "deck_spec_json", None)
+
+                # C7 / I1 — deck-level presentation columns.
+                # These power the row-read path's export chain; restoring deck_json
+                # alone leaves the row path serving the post-edit stylesheet,
+                # external scripts list, and chart bootstrap JS.
+                deck.css = deck_dict.get("css") or ""
+                deck.external_scripts_json = json.dumps(
+                    deck_dict.get("external_scripts") or []
+                )
+                deck.scripts_content = deck_dict.get("scripts") or ""
+                # F5 — head_meta is deck-level presentation state like css; the
+                # save point carries it inside deck_json, so lift it back out.
+                deck.head_meta_json = json.dumps(deck_dict.get("head_meta") or {})
+
+                # C7 — per-slide row re-materialisation via the shared row writer,
+                # so restore and the dual-write cannot diverge again.
+                restored_slides = deck_dict.get("slides") or []
+                now_dt = datetime.utcnow()
+
+                # C1: MERGE the save point's verdict for each slide's hash into
+                # whatever record followed the slide to its position.  When the
+                # save-point map has no entry (the normal ordering — the user
+                # verifies AFTER creating the save point) nothing is written over
+                # the attributed record, so post-save-point verdicts survive.
+                restored_incoming: Dict[int, Dict[str, Any]] = {}
+                for position, slide_dict in enumerate(restored_slides):
+                    slide_hash = compute_slide_hash(slide_dict.get("html") or "")
+                    restored_verdict = verification_map.get(slide_hash)
+                    if restored_verdict is not None:
+                        restored_incoming[position] = {slide_hash: restored_verdict}
+
+                # Attribution FIRST (F1/F2) inside the shared writer: a restore can
+                # reorder slides relative to the current rows, so each slide's
+                # existing verification record must follow it rather than stay on
+                # its old position.  Phantom rows beyond the restored slide count
+                # are pruned there too.
+                _rewrite_slide_rows(
+                    db,
+                    deck_owner.id,
+                    restored_slides,
+                    now_dt=now_dt,
+                    # No author_fallback: a restore replays stored authorship and
+                    # has no "current writer" to attribute slides to.
+                    author_fallback=None,
+                    incoming=restored_incoming,
+                )
+
+                db.flush()
+                restore_mutation = DeckMutationContext(
+                    actor=MutationActor(session.session_id, session.graph_release_id),
+                    operation="restore_version",
+                    object_type="deck",
+                )
+                record_shared_deck_mutation(
+                    db,
+                    requesting_session=session,
+                    deck_owner=deck_owner,
+                    deck=deck,
+                    actor=restore_mutation.actor,
+                    operation=restore_mutation.operation,
+                    object_type=restore_mutation.object_type,
+                    object_id=restore_mutation.object_id,
+                )
 
             logger.info(
                 "Restored to save point",
@@ -1556,7 +3443,7 @@ class SessionManager:
                 },
             )
 
-            return {
+            _restore_result = {
                 "version_number": version_number,
                 "description": version.description,
                 "deck": deck_dict,
@@ -1565,6 +3452,16 @@ class SessionManager:
                 "deleted_versions": deleted_count,
                 "deleted_messages": deleted_messages,
             }
+
+        # D6a: discard the pending spec-review marker unconditionally, AFTER the
+        # restore has committed.  The deck those pending edits described no longer
+        # exists; the restored version carries its own authoritative deck_spec_json
+        # snapshot.  discard_marker swallows exceptions so a marker-discard failure
+        # cannot undo the restore's successful response.
+        from src.services.spec_sync import discard_marker  # local: avoids circular import
+        discard_marker(session_id)
+
+        return _restore_result
 
     def get_current_version_number(self, session_id: str) -> Optional[int]:
         """Get the current (latest) version number for a session's slide deck.
@@ -1731,7 +3628,9 @@ class SessionManager:
             }
 
     # Session locking for concurrent request handling
-    def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
+    def acquire_session_lock(
+        self, session_id: str, timeout_seconds: int = SESSION_LOCK_TIMEOUT_SECONDS
+    ) -> bool:
         """Try to acquire processing lock for a session.
 
         Uses database-level locking to work across multiple uvicorn workers.
@@ -1814,7 +3713,7 @@ class SessionManager:
     ) -> str:
         """Create a new chat request, return request_id.
 
-        Auto-creates the session if it doesn't exist.
+        Requires the route or service boundary to have created the session.
 
         Args:
             session_id: Session to create request for
@@ -1826,26 +3725,7 @@ class SessionManager:
         request_id = secrets.token_urlsafe(24)
 
         with get_db_session() as db:
-            # Get or create session
-            session = (
-                db.query(UserSession)
-                .filter(UserSession.session_id == session_id)
-                .first()
-            )
-
-            if not session:
-                # Auto-create session on first request
-                session = UserSession(
-                    session_id=session_id,
-                    title=f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
-                    created_by=created_by,
-                )
-                db.add(session)
-                db.flush()
-                logger.info(
-                    "Auto-created session for chat request",
-                    extra={"session_id": session_id},
-                )
+            session = self._get_session_or_raise(db, session_id)
 
             chat_request = ChatRequest(
                 request_id=request_id,
@@ -1913,6 +3793,40 @@ class SessionManager:
 
             chat_request.result_json = json.dumps(result) if result else None
 
+    def record_chat_request_progress(
+        self, request_id: str, seq: int, progress: Dict[str, Any]
+    ) -> bool:
+        """Store *progress* as this request's stage summary iff *seq* is newer.
+
+        The predicate is the whole concurrency story: several slide pipelines report
+        from several threads and their commits land in any order, so an older
+        snapshot must be a no-op rather than a regression.  On PostgreSQL a
+        concurrent UPDATE of the same row waits for the first commit and then
+        re-evaluates this WHERE against the new row (READ COMMITTED), so two
+        writers cannot both win.  Core ``update`` on ``__table__``, as
+        ``spec_sync``'s claim does (``src/services/spec_sync.py:475-487``).
+
+        On PostgreSQL the wait for the row lock is bounded by ``SET LOCAL
+        lock_timeout``: ``get_db_session`` runs one transaction per ``with`` block,
+        so the setting covers exactly the UPDATE below.  A timeout raises
+        ``sqlalchemy.exc.OperationalError``; the only production caller
+        (``progress._persist``) logs it and the next report carries a newer snapshot.
+
+        Returns True when this snapshot was stored, False when a newer (or equal)
+        one already was or the request does not exist.
+        """
+        table = ChatRequest.__table__
+        statement = (
+            update(table)
+            .where(table.c.request_id == request_id)
+            .where(or_(table.c.progress_seq.is_(None), table.c.progress_seq < seq))
+            .values(progress_json=json.dumps(progress), progress_seq=seq)
+        )
+        with get_db_session() as db:
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(text(f"SET LOCAL lock_timeout = '{_PROGRESS_LOCK_TIMEOUT}'"))
+            return db.execute(statement).rowcount == 1
+
     def get_chat_request(self, request_id: str) -> Optional[Dict[str, Any]]:
         """Get request status and result.
 
@@ -1946,6 +3860,11 @@ class SessionManager:
                 "result": (
                     json.loads(chat_request.result_json)
                     if chat_request.result_json
+                    else None
+                ),
+                "turn_progress": (
+                    json.loads(chat_request.progress_json)
+                    if chat_request.progress_json
                     else None
                 ),
             }
@@ -2035,6 +3954,7 @@ class SessionManager:
             event_type = "assistant"  # User messages use assistant type for display
 
         metadata = msg.get("metadata") or {}
+        details = metadata.get("details")
 
         return {
             "type": event_type,
@@ -2043,6 +3963,12 @@ class SessionManager:
             "tool_input": metadata.get("tool_input"),
             "tool_output": msg["content"] if event_type == "tool_result" else None,
             "message_id": msg["id"],
+            # Only a failure notice's technical detail (#321) — never the row's whole
+            # metadata, which for a tool row carries its input. None on every other
+            # row, including every row persisted before notices had details.
+            "metadata": (
+                {"details": details} if isinstance(details, dict) and details else None
+            ),
         }
 
     def cleanup_stale_requests(self, max_age_hours: int = 24) -> int:
@@ -2072,6 +3998,84 @@ class SessionManager:
                 )
 
             return count
+
+    # Cleanup operations
+    def _delete_expired_session(self, session_id: int) -> bool:
+        """Delete one expiry candidate in its own committed transaction."""
+        with get_db_session() as db:
+            result = db.execute(
+                delete(UserSession).where(UserSession.id == session_id)
+            )
+            deleted = result.rowcount == 1
+        return deleted
+
+    def cleanup_expired_sessions(self) -> int:
+        """Delete sessions that have exceeded TTL.
+
+        WARNING: user_sessions is the app's durable usage history. This
+        method is intentionally NOT scheduled anywhere — it is only
+        reachable via the manual POST /api/sessions/cleanup endpoint.
+        Do not wire it to a scheduler; doing so would destroy the
+        history that the /admin usage dashboard's pre-event-log
+        aggregations rely on.
+
+        Returns:
+            Number of sessions deleted
+        """
+        cutoff = datetime.utcnow() - timedelta(hours=self.session_ttl_hours)
+
+        with get_db_session() as db:
+            expired_session_ids = [
+                session_id
+                for (session_id,) in db.query(UserSession.id)
+                .filter(UserSession.last_activity < cutoff)
+                .order_by(UserSession.id)
+                .all()
+            ]
+
+        count = 0
+        for session_id in expired_session_ids:
+            try:
+                deleted = self._delete_expired_session(session_id)
+            except SQLAlchemyError as exc:
+                logger.error(
+                    "Failed to delete expired session",
+                    extra={
+                        "session_id": session_id,
+                        "exception_class": type(exc).__name__,
+                    },
+                )
+                continue
+            if deleted:
+                count += 1
+
+        if count > 0:
+            logger.info(
+                "Cleaned up expired sessions",
+                extra={"count": count, "cutoff": cutoff.isoformat()},
+            )
+
+        return count
+
+    def deck_mutation_context(
+        self,
+        session_id: str,
+        *,
+        operation: MutationOperation,
+        object_type: MutationObjectType,
+        object_id: Optional[str] = None,
+    ) -> DeckMutationContext:
+        """Snapshot an immutable session pin for a forthcoming deck write."""
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            return DeckMutationContext(
+                actor=MutationActor(session.session_id, session.graph_release_id),
+                operation=operation,
+                object_type=object_type,
+                object_id=object_id,
+                suppress_nested_events=True,
+            )
+
 
     def _get_session_or_raise(self, db: Session, session_id: str) -> UserSession:
         """Get session by ID or raise error.
@@ -2114,4 +4118,3 @@ def get_session_manager() -> SessionManager:
         _session_manager = SessionManager()
 
     return _session_manager
-

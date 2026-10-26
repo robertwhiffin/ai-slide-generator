@@ -1,0 +1,37 @@
+name: Set up Python environment
+description: >
+  Install the interpreter pinned in .python-version and the exact dependency
+  versions and hashes recorded in uv.lock, so CI runs what a local
+  `uv sync --extra dev` runs.
+
+  uv.lock is resolved on Databricks laptops through the corporate PyPI proxy,
+  so its download URLs point at a host GitHub runners cannot reach. The pins and
+  sha256 hashes are index-independent, though, so CI exports them and installs
+  the same files from public PyPI with hash checking on.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version-file: .python-version
+
+    - uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+
+    # Offline: compares pyproject.toml against uv.lock without contacting any
+    # index, so it works without the proxy. Fails when a dependency was edited
+    # in pyproject.toml without re-running `uv lock`.
+    - name: Check uv.lock is up to date
+      shell: bash
+      run: uv lock --check --offline
+
+    - name: Install locked dependencies from PyPI
+      shell: bash
+      run: |
+        uv export --frozen --extra dev --no-emit-project --format requirements-txt \
+          -o "$RUNNER_TEMP/requirements.lock.txt"
+        uv pip install --system --require-hashes --default-index https://pypi.org/simple \
+          -r "$RUNNER_TEMP/requirements.lock.txt"
+        uv pip install --system --no-deps --default-index https://pypi.org/simple -e .

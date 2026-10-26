@@ -422,6 +422,7 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
+         patch("src.api.mcp_server.get_default_template_id", return_value=None), \
          patch("src.api.mcp_server.enqueue_create_job") as enqueue:
 
         auth_scope.return_value.__enter__.return_value = identity
@@ -448,6 +449,80 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
         assert "template_id" not in agent_config
         assert "Nonexistent" in caplog.text
         assert "matched no template" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "template_name, resolved",
+    [(None, None), ("Nonexistent", None)],
+    ids=["no-template-name", "unmatched-template-name"],
+)
+@pytest.mark.asyncio
+async def test_create_deck_pins_the_design_systems_default_template(
+    fake_request, identity, template_name, resolved
+):
+    """With no usable template_name, the deck is pinned to the design system's
+    default template so it binds to that template's sections."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
+         patch("src.api.mcp_server._resolve_template_name", return_value=resolved), \
+         patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="deck", template_name=template_name
+        )
+
+        get_tmpl.assert_called_once_with(5)
+        agent_config = sm.create_session.call_args.kwargs["agent_config"]
+        assert agent_config["design_system_id"] == 5
+        assert agent_config["template_id"] == 50
+
+
+@pytest.mark.asyncio
+async def test_create_deck_named_template_beats_the_default(fake_request, identity):
+    """A template_name that resolves wins; the default is not consulted."""
+    from src.api import mcp_server
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
+         patch("src.api.mcp_server._resolve_template_name", return_value=102), \
+         patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
+         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+
+        sm = MagicMock()
+        sm.create_session.return_value = {"session_id": "sess-123"}
+        get_sm.return_value = sm
+
+        async def _fake_enqueue(**kwargs):
+            return "req-42"
+
+        enqueue.side_effect = _fake_enqueue
+
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="deck", template_name="Two Column"
+        )
+
+        get_tmpl.assert_not_called()
+        assert sm.create_session.call_args.kwargs["agent_config"]["template_id"] == 102
 
 
 @pytest.mark.asyncio
@@ -1604,3 +1679,65 @@ async def test_create_deck_length_guard_when_enabled(monkeypatch):
     monkeypatch.setattr(mcp_server, "MCP_PROMPT_LIMIT", 100)
     with pytest.raises(MCPToolError, match="too long"):
         await _create_deck_impl(request=None, prompt="x" * 200)
+
+
+# ---- enqueue_create_job: MCP decks carry the legacy opt-out ------------------
+#
+# Since 2026-10-12 every deck runs on the graph unless its first user message
+# carries USE LEGACY MODE.  MCP stays on the monolith (its worker payload has no
+# engine key; the graph's one-shot path is not built) and its sessions are
+# unpinned, so the persisted first message must carry the opt-out -- otherwise a
+# browser turn on an MCP deck would resolve to the graph and fail with
+# ConversationPinMissingError.  The prompt the worker runs is NOT altered.
+
+
+async def _drive_enqueue_create_job(*, mode, message_count):
+    from unittest.mock import AsyncMock
+
+    from src.api import mcp_server
+
+    sm = MagicMock()
+    sm.acquire_session_lock.return_value = True
+    sm.create_chat_request.return_value = "req-1"
+    sm.get_session.return_value = {"message_count": message_count}
+    enqueue = AsyncMock()
+    with patch("src.api.mcp_server.get_session_manager", return_value=sm), \
+         patch("src.api.mcp_server.enqueue_job", enqueue), \
+         patch("src.core.user_context.get_current_user", return_value="mcp@example.com"):
+        request_id = await mcp_server.enqueue_create_job(
+            session_id="sess-1", prompt="make a deck about Q3", mode=mode
+        )
+    assert request_id == "req-1"
+    persisted = sm.add_message.call_args.kwargs["content"]
+    payload = enqueue.await_args.args[1]
+    return persisted, payload
+
+
+@pytest.mark.asyncio
+async def test_create_deck_first_message_is_persisted_with_the_legacy_opt_out():
+    from src.domain.conversation_engine import LEGACY_MODE_PHRASE, selects_graph_engine
+
+    persisted, payload = await _drive_enqueue_create_job(mode="generate", message_count=0)
+
+    assert LEGACY_MODE_PHRASE in persisted
+    assert persisted.endswith("make a deck about Q3")
+    assert selects_graph_engine(persisted) is False
+    # The worker runs the caller's prompt verbatim, and still has no engine key.
+    assert payload["message"] == "make a deck about Q3"
+    assert "engine_mode" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "message_count"),
+    [("edit", 0), ("edit", 3), ("generate", 2)],
+    ids=["edit-on-empty-deck", "edit", "generate-not-first"],
+)
+async def test_only_the_create_deck_first_message_is_marked(mode, message_count):
+    """edit_deck must never mark: on a browser deck it would flip a pinned graph
+    deck with no messages onto the monolith."""
+    persisted, payload = await _drive_enqueue_create_job(
+        mode=mode, message_count=message_count
+    )
+    assert persisted == "make a deck about Q3"
+    assert payload["message"] == "make a deck about Q3"

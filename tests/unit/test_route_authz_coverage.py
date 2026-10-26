@@ -43,6 +43,7 @@ _PERMISSION_CALL_RE = re.compile(
     r"|_require_slide_permission"
     r"|_require_export_job_access"
     r"|_check_chat_permission"      # chat.py send/stream/async
+    r"|_require_chat_request_owner" # chat.py poll: session creator only (F-CR-31)
     r"|_require_manage"             # deck_contributors.py
     r"|get_deck_permission"         # profiles.py / sessions.py inline checks
     # design_systems.py PUT/DELETE: creator-or-admin (Option C), and ADMIN-ONLY
@@ -54,6 +55,20 @@ _PERMISSION_CALL_RE = re.compile(
     # three mutations — including the is_default condition — is pinned by
     # test_design_system_mutations_have_the_intended_permission_levels below.
     r"|_require_creator_or_admin"
+    # GET /api/sessions/{session_id}/collaboration-history (#262 Task 4 slice 4A).
+    # Verified enforcing, and stricter than the deck-permission helpers: it is a
+    # single authorization-scoped SELECT that resolves the requested session to
+    # its deck-owning root and applies a SQL CAN_VIEW predicate reproducing all
+    # five live PermissionService.get_deck_permission checks (owner, direct grant
+    # by identity_id, the identity_name fallback, group grant, and workspace
+    # share filtered to VALID_DECK_GLOBAL_PERMISSIONS). It returns None — never a
+    # row — for an unauthorized caller, and the route turns that into the same
+    # 404 an unknown session id produces, so it discloses less than a 403 would.
+    # Equivalence with get_deck_permission in BOTH directions is pinned by
+    # tests/unit/test_collaboration_history.py::
+    # TestPredicateMatchesTheLivePermissionService and by the PostgreSQL
+    # differential in tests/integration/test_collaboration_history_api_postgres.py.
+    r"|authorized_collaboration_root"
     r")\s*[(,]"
     # images.py PUT/DELETE enforce HIGH-1 owner-scoping with a bespoke inline
     # check rather than a deck-permission helper: `if image.uploaded_by !=
@@ -444,6 +459,12 @@ DESIGN_SYSTEM_MUTATION_LEVELS = {
     # Removing the org default is the same ORG-WIDE state change as setting it:
     # it decides what EVERY user gets by default, so authorship must not buy it.
     ("POST", "/api/settings/design-systems/{ds_id}/clear-default"): "admin",
+    # A design system's default template is seeded into every new session on that
+    # system, so it is the same org-wide default class as the routes above.
+    ("POST", "/api/settings/design-systems/{ds_id}/templates/{template_id}/set-default"):
+        "admin",
+    ("POST", "/api/settings/design-systems/{ds_id}/templates/{template_id}/clear-default"):
+        "admin",
     # SDR-4437 F-CR-17: contribution is ADMIN-ONLY, reversing the earlier "any
     # user may CONTRIBUTE" decision. Not because creating a row is itself
     # privileged, but because of where the row's content ends up: the bundle's

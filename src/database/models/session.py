@@ -3,11 +3,13 @@
 These models support multi-session functionality in production deployments
 where session state is stored in Lakebase for persistence across app restarts.
 """
+import uuid
 from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -15,11 +17,52 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Uuid,
+    event,
+    inspect,
+    text,
 )
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import backref, relationship
+from sqlalchemy.sql.functions import FunctionElement
 
 from src.core.database import Base
 from src.database.types import NormalizedAgentConfig
+
+
+# Lowercase by SQLAlchemy convention: a FunctionElement subclass names the SQL
+# function it renders, so CapWords would misname it.
+class collaboration_identity_default(FunctionElement):  # noqa: N801
+    """Server-side generator for a stable collaboration identity.
+
+    ``collaboration_identity`` is ``nullable=False``, and a Python-side
+    ``default=uuid.uuid4`` fires only on an ORM-mapper insert.  Every other writer —
+    raw SQL, ``insert().values()`` that omits the column, a bulk insert, a migration
+    backfill — would violate the constraint.  Declaring the default on the *column*
+    makes ``create_all`` emit it for whichever dialect is in play, so the database,
+    not the mapper, is what guarantees an identity exists.
+
+    Rendered per dialect below.  The SQLite spelling produces the same 32-character
+    lowercase hex form that ``Uuid(as_uuid=True)`` stores in its ``CHAR(32)`` column,
+    and both ``randomblob`` and ``gen_random_uuid`` are evaluated per row, so every
+    row gets a distinct identity.  SQLite only accepts an expression default when it
+    is parenthesised; SQLAlchemy's SQLite DDL compiler adds those parentheses, which
+    is why they are absent here.
+    """
+
+    name = "collaboration_identity_default"
+    type = Uuid(as_uuid=True)
+    inherit_cache = True
+
+
+@compiles(collaboration_identity_default)
+def _render_collaboration_identity_default(element, compiler, **kw) -> str:
+    return "gen_random_uuid()"
+
+
+@compiles(collaboration_identity_default, "sqlite")
+def _render_collaboration_identity_default_sqlite(element, compiler, **kw) -> str:
+    return "lower(hex(randomblob(16)))"
 
 
 class ChatRequest(Base):
@@ -45,6 +88,13 @@ class ChatRequest(Base):
 
     # Final result data (JSON) - slides, raw_html, replacement_info
     result_json = Column(Text, nullable=True)
+
+    # #319: the graph turn's latest stage summary (JSON) and its sequence number.
+    # Written ONLY by SessionManager.record_chat_request_progress, whose
+    # conditional UPDATE on progress_seq is what stops concurrent per-slide
+    # writers regressing it.  Read by GET /chat/poll as `turn_progress`.
+    progress_json = Column(Text, nullable=True)
+    progress_seq = Column(Integer, nullable=True)
 
     # Relationship
     session = relationship("UserSession", back_populates="chat_requests")
@@ -98,6 +148,12 @@ class UserSession(Base):
 
     id = Column(Integer, primary_key=True)
     session_id = Column(String(64), unique=True, nullable=False, index=True)
+    collaboration_identity = Column(
+        Uuid(as_uuid=True),
+        default=uuid.uuid4,
+        server_default=collaboration_identity_default(),
+        nullable=False,
+    )
     user_id = Column(String(255), nullable=True, index=True)  # Legacy — kept for backward compat
     created_by = Column(String(255), nullable=True, index=True)  # Username of session creator
 
@@ -110,6 +166,16 @@ class UserSession(Base):
     parent_session_id = Column(
         Integer,
         ForeignKey("user_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    graph_release_id = Column(
+        Integer,
+        ForeignKey(
+            "graph_release.id",
+            name="fk_user_sessions_graph_release",
+            ondelete="RESTRICT",
+        ),
         nullable=True,
         index=True,
     )
@@ -182,6 +248,7 @@ class UserSession(Base):
             passive_deletes=True,
         ),
     )
+    graph_release = relationship("GraphRelease", foreign_keys=[graph_release_id])
 
     # Indexes for common queries
     __table_args__ = (
@@ -249,6 +316,12 @@ class SessionSlideDeck(Base):
     __tablename__ = "session_slide_decks"
 
     id = Column(Integer, primary_key=True)
+    collaboration_identity = Column(
+        Uuid(as_uuid=True),
+        default=uuid.uuid4,
+        server_default=collaboration_identity_default(),
+        nullable=False,
+    )
     session_id = Column(
         Integer,
         ForeignKey("user_sessions.id", ondelete="CASCADE"),
@@ -265,10 +338,38 @@ class SessionSlideDeck(Base):
     # Full SlideDeck structure as JSON (for restoration)
     # Note: Verification is NOT stored here - it's in verification_map
     deck_json = Column(Text)  # JSON with slides array, css, external_scripts, scripts
-    
+
     # Verification results keyed by content hash (survives deck regeneration)
     # JSON format: {"content_hash": {"score": 95, "rating": "excellent", ...}}
     verification_map = Column(Text, nullable=True)
+
+    # Deck spec (full architecture spec, architect-authored)
+    # Persisted per-session; inferred from existing HTML once, then persisted (spec §4.3).
+    # Snapshot also stored in SlideDeckVersion (spec §4.4).
+    deck_spec_json = Column(Text, nullable=True)
+
+    # Deck-level CSS (written by the foreman — single writer for the deck)
+    # Builders write only body HTML to their slides; deck CSS is centralized here.
+    css = Column(Text, nullable=True)
+
+    # Deck-level external script URLs (Chart.js CDN etc.), JSON array.
+    # REQUIRED, not optional: the export chain reads `external_scripts` off the deck
+    # dict (`src/api/routes/export.py:52`), and `SlideDeck._ensure_default_external_scripts`
+    # (`src/domain/slide_deck.py:74-77`) injects the Chart.js CDN into every deck. If the
+    # row path returns [] instead, EVERY export silently loses Chart.js and all charts
+    # render blank — the PRD §3 no-regression gate, failing invisibly.
+    external_scripts_json = Column(Text, nullable=True)
+
+    # Deck-level HTML <head> metadata (charset, viewport, other named metas),
+    # JSON object.  The third deck-level presentation field, lifted out of
+    # deck_json for the same reason as css and external_scripts_json: the row
+    # read path reconstructs the deck dict from columns, so a field left only in
+    # deck_json is DROPPED on the first row-path read and then made permanent by
+    # chat_service's round-trip back into deck_json (final review F5).
+    # SlideDeck.knit()/render_slide() fall back to a hardcoded
+    # `width=device-width, initial-scale=1.0` viewport when this is absent, so
+    # decks carrying a custom viewport silently re-render at the wrong scale.
+    head_meta_json = Column(Text, nullable=True)
 
     # Deck-level editing lock for chat-based edits (long-running operations).
     # When an agent is modifying slides, locked_by holds the username and
@@ -284,6 +385,31 @@ class SessionSlideDeck(Base):
     # Authorship
     modified_by = Column(String(255), nullable=True)
 
+    # Spec-dirty marker — the arc-review sweeper's work queue (B2.3).
+    #
+    # spec_dirty_at is set when an out-of-graph edit makes the committed spec stale;
+    # cleared when the sweeper finishes its re-review.
+    #
+    # spec_dirty_by records the human whose edit triggered the mark.  The sweeper tick
+    # has no HTTP request, so get_current_user() returns None and the Databricks client
+    # factory fails closed in production (SDR-4437 HIGH-6 removed the SP fallback
+    # outside non-prod).  Recording the author here gives the arc review's write a real
+    # modified_by, gives cost attribution a real user (PRD §8.1), and carries a
+    # permission provenance that was already checked on that human's route — with no new
+    # identity concept and no stored credential.
+    #
+    # spec_dirty_claimed_at is the worker lease.  UVICORN_WORKERS defaults to 4, so any
+    # periodic sweeper runs in all four workers simultaneously.  One worker claims the
+    # deck atomically by writing spec_dirty_claimed_at; the others see it and skip.
+    # A claim expires by age on the next sweep tick so a crashed worker does not block
+    # the deck permanently.
+    #
+    # NOT deck presentation state: deliberately absent from get_slide_deck's returned
+    # dict.  These fields drive internal sweep scheduling only.
+    spec_dirty_at = Column(DateTime, nullable=True)
+    spec_dirty_by = Column(String(255), nullable=True)
+    spec_dirty_claimed_at = Column(DateTime, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -291,8 +417,110 @@ class SessionSlideDeck(Base):
     # Relationship
     session = relationship("UserSession", back_populates="slide_deck")
 
+    # Partial index: the sweeper's "find dirty decks" query touches only the small
+    # subset where spec_dirty_at IS NOT NULL, so a whole-table index would be
+    # wasteful.  Declared on both dialects: SQLite has supported partial indexes
+    # since 3.8, so the unit suite exercises the same rule as PostgreSQL/Lakebase.
+    # _migrate_spec_dirty_marker creates it on already-provisioned databases.
+    __table_args__ = (
+        Index(
+            "ix_session_slide_decks_spec_dirty_at",
+            "spec_dirty_at",
+            postgresql_where=text("spec_dirty_at IS NOT NULL"),
+            sqlite_where=text("spec_dirty_at IS NOT NULL"),
+        ),
+    )
+
     def __repr__(self):
         return f"<SessionSlideDeck(session_id={self.session_id}, title='{self.title}')>"
+
+
+class SharedDeckMutationEvent(Base):
+    """Append-only, privacy-safe evidence for one shared-deck mutation."""
+
+    __tablename__ = "shared_deck_mutation_event"
+
+    id = Column(Integer, primary_key=True)
+    root_session_id = Column(
+        Integer,
+        ForeignKey(
+            "user_sessions.id",
+            name="fk_shared_deck_mutation_event_root_session",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    root_deck_id = Column(
+        Integer,
+        ForeignKey(
+            "session_slide_decks.id",
+            name="fk_shared_deck_mutation_event_root_deck",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+    actor_session_id = Column(
+        Integer,
+        ForeignKey(
+            "user_sessions.id",
+            name="fk_shared_deck_mutation_event_actor_session",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    root_session_identity = Column(Uuid(as_uuid=True), nullable=False)
+    root_deck_identity = Column(Uuid(as_uuid=True), nullable=False)
+    actor_session_identity = Column(Uuid(as_uuid=True), nullable=False)
+
+    graph_release_id = Column(Integer, nullable=True)
+    graph_version = Column(Integer, nullable=True)
+    operation = Column(String(32), nullable=False)
+    object_type = Column(String(16), nullable=False)
+    object_id = Column(String(128), nullable=True)
+    occurred_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(graph_release_id IS NULL) = (graph_version IS NULL)",
+            name="ck_shared_deck_mutation_event_release_pair",
+        ),
+        CheckConstraint(
+            "(object_type = 'slide' AND operation IN ('write_slide', 'delete_slide')) "
+            "OR (object_type = 'deck' AND operation IN "
+            "('save_deck', 'save_deck_slides', 'write_deck_level', 'insert_slide', "
+            "'update_slide', 'duplicate_slide', 'delete_slide', 'reorder_slides', "
+            "'restore_version'))",
+            name="ck_shared_deck_mutation_event_operation_object",
+        ),
+        Index(
+            "ix_shared_deck_event_root_deck_actor_release",
+            "root_deck_identity",
+            "actor_session_identity",
+            "graph_release_id",
+        ),
+        Index(
+            "ix_shared_deck_event_root_session_actor_release_time",
+            "root_session_identity",
+            "actor_session_identity",
+            "graph_release_id",
+            "occurred_at",
+        ),
+    )
+
+
+@event.listens_for(UserSession, "before_update")
+@event.listens_for(SessionSlideDeck, "before_update")
+def _reject_collaboration_identity_change(_mapper, _connection, target) -> None:
+    if inspect(target).attrs.collaboration_identity.history.has_changes():
+        raise ValueError("collaboration identity is immutable")
+
+
+@event.listens_for(SharedDeckMutationEvent, "before_update")
+@event.listens_for(SharedDeckMutationEvent, "before_delete")
+def _reject_shared_deck_mutation_event_change(*_args) -> None:
+    """Keep SQLite/application ORM paths append-only; PostgreSQL also has a trigger."""
+    raise ValueError("shared deck mutation events are append-only")
 
 
 class SlideDeckVersion(Base):
@@ -326,6 +554,9 @@ class SlideDeckVersion(Base):
     # Chat history snapshot (JSON array of messages up to this point)
     chat_history_json = Column(Text, nullable=True)
 
+    # Deck spec snapshot at save-point time (must stay in sync with deck_json for restore)
+    deck_spec_json = Column(Text, nullable=True)
+
     # Relationship
     session = relationship("UserSession", back_populates="versions")
 
@@ -338,3 +569,57 @@ class SlideDeckVersion(Base):
     def __repr__(self):
         return f"<SlideDeckVersion(session_id={self.session_id}, version={self.version_number}, desc='{self.description}')>"
 
+
+class SessionSlide(Base):
+    """One row per slide in a session's deck.
+
+    Keyed by (session_id, position). Carries the Slide domain model fields
+    plus verification_record (per-row, keyed by content_hash) and deck_spec_slide
+    (the slide's fragment of the architecture spec).
+
+    Verification moved here from SessionSlideDeck.verification_map to allow
+    parallel per-slide writes without lost-update races (spec §5.2.4).
+    """
+
+    __tablename__ = "session_slides"
+
+    # Composite primary key: (session_id, position)
+    session_id = Column(
+        Integer,
+        ForeignKey("user_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+        index=True,
+    )
+    position = Column(Integer, primary_key=True, nullable=False)
+
+    # Unique row ID (for external references if needed)
+    id = Column(String(64), unique=True, nullable=True)
+
+    # Slide content (from Slide domain model)
+    html = Column(Text, nullable=False)  # Body HTML only, not full document
+    slide_id = Column(String(255), nullable=True)  # Optional UUID
+    scripts = Column(Text, nullable=True)  # Chart.js, etc. per-slide code
+
+    # Authorship and timestamps
+    created_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=True)
+    modified_by = Column(String(255), nullable=True)
+    modified_at = Column(DateTime, nullable=True)
+
+    # Per-slide verification record (keyed by content_hash if present)
+    # JSON format: {"content_hash": {findings from reviewer}}
+    verification_record = Column(Text, nullable=True)
+
+    # This slide's portion of the deck spec (architect-authored, foreman-distributed)
+    # JSON format: {position, purpose, content brief, assumes, hands_off, data_references}
+    deck_spec_slide = Column(Text, nullable=True)
+
+    # Indexes for efficient queries
+    __table_args__ = (
+        Index("ix_session_slides_session_position", "session_id", "position"),
+        Index("ix_session_slides_id", "id"),
+    )
+
+    def __repr__(self):
+        return f"<SessionSlide(session_id={self.session_id}, position={self.position})>"

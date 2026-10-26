@@ -28,11 +28,13 @@ import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.core.database import Base
 from src.database.models.design_system import DesignSystem
 from src.services.design_system_service import _basename
+from src.services.svg_sanitizer import sanitize_svg
 from tests.unit.conftest_design_system import (
     COLORS_AND_TYPE_CSS,
     MANIFEST_FILENAME,
     SVG_LOGO,
     SYNTHETIC_README,
+    SYNTHETIC_SKILL,
     SYNTHETIC_TEMPLATE_HTML,
     default_manifest,
     make_bundle_zip,
@@ -2757,8 +2759,9 @@ class TestOnePathClaimedTwiceIsRefusedNotDecidedByZipOrder:
         )
         assert verdict == "stored", detail
         stored = dict(detail)
-        assert stored["assets/mixed.svg"] == COLLIDING_FIRST_BYTES
-        assert stored["assets/sub/mixed.svg"] == COLLIDING_SECOND_BYTES
+        # SVG assets are sanitized on import (F-CR-33), so compare sanitized bytes.
+        assert stored["assets/mixed.svg"] == sanitize_svg(COLLIDING_FIRST_BYTES)
+        assert stored["assets/sub/mixed.svg"] == sanitize_svg(COLLIDING_SECOND_BYTES)
 
 
 def _dot_rooted_members():
@@ -3811,3 +3814,134 @@ class TestTranslateNameConflictError:
         translate_name_conflict_error(
             ValueError("some entirely unrelated failure"), name="Acme"
         )
+
+
+# ---------------------------------------------------------------------------
+# New imports refuse templates whose slide roots carry no data-label
+# ---------------------------------------------------------------------------
+
+
+class TestImportRejectsUnlabeledSlideRoots:
+    """Each slide root of a newly imported template must declare a non-empty
+    ``data-label`` (the architect's ``slide_type`` vocabulary). An unlabeled
+    root is refused at import, naming the template path and 0-based index."""
+
+    ENTRY = "templates/corporate/index.html"
+
+    def _import(self, session, entry_html):
+        from src.services.design_system_service import import_bundle
+        from tests.unit.conftest_design_system import single_template_bundle_zip
+
+        return import_bundle(
+            session,
+            zip_bytes=single_template_bundle_zip(entry_html),
+            user="tester@example.com",
+        )
+
+    def _assert_refused(self, session, entry_html, indexes):
+        from src.services.design_system_service import DesignSystemImportError
+
+        with pytest.raises(DesignSystemImportError) as exc:
+            self._import(session, entry_html)
+        message = str(exc.value)
+        assert "unlabeled" in message
+        assert self.ENTRY in message
+        assert f"indexes {indexes}" in message
+        session.rollback()
+        assert session.query(DesignSystem).count() == 0
+
+    def test_single_unlabeled_slide_root_is_refused_at_index_0(self, session):
+        from tests.unit.conftest_design_system import slide_roots_html
+
+        self._assert_refused(session, slide_roots_html([None]), [0])
+
+    def test_only_the_unlabeled_and_blank_roots_are_reported(self, session):
+        from tests.unit.conftest_design_system import slide_roots_html
+
+        html = slide_roots_html(["Cover", None, "   ", "Agenda"])
+        self._assert_refused(session, html, [1, 2])
+
+    def test_label_must_be_on_the_promoted_outer_root(self, session):
+        html = (
+            b"<!doctype html><html><body>"
+            b'<section><div class="slide dark" data-label="Cover">x</div></section>'
+            b"</body></html>"
+        )
+        self._assert_refused(session, html, [0])
+
+    def test_fully_labeled_slide_roots_import(self, session):
+        from src.database.models.design_system import DesignSystemTemplate
+        from tests.unit.conftest_design_system import slide_roots_html
+
+        ds = self._import(session, slide_roots_html(["Cover", "Agenda", "Agenda"]))
+
+        templates = session.query(DesignSystemTemplate).filter_by(
+            design_system_id=ds.id
+        ).all()
+        assert [t.entry_path for t in templates] == [self.ENTRY]
+        assert 'data-label="Cover"' in templates[0].layout_html
+
+    def test_corporate_shape_labeled_on_outer_section_imports(self, session):
+        from src.database.models.design_system import DesignSystemTemplate
+        from tests.unit.conftest_design_system import slide_roots_html
+
+        ds = self._import(session, slide_roots_html(["Cover", "Agenda"], wrapped=True))
+
+        assert (
+            session.query(DesignSystemTemplate).filter_by(design_system_id=ds.id).count()
+            == 1
+        )
+
+    def test_zero_root_synthetic_template_still_imports(self, session):
+        from src.database.models.design_system import DesignSystemTemplate
+
+        ds = self._import(session, SYNTHETIC_TEMPLATE_HTML)
+
+        templates = session.query(DesignSystemTemplate).filter_by(
+            design_system_id=ds.id
+        ).all()
+        assert [t.entry_path for t in templates] == [self.ENTRY]
+
+    def test_unlabeled_second_template_is_refused(self, session):
+        from src.services.design_system_service import (
+            DesignSystemImportError,
+            import_bundle,
+        )
+        from tests.unit.conftest_design_system import slide_roots_html
+
+        labeled = slide_roots_html(["Cover", "Content"])
+        unlabeled = slide_roots_html([None])
+        manifest = default_manifest()
+        manifest["templates"] = [
+            {
+                "name": "Acme corporate",
+                "description": "Labeled first template.",
+                "folder": "templates/corporate",
+                "entryPath": "templates/corporate/index.html",
+            },
+            {
+                "name": "Acme events",
+                "description": "Unlabeled second template.",
+                "folder": "templates/events",
+                "entryPath": "templates/events/index.html",
+            },
+        ]
+        zip_bytes = make_bundle_zip(
+            manifest=manifest,
+            files={
+                "fonts/acme-sans.woff2": b"OTTO synthetic-font-bytes",
+                "assets/logo.svg": SVG_LOGO,
+                "README.md": SYNTHETIC_README,
+                "SKILL.md": SYNTHETIC_SKILL,
+                "templates/corporate/index.html": labeled,
+                "templates/events/index.html": unlabeled,
+            },
+        )
+        with pytest.raises(DesignSystemImportError) as exc:
+            import_bundle(session, zip_bytes=zip_bytes, user="tester@example.com")
+        message = str(exc.value)
+        assert "unlabeled" in message
+        assert "templates/events/index.html" in message
+        assert "indexes [0]" in message
+        session.rollback()
+        assert session.query(DesignSystem).count() == 0

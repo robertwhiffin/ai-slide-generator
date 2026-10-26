@@ -1,0 +1,10 @@
+kind: mutation
+fault: 'add after slide 3 (position 2): the new slide is position 3, only it is built,
+  and the later slides shift unchanged'
+expect:
+  intent: edit
+  positions:
+  - 3
+  inserted:
+  - 3
+design_system_active: true

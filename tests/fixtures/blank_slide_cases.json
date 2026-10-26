@@ -1,0 +1,286 @@
+{
+  "about": "Shared case table for the structural blank-slide predicates (#314 follow-up, plan D4 + PLAN-CORRECTIONS C4). Read by tests/unit/test_deck_spec_slides.py (Python: is_blank_slide_html, is_blank_slide_spec) and by Task 7's frontend/src/services/__tests__/blankSlide.test.ts (isBlankSlideHtml, isBlankSlideSpec). Rules, both languages: text is blank iff, after dropping comments, it holds only HTML ASCII whitespace [\\t\\n\\f\\r ]; the 'slide' class token match is case-sensitive; the first .slide (the end of the chain) must itself be a <div> (has_slide_wrapper / SLIDE_DIV_PATTERN are regexes over the raw string, so a <div class=slide> inside a comment or an attribute value satisfies them: check the element, e.g. localName === 'div') (TS: classList.contains, never querySelector: DOMParser text/html without a doctype is quirks mode, where .slide matches class=Slide). DOMParser hoists head-only elements that come BEFORE the root (style, meta, link, title, script, base) into <head>, and a leading comment onto the Document: the TS walk must count anything in <head> as off-chain. Do not add rows that the two parsers build into different trees (block elements inside <p>, tables, CDATA).",
+  "html_cases": [
+    {
+      "name": "bare div",
+      "html": "<div class=\"slide\"></div>",
+      "blank": true
+    },
+    {
+      "name": "section shell",
+      "html": "<section data-label=\"Acme Ground\"><div class=\"slide\"></div></section>",
+      "blank": true
+    },
+    {
+      "name": "three-level chain",
+      "html": "<section><div class=\"w\"><div class=\"slide\"></div></div></section>",
+      "blank": true
+    },
+    {
+      "name": "compound class slide dark",
+      "html": "<div class=\"slide dark\"></div>",
+      "blank": true
+    },
+    {
+      "name": "style with a url() image placeholder",
+      "html": "<div class=\"slide\" style=\"background:url('{{image:3}}') center/cover\"></div>",
+      "blank": true
+    },
+    {
+      "name": "whitespace and a comment inside",
+      "html": "<div class=\"slide\">\n  <!-- empty -->\n</div>",
+      "blank": true
+    },
+    {
+      "name": "leading comment and whitespace before the root",
+      "html": "\n<!-- shell -->\n<div class=\"slide\"></div>\n",
+      "blank": true
+    },
+    {
+      "name": "trailing comment after the root",
+      "html": "<div class=\"slide\"></div><!-- end -->",
+      "blank": true
+    },
+    {
+      "name": "pretty-printed section shell",
+      "html": "<section data-label=\"G\">\n  <div class=\"slide\">\n  </div>\n</section>",
+      "blank": true
+    },
+    {
+      "name": "every HTML ASCII whitespace character",
+      "html": "<div class=\"slide\">\t\n\f\r </div>",
+      "blank": true
+    },
+    {
+      "name": "single-quoted class",
+      "html": "<div class='slide'></div>",
+      "blank": true
+    },
+    {
+      "name": "upper-case tag and attribute names",
+      "html": "<DIV CLASS=\"slide\"></DIV>",
+      "blank": true
+    },
+    {
+      "name": "wrapper class containing slide only as a substring",
+      "html": "<div class=\"slide-wrapper\"><div class=\"slide\"></div></div>",
+      "blank": true
+    },
+    {
+      "name": "attributes other than class do not matter",
+      "html": "<div class=\"slide\" id=\"s1\" data-x=\"1\" style=\"color:red\"></div>",
+      "blank": true
+    },
+    {
+      "name": "text inside the slide",
+      "html": "<div class=\"slide\">hi</div>",
+      "blank": false
+    },
+    {
+      "name": "an img inside the slide",
+      "html": "<div class=\"slide\"><img src=\"data:image/png;base64,AAAA\"></div>",
+      "blank": false
+    },
+    {
+      "name": "a br inside the slide",
+      "html": "<div class=\"slide\"><br></div>",
+      "blank": false
+    },
+    {
+      "name": "a script sibling",
+      "html": "<div class=\"slide\"></div><script></script>",
+      "blank": false
+    },
+    {
+      "name": "a style element before the root",
+      "html": "<style>.slide{color:red}</style><div class=\"slide\"></div>",
+      "blank": false
+    },
+    {
+      "name": "a second top-level element",
+      "html": "<div class=\"slide\"></div><div></div>",
+      "blank": false
+    },
+    {
+      "name": "text after the root at the top level",
+      "html": "<div class=\"slide\"></div>caption",
+      "blank": false
+    },
+    {
+      "name": "a slide with a child div",
+      "html": "<div class=\"slide\"><div></div></div>",
+      "blank": false
+    },
+    {
+      "name": "a wrapper with a second element child",
+      "html": "<section><div class=\"slide\"></div><footer></footer></section>",
+      "blank": false
+    },
+    {
+      "name": "text in a wrapper beside the slide",
+      "html": "<section>Title<div class=\"slide\"></div></section>",
+      "blank": false
+    },
+    {
+      "name": "no .slide element",
+      "html": "<div class=\"x\"></div>",
+      "blank": false
+    },
+    {
+      "name": "section.slide alone (no div wrapper)",
+      "html": "<section class=\"slide\"></section>",
+      "blank": false
+    },
+    {
+      "name": "section.slide holding a div.slide",
+      "html": "<section class=\"slide\"><div class=\"slide\"></div></section>",
+      "blank": false
+    },
+    {
+      "name": "a wrapper only inside a comment, the slide an img",
+      "html": "<!-- <div class=\"slide\"> --><img class=\"slide\" src=\"data:image/png;base64,AAAA\">",
+      "blank": false
+    },
+    {
+      "name": "a wrapper only inside an attribute, the slide an img",
+      "html": "<img class=\"slide\" alt='<div class=\"slide\">' src=\"data:image/png;base64,AAAA\">",
+      "blank": false
+    },
+    {
+      "name": "a wrapper only inside a comment, the slide a childless span",
+      "html": "<!-- <div class=\"slide\"> --><section><span class=\"slide\"></span></section>",
+      "blank": false
+    },
+    {
+      "name": "capitalised class Slide",
+      "html": "<div class=\"Slide\"></div>",
+      "blank": false
+    },
+    {
+      "name": "nbsp entity text",
+      "html": "<div class=\"slide\">&nbsp;</div>",
+      "blank": false
+    },
+    {
+      "name": "U+00A0 text",
+      "html": "<div class=\"slide\">\u00a0</div>",
+      "blank": false
+    },
+    {
+      "name": "U+FEFF text",
+      "html": "<div class=\"slide\">\ufeff</div>",
+      "blank": false
+    },
+    {
+      "name": "U+0085 text",
+      "html": "<div class=\"slide\">\u0085</div>",
+      "blank": false
+    },
+    {
+      "name": "U+001C text",
+      "html": "<div class=\"slide\">\u001c</div>",
+      "blank": false
+    },
+    {
+      "name": "vertical tab text",
+      "html": "<div class=\"slide\">\u000b</div>",
+      "blank": false
+    },
+    {
+      "name": "U+3000 text",
+      "html": "<div class=\"slide\">\u3000</div>",
+      "blank": false
+    },
+    {
+      "name": "empty string",
+      "html": "",
+      "blank": false
+    }
+  ],
+  "spec_cases": [
+    {
+      "name": "both empty",
+      "purpose": "",
+      "content_brief": "",
+      "blank": true
+    },
+    {
+      "name": "both ASCII spaces",
+      "purpose": "   ",
+      "content_brief": "   ",
+      "blank": true
+    },
+    {
+      "name": "every HTML ASCII whitespace character",
+      "purpose": "\t\n\f\r ",
+      "content_brief": " \n",
+      "blank": true
+    },
+    {
+      "name": "U+00A0 purpose",
+      "purpose": "\u00a0",
+      "content_brief": "",
+      "blank": false
+    },
+    {
+      "name": "U+00A0 brief",
+      "purpose": "",
+      "content_brief": "\u00a0",
+      "blank": false
+    },
+    {
+      "name": "U+FEFF purpose",
+      "purpose": "\ufeff",
+      "content_brief": "",
+      "blank": false
+    },
+    {
+      "name": "U+0085 brief",
+      "purpose": "",
+      "content_brief": "\u0085",
+      "blank": false
+    },
+    {
+      "name": "U+001C purpose",
+      "purpose": "\u001c",
+      "content_brief": "",
+      "blank": false
+    },
+    {
+      "name": "vertical tab brief",
+      "purpose": "",
+      "content_brief": "\u000b",
+      "blank": false
+    },
+    {
+      "name": "U+3000 purpose",
+      "purpose": "\u3000",
+      "content_brief": "",
+      "blank": false
+    },
+    {
+      "name": "purpose set",
+      "purpose": "Pricing",
+      "content_brief": "",
+      "blank": false
+    },
+    {
+      "name": "brief set",
+      "purpose": "",
+      "content_brief": "Three tiers, one table",
+      "blank": false
+    },
+    {
+      "name": "both set",
+      "purpose": "Pricing",
+      "content_brief": "Three tiers, one table",
+      "blank": false
+    },
+    {
+      "name": "padded purpose",
+      "purpose": "  Pricing  ",
+      "content_brief": "   ",
+      "blank": false
+    }
+  ]
+}

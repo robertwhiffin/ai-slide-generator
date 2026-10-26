@@ -34,20 +34,16 @@ class ConfigValidator:
 
         return ValidationResult(valid=True)
 
-    def validate_prompts(
-        self,
-        system_prompt: str = None,
-    ) -> ValidationResult:
+    def validate_prompts(self) -> ValidationResult:
         """
         Validate prompts.
-        
-        Args:
-            system_prompt: System prompt (optional)
-            
+
+        The retired ``system_prompt`` override was this method's only input;
+        prompts are now assembled from ``src.core.prompt_modules``, so there is
+        nothing per-profile left to validate.
+
         Returns:
             ValidationResult
         """
-        # System prompt validation - just check it's not empty if provided
-        # No required placeholders for system prompt
         return ValidationResult(valid=True)
 

@@ -204,18 +204,22 @@ class TestGetImageBase64:
 
     def test_encodes_image_data_to_base64(self, db_session, png_1x1):
         image = create_test_image(db_session, image_data=png_1x1)
-        b64, mime = image_service.get_image_base64(db_session, image.token)
+        b64, mime = image_service.get_image_base64(
+            db_session, image.token, requesting_user="system"
+        )
         assert b64 == base64.b64encode(png_1x1).decode("utf-8")
         assert mime == "image/png"
 
     def test_raises_for_nonexistent_image(self, db_session):
         with pytest.raises(ValueError, match="not found"):
-            image_service.get_image_base64(db_session, "nonexistent-token")
+            image_service.get_image_base64(
+                db_session, "nonexistent-token", requesting_user="system"
+            )
 
     def test_raises_for_inactive_image(self, db_session):
         image = create_test_image(db_session, is_active=False)
         with pytest.raises(ValueError, match="not found"):
-            image_service.get_image_base64(db_session, image.id)
+            image_service.get_image_base64(db_session, image.id, requesting_user="system")
 
 
 # ===== Search =====

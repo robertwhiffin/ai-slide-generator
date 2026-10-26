@@ -137,4 +137,71 @@ test.describe('/admin route gate', () => {
     await expect(adminHeading(page)).toBeVisible();
     await expect(page).toHaveURL(/\/admin$/);
   });
+
+  test('non-admin visiting /admin/agent-definitions/review is redirected with no review content', async ({
+    page,
+  }) => {
+    // Hold the identity response so we can observe RequireAdmin's loading window.
+    // A resolved mockIdentity would redirect the user before we can assert, making the
+    // no-flash check trivially true.  Mirror the identity-hold pattern at `:106-139`.
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await page.route('**/api/user/current', async (route) => {
+      await released;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          username: 'user@test.com',
+          display_name: 'user@test.com',
+          is_admin: false,
+        }),
+      });
+    });
+
+    // Count preview GETs: the review page component must not mount before identity resolves.
+    let previewGets = 0;
+    await page.route('**/api/admin/agent-definitions/release-preview', (route) => {
+      previewGets += 1;
+      return route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'stub' }),
+      });
+    });
+
+    await page.goto('/admin/agent-definitions/review');
+
+    // Wait for the app's own setup-status loading state to clear.  Until then we
+    // are only observing the "Loading…" splash, not RequireAdmin's decision.
+    // After this, RequireAdmin has been evaluated with loading=true (identity still held)
+    // and the heading is either in the DOM (mutation) or absent (correct).
+    await page.waitForFunction(
+      () => !document.querySelector('div[style*="background: #1a1a2e"]'),
+    );
+
+    // While identity is still unknown, RequireAdmin renders null: no heading, no GET.
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Review & Publish' })
+    ).toHaveCount(0);
+    // No preview GET: the page component never mounted.
+    expect(previewGets).toBe(0);
+    // URL still on the requested path — RequireAdmin has not yet redirected.
+    await expect(page).toHaveURL(/\/admin\/agent-definitions\/review$/);
+
+    // Resolve as non-admin: RequireAdmin redirects to "/".
+    release();
+
+    await expect(page).toHaveURL(/\/(help)?$/);
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Review & Publish' })
+    ).toHaveCount(0);
+    // The landing page really rendered (not a blank redirect target).
+    await expect(
+      page.getByRole('heading', { level: 2, name: 'AI Assistant' })
+    ).toBeVisible();
+  });
 });

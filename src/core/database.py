@@ -195,6 +195,20 @@ async def stop_token_refresh() -> None:
         logger.info("Background token refresh task stopped")
 
 
+def _with_psycopg2_driver(url: str) -> str:
+    """Pin PostgreSQL URLs to psycopg2, matching the declared dependency.
+
+    SQLAlchemy 2.1 changed bare ``postgresql://`` to mean psycopg (v3). CI
+    installs ``sqlalchemy>=2.0`` via pip, so that default now imports a
+    package we do not ship (``psycopg2-binary`` is the driver). Explicit
+    ``postgresql+psycopg2://`` keeps both 2.0 and 2.1 on the installed driver.
+    URLs that already name a driver, and non-Postgres URLs, are left alone.
+    """
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + url[len("postgresql://") :]
+    return url
+
+
 def _get_database_url() -> str:
     """
     Determine database URL based on environment.
@@ -213,7 +227,7 @@ def _get_database_url() -> str:
     # Check for explicit DATABASE_URL first
     explicit_url = os.getenv("DATABASE_URL")
     if explicit_url and not explicit_url.startswith("jdbc:"):
-        return explicit_url
+        return _with_psycopg2_driver(explicit_url)
 
     # Check for autoscaling Lakebase (env vars set by deployment)
     lakebase_type = _get_lakebase_type()
@@ -237,7 +251,7 @@ def _get_database_url() -> str:
         url = f"postgresql://{pg_user}@{pg_host}:5432/{database}?sslmode=require"
         if schema:
             url += f"&options=-csearch_path%3D{schema}"
-        return url
+        return _with_psycopg2_driver(url)
 
     # Check for provisioned Lakebase (PGHOST auto-set by Databricks Apps)
     pg_host = os.getenv("PGHOST")
@@ -258,10 +272,10 @@ def _get_database_url() -> str:
         if schema:
             url += f"&options=-csearch_path%3D{schema}"
 
-        return url
+        return _with_psycopg2_driver(url)
 
     # Default to local PostgreSQL for development
-    return "postgresql://localhost/ai_slide_generator"
+    return _with_psycopg2_driver("postgresql://localhost/ai_slide_generator")
 
 
 def _create_engine():
@@ -291,14 +305,26 @@ def _create_engine():
 
     logger.info("Configuring database connection")
 
-    # Create engine with connection pooling
-    engine = create_engine(
-        database_url,
-        pool_pre_ping=True,
-        pool_size=80,
-        max_overflow=20,
-        echo=sql_echo,
-    )
+    # sqlite:///:memory: with the default QueuePool gives each checkout a
+    # different empty database. Unit tests use an in-memory URL; StaticPool
+    # keeps one shared connection. Postgres keeps the production pool settings.
+    if database_url.startswith("sqlite"):
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_engine(
+            database_url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+            echo=sql_echo,
+        )
+    else:
+        engine = create_engine(
+            database_url,
+            pool_pre_ping=True,
+            pool_size=80,
+            max_overflow=20,
+            echo=sql_echo,
+        )
 
     # For Lakebase: register event listener to inject fresh tokens
     if is_lakebase_environment():
@@ -550,6 +576,9 @@ def _run_migrations(engine, schema: str | None = None):
         # --- design system (v1): add font_mapping_json to pre-existing tables ---
         _migrate_design_system_font_mapping(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- design system template: add is_default (per-system default) ---
+        _migrate_design_system_template_default(conn, inspector, schema, _qual, is_sqlite)
+
         # --- design system: free-form brand text -> UNCAPPED TEXT (no cap at all) ---
         # SUPERSEDES the two ``design_system_token`` widen migrations (name 100 ->
         # 255, group 50 -> 255). Their target columns are now unbounded ``TEXT``,
@@ -566,10 +595,912 @@ def _run_migrations(engine, schema: str | None = None):
             conn, inspector, schema, _qual, is_sqlite
         )
 
+        # --- row-per-slide schema: session_slides table + deck_spec columns ---
+        # ORDERING: this must stay AFTER _migrate_rewrite_deck_image_placeholders.
+        # That rewrite targets _DECK_PLACEHOLDER_COLUMNS only — deck_json and
+        # html_content on session_slide_decks, plus slide_deck_versions.deck_json —
+        # and NOT session_slides.html, which did not exist when it was written. The
+        # row data is backfilled later still (run.py::init_database calls
+        # backfill_unmigrated_decks after init_db), so rows are always built from
+        # deck_json that has ALREADY been rewritten to {{image:<token>}} form.
+        # Reordering these would backfill rows from int-id placeholders that nothing
+        # subsequently rewrites, silently breaking images on every migrated deck.
+        # This helper itself is schema-only (ALTER for columns create_all() cannot
+        # add); the table comes from the SessionSlide ORM model.
+        # --- row-per-slide schema: session_slides table + deck_spec columns ---
+        _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- LangGraph checkpointer: graph_checkpoints + graph_checkpoint_writes ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so any table this step creates is re-homed onto the shared owner in the
+        # same boot instead of being left owned by the app's service principal.
+        _migrate_graph_checkpoints(conn, schema)
+
+        # --- deck review storage: deck_reviews table ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the table is re-homed onto the shared owner in the same boot.
+        _migrate_deck_reviews(conn, schema)
+
+        # --- spec-dirty marker: three columns + partial index on session_slide_decks ---
+        # ORDERING: must stay BEFORE _reassign_new_objects_to_shared_owner below,
+        # so the partial index created by this step is re-homed onto the shared owner
+        # in the same boot instead of being left owned by the app's service principal.
+        _migrate_spec_dirty_marker(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- retired prompt overrides: drop config_prompts.system_prompt and
+        # --- .slide_editing_instructions ---
+        # ORDERING: must stay INSIDE _run_migrations (i.e. before seed_defaults(),
+        # which init_database calls after init_db()) — see the helper's docstring.
+        # Also stays BEFORE _reassign_new_objects_to_shared_owner below, like its
+        # three siblings.
+        _migrate_drop_config_prompt_columns(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- Conversation Pins: nullable release identity on every session ---
+        # Keep this before graph mutation guards and owner reassignment so its
+        # constraint/index are present and re-homed during the same boot.
+        _migrate_conversation_pin_schema(conn, inspector, schema, _qual, is_sqlite)
+
+        # --- Shared-deck attribution: opaque identities + append-only events ---
+        # Keep immediately after Conversation Pins: event provenance consumes the
+        # exact actor pin and every later owner-reassignment pass must see the new
+        # table, indexes, functions, and triggers in this same transaction.
+        _migrate_shared_deck_mutation_schema(
+            conn, inspector, schema, _qual, is_sqlite
+        )
+
+        # --- Graph Configuration: database-enforced published-row immutability ---
+        # create_all owns the eight fresh table definitions. These PostgreSQL-only
+        # guards add the mutation boundary that constraints alone cannot express.
+        # Keep this before owner reassignment so new functions/triggers are re-homed
+        # in the same migration transaction.
+        _install_graph_configuration_mutation_guards(conn, schema, is_sqlite)
+
+        # --- chat_requests: the graph turn's stage summary for the chat placeholder (#319) ---
+        _migrate_chat_request_progress(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
         _reassign_new_objects_to_shared_owner(conn, is_sqlite)
+
+
+def _migrate_conversation_pin_schema(
+    conn, inspector, schema, _qual, is_sqlite: bool
+) -> None:
+    """Add the nullable Conversation Pin column, FK, and lookup index."""
+    from sqlalchemy import text
+
+    table_name = "user_sessions"
+    try:
+        columns = {
+            column["name"]
+            for column in inspector.get_columns(table_name, schema=schema)
+        }
+    except Exception:
+        return
+    if not columns:
+        return
+
+    qualified_sessions = _qual(table_name)
+    if "graph_release_id" not in columns:
+        logger.info("Migration: adding graph_release_id to user_sessions")
+        conn.execute(
+            text(
+                f"ALTER TABLE {qualified_sessions} "
+                "ADD COLUMN graph_release_id INTEGER NULL"
+            )
+        )
+
+    if not is_sqlite:
+        foreign_keys = {
+            foreign_key.get("name")
+            for foreign_key in inspector.get_foreign_keys(table_name, schema=schema)
+        }
+        if "fk_user_sessions_graph_release" not in foreign_keys:
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_sessions} "
+                    "ADD CONSTRAINT fk_user_sessions_graph_release "
+                    "FOREIGN KEY (graph_release_id) "
+                    f"REFERENCES {_qual('graph_release')}(id) ON DELETE RESTRICT"
+                )
+            )
+
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_user_sessions_graph_release_id "
+            f"ON {qualified_sessions} (graph_release_id)"
+        )
+    )
+
+
+def _migrate_shared_deck_mutation_schema(
+    conn, inspector, schema, _qual, is_sqlite: bool
+) -> None:
+    """Add stable collaboration UUIDs and the append-only mutation aggregate."""
+    from sqlalchemy import inspect, text
+
+    from src.database.models.session import SharedDeckMutationEvent
+
+    for table_name in ("user_sessions", "session_slide_decks"):
+        fresh_inspector = inspect(conn)
+        try:
+            columns = {
+                column["name"]
+                for column in fresh_inspector.get_columns(table_name, schema=schema)
+            }
+        except Exception:
+            continue
+        if not columns:
+            continue
+
+        qualified_table = _qual(table_name)
+        if "collaboration_identity" not in columns:
+            column_type = "VARCHAR(32)" if is_sqlite else "UUID"
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    f"ADD COLUMN collaboration_identity {column_type} NULL"
+                )
+            )
+
+        if is_sqlite:
+            conn.execute(
+                text(
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = lower(hex(randomblob(16))) "
+                    "WHERE collaboration_identity IS NULL"
+                )
+            )
+            # The column definition in src/database/models/session.py carries the
+            # server-side default, so any table create_all() built already generates
+            # an identity for non-ORM inserts. A legacy table reached here through
+            # ALTER TABLE ADD COLUMN cannot: SQLite rejects a non-constant default in
+            # ADD COLUMN ("Cannot add a column with non-constant default") and has no
+            # ALTER COLUMN SET DEFAULT. Without this trigger such a table would let a
+            # raw-SQL insert store NULL, and every later mutation on that row would
+            # fail in shared_deck_attribution with "collaboration identities must
+            # exist before mutation evidence". The trigger is the SQLite equivalent of
+            # the PostgreSQL DEFAULT below, fires only when the writer supplied no
+            # identity, and so never touches an identity that already exists.
+            conn.execute(
+                text(
+                    f"CREATE TRIGGER IF NOT EXISTS "
+                    f"trg_{table_name}_collaboration_identity_default "
+                    f"AFTER INSERT ON {qualified_table} "
+                    "WHEN NEW.collaboration_identity IS NULL "
+                    "BEGIN "
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = lower(hex(randomblob(16))) "
+                    "WHERE rowid = NEW.rowid; "
+                    "END"
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    f"UPDATE {qualified_table} "
+                    "SET collaboration_identity = gen_random_uuid() "
+                    "WHERE collaboration_identity IS NULL"
+                )
+            )
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    "ALTER COLUMN collaboration_identity SET DEFAULT gen_random_uuid()"
+                )
+            )
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    "ALTER COLUMN collaboration_identity SET NOT NULL"
+                )
+            )
+
+    # Production calls create_all first, but this explicit create owns the legacy
+    # path where the event table did not exist before this migration shipped.
+    SharedDeckMutationEvent.__table__.create(bind=conn, checkfirst=True)
+
+    if is_sqlite:
+        return
+
+    preparer = conn.dialect.identifier_preparer
+    namespace = preparer.quote(schema or "public")
+
+    def qualified(name: str) -> str:
+        return f"{namespace}.{preparer.quote(name)}"
+
+    identity_guard = qualified("guard_collaboration_identity_immutable")
+    event_guard = qualified("guard_shared_deck_mutation_event_append_only")
+    event_table = qualified("shared_deck_mutation_event")
+    sessions_table = qualified("user_sessions")
+    decks_table = qualified("session_slide_decks")
+
+    # Task 3 classifies the direct CRUD delete as a whole-deck rewrite while
+    # SlideWriter.delete_slide remains a row deletion.  Upgrade an interim
+    # Task-1 table as well as fresh installs, so the same operation is valid for
+    # both explicitly classified object types.
+    operation_object_check = preparer.quote(
+        "ck_shared_deck_mutation_event_operation_object"
+    )
+    conn.execute(
+        text(
+            f"ALTER TABLE {event_table} DROP CONSTRAINT IF EXISTS "
+            f"{operation_object_check}"
+        )
+    )
+    conn.execute(
+        text(
+            f"ALTER TABLE {event_table} ADD CONSTRAINT {operation_object_check} "
+            "CHECK ((object_type = 'slide' AND operation IN "
+            "('write_slide', 'delete_slide')) OR "
+            "(object_type = 'deck' AND operation IN "
+            "('save_deck', 'save_deck_slides', 'write_deck_level', "
+            "'insert_slide', 'update_slide', 'duplicate_slide', "
+            "'delete_slide', 'reorder_slides', 'restore_version')))"
+        )
+    )
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {identity_guard}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF NEW.collaboration_identity
+                    IS DISTINCT FROM OLD.collaboration_identity
+                THEN
+                    RAISE EXCEPTION '% collaboration identity is immutable', TG_TABLE_NAME
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    for table_name, trigger_name in (
+        ("user_sessions", "trg_user_sessions_collaboration_identity_immutable"),
+        (
+            "session_slide_decks",
+            "trg_session_slide_decks_collaboration_identity_immutable",
+        ),
+    ):
+        table = qualified(table_name)
+        trigger = preparer.quote(trigger_name)
+        conn.execute(text(f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+        conn.execute(
+            text(
+                f"CREATE TRIGGER {trigger} BEFORE UPDATE ON {table} "
+                f"FOR EACH ROW EXECUTE FUNCTION {identity_guard}()"
+            )
+        )
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {event_guard}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'shared deck mutation events are append-only'
+                        USING ERRCODE = '23514';
+                END IF;
+
+                IF NOT (
+                    NEW.id IS NOT DISTINCT FROM OLD.id
+                    AND NEW.root_session_identity
+                        IS NOT DISTINCT FROM OLD.root_session_identity
+                    AND NEW.root_deck_identity
+                        IS NOT DISTINCT FROM OLD.root_deck_identity
+                    AND NEW.actor_session_identity
+                        IS NOT DISTINCT FROM OLD.actor_session_identity
+                    AND NEW.graph_release_id IS NOT DISTINCT FROM OLD.graph_release_id
+                    AND NEW.graph_version IS NOT DISTINCT FROM OLD.graph_version
+                    AND NEW.operation IS NOT DISTINCT FROM OLD.operation
+                    AND NEW.object_type IS NOT DISTINCT FROM OLD.object_type
+                    AND NEW.object_id IS NOT DISTINCT FROM OLD.object_id
+                    AND NEW.occurred_at IS NOT DISTINCT FROM OLD.occurred_at
+                    AND (
+                        NEW.root_session_id IS DISTINCT FROM OLD.root_session_id
+                        OR NEW.root_deck_id IS DISTINCT FROM OLD.root_deck_id
+                        OR NEW.actor_session_id IS DISTINCT FROM OLD.actor_session_id
+                    )
+                    AND (
+                        NEW.root_session_id IS NOT DISTINCT FROM OLD.root_session_id
+                        OR (
+                            OLD.root_session_id IS NOT NULL
+                            AND NEW.root_session_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {sessions_table}
+                                WHERE id = OLD.root_session_id
+                            )
+                        )
+                    )
+                    AND (
+                        NEW.root_deck_id IS NOT DISTINCT FROM OLD.root_deck_id
+                        OR (
+                            OLD.root_deck_id IS NOT NULL
+                            AND NEW.root_deck_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {decks_table}
+                                WHERE id = OLD.root_deck_id
+                            )
+                        )
+                    )
+                    AND (
+                        NEW.actor_session_id IS NOT DISTINCT FROM OLD.actor_session_id
+                        OR (
+                            OLD.actor_session_id IS NOT NULL
+                            AND NEW.actor_session_id IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1 FROM {sessions_table}
+                                WHERE id = OLD.actor_session_id
+                            )
+                        )
+                    )
+                ) THEN
+                    RAISE EXCEPTION 'shared deck mutation events are append-only'
+                        USING ERRCODE = '23514';
+                END IF;
+
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    event_trigger = preparer.quote(
+        "trg_shared_deck_mutation_event_append_only"
+    )
+    conn.execute(text(f"DROP TRIGGER IF EXISTS {event_trigger} ON {event_table}"))
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {event_trigger} "
+            f"BEFORE UPDATE OR DELETE ON {event_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {event_guard}()"
+        )
+    )
+
+
+def _install_graph_configuration_mutation_guards(
+    conn, schema: str | None, is_sqlite: bool
+) -> None:
+    """Install idempotent PostgreSQL guards for published graph rows.
+
+    Definition revisions and release mappings reject every update/delete. A release
+    rejects delete and every update except its first ``effective_to`` transition from
+    NULL to a non-NULL value with all other fields unchanged. A deferred constraint
+    trigger also requires exactly one active release at transaction end, while allowing
+    the atomic close-and-insert transition used by publication. Agent Test Run evidence
+    rejects every update that changes a column other than its four verdict columns;
+    deletes stay allowed (bounded cleanup), subject to the RESTRICT release link. A
+    run linked to a release (``graph_release_test_run``) also rejects any change to
+    those four verdict columns (#269).
+    """
+    if is_sqlite:
+        return
+
+    from sqlalchemy import text
+
+    preparer = conn.dialect.identifier_preparer
+    namespace = preparer.quote(schema or "public")
+
+    def qualified(name: str) -> str:
+        return f"{namespace}.{preparer.quote(name)}"
+
+    reject_function = qualified("reject_graph_published_mutation")
+    release_function = qualified("guard_graph_release_mutation")
+    exactly_one_function = qualified("enforce_graph_release_exactly_one_active")
+    release_table = qualified("graph_release")
+    evidence_function = qualified("guard_agent_test_run_evidence_mutation")
+    evidence_table = qualified("agent_test_run")
+
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {reject_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME
+                    USING ERRCODE = '23514';
+            END;
+            $$
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {exactly_one_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            DECLARE
+                active_release_count bigint;
+            BEGIN
+                SELECT count(*)
+                INTO active_release_count
+                FROM {release_table}
+                WHERE effective_to IS NULL;
+
+                IF active_release_count <> 1 THEN
+                    RAISE EXCEPTION
+                        'graph_release must have exactly one active release; found %',
+                        active_release_count
+                        USING ERRCODE = '23514',
+                              CONSTRAINT = 'trg_graph_release_exactly_one_active';
+                END IF;
+
+                RETURN NULL;
+            END;
+            $$
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {release_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF TG_OP = 'UPDATE'
+                   AND OLD.effective_to IS NULL
+                   AND NEW.effective_to IS NOT NULL
+                   AND NEW.id IS NOT DISTINCT FROM OLD.id
+                   AND NEW.version_number IS NOT DISTINCT FROM OLD.version_number
+                   AND NEW.previous_release_id IS NOT DISTINCT FROM OLD.previous_release_id
+                   AND NEW.restored_from_release_id
+                       IS NOT DISTINCT FROM OLD.restored_from_release_id
+                   AND NEW.release_note IS NOT DISTINCT FROM OLD.release_note
+                   AND NEW.published_by IS NOT DISTINCT FROM OLD.published_by
+                   AND NEW.published_at IS NOT DISTINCT FROM OLD.published_at
+                   AND NEW.effective_from IS NOT DISTINCT FROM OLD.effective_from
+                THEN
+                    RETURN NEW;
+                END IF;
+
+                RAISE EXCEPTION 'graph_release rows are immutable except for their first close'
+                    USING ERRCODE = '23514';
+            END;
+            $$
+            """
+        )
+    )
+
+    for table_name, trigger_name in (
+        (
+            "agent_definition_revision",
+            "trg_agent_definition_revision_immutable",
+        ),
+        ("graph_release_agent", "trg_graph_release_agent_immutable"),
+    ):
+        table = qualified(table_name)
+        trigger = preparer.quote(trigger_name)
+        conn.execute(text(f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+        conn.execute(
+            text(
+                f"CREATE TRIGGER {trigger} "
+                f"BEFORE UPDATE OR DELETE ON {table} "
+                f"FOR EACH ROW EXECUTE FUNCTION {reject_function}()"
+            )
+        )
+
+    release_trigger = preparer.quote("trg_graph_release_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {release_trigger} ON {release_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {release_trigger} "
+            f"BEFORE UPDATE OR DELETE ON {release_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {release_function}()"
+        )
+    )
+
+    # Compare whole rows minus the verdict columns, so a column added later is
+    # immutable by default rather than silently writable.
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {evidence_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF (to_jsonb(NEW)
+                        - ARRAY['verdict', 'verdict_reviewer', 'verdict_at', 'verdict_notes'])
+                   IS DISTINCT FROM
+                   (to_jsonb(OLD)
+                        - ARRAY['verdict', 'verdict_reviewer', 'verdict_at', 'verdict_notes'])
+                THEN
+                    RAISE EXCEPTION
+                        'agent_test_run evidence is immutable except for its verdict'
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    evidence_trigger = preparer.quote("trg_agent_test_run_evidence_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {evidence_trigger} ON {evidence_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {evidence_trigger} "
+            f"BEFORE UPDATE ON {evidence_table} "
+            f"FOR EACH ROW EXECUTE FUNCTION {evidence_function}()"
+        )
+    )
+
+    # #269 (Q3, Corrections 14 and 30): a run linked to a release as evidence
+    # keeps its verdict.  PostgreSQL refuses a subquery in a trigger WHEN, so the
+    # WHEN compares columns only and the function body checks the link, with the
+    # link table schema-qualified so search-path drift cannot change the answer.
+    # It coexists with trg_agent_test_run_evidence_immutable above.
+    linked_verdict_function = qualified("reject_linked_agent_test_run_verdict_change")
+    release_test_run_table = qualified("graph_release_test_run")
+    conn.execute(
+        text(
+            f"""
+            CREATE OR REPLACE FUNCTION {linked_verdict_function}()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM {release_test_run_table}
+                    WHERE agent_test_run_id = OLD.id
+                ) THEN
+                    RAISE EXCEPTION
+                        'agent test run % is linked to a release; its verdict is immutable',
+                        OLD.id
+                        USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+    )
+    linked_verdict_trigger = preparer.quote("trg_agent_test_run_linked_verdict_immutable")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {linked_verdict_trigger} ON {evidence_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE TRIGGER {linked_verdict_trigger} "
+            "BEFORE UPDATE OF verdict, verdict_reviewer, verdict_at, verdict_notes "
+            f"ON {evidence_table} "
+            "FOR EACH ROW WHEN ("
+            "OLD.verdict IS DISTINCT FROM NEW.verdict "
+            "OR OLD.verdict_reviewer IS DISTINCT FROM NEW.verdict_reviewer "
+            "OR OLD.verdict_at IS DISTINCT FROM NEW.verdict_at "
+            "OR OLD.verdict_notes IS DISTINCT FROM NEW.verdict_notes) "
+            f"EXECUTE FUNCTION {linked_verdict_function}()"
+        )
+    )
+
+    exactly_one_trigger = preparer.quote("trg_graph_release_exactly_one_active")
+    conn.execute(
+        text(f"DROP TRIGGER IF EXISTS {exactly_one_trigger} ON {release_table}")
+    )
+    conn.execute(
+        text(
+            f"CREATE CONSTRAINT TRIGGER {exactly_one_trigger} "
+            f"AFTER INSERT OR UPDATE OR DELETE ON {release_table} "
+            "DEFERRABLE INITIALLY DEFERRED "
+            f"FOR EACH ROW EXECUTE FUNCTION {exactly_one_function}()"
+        )
+    )
+
+
+def _migrate_graph_checkpoints(conn, schema: str | None = None) -> None:
+    """Ensure the two LangGraph checkpoint tables exist (idempotent, dialect-safe).
+
+    ``graph_checkpoints`` and ``graph_checkpoint_writes`` persist LangGraph graph
+    state between supersteps. :mod:`src.core.checkpointer` is the saver that reads
+    and writes them; the two ORM models live in
+    ``src/database/models/graph_checkpoint.py``.
+
+    NOT the thing that creates the tables in production. ``init_db`` runs
+    ``Base.metadata.create_all()`` BEFORE ``_run_migrations``, and both tables are
+    ORM models, so on every real deployment ``create_all`` has already made them
+    and this helper short-circuits on ``checkfirst``. That is accepted and has
+    precedent — :func:`_migrate_design_system_tables`' own docstring says the same.
+    What it still earns: databases provisioned before these tables existed, test
+    paths that drive the migration on its own, and explicitness about what the
+    checkpointer depends on.
+
+    Creation is driven from the ORM metadata via ``Table.create(checkfirst=True)``
+    — one source of truth for the schema, idempotent, and correctly compiled for
+    both PostgreSQL/Lakebase and the SQLite used in tests.
+
+    Neither table declares a secondary index, so there is no raw ``CREATE INDEX``
+    pass and this helper emits no raw SQL at all — which is why it takes no
+    ``_qual``, matching :func:`_migrate_design_system_tables`' ``(conn, schema)``
+    shape rather than the five-argument one. Schema qualification comes from
+    ``Table.schema`` below. (Every lookup the saver makes is a leading-column
+    prefix of a primary key, which the PK btree already serves.) The saver's own
+    raw SQL in ``src/core/checkpointer.py`` is deliberately UNQUALIFIED, for the
+    reason spelled out in the NOTE in ``src/core/encryption.py``: it must also run
+    against SQLite and schema-less local Postgres, and it has no schema handed to
+    it. Should a raw statement ever be needed HERE, it must take ``_qual`` and use
+    it, like every other sibling in this module.
+    """
+    from src.database.models.graph_checkpoint import (
+        GraphCheckpoint,
+        GraphCheckpointWrite,
+    )
+
+    for model in (GraphCheckpoint, GraphCheckpointWrite):
+        table = model.__table__
+        # Match init_db()'s schema handling so a qualified deployment creates the
+        # tables in the Lakebase schema; guarded so it stays a no-op on repeat.
+        # NOTE: this mutates the module-global Table.schema on the shared ORM
+        # metadata — intentional, and identical to what init_db() already does.
+        if schema and table.schema is None:
+            table.schema = schema
+        table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: graph checkpoint tables ensured")
+
+
+def _migrate_deck_reviews(conn, schema: str | None = None) -> None:
+    """Ensure the ``deck_reviews`` table exists (idempotent, dialect-safe).
+
+    ``deck_reviews`` stores content-addressed deck-level review verdicts, keyed
+    by ``(deck_id, deck_digest)``.  The store functions live in
+    :mod:`src.services.deck_review_store`; the ORM model is in
+    :mod:`src.database.models.deck_review`.
+
+    NOT the thing that creates the table in production.  ``init_db`` runs
+    ``Base.metadata.create_all()`` BEFORE ``_run_migrations``, and the table is
+    an ORM model, so on every real deployment ``create_all`` has already made
+    it and this helper short-circuits on ``checkfirst``.  That is accepted and
+    has precedent — :func:`_migrate_design_system_tables`' own docstring says
+    the same.  What it still earns: databases provisioned before this table
+    existed, test paths that drive the migration on its own, and explicitness
+    about what the store depends on.
+
+    Creation is driven from the ORM metadata via ``Table.create(checkfirst=True)``
+    — one source of truth for the schema, idempotent, and correctly compiled
+    for both PostgreSQL/Lakebase and the SQLite used in tests.
+
+    This helper emits no raw SQL — which is why it takes ``(conn, schema)``
+    rather than the full five-argument sibling signature, matching
+    :func:`_migrate_graph_checkpoints`' shape.  Schema qualification comes from
+    ``Table.schema`` below.  Should a raw statement ever be needed HERE, it
+    must take ``_qual`` and use it, like every other sibling in this module that
+    does emit raw SQL.
+    """
+    from src.database.models.deck_review import DeckReview
+
+    table = DeckReview.__table__
+    # Match init_db()'s schema handling so a qualified deployment creates the
+    # table in the Lakebase schema; guarded so it stays a no-op on repeat.
+    # NOTE: mutates the module-global Table.schema on the shared ORM metadata —
+    # intentional, and identical to what init_db() already does.
+    if schema and table.schema is None:
+        table.schema = schema
+    table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: deck_reviews table ensured")
+
+
+#: Partial index over ``spec_dirty_at IS NOT NULL`` on ``session_slide_decks``.
+#: Must match the ``Index(...)`` declared in ``src/database/models/session.py`` —
+#: ``create_all`` builds it under this name on fresh installs and
+#: :func:`_migrate_spec_dirty_marker` builds it under the same name on
+#: already-provisioned databases, so both paths converge on one schema.
+_SPEC_DIRTY_INDEX = "ix_session_slide_decks_spec_dirty_at"
+
+
+def _migrate_spec_dirty_marker(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add the three spec-dirty columns to ``session_slide_decks`` (idempotent).
+
+    Adds ``spec_dirty_at``, ``spec_dirty_by``, and ``spec_dirty_claimed_at`` — all
+    nullable — to an already-provisioned ``session_slide_decks`` table.  Also creates
+    the partial index ``ix_session_slide_decks_spec_dirty_at`` on PostgreSQL so the
+    sweeper's "find dirty decks" query touches only the small dirty subset rather than
+    the full table.
+
+    Unlike its two siblings :func:`_migrate_graph_checkpoints` and
+    :func:`_migrate_deck_reviews`, this helper genuinely is the only thing that adds
+    these columns to an already-provisioned database.  Both siblings create brand-new
+    tables, so ``create_all`` runs first and their helpers always short-circuit on
+    ``checkfirst``.  ``create_all`` does NOT ALTER existing tables — it only creates
+    missing ones — so for a database provisioned before B2.3 landed, the columns are
+    absent until this migration runs.  On a fresh install ``create_all`` adds them
+    via the ORM model and the ``ALTER`` statements below are no-ops (the idempotence
+    guard skips them).
+
+    Why three columns, why here.  The marker lives on ``session_slide_decks`` because
+    it never needs to outlive the deck row.  ``spec_dirty_by`` is the identity
+    decision: a sweeper tick has no HTTP request, so ``get_current_user()`` returns
+    ``None`` and the Databricks client factory fails closed in production (SDR-4437
+    HIGH-6 removed the SP fallback outside non-prod).  Recording the marker's author
+    gives the arc review's write a real ``modified_by``, gives cost attribution a real
+    user (PRD §8.1), and carries a permission provenance that was already checked on
+    that human's route — with no new identity concept and no stored credential.
+    ``spec_dirty_claimed_at`` is the storage slot for the worker lease: the sweeper
+    claims a deck by writing this timestamp, and a later worker skips any deck where it
+    is already set.  The column alone does not provide mutual exclusion — that requires
+    a conditional ``UPDATE … WHERE id = ? AND spec_dirty_claimed_at IS NULL`` in the
+    sweeper, where a rowcount of 0 means another worker already claimed the deck.  That
+    write belongs to the sweeper implementation (a later PR), not to this schema.
+
+    NOT deck presentation state: these columns are deliberately absent from
+    ``get_slide_deck``'s returned dict.
+
+    The partial index (PostgreSQL only) is also declared on the ORM model in
+    ``src/database/models/session.py`` with both ``postgresql_where`` and
+    ``sqlite_where`` so ``create_all`` emits it on fresh databases of either dialect.
+    This helper creates it on already-provisioned PostgreSQL databases only.
+    """
+    from sqlalchemy import text
+
+    # Reflect live columns; degrade gracefully if the table does not yet exist.
+    try:
+        cols = {c["name"] for c in inspector.get_columns("session_slide_decks", schema=schema)}
+    except Exception:
+        cols = set()
+
+    if cols:
+        qualified = _qual("session_slide_decks")
+        for col_name, col_def in (
+            ("spec_dirty_at", "TIMESTAMP NULL"),
+            ("spec_dirty_by", "VARCHAR(255) NULL"),
+            ("spec_dirty_claimed_at", "TIMESTAMP NULL"),
+        ):
+            if col_name not in cols:
+                logger.info("Migration: adding %s to session_slide_decks", col_name)
+                conn.execute(text(
+                    f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"
+                ))
+
+    # --- Partial index (PostgreSQL only) ---
+    # SQLite: the ORM model's sqlite_where declaration already builds the index via
+    # create_all on fresh databases; altering an existing SQLite DB to add a partial
+    # index requires recreating the table, which is not worth doing here.
+    if is_sqlite:
+        return
+
+    # Use a FRESH inspector: the shared one caches its reflection from before the
+    # columns may have been added earlier in this same migration transaction.
+    try:
+        from sqlalchemy import inspect as sa_inspect
+        insp = sa_inspect(conn)
+        indexes = insp.get_indexes("session_slide_decks", schema=schema)
+    except Exception:
+        return  # table absent on this deploy
+
+    if any(ix.get("name") == _SPEC_DIRTY_INDEX for ix in indexes):
+        return  # already present
+
+    logger.info("Migration: creating partial index %s on session_slide_decks", _SPEC_DIRTY_INDEX)
+    try:
+        with conn.begin_nested():
+            conn.execute(text(
+                f"CREATE INDEX {_SPEC_DIRTY_INDEX} "
+                f"ON {_qual('session_slide_decks')} (spec_dirty_at) "
+                f"WHERE spec_dirty_at IS NOT NULL"
+            ))
+    except Exception:
+        logger.warning(
+            "Migration: could not create %s; dirty-deck sweeper will fall back to a "
+            "full-table scan until the index is created",
+            _SPEC_DIRTY_INDEX,
+            exc_info=True,
+        )
+
+
+def _migrate_chat_request_progress(conn, inspector, schema, _qual, is_sqlite) -> None:
+    """Add ``progress_json`` and ``progress_seq`` to ``chat_requests`` (#319, idempotent).
+
+    ``create_all`` adds both on a fresh install from the ORM model but never ALTERs
+    an existing table, so for every database provisioned before #319 this helper is
+    the only thing that adds them.  Both are nullable with no default: a request
+    that predates the columns, a monolith turn and a pending request all read NULL,
+    which the poll serves as ``turn_progress: null``.  TEXT/INTEGER on both
+    dialects, matching ``result_json``.
+    """
+    from sqlalchemy import text
+
+    try:
+        cols = {c["name"] for c in inspector.get_columns("chat_requests", schema=schema)}
+    except Exception:
+        return
+    if not cols:
+        return
+    qualified = _qual("chat_requests")
+    for col_name, col_def in (
+        ("progress_json", "TEXT NULL"),
+        ("progress_seq", "INTEGER NULL"),
+    ):
+        if col_name not in cols:
+            logger.info("Migration: adding %s to chat_requests", col_name)
+            conn.execute(text(f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"))
+
+
+#: The two retired per-profile prompt-override columns on ``config_prompts``.
+#: Prompts are assembled from ``src.core.prompt_modules``; a per-profile override no
+#: longer takes effect, and the ORM declarations were removed in the task before this
+#: one (see ``src/database/models/prompts.py``).
+_RETIRED_CONFIG_PROMPT_COLUMNS = ("system_prompt", "slide_editing_instructions")
+
+
+def _migrate_drop_config_prompt_columns(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Drop the two retired override columns from ``config_prompts`` (idempotent).
+
+    Removes ``system_prompt`` and ``slide_editing_instructions``. Unlike
+    :func:`_migrate_graph_checkpoints` and :func:`_migrate_deck_reviews` — which
+    create brand-new tables that ``create_all`` has already made in production, so
+    their helpers short-circuit there — this helper is the ONLY thing that removes
+    these columns from an already-provisioned database. ``create_all`` creates
+    missing TABLES; it neither alters nor drops, so it cannot retire a column. On a
+    fresh database the columns were never created (the ORM no longer declares them)
+    and the presence guard below makes this a no-op.
+
+    WHY IT MUST RUN HERE, AND MUST NOT BE MOVED LATER IN STARTUP. Both columns are
+    ``Text NOT NULL`` with NO DEFAULT, and the ORM declarations are gone, so nothing
+    supplies a value any more: on a database that still HAS them, every profile
+    insert raises ``IntegrityError: NOT NULL constraint failed:
+    config_prompts.system_prompt`` on SQLite, and ``IntegrityError
+    (psycopg2.errors.NotNullViolation) null value in column "system_prompt"`` on
+    PostgreSQL — both measured, the latter against local PostgreSQL 14.20 on a
+    throwaway database. The drop therefore has to happen
+    before anything creates a profile. Inside ``_run_migrations`` it does:
+    ``_run_migrations`` is reached from :func:`init_db`, which
+    ``run.py::init_database`` calls before ``seed_defaults()``. Relocating this step
+    to any point after seeding would fail on the first boot against an existing
+    database. (The companion blob strip, ``src.core.strip_retired_prompt_keys``, is
+    a different step and deliberately runs LAST in ``init_database``; the two
+    orderings hold simultaneously.)
+
+    A failed DROP is deliberately NOT swallowed. If the columns survive, every
+    profile insert on that database is broken, so a loud ``SystemExit(1)`` at
+    startup is better than a boot that looks healthy and then 500s on the first
+    profile write.
+
+    ``is_sqlite`` is accepted for the five-argument house signature and is
+    deliberately unused: ``ALTER TABLE … DROP COLUMN`` is valid on PostgreSQL and on
+    SQLite >= 3.35 (this environment ships 3.51.0), and neither column is indexed,
+    which is the one case SQLite refuses. Schema qualification comes from ``_qual``
+    like every other raw-SQL helper in this module.
+    """
+    from sqlalchemy import text
+
+    # Reflect live columns; degrade gracefully if the table does not yet exist. The
+    # shared inspector is safe here: no earlier step in _run_migrations reflects or
+    # alters config_prompts, so this reflection is read fresh inside the migration
+    # transaction rather than from a stale cache.
+    try:
+        cols = {c["name"] for c in inspector.get_columns("config_prompts", schema=schema)}
+    except Exception:
+        cols = set()
+
+    for col_name in _RETIRED_CONFIG_PROMPT_COLUMNS:
+        if col_name in cols:
+            logger.info("Migration: dropping config_prompts.%s", col_name)
+            conn.execute(text(
+                f"ALTER TABLE {_qual('config_prompts')} DROP COLUMN {col_name}"
+            ))
 
 
 def _migrate_design_system_tables(conn, schema: str | None = None) -> None:
@@ -646,6 +1577,36 @@ def _migrate_design_system_soft_delete(conn, inspector, schema, _qual, is_sqlite
     logger.info("Migration: adding is_active column to design_system")
     conn.execute(text(
         f"ALTER TABLE {_qual('design_system')} ADD COLUMN is_active BOOLEAN DEFAULT TRUE NOT NULL"
+    ))
+
+
+def _migrate_design_system_template_default(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add ``is_default`` to ``design_system_template`` (idempotent).
+
+    ``Base.metadata.create_all()`` adds the column on fresh installs but does not
+    alter a ``design_system_template`` table provisioned by an earlier deploy.
+    Defaults to FALSE and seeds nothing: which template is a system's default is
+    an admin choice, so no existing system gains one by migration.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspector or inspect(conn)
+    try:
+        cols = {
+            c["name"]
+            for c in insp.get_columns("design_system_template", schema=schema)
+        }
+    except Exception:
+        return
+    if not cols or "is_default" in cols:
+        return
+
+    logger.info("Migration: adding is_default column to design_system_template")
+    conn.execute(text(
+        f"ALTER TABLE {_qual('design_system_template')} "
+        "ADD COLUMN is_default BOOLEAN DEFAULT FALSE NOT NULL"
     ))
 
 
@@ -859,6 +1820,7 @@ def _migrate_uncap_brand_text_columns(
 #: name on fresh installs and this migration builds it under the same name on
 #: already-provisioned ones, so the two paths converge on one schema.
 _DS_NAME_ACTIVE_INDEX = "uq_design_system_name_active"
+
 
 
 def _migrate_design_system_partial_name_index(
@@ -1093,12 +2055,24 @@ def _migrate_image_assets_add_token(conn, inspector, schema, _qual, is_sqlite) -
     # Add nullable first so the ALTER succeeds on a populated table.
     conn.execute(text(f"ALTER TABLE {q} ADD COLUMN token VARCHAR(64)"))
 
-    # Backfill every existing row with a distinct unguessable token.
+    # Backfill every existing row with a distinct unguessable token. Tokens are
+    # minted here (secrets.token_urlsafe) but reach the database as ONE statement:
+    # a per-row UPDATE loop took ~28 s for 3,408 images on a prod fork.
     row_ids = [r[0] for r in conn.execute(text(f"SELECT id FROM {q} WHERE token IS NULL")).fetchall()]
-    for row_id in row_ids:
+    tokens = [secrets.token_urlsafe(32) for _ in row_ids]
+    if row_ids and is_sqlite:
         conn.execute(
             text(f"UPDATE {q} SET token = :tok WHERE id = :id"),
-            {"tok": secrets.token_urlsafe(32), "id": row_id},
+            [{"tok": tok, "id": row_id} for row_id, tok in zip(row_ids, tokens)],
+        )
+    elif row_ids:
+        conn.execute(
+            text(
+                f"UPDATE {q} AS image SET token = backfill.token "
+                "FROM unnest(CAST(:ids AS bigint[]), CAST(:tokens AS text[])) "
+                "AS backfill(id, token) WHERE image.id = backfill.id"
+            ),
+            {"ids": row_ids, "tokens": tokens},
         )
 
     # Enforce uniqueness (and non-null on PostgreSQL, now that every row has a token).
@@ -1129,64 +2103,168 @@ _DECK_PLACEHOLDER_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite) -> bool:
-    """Does any target column still hold an int-style ``{{image:<digits>}}`` placeholder?
+def _deck_columns_have_int_placeholder(conn, live_targets, _qual) -> bool:
+    """SQLite only: does any target column hold a ``{{image:<digit>...`` placeholder?
 
-    The cheap gate that keeps :func:`_migrate_rewrite_deck_image_placeholders` a
-    near no-op on every startup after its one-time rewrite. Read-only and
-    short-circuiting (``LIMIT 1``), so it never takes a write lock and stops at the
-    first match.
+    Gates the SQLite rewrite path, which maps every image row and so should not run
+    over a database that has nothing to rewrite. Read-only and short-circuiting
+    (``LIMIT 1``).
 
-    - PostgreSQL / Lakebase (the real target): a POSIX regex, ``{{image:`` + one or
-      more digits + ``}}``. Precise — a token placeholder is
-      ``{{image:<token>}}`` where the token is ``secrets.token_urlsafe(32)`` (43
-      chars of ``[A-Za-z0-9_-]``), which cannot be all digits, so only genuine
-      legacy int placeholders match.
-    - SQLite (tests only): ``GLOB`` has no ``+`` quantifier, so the pattern matches
-      ``{{image:`` followed by a single digit. Deliberately BROAD — it can also
-      match a token placeholder that happens to start with a digit, which at worst
-      makes the idempotent rewrite loop run when it strictly need not. It never
-      misses a real int placeholder, so correctness is preserved; SQLite is not a
-      deployment target and its data is tiny.
+    ``GLOB`` has no ``+`` quantifier, so the pattern matches ``{{image:`` followed by
+    a single digit. Deliberately BROAD — it can also match a token placeholder that
+    happens to start with a digit, which at worst makes the idempotent rewrite run
+    when it strictly need not. It never misses a real int placeholder, so
+    correctness is preserved; SQLite is not a deployment target and its data is tiny.
     """
     from sqlalchemy import text
 
     for table_name, column_name in live_targets:
-        q = _qual(table_name)
-        if is_sqlite:
-            stmt = text(f"SELECT 1 FROM {q} WHERE {column_name} GLOB :pat LIMIT 1")
-            params = {"pat": "*{{image:[0-9]*"}
-        else:
-            stmt = text(f"SELECT 1 FROM {q} WHERE {column_name} ~ :pat LIMIT 1")
-            params = {"pat": r"\{\{image:[0-9]+\}\}"}
-        if conn.execute(stmt, params).first() is not None:
+        stmt = text(f"SELECT 1 FROM {_qual(table_name)} WHERE {column_name} GLOB :pat LIMIT 1")
+        if conn.execute(stmt, {"pat": "*{{image:[0-9]*"}).first() is not None:
             return True
     return False
 
 
-def _referenced_int_image_ids(conn, live_targets, _qual) -> set:
-    """Distinct integer ids referenced by ``{{image:<int>}}`` across the deck columns.
+#: ``data_migrations`` row recording that every stored deck's ``{{image:<int-id>}}``
+#: placeholders have been rewritten to tokens. See
+#: :func:`_migrate_rewrite_deck_image_placeholders`.
+_DECK_IMAGE_PLACEHOLDER_REWRITE = "deck_image_placeholders_to_tokens"
 
-    PostgreSQL/Lakebase only. Extraction happens IN THE DATABASE via
-    ``regexp_matches`` — only the small integer ids come back to Python, never the
-    deck blobs. This lets :func:`_migrate_rewrite_deck_image_placeholders` map just
-    the few hundred images decks actually reference instead of every image row (the
-    difference between a ~1-minute and an ~80-minute startup step on a real fork).
+#: PL/pgSQL helper the PostgreSQL rewrite creates, uses and drops in one migration
+#: transaction. Lives in the app schema rather than ``pg_temp``: migrations already
+#: create functions there, so it needs no privilege beyond what they use.
+_IMAGE_REWRITE_FUNCTION = "tellr_rewrite_image_placeholders"
+
+#: Rewrites one text value: a single regex pass finds the distinct ids it
+#: references, and only those are replaced. ``__FUNCTION__`` / ``__IMAGE_ASSETS__``
+#: are substituted with qualified names; there is no other templating, so the body
+#: is written exactly as PostgreSQL sees it.
+_IMAGE_REWRITE_FUNCTION_SQL = r"""
+CREATE OR REPLACE FUNCTION __FUNCTION__(src text)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    image_id text;
+    image_token text;
+BEGIN
+    FOR image_id IN
+        SELECT DISTINCT m[1] FROM regexp_matches(src, '\{\{image:([0-9]+)\}\}', 'g') AS m
+    LOOP
+        -- Only an id's canonical decimal form names it (a literal replace never
+        -- matched {{image:01}}), and the length cap keeps the cast inside bigint
+        -- so an absurd id cannot abort the migration transaction.
+        CONTINUE WHEN image_id !~ '^(0|[1-9][0-9]{0,17})$';
+        SELECT token INTO image_token
+        FROM __IMAGE_ASSETS__
+        WHERE id = image_id::bigint AND token IS NOT NULL;
+        IF FOUND THEN
+            src := replace(src, '{{image:' || image_id || '}}', '{{image:' || image_token || '}}');
+        END IF;
+    END LOOP;
+    RETURN src;
+END;
+$$
+"""
+
+
+def _data_migration_applied(conn, insp, schema, _qual, name: str) -> bool | None:
+    """Has the one-time data migration *name* completed on this database?
+
+    Returns None when the ``data_migrations`` table does not exist — a schema built
+    by hand, which ``create_all`` (run before ``_run_migrations``) never leaves on a
+    real deploy — so the caller runs the migration and skips recording it.
     """
     from sqlalchemy import text
 
-    ids: set = set()
+    if not insp.has_table("data_migrations", schema=schema):
+        return None
+    return conn.execute(
+        text(f"SELECT 1 FROM {_qual('data_migrations')} WHERE name = :name"),
+        {"name": name},
+    ).first() is not None
+
+
+def _record_data_migration(conn, _qual, name: str) -> None:
+    """Record that *name* completed, in the caller's (migration) transaction."""
+    from sqlalchemy import text
+
+    conn.execute(
+        text(
+            f"INSERT INTO {_qual('data_migrations')} (name, applied_at) "
+            "VALUES (:name, CURRENT_TIMESTAMP) ON CONFLICT (name) DO NOTHING"
+        ),
+        {"name": name},
+    )
+
+
+def _rewrite_deck_image_placeholders_postgres(conn, live_targets, _qual) -> None:
+    """One UPDATE per column; each matching row is rewritten by the PL/pgSQL helper."""
+    from sqlalchemy import text
+
+    function = _qual(_IMAGE_REWRITE_FUNCTION)
+    conn.execute(text(
+        _IMAGE_REWRITE_FUNCTION_SQL
+        .replace("__FUNCTION__", function)
+        .replace("__IMAGE_ASSETS__", _qual("image_assets"))
+    ))
     for table_name, column_name in live_targets:
-        q = _qual(table_name)
         result = conn.execute(
             text(
-                f"SELECT DISTINCT (regexp_matches({column_name}, :cap, 'g'))[1] AS id "
-                f"FROM {q} WHERE {column_name} ~ :any_int"
+                f"UPDATE {_qual(table_name)} SET {column_name} = {function}({column_name}) "
+                f"WHERE {column_name} ~ :int_placeholder"
             ),
-            {"cap": r"\{\{image:([0-9]+)\}\}", "any_int": r"\{\{image:[0-9]+\}\}"},
-        ).fetchall()
-        ids.update(int(r[0]) for r in result)
-    return ids
+            {"int_placeholder": r"\{\{image:[0-9]+\}\}"},
+        )
+        logger.info(
+            "Migration: rewrote {{image:<id>}} placeholders to tokens in %d %s.%s "
+            "row(s) (SDR-4437 F-TM-7)",
+            result.rowcount,
+            table_name,
+            column_name,
+        )
+    conn.execute(text(f"DROP FUNCTION {function}(text)"))
+
+
+def _rewrite_deck_image_placeholders_sqlite(conn, live_targets, _qual) -> None:
+    """SQLite (tests, tiny data): one chained ``replace()`` per column over every image."""
+    from sqlalchemy import text
+
+    # No in-DB regex on SQLite; gate on any int placeholder (skips an
+    # already-migrated DB) and map every image row.
+    if not _deck_columns_have_int_placeholder(conn, live_targets, _qual):
+        return
+    rows = conn.execute(
+        text(f"SELECT id, token FROM {_qual('image_assets')} WHERE token IS NOT NULL")
+    ).fetchall()
+    if not rows:
+        return
+
+    logger.info(
+        "Migration: rewriting {{image:<id>}} deck placeholders to tokens for "
+        "%d images across %d columns (SDR-4437 F-TM-7)",
+        len(rows),
+        len(live_targets),
+    )
+    # A single chained replace() over all (id -> token) pairs per column, so each
+    # column is scanned ONCE, not once per image. The WHERE guard limits the pass to
+    # rows that still hold a placeholder. Identifiers come from the hardcoded
+    # _DECK_PLACEHOLDER_COLUMNS; every placeholder literal is a bound parameter.
+    for table_name, column_name in live_targets:
+        expr = column_name
+        params: dict = {}
+        for i, (image_id, token) in enumerate(rows):
+            expr = f"replace({expr}, :o{i}, :n{i})"
+            params[f"o{i}"] = f"{{{{image:{image_id}}}}}"
+            params[f"n{i}"] = f"{{{{image:{token}}}}}"
+        conn.execute(
+            text(
+                f"UPDATE {_qual(table_name)} SET {column_name} = {expr} "
+                f"WHERE {column_name} LIKE :_guard"
+            ),
+            {**params, "_guard": "%{{image:%"},
+        )
 
 
 def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_sqlite) -> None:
@@ -1196,57 +2274,67 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
     an unguessable token, and ``substitute_image_placeholders`` now resolves
     ``{{image:<token>}}``. Decks saved BEFORE that change have ``{{image:<int-id>}}``
     baked into their stored HTML/JSON, so their embedded images would stop
-    rendering. This one-time, idempotent migration rewrites those placeholders in
-    place, using the ``id -> token`` map that ``_migrate_image_assets_add_token``
-    (which runs just before this) has guaranteed exists on every image row.
+    rendering. This one-time migration rewrites those placeholders in place, using
+    the ``id -> token`` map that ``_migrate_image_assets_add_token`` (which runs just
+    before this) has guaranteed exists on every image row.
 
-    The string work stays IN THE DATABASE — Python only drives the id/token map and
-    builds the SQL. Deck blobs are never pulled into the app to be regexed.
+    The string work stays IN THE DATABASE — Python only builds the SQL. Deck blobs
+    are never pulled into the app to be regexed.
 
     Scale matters: prod holds thousands of image rows and thousands of decks with
-    ~35 KB (up to ~430 KB) JSON blobs. The naive shape — a per-``(id, token)`` loop
-    of ``UPDATE ... WHERE col LIKE '%{{image:N}}%'`` — is O(images) unindexable
-    full-table scans per column and measured ~80 min on a real fork, which stalled
-    startup. Two changes make it a ~1-minute one-time step:
+    ~35 KB (up to ~430 KB) JSON blobs; on a prod fork ~10k rows (390 MB) carry a
+    placeholder. Measured shapes, on that fork:
 
-    - **Only referenced ids.** On PostgreSQL/Lakebase the ids ACTUALLY referenced by
-      a deck are extracted IN THE DATABASE (:func:`_referenced_int_image_ids`, via
-      ``regexp_matches`` — only integers come back, never blobs); prod decks reuse a
-      few hundred of the thousands of images, so the rest are never considered. On
-      SQLite (tests, tiny data) there is no in-DB regex, so every image row is mapped
-      and a fast gate (:func:`_deck_columns_have_int_placeholder`) skips an
-      already-migrated DB.
-    - **One pass per column.** A single ``UPDATE`` per column applies a CHAINED
-      ``replace()`` over every ``(id -> token)`` pair, so each large-blob column is
-      scanned once rather than once per image.
+    - a per-``(id, token)`` loop of ``UPDATE ... LIKE`` — ~80 min;
+    - one UPDATE per column with a ``replace()`` chained over the 549 referenced
+      ids — 549 full scans of every matching blob, ~86 s, plus a separate regex
+      scan to find the referenced ids;
+    - **this one (PostgreSQL):** one UPDATE per column calling a PL/pgSQL helper
+      (:data:`_IMAGE_REWRITE_FUNCTION_SQL`) that finds a row's distinct ids in one
+      regex pass and replaces only those — ~11 s of scanning, measured against the
+      chain's ~79 s on the same rows. The helper is created, used and dropped in
+      this transaction.
+
+    SQLite (tests, tiny data) has no in-DB regex or PL/pgSQL, so it keeps one
+    chained ``replace()`` per column over every image, gated by
+    :func:`_deck_columns_have_int_placeholder`.
+
+    Recorded once done: a :data:`_DECK_IMAGE_PLACEHOLDER_REWRITE` row in
+    ``data_migrations``, written in the same transaction, so every later boot skips
+    this migration after one indexed lookup instead of regex-scanning every deck and
+    version blob (~30 s cold on a prod fork). The presence of ``image_assets.token``
+    is NOT that signal: tokens shipped (757ca1b3) five days before this rewrite
+    (e0052bed), and an early version of the rewrite silently skipped (a94766cb), so a
+    database can hold tokens and un-rewritten placeholders at once. Recording once is
+    safe because nothing writes ``{{image:<int>}}`` any more: the image tools and API
+    hand out ``ImageAsset.token``, and design-system assets use ``{{ds-asset:...}}``.
 
     Correctness:
 
-    - **Chained sequential replace, not a join.** ``replace(replace(col, id1, tok1),
-      id2, tok2)`` applies each substitution across the whole blob in turn, so a
-      multi-image deck is fully rewritten. A single ``UPDATE ... FROM image_assets``
-      would apply only ONE arbitrary matched row per target row (half-rewriting
-      multi-image decks); ``regexp_replace`` can't do the per-match id->token lookup.
+    - **Every id in the row is rewritten.** The helper applies one ``replace()`` per
+      distinct id the row references, in sequence, so a multi-image deck is fully
+      rewritten. A single ``UPDATE ... FROM image_assets`` would apply only ONE
+      arbitrary matched row per target row (half-rewriting multi-image decks);
+      ``regexp_replace`` can't do the per-match id->token lookup.
     - **Prefix-safe.** The literal ``{{image:5}}`` (closing braces included) never
       matches inside ``{{image:51}}``, and a token (``[A-Za-z0-9_-]``) has no braces,
-      so the order of the chained replaces is irrelevant — no id-prefix collision.
+      so the order of the replaces is irrelevant — no id-prefix collision.
     - **Idempotent.** The per-``UPDATE`` guard restricts the pass to rows that still
-      hold an int placeholder, so a re-run over token-only rows is a no-op; once the
-      mappable ids are rewritten, extraction/gate find nothing (only unmappable
-      ids), so no further passes run.
+      hold an int placeholder, and the completion record stops re-runs outright.
     - **No jsonb cast.** Every target column (:data:`_DECK_PLACEHOLDER_COLUMNS`) is
       ``TEXT`` on both backends, so ``replace()`` applies directly. Tokens are
       ``[A-Za-z0-9_-]`` (JSON-safe), so text-level replacement inside a JSON blob
       cannot corrupt its structure.
     - **Soft-deleted images included** (no ``is_active`` filter) — a deck may still
       reference an image that was later soft-deleted, and it must keep resolving.
-    - **Unknown/hard-deleted ids** referenced by a deck have no image row, so they
-      are not in the map and their placeholder is left unchanged.
+    - **Unknown/hard-deleted ids** referenced by a deck have no image row, so their
+      placeholder is left unchanged. So are non-canonical ids (``{{image:01}}``) and
+      ids too long for ``bigint``, which the chained literal replace never matched.
 
     A no-op when ``image_assets`` (or its ``token`` column) or every target table is
     absent on a given deploy.
     """
-    from sqlalchemy import inspect, text
+    from sqlalchemy import inspect
 
     # Reflect the LIVE schema with a FRESH inspector, NOT the shared one that
     # _run_migrations threads through. _migrate_image_assets_add_token adds the
@@ -1257,6 +2345,12 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
     # This is the same reflection-cache staleness the design-system migrations in
     # this file avoid the same way (see _migrate_uncap_brand_text_columns).
     insp = inspect(conn)
+
+    recorded = _data_migration_applied(
+        conn, insp, schema, _qual, _DECK_IMAGE_PLACEHOLDER_REWRITE
+    )
+    if recorded:
+        return
 
     # image_assets + its token column must exist (guaranteed by the prior migration
     # on any live deploy; guarded so this can be exercised standalone).
@@ -1279,61 +2373,13 @@ def _migrate_rewrite_deck_image_placeholders(conn, inspector, schema, _qual, is_
     if not live_targets:
         return
 
-    # The (id -> token) pairs to rewrite. Only ids ACTUALLY referenced by a deck —
-    # see the docstring for why looping every image row is far too slow at prod
-    # scale.
-    q_images = _qual("image_assets")
     if is_sqlite:
-        # No in-DB regex on SQLite; test data is tiny, so gate on any int
-        # placeholder (skips an already-migrated DB) and map every image row.
-        if not _deck_columns_have_int_placeholder(conn, live_targets, _qual, is_sqlite):
-            return
-        rows = conn.execute(
-            text(f"SELECT id, token FROM {q_images} WHERE token IS NOT NULL")
-        ).fetchall()
+        _rewrite_deck_image_placeholders_sqlite(conn, live_targets, _qual)
     else:
-        referenced = _referenced_int_image_ids(conn, live_targets, _qual)
-        if not referenced:
-            return
-        rows = conn.execute(
-            text(
-                f"SELECT id, token FROM {q_images} "
-                "WHERE token IS NOT NULL AND id = ANY(:ids)"
-            ),
-            {"ids": list(referenced)},
-        ).fetchall()
-    if not rows:
-        return
+        _rewrite_deck_image_placeholders_postgres(conn, live_targets, _qual)
 
-    logger.info(
-        "Migration: rewriting {{image:<id>}} deck placeholders to tokens for "
-        "%d referenced images across %d columns (SDR-4437 F-TM-7)",
-        len(rows),
-        len(live_targets),
-    )
-
-    # One UPDATE per column: a single chained replace() over all (id -> token)
-    # pairs, so each large-blob column is scanned ONCE, not once per image. The
-    # WHERE guard limits the pass to rows that still hold an int placeholder, so a
-    # re-run over token-only rows is a no-op. Identifiers come from the hardcoded
-    # _DECK_PLACEHOLDER_COLUMNS; every placeholder literal is a bound parameter.
-    if is_sqlite:
-        guard_sql, guard_param = "LIKE :_guard", {"_guard": "%{{image:%"}
-    else:
-        guard_sql, guard_param = "~ :_guard", {"_guard": r"\{\{image:[0-9]+\}\}"}
-
-    for table_name, column_name in live_targets:
-        q = _qual(table_name)
-        expr = column_name
-        params: dict = {}
-        for i, (image_id, token) in enumerate(rows):
-            expr = f"replace({expr}, :o{i}, :n{i})"
-            params[f"o{i}"] = f"{{{{image:{image_id}}}}}"
-            params[f"n{i}"] = f"{{{{image:{token}}}}}"
-        conn.execute(
-            text(f"UPDATE {q} SET {column_name} = {expr} WHERE {column_name} {guard_sql}"),
-            {**params, **guard_param},
-        )
+    if recorded is not None:
+        _record_data_migration(conn, _qual, _DECK_IMAGE_PLACEHOLDER_REWRITE)
 
 
 #: The one place the precedence rule is written in SQL. ``$$``-quoted so the body
@@ -1966,3 +3012,68 @@ def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
     logger.info("Migration: granted CAN_MANAGE to existing deck creators")
 
     logger.info("Migration: deck permissions model migration complete")
+
+
+def _migrate_row_per_slide_schema(conn, inspector, schema, _qual, is_sqlite):
+    """Add columns for row-per-slide schema migration.
+
+    Steps (each idempotent via column-existence check):
+    1. session_slide_decks: add deck_spec_json, css, external_scripts_json,
+       head_meta_json (all nullable during dual-write period; deck_json stays)
+    2. slide_deck_versions: add deck_spec_json (snapshot of spec at save-point time)
+
+    Note: session_slides table itself is created by Base.metadata.create_all() from
+    the Task 1 ORM model (SessionSlide). This helper only handles the ALTER path for
+    columns that create_all() will never add to already-existing tables in a live DB.
+    """
+    from sqlalchemy import text
+
+    # --- session_slide_decks: add deck_spec_json, css, external_scripts_json ---
+    decks_table = "session_slide_decks"
+    try:
+        decks_cols = {c["name"] for c in inspector.get_columns(decks_table, schema=schema)}
+    except Exception:
+        decks_cols = set()
+
+    q_decks = _qual(decks_table)
+
+    if decks_cols and "deck_spec_json" not in decks_cols:
+        logger.info(f"Migration: adding deck_spec_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN deck_spec_json TEXT NULL"
+        ))
+
+    if decks_cols and "css" not in decks_cols:
+        logger.info(f"Migration: adding css column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN css TEXT NULL"
+        ))
+
+    if decks_cols and "external_scripts_json" not in decks_cols:
+        logger.info(f"Migration: adding external_scripts_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN external_scripts_json TEXT NULL"
+        ))
+
+    if decks_cols and "head_meta_json" not in decks_cols:
+        logger.info(f"Migration: adding head_meta_json column to {decks_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_decks} ADD COLUMN head_meta_json TEXT NULL"
+        ))
+
+    # --- slide_deck_versions: add deck_spec_json ---
+    versions_table = "slide_deck_versions"
+    try:
+        versions_cols = {c["name"] for c in inspector.get_columns(versions_table, schema=schema)}
+    except Exception:
+        versions_cols = set()
+
+    q_versions = _qual(versions_table)
+
+    if versions_cols and "deck_spec_json" not in versions_cols:
+        logger.info(f"Migration: adding deck_spec_json column to {versions_table}")
+        conn.execute(text(
+            f"ALTER TABLE {q_versions} ADD COLUMN deck_spec_json TEXT NULL"
+        ))
+
+    logger.info("Migration: row-per-slide schema migration complete")

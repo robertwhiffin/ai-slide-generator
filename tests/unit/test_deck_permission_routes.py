@@ -6,6 +6,8 @@ instead of ConfigProfileContributor (profile-based) for access control.
 Uses in-memory SQLite with StaticPool and monkeypatches context functions.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 from unittest.mock import patch, MagicMock
 from sqlalchemy import create_engine
@@ -17,12 +19,28 @@ from src.core.database import Base
 from src.core.permission_context import PermissionContext
 from src.database.models import UserSession
 from src.database.models.deck_contributor import DeckContributor
+from src.database.models.graph_configuration import GraphRelease
 from src.database.models.profile_contributor import PermissionLevel
 
 
 @pytest.fixture
 def db():
-    """In-memory SQLite session for unit tests."""
+    """In-memory SQLite session for unit tests, with one live active Graph Release.
+
+    The active release is seeded because #261 made a live active release a
+    *public projection invariant*: ``SessionManager.create_session`` and
+    ``list_sessions`` project a conversation's graph version through
+    ``_require_active_graph_release``, which raises
+    ``ConversationGraphReleaseIntegrityError`` when none exists. This fixture
+    predates that invariant, which is why
+    ``TestCreateSessionNoProfile::test_create_session_no_profile_params`` failed
+    identically on the integration head (correction C-10, the same cause class as
+    C-6 at a site C-6 did not enumerate).
+
+    The repair is a real row, not a weakened invariant:
+    ``_require_active_graph_release`` is deliberately left untouched so a missing
+    or dangling release still fails loudly in production.
+    """
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -31,6 +49,18 @@ def db():
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     session = Session()
+    published = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    session.add(
+        GraphRelease(
+            version_number=1,
+            release_note="deck-permission-routes fixture active release",
+            published_by="fixture@test.com",
+            published_at=published,
+            effective_from=published,
+            effective_to=None,
+        )
+    )
+    session.commit()
     yield session
     session.close()
     engine.dispose()
@@ -460,6 +490,13 @@ class TestCreateSessionNoProfile:
 
         assert result["session_id"] == "new-session-1"
         assert result["created_by"] == "someone@test.com"
+        # The seeded active release is load-bearing, not decoration: creation
+        # projects the conversation's graph version through
+        # _require_active_graph_release, so these three values prove the
+        # projection really ran rather than the fixture merely not crashing.
+        assert result["graph_version"] is None
+        assert result["active_graph_version"] == 1
+        assert result["is_older_than_active"] is False
 
 
 # ---------------------------------------------------------------------------

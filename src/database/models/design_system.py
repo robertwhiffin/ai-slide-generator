@@ -454,6 +454,12 @@ class DesignSystemTemplate(Base):
         index=True,
     )
 
+    # The design system's default template: at most one per design system, set by
+    # an admin. A new session that resolves this design system without a template
+    # pin is seeded with it, and the architect falls back to it for an unpinned
+    # session, so the deck binds to a template's sections instead of improvising.
+    is_default = Column(Boolean, default=False, nullable=False)
+
     design_system = relationship("DesignSystem", back_populates="templates")
     thumbnail_asset = relationship("DesignSystemAsset")
 

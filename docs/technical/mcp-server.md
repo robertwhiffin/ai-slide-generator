@@ -263,6 +263,8 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
 
 **`status: "ready"` does not mean the edit was applied.** When the agent decides it needs more information, it asks a question rather than changing the deck — and the turn still completes, so `status` is `"ready"` and `replacement_info` is `null`. **An automated caller must check `metadata.clarification_needed`**, not `status` alone, or it will report success for a turn in which nothing changed. `metadata.clarification` carries the question text to relay back to the user.
 
+**`messages` after a clear or a message delete.** If the session's chat has been cleared (`DELETE /api/sessions/{id}/context`), a poll for the deck's first request can return the row the clear kept, with `message_type: "engine_mode_marker"`. After a message is deleted (`DELETE /api/sessions/{id}/messages/{message_id}`), a poll for that turn's request returns no messages. When the deleted message was the deck's first, the poll returns only the kept row, typed `engine_mode_marker`, as after a clear. That row is hidden from every transcript read the UI uses but not from this per-request poll. It is harmless: callers can ignore rows of that type. The web UI offers Clear chat on every deck the user can edit, including decks created through `create_deck`.
+
 **Output schema (failed)**
 
 ```jsonc

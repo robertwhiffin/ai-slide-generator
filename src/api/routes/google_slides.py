@@ -12,19 +12,23 @@ import logging
 import os
 import secrets
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from src.api.services.chat_service import get_chat_service
 from src.api.routes._authz import (
     _check_deck_permission_for_session,
     _require_export_job_access,
 )
 from src.api.routes.export import ExportJobResponse
+from src.api.services.chat_service import get_chat_service
 from src.core.database import get_db
+from src.core.encryption import decrypt_data
+from src.database.models.google_global_credentials import GoogleGlobalCredentials
+from src.database.models.google_oauth_token import GoogleOAuthToken
 from src.database.models.profile_contributor import PermissionLevel
 from src.services.drive_uploader import replace_presentation, upload_pptx_as_slides
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
@@ -73,6 +77,24 @@ def _get_auth(db: Session) -> GoogleSlidesAuth:
     return GoogleSlidesAuth.from_global(user_identity, db)
 
 
+def _has_global_credentials(db: Session) -> bool:
+    """True if app-wide OAuth client credentials exist and decrypt.
+
+    Does not mutate the row (unlike the admin status endpoint, which
+    deletes stale ciphertext). Callers only need a boolean to decide
+    whether user-level connect UI is available.
+    """
+    row = db.query(GoogleGlobalCredentials).first()
+    if not row or not row.credentials_encrypted:
+        return False
+    try:
+        decrypt_data(row.credentials_encrypted)
+        return True
+    except Exception:
+        logger.debug("Global Google credentials present but not decryptable")
+        return False
+
+
 # -------------------------------------------------------------------------
 # Request / Response schemas
 # -------------------------------------------------------------------------
@@ -92,6 +114,7 @@ class ExportGoogleSlidesRequest(BaseModel):
 
 class AuthStatusResponse(BaseModel):
     authorized: bool
+    has_credentials: bool
 
 
 class AuthUrlResponse(BaseModel):
@@ -112,7 +135,24 @@ def _build_app_origin(request: Request) -> str:
     returns the internal address (``http://localhost:8000``).  We use the
     ``X-Forwarded-Host`` / ``X-Forwarded-Proto`` headers set by the proxy
     to reconstruct the public URL instead. For localhost, force ``http``.
+
+    ``DATABRICKS_APP_URL`` (platform-injected on Databricks Apps) takes
+    precedence over any request header (F-CR-28): ``X-Forwarded-Host`` is
+    client-influenceable, and this origin feeds both the OAuth
+    ``redirect_uri`` and the callback ``postMessage`` target. This mirrors
+    ``CSRFProtectionMiddleware._expected_origin``. The header-based path
+    remains only as a fallback for local dev where the env var is unset.
     """
+    app_url = os.getenv("DATABRICKS_APP_URL", "").strip()
+    if app_url:
+        if "://" not in app_url:
+            app_url = f"https://{app_url}"
+        parts = urlsplit(app_url)
+        if parts.scheme and parts.netloc:
+            # scheme://host[:port] only; drop any path/query/fragment.
+            return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+        logger.warning("DATABRICKS_APP_URL is set but unparseable; falling back to request headers")
+
     forwarded_host = request.headers.get("x-forwarded-host")
     forwarded_proto = request.headers.get("x-forwarded-proto")
 
@@ -179,14 +219,42 @@ def _callback_response(app_origin: str, *, success: bool) -> HTMLResponse:
 
 @router.get("/auth/status", response_model=AuthStatusResponse)
 async def auth_status(db: Session = Depends(get_db)):
-    """Check whether the current user has a valid Google OAuth token."""
+    """Check whether the current user has a valid Google OAuth token.
+
+    ``has_credentials`` is a non-secret probe so user Settings can tell
+    "admin has not uploaded client JSON" from "this user is not connected"
+    without calling the admin credentials API.
+    """
+    has_credentials = _has_global_credentials(db)
     try:
         auth = _get_auth(db)
-        return AuthStatusResponse(authorized=auth.is_authorized())
+        return AuthStatusResponse(
+            authorized=auth.is_authorized(),
+            has_credentials=has_credentials,
+        )
     except (GoogleSlidesAuthError, Exception) as exc:
         # No credentials, bad encryption key, or any other issue → not authorized
         logger.debug("auth_status check failed: %s", exc)
-        return AuthStatusResponse(authorized=False)
+        return AuthStatusResponse(authorized=False, has_credentials=has_credentials)
+
+
+@router.delete("/auth", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_auth(db: Session = Depends(get_db)):
+    """Drop the current user's stored Google OAuth token.
+
+    Idempotent: 204 whether or not a row existed. Does not call Google's
+    remote revoke endpoint. Does not remove app-wide client credentials.
+    """
+    user_identity = _get_user_identity()
+    row = (
+        db.query(GoogleOAuthToken)
+        .filter_by(user_identity=user_identity)
+        .first()
+    )
+    if row:
+        db.delete(row)
+        db.commit()
+        logger.info("Google OAuth token revoked", extra={"user": user_identity})
 
 
 @router.get("/auth/url", response_model=AuthUrlResponse)
@@ -341,9 +409,9 @@ async def start_google_slides_export(
     # Substitute {{image:ID}} + {{ds-asset:ID}} placeholders with base64 data URIs.
     # ds-asset resolution is scoped to the session's active design system.
     from src.api.services.chat_service import resolve_active_design_system_id
+    from src.core.database import get_db_session
     from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
-    from src.core.database import get_db_session
     ds_id = resolve_active_design_system_id(request_body.session_id)
     with get_db_session() as db:
         substitute_deck_dict_images(slide_deck, db)

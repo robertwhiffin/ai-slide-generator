@@ -1,0 +1,6 @@
+# Builder v1 prompt (deck-parity devloop loop, 2026-10-16): no notes about missing
+# data; sample footer/meta copy and off-topic product lockups are placeholder.
+agent_key: builder
+name: deck-parity
+base: v1
+prompt_file: deck-parity.md

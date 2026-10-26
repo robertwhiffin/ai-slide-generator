@@ -79,8 +79,6 @@ export interface AgentConfig {
    */
   template_id: number | null;
   deck_prompt_id: number | null;
-  system_prompt: string | null;
-  slide_editing_instructions: string | null;
 }
 
 export interface DiscoveryItem {
@@ -132,8 +130,6 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   design_system_id: null,
   template_id: null,
   deck_prompt_id: null,
-  system_prompt: null,
-  slide_editing_instructions: null,
 };
 
 export const TOOL_TYPE_LABELS: Record<ToolType, string> = {

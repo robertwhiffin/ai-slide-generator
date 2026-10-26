@@ -115,6 +115,11 @@ def netns_available() -> bool:
         except Exception:
             result = False
     _netns_cache = result
+    # NOTE (F-CR-30): in Databricks Apps `unshare --net` is typically
+    # unavailable. We deliberately do NOT fail closed: that would disable all
+    # PPTX/GSlides production conversion. Residual risk is accepted because the
+    # child env is whitelisted via build_scrubbed_env (no credentials) and the
+    # host-side AST import allowlist runs before every jail exec.
     if not result:
         logger.warning(
             "Network namespace unavailable — converter jail runs without netns. "
