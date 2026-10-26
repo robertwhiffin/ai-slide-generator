@@ -606,7 +606,9 @@ def get_slide_style_preview(
         )
 
     current_fp = preview_fixture.compute_fingerprint(
-        style.style_content, style.image_guidelines
+        style.style_content,
+        style.image_guidelines,
+        preview_fixture.current_builder_definition(db),
     )
     status_val = style.preview_status or "missing"
 
@@ -653,8 +655,10 @@ def get_slide_style_preview(
         try_enqueue(style_id)
         return _resp("stale", include_payload=True, stale=True)
 
-    # In flight. Serve stale copy underneath if present.
+    # In flight. Serve stale copy underneath if present. try_enqueue no-ops a
+    # live job and re-queues one whose worker died, so a viewer recovers it.
     if status_val in ("queued", "generating"):
+        try_enqueue(style_id)
         return _resp(status_val, include_payload=bool(payload), stale=bool(payload))
 
     # Failed. Return last-known-good if we have one; otherwise just the error.
@@ -683,7 +687,9 @@ def regenerate_slide_style_preview(
     a generation is already in flight this is a no-op that returns the in-flight
     status.
     """
-    from src.api.services.slide_style_preview_queue import try_enqueue
+    from datetime import datetime as _dt
+
+    from src.api.services.slide_style_preview_queue import claimable_clause, try_enqueue
 
     style = db.query(SlideStyleLibrary).filter(SlideStyleLibrary.id == style_id).first()
     if not style:
@@ -693,11 +699,15 @@ def regenerate_slide_style_preview(
         )
 
     # Force a re-attempt even from a 'failed'/'ready' terminal state by clearing
-    # to 'missing' first (in its own committed txn), then enqueue.
-    db.query(SlideStyleLibrary).filter(SlideStyleLibrary.id == style_id).update(
-        {"preview_status": "missing"}, synchronize_session=False
-    )
+    # to 'missing' first (in its own committed txn), then enqueue. A live job is
+    # left alone (no duplicate generation); an abandoned one is claimable.
+    db.query(SlideStyleLibrary).filter(
+        SlideStyleLibrary.id == style_id, claimable_clause(_dt.utcnow())
+    ).update({"preview_status": "missing"}, synchronize_session=False)
     db.commit()
 
     try_enqueue(style_id)
-    return SlideStylePreviewResponse(style_id=style_id, status="queued")
+    db.refresh(style)
+    return SlideStylePreviewResponse(
+        style_id=style_id, status=style.preview_status or "queued"
+    )
