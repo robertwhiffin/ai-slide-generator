@@ -200,9 +200,13 @@ def test_every_preview_surface_routes_its_frame_through_the_shared_contract(slid
     assert "${slideHostFrameStyle('body')}" in _inline_reset_literal(_RIBBON, "resetStyle")
 
 
-def test_the_preview_reset_has_exactly_two_consumers(slide_document):
-    """Neither of them an export path, so the preview reset and the export resets
-    stay separately attributable."""
+def test_the_preview_reset_has_exactly_four_consumers(slide_document):
+    """All four are preview surfaces, none an export path, so the preview reset
+    and the export resets stay separately attributable.
+
+    SlideStylePreviewFrame.tsx (slide-style visual preview) is one: like
+    SlideTile and VisualEditorPanel it renders a framed single slide in-app, not
+    a scrolling export document, so it correctly shares the preview reset."""
     consumers = [
         p
         for p in (_FRONTEND).rglob("*.tsx")
@@ -215,6 +219,7 @@ def test_the_preview_reset_has_exactly_two_consumers(slide_document):
         "SlideTile.tsx",
         "VisualEditorPanel.tsx",
         "SlideStage.tsx",
+        "SlideStylePreviewFrame.tsx",
     }
 
     wrapper_start = slide_document.index("const wrapperStyle = `")
