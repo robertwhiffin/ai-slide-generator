@@ -24,6 +24,13 @@ Content-Security-Policy differentiated by response type:
      Radix UI injects inline styles at runtime; CSP hashes apply to
      <style>/<script> *elements*, not style *attributes*, so
      ``style-src`` needs 'unsafe-inline'.
+  3. Monaco: the editors load from jsDelivr via @monaco-editor/react, the
+     JS through ``script-src`` and ``editor.main.css`` as a stylesheet
+     link, so ``style-src`` also allows ``https://cdn.jsdelivr.net``.
+     Without it the sheet is blocked and the editor renders broken (its
+     input textarea shows as a stray box above the text). Given
+     'unsafe-inline' already, the origin adds no real style-injection
+     surface; ``script-src`` already trusts it.
 
   ``script-src 'unsafe-inline'`` + CDNs is a deliberate, documented
   trade-off forced by srcdoc inheritance: slides remain confined by the
@@ -83,7 +90,7 @@ from starlette.responses import Response
 DOCUMENT_CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.tailwindcss.com; "
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
     "img-src 'self' data:; "
     "font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; "
     "connect-src 'self'; "
