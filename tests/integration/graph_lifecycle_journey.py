@@ -155,6 +155,7 @@ CREATE_SESSION_KEYS = frozenset(
         "graph_version",
         "active_graph_version",
         "is_older_than_active",
+        "deck_mode",
     }
 )
 
