@@ -1119,8 +1119,8 @@ class ChatService:
             request_id: Optional request ID for async polling support
             image_ids: Optional list of image IDs attached to this message
             is_first_message_override: If set, overrides the DB-based first-message
-                detection. Used by the async path where the user message is
-                persisted before the job runs.
+                detection. Used by the async path and ``POST /chat/stream``,
+                which both persist the user message before this method runs.
             engine_mode: ``"graph"`` runs the turn on the LangGraph engine,
                 ``"monolith"`` (the default) on the shipped agent. Resolved by
                 the CHAT ROUTES and passed in — never resolved here. The default

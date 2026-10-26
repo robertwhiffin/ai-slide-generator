@@ -33,6 +33,7 @@ The old opt-out phrase is written out literally (not imported): it is ordinary t
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -588,6 +589,46 @@ def test_no_active_graph_release_on_an_agent_first_message_is_a_503_and_leaves_t
         [(status, error)] = _chat_requests(env.factory, sid)
         assert status == "error"
         assert error, "the failed chat request must carry an error code"
+    _assert_released_once(env, sid)
+
+
+@pytest.mark.parametrize("failure", ["deck-mode-locked", "no-active-release"])
+def test_a_failed_status_write_never_masks_the_async_409_or_503(env, failure):
+    """Marking the chat request ``error`` is best effort: if that write fails, the
+    caller still gets the typed 409/503, and the lock is still released once."""
+    if failure == "deck-mode-locked":
+        sid = _seed_deck(env.factory, deck_mode="agent", prior_user_messages=(_MESSAGE,))
+        body = _body(sid, message=_LATER_MESSAGE, deck_mode="legacy")
+        expected = (
+            409,
+            {
+                "detail": {
+                    "code": "deck_mode_locked",
+                    "message": _LOCKED_MESSAGES["agent"],
+                    "deck_mode": "agent",
+                }
+            },
+        )
+        lock = contextlib.nullcontext()
+    else:
+        sid = _seed_deck(env.factory, pin=None)
+        body = _body(sid)
+        expected = (503, _NO_RELEASE)
+        lock = patch(
+            _LOCK, side_effect=ActiveGraphReleaseUnavailableError("no active Graph Release")
+        )
+
+    with lock, patch.object(
+        SessionManager,
+        "update_chat_request_status",
+        side_effect=RuntimeError("the status write failed"),
+    ) as status_write:
+        response = env.post("async", body)
+
+    assert status_write.call_count == 1, "the route never tried to mark the request"
+    assert (response.status_code, response.json()) == expected, response.text
+    assert "the status write failed" not in response.text
+    env.nothing_ran()
     _assert_released_once(env, sid)
 
 
