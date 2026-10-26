@@ -62,13 +62,23 @@ async function setupMocks(page: Page) {
     });
   });
 
+  // Session ids created via POST /api/sessions in this test. New Deck persists the session before it
+  // navigates to /sessions/<id>/edit, so — as on the real backend — GET /api/sessions/<id> must find
+  // it there; a 404 makes AppLayout's URL restore redirect to /help mid-test.
+  const createdSessionIds = new Set<string>();
+
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();
     const method = request.method();
+    const pathname = new URL(url).pathname;
 
     // Handle session creation/deletion
     if (method === 'POST' || method === 'DELETE') {
+      if (method === 'POST' && pathname === '/api/sessions') {
+        const createdId = request.postDataJSON()?.session_id;
+        if (createdId) createdSessionIds.add(createdId);
+      }
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
       return;
     }
@@ -94,8 +104,35 @@ async function setupMocks(page: Page) {
         body: JSON.stringify(mockSlides)
       });
     } else {
-      // Session details - return 404 for new sessions
-      route.fulfill({ status: 404 });
+      const detailId = pathname.match(/^\/api\/sessions\/([^/]+)$/)?.[1];
+      if (method === 'GET' && detailId && createdSessionIds.has(detailId)) {
+        // Session details for a session this test created — a new, empty deck
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            session_id: detailId,
+            title: 'New',
+            user_id: null,
+            created_by: 'test@example.com',
+            created_at: '2026-01-01T00:00:00Z',
+            message_count: 0,
+            has_slide_deck: false,
+            graph_version: null,
+            active_graph_version: 1,
+            is_older_than_active: false,
+            deck_mode: null,
+            messages: [],
+            slide_deck: null,
+            my_permission: 'CAN_MANAGE',
+          }),
+        });
+      } else {
+        // A session id never created (e.g. the browser-local id before New Deck persists it) is a
+        // 404, as on the backend; so are the session sub-resources this file does not mock
+        // (contributors, collaboration history, lock status)
+        route.fulfill({ status: 404 });
+      }
     }
   });
 

@@ -208,6 +208,26 @@ async function setupStreamMock(page: Page, slideDeck = mockSlideDeck) {
   });
 }
 
+/**
+ * A session with no slide deck. Overrides only the deck fetch; every other sessions call falls back
+ * to setupMocks' handler, so agent-config, lock and session details stay the shared mocks. (A full
+ * hand-copied handler here once lacked the agent-config branch: the session body was served as the
+ * agent config and GenieDataButton crashed the page on `agentConfig.tools.filter`.)
+ */
+async function setupNoSlidesMock(page: Page) {
+  await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
+    if (new URL(request.url()).pathname.endsWith('/slides')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ slide_deck: null }),
+      });
+      return;
+    }
+    route.fallback();
+  });
+}
+
 /** Mock full PPTX flow (async → poll → download) so export runs without real backend. */
 async function setupPPTXExportMocks(page: Page) {
   await page.route('**/api/export/pptx/async', async (route) => {
@@ -259,55 +279,7 @@ async function generateSlides(page: Page) {
 test.describe('ExportButtons', () => {
   test('export button hidden when no slides', async ({ page }) => {
     await setupMocks(page);
-    // Override to return null slide_deck
-    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
-      const url = request.url();
-      const method = request.method();
-
-      if (url.includes('/sessions/shared')) {
-        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
-        return;
-      }
-
-      if (url.includes('/lock')) {
-        if (method === 'POST') {
-          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
-        } else if (method === 'PUT') {
-          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
-        } else if (method === 'DELETE') {
-          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
-        } else {
-          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
-        }
-        return;
-      }
-
-      // Handle session creation/deletion
-      if (method === 'POST' || method === 'DELETE') {
-        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
-        return;
-      }
-
-      if (url.includes('limit=')) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(mockSessions),
-        });
-      } else if (url.includes('/slides')) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ slide_deck: null }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ session_id: 'test-session-id', messages: [], my_permission: 'CAN_MANAGE' }),
-        });
-      }
-    });
+    await setupNoSlidesMock(page);
     await goToGenerator(page);
 
     // Empty state - no slides
@@ -603,55 +575,7 @@ test.describe('ViewModes', () => {
 test.describe('PresentButton', () => {
   test('present button hidden when no slides', async ({ page }) => {
     await setupMocks(page);
-    // Override to return null slide_deck
-    await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
-      const url = request.url();
-      const method = request.method();
-
-      if (url.includes('/sessions/shared')) {
-        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ presentations: [], count: 0 }) });
-        return;
-      }
-
-      if (url.includes('/lock')) {
-        if (method === 'POST') {
-          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ acquired: true, locked_by: null }) });
-        } else if (method === 'PUT') {
-          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ renewed: true }) });
-        } else if (method === 'DELETE') {
-          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'released' }) });
-        } else {
-          route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ locked: false, locked_by: null }) });
-        }
-        return;
-      }
-
-      // Handle session creation/deletion
-      if (method === 'POST' || method === 'DELETE') {
-        route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ session_id: 'mock', title: 'New', user_id: null, created_at: '2026-01-01T00:00:00Z' }) });
-        return;
-      }
-
-      if (url.includes('limit=')) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(mockSessions),
-        });
-      } else if (url.includes('/slides')) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ slide_deck: null }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ session_id: 'test-session-id', messages: [], my_permission: 'CAN_MANAGE' }),
-        });
-      }
-    });
+    await setupNoSlidesMock(page);
     await goToGenerator(page);
 
     // Empty state
