@@ -1498,12 +1498,6 @@ class SessionManager:
             SessionAccessDeniedError: If ``min_permission`` is not satisfied
             ValueError: If source has no slide deck or version not found
         """
-        # Imported here, not at module level: chat_service imports this module,
-        # so a module-level import back would be a cycle — and this module is
-        # what pulls chat_service into the unit suite's collection chain, where
-        # an ImportError stops the suite COLLECTING rather than failing a test.
-        from src.api.services.chat_service import _selects_agent_mode
-
         with get_db_session() as db:
             source = self._get_session_or_raise(db, source_session_id)
             if min_permission is not None:
@@ -1547,22 +1541,13 @@ class SessionManager:
             else:
                 new_title = _default_duplicate_title(base_title)
 
-            # Determine graph capability before constructing the new actor. The
-            # duplicate owns a fresh immutable pin selected under the active-row
-            # lock; the source's older pin is never copied or rewritten.
-            marker = earliest_user_message(db, deck_owner.id)
-            # The duplicate keeps its SOURCE deck's engine.  Since 2026-10-12
-            # the graph is the default and the marker is the LEGACY opt-out:
-            # a graph source (no first user message, or one without
-            # LEGACY_MODE_PHRASE) gives a duplicate with NO user message --
-            # which itself resolves to the graph -- so it must be pinned; a
-            # legacy source gives an unpinned duplicate carrying the opt-out.
-            source_is_graph = _selects_agent_mode(
-                marker.content if marker is not None else None
-            )
-            carried_marker = not source_is_graph
+            # The duplicate keeps its SOURCE deck's engine: it copies the
+            # owner's deck_mode (NULL stays NULL, i.e. unlocked).  Every mode
+            # but legacy is graph-capable, so it owns a fresh immutable pin
+            # selected under the active-row lock; the source's older pin is
+            # never copied or rewritten.  A legacy duplicate stays unpinned.
             graph_release_id = None
-            if source_is_graph:
+            if deck_owner.deck_mode != "legacy":
                 graph_release_id = lock_active_graph_release(db).release_id
 
             new_session = UserSession(
@@ -1577,6 +1562,7 @@ class SessionManager:
                 google_slides_presentation_id=None,
                 google_slides_url=None,
                 graph_release_id=graph_release_id,
+                deck_mode=deck_owner.deck_mode,
             )
             db.add(new_session)
             db.flush()
@@ -1602,33 +1588,6 @@ class SessionManager:
             db.add(new_deck)
             db.flush()
 
-            # ws4d D1: carry the engine-mode marker, and NOTHING else.
-            #
-            # Engine mode is derived from the deck's earliest role='user'
-            # message, and no SessionMessage row is copied by a duplicate — so
-            # without this a duplicate of a LEGACY deck silently moves to the
-            # graph (the default since 2026-10-12).  Only a marker that
-            # actually selects the legacy engine is carried: copying the first
-            # message of every graph duplicate would change the graph path
-            # (message_count is a live COUNT, so a copy makes is_first_message
-            # False and suppresses title generation on the duplicate's first
-            # real turn) and would break the standing guarantee that a
-            # duplicate carries no chat history.  For a legacy duplicate that
-            # title suppression is accepted: the carried row is metadata, not
-            # conversation, and the title should come from the new
-            # conversation.
-            if carried_marker:
-                db.add(
-                    SessionMessage(
-                        session_id=new_session.id,
-                        role="user",
-                        content=marker.content,
-                        message_type=marker.message_type,
-                        created_at=marker.created_at,
-                    )
-                )
-                db.flush()
-
             logger.info(
                 "Duplicated session",
                 extra={
@@ -1637,7 +1596,7 @@ class SessionManager:
                     "created_by": created_by,
                     "slide_count": slide_count,
                     "source_version_number": version_number,
-                    "carried_engine_mode_marker": carried_marker,
+                    "deck_mode": deck_owner.deck_mode,
                 },
             )
 

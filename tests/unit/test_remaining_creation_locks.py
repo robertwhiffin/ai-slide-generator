@@ -267,13 +267,14 @@ def test_existing_contributor_returns_before_lock_and_keeps_its_pin(factory):
         assert actor.graph_release_id == 101
 
 
-def _seed_duplicate_source(factory, *, session_id: str, message: str):
+def _seed_duplicate_source(factory, *, session_id: str, message: str, deck_mode=None):
     with factory.begin() as db:
         source = UserSession(
             session_id=session_id,
             created_by="owner@example.com",
             title="Source",
             graph_release_id=101,
+            deck_mode=deck_mode,
         )
         db.add(source)
         db.flush()
@@ -292,8 +293,8 @@ def _seed_duplicate_source(factory, *, session_id: str, message: str):
 def test_graph_duplicate_locks_r2_and_never_copies_or_repins_source(factory):
     """Copying the source pin would give the new graph actor R1 instead of locked R2.
 
-    Since 2026-10-12 a graph source has no marker to carry (the graph is the
-    default), so the copy carries no message at all.
+    The source is unlocked (``deck_mode`` NULL), so the copy is pinned like any
+    new deck; no duplicate carries a message.
     """
     _seed_duplicate_source(
         factory,
@@ -319,34 +320,41 @@ def test_graph_duplicate_locks_r2_and_never_copies_or_repins_source(factory):
         ) is None
 
 
-def test_legacy_marker_duplicate_stays_unpinned_and_never_locks(factory):
-    """Locking every duplicate would classify legacy copies as graph actors."""
+def test_legacy_duplicate_stays_unpinned_and_never_locks(factory):
+    """Locking every duplicate would classify legacy copies as graph actors.
+
+    The source is legacy by its stored ``deck_mode``, not by its message text;
+    the copy is legacy too, unpinned, and carries no message row.  The source's
+    stale pin (101) is deliberate: a copy that inherited the source's pin would
+    come back pinned.
+    """
     _seed_duplicate_source(
         factory,
-        session_id="plain-source",
-        message=f"{LEGACY_MODE_PHRASE} ordinary monolith request",
+        session_id="legacy-source",
+        message="ordinary monolith request",
+        deck_mode="legacy",
     )
     manager = SessionManager()
     with patch(
         "src.api.services.session_manager.get_db_session", _database_context(factory)
     ), patch(
         "src.api.services.session_manager.lock_active_graph_release",
-        side_effect=AssertionError("legacy-marker duplicate must not lock"),
+        side_effect=AssertionError("legacy duplicate must not lock"),
     ):
-        result = manager.duplicate_session("plain-source", "copier@example.com")
+        result = manager.duplicate_session("legacy-source", "copier@example.com")
 
     with factory() as db:
         source = db.scalar(
-            select(UserSession).where(UserSession.session_id == "plain-source")
+            select(UserSession).where(UserSession.session_id == "legacy-source")
         )
         duplicate = db.scalar(
             select(UserSession).where(UserSession.session_id == result["session_id"])
         )
         assert (source.graph_release_id, duplicate.graph_release_id) == (101, None)
-        marker = db.scalar(
+        assert duplicate.deck_mode == "legacy"
+        assert db.scalar(
             select(SessionMessage).where(SessionMessage.session_id == duplicate.id)
-        )
-        assert marker.content == f"{LEGACY_MODE_PHRASE} ordinary monolith request"
+        ) is None
 
 
 @pytest.mark.parametrize("route_name", ["send_message", "send_message_streaming", "submit_chat_async"])

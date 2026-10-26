@@ -1,11 +1,12 @@
 """`earliest_user_message` (#317 Task 1, plan D16): ONE copy of the earliest-user-row rule.
 
 The session's earliest ``role='user'`` row is the row ``clear_context`` (and
-#317's message delete) keeps, and the marker ``duplicate_session`` carries.
-Before #317 three callers each wrote the query out; this file pins the single
-helper that replaces them and proves that every converted caller goes through
-it.  (``resolve_engine_mode`` was the third caller; since Deck Mode it reads the
-owner's ``deck_mode`` column instead, so its entries are gone from tests 5 and 6.)
+#317's message delete) keeps.  Before #317 three callers each wrote the query
+out; this file pins the single helper that replaces them and proves that every
+converted caller goes through it.  (``resolve_engine_mode`` and
+``duplicate_session`` were the other two; since Deck Mode the first reads the
+owner's ``deck_mode`` column and the second copies it, carrying no row, so
+their entries are gone from tests 5 and 6.)
 
 Real sqlite throughout, with EXPLICIT ``created_at`` on every row (a fixed
 past instant, never the clock), so a tie is a real tie.  Tied rows are given
@@ -26,18 +27,18 @@ Red before Task 1 for a stated reason, one test at a time:
   * test 5 reads ``session_manager.earliest_user_message`` to wrap it, then
     patches both module names with ``monkeypatch.setattr`` (``raising=True``):
     ``AttributeError`` while the module has no such attribute;
-  * test 6 is a characterization test of the three callers' observable
+  * test 6 is a characterization test of the callers' observable
     results: green before and after.
 
 Patch targets: ``clear_context`` imports
 ``get_db_session`` / ``get_checkpointer`` lazily, so the reachable targets are
 the source attributes; ``_patched`` from ``test_clear_context`` patches those
-and ``session_manager.get_db_session`` (``duplicate_session``).
+and ``session_manager.get_db_session``.
 """
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 import pytest
@@ -49,7 +50,6 @@ from src.api.services.chat_service import (
     ChatService,
 )
 from src.api.services.session_manager import SessionManager
-from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SessionMessage, UserSession
 from src.domain.conversation_engine import ENGINE_MODE_MARKER_MESSAGE_TYPE
 from tests.unit.conftest import _make_factory, _make_fake_db
@@ -142,42 +142,6 @@ def _next_free_id(factory) -> int:
 
     with _make_fake_db(factory)() as db:
         return (db.query(func.max(SessionMessage.id)).scalar() or 0) + 100
-
-
-def _seed_active_graph_release(factory) -> int:
-    """One active Graph Release, so a graph-source duplicate can take its pin.
-
-    Without it a wrong pick that lands a duplicate on the graph would surface
-    as ``ActiveGraphReleaseUnavailableError`` instead of a failed assertion.
-    """
-    now = datetime.now(timezone.utc)
-    with _make_fake_db(factory)() as db:
-        db.add(
-            GraphRelease(
-                id=900,
-                version_number=1,
-                release_note="earliest-user-message fixture release",
-                published_by="fixture@example.com",
-                published_at=now,
-                effective_from=now,
-                effective_to=None,
-            )
-        )
-    return 900
-
-
-def _pin_of(factory, session_id: str) -> Optional[int]:
-    with _make_fake_db(factory)() as db:
-        return (
-            db.query(UserSession)
-            .filter(UserSession.session_id == session_id)
-            .one()
-            .graph_release_id
-        )
-
-
-def _shape(rows) -> list[tuple]:
-    return [(r.role, r.content, r.message_type) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +247,7 @@ def test_assistant_and_tool_rows_are_never_the_earliest_user_row(
 def test_a_hidden_marker_is_still_the_earliest_user_row(_session_unit_engine):
     """The row a clear (or a delete) keeps is re-typed ``engine_mode_marker``
     and hidden from every transcript read -- and is still THE earliest user row,
-    so the engine, the next clear and a duplicate all keep seeing it."""
+    so the next clear (or delete) keeps seeing it."""
     factory = _make_factory(_session_unit_engine)
     sid, pk = _new_session(factory)
     marker_id, _, later_id = _add_rows(
@@ -367,8 +331,8 @@ def _install_spy(monkeypatch) -> _HelperSpy:
     """Patch the spy over BOTH names, failing loudly where a name is missing.
 
     ``chat_service`` imports the helper by name (``clear_context``);
-    ``duplicate_session`` reads ``session_manager``'s
-    module global.  ``monkeypatch.setattr`` defaults to ``raising=True``.
+    ``session_manager`` defines it, so a caller there would read that module
+    global.  ``monkeypatch.setattr`` defaults to ``raising=True``.
     """
     spy = _HelperSpy(session_manager_module.earliest_user_message)
     monkeypatch.setattr("src.api.services.session_manager.earliest_user_message", spy)
@@ -435,63 +399,8 @@ def _clear_context_reads_the_sessions_own_row(
     assert (kept.id, kept.message_type) == (second_user_id, ENGINE_MODE_MARKER_MESSAGE_TYPE)
 
 
-def _duplicate_session_reads_the_source_owners_row(
-    spy, *, contributor_session, session_with_spec_and_messages, _session_unit_engine, **_
-):
-    """``duplicate_session`` asks for the source deck OWNER's pk, and carries
-    the row the helper answers with."""
-    # (a) From a contributor session: the OWNER's pk, not the source's.
-    c_factory = contributor_session._factory
-    _seed_active_graph_release(c_factory)
-    owner_pk = _session_pk(c_factory, contributor_session._owner_session_id)
-    contrib_sid = contributor_session.contributor_session_id
-    contrib_pk = _session_pk(c_factory, contrib_sid)
-    _add_rows(c_factory, owner_pk,
-              _row("user", _PLAIN_MESSAGE, _at(10), message_type="user_input"))
-    _add_rows(c_factory, contrib_pk,
-              _row("user", _PHRASE_MESSAGE, _at(0), message_type="user_query"))
-
-    with _patched(c_factory, _RecordingSaver()):
-        copy = SessionManager().duplicate_session(contrib_sid, "copier@example.com")
-    assert spy.pks == [owner_pk], (
-        f"duplicate_session must ask the helper once, for the source OWNER's pk "
-        f"{owner_pk} (the contributor source is {contrib_pk}); it asked for {spy.pks}"
-    )
-    assert _messages_of(c_factory, copy["session_id"]) == [], (
-        "the owner's deck is a graph deck: its copy carries no row"
-    )
-
-    # (b) From a root session (the plan's fixture): the source's own pk, and
-    # the copy carries what the helper answered -- not the database's first row.
-    factory = _make_factory(_session_unit_engine)
-    _seed_active_graph_release(factory)
-    sid = session_with_spec_and_messages
-    pk = _session_pk(factory, sid)
-    steered_at = _at(-3600)
-    spy.pks.clear()
-    spy.steer = lambda db, session_pk: SessionMessage(
-        role="user", content=_PHRASE_MESSAGE, message_type="user_query",
-        created_at=steered_at,
-    )
-
-    with _patched(factory, _RecordingSaver()):
-        copy = SessionManager().duplicate_session(sid, "copier@example.com")
-
-    assert spy.pks == [pk], (
-        f"duplicate_session must ask the helper once, for the source pk {pk}; "
-        f"it asked for {spy.pks}"
-    )
-    carried = _messages_of(factory, copy["session_id"])
-    assert _shape(carried) == [("user", _PHRASE_MESSAGE, "user_query")], (
-        "duplicate_session must carry the row the helper answered with"
-    )
-    assert carried[0].created_at == steered_at
-    assert _pin_of(factory, copy["session_id"]) is None, "a legacy copy takes no pin"
-
-
 _CALLERS = {
     "clear_context": _clear_context_reads_the_sessions_own_row,
-    "duplicate_session": _duplicate_session_reads_the_source_owners_row,
 }
 
 
@@ -504,9 +413,8 @@ def test_every_caller_reads_the_row_through_the_helper(
     _session_unit_engine,
 ):
     """Each converted caller calls ``earliest_user_message`` with the right
-    pk -- the deck OWNER's for the duplicate, the session's own for a clear --
-    and acts on its answer (the spy steers it to a row the
-    caller's old inline query would not pick)."""
+    pk -- the session's own for a clear -- and acts on its answer (the spy
+    steers it to a row the caller's old inline query would not pick)."""
     spy = _install_spy(monkeypatch)
     _CALLERS[caller](
         spy,
@@ -552,23 +460,8 @@ def _clear_context_keeps_the_lower_id(*, factory, **_):
     )
 
 
-def _duplicate_session_carries_the_lower_id(*, factory, session_with_spec_and_messages, **_):
-    _seed_active_graph_release(factory)
-    sid = session_with_spec_and_messages
-    lower, _ = _seed_tie(factory, _session_pk(factory, sid), phrase_on="lower")
-
-    with _patched(factory, _RecordingSaver()):
-        copy = SessionManager().duplicate_session(sid, "copier@example.com")
-
-    assert _shape(_messages_of(factory, copy["session_id"])) == [
-        ("user", _PHRASE_MESSAGE, "user_input")
-    ], "the copy carries the tied LOWER id's row"
-    assert _pin_of(factory, copy["session_id"]) is None
-
-
 _TIE_CALLERS = {
     "clear_context": _clear_context_keeps_the_lower_id,
-    "duplicate_session": _duplicate_session_carries_the_lower_id,
 }
 
 
@@ -579,8 +472,8 @@ def test_a_created_at_tie_is_broken_by_id_for_every_caller(
     """CHARACTERIZATION TEST: green before Task 1 and after it.
 
     Two user rows share one ``created_at``; the lower id wins.  Pinned through
-    each caller's OBSERVABLE result (the row a clear keeps, the marker a
-    duplicate carries), not through the helper, so it holds the
+    each caller's OBSERVABLE result (the row a clear keeps), not through the
+    helper, so it holds the
     behaviour steady across the refactor; sabotaging the helper's order
     (``id DESC``) after Task 1 turns every case red.
     """

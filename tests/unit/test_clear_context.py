@@ -1125,10 +1125,10 @@ class TestAClearedConversationIsEmptyToEveryReader:
     def test_a_duplicate_of_a_cleared_legacy_deck_stays_legacy_and_shows_no_chat(
         self, session_with_spec_and_messages, _session_unit_engine
     ):
-        """The duplicate carries the marker (role only) WITH its hidden type.
-
-        So the copy keeps the source's engine, and its chat panel is empty, as a
-        duplicate's always is.
+        """The copy takes the owner's stored ``deck_mode``, so it keeps the
+        source's engine without carrying the kept (hidden) row: it has no
+        message rows at all, and its chat panel is empty, as a duplicate's
+        always is.
         """
         factory = _make_factory(_session_unit_engine)
         sid = _seed_transcript(factory, session_with_spec_and_messages, first=_PHRASE_MESSAGE)
@@ -1137,15 +1137,23 @@ class TestAClearedConversationIsEmptyToEveryReader:
         with _patched(factory, _RecordingSaver()):
             assert resolve_engine_mode(sid) == "monolith", "precondition: a legacy deck"
             ChatService().clear_context(sid, cleared_by="owner@example.com")
+            assert [m.message_type for m in _messages_of(factory, sid)] == [
+                _marker_type()
+            ], "precondition: the clear kept the hidden first row"
 
             new = SessionManager().duplicate_session(sid, "copier@example.com")["session_id"]
             assert new != sid
 
             assert SessionManager().get_messages(new) == []
+            assert resolve_engine_mode(new) == "monolith"
 
-        [carried] = _messages_of(factory, new)
-        assert (carried.role, carried.content) == ("user", _PHRASE_MESSAGE)
-        assert carried.message_type == _marker_type()
+        assert _messages_of(factory, new) == []
+        db = factory()
+        try:
+            copy = db.query(UserSession).filter(UserSession.session_id == new).one()
+            assert (copy.deck_mode, copy.graph_release_id) == ("legacy", None)
+        finally:
+            db.close()
 
 
 # ---------------------------------------------------------------------------

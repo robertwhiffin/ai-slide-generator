@@ -1,4 +1,4 @@
-"""Engine-mode selection (ws4d D1): the phrase, the sticky resolver, the marker carry.
+"""Engine-mode selection (ws4d D1): the phrase, the sticky resolver, the duplicate.
 
 Since 2026-10-12 the rule is inverted: every deck runs on the graph UNLESS its
 first user message carries ``LEGACY_MODE_PHRASE``.  The old opt-in
@@ -103,7 +103,7 @@ def _add_message(factory, session_id: str, *, role: str, content: str,
 # duplicate_session decides graph capability and then locks the ACTIVE Graph
 # Release before constructing the copy's UserSession (correction C-2), because
 # #261 makes a graph-capable conversation's pin immutable from creation. A
-# marker-carrying duplicate therefore requires a live active release to exist.
+# pinned (non-legacy) duplicate therefore requires a live active release to exist.
 #
 # Two releases are published, and the SOURCE session is pinned to the SUPERSEDED
 # one. That is what gives the pin assertions their teeth: duplication must never
@@ -466,7 +466,7 @@ class TestOwnerDeckResolution:
 
 
 # ---------------------------------------------------------------------------
-# duplicate_session carries the marker — and only the marker.
+# duplicate_session copies the owner's deck_mode, and no message.
 # ---------------------------------------------------------------------------
 
 
@@ -487,12 +487,12 @@ def _messages_of(factory, session_id: str):
         db.close()
 
 
-class TestDuplicateCarriesTheMarker:
+class TestDuplicateKeepsTheOwnersEngine:
     """A duplicate keeps its SOURCE deck's engine.
 
-    Since 2026-10-12 the carried marker is the LEGACY opt-out: a graph source
-    yields a pinned copy with no messages (no user row resolves to the graph);
-    a legacy source yields an unpinned copy carrying exactly the opt-out row.
+    Since Deck Mode (Task 5) the copy takes the deck owner's stored
+    ``deck_mode``: a legacy source yields an unpinned legacy copy, any other a
+    pinned copy.  No copy carries a message; the old marker-row carry is gone.
     """
 
     def test_duplicate_of_a_graph_mode_deck_stays_in_graph_mode(
@@ -564,70 +564,45 @@ class TestDuplicateCarriesTheMarker:
             assert resolve_engine_mode(copy["session_id"]) == "graph"
         assert _pin_of(factory, copy["session_id"]) == _ACTIVE_RELEASE_ID
 
-    def test_only_the_marker_row_is_copied(self, deck_with_three_rows):
-        """Copying more rows would replay a phantom conversation into the copy."""
-        factory = deck_with_three_rows._factory
-        sid = deck_with_three_rows.session_id
-        _seed_releases_pinning_source_to_the_superseded_one(factory, sid)
-        _add_message(factory, sid, role="user", content=_PHRASE_MESSAGE,
-                     message_type="user_query")
-        _add_message(factory, sid, role="assistant", content="here you go",
-                     message_type="llm_response", offset_seconds=5)
-        _add_message(factory, sid, role="user", content="make it blue",
-                     message_type="user_input", offset_seconds=10)
-
-        copy = deck_with_three_rows.duplicate()
-
-        rows = _messages_of(factory, copy["session_id"])
-        assert len(rows) == 1
-        assert rows[0].role == "user"
-        assert rows[0].content == _PHRASE_MESSAGE
-        # Preserved so _hydrate_chat_history's HUMAN_TYPES allowlist treats the
-        # carried row exactly as it treated the original.
-        assert rows[0].message_type == "user_query"
-
     def test_duplicate_of_a_legacy_deck_stays_legacy_and_unpinned(
         self, deck_with_three_rows
     ):
-        """The legacy copy carries the opt-out and takes no pin.
+        """The copy keeps the owner's stored legacy mode: it resolves to the
+        monolith, takes no pin and carries no message.
 
         An active release is available here, and the legacy copy still takes no
-        pin: capability decides whether a pin is selected at all.
+        pin.  The source's first message is plain text: the column, not the
+        text, makes it legacy.
         """
         factory = deck_with_three_rows._factory
-        _seed_releases_pinning_source_to_the_superseded_one(
-            factory, deck_with_three_rows.session_id
-        )
-        _add_message(
-            factory,
-            deck_with_three_rows.session_id,
-            role="user",
-            content=_PHRASE_MESSAGE,
-            message_type="user_input",
-        )
+        sid = deck_with_three_rows.session_id
+        _seed_releases_pinning_source_to_the_superseded_one(factory, sid)
+        _set_deck_mode(factory, sid, "legacy")
+        _add_message(factory, sid, role="user", content=_PLAIN_MESSAGE,
+                     message_type="user_input")
 
         copy = deck_with_three_rows.duplicate()
 
-        assert [r.content for r in _messages_of(factory, copy["session_id"])] == [
-            _PHRASE_MESSAGE
-        ]
+        assert _messages_of(factory, copy["session_id"]) == []
+        with _patched(factory):
+            assert resolve_engine_mode(copy["session_id"]) == "monolith"
         assert _pin_of(factory, copy["session_id"]) is None
 
-    def test_duplicate_from_a_contributor_session_carries_the_owner_marker(
+    def test_duplicate_from_a_contributor_session_copies_the_owners_legacy_mode(
         self, contributor_session
     ):
-        """A contributor duplicating a legacy deck gets a legacy copy."""
+        """A contributor duplicating a legacy deck gets a legacy copy.
+
+        The mode is read off the deck OWNER's row.  The owner's first row holds
+        the old opt-out (a legacy deck from before the Mode selector); it is not
+        copied.
+        """
         factory = contributor_session._factory
-        _seed_releases_pinning_source_to_the_superseded_one(
-            factory, contributor_session._owner_session_id
-        )
-        _add_message(
-            factory,
-            contributor_session._owner_session_id,
-            role="user",
-            content=_PHRASE_MESSAGE,
-            message_type="user_input",
-        )
+        owner_sid = contributor_session._owner_session_id
+        _seed_releases_pinning_source_to_the_superseded_one(factory, owner_sid)
+        _set_deck_mode(factory, owner_sid, "legacy")
+        _add_message(factory, owner_sid, role="user", content=_PHRASE_MESSAGE,
+                     message_type="user_input")
 
         with contributor_session._patched():
             copy = contributor_session._sm.duplicate_session(
@@ -635,8 +610,9 @@ class TestDuplicateCarriesTheMarker:
                 created_by="contributor@example.com",
             )
 
-        rows = _messages_of(factory, copy["session_id"])
-        assert [r.content for r in rows] == [_PHRASE_MESSAGE]
+        assert _messages_of(factory, copy["session_id"]) == []
+        with _patched(factory):
+            assert resolve_engine_mode(copy["session_id"]) == "monolith"
         assert _pin_of(factory, copy["session_id"]) is None
 
     def test_duplicate_from_a_contributor_of_a_graph_deck_is_pinned_graph(
@@ -680,38 +656,6 @@ class TestDuplicateCarriesTheMarker:
         assert _pin_of(factory, contributor_session._owner_session_id) == (
             _SUPERSEDED_RELEASE_ID
         )
-
-    def test_the_carried_marker_predates_the_copys_own_rows(
-        self, deck_with_three_rows
-    ):
-        """restore_version prunes messages by timestamp, so the marker must be
-        older than anything the new conversation writes — it keeps the source
-        row's created_at, which is older than the copy itself."""
-        factory = deck_with_three_rows._factory
-        _seed_releases_pinning_source_to_the_superseded_one(
-            factory, deck_with_three_rows.session_id
-        )
-        _add_message(
-            factory,
-            deck_with_three_rows.session_id,
-            role="user",
-            content=_PHRASE_MESSAGE,
-            offset_seconds=-3600,
-        )
-
-        copy = deck_with_three_rows.duplicate()
-
-        rows = _messages_of(factory, copy["session_id"])
-        db = factory()
-        try:
-            copy_row = (
-                db.query(UserSession)
-                .filter(UserSession.session_id == copy["session_id"])
-                .one()
-            )
-            assert rows[0].created_at < copy_row.created_at
-        finally:
-            db.close()
 
 
 # ---------------------------------------------------------------------------

@@ -600,9 +600,9 @@ class TestTheFirstUserMessageIsHiddenNotDeleted:
     def test_a_duplicate_of_a_legacy_deck_whose_first_turn_was_deleted_stays_legacy_and_shows_no_chat(  # noqa: E501
         self, session_with_spec_and_messages, _session_unit_engine
     ):
-        """The duplicate carries the source's earliest user row (role only) WITH
-        its hidden type, so the copy keeps the source's engine and its chat
-        panel is empty, as a duplicate's always is."""
+        """The copy takes the owner's stored ``deck_mode``, so it keeps the
+        source's engine without carrying the hidden first row: it has no message
+        rows at all, and its chat panel is empty, as a duplicate's always is."""
         factory = _make_factory(_session_unit_engine)
         sid = _seed_transcript(factory, session_with_spec_and_messages, first=_PHRASE_MESSAGE)
         _set_deck_mode(factory, sid, "legacy")
@@ -616,14 +616,23 @@ class TestTheFirstUserMessageIsHiddenNotDeleted:
             assert (result["hidden_message_id"], result["deleted_messages"]) == (head.id, 1)
             assert resolve_engine_mode(sid) == "monolith"
 
+            assert _messages_of(factory, sid)[0].message_type == _marker_type(), (
+                "precondition: the delete hid the first row"
+            )
+
             new = SessionManager().duplicate_session(sid, "copier@example.com")["session_id"]
             assert new != sid
 
             assert SessionManager().get_messages(new) == []
+            assert resolve_engine_mode(new) == "monolith"
 
-        [carried] = _messages_of(factory, new)
-        assert (carried.role, carried.content) == ("user", _PHRASE_MESSAGE)
-        assert carried.message_type == _marker_type()
+        assert _messages_of(factory, new) == []
+        db = factory()
+        try:
+            copy = db.query(UserSession).filter(UserSession.session_id == new).one()
+            assert (copy.deck_mode, copy.graph_release_id) == ("legacy", None)
+        finally:
+            db.close()
 
     def test_a_contributor_deletes_in_their_own_session_only(self, contributor_session):
         """A contributor's rows are its own: its first turn is hidden on ITS

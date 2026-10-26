@@ -61,6 +61,13 @@ def _pin(factory, session_id):
         )
 
 
+def _deck_mode(factory, session_id):
+    with factory() as db:
+        return db.scalar(
+            select(UserSession.deck_mode).where(UserSession.session_id == session_id)
+        )
+
+
 class _RecordingManager:
     """Record the caller's explicit capability while delegating real DB behavior."""
 
@@ -116,16 +123,13 @@ def test_create_chat_request_cannot_create_an_absent_session(postgres_engine):
 
 
 def test_tour_spells_true_and_persists_the_active_pin(postgres_engine):
-    """Since 2026-10-12 the tour is no longer excluded: it is a graph deck.
+    """The tour is not excluded: it is an agent (graph) deck.
 
-    Its fixture prompt carries no USE LEGACY MODE opt-out, so the resolver sends
-    the tour deck to the graph; an unpinned tour root would fail its first chat
-    turn with ConversationPinMissingError.  It must spell True (not lean on a
-    default) and persist the exact active release.
+    It is created with Deck Mode ``agent``, so the resolver sends the tour deck
+    to the graph; an unpinned tour root would fail its first chat turn with
+    ConversationPinMissingError.  It must spell True (not lean on a default)
+    and persist the exact active release.
     """
-    from src.api.routes.tour import _load_fixture
-    from src.domain.conversation_engine import selects_graph_engine
-
     factory = _factory_with_active_release(postgres_engine)
     recorder = _RecordingManager(SessionManager())
     with patch(
@@ -136,22 +140,24 @@ def test_tour_spells_true_and_persists_the_active_pin(postgres_engine):
         result = _phase1_create_session("tour@example.com")
 
     assert recorder.create_kwargs[0]["graph_capable"] is True
+    assert recorder.create_kwargs[0].get("deck_mode") == "agent"
     with factory() as db:
         active_id = db.scalar(
             select(GraphRelease.id).where(GraphRelease.effective_to.is_(None))
         )
     assert _pin(factory, result["session_id"]) == active_id
-    # The pin and the engine agree: the fixture prompt selects the graph.
-    assert selects_graph_engine(_load_fixture()["chat_prompt"]) is True
+    # The pin and the engine agree: the stored mode selects the graph.
+    assert _deck_mode(factory, result["session_id"]) == "agent"
 
 
 @pytest.mark.asyncio
 async def test_mcp_spells_false_and_persists_a_null_pin(postgres_engine):
     """Omitting the MCP exclusion makes a later default change silently pin tool decks.
 
-    MCP is still excluded after the 2026-10-12 inversion: it stays on the
-    monolith, and its first persisted message carries USE LEGACY MODE (see
-    tests/unit/test_mcp_server.py) so the transcript agrees with the null pin.
+    MCP is still excluded: it stays on the monolith, so it creates its deck
+    with Deck Mode ``legacy``, stored at creation, which agrees with the null
+    pin.  (Its first message is persisted verbatim: see
+    tests/unit/test_mcp_server.py.)
     """
     factory = _factory_with_active_release(postgres_engine)
     recorder = _RecordingManager(SessionManager())
@@ -182,4 +188,6 @@ async def test_mcp_spells_false_and_persists_a_null_pin(postgres_engine):
         )
 
     assert recorder.create_kwargs[0]["graph_capable"] is False
+    assert recorder.create_kwargs[0].get("deck_mode") == "legacy"
     assert _pin(factory, result["session_id"]) is None
+    assert _deck_mode(factory, result["session_id"]) == "legacy"
