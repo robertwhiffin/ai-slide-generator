@@ -1201,6 +1201,17 @@ class SessionManager:
             # A legacy deck never uses a Graph Release, so its new contributor is
             # unpinned (spec §5.5).  An unlocked deck may still lock agent, so its
             # contributor is pinned as today; a later legacy lock clears that pin.
+            #
+            # Re-read deck_mode under a row lock (FOR SHARE) so this creation and
+            # a concurrent Deck Mode lock (add_user_message's UPDATE of this row)
+            # serialise in either order: if the lock committed first we read
+            # 'legacy' and stay unpinned; if we lock first, the lock's pin clear
+            # waits for our commit and then sees (and clears) this contributor.
+            # Without it, a legacy lock committing between the plain read above
+            # and our insert leaves a pinned contributor on a legacy deck.  Taken
+            # BEFORE the release lock, so the lock order is parent -> release, as
+            # on the agent-lock path.  (SQLite renders no FOR SHARE.)
+            db.refresh(parent, attribute_names=["deck_mode"], with_for_update={"read": True})
             graph_release_id = None
             if parent.deck_mode != DECK_MODE_LEGACY:
                 graph_release_id = lock_active_graph_release(db).release_id
