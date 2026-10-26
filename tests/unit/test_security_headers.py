@@ -58,6 +58,24 @@ def test_error_response_carries_headers(client):
     assert r.headers["X-Frame-Options"] == "DENY"
 
 
+def _sources(policy: str, directive: str) -> list[str]:
+    for part in policy.split(";"):
+        name, *sources = part.split()
+        if name == directive:
+            return sources
+    raise AssertionError(f"{directive} missing from {policy!r}")
+
+
+def test_document_csp_lets_monaco_load_its_stylesheet():
+    """The Monaco editors (slide style, image guidelines, deck prompt) come from
+    jsDelivr via @monaco-editor/react: the JS through script-src, and
+    ``editor.main.css`` as a <link rel="stylesheet">. Without jsDelivr in
+    style-src the browser blocks that sheet, Monaco's hidden input textarea drops
+    into normal flow as a visible box and the text renders below it."""
+    assert "https://cdn.jsdelivr.net" in _sources(DOCUMENT_CSP, "script-src")
+    assert "https://cdn.jsdelivr.net" in _sources(DOCUMENT_CSP, "style-src")
+
+
 def test_document_csp_hardening_directives():
     # The document policy must still deny framing, plugins, and <base> rewrites,
     # and must not grant eval.
