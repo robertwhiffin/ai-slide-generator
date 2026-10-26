@@ -1547,7 +1547,7 @@ class SessionManager:
             # selected under the active-row lock; the source's older pin is
             # never copied or rewritten.  A legacy duplicate stays unpinned.
             graph_release_id = None
-            if deck_owner.deck_mode != "legacy":
+            if deck_owner.deck_mode != DECK_MODE_LEGACY:
                 graph_release_id = lock_active_graph_release(db).release_id
 
             new_session = UserSession(

@@ -236,9 +236,10 @@ async def enqueue_create_job(
         # transcript identical in shape to browser-initiated ones.
         #
         # MCP stays on the legacy monolith (its worker payload carries no engine
-        # key, and the graph's one-shot path, spec §6.4, is not built).  The
-        # deck is created with deck_mode="legacy", so the engine is fixed from
-        # creation and the prompt is persisted verbatim.
+        # key, and the graph's one-shot path, spec §6.4, is not built).
+        # create_deck stores that on the session it creates (deck_mode="legacy"),
+        # so no prompt has to say it: every prompt, create or edit, is persisted
+        # verbatim.
         await asyncio.to_thread(
             session_manager.add_message,
             session_id=session_id,
