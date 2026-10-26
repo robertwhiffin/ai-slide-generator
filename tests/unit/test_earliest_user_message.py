@@ -1,10 +1,11 @@
 """`earliest_user_message` (#317 Task 1, plan D16): ONE copy of the earliest-user-row rule.
 
-The session's earliest ``role='user'`` row is the row engine mode is read off,
-the row ``clear_context`` (and #317's message delete) keeps, and the marker
-``duplicate_session`` carries.  Before #317 three callers each wrote the query
-out; this file pins the single helper that replaces them and proves that every
-converted caller goes through it.
+The session's earliest ``role='user'`` row is the row ``clear_context`` (and
+#317's message delete) keeps, and the marker ``duplicate_session`` carries.
+Before #317 three callers each wrote the query out; this file pins the single
+helper that replaces them and proves that every converted caller goes through
+it.  (``resolve_engine_mode`` was the third caller; since Deck Mode it reads the
+owner's ``deck_mode`` column instead, so its entries are gone from tests 5 and 6.)
 
 Real sqlite throughout, with EXPLICIT ``created_at`` on every row (a fixed
 past instant, never the clock), so a tie is a real tie.  Tied rows are given
@@ -28,7 +29,7 @@ Red before Task 1 for a stated reason, one test at a time:
   * test 6 is a characterization test of the three callers' observable
     results: green before and after.
 
-Patch targets: ``resolve_engine_mode`` and ``clear_context`` import
+Patch targets: ``clear_context`` imports
 ``get_db_session`` / ``get_checkpointer`` lazily, so the reachable targets are
 the source attributes; ``_patched`` from ``test_clear_context`` patches those
 and ``session_manager.get_db_session`` (``duplicate_session``).
@@ -46,7 +47,6 @@ import src.api.services.session_manager as session_manager_module
 from src.api.services.chat_service import (
     LEGACY_MODE_PHRASE,
     ChatService,
-    resolve_engine_mode,
 )
 from src.api.services.session_manager import SessionManager
 from src.database.models.graph_configuration import GraphRelease
@@ -366,44 +366,14 @@ class _HelperSpy:
 def _install_spy(monkeypatch) -> _HelperSpy:
     """Patch the spy over BOTH names, failing loudly where a name is missing.
 
-    ``chat_service`` imports the helper by name (``resolve_engine_mode``,
-    ``clear_context``); ``duplicate_session`` reads ``session_manager``'s
+    ``chat_service`` imports the helper by name (``clear_context``);
+    ``duplicate_session`` reads ``session_manager``'s
     module global.  ``monkeypatch.setattr`` defaults to ``raising=True``.
     """
     spy = _HelperSpy(session_manager_module.earliest_user_message)
     monkeypatch.setattr("src.api.services.session_manager.earliest_user_message", spy)
     monkeypatch.setattr("src.api.services.chat_service.earliest_user_message", spy)
     return spy
-
-
-def _resolve_engine_mode_reads_the_owners_row(spy, *, contributor_session, **_):
-    """``resolve_engine_mode`` on a CONTRIBUTOR session asks for the OWNER's row."""
-    factory = contributor_session._factory
-    owner_sid = contributor_session._owner_session_id
-    contrib_sid = contributor_session.contributor_session_id
-    owner_pk = _session_pk(factory, owner_sid)
-    contrib_pk = _session_pk(factory, contrib_sid)
-    assert owner_pk != contrib_pk, "precondition: two distinct sessions"
-    # The owner's deck is a graph deck; the contributor's own (earlier) first
-    # row carries the opt-out, so reading the wrong session changes the answer.
-    _add_rows(factory, owner_pk,
-              _row("user", _PLAIN_MESSAGE, _at(10), message_type="user_input"))
-    _add_rows(factory, contrib_pk,
-              _row("user", _PHRASE_MESSAGE, _at(0), message_type="user_query"))
-
-    with _patched(factory, _RecordingSaver()):
-        assert resolve_engine_mode(contrib_sid) == "graph"
-        assert spy.pks == [owner_pk], (
-            f"resolve_engine_mode must ask the helper once, for the OWNER's pk "
-            f"{owner_pk} (contributor pk is {contrib_pk}); it asked for {spy.pks}"
-        )
-
-        spy.pks.clear()
-        spy.steer = lambda db, pk: SessionMessage(role="user", content=_PHRASE_MESSAGE)
-        assert resolve_engine_mode(contrib_sid) == "monolith", (
-            "resolve_engine_mode must decide on the helper's answer"
-        )
-        assert spy.pks == [owner_pk]
 
 
 def _clear_context_reads_the_sessions_own_row(
@@ -520,7 +490,6 @@ def _duplicate_session_reads_the_source_owners_row(
 
 
 _CALLERS = {
-    "resolve_engine_mode": _resolve_engine_mode_reads_the_owners_row,
     "clear_context": _clear_context_reads_the_sessions_own_row,
     "duplicate_session": _duplicate_session_reads_the_source_owners_row,
 }
@@ -535,8 +504,8 @@ def test_every_caller_reads_the_row_through_the_helper(
     _session_unit_engine,
 ):
     """Each converted caller calls ``earliest_user_message`` with the right
-    pk -- the deck OWNER's for the engine and the duplicate, the session's own
-    for a clear -- and acts on its answer (the spy steers it to a row the
+    pk -- the deck OWNER's for the duplicate, the session's own for a clear --
+    and acts on its answer (the spy steers it to a row the
     caller's old inline query would not pick)."""
     spy = _install_spy(monkeypatch)
     _CALLERS[caller](
@@ -567,21 +536,6 @@ def _seed_tie(factory, pk: int, *, phrase_on: str) -> tuple[int, int]:
     return lower, higher
 
 
-def _resolve_engine_mode_breaks_the_tie_by_id(*, factory, **_):
-    legacy_sid, legacy_pk = _new_session(factory)
-    _seed_tie(factory, legacy_pk, phrase_on="lower")
-    graph_sid, graph_pk = _new_session(factory)
-    _seed_tie(factory, graph_pk, phrase_on="higher")
-
-    with _patched(factory, _RecordingSaver()):
-        assert resolve_engine_mode(legacy_sid) == "monolith", (
-            "the tied LOWER id carries the opt-out: the deck is legacy"
-        )
-        assert resolve_engine_mode(graph_sid) == "graph", (
-            "the tied HIGHER id carries the opt-out: the deck is graph"
-        )
-
-
 def _clear_context_keeps_the_lower_id(*, factory, **_):
     sid, pk = _new_session(factory)
     lower, higher = _seed_tie(factory, pk, phrase_on="lower")
@@ -589,7 +543,6 @@ def _clear_context_keeps_the_lower_id(*, factory, **_):
 
     with _patched(factory, _RecordingSaver()):
         result = ChatService().clear_context(sid, cleared_by="owner@example.com")
-        mode_after = resolve_engine_mode(sid)
 
     assert result["preserved_message_id"] == lower
     assert result["deleted_messages"] == 2
@@ -597,7 +550,6 @@ def _clear_context_keeps_the_lower_id(*, factory, **_):
     assert (kept.id, kept.content, kept.message_type) == (
         lower, _PHRASE_MESSAGE, ENGINE_MODE_MARKER_MESSAGE_TYPE
     )
-    assert mode_after == "monolith"
 
 
 def _duplicate_session_carries_the_lower_id(*, factory, session_with_spec_and_messages, **_):
@@ -607,17 +559,14 @@ def _duplicate_session_carries_the_lower_id(*, factory, session_with_spec_and_me
 
     with _patched(factory, _RecordingSaver()):
         copy = SessionManager().duplicate_session(sid, "copier@example.com")
-        mode_of_copy = resolve_engine_mode(copy["session_id"])
 
     assert _shape(_messages_of(factory, copy["session_id"])) == [
         ("user", _PHRASE_MESSAGE, "user_input")
     ], "the copy carries the tied LOWER id's row"
-    assert mode_of_copy == "monolith"
     assert _pin_of(factory, copy["session_id"]) is None
 
 
 _TIE_CALLERS = {
-    "resolve_engine_mode": _resolve_engine_mode_breaks_the_tie_by_id,
     "clear_context": _clear_context_keeps_the_lower_id,
     "duplicate_session": _duplicate_session_carries_the_lower_id,
 }
@@ -630,8 +579,8 @@ def test_a_created_at_tie_is_broken_by_id_for_every_caller(
     """CHARACTERIZATION TEST: green before Task 1 and after it.
 
     Two user rows share one ``created_at``; the lower id wins.  Pinned through
-    each caller's OBSERVABLE result (the engine, the row a clear keeps, the
-    marker a duplicate carries), not through the helper, so it holds the
+    each caller's OBSERVABLE result (the row a clear keeps, the marker a
+    duplicate carries), not through the helper, so it holds the
     behaviour steady across the refactor; sabotaging the helper's order
     (``id DESC``) after Task 1 turns every case red.
     """

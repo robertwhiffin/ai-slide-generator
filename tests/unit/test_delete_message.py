@@ -74,6 +74,7 @@ from tests.unit.test_clear_context import (  # noqa: F401 (file_backed_db: a fix
     _seed_clearable_session,
     _seed_transcript,
     _session_pk,
+    _set_deck_mode,
     _version_rows,
     file_backed_db,
 )
@@ -484,10 +485,11 @@ class TestTheFirstUserMessageIsHiddenNotDeleted:
     def test_a_legacy_deck_stays_legacy_after_its_first_turn_is_deleted(
         self, _session_unit_engine
     ):
-        """Engine mode is read off the earliest user row.  Deleting it would make
-        U2 the earliest, and move this legacy deck onto the graph."""
+        """The deck's mode is stored on its (owner) row: deleting its first turn,
+        or adding a later one, does not move this legacy deck onto the graph."""
         factory = _make_factory(_session_unit_engine)
-        seeded = _seed_turns(factory, contents={"U1": _PHRASE_MESSAGE})
+        seeded = _seed_turns(factory)
+        _set_deck_mode(factory, seeded.sid, "legacy")
 
         with _patched(factory, _RecordingSaver()):
             assert resolve_engine_mode(seeded.sid) == "monolith", "precondition"
@@ -520,15 +522,16 @@ class TestTheFirstUserMessageIsHiddenNotDeleted:
         self, _session_unit_engine
     ):
         """Legacy decks, and decks whose first build failed, can open with an
-        assistant row.  The row engine mode is read off is the earliest USER
-        row (role only), not the earliest row: deleting the first user turn
-        hides U1 and leaves A0, which belongs to no turn."""
+        assistant row.  The row a delete keeps is the earliest USER row (role
+        only), not the earliest row: deleting the first user turn hides U1 and
+        leaves A0, which belongs to no turn."""
         factory = _make_factory(_session_unit_engine)
         sid = _new_session(factory)
+        _set_deck_mode(factory, sid, "legacy")
         ids = {}
         for label, offset, role, content, message_type in (
             ("A0", 0, "assistant", "Welcome back.", "llm_response"),
-            ("U1", 5, "user", _PHRASE_MESSAGE, "user_input"),
+            ("U1", 5, "user", _PLAIN_MESSAGE, "user_input"),
             ("A1", 10, "assistant", "deck built", "llm_response"),
             ("U2", 20, "user", "make slide 3 shorter", "user_input"),
             ("A2", 25, "assistant", "done", "llm_response"),
@@ -602,6 +605,7 @@ class TestTheFirstUserMessageIsHiddenNotDeleted:
         panel is empty, as a duplicate's always is."""
         factory = _make_factory(_session_unit_engine)
         sid = _seed_transcript(factory, session_with_spec_and_messages, first=_PHRASE_MESSAGE)
+        _set_deck_mode(factory, sid, "legacy")
         head, *_ = _messages_of(factory, sid)
 
         with _patched(factory, _RecordingSaver()):
@@ -615,7 +619,6 @@ class TestTheFirstUserMessageIsHiddenNotDeleted:
             new = SessionManager().duplicate_session(sid, "copier@example.com")["session_id"]
             assert new != sid
 
-            assert resolve_engine_mode(new) == "monolith"
             assert SessionManager().get_messages(new) == []
 
         [carried] = _messages_of(factory, new)
@@ -624,13 +627,14 @@ class TestTheFirstUserMessageIsHiddenNotDeleted:
 
     def test_a_contributor_deletes_in_their_own_session_only(self, contributor_session):
         """A contributor's rows are its own: its first turn is hidden on ITS
-        earliest row (not the owner's), and the owner's transcript -- which the
-        deck's engine is read off -- is never touched."""
+        earliest row (not the owner's), and the owner's transcript is never
+        touched.  The deck's engine is read off the owner's row (legacy here)."""
         factory = contributor_session._factory
         owner_sid = contributor_session._owner_session_id
         contrib_sid = contributor_session.contributor_session_id
 
-        _add_row(factory, owner_sid, role="user", content=_PHRASE_MESSAGE,
+        _set_deck_mode(factory, owner_sid, "legacy")
+        _add_row(factory, owner_sid, role="user", content=_PLAIN_MESSAGE,
                  message_type="user_input", offset_seconds=0)
         _add_row(factory, owner_sid, role="assistant", content="deck built",
                  message_type="llm_response", offset_seconds=5)
@@ -649,7 +653,7 @@ class TestTheFirstUserMessageIsHiddenNotDeleted:
         saver = _RecordingSaver()
         with _patched(factory, saver):
             assert resolve_engine_mode(contrib_sid) == "monolith", (
-                "precondition: the deck is legacy, read off the owner's rows"
+                "precondition: the deck is legacy, read off the owner's row"
             )
 
             first = _delete(contrib_sid, first_ask, deleted_by="contributor@example.com")

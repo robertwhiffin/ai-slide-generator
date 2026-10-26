@@ -38,6 +38,7 @@ from src.domain.conversation_engine import (
     AGENT_MODE_PHRASE as AGENT_MODE_PHRASE,
     ENGINE_MODE_MARKER_MESSAGE_TYPE,
     LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
+    engine_mode_for_deck_mode,
     selects_graph_engine,
 )
 from src.domain.conversation_turns import turn_message_ids
@@ -170,50 +171,34 @@ def _selects_agent_mode(content: Optional[str]) -> bool:
 def resolve_engine_mode(session_id: Optional[str]) -> str:
     """Return the engine this deck's turns run on: ``"graph"`` or ``"monolith"``.
 
-    **Sticky, and derived from the transcript.**  Evaluated per message, only
-    turn 1 would carry the phrase and turn 2 would fall back — a deck written
-    alternately by both engines diverges between ``session_slides`` rows and
-    ``deck_json``, and the graph's checkpoint thread, keyed by the session id,
-    would be resumed by one engine and ignored by the other.  So the answer is
-    a property of the deck, read off the **earliest** ``role='user'`` message.
-    A later message carrying the phrase must not switch a monolith deck, and
-    assistant messages are ignored so echoed tool output cannot flip the
-    engine.  (Since the 2026-10-12 inversion the graph is the default and the
-    phrase is the LEGACY opt-out: a later ``USE LEGACY MODE`` must not switch a
-    graph deck.)
+    **Sticky, and read from the deck owner's stored Deck Mode.**  The engine is
+    a property of the deck, held in ``user_sessions.deck_mode`` (``"agent"``,
+    ``"legacy"`` or NULL = not chosen yet).  ``legacy`` resolves to
+    ``"monolith"``; ``agent`` and NULL resolve to ``"graph"`` (the default).  The
+    transcript is never consulted, so no message text can switch the engine.
 
     **Resolved on the OWNER DECK's session, not the calling session** (ruling
     W-3).  Decks are shared through ``UserSession.parent_session_id``; mode is
-    per-session while divergence is per-DECK, so a contributor carrying the
-    phrase would write rows while a contributor without it wrote ``deck_json``
-    on the same deck — exactly the divergence stickiness exists to prevent.
-    The owner is resolved with the same ``_get_deck_owner_session`` hop
-    ``read_deck_spec`` uses, so a contributor inherits the owner's engine.
+    per-deck, so a contributor inherits its owner's column.  The owner is
+    resolved with the same ``_get_deck_owner_session`` hop ``read_deck_spec``
+    uses.
 
-    **Filters on ``role`` only, never on ``message_type``.**  The two live
-    paths write different types for the same user turn (``"user_input"`` on the
-    sync/streaming path, ``"user_query"`` on the async route and MCP), so a
-    ``message_type`` filter would see half the traffic.
-
-    Nothing about mode is stored: the answer is derived from the database on
-    every call, so there is nothing to keep in sync and it is multi-worker safe
-    by construction.
+    The answer is read from the database on every call, so it is multi-worker
+    safe by construction.
 
     Args:
         session_id: The session whose turn is about to run.  May be a
             contributor session, an owner session, or ``None``.
 
     Returns:
-        ``"monolith"`` when the owner deck's first user message carries
-        :data:`LEGACY_MODE_PHRASE`, else ``"graph"``.  A deck with no user turn
-        yet and an empty first message resolve to ``"graph"`` (the default,
-        matching the pin every creator takes for such a deck); a missing
-        session or no session id resolves to ``"monolith"`` -- there is no
-        deck and no pin to run a graph turn on, and on the SSE path the turn-1
-        re-resolve in :meth:`ChatService.send_message_streaming` runs after the
-        auto-create, so it is never the answer a turn actually executes on.
-        Those are answers.  An unexpected database error is not
-        an answer and propagates; every call site goes through
+        ``"monolith"`` when the owner deck's ``deck_mode`` is ``"legacy"``, else
+        ``"graph"``.  A missing session or no session id resolves to
+        ``"monolith"`` -- there is no deck and no pin to run a graph turn on,
+        and on the SSE path the turn-1 re-resolve in
+        :meth:`ChatService.send_message_streaming` runs after the auto-create,
+        so it is never the answer a turn actually executes on.  Those are
+        answers.  An unexpected database error is not an answer and propagates;
+        every call site goes through
         :func:`resolve_engine_mode_or_unavailable`, which fails the turn
         explicitly (#271 C24).
     """
@@ -227,8 +212,7 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         with get_db_session() as db:
             session = session_manager._get_session_or_raise(db, session_id)
             deck_owner = session_manager._get_deck_owner_session(db, session)
-            earliest = earliest_user_message(db, deck_owner.id)
-            content = earliest.content if earliest else None
+            deck_mode = deck_owner.deck_mode
             owner_session_id = deck_owner.session_id
     except SessionNotFoundError:
         logger.warning(
@@ -237,7 +221,7 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         )
         return "monolith"
 
-    mode = "graph" if _selects_agent_mode(content) else "monolith"
+    mode = engine_mode_for_deck_mode(deck_mode)
     logger.info(
         "Resolved engine mode",
         extra={

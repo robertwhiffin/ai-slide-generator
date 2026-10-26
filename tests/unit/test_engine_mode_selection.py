@@ -4,10 +4,14 @@ Since 2026-10-12 the rule is inverted: every deck runs on the graph UNLESS its
 first user message carries ``LEGACY_MODE_PHRASE``.  The old opt-in
 ``AGENT_MODE_PHRASE`` still lands on the graph (it is simply not the opt-out).
 
-Real sqlite throughout.  The whole point of `resolve_engine_mode` is that the
-answer is DERIVED from committed rows rather than stored, so every assertion
-here reads the database back through the resolver; a mock standing in for the
-transcript would prove nothing about the derivation.
+Since Deck Mode (2026-10-22 Task 2) the resolver reads the deck owner's stored
+``user_sessions.deck_mode`` instead of its first user message, so every test here
+that expects ``"monolith"`` seeds ``deck_mode='legacy'`` on the owner row; the
+phrase-semantics tests whose subject is gone were deleted (the rest go in Task 6).
+Column-based resolution itself is pinned in ``test_deck_mode_resolution.py``.
+
+Real sqlite throughout: every assertion reads the database back through the
+resolver.
 
 Patch targets — `resolve_engine_mode` and `clear_context` import
 `get_db_session` lazily inside the function body, matching this file's four
@@ -60,6 +64,17 @@ def _patched(factory):
     fake = _make_fake_db(factory)
     with patch(_DB_SOURCE, fake), patch(_MANAGER_DB, fake):
         yield
+
+
+def _set_deck_mode(factory, session_id: str, deck_mode) -> None:
+    """Store *deck_mode* on *session_id*'s row (the deck owner's, where it is read)."""
+    db = factory()
+    try:
+        us = db.query(UserSession).filter(UserSession.session_id == session_id).one()
+        us.deck_mode = deck_mode
+        db.commit()
+    finally:
+        db.close()
 
 
 def _add_message(factory, session_id: str, *, role: str, content: str,
@@ -176,14 +191,6 @@ class TestThePhraseSelectsTheEngine:
         assert AGENT_MODE_PHRASE == "USE AGENT MODE"
 
     @pytest.mark.parametrize("message_type", MESSAGE_TYPES)
-    def test_phrase_in_first_user_message_selects_monolith(
-        self, session_with_messages, _session_unit_engine, message_type
-    ):
-        sid = session_with_messages([_PHRASE_MESSAGE], message_type=message_type)
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "monolith"
-
-    @pytest.mark.parametrize("message_type", MESSAGE_TYPES)
     def test_absence_of_the_phrase_selects_graph(
         self, session_with_messages, _session_unit_engine, message_type
     ):
@@ -198,24 +205,6 @@ class TestThePhraseSelectsTheEngine:
         sid = session_with_messages([_AGENT_MESSAGE])
         with _patched(_make_factory(_session_unit_engine)):
             assert resolve_engine_mode(sid) == "graph"
-
-    def test_the_opt_out_wins_when_both_phrases_are_present(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """The rule is "graph UNLESS the opt-out": the opt-out is decisive."""
-        sid = session_with_messages(
-            [f"{AGENT_MODE_PHRASE} -- actually, {LEGACY_MODE_PHRASE}"]
-        )
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "monolith"
-
-    def test_the_match_is_a_substring_anywhere_in_the_message(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """§D0: a loose substring match is the intended (unhardened) form."""
-        sid = session_with_messages([f"hello there, {LEGACY_MODE_PHRASE}, thanks"])
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "monolith"
 
     def test_the_match_is_case_sensitive(
         self, session_with_messages, _session_unit_engine
@@ -241,13 +230,15 @@ class TestStickiness:
     def test_mode_is_sticky_across_later_turns(
         self, session_with_messages, _session_unit_engine, message_type
     ):
-        """Turn 2 and turn 3 carry no phrase and must still resolve to monolith."""
+        """A legacy deck's turns 2 and 3 still resolve to monolith."""
+        factory = _make_factory(_session_unit_engine)
         sid = session_with_messages(
-            [_PHRASE_MESSAGE, "make slide 2 blue", "now add a summary"],
+            [_PLAIN_MESSAGE, "make slide 2 blue", "now add a summary"],
             assistant_messages=["done", "done again"],
             message_type=message_type,
         )
-        with _patched(_make_factory(_session_unit_engine)):
+        _set_deck_mode(factory, sid, "legacy")
+        with _patched(factory):
             assert resolve_engine_mode(sid) == "monolith"
 
     @pytest.mark.parametrize("message_type", MESSAGE_TYPES)
@@ -334,18 +325,18 @@ class TestDefaults:
     def test_mcp_created_deck_gets_monolith(
         self, mcp_created_session, _session_unit_engine
     ):
-        """MCP stays on the monolith: its persisted first message is marked.
+        """MCP stays on the monolith: its deck is stored as legacy.
 
-        ``enqueue_create_job`` persists ``with_legacy_marker(prompt)`` as the
-        create_deck deck's first user row (pinned in test_mcp_legacy_marker);
-        this is the resolver half -- the marked prompt resolves to the
-        monolith, so a browser turn on an MCP deck cannot land on the graph
-        with no pin.
+        MCP creates its deck with ``deck_mode="legacy"`` (Task 5) and persists
+        the prompt verbatim; this is the resolver half -- a legacy MCP deck
+        resolves to the monolith, so a browser turn on it cannot land on the
+        graph with no pin.
         """
         factory = _make_factory(_session_unit_engine)
+        _set_deck_mode(factory, mcp_created_session, "legacy")
         _add_message(
             factory, mcp_created_session, role="user",
-            content=with_legacy_marker(_PLAIN_MESSAGE), message_type="user_query",
+            content=_PLAIN_MESSAGE, message_type="user_query",
         )
         with _patched(factory):
             assert resolve_engine_mode(mcp_created_session) == "monolith"
@@ -405,13 +396,14 @@ class TestOwnerDeckResolution:
     def test_contributor_inherits_the_owner_decks_monolith_mode(
         self, contributor_session
     ):
-        """The opt-out is on the OWNER's transcript; the contributor has none."""
+        """Legacy is stored on the OWNER's row; the contributor's row is NULL."""
         factory = contributor_session._factory
+        _set_deck_mode(factory, contributor_session._owner_session_id, "legacy")
         _add_message(
             factory,
             contributor_session._owner_session_id,
             role="user",
-            content=_PHRASE_MESSAGE,
+            content=_PLAIN_MESSAGE,
             message_type="user_input",
         )
         _add_message(
@@ -454,16 +446,17 @@ class TestOwnerDeckResolution:
                 == "graph"
             )
 
-    def test_the_owner_session_resolves_its_own_transcript(
+    def test_the_owner_session_resolves_its_own_deck_mode(
         self, contributor_session
     ):
         """An owner session is its own deck owner — the same hop, no parent."""
         factory = contributor_session._factory
+        _set_deck_mode(factory, contributor_session._owner_session_id, "legacy")
         _add_message(
             factory,
             contributor_session._owner_session_id,
             role="user",
-            content=_PHRASE_MESSAGE,
+            content=_PLAIN_MESSAGE,
         )
         with _patched(factory):
             assert (
@@ -618,8 +611,6 @@ class TestDuplicateCarriesTheMarker:
         assert [r.content for r in _messages_of(factory, copy["session_id"])] == [
             _PHRASE_MESSAGE
         ]
-        with _patched(factory):
-            assert resolve_engine_mode(copy["session_id"]) == "monolith"
         assert _pin_of(factory, copy["session_id"]) is None
 
     def test_duplicate_from_a_contributor_session_carries_the_owner_marker(
@@ -646,8 +637,6 @@ class TestDuplicateCarriesTheMarker:
 
         rows = _messages_of(factory, copy["session_id"])
         assert [r.content for r in rows] == [_PHRASE_MESSAGE]
-        with _patched(factory):
-            assert resolve_engine_mode(copy["session_id"]) == "monolith"
         assert _pin_of(factory, copy["session_id"]) is None
 
     def test_duplicate_from_a_contributor_of_a_graph_deck_is_pinned_graph(
@@ -751,19 +740,6 @@ class TestTheCreationPredicate:
         from src.domain.conversation_engine import selects_graph_engine
 
         assert selects_graph_engine(content) is expected
-
-    @pytest.mark.parametrize(
-        "first", [_PLAIN_MESSAGE, _AGENT_MESSAGE, _PHRASE_MESSAGE, ""]
-    )
-    def test_the_predicate_agrees_with_the_resolver(
-        self, session_with_messages, _session_unit_engine, first
-    ):
-        from src.domain.conversation_engine import selects_graph_engine
-
-        sid = session_with_messages([first])
-        with _patched(_make_factory(_session_unit_engine)):
-            mode = resolve_engine_mode(sid)
-        assert (mode == "graph") is selects_graph_engine(first)
 
     def test_with_legacy_marker_is_idempotent_and_keeps_the_prompt(self):
         marked = with_legacy_marker(_PLAIN_MESSAGE)

@@ -29,7 +29,12 @@ from src.database.models.session import (
     SlideDeckVersion,
     UserSession,
 )
-from src.domain.conversation_engine import is_transcript_message
+from src.domain.conversation_engine import (
+    DECK_MODE_AGENT,
+    DECK_MODE_LEGACY,
+    DECK_MODES,
+    is_transcript_message,
+)
 from src.domain.finding import findings_from_record
 from src.domain.finding_copy import plain_finding_issue, plain_finding_message
 from src.services.conversation_pins import (
@@ -973,6 +978,7 @@ class SessionManager:
         created_by: Optional[str] = None,
         agent_config: Optional[Dict[str, Any]] = None,
         graph_capable: bool = False,
+        deck_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new session.
 
@@ -986,10 +992,19 @@ class SessionManager:
                 (see below), so a caller cannot persist a config that carries BOTH
                 style authorities.
             graph_capable: Whether this explicit root pins the active graph release.
+            deck_mode: Stored Deck Mode (``"agent"``, ``"legacy"`` or None = not
+                chosen).  Pin rule: ``"legacy"`` is never pinned whatever
+                ``graph_capable`` says, ``"agent"`` is always pinned, None
+                follows ``graph_capable``.  Ignored for an existing row.
 
         Returns:
             Dictionary with session info including session_id
+
+        Raises:
+            ValueError: If ``deck_mode`` is neither None nor in ``DECK_MODES``.
         """
+        if deck_mode is not None and deck_mode not in DECK_MODES:
+            raise ValueError(f"Unknown deck_mode: {deck_mode!r}")
         # This method takes a RAW DICT and used to assign it straight to the ORM row,
         # which made it a live bypass of style-source exclusivity: a caller passing
         # both slide_style_id and design_system_id had both stored, and generation
@@ -1015,13 +1030,20 @@ class SessionManager:
                     "created_by": existing.created_by,
                     "title": existing.title,
                     "created_at": existing.created_at.isoformat(),
+                    "deck_mode": existing.deck_mode,
                     "graph_version": graph_version.graph_version,
                     "active_graph_version": graph_version.active_graph_version,
                     "is_older_than_active": graph_version.is_older_than_active,
                 }
 
+            if deck_mode == DECK_MODE_LEGACY:
+                pin_graph = False
+            elif deck_mode == DECK_MODE_AGENT:
+                pin_graph = True
+            else:
+                pin_graph = graph_capable
             graph_release_id = None
-            if graph_capable:
+            if pin_graph:
                 graph_release_id = lock_active_graph_release(db).release_id
 
             session = UserSession(
@@ -1031,6 +1053,7 @@ class SessionManager:
                 title=title or f"Session {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
                 agent_config=agent_config,
                 graph_release_id=graph_release_id,
+                deck_mode=deck_mode,
             )
             db.add(session)
             db.flush()
@@ -1050,6 +1073,7 @@ class SessionManager:
                 "created_by": created_by,
                 "title": session.title,
                 "created_at": session.created_at.isoformat(),
+                "deck_mode": session.deck_mode,
                 "graph_version": graph_version.graph_version,
                 "active_graph_version": graph_version.active_graph_version,
                 "is_older_than_active": graph_version.is_older_than_active,
@@ -1109,6 +1133,7 @@ class SessionManager:
                 "parent_session_id": parent_session_id_str,
                 "parent_session_internal_id": session.parent_session_id,
                 "global_permission": deck_owner.global_permission,
+                "deck_mode": deck_owner.deck_mode,
                 "graph_version": graph_version.graph_version,
                 "active_graph_version": graph_version.active_graph_version,
                 "is_older_than_active": graph_version.is_older_than_active,

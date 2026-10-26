@@ -154,8 +154,14 @@ def route_env(client, route_db_engine):
         }
 
 
-def _seed_session(factory, user_messages: List[str]) -> str:
-    """A UserSession whose transcript is *user_messages*, earliest first."""
+def _seed_session(
+    factory, user_messages: List[str], *, deck_mode: Optional[str] = None
+) -> str:
+    """A UserSession whose transcript is *user_messages*, earliest first.
+
+    *deck_mode* is stored on the row, which is the deck owner: since Deck Mode
+    the engine is read off that column, not off the transcript.
+    """
     from datetime import datetime, timedelta
 
     from src.database.models.session import SessionMessage, UserSession
@@ -163,7 +169,9 @@ def _seed_session(factory, user_messages: List[str]) -> str:
     sid = f"ws4d-wiring-{uuid.uuid4().hex[:10]}"
     db = factory()
     try:
-        us = UserSession(session_id=sid, created_by="test-user@example.com")
+        us = UserSession(
+            session_id=sid, created_by="test-user@example.com", deck_mode=deck_mode
+        )
         db.add(us)
         db.flush()
         base = datetime.utcnow()
@@ -184,32 +192,6 @@ def _seed_session(factory, user_messages: List[str]) -> str:
     finally:
         db.close()
     return sid
-
-
-def _append_user_message(factory, session_id: str, content: str) -> None:
-    """Append one `role='user'` row, as the async route's add_message would."""
-    from datetime import datetime
-
-    from src.database.models.session import SessionMessage, UserSession
-
-    db = factory()
-    try:
-        us = db.query(UserSession).filter(UserSession.session_id == session_id).one()
-        db.add(
-            SessionMessage(
-                session_id=us.id,
-                role="user",
-                content=content,
-                message_type="user_query",
-                created_at=datetime.utcnow(),
-            )
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -240,20 +222,24 @@ class TestStreamingRoute:
         route_env["manager"].release_session_lock.assert_called_once_with(sid)
 
     def test_the_mode_is_sticky_on_this_entry_point(self, route_env):
-        """A later turn carrying no phrase still runs on the legacy monolith.
+        """A later turn of a legacy deck still runs on the legacy monolith.
 
-        The deck's EARLIEST user message decides, so the message posted here
-        deliberately does not carry the phrase.  Stickiness is what stops a
-        deck being written alternately by both engines.
+        The deck's stored ``deck_mode`` decides; no message in its transcript
+        carries anything mode-like.  Stickiness is what stops a deck being
+        written alternately by both engines.
         """
         sid = _seed_session(
-            route_env["factory"], [_PHRASE_MESSAGE, "turn 2", "turn 3"]
+            route_env["factory"],
+            ["build me a deck", "turn 2", "turn 3"],
+            deck_mode="legacy",
         )
         call = self._post(route_env, sid, _PLAIN_MESSAGE)
         assert call.kwargs["engine_mode"] == "monolith"
 
     def test_a_monolith_session_reaches_the_service_as_monolith(self, route_env):
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE, "turn 2"])
+        sid = _seed_session(
+            route_env["factory"], ["build me a deck", "turn 2"], deck_mode="legacy"
+        )
         call = self._post(route_env, sid, _PLAIN_MESSAGE)
         assert call.kwargs["engine_mode"] == "monolith"
 
@@ -328,7 +314,9 @@ class TestAsyncRoute:
 
     def test_the_mode_is_sticky_on_this_entry_point(self, route_env):
         sid = _seed_session(
-            route_env["factory"], [_PHRASE_MESSAGE, "turn 2", "turn 3"]
+            route_env["factory"],
+            ["build me a deck", "turn 2", "turn 3"],
+            deck_mode="legacy",
         )
         assert (
             self._payload(route_env, sid, _PLAIN_MESSAGE)["engine_mode"]
@@ -340,29 +328,8 @@ class TestAsyncRoute:
         assert self._payload(route_env, sid, _PHRASE_MESSAGE)["engine_mode"] == "graph"
 
     def test_a_monolith_session_is_enqueued_as_monolith(self, route_env):
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"], deck_mode="legacy")
         payload = self._payload(route_env, sid, _PLAIN_MESSAGE)
-        assert payload["engine_mode"] == "monolith"
-
-    def test_turn_one_of_a_new_session_DOES_see_the_phrase(self, route_env):
-        """The async route persists the user turn BEFORE it resolves — ORDER.
-
-        The counterpart to `TestStreamingRouteCannotSeeTurnOne`.  The session starts
-        with ZERO user rows and the mocked `add_message` really inserts one, so
-        the only way the phrase can be seen is if resolution runs AFTER that
-        call.  Moving the resolve above it reddens this test.
-        """
-        sid = _seed_session(route_env["factory"], [])
-        factory = route_env["factory"]
-        route_env["manager"].get_session.return_value = {"message_count": 0}
-
-        def really_add_message(**kwargs):
-            _append_user_message(factory, kwargs["session_id"], kwargs["content"])
-            return {"id": 1}
-
-        route_env["manager"].add_message.side_effect = really_add_message
-
-        payload = self._payload(route_env, sid, _PHRASE_MESSAGE)
         assert payload["engine_mode"] == "monolith"
 
 

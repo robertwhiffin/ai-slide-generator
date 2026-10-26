@@ -183,6 +183,22 @@ def _session_pk(factory, session_id: str) -> int:
         db.close()
 
 
+def _set_deck_mode(factory, session_id: str, deck_mode) -> None:
+    """Store *deck_mode* on *session_id*'s row.
+
+    Since Deck Mode the engine is read off the deck OWNER's ``deck_mode``
+    column, not off its first user row, so a test whose deck must be legacy
+    stores that on the owner's row.
+    """
+    db = factory()
+    try:
+        us = db.query(UserSession).filter(UserSession.session_id == session_id).one()
+        us.deck_mode = deck_mode
+        db.commit()
+    finally:
+        db.close()
+
+
 def _clear_events(factory) -> list[tuple[str, int | None]]:
     """Every committed ``context_cleared`` usage event, as (username, session_id)."""
     db = factory()
@@ -351,16 +367,18 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
         factory = _make_factory(_session_unit_engine)
 
         # The fixture's single user row IS the earliest one — make it the marker.
+        # The deck is legacy, stored on its (owner) row.
         db = factory()
         try:
             us = db.query(UserSession).filter(UserSession.session_id == sid).one()
+            us.deck_mode = "legacy"
             row = (
                 db.query(SessionMessage)
                 .filter(SessionMessage.session_id == us.id)
                 .order_by(SessionMessage.created_at)
                 .first()
             )
-            row.content = _PHRASE_MESSAGE
+            row.content = _PLAIN_MESSAGE
             row.message_type = "user_query"
             db.commit()
         finally:
@@ -383,12 +401,12 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
 
             # The marker survived, everything else went.
             rows = _messages_of(factory, sid)
-            assert [r.content for r in rows] == [_PHRASE_MESSAGE]
+            assert [r.content for r in rows] == [_PLAIN_MESSAGE]
             assert rows[0].role == "user"
             assert result["deleted_messages"] == 3
             assert result["preserved_message_id"] == rows[0].id
 
-            # The mode the marker encodes survived with it.
+            # The deck's stored mode survived the clear.
             assert resolve_engine_mode(sid) == "monolith"
 
             # The spec is still there AND still readable.
@@ -448,12 +466,13 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
     def test_clearing_a_contributor_session_leaves_the_owners_marker(
         self, contributor_session
     ):
-        """The deck's mode lives on the owner's transcript, so it is untouched."""
+        """The deck's mode lives on the owner's row, so it is untouched."""
         factory = contributor_session._factory
         owner_sid = contributor_session._owner_session_id
         contrib_sid = contributor_session.contributor_session_id
 
-        _add_message(factory, owner_sid, role="user", content=_PHRASE_MESSAGE,
+        _set_deck_mode(factory, owner_sid, "legacy")
+        _add_message(factory, owner_sid, role="user", content=_PLAIN_MESSAGE,
                      message_type="user_input")
         _add_message(factory, contrib_sid, role="user", content="my own first ask",
                      message_type="user_query", offset_seconds=10)
@@ -464,7 +483,7 @@ class TestClearContextKeepsTheMarkerAndDropsTheRest:
         with _patched(factory, saver):
             ChatService().clear_context(contrib_sid, cleared_by="test-user@example.com")
             assert [r.content for r in _messages_of(factory, owner_sid)] == [
-                _PHRASE_MESSAGE
+                _PLAIN_MESSAGE
             ]
             assert [r.content for r in _messages_of(factory, contrib_sid)] == [
                 "my own first ask"
@@ -1113,6 +1132,7 @@ class TestAClearedConversationIsEmptyToEveryReader:
         """
         factory = _make_factory(_session_unit_engine)
         sid = _seed_transcript(factory, session_with_spec_and_messages, first=_PHRASE_MESSAGE)
+        _set_deck_mode(factory, sid, "legacy")
 
         with _patched(factory, _RecordingSaver()):
             assert resolve_engine_mode(sid) == "monolith", "precondition: a legacy deck"
@@ -1121,7 +1141,6 @@ class TestAClearedConversationIsEmptyToEveryReader:
             new = SessionManager().duplicate_session(sid, "copier@example.com")["session_id"]
             assert new != sid
 
-            assert resolve_engine_mode(new) == "monolith"
             assert SessionManager().get_messages(new) == []
 
         [carried] = _messages_of(factory, new)

@@ -55,9 +55,10 @@ from tests.integration.conftest_stub_skills import CallableAgentRuntime, builder
 
 AUTHOR = "graph-caller@example.com"
 SEEDED_AUTHOR = "someone-who-came-before@example.com"
-# Since 2026-10-12 the graph is the default: MESSAGE (the pre-inversion opt-in)
-# and PLAIN_MESSAGE both select the graph; only LEGACY_MESSAGE selects the
-# monolith.
+# Since Deck Mode no message selects the engine: the deck's stored `deck_mode`
+# does (legacy -> monolith; agent and NULL -> graph), so a legacy test calls
+# `seed_deck_mode("legacy")`.  MESSAGE and LEGACY_MESSAGE carry the old opt-in
+# and opt-out phrases, which are ordinary text now.
 MESSAGE = "USE AGENT MODE build me a deck about puffins"
 PLAIN_MESSAGE = "build me a deck about puffins"
 LEGACY_MESSAGE = "USE LEGACY MODE build me a deck about puffins"
@@ -264,6 +265,29 @@ class _GraphChatEnv:
             db.close()
 
     # -- writing ------------------------------------------------------------
+
+    def seed_deck_mode(self, deck_mode: Optional[str]) -> None:
+        """Store *deck_mode* on the session's row (the deck owner's).
+
+        Since Deck Mode the engine is read off that column, not off the
+        deck's first user message.
+        """
+        from src.database.models.session import UserSession
+
+        db = self._env.factory()
+        try:
+            owner = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == self.session_id)
+                .one()
+            )
+            owner.deck_mode = deck_mode
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     def seed_deck_row(self) -> None:
         """Create the SessionSlideDeck row at version 1, with no slides.
@@ -1341,9 +1365,9 @@ class TestTheMonolithIsUnaffected:
     The two paths reach that conclusion DIFFERENTLY, and the difference is the
     seventh edit point:
 
-      SSE (`request_id is None`)  — the engine is re-derived from the transcript
-                                    here, so a USE LEGACY MODE deck runs the
-                                    monolith whatever the caller passed.
+      SSE (`request_id is None`)  — the engine is re-resolved here from the
+                                    deck's stored `deck_mode`, so a legacy deck
+                                    runs the monolith whatever the caller passed.
       async / MCP (`request_id`)  — the caller's value is authoritative and is
                                     never re-resolved.
 
@@ -1352,10 +1376,11 @@ class TestTheMonolithIsUnaffected:
     """
 
     def test_a_legacy_sse_turn_reaches_the_monolith(self, graph_chat_env):
+        graph_chat_env.seed_deck_mode("legacy")
         graph_chat_env.recorder.configure(slide_count=1)
 
         with pytest.raises(_MonolithReached):
-            graph_chat_env.run(engine_mode="monolith", message=LEGACY_MESSAGE)
+            graph_chat_env.run(engine_mode="monolith", message=PLAIN_MESSAGE)
 
         assert graph_chat_env.recorder.counts("architect") == 0
         assert graph_chat_env.rows() == []
@@ -1364,10 +1389,11 @@ class TestTheMonolithIsUnaffected:
         self, graph_chat_env
     ):
         """The parameter's default is monolith, and the re-resolve agrees."""
+        graph_chat_env.seed_deck_mode("legacy")
         graph_chat_env.recorder.configure(slide_count=1)
 
         with pytest.raises(_MonolithReached):
-            graph_chat_env.run(engine_mode=None, message=LEGACY_MESSAGE)
+            graph_chat_env.run(engine_mode=None, message=PLAIN_MESSAGE)
 
         assert graph_chat_env.recorder.counts("architect") == 0
 
@@ -1435,18 +1461,17 @@ class TestTheSseTurnOneReResolve:
         """THE fix, post-inversion.  `engine_mode="graph"` is what the route
         now passes for a deck with no user turn (the default).
 
-        The route cannot do better — at its resolution point the row does not
-        exist yet — so this passes the route's real value with a USE LEGACY MODE
-        first message and asserts the monolith ran, and the graph did not.
-        Removing the re-resolve reddens this: turn 1 would run the graph and
-        turn 2 the monolith.
+        The route's answer here is the graph; the deck is stored legacy, so the
+        re-resolve must run the monolith, and the graph must not run.
+        Removing the re-resolve reddens this.
         """
         env = graph_chat_env
         assert env.user_messages() == [], "the session must start with no user turn"
+        env.seed_deck_mode("legacy")
         env.recorder.configure(slide_count=1)
 
         with pytest.raises(_MonolithReached):
-            env.run(engine_mode="graph", message=LEGACY_MESSAGE)
+            env.run(engine_mode="graph", message=PLAIN_MESSAGE)
 
         assert env.recorder.counts("architect") == 0
         assert env.rows() == []
@@ -1544,15 +1569,16 @@ class TestTheSseTurnOneReResolve:
         )
 
     def test_the_re_resolve_is_idempotent_on_a_monolith_deck(self, graph_chat_env):
-        """Turn 2 of a legacy deck stays on the monolith though THIS message
-        does not carry the opt-out (and the route passed the graph).
+        """Turn 2 of a legacy deck stays on the monolith though the route passed
+        the graph.
 
         This is the direction that would be WORSE than the gap being closed: a
         re-resolve able to flip an established deck onto the graph mid-way would
         split one deck across both engines deliberately.
         """
         env = graph_chat_env
-        env.seed_user_message(LEGACY_MESSAGE)   # turn 1 was a monolith turn
+        env.seed_deck_mode("legacy")
+        env.seed_user_message(PLAIN_MESSAGE)    # turn 1 was a monolith turn
         env.recorder.configure(slide_count=1)
 
         with pytest.raises(_MonolithReached):
