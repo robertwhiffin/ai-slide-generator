@@ -185,7 +185,9 @@ A deck is locked exactly when its owner row's `deck_mode` is set. Consequences:
     from checkpoints either.
 - **Duplicates (decided by the user).** A duplicate copies the owner's `deck_mode` value, so it
   inherits the mode and is locked from creation.
-  - The duplicate is pinned if and only if that value is `agent`, with a fresh pin as today.
+  - The duplicate is pinned unless that value is `legacy`, with a fresh pin as today. An unlocked
+    (NULL) duplicate is pinned like any new deck, because it may still lock as agent (§5.5
+    invariant).
   - The legacy duplicate's carried hidden row is dropped (the brief's table says the same). A
     duplicate again carries no chat history, and duplicates of either mode get an auto-title on
     their first message, as agent duplicates do today. **This changes behaviour for legacy
