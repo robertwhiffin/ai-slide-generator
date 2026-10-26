@@ -193,11 +193,8 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
     Returns:
         ``"monolith"`` when the owner deck's ``deck_mode`` is ``"legacy"``, else
         ``"graph"``.  A missing session or no session id resolves to
-        ``"monolith"`` -- there is no deck and no pin to run a graph turn on,
-        and on the SSE path the turn-1 re-resolve in
-        :meth:`ChatService.send_message_streaming` runs after the auto-create,
-        so it is never the answer a turn actually executes on.  Those are
-        answers.  An unexpected database error is not an answer and propagates;
+        ``"monolith"`` -- there is no deck and no pin to run a graph turn on.
+        Those are answers.  An unexpected database error is not an answer and propagates;
         every call site goes through
         :func:`resolve_engine_mode_or_unavailable`, which fails the turn
         explicitly (#271 C24).
@@ -251,10 +248,7 @@ def resolve_engine_mode_or_unavailable(session_id: Optional[str]) -> str:
     failed.  So every call site now fails explicitly (#271 C24/C47):
 
     * ``POST /chat/stream`` and ``POST /chat/async`` release the session lock
-      and answer a typed 503 (``ENGINE_MODE_UNAVAILABLE_DETAIL``);
-    * the SSE turn-1 re-resolve in :meth:`ChatService.send_message_streaming`
-      yields the safe ``pinned_graph_configuration_unavailable`` event, then
-      raises.
+      and answer a typed 503 (``ENGINE_MODE_UNAVAILABLE_DETAIL``).
 
     The persisted user message (and the async ``chat_requests`` row) written
     before resolution stay: nothing else about the conversation changes.
@@ -660,7 +654,7 @@ class ChatService:
             # Auto-create session on first message
             db_session = session_manager.create_session(
                 session_id=session_id,
-                graph_capable=selects_graph_engine(message),
+                graph_capable=True,
             )
             logger.info(
                 "Auto-created session on first message",
@@ -1109,6 +1103,7 @@ class ChatService:
         image_ids: Optional[List[str]] = None,
         is_first_message_override: Optional[bool] = None,
         engine_mode: str = "monolith",
+        user_message_persisted: bool = False,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -1132,6 +1127,8 @@ class ChatService:
                 is what keeps MCP on the monolith: MCP reaches this method
                 through the same job queue as ``POST /chat/async`` but builds a
                 payload with no ``engine_mode`` key.
+            user_message_persisted: True when the caller (``POST /chat/stream``)
+                already saved the user message, so it is not saved again here.
 
         Yields:
             StreamEvent objects for real-time display
@@ -1165,7 +1162,7 @@ class ChatService:
         except SessionNotFoundError:
             db_session = session_manager.create_session(
                 session_id=session_id,
-                graph_capable=selects_graph_engine(message),
+                graph_capable=True,
             )
             logger.info(
                 "Auto-created session on first streaming message",
@@ -1180,8 +1177,9 @@ class ChatService:
         else:
             is_first_message = db_session.get("message_count", 0) == 0
 
-        # Persist user message to database FIRST (only if not already done by async endpoint)
-        if not request_id:
+        # Persist user message to database FIRST (only if neither the async
+        # endpoint nor the stream route already did)
+        if not request_id and not user_message_persisted:
             user_msg = session_manager.add_message(
                 session_id=session_id,
                 role="user",
@@ -1192,50 +1190,6 @@ class ChatService:
                 "Persisted user message",
                 extra={"session_id": session_id, "message_id": user_msg.get("id")},
             )
-
-        # ws4d D2, seventh edit point — the SSE path RE-RESOLVES here, and only
-        # the SSE path.  Resolving a mode in this method is otherwise forbidden
-        # (that is what keeps MCP off the graph), so the guard is the whole point
-        # of these three lines:
-        #
-        # `POST /chat/stream` does NOT persist the user message — the block
-        # immediately above does it on the route's behalf.  So the streaming
-        # route's own resolution necessarily ran BEFORE the deck had any
-        # `role='user'` row, and `resolve_engine_mode` answers the DEFAULT for a
-        # deck with no user turn (graph since 2026-10-12; monolith before):
-        # without this, turn 1 of a new SSE session would run the default
-        # however the message read -- e.g. a `USE LEGACY MODE` first message
-        # would run turn 1 on the graph and turn 2 onward on the monolith.
-        # One deck written by both engines is the divergence stickiness exists
-        # to prevent.
-        #
-        # `not request_id` IS the SSE path, structurally:
-        # `job_queue._run_streaming_generator` always passes
-        # `request_id=request_id`, and `enqueue_job(request_id: str, ...)` types
-        # it non-optional and keys `jobs[request_id]` on it — so the async route
-        # and MCP can never reach this branch, and neither can ever be
-        # re-resolved onto the graph.
-        #
-        # IDEMPOTENT on turn 2 and after: the resolver reads the deck's EARLIEST
-        # `role='user'` row, which the insert above cannot change once one
-        # exists.  A re-resolve able to flip an established deck's engine would
-        # be worse than the gap it closes.
-        #
-        # The plan contradicts itself here — D1 asserts the row exists before
-        # mode resolution on this path while D0 mandates resolving in the route —
-        # so this resolves a plan defect rather than deviating from the plan.
-        #
-        # FAIL CLOSED (#271 C24/C47): a failure to re-resolve used to keep the
-        # route's `monolith` and run the legacy path on a graph deck.  It now
-        # yields the safe typed event and raises; the lock is released by the
-        # route's SSE generator `finally`, and the user message persisted just
-        # above stays (C47(e)).
-        if not request_id:
-            try:
-                engine_mode = resolve_engine_mode_or_unavailable(session_id)
-            except PersistedConfigurationUnavailableError:
-                yield _pinned_graph_configuration_error_event()
-                raise
 
         # ws4d D2 — the graph branch.  Placed AFTER the user message is
         # persisted (the resolver upstream reads that row) and BEFORE anything

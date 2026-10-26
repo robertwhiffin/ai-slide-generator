@@ -37,7 +37,11 @@ from src.api.services.job_queue import (
     is_pinned_graph_configuration_error_event,
     pinned_graph_configuration_error_event_payload,
 )
-from src.api.services.session_manager import SessionNotFoundError, get_session_manager
+from src.api.services.session_manager import (
+    DeckModeLockedError,
+    SessionNotFoundError,
+    get_session_manager,
+)
 from src.core.context_utils import run_in_thread_with_context
 from src.core.database import get_db
 from src.core.permission_context import get_permission_context
@@ -48,7 +52,6 @@ from src.core.settings_db import (
 )
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
-from src.domain.conversation_engine import selects_graph_engine
 from src.services.agent import UnsafeContentError
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 from src.services.permission_service import PERMISSION_PRIORITY, get_permission_service
@@ -73,6 +76,34 @@ ENGINE_MODE_UNAVAILABLE_DETAIL = {
 
 class _EngineModeUnresolvedError(Exception):
     """The async route's engine-mode resolution (and nothing else) failed closed."""
+
+
+DECK_MODE_LOCKED_CODE = "deck_mode_locked"
+
+_DECK_MODE_LABELS = {"agent": "Agent mode", "legacy": "Legacy mode"}
+
+
+def _deck_mode_locked(exc: DeckModeLockedError) -> HTTPException:
+    """The 409 for a message asking for a Deck Mode other than the deck's locked one."""
+    label = _DECK_MODE_LABELS.get(exc.deck_mode, exc.deck_mode)
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": DECK_MODE_LOCKED_CODE,
+            "message": f"This deck's mode is already set to {label}, and it can't be changed.",
+            "deck_mode": exc.deck_mode,
+        },
+    )
+
+
+async def _mark_chat_request_error(session_manager, request_id: str, code: str) -> None:
+    """Best effort: a failed status write must never mask the 409/503 being raised."""
+    try:
+        await asyncio.to_thread(
+            session_manager.update_chat_request_status, request_id, "error", code
+        )
+    except Exception:
+        logger.warning("Failed to mark chat request %s as errored", request_id, exc_info=True)
 
 
 def _engine_mode_unavailable() -> HTTPException:
@@ -344,7 +375,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
                     _without_template_pin(_seeded_for_new_session(agent_config_data))
                 ),
                 created_by=current_user,
-                graph_capable=selects_graph_engine(request.message),
+                graph_capable=True,
             )
             logger.info(
                 "Created session from client-generated ID",
@@ -382,7 +413,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
             _without_template_pin(_seeded_for_new_session(agent_config_data))
         ),
         created_by=current_user,
-        graph_capable=selects_graph_engine(request.message),
+        graph_capable=True,
     )
     request.session_id = session["session_id"]
     return True
@@ -555,6 +586,42 @@ async def send_message_streaming(
             detail="Session is currently processing another request. Please wait.",
         )
 
+    # The user message is saved BEFORE the engine is resolved: the resolver
+    # reads the deck's owner column, which this save locks atomically with the
+    # message.  Nothing has started streaming yet, so every failure here must
+    # release the lock taken above itself.
+    try:
+        session_data = await asyncio.to_thread(
+            session_manager.get_session, request.session_id
+        )
+        is_first_message = session_data.get("message_count", 0) == 0
+        await asyncio.to_thread(
+            session_manager.add_user_message,
+            request.session_id,
+            request.message,
+            message_type="user_input",
+            requested_deck_mode=request.deck_mode,
+        )
+    except SessionNotFoundError as e:
+        await asyncio.to_thread(session_manager.release_session_lock, request.session_id)
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session not found: {request.session_id}",
+        ) from e
+    except DeckModeLockedError as e:
+        await asyncio.to_thread(session_manager.release_session_lock, request.session_id)
+        raise _deck_mode_locked(e) from e
+    except ActiveGraphReleaseUnavailableError as e:
+        await asyncio.to_thread(session_manager.release_session_lock, request.session_id)
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
+    except Exception as e:
+        await asyncio.to_thread(session_manager.release_session_lock, request.session_id)
+        logger.error(f"Failed to save streaming chat message: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error") from e
+
     # ws4d D2 — the engine for this turn is resolved HERE, in the chat route,
     # and passed down.  Not in send_message_streaming and not in the job queue:
     # MCP's enqueue_create_job drains through the same worker as POST
@@ -606,6 +673,8 @@ async def send_message_streaming(
                     else None,
                     image_ids=request.image_ids,
                     engine_mode=engine_mode,
+                    is_first_message_override=is_first_message,
+                    user_message_persisted=True,
                 ):
                     event_queue.put(event)
             except Exception as e:
@@ -746,20 +815,20 @@ async def submit_chat_async(
         )
 
         # Capture first-message flag BEFORE persisting the user message,
-        # because add_message increments message_count.
+        # because saving the message increments message_count.
         session_data = await asyncio.to_thread(
             session_manager.get_session, request.session_id
         )
         is_first_message = session_data.get("message_count", 0) == 0
 
-        # Persist user message
+        # Persist user message (locks the deck's mode atomically with it)
         await asyncio.to_thread(
-            session_manager.add_message,
-            session_id=request.session_id,
-            role="user",
-            content=request.message,
+            session_manager.add_user_message,
+            request.session_id,
+            request.message,
             message_type="user_query",
             request_id=request_id,
+            requested_deck_mode=request.deck_mode,
         )
 
         # ws4d D2 — resolved AFTER the user message is persisted just above,
@@ -815,6 +884,23 @@ async def submit_chat_async(
             session_manager.release_session_lock, request.session_id
         )
         raise _engine_mode_unavailable() from e.__cause__
+    except DeckModeLockedError as e:
+        await asyncio.to_thread(
+            session_manager.release_session_lock, request.session_id
+        )
+        await _mark_chat_request_error(session_manager, request_id, DECK_MODE_LOCKED_CODE)
+        raise _deck_mode_locked(e) from e
+    except ActiveGraphReleaseUnavailableError as e:
+        await asyncio.to_thread(
+            session_manager.release_session_lock, request.session_id
+        )
+        await _mark_chat_request_error(
+            session_manager, request_id, "no_active_graph_release"
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="No active Graph Release available",
+        ) from e
     except Exception as e:
         # Release lock on failure
         await asyncio.to_thread(

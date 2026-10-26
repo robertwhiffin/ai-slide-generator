@@ -90,18 +90,19 @@ def _database_context(factory):
 @pytest.mark.parametrize(
     ("message", "expected_capable"),
     [
-        # Since 2026-10-12 the graph is the default; only the opt-out stays unpinned.
+        # Since Deck Mode no message text decides the pin: every chat-created root
+        # is graph-capable, and a legacy first message clears the pin when it locks.
         ("make a deck without the marker", True),
         (f"{AGENT_MODE_PHRASE} make a deck", True),
-        (f"{LEGACY_MODE_PHRASE} make a deck", False),
+        (f"{LEGACY_MODE_PHRASE} make a deck", True),
     ],
     ids=["non-marker", "old-agent-marker", "legacy-marker"],
 )
 def test_chat_creation_branches_forward_literal_message_capability(
     supplied_id, message, expected_capable
 ):
-    """Dropping either branch's capability argument creates an unpinned graph chat
-    (now: every chat without the opt-out) or pins a legacy chat."""
+    """Dropping either branch's capability argument creates an unpinned graph chat.
+    The opt-out phrase is ordinary text: it no longer leaves the root unpinned."""
     manager = MagicMock()
     manager.get_session.side_effect = SessionNotFoundError("client-id")
     manager.create_session.return_value = {"session_id": "server-id"}
@@ -129,10 +130,10 @@ class _StopAfterCreation(RuntimeError):
     [
         ("send_message", f"{AGENT_MODE_PHRASE} sync", True),
         ("send_message", "plain sync", True),
-        ("send_message", f"{LEGACY_MODE_PHRASE} sync", False),
+        ("send_message", f"{LEGACY_MODE_PHRASE} sync", True),
         ("send_message_streaming", f"{AGENT_MODE_PHRASE} stream", True),
         ("send_message_streaming", "plain stream", True),
-        ("send_message_streaming", f"{LEGACY_MODE_PHRASE} stream", False),
+        ("send_message_streaming", f"{LEGACY_MODE_PHRASE} stream", True),
         # Empty first message: the graph default, so pinned.
         ("send_message_streaming", "", True),
     ],

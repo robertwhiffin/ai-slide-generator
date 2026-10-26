@@ -684,7 +684,12 @@ class TestOrgDefaultIsNewSessionOnly:
         from src.api.services.session_manager import SessionNotFoundError
 
         self._complete_stream(mock_chat_service)
-        mock_session_manager.get_session.side_effect = SessionNotFoundError("nope")
+        # The first read finds no row (the creation boundary); the stream route's
+        # own first-message read, after the create, finds the new empty session.
+        mock_session_manager.get_session.side_effect = [
+            SessionNotFoundError("nope"),
+            {"message_count": 0},
+        ]
 
         with patch("src.api.routes.chat.get_default_design_system_id", return_value=7):
             response = client.post(
@@ -975,7 +980,12 @@ class TestSessionCreatingRequestsNeverSeedTemplatePin:
         from src.api.services.session_manager import SessionNotFoundError
 
         self._complete_stream(mock_chat_service)
-        mock_session_manager.get_session.side_effect = SessionNotFoundError("nope")
+        # The first read finds no row (the creation boundary); the stream route's
+        # own first-message read, after the create, finds the new empty session.
+        mock_session_manager.get_session.side_effect = [
+            SessionNotFoundError("nope"),
+            {"message_count": 0},
+        ]
 
         response = client.post(
             "/api/chat/stream",
