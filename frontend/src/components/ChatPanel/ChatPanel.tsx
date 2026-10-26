@@ -5,6 +5,7 @@ import type { Message } from '../../types/message';
 import type { ReplacementInfo, SlideDeck } from '../../types/slide';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
+import { DeckModeSelect } from './DeckModeSelect';
 import { api, type StreamEvent } from '../../services/api';
 import { conversationApi } from '../../api/conversation';
 import { canEditConversation } from '../../utils/conversationPermissions';
@@ -100,7 +101,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const cancelStreamRef = useRef<(() => void) | null>(null);
   const sendSeqRef = useRef(0);  // #317: the send a turn-end id read belongs to
   const navigate = useNavigate();
-  const { sessionId, isSessionPersisted, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle, storedDeckMode, selectedDeckMode, setStoredDeckMode } = useSession();
+  const { sessionId, isSessionPersisted, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle, storedDeckMode, selectedDeckMode, setStoredDeckMode, setSelectedDeckMode } = useSession();
   const { agentConfig, refreshConfig, configOwnerSessionId, isPreSession } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
@@ -672,6 +673,13 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             : isInitializing
             ? 'Initializing session...'
             : 'Ask to generate or modify slides...'
+        }
+        modeControl={
+          <DeckModeSelect
+            value={storedDeckMode ?? selectedDeckMode}
+            locked={storedDeckMode !== null || disabled || !!viewOnlyReason || previewMessages != null}
+            onChange={setSelectedDeckMode}
+          />
         }
       />
 

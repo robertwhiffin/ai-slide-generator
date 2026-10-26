@@ -9,6 +9,7 @@ interface ChatInputProps {
   disabled: boolean;
   placeholder?: string;
   badge?: React.ReactNode;
+  modeControl?: React.ReactNode;
 }
 
 interface AttachedImage {
@@ -25,6 +26,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   disabled,
   placeholder,
   badge,
+  modeControl,
 }) => {
   const [message, setMessage] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -230,12 +232,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         </div>
 
         <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-          <span>Press Enter to send, Shift+Enter for new line</span>
-          {message.length > 0 && (
-            <span>
-              {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {charCount} chars
-            </span>
-          )}
+          <span>Enter to send · Shift+Enter new line</span>
+          <div className="flex items-center gap-3">
+            {message.length > 0 && (
+              <span>
+                {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {charCount} chars
+              </span>
+            )}
+            {modeControl}
+          </div>
         </div>
       </form>
 

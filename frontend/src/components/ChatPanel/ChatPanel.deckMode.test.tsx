@@ -22,6 +22,14 @@
  * ChatPanel calls getSession on mount and on every session change, so the re-read is pinned as the call
  * COUNT rising by one after the failure, plus the server's value reaching storedDeckMode.
  *
+ * Task 8 adds "the Mode control in the panel" (end of file): ChatPanel passes
+ *   modeControl={<DeckModeSelect value={storedDeckMode ?? selectedDeckMode}
+ *     locked={storedDeckMode !== null || disabled || !!viewOnlyReason || previewMessages != null}
+ *     onChange={setSelectedDeckMode} />}
+ * to ChatInput. The ChatInput mock renders that prop (C5), so the REAL DeckModeSelect is under test.
+ * Review Focus 4: read-only and preview views show the control disabled with the deck's mode, never an
+ * enabled Agent default; `previewMessages=[]` counts as a preview (`!= null`, not `.length`).
+ *
  * SABOTAGE (measured against a throwaway implementation outside the worktree; each turned at least one
  * test red):
  *   - deckMode not passed to sendChatMessage (or always the selection / always `stored ?? 'agent'`)
@@ -37,6 +45,7 @@
  *   - switchSession resets the stored mode or the selection on a same-id re-restore
  *                                                                   -> "the landing deck's first send".
  */
+import type { ComponentProps, ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -88,11 +97,16 @@ vi.mock('../../api/conversation', () => ({
 }));
 vi.mock('../../contexts/AgentConfigContext', () => ({ useAgentConfig: () => h.agentConfig }));
 vi.mock('../../contexts/GenerationContext', () => ({ useGeneration: () => h.generation }));
+// Task 8 (PLAN-CORRECTIONS C5): the mock renders its `modeControl` prop, so the panel's REAL
+// DeckModeSelect is on screen; a mock that dropped it would make the control tests vacuous.
 vi.mock('./ChatInput', () => ({
-  ChatInput: ({ onSend, disabled }: { onSend: (message: string) => void; disabled: boolean }) => (
-    <button type="button" data-testid="mock-send" disabled={disabled} onClick={() => onSend('Build me a deck')}>
-      send
-    </button>
+  ChatInput: ({ onSend, disabled, modeControl }: { onSend: (message: string) => void; disabled: boolean; modeControl?: ReactNode }) => (
+    <div>
+      <button type="button" data-testid="mock-send" disabled={disabled} onClick={() => onSend('Build me a deck')}>
+        send
+      </button>
+      {modeControl}
+    </div>
   ),
 }));
 
@@ -137,12 +151,14 @@ let turns: Turn[] = [];
 /** Let promise callbacks and effects run, so a "nothing happened" check is meaningful. */
 const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 30)); });
 
-async function mount() {
+type PanelProps = Partial<ComponentProps<typeof ChatPanel>>;
+
+async function mount(extra: PanelProps = {}) {
   const view = render(
     <MemoryRouter>
       <SessionProvider>
         <Probe />
-        <ChatPanel rawHtml={null} onSlidesGenerated={onSlidesGenerated} ensureGraphCapableRoot={ensureGraphCapableRoot} />
+        <ChatPanel rawHtml={null} onSlidesGenerated={onSlidesGenerated} ensureGraphCapableRoot={ensureGraphCapableRoot} {...extra} />
       </SessionProvider>
     </MemoryRouter>,
   );
@@ -467,5 +483,104 @@ describe('the re-read is dropped when it no longer belongs to the panel', () => 
     expect(getSessionCalls()).toBe(before + 1);
     expect(h.getSession).toHaveBeenLastCalledWith('sess-2');
     expect(stored()).toBe('legacy');
+  });
+});
+
+// ── Task 8: the Mode control in the panel ─────────────────────────────────────
+
+const control = () => screen.getByTestId('deck-mode-select') as HTMLSelectElement;
+const VIEW_ONLY_REASON = 'alice@example.com is currently editing this session';
+
+describe('the Mode control in the panel', () => {
+  it('on an unlocked editable deck it is enabled on the selection, and choosing Legacy sets the selection', async () => {
+    const consoleError = vi.spyOn(console, 'error');
+    await mount();
+    await restore('sess-1', null);
+
+    expect(control()).toBeEnabled();
+    expect(control().value).toBe('agent');
+
+    await act(async () => { fireEvent.change(control(), { target: { value: 'legacy' } }); });
+    expect(selected()).toBe('legacy');
+    expect(stored()).toBe('null'); // choosing saves nothing: the deck is still unlocked
+    expect(control().value).toBe('legacy');
+    expect(control()).toBeEnabled();
+
+    await act(async () => { fireEvent.change(control(), { target: { value: 'agent' } }); });
+    expect(selected()).toBe('agent');
+    expect(control().value).toBe('agent');
+
+    // Never an undefined value: React warns when a select flips between uncontrolled and controlled.
+    const warnings = consoleError.mock.calls.map((c) => String(c[0])).filter((m) => /uncontrolled|controlled input|`value` prop/i.test(m));
+    expect(warnings).toEqual([]);
+    consoleError.mockRestore();
+  });
+
+  it.each<{ storedMode: DeckMode; selection: DeckMode }>([
+    { storedMode: 'legacy', selection: 'agent' },
+    { storedMode: 'agent', selection: 'legacy' },
+  ])('on a locked deck it is disabled on the stored mode, whatever the selection (stored $storedMode, selected $selection)', async ({ storedMode, selection }) => {
+    await mount();
+    await restore('sess-1', storedMode);
+    await select(selection);
+
+    expect(control()).toBeDisabled();
+    expect(control().value).toBe(storedMode);
+  });
+
+  it('greys out as soon as the first message is sent, on the mode it sent', async () => {
+    await mount();
+    await restore('sess-1', null);
+    await act(async () => { fireEvent.change(control(), { target: { value: 'legacy' } }); });
+    expect(control()).toBeEnabled();
+
+    await send();
+    await settle(); // still in flight: no event has arrived
+
+    expect(h.sendChatMessage.mock.calls[0][7]).toBe('legacy');
+    expect(control()).toBeDisabled();
+    expect(control().value).toBe('legacy');
+  });
+
+  it('the landing deck greys out on its first send and stays grey through the same-id re-restore (C2)', async () => {
+    await mount();
+    const landingId = ctx.sessionId!;
+    await act(async () => { fireEvent.change(control(), { target: { value: 'legacy' } }); });
+    await send();
+    expect(control()).toBeDisabled();
+
+    await act(async () => {
+      await ctx.switchSession(landingId, { title: null, has_slide_deck: false, deck_mode: null });
+    });
+    await settle();
+
+    expect(control()).toBeDisabled();
+    expect(control().value).toBe('legacy');
+  });
+
+  it.each<{ view: string; props: PanelProps }>([
+    { view: 'disabled (no edit rights)', props: { disabled: true } },
+    { view: 'viewOnlyReason (another editor holds the lock)', props: { viewOnlyReason: VIEW_ONLY_REASON } },
+    { view: 'previewMessages=[] (a save-point preview, even an empty one)', props: { previewMessages: [] } },
+  ])('the control is disabled in a read-only or preview view: $view', async ({ props }) => {
+    await mount(props);
+
+    // An unlocked deck: the only reason to be disabled is the view itself.
+    await restore('sess-1', null);
+    expect(stored()).toBe('null');
+    expect(control()).toBeDisabled();
+    expect(control().value).toBe('agent');
+
+    // A locked legacy deck in the same view shows the deck's mode, greyed (Review Focus 4).
+    await restore('sess-2', 'legacy');
+    expect(control()).toBeDisabled();
+    expect(control().value).toBe('legacy');
+  });
+
+  it('the same deck in an editable view is enabled (positive control for the read-only cases)', async () => {
+    await mount({ disabled: false, viewOnlyReason: undefined, previewMessages: null });
+    await restore('sess-1', null);
+
+    expect(control()).toBeEnabled();
   });
 });
