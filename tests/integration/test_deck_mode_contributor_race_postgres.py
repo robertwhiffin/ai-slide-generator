@@ -33,9 +33,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 import src.api.services.session_manager as session_manager_module
-from src.api.services.session_manager import SessionManager
+from src.api.services.session_manager import DeckModeLockedError, SessionManager
 from src.database.models.graph_configuration import GraphRelease
-from src.database.models.session import UserSession
+from src.database.models.session import SessionMessage, UserSession
 from tests.integration.postgres_concurrency_helpers import _WAIT_SECONDS, _lock_waiters
 
 pytestmark = pytest.mark.postgres
@@ -308,3 +308,102 @@ def test_a_contributor_joining_a_deck_is_pinned_unless_the_deck_is_legacy(
     )
     assert _mode_and_pin(factory, _OWNER)[0] == owner_mode
     assert len(calls) == (1 if pinned else 0)
+
+
+def _send_first_message(manager: SessionManager, session_id: str, mode: str, name: str):
+    threading.current_thread().name = name
+    try:
+        return manager.add_user_message(
+            session_id, f"first message from {name}", message_type="user_input",
+            requested_deck_mode=mode,
+        )
+    except DeckModeLockedError as exc:
+        return exc
+
+
+def _user_message_count(factory, *session_ids: str) -> int:
+    with factory() as db:
+        ids = db.execute(
+            select(UserSession.id).where(UserSession.session_id.in_(session_ids))
+        ).scalars().all()
+        rows = db.execute(
+            select(SessionMessage.id).where(
+                SessionMessage.session_id.in_(ids), SessionMessage.role == "user"
+            )
+        ).all()
+        return len(rows)
+
+
+def _race_two_first_messages(postgres_engine, owner_mode: str, contributor_mode: str):
+    """The owner's first message has run its lock UPDATE (uncommitted, held at the
+    insert) when a contributor's first message on the same empty deck arrives; the
+    contributor's UPDATE of the owner row blocks on the owner's row lock.  Returns
+    ``(factory, release_id, contributor_session_id, owner_result, contributor_result,
+    contributor_waited)``."""
+    factory, release_id = _seed(postgres_engine, owner_mode=None, owner_pinned=True)
+    manager = SessionManager()
+    db_context = _database_context(factory)
+    gate = _Gate("owner")
+
+    with patch(_MANAGER_DB, db_context), patch(_DB_SOURCE, db_context), patch.object(
+        SessionManager, "_insert_user_message", _insert_then(gate)
+    ):
+        contributor_id = manager.get_or_create_contributor_session(
+            _OWNER, _LATE_CONTRIBUTOR
+        )["session_id"]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                owner = pool.submit(_send_first_message, manager, _OWNER, owner_mode, "owner")
+                assert gate.reached.wait(timeout=_WAIT_SECONDS), "owner never reached its insert"
+                contributor = pool.submit(
+                    _send_first_message, manager, contributor_id, contributor_mode, "contributor"
+                )
+                waited = _waits_on_a_lock(postgres_engine, contributor)
+            finally:
+                gate.release.set()
+            owner_result = owner.result(timeout=_WAIT_SECONDS)
+            contributor_result = contributor.result(timeout=_WAIT_SECONDS)
+    return factory, release_id, contributor_id, owner_result, contributor_result, waited
+
+
+@pytest.mark.parametrize("owner_mode, loser_mode", [("legacy", "agent"), ("agent", "legacy")])
+def test_two_first_messages_in_flight_with_different_modes_one_wins_and_one_gets_409(
+    postgres_engine, owner_mode, loser_mode
+):
+    """Spec §12 row 4.  The owner holds the lock UPDATE uncommitted; the contributor
+    asked for the other mode and waits on the owner row.  When the owner commits, the
+    contributor's conditional UPDATE matches nothing, it re-reads the stored mode and
+    raises ``DeckModeLockedError`` carrying the WINNER's mode.  One user row exists
+    and the pins follow the winner (legacy clears both; agent keeps both)."""
+    factory, release_id, contributor_id, owner_result, loser, waited = _race_two_first_messages(
+        postgres_engine, owner_mode, loser_mode
+    )
+
+    assert waited, "the contributor's lock UPDATE did not wait for the owner's row lock"
+    assert (owner_result["deck_mode"], owner_result["locked_now"]) == (owner_mode, True)
+    assert isinstance(loser, DeckModeLockedError)
+    assert loser.deck_mode == owner_mode
+    assert _user_message_count(factory, _OWNER, contributor_id) == 1
+    expected_pin = None if owner_mode == "legacy" else release_id
+    assert _mode_and_pin(factory, _OWNER) == (owner_mode, expected_pin)
+    assert _mode_and_pin(factory, contributor_id) == (None, expected_pin)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "agent"])
+def test_two_first_messages_in_flight_with_the_same_mode_both_save_and_one_locks(
+    postgres_engine, mode
+):
+    """Spec §12 row 4, same mode on both sides: the loser re-reads the winner's mode,
+    finds it is the mode it asked for, and saves its message too."""
+    factory, release_id, contributor_id, owner_result, contributor_result, waited = (
+        _race_two_first_messages(postgres_engine, mode, mode)
+    )
+
+    assert waited, "the contributor's lock UPDATE did not wait for the owner's row lock"
+    assert not isinstance(contributor_result, Exception)
+    assert owner_result["deck_mode"] == contributor_result["deck_mode"] == mode
+    assert sorted([owner_result["locked_now"], contributor_result["locked_now"]]) == [False, True]
+    assert _user_message_count(factory, _OWNER, contributor_id) == 2
+    expected_pin = None if mode == "legacy" else release_id
+    assert _mode_and_pin(factory, _OWNER) == (mode, expected_pin)
+    assert _mode_and_pin(factory, contributor_id) == (None, expected_pin)

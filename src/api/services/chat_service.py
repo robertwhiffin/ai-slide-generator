@@ -2123,7 +2123,7 @@ class ChatService:
         drops (:meth:`SessionManager.get_messages` -- and so the chat panel,
         ``GET /messages``, the architect's conversation and the monolith's
         history -- and save-point capture), so a cleared conversation is empty
-        to every reader and the old first prompt is never replayed.  
+        to every reader and the old first prompt is never replayed.
         ``message_count`` still counts it, so the next turn is not a "first
         message" and the deck's title is not regenerated.  The re-type is part of
         this transaction.

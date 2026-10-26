@@ -707,6 +707,7 @@ jobs:
           - conversation-graph-version
           - css-bg-export
           - deck-integrity
+          - deck-mode-toggle
           - deck-review-flag
           - deck-prompts-integration
           - deck-prompts-ui
