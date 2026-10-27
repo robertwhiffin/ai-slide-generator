@@ -49,6 +49,7 @@ from src.api.services.export_job_queue import (
     start_export_worker,
 )
 from src.api.services.job_queue import recover_stuck_requests, start_worker
+from src.api.services.slide_style_preview_queue import start_preview_worker
 from src.core.database import (
     is_lakebase_environment,
     start_token_refresh,
@@ -70,6 +71,7 @@ IS_TESTING = ENVIRONMENT == "test"
 _worker_task = None
 _export_worker_task = None
 _export_cleanup_task: asyncio.Task | None = None
+_preview_worker_task = None
 _cleanup_task = None
 _timeout_task = None
 _spec_sweeper_task = None
@@ -79,7 +81,7 @@ _frontend_assets_stack: ExitStack | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task, _export_worker_task, _export_cleanup_task
+    global _worker_task, _export_worker_task, _export_cleanup_task, _preview_worker_task
     global _cleanup_task, _timeout_task, _spec_sweeper_task, _frontend_assets_stack
 
     # Startup
@@ -151,6 +153,20 @@ async def lifespan(app: FastAPI):
         _export_cleanup_task = await start_export_cleanup_worker()
         logger.info("Export job cleanup worker started")
 
+        # Start the slide-style preview generation worker
+        _preview_worker_task = await start_preview_worker()
+        logger.info("Slide-style preview worker started")
+
+        # Pre-warm previews for active styles so viewers hit a warm cache instead
+        # of a cold LLM generation. Bounded + deduplicated; runs off the event loop.
+        try:
+            from src.api.services.slide_style_preview_queue import warm_missing_previews
+
+            warmed = await asyncio.to_thread(warm_missing_previews)
+            logger.info("Slide-style preview warm backfill enqueued", extra={"enqueued": warmed})
+        except Exception:  # noqa: BLE001 — warming must never block startup
+            logger.warning("Slide-style preview warm backfill failed", exc_info=True)
+
         # Start the MCP job timeout sweeper
         from src.api.services.job_queue import mark_timed_out_jobs_loop
         _timeout_task = asyncio.create_task(mark_timed_out_jobs_loop())
@@ -213,6 +229,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("Export job cleanup worker stopped")
+
+    if _preview_worker_task:
+        _preview_worker_task.cancel()
+        try:
+            await _preview_worker_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Slide-style preview worker stopped")
 
     if _cleanup_task:
         _cleanup_task.cancel()

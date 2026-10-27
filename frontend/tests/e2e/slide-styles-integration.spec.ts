@@ -703,11 +703,13 @@ test.describe('Slide Style Edge Cases', () => {
       // Find the style card (use .first() to avoid matching nested divs)
       const styleCard = page.locator('div.border.rounded-lg').filter({ hasText: styleName }).first();
 
-      // Click Preview
+      // Click Preview to expand
       await styleCard.getByRole('button', { name: 'Preview' }).first().click();
 
-      // Should show content
-      await expect(page.getByText('Style Content').first()).toBeVisible();
+      // Expanded panel shows the visual preview by default; raw style text is
+      // behind a toggle (the panel no longer dumps the CSS inline).
+      await expect(page.getByText('Style Preview').first()).toBeVisible();
+      await styleCard.getByTestId('slide-style-raw-toggle').first().click();
       await expect(page.locator('pre').filter({ hasText: 'E2E test CSS' })).toBeVisible();
 
       // Button should now say Hide
