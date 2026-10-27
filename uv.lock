@@ -84,7 +84,7 @@ requires-dist = [
     { name = "databricks-langchain", specifier = ">=0.19.0" },
     { name = "databricks-mcp", specifier = ">=0.1.0" },
     { name = "databricks-openai", specifier = ">=0.14.0" },
-    { name = "databricks-sdk", specifier = ">=0.85.0" },
+    { name = "databricks-sdk", specifier = ">=0.157.0" },
     { name = "databricks-sql-connector", specifier = ">=3.0.0" },
     { name = "esprima", specifier = ">=4.0.0" },
     { name = "fastapi", specifier = ">=0.104.0,<0.137" },
@@ -425,11 +425,11 @@ wheels = [
 
 [[package]]
 name = "certifi"
-version = "2025.11.12"
+version = "2026.10.19"
 source = { registry = "https://pypi-proxy.cloud.databricks.com/simple/" }
-sdist = { url = "https://pypi-proxy.cloud.databricks.com/packages/a2/8c/58f469717fa48465e4a50c014a0400602d3c437d7c0c468e17ada824da3a/certifi-2025.11.12.tar.gz", hash = "sha256:d8ab5478f2ecd78af242878415affce761ca6bc54a22a27e026d7c25357c3316", size = 160538, upload-time = "2025-11-12T02:54:51.517Z" }
+sdist = { url = "https://pypi-proxy.cloud.databricks.com/packages/a6/bd/1436c50cc46699de0230fbaacc1d1de7bfec413176099949e9d5112e88f2/certifi-2026.10.19.tar.gz", hash = "sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae", size = 137598, upload-time = "2026-10-20T02:24:16.604Z" }
 wheels = [
-    { url = "https://pypi-proxy.cloud.databricks.com/packages/70/7d/9bc192684cea499815ff478dfcdc13835ddf401365057044fb721ec6bddb/certifi-2025.11.12-py3-none-any.whl", hash = "sha256:97de8790030bbd5c2d96b7ec782fc2f7820ef8dba6db909ccf95449f2d062d4b", size = 159438, upload-time = "2025-11-12T02:54:49.735Z" },
+    { url = "https://pypi-proxy.cloud.databricks.com/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl", hash = "sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b", size = 136464, upload-time = "2026-10-20T02:24:15.072Z" },
 ]
 
 [[package]]
@@ -1115,17 +1115,19 @@ wheels = [
 
 [[package]]
 name = "databricks-sdk"
-version = "0.94.0"
+version = "0.157.0"
 source = { registry = "https://pypi-proxy.cloud.databricks.com/simple/" }
 dependencies = [
+    { name = "certifi" },
     { name = "google-auth" },
     { name = "protobuf", version = "5.29.5", source = { registry = "https://pypi-proxy.cloud.databricks.com/simple/" }, marker = "python_full_version >= '3.12' and python_full_version < '3.14'" },
     { name = "protobuf", version = "6.33.1", source = { registry = "https://pypi-proxy.cloud.databricks.com/simple/" }, marker = "python_full_version < '3.12' or python_full_version >= '3.14'" },
     { name = "requests" },
+    { name = "urllib3" },
 ]
-sdist = { url = "https://pypi-proxy.cloud.databricks.com/packages/3e/39/18b3a4a69851f583d7970ae71f19975e06ef892ea17393bcafb773088f96/databricks_sdk-0.94.0.tar.gz", hash = "sha256:1b29a9d63e2dc9808ed79253ba3668cd6d130dabb880a576d647fa3b1b1a7b30", size = 861465, upload-time = "2026-02-26T08:17:12.063Z" }
+sdist = { url = "https://pypi-proxy.cloud.databricks.com/packages/36/85/69d309573b7aa40531e837eb916fc823b9b4ff1e7d9117ce2dbcd2e1508d/databricks_sdk-0.157.0.tar.gz", hash = "sha256:aafde4daeeb2f041f0d8b8b6f2dcc2543413b06b3c00fa57c8a43eff2c7aaecd", size = 1176846, upload-time = "2026-10-24T09:30:22.103Z" }
 wheels = [
-    { url = "https://pypi-proxy.cloud.databricks.com/packages/aa/da/072fe4df10aec583eb72327856b4743c7f5fb50a16772d5f86fcc20e2457/databricks_sdk-0.94.0-py3-none-any.whl", hash = "sha256:ae980186ee2d99f3639d14a94457776dca22980a04f65f89497a79889b2b9149", size = 811079, upload-time = "2026-02-26T08:17:10.242Z" },
+    { url = "https://pypi-proxy.cloud.databricks.com/packages/7d/bc/0fdd62f0328c23b17c60daf2ca7a3b2750b7c6853011e61593f7a434bdac/databricks_sdk-0.157.0-py3-none-any.whl", hash = "sha256:d20b20cbc399c7cef801d90c8bc4f2f5f63887d2920aef6ebd94edef1ae000f5", size = 1118849, upload-time = "2026-10-24T09:30:20.558Z" },
 ]
 
 [[package]]
