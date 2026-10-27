@@ -162,11 +162,11 @@ class _Adapter:
 
 
 EXPECTED_ENDPOINTS = {
-    "architect": "system.ai.claude-opus-5",
-    "data_analyst": "system.ai.claude-opus-5",
+    "architect": "system.ai.claude-opus-5-5",
+    "data_analyst": "system.ai.claude-opus-5-5",
     "builder": "system.ai.claude-haiku-4-5",
-    "build_reviewer": "system.ai.claude-opus-5",
-    "fixer": "system.ai.claude-opus-5",
+    "build_reviewer": "system.ai.claude-opus-5-5",
+    "fixer": "system.ai.claude-opus-5-5",
     "fix_reviewer": "system.ai.claude-haiku-4-5",
     "deck_reviewer": "system.ai.claude-haiku-4-5",
 }
@@ -689,7 +689,7 @@ def test_persisted_v2_build_reviewer_deck_brief_tracks_truthiness(deck_brief) ->
         {
             "agent_key": "build_reviewer",
             "configuration": AgentModelConfiguration(
-                endpoint_name="system.ai.claude-opus-5",
+                endpoint_name="system.ai.claude-opus-5-5",
                 temperature=0.7,
                 max_tokens=60000,
                 top_p=0.95,
@@ -874,7 +874,7 @@ def test_persisted_runtime_uses_exact_release_and_records_full_identity():
     ]
     assert adapter.calls[0]["agent_key"] == "architect"
     assert adapter.calls[0]["configuration"] == AgentModelConfiguration(
-        endpoint_name="system.ai.claude-opus-5",
+        endpoint_name="system.ai.claude-opus-5-5",
         temperature=0.7,
         max_tokens=60000,
         top_p=0.95,

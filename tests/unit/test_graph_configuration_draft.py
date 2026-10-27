@@ -65,7 +65,7 @@ def _legacy_manifest():
     for d in manifest.definitions:
         # Replace gateway endpoints with legacy databricks endpoints
         endpoint_map = {
-            "system.ai.claude-opus-5": "databricks-claude-opus-4-6",
+            "system.ai.claude-opus-5-5": "databricks-claude-opus-4-6",
             "system.ai.claude-haiku-4-5": "databricks-claude-haiku-5-5",
         }
         legacy_endpoint = endpoint_map.get(d.model.endpoint_name, d.model.endpoint_name)

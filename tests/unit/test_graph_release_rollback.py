@@ -658,7 +658,7 @@ def test_preview_runs_the_remote_check_after_the_locked_transaction(factory, mon
     result = _preview_with(factory, 2, validator, holder)
 
     assert validator.calls == [
-        ("system.ai.claude-opus-5", False),
+        ("system.ai.claude-opus-5-5", False),
         ("system.ai.claude-haiku-4-5", False),
     ]
     assert result.warnings == ()
@@ -702,7 +702,7 @@ def test_preview_checks_each_distinct_endpoint_once_and_warns_every_user(
     result = _preview_with(factory, 5, validator, holder)
 
     assert validator.calls == [
-        ("system.ai.claude-opus-5", False),
+        ("system.ai.claude-opus-5-5", False),
         ("system.ai.claude-haiku-4-5", False),
         ("system.ai.other-endpoint", False),
     ]

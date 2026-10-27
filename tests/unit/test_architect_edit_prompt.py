@@ -35,20 +35,20 @@ from src.services.graph_definition_manifest import (
 
 # Pins updated for the endpoint switch to system.ai Gateway models, then for the
 # deck-parity architect and builder prompts, then for #313 slide references,
-# then for #314 add a slide.
-HEAD_ARCHITECT_CONTENT_HASH = "b5a4cba61121a97cd55656cc3a1a8de6b231120c87c3ed754668cf341ae650b4"
+# then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move.
+HEAD_ARCHITECT_CONTENT_HASH = "2311ded0e960e433e58f3ae83ce460175e85027b77e89a0732b6ade25dac96e9"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
 HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
-    "66c5a7e697144bb37093dede0a4604c92af2849da2e103ecc18aa23b539f89ba"
+    "45a2ee67941b4409528b2bf4a7e81e6e690948d093735bf8f00a63e754626852"
 )
 
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
-    "data_analyst": "287da422d4aeb6c328685ace87be167feac639e4318cff07f147d9cd181be3c3",
+    "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
     "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
-    "build_reviewer": "8423d4989950e283ee34605059a7f16151404bb687c0651ef55035efce25795a",
-    "fixer": "2da73326e228d16889a9b21f31a7d22bf124db9feee728aeafdaade7d7a39bbc",
+    "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
+    "fixer": "8342438644d4665e929d7fdbd694d0024e401546ae06a9566161b309adb4c82a",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
