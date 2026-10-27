@@ -19,7 +19,6 @@ from src.api.services.chat_service import ChatService
 from src.api.services.session_manager import SessionManager
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SessionMessage, SessionSlideDeck, UserSession
-from src.domain.conversation_engine import AGENT_MODE_PHRASE
 from tests.integration.postgres_concurrency_helpers import _WAIT_SECONDS, _await_lock_waiters
 
 pytestmark = pytest.mark.postgres
@@ -98,7 +97,7 @@ def _seed(factory, creator):
                     SessionMessage(
                         session_id=source.id,
                         role="user",
-                        content=f"{AGENT_MODE_PHRASE} duplicate",
+                        content="USE AGENT MODE duplicate",
                     )
                 )
         return r1.id, source_id
@@ -128,7 +127,7 @@ def _backend_pid(conn):
 
 def _create(factory, creator):
     manager = SessionManager()
-    marker = f"{AGENT_MODE_PHRASE} build a deck"
+    marker = "USE AGENT MODE build a deck"
     if creator == "explicit-root":
         return manager.create_session(
             session_id="explicit-root-actor",

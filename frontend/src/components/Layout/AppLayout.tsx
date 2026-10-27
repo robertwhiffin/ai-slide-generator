@@ -211,7 +211,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     switchSession,
     renameSession,
     setConversationGraphVersion,
+    storedDeckMode,
+    selectedDeckMode,
   } = useSession();
+  // Legacy decks have no graph version or release-mix status to show.
+  const isLegacyDeck = (storedDeckMode ?? selectedDeckMode) === 'legacy';
   const { isGenerating } = useGeneration();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
   const sessionIdRef = useRef(sessionId);
@@ -487,6 +491,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
         graph_version: sessionInfo.graph_version,
         active_graph_version: sessionInfo.active_graph_version,
         is_older_than_active: sessionInfo.is_older_than_active,
+        deck_mode: sessionInfo.deck_mode,
       },
       isCancelled,
     );
@@ -1203,13 +1208,15 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                     <div className="shrink-0 relative z-10 overflow-visible" data-tour="agent-config">
                       <AgentConfigBar />
                     </div>
-                    <GraphVersionStatus
-                      graphVersion={graphVersion}
-                      activeGraphVersion={activeGraphVersion ?? graphVersion ?? 0}
-                      isOlder={isGraphVersionOlder}
-                      onStartLatest={handleStartLatest}
-                      isStartingLatest={isStartingLatest}
-                    />
+                    {!isLegacyDeck && (
+                      <GraphVersionStatus
+                        graphVersion={graphVersion}
+                        activeGraphVersion={activeGraphVersion ?? graphVersion ?? 0}
+                        isOlder={isGraphVersionOlder}
+                        onStartLatest={handleStartLatest}
+                        isStartingLatest={isStartingLatest}
+                      />
+                    )}
                     {/* BESIDE the #261 badge, never inside it: a failed
                         collaboration-history load must not erase the pinned
                         Graph Version, and a sibling makes that structural
@@ -1228,12 +1235,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                         here (always visible), the collaboration copy lives in
                         the share dialog (scoped to one deck), and each surface
                         answers AC5 for its own context. */}
-                    <MixedReleaseWarning
-                      surface="conversation"
-                      history={collaborationHistory}
-                      loadFailed={collaborationHistoryFailed}
-                      isSessionPersisted={isSessionPersisted}
-                    />
+                    {!isLegacyDeck && (
+                      <MixedReleaseWarning
+                        surface="conversation"
+                        history={collaborationHistory}
+                        loadFailed={collaborationHistoryFailed}
+                        isSessionPersisted={isSessionPersisted}
+                      />
+                    )}
                     <ChatPanel
                       key="chat-panel"
                       ref={chatPanelRef}

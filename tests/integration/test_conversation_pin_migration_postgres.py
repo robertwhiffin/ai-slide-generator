@@ -1,14 +1,17 @@
+"""The Conversation Pin column's migration on PostgreSQL.
+
+The only Postgres proof of ``user_sessions.graph_release_id``: nullable, indexed,
+and an ``ON DELETE RESTRICT`` foreign key, through a migration that is safe to run
+twice.  (The startup pin backfill this file also covered was deleted with Deck
+Mode: a deck is pinned only when it locks to agent mode.)
+"""
+
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-
 import pytest
-from sqlalchemy import inspect, select, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import inspect, text
 
 from src.core.database import _run_migrations
-from src.database.models.session import SessionMessage, UserSession
-from src.services.graph_configuration import bootstrap_graph_configuration
 
 pytestmark = pytest.mark.postgres
 
@@ -25,9 +28,7 @@ def _restore_pre_column_schema(engine) -> None:
         )
 
 
-def test_postgres_migrates_and_backfills_conversation_pins_deterministically(
-    postgres_engine,
-):
+def test_postgres_migrates_the_conversation_pin_column_idempotently(postgres_engine):
     _restore_pre_column_schema(postgres_engine)
     _run_migrations(postgres_engine)
     _run_migrations(postgres_engine)
@@ -49,161 +50,3 @@ def test_postgres_migrates_and_backfills_conversation_pins_deterministically(
                 "WHERE conname = 'fk_user_sessions_graph_release'"
             )
         ) == "r"
-
-    factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
-    bootstrap = bootstrap_graph_configuration(factory)
-    v1_id = bootstrap.release_id
-    timestamp = datetime(2026, 9, 22, 10, 0, 0)
-
-    with factory.begin() as db:
-        roots = {
-            name: UserSession(
-                session_id=name,
-                created_by="migration-test@example.com",
-                created_at=timestamp,
-                last_activity=timestamp,
-            )
-            for name in (
-                "graph-root",
-                "tie-graph-root",
-                "tie-legacy-root",
-                "later-marker-root",
-                "empty-root",
-                "historical-pre-pinned-root",
-                "opted-out-historical-root",
-            )
-        }
-        roots["historical-pre-pinned-root"].graph_release_id = v1_id
-        db.add_all(roots.values())
-        db.flush()
-
-        # A contributor's own marker never overrides its legacy root owner.
-        graph_contributor = UserSession(
-            session_id="graph-contributor",
-            created_by="contributor@example.com",
-            parent_session_id=roots["later-marker-root"].id,
-            created_at=timestamp,
-            last_activity=timestamp,
-        )
-        # A plain contributor inherits its graph root owner's V1 pin.
-        legacy_contributor = UserSession(
-            session_id="legacy-contributor",
-            created_by="contributor@example.com",
-            parent_session_id=roots["graph-root"].id,
-            created_at=timestamp,
-            last_activity=timestamp,
-        )
-        db.add_all((graph_contributor, legacy_contributor))
-        db.flush()
-
-        db.add_all(
-            (
-                SessionMessage(
-                    id=101,
-                    session_id=roots["graph-root"].id,
-                    role="user",
-                    content="USE AGENT MODE build a deck",
-                    created_at=timestamp,
-                ),
-                SessionMessage(
-                    id=102,
-                    session_id=roots["tie-graph-root"].id,
-                    role="user",
-                    content="USE AGENT MODE first by id",
-                    created_at=timestamp,
-                ),
-                SessionMessage(
-                    id=103,
-                    session_id=roots["tie-graph-root"].id,
-                    role="user",
-                    content="plain second by id",
-                    created_at=timestamp,
-                ),
-                SessionMessage(
-                    id=104,
-                    session_id=roots["tie-legacy-root"].id,
-                    role="user",
-                    content="plain first by id",
-                    created_at=timestamp,
-                ),
-                SessionMessage(
-                    id=105,
-                    session_id=roots["tie-legacy-root"].id,
-                    role="user",
-                    content="USE AGENT MODE second by id",
-                    created_at=timestamp,
-                ),
-                SessionMessage(
-                    id=106,
-                    session_id=roots["later-marker-root"].id,
-                    role="user",
-                    content="plain first turn",
-                    created_at=timestamp,
-                ),
-                SessionMessage(
-                    id=107,
-                    session_id=roots["later-marker-root"].id,
-                    role="user",
-                    content="USE AGENT MODE later turn",
-                    created_at=timestamp + timedelta(seconds=1),
-                ),
-                SessionMessage(
-                    id=108,
-                    session_id=graph_contributor.id,
-                    role="user",
-                    content="USE AGENT MODE contributor-only marker",
-                    created_at=timestamp,
-                ),
-                SessionMessage(
-                    id=109,
-                    session_id=legacy_contributor.id,
-                    role="user",
-                    content="plain contributor turn",
-                    created_at=timestamp,
-                ),
-                SessionMessage(
-                    id=110,
-                    session_id=roots["historical-pre-pinned-root"].id,
-                    role="user",
-                    content="USE AGENT MODE already pinned",
-                    created_at=timestamp,
-                ),
-                # Since 2026-10-12 USE LEGACY MODE wins: this deck resolves to
-                # the monolith, so the historical backfill must not pin it.
-                SessionMessage(
-                    id=111,
-                    session_id=roots["opted-out-historical-root"].id,
-                    role="user",
-                    content="USE AGENT MODE -- no, USE LEGACY MODE",
-                    created_at=timestamp,
-                ),
-            )
-        )
-
-    from src.services.conversation_pins import BackfillResult, backfill_conversation_pins
-
-    # The backfill keeps its HISTORICAL meaning after the 2026-10-12 inversion:
-    # plain-first roots ("later-marker-root", "tie-legacy-root") now resolve to
-    # the graph, but pinning them at startup would be a cutover the decision
-    # ruled out, so they stay null.
-    assert backfill_conversation_pins(factory) == BackfillResult(v1_id, 1, 3)
-    with factory() as db:
-        identity_map = dict(
-            db.execute(
-                select(UserSession.session_id, UserSession.graph_release_id).order_by(
-                    UserSession.session_id
-                )
-            ).all()
-        )
-    assert identity_map == {
-        "empty-root": None,
-        "graph-contributor": None,
-        "graph-root": v1_id,
-        "historical-pre-pinned-root": v1_id,
-        "later-marker-root": None,
-        "legacy-contributor": v1_id,
-        "opted-out-historical-root": None,
-        "tie-graph-root": v1_id,
-        "tie-legacy-root": None,
-    }
-    assert backfill_conversation_pins(factory) == BackfillResult(v1_id, 1, 0)

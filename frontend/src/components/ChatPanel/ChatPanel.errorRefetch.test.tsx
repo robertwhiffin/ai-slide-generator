@@ -64,6 +64,9 @@ const h = vi.hoisted(() => {
     refreshConfig,
     setExperimentUrl: vi.fn(),
     setSessionTitle: vi.fn(),
+    // Deck Mode (Task 7): the setters ChatPanel reads from useSession; stable identities.
+    setSelectedDeckMode: vi.fn(),
+    setStoredDeckMode: vi.fn(),
     agentConfig: { agentConfig: null, refreshConfig, configOwnerSessionId: null, isPreSession: false },
     generation: { setIsGenerating },
     /** The session the panel is on (useSession().sessionId). */
@@ -102,6 +105,10 @@ vi.mock('../../contexts/SessionContext', () => ({
     error: null,
     setExperimentUrl: h.setExperimentUrl,
     setSessionTitle: h.setSessionTitle,
+    storedDeckMode: null,
+    selectedDeckMode: 'agent',
+    setSelectedDeckMode: h.setSelectedDeckMode,
+    setStoredDeckMode: h.setStoredDeckMode,
   }),
 }));
 vi.mock('../../contexts/AgentConfigContext', () => ({ useAgentConfig: () => h.agentConfig }));

@@ -431,6 +431,8 @@ jobs:
             tests/integration/test_graph_configuration_bootstrap_postgres.py \
             tests/integration/test_graph_configuration_constraints_postgres.py \
             tests/integration/test_conversation_pin_migration_postgres.py \
+            tests/integration/test_deck_mode_migration_postgres.py \
+            tests/integration/test_deck_mode_contributor_race_postgres.py \
             tests/integration/test_shared_deck_mutation_migration_postgres.py \
             tests/integration/test_shared_deck_mutation_lifecycle_postgres.py \
             tests/integration/test_collaboration_history_api_postgres.py \
@@ -705,6 +707,7 @@ jobs:
           - conversation-graph-version
           - css-bg-export
           - deck-integrity
+          - deck-mode-toggle
           - deck-review-flag
           - deck-prompts-integration
           - deck-prompts-ui

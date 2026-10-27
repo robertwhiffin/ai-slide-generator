@@ -1681,14 +1681,19 @@ async def test_create_deck_length_guard_when_enabled(monkeypatch):
         await _create_deck_impl(request=None, prompt="x" * 200)
 
 
-# ---- enqueue_create_job: MCP decks carry the legacy opt-out ------------------
+# ---- create_deck: an MCP deck is stored legacy at creation --------------------
 #
-# Since 2026-10-12 every deck runs on the graph unless its first user message
-# carries USE LEGACY MODE.  MCP stays on the monolith (its worker payload has no
-# engine key; the graph's one-shot path is not built) and its sessions are
-# unpinned, so the persisted first message must carry the opt-out -- otherwise a
-# browser turn on an MCP deck would resolve to the graph and fail with
-# ConversationPinMissingError.  The prompt the worker runs is NOT altered.
+# MCP stays on the monolith (the graph's one-shot path is not built), so
+# create_deck creates its session with deck_mode="legacy": unpinned, and locked
+# to legacy from creation, so a later browser turn on it runs on the monolith
+# too.  The mode lives in the column, so every prompt -- create_deck's first one
+# included -- is persisted exactly as the caller sent it; the old
+# USE LEGACY MODE prepend is gone.  The manager here is a MagicMock: that a
+# legacy deck_mode is never pinned, whatever graph_capable says, is
+# SessionManager's pin rule, covered in test_deck_mode_resolution.py.
+
+# A literal, not the constant: the phrase constants are deleted in Task 6.
+_OLD_LEGACY_PHRASE = "USE LEGACY MODE"
 
 
 async def _drive_enqueue_create_job(*, mode, message_count):
@@ -1714,30 +1719,72 @@ async def _drive_enqueue_create_job(*, mode, message_count):
 
 
 @pytest.mark.asyncio
-async def test_create_deck_first_message_is_persisted_with_the_legacy_opt_out():
-    from src.domain.conversation_engine import LEGACY_MODE_PHRASE, selects_graph_engine
+async def test_mcp_create_deck_is_legacy_unpinned_and_persists_the_prompt_verbatim(
+    fake_request, identity
+):
+    """The whole create_deck path, through the real enqueue_create_job: the
+    session is created legacy (so unpinned), and its first message is the
+    caller's prompt, unchanged."""
+    from unittest.mock import AsyncMock
 
-    persisted, payload = await _drive_enqueue_create_job(mode="generate", message_count=0)
+    prompt = "make a deck about Q3 revenue by region"
+    sm = MagicMock()
+    sm.create_session.return_value = {"session_id": "sess-legacy"}
+    sm.acquire_session_lock.return_value = True
+    sm.create_chat_request.return_value = "req-1"
+    sm.get_session.return_value = {"message_count": 0}
+    enqueue = AsyncMock()
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager", return_value=sm), \
+         patch("src.api.mcp_server.enqueue_job", enqueue), \
+         patch("src.core.user_context.get_current_user", return_value="alice@example.com"):
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
 
-    assert LEGACY_MODE_PHRASE in persisted
-    assert persisted.endswith("make a deck about Q3")
-    assert selects_graph_engine(persisted) is False
-    # The worker runs the caller's prompt verbatim, and still has no engine key.
-    assert payload["message"] == "make a deck about Q3"
+        result = await _create_deck_impl(
+            request=fake_request, prompt=prompt, slide_style_id=4
+        )
+
+    assert result == {
+        "session_id": "sess-legacy",
+        "request_id": "req-1",
+        "status": "pending",
+    }
+    sm.create_session.assert_called_once()
+    create_kwargs = sm.create_session.call_args.kwargs
+    assert (create_kwargs.get("deck_mode"), create_kwargs.get("graph_capable")) == (
+        "legacy",
+        False,
+    )
+    sm.add_message.assert_called_once()
+    saved = sm.add_message.call_args.kwargs
+    assert (saved["session_id"], saved["role"], saved["content"]) == (
+        "sess-legacy",
+        "user",
+        prompt,
+    )
+    assert _OLD_LEGACY_PHRASE not in saved["content"]
+    payload = enqueue.await_args.args[1]
+    assert (payload["message"], payload["is_first_message"]) == (prompt, True)
     assert "engine_mode" not in payload
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "message_count"),
-    [("edit", 0), ("edit", 3), ("generate", 2)],
-    ids=["edit-on-empty-deck", "edit", "generate-not-first"],
+    [("generate", 0), ("edit", 0), ("edit", 3), ("generate", 2)],
+    ids=["create-deck-first-message", "edit-on-empty-deck", "edit", "generate-not-first"],
 )
-async def test_only_the_create_deck_first_message_is_marked(mode, message_count):
-    """edit_deck must never mark: on a browser deck it would flip a pinned graph
-    deck with no messages onto the monolith."""
+async def test_every_enqueued_prompt_is_persisted_verbatim(mode, message_count):
+    """No prompt is altered, create_deck's first message included (it used to
+    get the opt-out prepended).  The first-message flag still reaches the
+    worker, and the payload still carries no engine key."""
     persisted, payload = await _drive_enqueue_create_job(
         mode=mode, message_count=message_count
     )
+
     assert persisted == "make a deck about Q3"
+    assert _OLD_LEGACY_PHRASE not in persisted
     assert payload["message"] == "make a deck about Q3"
+    assert payload["is_first_message"] is (message_count == 0)
+    assert "engine_mode" not in payload

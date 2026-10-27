@@ -664,8 +664,12 @@ test.describe('spec view toggle', () => {
     }
 
     // And nothing NEW at all on the chat request: an unexpected key is how view
-    // state would arrive under a name this list does not anticipate.
-    const ALLOWED = ['session_id', 'message', 'slide_context', 'image_ids', 'agent_config'];
+    // state would arrive under a name this list does not anticipate. `deck_mode`
+    // ('agent' | 'legacy') is the deck's engine choice, deliberately sent on every
+    // chat request (engine-toggle design §5.2); it is not spec-view state.
+    const ALLOWED = [
+      'session_id', 'message', 'slide_context', 'image_ids', 'agent_config', 'deck_mode',
+    ];
     const unexpected = Object.keys(JSON.parse(chatBodies[0]))
       .filter((key) => !ALLOWED.includes(key));
     expect(unexpected, 'the chat request body gained a key').toEqual([]);

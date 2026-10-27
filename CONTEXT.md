@@ -27,8 +27,14 @@ The human-facing, monotonically increasing ordinal assigned to a Graph Release.
 _Avoid_: Database ID, Agent Definition revision
 
 **Conversation Pin**:
-The Graph Release selected when a conversation is created and retained for that conversation's lifetime.
+The Graph Release selected when a conversation is created and retained for that conversation's lifetime. It is selected for Agent-mode decks only. Legacy-mode decks have none.
 _Avoid_: Current version, latest version
+
+**Deck Mode**: which engine a deck's conversation runs on, **Agent mode** (the LangGraph agent) or
+**Legacy mode**. It is chosen with the deck's first message and fixed for the deck's lifetime after
+that. Duplicates inherit it, and collaborators share the owner's. *Avoid, in UI copy and docs:*
+engine mode, graph/monolith, "USE LEGACY MODE". (`engine_mode` stays as an internal job-payload
+field.)
 
 **Agent Test Case**:
 A named, versioned synthetic input and assembly context for exercising one Agent Definition in isolation.

@@ -266,12 +266,11 @@ class TestTheFixtureSpecReachesTheColumn:
             db.close()
 
     def test_tour_writers_record_the_tour_roots_pin_without_principal(self, tour_db):
-        """Since 2026-10-12 the tour deck is a pinned graph root.
+        """The tour deck is a pinned graph root.
 
-        Its fixture prompt carries no USE LEGACY MODE opt-out, so it resolves to
-        the graph like any other deck; it is therefore created pinned to the
-        active release, and its writers attribute that exact pin (never NULL,
-        never inferred from "latest").
+        It is created with Deck Mode ``agent`` (see TestTheTourDeckIsAnAgentDeck),
+        so it is pinned to the active release at creation, and its writers
+        attribute that exact pin (never NULL, never inferred from "latest").
         """
         from src.database.models.graph_configuration import GraphRelease
         from src.database.models.session import SharedDeckMutationEvent, UserSession
@@ -302,6 +301,47 @@ class TestTheFixtureSpecReachesTheColumn:
             assert all(
                 event.graph_version == active.version_number for event in events
             )
+        finally:
+            db.close()
+
+
+class TestTheTourDeckIsAnAgentDeck:
+    def test_the_tour_deck_is_agent_and_pinned(self, tour_db):
+        """Created with Deck Mode ``agent``: locked from creation, pinned to the
+        active release.
+
+        A tour step points at the graph-version status, which only an agent deck
+        shows, and the tour deck ships a spec for the agent.  An unlocked tour
+        deck would let the first message after the tour make it legacy and
+        unpin it.
+        """
+        from src.api.services.session_manager import (
+            DeckModeLockedError,
+            get_session_manager,
+        )
+        from src.database.models.graph_configuration import GraphRelease
+        from src.database.models.session import UserSession
+
+        session_id = _run_the_tour(tour_db)
+
+        with _patched(tour_db):
+            assert get_session_manager().get_session(session_id)["deck_mode"] == "agent"
+            with pytest.raises(DeckModeLockedError) as locked:
+                get_session_manager().add_user_message(
+                    session_id,
+                    "carry on in legacy mode",
+                    message_type="user_input",
+                    requested_deck_mode="legacy",
+                )
+            assert locked.value.deck_mode == "agent"
+
+        db = tour_db()
+        try:
+            root = db.query(UserSession).filter_by(session_id=session_id).one()
+            active = (
+                db.query(GraphRelease).filter(GraphRelease.effective_to.is_(None)).one()
+            )
+            assert (root.deck_mode, root.graph_release_id) == ("agent", active.id)
         finally:
             db.close()
 

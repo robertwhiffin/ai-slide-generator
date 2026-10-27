@@ -101,6 +101,8 @@ export interface SessionMessage {
   metadata?: Record<string, any>;
 }
 
+export type DeckMode = 'agent' | 'legacy';
+
 export interface Session {
   session_id: string;
   user_id: string | null;
@@ -131,6 +133,8 @@ export interface Session {
   active_graph_version: number;
   /** Whether this session remains pinned to an older graph version. */
   is_older_than_active: boolean;
+  /** The deck's engine mode; null/absent means not yet locked by a first message. */
+  deck_mode?: DeckMode | null;
 }
 
 /**
@@ -954,6 +958,7 @@ export const api = {
     onError: (error: Error) => void,
     imageIds?: string[],
     agentConfig?: AgentConfig,
+    deckMode?: DeckMode,
   ): () => void {
     const controller = new AbortController();
 
@@ -970,6 +975,7 @@ export const api = {
             slide_context: slideContext,
             image_ids: imageIds,
             agent_config: agentConfig,
+            deck_mode: deckMode,
           }),
           signal: controller.signal,
         });
@@ -1049,6 +1055,7 @@ export const api = {
     slideContext?: SlideContext,
     imageIds?: string[],
     agentConfig?: AgentConfig,
+    deckMode?: DeckMode,
   ): Promise<{ request_id: string }> {
     const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
       method: 'POST',
@@ -1059,6 +1066,7 @@ export const api = {
         slide_context: slideContext,
         image_ids: imageIds,
         agent_config: agentConfig,
+        deck_mode: deckMode,
       }),
     });
 
@@ -1126,13 +1134,14 @@ export const api = {
     onError: (error: Error) => void,
     imageIds?: string[],
     agentConfig?: AgentConfig,
+    deckMode?: DeckMode,
   ): () => void {
     let cancelled = false;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     (async () => {
       try {
-        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig);
+        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig, deckMode);
 
         let lastMessageId = 0;
         // E0: track the next-slide cursor so we hand it back on each poll,
@@ -1281,11 +1290,12 @@ export const api = {
     onError: (error: Error) => void,
     imageIds?: string[],
     agentConfig?: AgentConfig,
+    deckMode?: DeckMode,
   ): () => void {
     if (isPollingMode()) {
-      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig);
+      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig, deckMode);
     } else {
-      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig);
+      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig, deckMode);
     }
   },
 

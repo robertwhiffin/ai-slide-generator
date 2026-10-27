@@ -648,6 +648,11 @@ def _run_migrations(engine, schema: str | None = None):
             conn, inspector, schema, _qual, is_sqlite
         )
 
+        # --- Deck Mode: user_sessions.deck_mode, run-once 'legacy' fill ---
+        # Keep after the shared-deck step and before the graph mutation guards and
+        # owner reassignment.
+        _migrate_deck_mode_schema(conn, inspector, schema, _qual, is_sqlite)
+
         # --- Graph Configuration: database-enforced published-row immutability ---
         # create_all owns the eight fresh table definitions. These PostgreSQL-only
         # guards add the mutation boundary that constraints alone cannot express.
@@ -712,6 +717,49 @@ def _migrate_conversation_pin_schema(
             f"ON {qualified_sessions} (graph_release_id)"
         )
     )
+
+
+def _migrate_deck_mode_schema(
+    conn, inspector, schema, _qual, is_sqlite: bool
+) -> None:
+    """Add ``user_sessions.deck_mode``; mark every pre-existing row 'legacy' once.
+
+    NULL means "not chosen yet", so the fill must only ever run in the same
+    transaction that adds the column; a later boot must never touch a row.
+    The column carries no default afterwards.
+    """
+    from sqlalchemy import inspect, text
+
+    table_name = "user_sessions"
+    try:
+        columns = {
+            column["name"]
+            for column in inspect(conn).get_columns(table_name, schema=schema)
+        }
+    except Exception:
+        return
+    if not columns:
+        return
+    if "deck_mode" in columns:
+        return
+
+    logger.info("Migration: adding deck_mode to user_sessions (existing rows -> legacy)")
+    qualified_sessions = _qual(table_name)
+    if is_sqlite:
+        conn.execute(
+            text(f"ALTER TABLE {qualified_sessions} ADD COLUMN deck_mode VARCHAR(16)")
+        )
+        conn.execute(text(f"UPDATE {qualified_sessions} SET deck_mode = 'legacy'"))
+    else:
+        conn.execute(
+            text(
+                f"ALTER TABLE {qualified_sessions} "
+                "ADD COLUMN deck_mode VARCHAR(16) DEFAULT 'legacy'"
+            )
+        )
+        conn.execute(
+            text(f"ALTER TABLE {qualified_sessions} ALTER COLUMN deck_mode DROP DEFAULT")
+        )
 
 
 def _migrate_shared_deck_mutation_schema(

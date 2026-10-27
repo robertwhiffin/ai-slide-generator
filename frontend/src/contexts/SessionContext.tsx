@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
-import { api, ApiError, type CollaborationHistory } from '../services/api';
+import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
+import { api, ApiError, type CollaborationHistory, type DeckMode } from '../services/api';
 import type { SlideDeck } from '../types/slide';
 
 function generateLocalSessionId(): string {
@@ -19,6 +19,7 @@ export interface OptionalSessionInfo {
   graph_version?: number | null;
   active_graph_version?: number | null;
   is_older_than_active?: boolean;
+  deck_mode?: DeckMode | null;
 }
 
 interface SessionContextType {
@@ -43,6 +44,12 @@ interface SessionContextType {
    * existence oracle.
    */
   collaborationHistoryFailed: boolean;
+  /** The server's engine mode for this deck; null means not yet locked. */
+  storedDeckMode: DeckMode | null;
+  /** The mode picked for an unlocked deck. */
+  selectedDeckMode: DeckMode;
+  setSelectedDeckMode: (mode: DeckMode) => void;
+  setStoredDeckMode: (mode: DeckMode | null) => void;
   isSessionPersisted: boolean;
   isInitializing: boolean;
   error: string | null;
@@ -66,6 +73,13 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isGraphVersionOlder, setIsGraphVersionOlder] = useState(false);
   const [collaborationHistory, setCollaborationHistory] = useState<CollaborationHistory | null>(null);
   const [collaborationHistoryFailed, setCollaborationHistoryFailed] = useState(false);
+  const [storedDeckMode, setStoredDeckMode] = useState<DeckMode | null>(null);
+  const [selectedDeckMode, setSelectedDeckMode] = useState<DeckMode>('agent');
+  // switchSession is a useCallback, so it reads the current id and stored mode through refs.
+  const sessionIdRef = useRef<string | null>(sessionId);
+  sessionIdRef.current = sessionId;
+  const storedDeckModeRef = useRef<DeckMode | null>(null);
+  storedDeckModeRef.current = storedDeckMode;
   const [isSessionPersisted, setIsSessionPersisted] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +104,8 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setIsGraphVersionOlder(false);
     setCollaborationHistory(null);
     setCollaborationHistoryFailed(false);
+    setStoredDeckMode(null);
+    setSelectedDeckMode('agent');
     setIsSessionPersisted(false);
     setError(null);
     api.setCurrentSessionId(newSessionId);
@@ -130,6 +146,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             graph_version: existingSessionInfo.graph_version,
             active_graph_version: existingSessionInfo.active_graph_version,
             is_older_than_active: existingSessionInfo.is_older_than_active,
+            deck_mode: existingSessionInfo.deck_mode,
           };
         } else {
           const full = await api.getSession(newSessionId);
@@ -140,6 +157,7 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
             graph_version: full.graph_version,
             active_graph_version: full.active_graph_version,
             is_older_than_active: full.is_older_than_active,
+            deck_mode: full.deck_mode,
           };
         }
 
@@ -191,6 +209,17 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setCollaborationHistory(null);
           setCollaborationHistoryFailed(false);
           setIsSessionPersisted(true);
+          // Mode state. A different session resets the selection. A re-restore of the SAME
+          // session (the landing deck's first send navigates to its own id) must not wipe an
+          // optimistic local lock with a server null: that only means the lock has not
+          // committed yet. A non-null server value is the truth and always wins.
+          const serverMode = sessionInfo.deck_mode ?? null;
+          if (sessionIdRef.current !== newSessionId) {
+            setSelectedDeckMode('agent');
+            setStoredDeckMode(serverMode);
+          } else if (serverMode !== null || storedDeckModeRef.current === null) {
+            setStoredDeckMode(serverMode);
+          }
 
           // Attached only on the committed path, so an abandoned restore (the
           // catch below calls createNewSession) can never have its in-flight
@@ -252,6 +281,10 @@ export const SessionProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isGraphVersionOlder,
         collaborationHistory,
         collaborationHistoryFailed,
+        storedDeckMode,
+        selectedDeckMode,
+        setSelectedDeckMode,
+        setStoredDeckMode,
         isSessionPersisted,
         isInitializing,
         error,

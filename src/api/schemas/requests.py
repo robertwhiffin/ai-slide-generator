@@ -1,6 +1,6 @@
 """Request schemas for the API."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -81,6 +81,13 @@ class ChatRequest(BaseModel):
     agent_config: Optional[dict] = Field(
         default=None,
         description="Agent configuration for session creation (tools, style, prompts)",
+    )
+    deck_mode: Optional[Literal["agent", "legacy"]] = Field(
+        default=None,
+        description=(
+            "Deck Mode to lock the deck to with its first message. Ignored once the "
+            "deck is locked, unless it differs from the stored mode (then 409)."
+        ),
     )
 
     @field_validator("session_id", mode="before")

@@ -27,9 +27,10 @@ apart from what is documented (``_expected_after_failed_turn``): the turn's own
 user message (C47(e)), the narration of nodes that completed before a later-node
 failure, and the failed turn's appended checkpoints.
 
-The three engine-mode sites fail closed over the shipped chat router (C24/C47):
+The engine-mode sites fail closed over the shipped chat router (C24/C47):
 ``/chat/stream`` and ``/chat/async`` answer the typed 503 ``lakebase_unavailable``
-with the session lock released, and the SSE re-resolve emits the safe event.
+with the session lock released.  (The third site, the SSE re-resolve, was deleted
+with Deck Mode: the stream route saves the message before it resolves.)
 
 Cases already landed in ``test_persisted_graph_runtime_failures_postgres.py``
 (C18.1/C38) at the loader and runtime level, and not repeated here: nonexistent
@@ -78,7 +79,6 @@ from src.database.models.session import (
     SessionSlideDeck,
     UserSession,
 )
-from src.domain.conversation_engine import AGENT_MODE_PHRASE
 from src.services import agent_schema_registry
 from src.services.agent_runtime import AgentRuntime, ModelProviderUnavailableError
 from src.services.agent_runtime_identity import LoggingAgentInvocationIdentitySink
@@ -208,8 +208,9 @@ def _expected_after_failed_turn(
 ) -> dict[str, Any]:
     """``before`` plus exactly what a failed turn is DOCUMENTED to leave, nothing else.
 
-    * **This turn's user message** (C47(e)): ``send_message_streaming`` persists
-      it before the graph (or the engine re-resolve) runs.  Asserted to be one
+    * **This turn's user message** (C47(e)): ``send_message_streaming`` (or, on
+      the chat routes, the route itself, before it resolves the engine) persists
+      it before the graph runs.  Asserted to be one
       new ``role='user'`` row carrying ``MESSAGE``.
     * **Assistant narration of nodes that COMPLETED before the failure**
       (``narration``: content hashes, in order).  Nodes commit as they finish,
@@ -775,8 +776,10 @@ def test_the_stream_route_answers_503_releases_the_lock_and_runs_no_engine(
     assert resolver.calls == [("new-root", "raised")]
     assert _is_processing(stage.journey.factory, "new-root") is False
     assert len(stage.driver.adapter.calls) == adapter_calls  # no graph, no monolith
-    # Nothing was persisted: the route failed before the service ran.
-    assert _conversation_state(stage.journey.factory, "new-root") == stage.before
+    # Since Deck Mode the route saves the user message (and locks the deck) BEFORE
+    # it resolves, as the async route always has: that message stays (C47(e)).
+    after = _conversation_state(stage.journey.factory, "new-root")
+    assert after == _expected_after_failed_turn(stage.driver, "new-root", stage.before)
 
 
 def test_the_async_route_answers_503_releases_the_lock_and_enqueues_nothing(
@@ -797,35 +800,6 @@ def test_the_async_route_answers_503_releases_the_lock_and_enqueues_nothing(
     # C47(e): the user message and the chat_requests row were persisted BEFORE
     # resolution and stay; the request row is left pending (no job was queued).
     assert _chat_requests(stage.journey.factory, "new-root") == [("pending", None)]
-    after = _conversation_state(stage.journey.factory, "new-root")
-    assert after == _expected_after_failed_turn(stage.driver, "new-root", stage.before)
-
-
-def test_the_sse_re_resolve_fails_closed_with_the_safe_event_on_the_real_route(
-    chat_route_stage, monkeypatch
-):
-    """C47(d): the route's resolution succeeds, the service's re-resolve blips."""
-    stage, chat_service_module, _enqueued = chat_route_stage
-    resolver = _BlippingResolver(chat_service_module.resolve_engine_mode, fail_on={2})
-    monkeypatch.setattr(chat_service_module, "resolve_engine_mode", resolver)
-    adapter_calls = len(stage.driver.adapter.calls)
-
-    response = stage.journey.admin.post(
-        "/api/chat/stream", json={"session_id": "new-root", "message": MESSAGE}
-    )
-
-    assert response.status_code == 200, response.text
-    body = response.text
-    assert resolver.calls == [("new-root", "graph"), ("new-root", "raised")]
-    data = [
-        json.loads(line[len("data: ") :]) for line in body.splitlines() if line.startswith("data: ")
-    ]
-    assert [{k: v for k, v in item.items() if v not in (None, "")} for item in data] == [
-        SAFE_EVENT
-    ], body
-    assert "server closed" not in body and "OperationalError" not in body
-    assert _is_processing(stage.journey.factory, "new-root") is False
-    assert len(stage.driver.adapter.calls) == adapter_calls  # no graph, no monolith
     after = _conversation_state(stage.journey.factory, "new-root")
     assert after == _expected_after_failed_turn(stage.driver, "new-root", stage.before)
 
@@ -863,7 +837,7 @@ def _seed_legacy_sources(factory) -> None:
             SessionMessage(
                 session_id=duplicate_source.id,
                 role="user",
-                content=f"{AGENT_MODE_PHRASE} duplicate",
+                content="USE AGENT MODE duplicate",
             )
         )
         db.add(
@@ -936,13 +910,13 @@ ROUTE_CREATORS = {
     "chat-generated-id": (
         "POST",
         "/api/chat/stream",
-        {"message": f"{AGENT_MODE_PHRASE} go"},
+        {"message": "USE AGENT MODE go"},
         _NO_ACTIVE,
     ),
     "chat-supplied-id": (
         "POST",
         "/api/chat/async",
-        {"session_id": "route-supplied", "message": f"{AGENT_MODE_PHRASE} go"},
+        {"session_id": "route-supplied", "message": "USE AGENT MODE go"},
         _NO_ACTIVE,
     ),
     # Fix round 1 (was a FINDING pinned at 500): the contribute route reads the

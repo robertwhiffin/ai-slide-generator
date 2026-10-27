@@ -97,8 +97,9 @@ def engine_mode_resolves_to_monolith():
     """Answer engine-mode resolution with ``"monolith"``, for tests NOT about it (#271 C47).
 
     Engine-mode resolution fails CLOSED now (C24): a resolver that cannot read
-    the database answers 503 at the chat routes and a safe error event at the
-    SSE re-resolve, instead of silently keeping ``"monolith"``.  Tests about SSE
+    the database answers 503 at the chat routes (the SSE re-resolve that also
+    used it was deleted with Deck Mode), instead of silently keeping
+    ``"monolith"``.  Tests about SSE
     framing, session creation, naming or agent building used to reach their
     subject only because their mocked database made the resolver raise and the
     fail-open kept the monolith.  They opt in to this fixture, which states the

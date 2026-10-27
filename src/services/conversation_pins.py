@@ -4,19 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.database.models.graph_configuration import GraphRelease
-from src.database.models.session import SessionMessage, UserSession
-from src.domain.conversation_engine import AGENT_MODE_PHRASE, LEGACY_MODE_PHRASE
-
-
-@dataclass(frozen=True)
-class BackfillResult:
-    graph_release_id: int
-    graph_version: int
-    pinned_count: int
+from src.database.models.session import UserSession
 
 
 @dataclass(frozen=True)
@@ -157,69 +149,3 @@ def load_conversation_pin(session_factory: sessionmaker, session_id: str) -> int
         if not isinstance(row.graph_release_id, int):
             raise ConversationPinMissingError(session_id)
         return row.graph_release_id
-
-
-def backfill_conversation_pins(session_factory: sessionmaker) -> BackfillResult:
-    """Pin historical graph conversations to V1 in one transaction/set update.
-
-    "Historical graph conversation" keeps its pre-2026-10-12 meaning: an
-    unpinned root whose first user message carries the old opt-in
-    ``AGENT_MODE_PHRASE`` (plus its contributors).  It is deliberately NOT
-    widened to the new default (every root without ``LEGACY_MODE_PHRASE``):
-    since the inversion every creator pins a graph deck at creation, so the
-    only unpinned non-legacy roots are pre-inversion monolith decks, and
-    pinning those on startup would be the cutover the 2026-10-12 decision
-    ruled out.  It is narrowed by one clause: a first message that also
-    carries ``LEGACY_MODE_PHRASE`` now resolves to the monolith, so it is not
-    pinned -- the backfill pins exactly the historical decks that still run on
-    the graph.
-    """
-    with session_factory.begin() as db:
-        return _backfill_in_transaction(db)
-
-
-def _backfill_in_transaction(db) -> BackfillResult:
-    graph_release_id, graph_version = db.execute(
-        select(GraphRelease.id, GraphRelease.version_number).where(
-            GraphRelease.version_number == 1
-        )
-    ).one()
-
-    ranked_first_user_messages = (
-        select(
-            SessionMessage.session_id.label("session_id"),
-            SessionMessage.content.label("content"),
-            func.row_number()
-            .over(
-                partition_by=SessionMessage.session_id,
-                order_by=(SessionMessage.created_at, SessionMessage.id),
-            )
-            .label("message_rank"),
-        )
-        .join(UserSession, UserSession.id == SessionMessage.session_id)
-        .where(
-            UserSession.parent_session_id.is_(None),
-            SessionMessage.role == "user",
-        )
-        .cte("ranked_first_user_messages")
-    )
-    graph_root_ids = select(ranked_first_user_messages.c.session_id).where(
-        ranked_first_user_messages.c.message_rank == 1,
-        ranked_first_user_messages.c.content.contains(AGENT_MODE_PHRASE),
-        ~ranked_first_user_messages.c.content.contains(LEGACY_MODE_PHRASE),
-    )
-    root_owner_id = func.coalesce(UserSession.parent_session_id, UserSession.id)
-    result = db.execute(
-        update(UserSession)
-        .where(
-            root_owner_id.in_(graph_root_ids),
-            UserSession.graph_release_id.is_(None),
-        )
-        .values(graph_release_id=graph_release_id)
-        .execution_options(synchronize_session=False)
-    )
-    return BackfillResult(
-        graph_release_id=graph_release_id,
-        graph_version=graph_version,
-        pinned_count=result.rowcount,
-    )

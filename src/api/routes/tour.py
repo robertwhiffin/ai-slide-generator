@@ -65,16 +65,15 @@ def _phase1_create_session(created_by: str) -> dict:
     fixture = _load_fixture()
     sm = get_session_manager()
 
-    # Graph-capable (pinned): the fixture's chat_prompt carries no
-    # USE LEGACY MODE opt-out, so since 2026-10-12 the tour deck resolves to
-    # the graph like any other deck, and a graph turn on an unpinned session
-    # raises ConversationPinMissingError.  The fixture already ships a
-    # deck_spec for exactly this (ws4d), so a user who keeps chatting after the
-    # tour gets the default engine.
+    # Graph-capable (pinned) and locked to the agent engine from creation, so
+    # a user who keeps chatting after the tour stays on the graph.  A graph
+    # turn on an unpinned session raises ConversationPinMissingError.  The
+    # fixture already ships a deck_spec for exactly this (ws4d).
     session = sm.create_session(
         title=fixture["title"],
         created_by=created_by,
         graph_capable=True,
+        deck_mode="agent",
     )
     session_id = session["session_id"]
 

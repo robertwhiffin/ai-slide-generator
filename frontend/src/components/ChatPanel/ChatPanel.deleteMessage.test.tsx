@@ -32,6 +32,13 @@ const setIsGenerating = vi.fn();
 let currentSessionId = 'sess-1';
 let currentPersisted = true;
 let turn: Turn | null = null;
+// Deck Mode (Task 7): the four SessionContext members ChatPanel reads; stable identities.
+const deckModeSession = {
+  storedDeckMode: null,
+  selectedDeckMode: 'agent' as const,
+  setSelectedDeckMode: vi.fn(),
+  setStoredDeckMode: vi.fn(),
+};
 
 vi.mock('../../services/api', () => ({
   api: {
@@ -55,6 +62,7 @@ vi.mock('../../contexts/SessionContext', () => ({
     error: null,
     setExperimentUrl: vi.fn(),
     setSessionTitle: vi.fn(),
+    ...deckModeSession,
   }),
 }));
 vi.mock('../../contexts/AgentConfigContext', () => ({

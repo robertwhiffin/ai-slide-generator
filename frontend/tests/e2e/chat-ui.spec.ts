@@ -698,7 +698,9 @@ test.describe('ChatPanel Header', () => {
 
   test('shows input hint text', async ({ page }) => {
     await goToGenerator(page);
-    await expect(page.getByText(/Press Enter to send/i)).toBeVisible();
+    // Deck Mode toggle (Task 8): the hint was shortened to make room for the Mode control.
+    await expect(page.getByText('Enter to send · Shift+Enter new line', { exact: true })).toBeVisible();
+    await expect(page.getByText(/Press Enter to send/i)).toHaveCount(0);
   });
 });
 

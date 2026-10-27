@@ -1,6 +1,7 @@
 """Unit tests for SessionManager.duplicate_session and agent config sanitization."""
 
 import json
+import logging
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -14,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 import src.database.models  # noqa: F401 — register all models with Base
 from src.api.schemas.agent_config import sanitize_agent_config_for_persist
 from src.api.services.session_manager import (
+    DeckModeLockedError,
     SessionAccessDeniedError,
     SessionManager,
     SessionNotFoundError,
@@ -336,6 +338,288 @@ class TestDuplicateSessionValidScenarios:
         assert '<meta charset="utf-8">' in copy.slide_deck.html_content
         assert 'name="viewport"' in copy.slide_deck.html_content
         assert copy.slide_deck.deck_json == version_deck_json
+
+
+# ---------------------------------------------------------------------------
+# Deck Mode (spec rev 2 §5.3): a duplicate copies the deck OWNER's deck_mode.
+#
+# The copy is locked to that mode from creation and is pinned unless the mode
+# is legacy; an unlocked (NULL) source gives an unlocked copy, pinned like any
+# new deck.  In every mode the copy carries no chat history (the old hidden
+# first-row carry is gone), so its first message really is its first:
+# message_count 0, which is what gives it an auto-title.
+#
+# Every source has a chat history, and every pinned source is pinned to a
+# SUPERSEDED release, so a copy must take a fresh pin from the active row,
+# never the source's.  The old opt-out phrase is a literal here (Task 6 deletes
+# the constant) and is ordinary text: no row's content decides a copy's mode.
+# ---------------------------------------------------------------------------
+
+_OLD_LEGACY_PHRASE = "USE LEGACY MODE"
+_ACTIVE_RELEASE_ID = 200  # the ``db`` fixture's release
+_SUPERSEDED_RELEASE_ID = 199
+
+_FIRST_MESSAGES = {
+    "plain": "Build me a deck about puffins",
+    "old-phrase": f"{_OLD_LEGACY_PHRASE} and build me a deck about puffins",
+}
+
+
+def _seed_superseded_release(db) -> None:
+    published = datetime.now(timezone.utc) - timedelta(days=3)
+    db.add(
+        GraphRelease(
+            id=_SUPERSEDED_RELEASE_ID,
+            version_number=1,
+            release_note="superseded duplicate fixture release",
+            published_by="duplicate-fixture@example.com",
+            published_at=published,
+            effective_from=published,
+            effective_to=published + timedelta(days=1),
+        )
+    )
+    db.commit()
+
+
+def _seed_history(db, session: UserSession, first_message: Optional[str]) -> None:
+    """A three-row transcript opening with *first_message*; None seeds no rows."""
+    if first_message is None:
+        return
+    start = datetime.utcnow() - timedelta(hours=1)
+    for offset, role, content, message_type in [
+        (0, "user", first_message, "user_input"),
+        (5, "assistant", "Here is your deck.", "llm_response"),
+        (10, "user", "make slide 2 blue", "user_input"),
+    ]:
+        db.add(
+            SessionMessage(
+                session_id=session.id,
+                role=role,
+                content=content,
+                message_type=message_type,
+                created_at=start + timedelta(seconds=offset),
+            )
+        )
+    db.commit()
+
+
+def _moded_source(db, *, session_id: str, deck_mode, first_message) -> UserSession:
+    """A deck-owning root stored as *deck_mode*, with a chat history.
+
+    Pinned to the superseded release unless legacy (a legacy deck holds no pin).
+    """
+    _seed_superseded_release(db)
+    owner = _make_root_session(
+        db,
+        session_id=session_id,
+        created_by="owner@test.com",
+        title="Moded Deck",
+        deck_mode=deck_mode,
+        graph_release_id=None if deck_mode == "legacy" else _SUPERSEDED_RELEASE_ID,
+    )
+    _add_deck(db, owner)
+    _seed_history(db, owner, first_message)
+    return owner
+
+
+def _copy_state(db, session_manager, copy_id: str) -> dict:
+    """What a reader sees of the copy: stored and API mode, pin, chat history."""
+    row = db.query(UserSession).filter(UserSession.session_id == copy_id).one()
+    db.refresh(row)
+    api = session_manager.get_session(copy_id)
+    return {
+        "deck_mode": row.deck_mode,
+        "api_deck_mode": api["deck_mode"],
+        "pin": row.graph_release_id,
+        "message_rows": db.query(SessionMessage)
+        .filter(SessionMessage.session_id == row.id)
+        .count(),
+        "message_count": api["message_count"],
+    }
+
+
+class TestDuplicateCopiesTheOwnersMode:
+    @pytest.mark.parametrize("first_message", list(_FIRST_MESSAGES))
+    def test_duplicate_of_an_agent_deck_is_agent_and_pinned(
+        self, db, session_manager, first_message
+    ):
+        """The copy is an agent deck, locked from creation, with a fresh pin.
+
+        The ``old-phrase`` case is an agent deck whose first message happens to
+        contain the old opt-out text: the column decides, not the text.
+        """
+        _moded_source(
+            db,
+            session_id="src-agent",
+            deck_mode="agent",
+            first_message=_FIRST_MESSAGES[first_message],
+        )
+
+        copy_id = session_manager.duplicate_session(
+            "src-agent", created_by="copier@test.com"
+        )["session_id"]
+
+        assert _copy_state(db, session_manager, copy_id) == {
+            "deck_mode": "agent",
+            "api_deck_mode": "agent",
+            "pin": _ACTIVE_RELEASE_ID,
+            "message_rows": 0,
+            "message_count": 0,
+        }
+        # Locked from creation: the copy's first message cannot choose legacy.
+        with pytest.raises(DeckModeLockedError) as locked:
+            session_manager.add_user_message(
+                copy_id,
+                "make it legacy",
+                message_type="user_input",
+                requested_deck_mode="legacy",
+            )
+        assert locked.value.deck_mode == "agent"
+        # The source keeps its own mode and its own (older) pin.
+        source = db.query(UserSession).filter(UserSession.session_id == "src-agent").one()
+        assert (source.deck_mode, source.graph_release_id) == (
+            "agent",
+            _SUPERSEDED_RELEASE_ID,
+        )
+
+    @pytest.mark.parametrize("first_message", list(_FIRST_MESSAGES))
+    def test_duplicate_of_a_legacy_deck_is_legacy_unpinned_and_carries_no_message(
+        self, db, session_manager, first_message
+    ):
+        """The column carries the mode now, so no hidden row is copied.
+
+        ``plain`` is a deck made legacy by the Mode selector; ``old-phrase`` is a
+        legacy deck from before it (its first row still holds the opt-out).
+        Either way the copy has no message, so its first message is its first
+        and it gets an auto-title.  A legacy copy never takes the release lock.
+        """
+        _moded_source(
+            db,
+            session_id="src-legacy",
+            deck_mode="legacy",
+            first_message=_FIRST_MESSAGES[first_message],
+        )
+
+        with patch(
+            "src.api.services.session_manager.lock_active_graph_release",
+            side_effect=AssertionError("a legacy duplicate must not lock a release"),
+        ):
+            copy_id = session_manager.duplicate_session(
+                "src-legacy", created_by="copier@test.com"
+            )["session_id"]
+
+        assert _copy_state(db, session_manager, copy_id) == {
+            "deck_mode": "legacy",
+            "api_deck_mode": "legacy",
+            "pin": None,
+            "message_rows": 0,
+            "message_count": 0,
+        }
+        # Locked from creation: the copy's first message cannot choose agent.
+        with pytest.raises(DeckModeLockedError) as locked:
+            session_manager.add_user_message(
+                copy_id,
+                "make it agent",
+                message_type="user_input",
+                requested_deck_mode="agent",
+            )
+        assert locked.value.deck_mode == "legacy"
+
+    @pytest.mark.parametrize(
+        "first_message",
+        [None, *_FIRST_MESSAGES],
+        ids=["no-history", *_FIRST_MESSAGES],
+    )
+    def test_duplicate_of_an_unlocked_deck_is_unlocked_and_pinned(
+        self, db, session_manager, first_message
+    ):
+        """An unlocked source gives an unlocked copy, pinned like any new deck.
+
+        Its own first message still chooses its mode.  The ``old-phrase`` case
+        is the one the old carry got wrong: the opt-out text in the source's
+        first row no longer makes the copy legacy.
+        """
+        _moded_source(
+            db,
+            session_id="src-unlocked",
+            deck_mode=None,
+            first_message=_FIRST_MESSAGES.get(first_message),
+        )
+
+        copy_id = session_manager.duplicate_session(
+            "src-unlocked", created_by="copier@test.com"
+        )["session_id"]
+
+        assert _copy_state(db, session_manager, copy_id) == {
+            "deck_mode": None,
+            "api_deck_mode": None,
+            "pin": _ACTIVE_RELEASE_ID,
+            "message_rows": 0,
+            "message_count": 0,
+        }
+        # Still unlocked: its first message may choose legacy.
+        first = session_manager.add_user_message(
+            copy_id,
+            "first ask on the copy",
+            message_type="user_input",
+            requested_deck_mode="legacy",
+        )
+        assert (first["deck_mode"], first["locked_now"]) == ("legacy", True)
+
+    @pytest.mark.parametrize("owner_mode", ["agent", "legacy"])
+    def test_duplicate_of_a_contributor_view_copies_the_owners_mode(
+        self, db, session_manager, owner_mode
+    ):
+        """From a contributor's session, the copy takes the deck OWNER's mode.
+
+        The contributor's own row holds no mode (the lock writes the owner's).
+        """
+        owner = _moded_source(
+            db,
+            session_id="parent-moded",
+            deck_mode=owner_mode,
+            first_message=_FIRST_MESSAGES["plain"],
+        )
+        contributor = UserSession(
+            session_id="contrib-moded",
+            created_by="contrib@test.com",
+            title="Moded Deck",
+            parent_session_id=owner.id,
+            graph_release_id=None if owner_mode == "legacy" else _SUPERSEDED_RELEASE_ID,
+        )
+        db.add(contributor)
+        db.commit()
+        _seed_history(db, contributor, "contributor's own ask")
+        assert contributor.deck_mode is None, "precondition: only the owner holds a mode"
+
+        result = session_manager.duplicate_session(
+            "contrib-moded", created_by="contrib@test.com"
+        )
+
+        assert result["source_session_id"] == "parent-moded"
+        assert _copy_state(db, session_manager, result["session_id"]) == {
+            "deck_mode": owner_mode,
+            "api_deck_mode": owner_mode,
+            "pin": None if owner_mode == "legacy" else _ACTIVE_RELEASE_ID,
+            "message_rows": 0,
+            "message_count": 0,
+        }
+
+    def test_the_duplicate_log_records_the_deck_mode(self, db, session_manager, caplog):
+        """The log's ``carried_engine_mode_marker`` key becomes ``deck_mode``."""
+        _moded_source(
+            db,
+            session_id="src-logged",
+            deck_mode="legacy",
+            first_message=_FIRST_MESSAGES["plain"],
+        )
+
+        with caplog.at_level(logging.INFO, logger="src.api.services.session_manager"):
+            session_manager.duplicate_session("src-logged", created_by="copier@test.com")
+
+        [record] = [r for r in caplog.records if r.getMessage() == "Duplicated session"]
+        assert record.deck_mode == "legacy"
+        assert not hasattr(record, "carried_engine_mode_marker")
 
 
 class TestDuplicateSessionErrorHandling:

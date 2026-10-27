@@ -35,10 +35,8 @@ from src.core.databricks_client import (
     get_system_client,
 )
 from src.domain.conversation_engine import (
-    AGENT_MODE_PHRASE as AGENT_MODE_PHRASE,
     ENGINE_MODE_MARKER_MESSAGE_TYPE,
-    LEGACY_MODE_PHRASE as LEGACY_MODE_PHRASE,
-    selects_graph_engine,
+    engine_mode_for_deck_mode,
 )
 from src.domain.conversation_turns import turn_message_ids
 # BLANK_SLIDE_HTML is re-exported: callers and tests import it from here.
@@ -144,76 +142,34 @@ def _sanitize_replacement_info(replacement_info: Optional[Dict[str, Any]]) -> Op
 # Engine-mode selection (ws4d D1)
 # ---------------------------------------------------------------------------
 
-# The chat-input trigger that keeps a deck OFF the LangGraph engine.
-#
-# Since 2026-10-12 (agent-mode beta) the graph is the default: a deck runs on
-# the graph unless its first user message contains LEGACY_MODE_PHRASE.
-# Deliberately NOT hardened (plan D0): a loose, case-sensitive substring match
-# anywhere in the deck's first user message, with no authorisation check.  The
-# switch exists so the legacy monolith stays reachable during the beta; if it
-# ever outlives that it needs a strict form (exact prefix, first message only)
-# plus an authorisation check, because a phrase matched anywhere in user text
-# can be tripped by pasted content.  Recorded, not built.
-def _selects_agent_mode(content: Optional[str]) -> bool:
-    """Whether a deck whose first user message is ``content`` runs on the graph.
-
-    True unless ``content`` carries :data:`LEGACY_MODE_PHRASE`; ``None`` (no
-    user message yet) and ``""`` are the graph.
-
-    The single authority for the match, shared with
-    ``SessionManager.duplicate_session``'s marker carry so the two cannot
-    disagree about what a marker is.
-    """
-    return selects_graph_engine(content)
-
-
 def resolve_engine_mode(session_id: Optional[str]) -> str:
     """Return the engine this deck's turns run on: ``"graph"`` or ``"monolith"``.
 
-    **Sticky, and derived from the transcript.**  Evaluated per message, only
-    turn 1 would carry the phrase and turn 2 would fall back — a deck written
-    alternately by both engines diverges between ``session_slides`` rows and
-    ``deck_json``, and the graph's checkpoint thread, keyed by the session id,
-    would be resumed by one engine and ignored by the other.  So the answer is
-    a property of the deck, read off the **earliest** ``role='user'`` message.
-    A later message carrying the phrase must not switch a monolith deck, and
-    assistant messages are ignored so echoed tool output cannot flip the
-    engine.  (Since the 2026-10-12 inversion the graph is the default and the
-    phrase is the LEGACY opt-out: a later ``USE LEGACY MODE`` must not switch a
-    graph deck.)
+    **Sticky, and read from the deck owner's stored Deck Mode.**  The engine is
+    a property of the deck, held in ``user_sessions.deck_mode`` (``"agent"``,
+    ``"legacy"`` or NULL = not chosen yet).  ``legacy`` resolves to
+    ``"monolith"``; ``agent`` and NULL resolve to ``"graph"`` (the default).  The
+    transcript is never consulted, so no message text can switch the engine.
 
     **Resolved on the OWNER DECK's session, not the calling session** (ruling
     W-3).  Decks are shared through ``UserSession.parent_session_id``; mode is
-    per-session while divergence is per-DECK, so a contributor carrying the
-    phrase would write rows while a contributor without it wrote ``deck_json``
-    on the same deck — exactly the divergence stickiness exists to prevent.
-    The owner is resolved with the same ``_get_deck_owner_session`` hop
-    ``read_deck_spec`` uses, so a contributor inherits the owner's engine.
+    per-deck, so a contributor inherits its owner's column.  The owner is
+    resolved with the same ``_get_deck_owner_session`` hop ``read_deck_spec``
+    uses.
 
-    **Filters on ``role`` only, never on ``message_type``.**  The two live
-    paths write different types for the same user turn (``"user_input"`` on the
-    sync/streaming path, ``"user_query"`` on the async route and MCP), so a
-    ``message_type`` filter would see half the traffic.
-
-    Nothing about mode is stored: the answer is derived from the database on
-    every call, so there is nothing to keep in sync and it is multi-worker safe
-    by construction.
+    The answer is read from the database on every call, so it is multi-worker
+    safe by construction.
 
     Args:
         session_id: The session whose turn is about to run.  May be a
             contributor session, an owner session, or ``None``.
 
     Returns:
-        ``"monolith"`` when the owner deck's first user message carries
-        :data:`LEGACY_MODE_PHRASE`, else ``"graph"``.  A deck with no user turn
-        yet and an empty first message resolve to ``"graph"`` (the default,
-        matching the pin every creator takes for such a deck); a missing
-        session or no session id resolves to ``"monolith"`` -- there is no
-        deck and no pin to run a graph turn on, and on the SSE path the turn-1
-        re-resolve in :meth:`ChatService.send_message_streaming` runs after the
-        auto-create, so it is never the answer a turn actually executes on.
-        Those are answers.  An unexpected database error is not
-        an answer and propagates; every call site goes through
+        ``"monolith"`` when the owner deck's ``deck_mode`` is ``"legacy"``, else
+        ``"graph"``.  A missing session or no session id resolves to
+        ``"monolith"`` -- there is no deck and no pin to run a graph turn on.
+        Those are answers.  An unexpected database error is not an answer and propagates;
+        every call site goes through
         :func:`resolve_engine_mode_or_unavailable`, which fails the turn
         explicitly (#271 C24).
     """
@@ -227,8 +183,7 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         with get_db_session() as db:
             session = session_manager._get_session_or_raise(db, session_id)
             deck_owner = session_manager._get_deck_owner_session(db, session)
-            earliest = earliest_user_message(db, deck_owner.id)
-            content = earliest.content if earliest else None
+            deck_mode = deck_owner.deck_mode
             owner_session_id = deck_owner.session_id
     except SessionNotFoundError:
         logger.warning(
@@ -237,7 +192,7 @@ def resolve_engine_mode(session_id: Optional[str]) -> str:
         )
         return "monolith"
 
-    mode = "graph" if _selects_agent_mode(content) else "monolith"
+    mode = engine_mode_for_deck_mode(deck_mode)
     logger.info(
         "Resolved engine mode",
         extra={
@@ -267,10 +222,7 @@ def resolve_engine_mode_or_unavailable(session_id: Optional[str]) -> str:
     failed.  So every call site now fails explicitly (#271 C24/C47):
 
     * ``POST /chat/stream`` and ``POST /chat/async`` release the session lock
-      and answer a typed 503 (``ENGINE_MODE_UNAVAILABLE_DETAIL``);
-    * the SSE turn-1 re-resolve in :meth:`ChatService.send_message_streaming`
-      yields the safe ``pinned_graph_configuration_unavailable`` event, then
-      raises.
+      and answer a typed 503 (``ENGINE_MODE_UNAVAILABLE_DETAIL``).
 
     The persisted user message (and the async ``chat_requests`` row) written
     before resolution stay: nothing else about the conversation changes.
@@ -676,7 +628,7 @@ class ChatService:
             # Auto-create session on first message
             db_session = session_manager.create_session(
                 session_id=session_id,
-                graph_capable=selects_graph_engine(message),
+                graph_capable=True,
             )
             logger.info(
                 "Auto-created session on first message",
@@ -1125,6 +1077,7 @@ class ChatService:
         image_ids: Optional[List[str]] = None,
         is_first_message_override: Optional[bool] = None,
         engine_mode: str = "monolith",
+        user_message_persisted: bool = False,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -1140,14 +1093,16 @@ class ChatService:
             request_id: Optional request ID for async polling support
             image_ids: Optional list of image IDs attached to this message
             is_first_message_override: If set, overrides the DB-based first-message
-                detection. Used by the async path where the user message is
-                persisted before the job runs.
+                detection. Used by the async path and ``POST /chat/stream``,
+                which both persist the user message before this method runs.
             engine_mode: ``"graph"`` runs the turn on the LangGraph engine,
                 ``"monolith"`` (the default) on the shipped agent. Resolved by
                 the CHAT ROUTES and passed in — never resolved here. The default
                 is what keeps MCP on the monolith: MCP reaches this method
                 through the same job queue as ``POST /chat/async`` but builds a
                 payload with no ``engine_mode`` key.
+            user_message_persisted: True when the caller (``POST /chat/stream``)
+                already saved the user message, so it is not saved again here.
 
         Yields:
             StreamEvent objects for real-time display
@@ -1181,7 +1136,7 @@ class ChatService:
         except SessionNotFoundError:
             db_session = session_manager.create_session(
                 session_id=session_id,
-                graph_capable=selects_graph_engine(message),
+                graph_capable=True,
             )
             logger.info(
                 "Auto-created session on first streaming message",
@@ -1196,8 +1151,9 @@ class ChatService:
         else:
             is_first_message = db_session.get("message_count", 0) == 0
 
-        # Persist user message to database FIRST (only if not already done by async endpoint)
-        if not request_id:
+        # Persist user message to database FIRST (only if neither the async
+        # endpoint nor the stream route already did)
+        if not request_id and not user_message_persisted:
             user_msg = session_manager.add_message(
                 session_id=session_id,
                 role="user",
@@ -1209,52 +1165,8 @@ class ChatService:
                 extra={"session_id": session_id, "message_id": user_msg.get("id")},
             )
 
-        # ws4d D2, seventh edit point — the SSE path RE-RESOLVES here, and only
-        # the SSE path.  Resolving a mode in this method is otherwise forbidden
-        # (that is what keeps MCP off the graph), so the guard is the whole point
-        # of these three lines:
-        #
-        # `POST /chat/stream` does NOT persist the user message — the block
-        # immediately above does it on the route's behalf.  So the streaming
-        # route's own resolution necessarily ran BEFORE the deck had any
-        # `role='user'` row, and `resolve_engine_mode` answers the DEFAULT for a
-        # deck with no user turn (graph since 2026-10-12; monolith before):
-        # without this, turn 1 of a new SSE session would run the default
-        # however the message read -- e.g. a `USE LEGACY MODE` first message
-        # would run turn 1 on the graph and turn 2 onward on the monolith.
-        # One deck written by both engines is the divergence stickiness exists
-        # to prevent.
-        #
-        # `not request_id` IS the SSE path, structurally:
-        # `job_queue._run_streaming_generator` always passes
-        # `request_id=request_id`, and `enqueue_job(request_id: str, ...)` types
-        # it non-optional and keys `jobs[request_id]` on it — so the async route
-        # and MCP can never reach this branch, and neither can ever be
-        # re-resolved onto the graph.
-        #
-        # IDEMPOTENT on turn 2 and after: the resolver reads the deck's EARLIEST
-        # `role='user'` row, which the insert above cannot change once one
-        # exists.  A re-resolve able to flip an established deck's engine would
-        # be worse than the gap it closes.
-        #
-        # The plan contradicts itself here — D1 asserts the row exists before
-        # mode resolution on this path while D0 mandates resolving in the route —
-        # so this resolves a plan defect rather than deviating from the plan.
-        #
-        # FAIL CLOSED (#271 C24/C47): a failure to re-resolve used to keep the
-        # route's `monolith` and run the legacy path on a graph deck.  It now
-        # yields the safe typed event and raises; the lock is released by the
-        # route's SSE generator `finally`, and the user message persisted just
-        # above stays (C47(e)).
-        if not request_id:
-            try:
-                engine_mode = resolve_engine_mode_or_unavailable(session_id)
-            except PersistedConfigurationUnavailableError:
-                yield _pinned_graph_configuration_error_event()
-                raise
-
         # ws4d D2 — the graph branch.  Placed AFTER the user message is
-        # persisted (the resolver upstream reads that row) and BEFORE anything
+        # persisted (the resolver upstream reads the owner's deck_mode column) and BEFORE anything
         # monolith-specific runs, so intent detection, the clarification
         # checks and `_build_agent_for_session` are all skipped on a graph turn
         # and the monolith path below is left byte-identical: it is this PR's
@@ -2195,26 +2107,23 @@ class ChatService:
         there.  So clearing drops the transcript and the graph thread, keeps the
         deck and ``deck_spec_json``, and loses nothing that was agreed.
 
-        **The earliest ``role='user'`` row survives.**  Engine mode is derived
-        from it (:func:`resolve_engine_mode`), so deleting it would silently
-        revert a graph-mode deck to the monolith on the next turn — the two
-        halves of this PR would contradict each other.  There is precedent:
+        **The earliest ``role='user'`` row survives.**  The deck's Deck Mode is
+        stored on ``user_sessions.deck_mode`` and is unaffected by a clear; the
+        row is kept so the deck still counts as started (``message_count``) and
+        its title is not regenerated.  There is precedent:
         ``restore_version`` also prunes messages selectively -- it deletes this
         session's rows created after the save point, so the kept row survives a
         restore whenever it predates that save point (always true for a root
         deck's own first turn).  A contributor's kept row can be removed by a
-        restore; that is harmless, because engine mode resolves on the deck
-        OWNER's rows.  It is preserved unconditionally, in both modes, so
-        clearing never *changes* the mode in either direction.
+        restore; that is harmless, because the mode lives on the deck OWNER's
+        ``deck_mode`` column, not on any row.
 
         **The kept row is re-typed and hidden.**  Its ``message_type`` becomes
         :data:`ENGINE_MODE_MARKER_MESSAGE_TYPE`, which every transcript read
         drops (:meth:`SessionManager.get_messages` -- and so the chat panel,
         ``GET /messages``, the architect's conversation and the monolith's
         history -- and save-point capture), so a cleared conversation is empty
-        to every reader and the old first prompt is never replayed.  The
-        engine-mode, Conversation Pin and duplicate-carry reads go by ``role``
-        only, so they still see the row and nothing about the engine changes;
+        to every reader and the old first prompt is never replayed.
         ``message_count`` still counts it, so the next turn is not a "first
         message" and the deck's title is not regenerated.  The re-type is part of
         this transaction.
@@ -2344,8 +2253,9 @@ class ChatService:
         Deleting a prompt but keeping its reply would leave the architect an
         orphan reply in ``conversation``; the turn goes whole.
 
-        **The session's earliest user row is never deleted** (#323): engine mode
-        is read off it.  When the turn starts there, that row is re-typed
+        **The session's earliest user row is never deleted** (#323): it keeps
+        the deck started and its title stable (the mode is the ``deck_mode``
+        column).  When the turn starts there, that row is re-typed
         ``ENGINE_MODE_MARKER_MESSAGE_TYPE`` (hidden from every transcript read)
         and the rest of its turn is deleted; ``hidden_message_id`` says so.
 

@@ -71,7 +71,6 @@ from src.database.models.session import (
     SharedDeckMutationEvent,
     UserSession,
 )
-from src.domain.conversation_engine import AGENT_MODE_PHRASE
 from src.services.collaboration_history import (
     AuthorizedCollaborationRoot,
     authorized_collaboration_root,
@@ -345,7 +344,7 @@ def acceptance(postgres_engine, monkeypatch):
             SessionMessage(
                 session_id=owner_row.id,
                 role="user",
-                content=f"{AGENT_MODE_PHRASE} build the shared deck",
+                content="USE AGENT MODE build the shared deck",
             )
         )
 
@@ -854,7 +853,7 @@ def _seed_owner_on_r1(factory):
             SessionMessage(
                 session_id=owner.id,
                 role="user",
-                content=f"{AGENT_MODE_PHRASE} lock ordering",
+                content="USE AGENT MODE lock ordering",
             )
         )
         return r1.id

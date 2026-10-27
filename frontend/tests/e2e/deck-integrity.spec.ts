@@ -108,6 +108,18 @@ async function setupMocks(page: Page) {
     });
   });
 
+  // Mock design systems endpoint — AgentConfigBar lists them on every first load. Left unmocked it
+  // fails with ECONNREFUSED when no backend runs, and its console errors would be counted here.
+  // An empty library: a listed default design system becomes the selected one, and the bar then
+  // also fetches that system's templates.
+  await page.route('http://127.0.0.1:8000/api/settings/design-systems', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ design_systems: [], total: 0 })
+    });
+  });
+
   // Mock sessions endpoints
   await page.route('http://127.0.0.1:8000/api/sessions**', (route, request) => {
     const url = request.url();

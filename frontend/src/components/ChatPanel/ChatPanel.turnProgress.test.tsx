@@ -33,6 +33,11 @@ const h = vi.hoisted(() => {
       error: null,
       setExperimentUrl: vi.fn(),
       setSessionTitle: vi.fn(),
+      // Deck Mode (Task 7): the four SessionContext members ChatPanel reads.
+      storedDeckMode: null,
+      selectedDeckMode: 'agent' as const,
+      setSelectedDeckMode: vi.fn(),
+      setStoredDeckMode: vi.fn(),
     },
     agentConfig: { agentConfig: null, refreshConfig, configOwnerSessionId: null, isPreSession: false },
     generation: { setIsGenerating },

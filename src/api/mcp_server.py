@@ -33,7 +33,6 @@ from src.core.settings_db import (
     get_default_slide_style_id,
     get_default_template_id,
 )
-from src.domain.conversation_engine import with_legacy_marker
 from src.domain.slide_deck import SlideDeck
 from src.services.permission_service import get_permission_service
 
@@ -238,23 +237,14 @@ async def enqueue_create_job(
         #
         # MCP stays on the legacy monolith (its worker payload carries no engine
         # key, and the graph's one-shot path, spec §6.4, is not built).
-        # Since 2026-10-12 the graph is the DEFAULT engine, derived from the
-        # deck's first user message -- so a create_deck deck whose transcript
-        # did not say otherwise would resolve to the graph the first time
-        # someone chatted on it in the browser, and fail there
-        # (ConversationPinMissingError: MCP sessions are unpinned).  The
-        # persisted first message therefore carries the LEGACY opt-out; the
-        # prompt the worker runs (payload "message" below) is untouched.
-        persisted_prompt = (
-            with_legacy_marker(prompt)
-            if mode == "generate" and is_first_message
-            else prompt
-        )
+        # create_deck stores that on the session it creates (deck_mode="legacy"),
+        # so no prompt has to say it: every prompt, create or edit, is persisted
+        # verbatim.
         await asyncio.to_thread(
             session_manager.add_message,
             session_id=session_id,
             role="user",
-            content=persisted_prompt,
+            content=prompt,
             message_type="user_query",
             request_id=request_id,
         )
@@ -536,10 +526,9 @@ async def _create_deck_impl(
             session = session_manager.create_session(
                 created_by=identity.user_name,
                 agent_config=agent_config,
-                # Legacy deck: unpinned, and enqueue_create_job persists the
-                # first message with the USE LEGACY MODE opt-out so the
-                # transcript-derived engine agrees in every surface.
+                # Legacy deck: unpinned, and locked to the monolith from creation.
                 graph_capable=False,
+                deck_mode="legacy",
             )
             # create_session returns a dict (see SessionManager.create_session);
             # guard against a model-object return defensively so this stays

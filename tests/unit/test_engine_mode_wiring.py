@@ -60,7 +60,6 @@ from src.api.routes.chat import ENGINE_MODE_UNAVAILABLE_DETAIL
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services import job_queue
 from src.api.services.chat_service import (
-    LEGACY_MODE_PHRASE,
     ChatService,
     resolve_engine_mode_or_unavailable,
 )
@@ -75,8 +74,6 @@ from tests.unit.conftest import _make_factory, _make_fake_db
 _DB_SOURCE = "src.core.database.get_db_session"
 _MANAGER_DB = "src.api.services.session_manager.get_db_session"
 
-# Since 2026-10-12 the phrase is the LEGACY opt-out; the graph is the default.
-_PHRASE_MESSAGE = f"{LEGACY_MODE_PHRASE} build me a deck about puffins"
 _PLAIN_MESSAGE = "and now add a slide about eider ducks"
 
 
@@ -154,8 +151,14 @@ def route_env(client, route_db_engine):
         }
 
 
-def _seed_session(factory, user_messages: List[str]) -> str:
-    """A UserSession whose transcript is *user_messages*, earliest first."""
+def _seed_session(
+    factory, user_messages: List[str], *, deck_mode: Optional[str] = None
+) -> str:
+    """A UserSession whose transcript is *user_messages*, earliest first.
+
+    *deck_mode* is stored on the row, which is the deck owner: since Deck Mode
+    the engine is read off that column, not off the transcript.
+    """
     from datetime import datetime, timedelta
 
     from src.database.models.session import SessionMessage, UserSession
@@ -163,7 +166,9 @@ def _seed_session(factory, user_messages: List[str]) -> str:
     sid = f"ws4d-wiring-{uuid.uuid4().hex[:10]}"
     db = factory()
     try:
-        us = UserSession(session_id=sid, created_by="test-user@example.com")
+        us = UserSession(
+            session_id=sid, created_by="test-user@example.com", deck_mode=deck_mode
+        )
         db.add(us)
         db.flush()
         base = datetime.utcnow()
@@ -184,32 +189,6 @@ def _seed_session(factory, user_messages: List[str]) -> str:
     finally:
         db.close()
     return sid
-
-
-def _append_user_message(factory, session_id: str, content: str) -> None:
-    """Append one `role='user'` row, as the async route's add_message would."""
-    from datetime import datetime
-
-    from src.database.models.session import SessionMessage, UserSession
-
-    db = factory()
-    try:
-        us = db.query(UserSession).filter(UserSession.session_id == session_id).one()
-        db.add(
-            SessionMessage(
-                session_id=us.id,
-                role="user",
-                content=content,
-                message_type="user_query",
-                created_at=datetime.utcnow(),
-            )
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -240,69 +219,32 @@ class TestStreamingRoute:
         route_env["manager"].release_session_lock.assert_called_once_with(sid)
 
     def test_the_mode_is_sticky_on_this_entry_point(self, route_env):
-        """A later turn carrying no phrase still runs on the legacy monolith.
+        """A later turn of a legacy deck still runs on the legacy monolith.
 
-        The deck's EARLIEST user message decides, so the message posted here
-        deliberately does not carry the phrase.  Stickiness is what stops a
-        deck being written alternately by both engines.
+        The deck's stored ``deck_mode`` decides; no message in its transcript
+        carries anything mode-like.  Stickiness is what stops a deck being
+        written alternately by both engines.
         """
         sid = _seed_session(
-            route_env["factory"], [_PHRASE_MESSAGE, "turn 2", "turn 3"]
+            route_env["factory"],
+            ["build me a deck", "turn 2", "turn 3"],
+            deck_mode="legacy",
         )
         call = self._post(route_env, sid, _PLAIN_MESSAGE)
         assert call.kwargs["engine_mode"] == "monolith"
 
     def test_a_monolith_session_reaches_the_service_as_monolith(self, route_env):
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE, "turn 2"])
+        sid = _seed_session(
+            route_env["factory"], ["build me a deck", "turn 2"], deck_mode="legacy"
+        )
         call = self._post(route_env, sid, _PLAIN_MESSAGE)
         assert call.kwargs["engine_mode"] == "monolith"
-
-    def test_a_later_phrase_does_not_switch_a_graph_deck(self, route_env):
-        """The opt-out in THIS turn's text must not flip an established deck."""
-        sid = _seed_session(route_env["factory"], ["build me a deck"])
-        call = self._post(route_env, sid, _PHRASE_MESSAGE)
-        assert call.kwargs["engine_mode"] == "graph"
 
     def test_the_engine_mode_is_always_passed_explicitly(self, route_env):
         """Never omitted and left to the default — the route decides."""
         sid = _seed_session(route_env["factory"], ["build me a deck"])
         call = self._post(route_env, sid, _PLAIN_MESSAGE)
         assert "engine_mode" in call.kwargs
-
-
-class TestStreamingRouteCannotSeeTurnOne:
-    """What the ROUTE can know on turn 1 — which is nothing, by construction.
-
-    `POST /chat/stream` does not persist the user message; `send_message_streaming`
-    does it on the route's behalf, DOWNSTREAM.  So at the route's resolution
-    point a brand-new session has no `role='user'` row and `resolve_engine_mode`
-    answers the DEFAULT -- the graph since 2026-10-12 -- whatever the message
-    says.  This test pins that as a property of the route, because it is what
-    makes the seventh edit point necessary rather than redundant: here the
-    first message carries the LEGACY opt-out and the route still says graph.
-
-    The GAP this used to record is now CLOSED, one layer down:
-    `send_message_streaming` re-resolves after its persist block, guarded on
-    `not request_id` so MCP cannot reach it.  The behaviour that matters to a
-    user — turn 1 of an SSE session carrying the opt-out runs the monolith — is
-    pinned by
-    `tests/integration/test_graph_mode_turn.py::TestTheSseTurnOneReResolve`.
-    Do not "fix" the assertion below to `"monolith"`: the route genuinely cannot
-    return that, and pretending otherwise would hide why the re-resolve exists.
-    """
-
-    def test_the_route_resolves_the_default_for_a_new_session(
-        self, route_env
-    ):
-        sid = _seed_session(route_env["factory"], [])
-        response = route_env["client"].post(
-            "/api/chat/stream",
-            json={"session_id": sid, "message": _PHRASE_MESSAGE},
-        )
-        assert response.status_code == 200, response.text
-        response.read()
-        call = route_env["service"].send_message_streaming.call_args
-        assert call.kwargs["engine_mode"] == "graph"
 
 
 # ---------------------------------------------------------------------------
@@ -328,41 +270,18 @@ class TestAsyncRoute:
 
     def test_the_mode_is_sticky_on_this_entry_point(self, route_env):
         sid = _seed_session(
-            route_env["factory"], [_PHRASE_MESSAGE, "turn 2", "turn 3"]
+            route_env["factory"],
+            ["build me a deck", "turn 2", "turn 3"],
+            deck_mode="legacy",
         )
         assert (
             self._payload(route_env, sid, _PLAIN_MESSAGE)["engine_mode"]
             == "monolith"
         )
 
-    def test_a_later_phrase_does_not_switch_a_graph_deck(self, route_env):
-        sid = _seed_session(route_env["factory"], ["build me a deck"])
-        assert self._payload(route_env, sid, _PHRASE_MESSAGE)["engine_mode"] == "graph"
-
     def test_a_monolith_session_is_enqueued_as_monolith(self, route_env):
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"], deck_mode="legacy")
         payload = self._payload(route_env, sid, _PLAIN_MESSAGE)
-        assert payload["engine_mode"] == "monolith"
-
-    def test_turn_one_of_a_new_session_DOES_see_the_phrase(self, route_env):
-        """The async route persists the user turn BEFORE it resolves — ORDER.
-
-        The counterpart to `TestStreamingRouteCannotSeeTurnOne`.  The session starts
-        with ZERO user rows and the mocked `add_message` really inserts one, so
-        the only way the phrase can be seen is if resolution runs AFTER that
-        call.  Moving the resolve above it reddens this test.
-        """
-        sid = _seed_session(route_env["factory"], [])
-        factory = route_env["factory"]
-        route_env["manager"].get_session.return_value = {"message_count": 0}
-
-        def really_add_message(**kwargs):
-            _append_user_message(factory, kwargs["session_id"], kwargs["content"])
-            return {"id": 1}
-
-        route_env["manager"].add_message.side_effect = really_add_message
-
-        payload = self._payload(route_env, sid, _PHRASE_MESSAGE)
         assert payload["engine_mode"] == "monolith"
 
 
@@ -370,7 +289,7 @@ class TestTheKeyIsEngineModeNotMode:
     """`mode` is MCP's generate/edit flag. Conflating the two ships a defect."""
 
     def test_the_async_payload_carries_engine_mode(self, route_env):
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
         route_env["client"].post(
             "/api/chat/async", json={"session_id": sid, "message": _PLAIN_MESSAGE}
         )
@@ -378,7 +297,7 @@ class TestTheKeyIsEngineModeNotMode:
         assert "engine_mode" in payload
 
     def test_the_async_payload_does_not_reuse_the_mode_key(self, route_env):
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
         route_env["client"].post(
             "/api/chat/async", json={"session_id": sid, "message": _PLAIN_MESSAGE}
         )
@@ -580,8 +499,9 @@ class TestResolutionFailureFailsTheTurnClosed:
     So the four fail-open tests that stood here are INVERTED, deliberately and
     by controller ruling (C24, surfaced to the user): a raising resolver now
     yields a typed 503 ``lakebase_unavailable`` on both routes, with the session
-    lock released and the service never reached, and the SSE turn-1 re-resolve
-    yields the safe ``pinned_graph_configuration_unavailable`` event then raises.
+    lock released and the service never reached.  (The SSE turn-1 re-resolve,
+    the third site, is gone since Deck Mode: the stream route saves the message
+    before it resolves, so there is nothing left to re-resolve.)
     ``resolve_engine_mode``'s three "no answer -> monolith" cases are answers,
     not failures, and are unchanged (``test_engine_mode_selection.py``).
     """
@@ -663,7 +583,7 @@ class TestResolutionFailureFailsTheTurnClosed:
         generator's ``finally`` never runs: the route itself must release the
         lock it took, exactly once.
         """
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
 
         with patch(self._BOOM, self._boom):
             response = route_env["client"].post(
@@ -686,7 +606,7 @@ class TestResolutionFailureFailsTheTurnClosed:
         message and the ``chat_requests`` row were persisted before resolution
         and remain.
         """
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
 
         with patch(self._BOOM, self._boom):
             response = route_env["client"].post(
@@ -697,7 +617,7 @@ class TestResolutionFailureFailsTheTurnClosed:
         route_env["enqueue"].assert_not_awaited()
         route_env["manager"].release_session_lock.assert_called_once_with(sid)
         route_env["manager"].create_chat_request.assert_called_once()
-        route_env["manager"].add_message.assert_called_once()
+        route_env["manager"].add_user_message.assert_called_once()
 
     def test_only_the_resolve_call_is_labelled_lakebase_unavailable_on_the_async_route(
         self, route_env
@@ -705,8 +625,8 @@ class TestResolutionFailureFailsTheTurnClosed:
         """The typed 503 is scoped to resolution: the same error class raised by any
         other step of the route's ``try`` (here, persisting the user message) is the
         route's generic 500, not a mislabelled ``lakebase_unavailable``."""
-        sid = _seed_session(route_env["factory"], [_PHRASE_MESSAGE])
-        route_env["manager"].add_message.side_effect = PersistedConfigurationUnavailableError(
+        sid = _seed_session(route_env["factory"], ["build me a deck"])
+        route_env["manager"].add_user_message.side_effect = PersistedConfigurationUnavailableError(
             code="lakebase_unavailable"
         )
 
@@ -719,118 +639,6 @@ class TestResolutionFailureFailsTheTurnClosed:
         assert response.json() == {"detail": "Internal server error"}
         route_env["enqueue"].assert_not_awaited()
         route_env["manager"].release_session_lock.assert_called_once_with(sid)
-
-
-class TestTheSseReResolveFailsClosed:
-    """The THIRD site (C24): ``send_message_streaming``'s SSE turn-1 re-resolve.
-
-    On turn 1 of an SSE session the route necessarily resolved the DEFAULT (no
-    user row yet; ``graph`` since 2026-10-12, ``monolith`` before).  A raising
-    re-resolve used to keep the route's answer and run that engine whatever the
-    first message said.  It now yields the typed safe event and raises, and
-    neither engine is built.
-    """
-
-    _BOOM = "src.api.services.chat_service.resolve_engine_mode"
-
-    @pytest.fixture
-    def service_env(self):
-        manager = MagicMock()
-        manager.get_session.return_value = {"message_count": 0}
-        manager.add_message.return_value = {"id": 7}
-
-        def monolith_reached(*args, **kwargs):
-            raise AssertionError("the monolith was built after a failed re-resolve")
-
-        with patch(
-            "src.api.services.chat_service.get_session_manager", return_value=manager
-        ), patch("src.core.settings_db.get_settings", return_value=MagicMock()), patch.object(
-            ChatService, "_build_agent_for_session", monolith_reached
-        ), patch.object(
-            ChatService,
-            "_send_message_streaming_graph",
-            side_effect=AssertionError("the graph ran after a failed re-resolve"),
-        ):
-            yield manager
-
-    def _drive(self, *, engine_mode: str):
-        events: List[StreamEvent] = []
-        with pytest.raises(PersistedConfigurationUnavailableError) as raised:
-            for event in ChatService().send_message_streaming(
-                session_id="sse-turn-1",
-                message=_PHRASE_MESSAGE,
-                engine_mode=engine_mode,
-            ):
-                events.append(event)
-        return events, raised.value
-
-    @pytest.mark.parametrize("route_mode", ["monolith", "graph"])
-    def test_a_raising_re_resolve_yields_the_safe_event_then_raises(
-        self, service_env, route_mode
-    ):
-        def boom(session_id):
-            raise RuntimeError("the database went away")
-
-        with patch(self._BOOM, boom):
-            events, error = self._drive(engine_mode=route_mode)
-
-        assert error.code == "lakebase_unavailable"
-        assert len(events) == 1, events
-        assert job_queue.is_pinned_graph_configuration_error_event(events[0])
-        safe = job_queue.pinned_graph_configuration_error_event_payload()
-        assert events[0] == StreamEvent(**safe)
-        # C47(e): the user message was persisted before the re-resolve and stays.
-        service_env.add_message.assert_called_once()
-
-    def test_the_route_answer_then_a_failing_re_resolve_fails_the_turn_on_the_real_route(
-        self, route_env
-    ):
-        """C47(d): the default on the ROUTE's call, a raise on the SERVICE's call.
-
-        An always-raising resolver would 503 at the route first, so a fail-open
-        restored at the service site alone would stay green; this two-call
-        resolver reaches it through the shipped ``/chat/stream`` route.
-        """
-        sid = _seed_session(route_env["factory"], [])
-        calls: List[str] = []
-
-        def route_then_boom(session_id):
-            calls.append(session_id)
-            if len(calls) == 1:
-                return "graph"
-            raise RuntimeError("the database went away")
-
-        manager = route_env["manager"]
-        manager.add_message.return_value = {"id": 7}
-
-        def monolith_reached(*args, **kwargs):
-            raise AssertionError("the monolith was built after a failed re-resolve")
-
-        with patch(self._BOOM, route_then_boom), patch(
-            "src.api.routes.chat.get_chat_service", return_value=ChatService()
-        ), patch(
-            "src.api.services.chat_service.get_session_manager", return_value=manager
-        ), patch("src.core.settings_db.get_settings", return_value=MagicMock()), patch.object(
-            ChatService, "_build_agent_for_session", monolith_reached
-        ):
-            response = route_env["client"].post(
-                "/api/chat/stream",
-                json={"session_id": sid, "message": _PHRASE_MESSAGE},
-            )
-            assert response.status_code == 200, response.text
-            body = response.read().decode()
-
-        assert calls == [sid, sid]
-        data_lines = [line for line in body.splitlines() if line.startswith("data: ")]
-        assert len(data_lines) == 1, body
-        import json
-
-        sent = StreamEvent(**json.loads(data_lines[0][len("data: ") :]))
-        assert job_queue.is_pinned_graph_configuration_error_event(sent)
-        safe = job_queue.pinned_graph_configuration_error_event_payload()
-        assert sent == StreamEvent(**safe)
-        assert "the database went away" not in body
-        manager.release_session_lock.assert_called_once_with(sid)
 
 
 class TestSendMessageNeverReferencesTheGraph:

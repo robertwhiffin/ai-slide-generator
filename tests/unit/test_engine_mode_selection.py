@@ -1,13 +1,15 @@
-"""Engine-mode selection (ws4d D1): the phrase, the sticky resolver, the marker carry.
+"""Engine-mode selection: the sticky resolver, the owner hop, the duplicate.
 
-Since 2026-10-12 the rule is inverted: every deck runs on the graph UNLESS its
-first user message carries ``LEGACY_MODE_PHRASE``.  The old opt-in
-``AGENT_MODE_PHRASE`` still lands on the graph (it is simply not the opt-out).
+A deck's engine is its owner's stored Deck Mode (``user_sessions.deck_mode``):
+``legacy`` runs on the monolith; ``agent`` and NULL (not chosen yet) run on the
+graph.  No message text selects anything: the ``USE LEGACY MODE`` /
+``USE AGENT MODE`` phrases and their helpers were deleted with Task 6, and the
+end of this file pins that they are gone.  Column-based resolution itself is
+pinned in ``test_deck_mode_resolution.py``, including that the old phrase in a
+first message is ordinary text.
 
-Real sqlite throughout.  The whole point of `resolve_engine_mode` is that the
-answer is DERIVED from committed rows rather than stored, so every assertion
-here reads the database back through the resolver; a mock standing in for the
-transcript would prove nothing about the derivation.
+Real sqlite throughout: every assertion reads the database back through the
+resolver.
 
 Patch targets — `resolve_engine_mode` and `clear_context` import
 `get_db_session` lazily inside the function body, matching this file's four
@@ -21,17 +23,15 @@ the behaviour, not on a real-database connection error.
 from __future__ import annotations
 
 import contextlib
+import importlib
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from src.api.services.chat_service import (
-    AGENT_MODE_PHRASE,
-    LEGACY_MODE_PHRASE,
-    resolve_engine_mode,
-)
-from src.domain.conversation_engine import with_legacy_marker
+from src.api.services.chat_service import resolve_engine_mode
 from src.database.models.graph_configuration import GraphRelease
 from src.database.models.session import SessionMessage, UserSession
 from tests.unit.conftest import _make_factory, _make_fake_db
@@ -47,10 +47,6 @@ _MANAGER_DB = "src.api.services.session_manager.get_db_session"
 # runs against all three.
 MESSAGE_TYPES = ["user_input", "user_query", None]
 
-# The opt-out: the only first message that keeps a deck off the graph.
-_PHRASE_MESSAGE = f"{LEGACY_MODE_PHRASE} and build me a deck about puffins"
-# The pre-inversion opt-in: still the graph, harmlessly.
-_AGENT_MESSAGE = f"{AGENT_MODE_PHRASE} and build me a deck about puffins"
 _PLAIN_MESSAGE = "Build me a deck about puffins"
 
 
@@ -60,6 +56,17 @@ def _patched(factory):
     fake = _make_fake_db(factory)
     with patch(_DB_SOURCE, fake), patch(_MANAGER_DB, fake):
         yield
+
+
+def _set_deck_mode(factory, session_id: str, deck_mode) -> None:
+    """Store *deck_mode* on *session_id*'s row (the deck owner's, where it is read)."""
+    db = factory()
+    try:
+        us = db.query(UserSession).filter(UserSession.session_id == session_id).one()
+        us.deck_mode = deck_mode
+        db.commit()
+    finally:
+        db.close()
 
 
 def _add_message(factory, session_id: str, *, role: str, content: str,
@@ -88,7 +95,7 @@ def _add_message(factory, session_id: str, *, role: str, content: str,
 # duplicate_session decides graph capability and then locks the ACTIVE Graph
 # Release before constructing the copy's UserSession (correction C-2), because
 # #261 makes a graph-capable conversation's pin immutable from creation. A
-# marker-carrying duplicate therefore requires a live active release to exist.
+# pinned (non-legacy) duplicate therefore requires a live active release to exist.
 #
 # Two releases are published, and the SOURCE session is pinned to the SUPERSEDED
 # one. That is what gives the pin assertions their teeth: duplication must never
@@ -160,79 +167,7 @@ def _pin_of(factory, session_id: str):
 
 
 # ---------------------------------------------------------------------------
-# The opt-out in the FIRST user message selects the monolith; its absence the graph.
-# ---------------------------------------------------------------------------
-
-
-class TestThePhraseSelectsTheEngine:
-    def test_the_phrase_is_exactly_the_agreed_string(self):
-        """Pinned verbatim: the whole switch is this literal, typed by a human.
-
-        Every other test in this file builds its messages FROM the constant, so
-        they would all follow a changed value silently — this is the one that
-        would not.
-        """
-        assert LEGACY_MODE_PHRASE == "USE LEGACY MODE"
-        assert AGENT_MODE_PHRASE == "USE AGENT MODE"
-
-    @pytest.mark.parametrize("message_type", MESSAGE_TYPES)
-    def test_phrase_in_first_user_message_selects_monolith(
-        self, session_with_messages, _session_unit_engine, message_type
-    ):
-        sid = session_with_messages([_PHRASE_MESSAGE], message_type=message_type)
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "monolith"
-
-    @pytest.mark.parametrize("message_type", MESSAGE_TYPES)
-    def test_absence_of_the_phrase_selects_graph(
-        self, session_with_messages, _session_unit_engine, message_type
-    ):
-        sid = session_with_messages([_PLAIN_MESSAGE], message_type=message_type)
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "graph"
-
-    def test_the_old_agent_mode_phrase_still_selects_graph(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """Pre-inversion habit: typing the old opt-in is harmless."""
-        sid = session_with_messages([_AGENT_MESSAGE])
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "graph"
-
-    def test_the_opt_out_wins_when_both_phrases_are_present(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """The rule is "graph UNLESS the opt-out": the opt-out is decisive."""
-        sid = session_with_messages(
-            [f"{AGENT_MODE_PHRASE} -- actually, {LEGACY_MODE_PHRASE}"]
-        )
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "monolith"
-
-    def test_the_match_is_a_substring_anywhere_in_the_message(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """§D0: a loose substring match is the intended (unhardened) form."""
-        sid = session_with_messages([f"hello there, {LEGACY_MODE_PHRASE}, thanks"])
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "monolith"
-
-    def test_the_match_is_case_sensitive(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """Pins a judgment call: the constant's own casing is the trigger.
-
-        Loose on position, exact on case — a lowercase 'use legacy mode' in
-        prose is far likelier to be accidental than the shouted form.  One
-        `.lower()` reverses it if the operator wants the looser rule.
-        """
-        sid = session_with_messages([LEGACY_MODE_PHRASE.lower() + " please"])
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "graph"
-
-
-# ---------------------------------------------------------------------------
-# Sticky: only the EARLIEST user row counts.
+# Sticky: later turns never move a deck.
 # ---------------------------------------------------------------------------
 
 
@@ -241,82 +176,16 @@ class TestStickiness:
     def test_mode_is_sticky_across_later_turns(
         self, session_with_messages, _session_unit_engine, message_type
     ):
-        """Turn 2 and turn 3 carry no phrase and must still resolve to monolith."""
+        """A legacy deck's turns 2 and 3 still resolve to monolith."""
+        factory = _make_factory(_session_unit_engine)
         sid = session_with_messages(
-            [_PHRASE_MESSAGE, "make slide 2 blue", "now add a summary"],
+            [_PLAIN_MESSAGE, "make slide 2 blue", "now add a summary"],
             assistant_messages=["done", "done again"],
             message_type=message_type,
         )
-        with _patched(_make_factory(_session_unit_engine)):
+        _set_deck_mode(factory, sid, "legacy")
+        with _patched(factory):
             assert resolve_engine_mode(sid) == "monolith"
-
-    @pytest.mark.parametrize("message_type", MESSAGE_TYPES)
-    def test_a_later_phrase_does_not_switch_a_graph_session(
-        self, session_with_messages, _session_unit_engine, message_type
-    ):
-        """Otherwise turn n writes rows while turn n-1 wrote deck_json."""
-        sid = session_with_messages(
-            [_PLAIN_MESSAGE, _PHRASE_MESSAGE, _PHRASE_MESSAGE],
-            message_type=message_type,
-        )
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "graph"
-
-    def test_an_assistant_message_carrying_the_phrase_is_ignored(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """Echoed tool output must not be able to flip the engine."""
-        sid = session_with_messages(
-            [_PLAIN_MESSAGE], assistant_messages=[f"I will {LEGACY_MODE_PHRASE}"]
-        )
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "graph"
-
-    def test_an_assistant_only_transcript_carrying_the_phrase_is_ignored(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """No user row at all: the assistant's phrase is still not a marker."""
-        sid = session_with_messages([], assistant_messages=[_PHRASE_MESSAGE])
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "graph"
-
-    def test_an_assistant_message_that_predates_the_first_user_turn_is_ignored(
-        self, empty_session, _session_unit_engine
-    ):
-        """The version of the test above that a dropped `role` filter fails.
-
-        Sabotage found this: with the assistant row LATER than the user's, the
-        earliest-row rule alone still returns the user's message, so dropping
-        the role filter changes nothing.  An assistant/info row written before
-        the user's first turn is the shape that actually needs the filter.
-        """
-        factory = _make_factory(_session_unit_engine)
-        _add_message(
-            factory, empty_session, role="assistant", content=_PHRASE_MESSAGE,
-            message_type="llm_response", offset_seconds=-30,
-        )
-        _add_message(
-            factory, empty_session, role="user", content=_PLAIN_MESSAGE,
-            message_type="user_input",
-        )
-        with _patched(factory):
-            assert resolve_engine_mode(empty_session) == "graph"
-
-    def test_a_system_role_message_carrying_the_phrase_is_ignored(
-        self, empty_session, _session_unit_engine
-    ):
-        """POST /sessions/{id}/messages accepts an arbitrary role (sessions.py:658).
-
-        A 'system' row carrying the phrase on a session with no user turn is
-        unusual but reachable, and must not select the monolith.
-        """
-        factory = _make_factory(_session_unit_engine)
-        _add_message(
-            factory, empty_session, role="system", content=_PHRASE_MESSAGE
-        )
-        with _patched(factory):
-            assert resolve_engine_mode(empty_session) == "graph"
-
 
 # ---------------------------------------------------------------------------
 # Defaults: a deck with nothing to say is the graph; no deck at all is not.
@@ -334,18 +203,18 @@ class TestDefaults:
     def test_mcp_created_deck_gets_monolith(
         self, mcp_created_session, _session_unit_engine
     ):
-        """MCP stays on the monolith: its persisted first message is marked.
+        """MCP stays on the monolith: its deck is stored as legacy.
 
-        ``enqueue_create_job`` persists ``with_legacy_marker(prompt)`` as the
-        create_deck deck's first user row (pinned in test_mcp_legacy_marker);
-        this is the resolver half -- the marked prompt resolves to the
-        monolith, so a browser turn on an MCP deck cannot land on the graph
-        with no pin.
+        MCP creates its deck with ``deck_mode="legacy"`` (Task 5) and persists
+        the prompt verbatim; this is the resolver half -- a legacy MCP deck
+        resolves to the monolith, so a browser turn on it cannot land on the
+        graph with no pin.
         """
         factory = _make_factory(_session_unit_engine)
+        _set_deck_mode(factory, mcp_created_session, "legacy")
         _add_message(
             factory, mcp_created_session, role="user",
-            content=with_legacy_marker(_PLAIN_MESSAGE), message_type="user_query",
+            content=_PLAIN_MESSAGE, message_type="user_query",
         )
         with _patched(factory):
             assert resolve_engine_mode(mcp_created_session) == "monolith"
@@ -353,7 +222,7 @@ class TestDefaults:
     def test_an_unmarked_mcp_style_session_gets_graph(
         self, mcp_created_session, _session_unit_engine
     ):
-        """Why the marker is needed: agent_config does not decide the engine."""
+        """``agent_config`` does not decide the engine: only the stored mode does."""
         with _patched(_make_factory(_session_unit_engine)):
             assert resolve_engine_mode(mcp_created_session) == "graph"
 
@@ -365,15 +234,6 @@ class TestDefaults:
     def test_no_session_id_gets_monolith(self):
         assert resolve_engine_mode(None) == "monolith"
         assert resolve_engine_mode("") == "monolith"
-
-    def test_empty_first_user_message_gets_graph(
-        self, session_with_messages, _session_unit_engine
-    ):
-        """And a later opt-out cannot rescue it: the empty first row decides."""
-        sid = session_with_messages(["", _PHRASE_MESSAGE])
-        with _patched(_make_factory(_session_unit_engine)):
-            assert resolve_engine_mode(sid) == "graph"
-
 
 # ---------------------------------------------------------------------------
 # Ruling W-3: the mode belongs to the OWNER DECK, not the calling session.
@@ -405,13 +265,14 @@ class TestOwnerDeckResolution:
     def test_contributor_inherits_the_owner_decks_monolith_mode(
         self, contributor_session
     ):
-        """The opt-out is on the OWNER's transcript; the contributor has none."""
+        """Legacy is stored on the OWNER's row; the contributor's row is NULL."""
         factory = contributor_session._factory
+        _set_deck_mode(factory, contributor_session._owner_session_id, "legacy")
         _add_message(
             factory,
             contributor_session._owner_session_id,
             role="user",
-            content=_PHRASE_MESSAGE,
+            content=_PLAIN_MESSAGE,
             message_type="user_input",
         )
         _add_message(
@@ -428,42 +289,17 @@ class TestOwnerDeckResolution:
                 == "monolith"
             )
 
-    def test_contributor_phrase_does_not_switch_the_owners_graph_deck(
+    def test_the_owner_session_resolves_its_own_deck_mode(
         self, contributor_session
     ):
-        """The divergence W-3 closes: two contributors, one deck, two engines."""
+        """An owner session is its own deck owner — the same hop, no parent."""
         factory = contributor_session._factory
+        _set_deck_mode(factory, contributor_session._owner_session_id, "legacy")
         _add_message(
             factory,
             contributor_session._owner_session_id,
             role="user",
             content=_PLAIN_MESSAGE,
-            message_type="user_input",
-        )
-        _add_message(
-            factory,
-            contributor_session.contributor_session_id,
-            role="user",
-            content=_PHRASE_MESSAGE,
-            message_type="user_query",
-            offset_seconds=10,
-        )
-        with _patched(factory):
-            assert (
-                resolve_engine_mode(contributor_session.contributor_session_id)
-                == "graph"
-            )
-
-    def test_the_owner_session_resolves_its_own_transcript(
-        self, contributor_session
-    ):
-        """An owner session is its own deck owner — the same hop, no parent."""
-        factory = contributor_session._factory
-        _add_message(
-            factory,
-            contributor_session._owner_session_id,
-            role="user",
-            content=_PHRASE_MESSAGE,
         )
         with _patched(factory):
             assert (
@@ -473,7 +309,7 @@ class TestOwnerDeckResolution:
 
 
 # ---------------------------------------------------------------------------
-# duplicate_session carries the marker — and only the marker.
+# duplicate_session copies the owner's deck_mode, and no message.
 # ---------------------------------------------------------------------------
 
 
@@ -494,12 +330,12 @@ def _messages_of(factory, session_id: str):
         db.close()
 
 
-class TestDuplicateCarriesTheMarker:
+class TestDuplicateKeepsTheOwnersEngine:
     """A duplicate keeps its SOURCE deck's engine.
 
-    Since 2026-10-12 the carried marker is the LEGACY opt-out: a graph source
-    yields a pinned copy with no messages (no user row resolves to the graph);
-    a legacy source yields an unpinned copy carrying exactly the opt-out row.
+    Since Deck Mode (Task 5) the copy takes the deck owner's stored
+    ``deck_mode``: a legacy source yields an unpinned legacy copy, any other a
+    pinned copy.  No copy carries a message; the old marker-row carry is gone.
     """
 
     def test_duplicate_of_a_graph_mode_deck_stays_in_graph_mode(
@@ -543,7 +379,7 @@ class TestDuplicateCarriesTheMarker:
         factory = deck_with_three_rows._factory
         sid = deck_with_three_rows.session_id
         _seed_releases_pinning_source_to_the_superseded_one(factory, sid)
-        _add_message(factory, sid, role="user", content=_AGENT_MESSAGE,
+        _add_message(factory, sid, role="user", content=_PLAIN_MESSAGE,
                      message_type="user_query")
         _add_message(factory, sid, role="assistant", content="here you go",
                      message_type="llm_response", offset_seconds=5)
@@ -571,72 +407,44 @@ class TestDuplicateCarriesTheMarker:
             assert resolve_engine_mode(copy["session_id"]) == "graph"
         assert _pin_of(factory, copy["session_id"]) == _ACTIVE_RELEASE_ID
 
-    def test_only_the_marker_row_is_copied(self, deck_with_three_rows):
-        """Copying more rows would replay a phantom conversation into the copy."""
-        factory = deck_with_three_rows._factory
-        sid = deck_with_three_rows.session_id
-        _seed_releases_pinning_source_to_the_superseded_one(factory, sid)
-        _add_message(factory, sid, role="user", content=_PHRASE_MESSAGE,
-                     message_type="user_query")
-        _add_message(factory, sid, role="assistant", content="here you go",
-                     message_type="llm_response", offset_seconds=5)
-        _add_message(factory, sid, role="user", content="make it blue",
-                     message_type="user_input", offset_seconds=10)
-
-        copy = deck_with_three_rows.duplicate()
-
-        rows = _messages_of(factory, copy["session_id"])
-        assert len(rows) == 1
-        assert rows[0].role == "user"
-        assert rows[0].content == _PHRASE_MESSAGE
-        # Preserved so _hydrate_chat_history's HUMAN_TYPES allowlist treats the
-        # carried row exactly as it treated the original.
-        assert rows[0].message_type == "user_query"
-
     def test_duplicate_of_a_legacy_deck_stays_legacy_and_unpinned(
         self, deck_with_three_rows
     ):
-        """The legacy copy carries the opt-out and takes no pin.
+        """The copy keeps the owner's stored legacy mode: it resolves to the
+        monolith, takes no pin and carries no message.
 
         An active release is available here, and the legacy copy still takes no
-        pin: capability decides whether a pin is selected at all.
+        pin.  The source's first message is plain text: the column, not the
+        text, makes it legacy.
         """
         factory = deck_with_three_rows._factory
-        _seed_releases_pinning_source_to_the_superseded_one(
-            factory, deck_with_three_rows.session_id
-        )
-        _add_message(
-            factory,
-            deck_with_three_rows.session_id,
-            role="user",
-            content=_PHRASE_MESSAGE,
-            message_type="user_input",
-        )
+        sid = deck_with_three_rows.session_id
+        _seed_releases_pinning_source_to_the_superseded_one(factory, sid)
+        _set_deck_mode(factory, sid, "legacy")
+        _add_message(factory, sid, role="user", content=_PLAIN_MESSAGE,
+                     message_type="user_input")
 
         copy = deck_with_three_rows.duplicate()
 
-        assert [r.content for r in _messages_of(factory, copy["session_id"])] == [
-            _PHRASE_MESSAGE
-        ]
+        assert _messages_of(factory, copy["session_id"]) == []
         with _patched(factory):
             assert resolve_engine_mode(copy["session_id"]) == "monolith"
         assert _pin_of(factory, copy["session_id"]) is None
 
-    def test_duplicate_from_a_contributor_session_carries_the_owner_marker(
+    def test_duplicate_from_a_contributor_session_copies_the_owners_legacy_mode(
         self, contributor_session
     ):
-        """A contributor duplicating a legacy deck gets a legacy copy."""
+        """A contributor duplicating a legacy deck gets a legacy copy.
+
+        The mode is read off the deck OWNER's row; the owner's first row is not
+        copied.
+        """
         factory = contributor_session._factory
-        _seed_releases_pinning_source_to_the_superseded_one(
-            factory, contributor_session._owner_session_id
-        )
-        _add_message(
-            factory,
-            contributor_session._owner_session_id,
-            role="user",
-            content=_PHRASE_MESSAGE,
-            message_type="user_input",
-        )
+        owner_sid = contributor_session._owner_session_id
+        _seed_releases_pinning_source_to_the_superseded_one(factory, owner_sid)
+        _set_deck_mode(factory, owner_sid, "legacy")
+        _add_message(factory, owner_sid, role="user", content=_PLAIN_MESSAGE,
+                     message_type="user_input")
 
         with contributor_session._patched():
             copy = contributor_session._sm.duplicate_session(
@@ -644,8 +452,7 @@ class TestDuplicateCarriesTheMarker:
                 created_by="contributor@example.com",
             )
 
-        rows = _messages_of(factory, copy["session_id"])
-        assert [r.content for r in rows] == [_PHRASE_MESSAGE]
+        assert _messages_of(factory, copy["session_id"]) == []
         with _patched(factory):
             assert resolve_engine_mode(copy["session_id"]) == "monolith"
         assert _pin_of(factory, copy["session_id"]) is None
@@ -655,8 +462,8 @@ class TestDuplicateCarriesTheMarker:
     ):
         """Resolving the contributor to the deck owner decides capability.
 
-        The contributor's OWN transcript carries the opt-out; the owner's does
-        not, so the copy is graph -- and its pin is its own, from the active row.
+        The owner's mode is unset, so the copy is graph -- and its pin is its
+        own, from the active row, not the owner's superseded one.
         """
         factory = contributor_session._factory
         _seed_releases_pinning_source_to_the_superseded_one(
@@ -673,7 +480,7 @@ class TestDuplicateCarriesTheMarker:
             factory,
             contributor_session.contributor_session_id,
             role="user",
-            content=_PHRASE_MESSAGE,
+            content="my own first ask",
             message_type="user_query",
             offset_seconds=10,
         )
@@ -692,82 +499,72 @@ class TestDuplicateCarriesTheMarker:
             _SUPERSEDED_RELEASE_ID
         )
 
-    def test_the_carried_marker_predates_the_copys_own_rows(
-        self, deck_with_three_rows
-    ):
-        """restore_version prunes messages by timestamp, so the marker must be
-        older than anything the new conversation writes — it keeps the source
-        row's created_at, which is older than the copy itself."""
-        factory = deck_with_three_rows._factory
-        _seed_releases_pinning_source_to_the_superseded_one(
-            factory, deck_with_three_rows.session_id
-        )
-        _add_message(
-            factory,
-            deck_with_three_rows.session_id,
-            role="user",
-            content=_PHRASE_MESSAGE,
-            offset_seconds=-3600,
-        )
-
-        copy = deck_with_three_rows.duplicate()
-
-        rows = _messages_of(factory, copy["session_id"])
-        db = factory()
-        try:
-            copy_row = (
-                db.query(UserSession)
-                .filter(UserSession.session_id == copy["session_id"])
-                .one()
-            )
-            assert rows[0].created_at < copy_row.created_at
-        finally:
-            db.close()
-
 
 # ---------------------------------------------------------------------------
-# The shared predicate every creator uses to decide whether to pin.
+# Task 6: the phrase, its helpers and the startup pin backfill are deleted; the
+# marker type that hides a kept row is not.
 # ---------------------------------------------------------------------------
 
+# What the deleted names look like, as a pattern rather than as the names: the
+# Step 4 grep for them over ``tests`` must come back empty, this file included.
+# Measured before the deletion, it matches exactly the fourteen names Task 6
+# deletes in these three modules and nothing else: the two mode phrases, the two
+# ``selects_*`` predicates and the legacy-marker helper (conversation_engine);
+# the agent-mode predicate and the re-exported phrases and predicate
+# (chat_service); the backfill, its in-transaction helper and its result type,
+# and the phrase imports (conversation_pins).  As a pattern it also catches a
+# survivor under a new name.
+_PHRASE_ERA_NAME = re.compile(r"PHRASE|^_?selects_|legacy_marker|[Bb]ackfill")
 
-class TestTheCreationPredicate:
-    """``selects_graph_engine`` decides the PIN at every creator, and
-    ``resolve_engine_mode`` decides the ENGINE; they must agree on every input,
-    or turn 1 creates an unpinned deck that the resolver sends to the graph."""
 
-    @pytest.mark.parametrize(
-        ("content", "expected"),
-        [
-            (None, True),
-            ("", True),
-            (_PLAIN_MESSAGE, True),
-            (_AGENT_MESSAGE, True),
-            (_PHRASE_MESSAGE, False),
-            (LEGACY_MODE_PHRASE.lower(), True),
-        ],
-        ids=["no-message", "empty", "plain", "old-agent-phrase", "legacy", "lowercase"],
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "src.domain.conversation_engine",
+        "src.api.services.chat_service",
+        "src.services.conversation_pins",
+    ],
+)
+def test_the_phrase_helpers_are_gone(module_name):
+    """No message text selects an engine any more, and boot pins nothing, so no
+    module offers a phrase, a phrase predicate or the startup backfill."""
+    module = importlib.import_module(module_name)
+    leftovers = sorted(name for name in dir(module) if _PHRASE_ERA_NAME.search(name))
+    assert leftovers == [], f"{module_name} still defines {leftovers}"
+
+
+@pytest.mark.parametrize(
+    ("module_name", "name"),
+    [
+        ("src.domain.conversation_engine", "ENGINE_MODE_MARKER_MESSAGE_TYPE"),
+        ("src.domain.conversation_engine", "is_transcript_message"),
+        ("src.api.services.chat_service", "ENGINE_MODE_MARKER_MESSAGE_TYPE"),
+    ],
+)
+def test_the_marker_symbols_stay(module_name, name):
+    """The row a clear or a delete keeps is still re-typed and hidden: these stay."""
+    assert hasattr(importlib.import_module(module_name), name)
+
+
+def test_the_marker_type_keeps_its_stored_value():
+    """Kept rows already in the database carry this string; a new value would
+    show them in every transcript again."""
+    from src.domain.conversation_engine import (
+        ENGINE_MODE_MARKER_MESSAGE_TYPE,
+        is_transcript_message,
     )
-    def test_the_predicate(self, content, expected):
-        from src.domain.conversation_engine import selects_graph_engine
 
-        assert selects_graph_engine(content) is expected
+    assert ENGINE_MODE_MARKER_MESSAGE_TYPE == "engine_mode_marker"
+    assert is_transcript_message("engine_mode_marker") is False
+    assert is_transcript_message("user_input") is True
 
-    @pytest.mark.parametrize(
-        "first", [_PLAIN_MESSAGE, _AGENT_MESSAGE, _PHRASE_MESSAGE, ""]
-    )
-    def test_the_predicate_agrees_with_the_resolver(
-        self, session_with_messages, _session_unit_engine, first
-    ):
-        from src.domain.conversation_engine import selects_graph_engine
 
-        sid = session_with_messages([first])
-        with _patched(_make_factory(_session_unit_engine)):
-            mode = resolve_engine_mode(sid)
-        assert (mode == "graph") is selects_graph_engine(first)
-
-    def test_with_legacy_marker_is_idempotent_and_keeps_the_prompt(self):
-        marked = with_legacy_marker(_PLAIN_MESSAGE)
-        assert marked.startswith(LEGACY_MODE_PHRASE)
-        assert marked.endswith(_PLAIN_MESSAGE)
-        assert with_legacy_marker(marked) == marked
-        assert with_legacy_marker(_PHRASE_MESSAGE) == _PHRASE_MESSAGE
+def test_the_glossary_defines_deck_mode():
+    """CONTEXT.md carries the **Deck Mode** term (spec 2026-10-22 §8) with its
+    Avoid list.  Whitespace is normalised, so the entry may wrap anywhere."""
+    context = (Path(__file__).resolve().parents[2] / "CONTEXT.md").read_text()
+    entry = re.search(r"^\*\*Deck Mode\*\*:(.*?)(?:\n[ \t]*\n|\Z)", context, re.S | re.M)
+    assert entry, "CONTEXT.md has no **Deck Mode**: entry"
+    body = " ".join(entry.group(1).split())
+    assert "Avoid" in body, body
+    assert 'engine mode, graph/monolith, "USE LEGACY MODE"' in body, body
