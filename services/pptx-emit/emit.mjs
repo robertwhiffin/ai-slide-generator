@@ -5,7 +5,7 @@
 //   { slides: [ { width, height, records, notes? } ], title?, font_mode? }
 // where each record is one of:
 //   { kind: 'rect',  x, y, w, h, fill, stroke?, strokeW?, radius? }
-//   { kind: 'image', x, y, w, h, src }   // src: dataURL or http(s)
+//   { kind: 'image', x, y, w, h, src }   // src: data: URI only (SDR-4437 F-CR-35)
 //   { kind: 'text',  x, y, w, h, runs: [{text, bold, italic, color, size, family, breakLine?, underline?}], align, valign }
 // Walker produces records in paint order (pre-order DOM walk); we emit in that
 // order so stacking contexts follow the browser's behavior.
@@ -84,15 +84,13 @@ function emitRect(s, r) {
 }
 
 function emitImage(s, r) {
-  const opts = { x: px(r.x), y: px(r.y), w: px(r.w), h: px(r.h) };
+  // SDR-4437 F-CR-35: never hand pptxgenjs a `path` — it reads a filesystem
+  // path or fetches an https URL and embeds the bytes, so records are
+  // data: URIs or nothing. pptx_from_records.py drops these first; this is
+  // the backstop for a raw payload.
+  if (!(typeof r.src === 'string' && r.src.startsWith('data:'))) return;
+  const opts = { x: px(r.x), y: px(r.y), w: px(r.w), h: px(r.h), data: r.src };
   if (r.rotate) opts.rotate = r.rotate;
-  if (typeof r.src === 'string' && r.src.startsWith('data:')) {
-    opts.data = r.src;
-  } else if (r.src) {
-    opts.path = r.src;
-  } else {
-    return;
-  }
   s.addImage(opts);
 }
 
