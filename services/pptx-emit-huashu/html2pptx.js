@@ -130,12 +130,14 @@ async function addBackground(slideData, targetSlide, tmpDir) {
     // and `path:` for filesystem paths. The vanilla huashu code always
     // assigned to path, which silently drops the bg when src is a base64
     // data URL (e.g., our preprocessor's rasterized gradient).
+    //
+    // SDR-4437 F-CR-35: data: only. A `path` is read from disk (or fetched)
+    // by pptxgenjs and embedded, and the URL comes from deck CSS — so any
+    // other source is skipped rather than resolved.
     if (src.startsWith('data:')) {
       targetSlide.background = { data: src };
-    } else if (src.startsWith('file://')) {
-      targetSlide.background = { path: src.replace('file://', '') };
     } else {
-      targetSlide.background = { path: src };
+      console.error('[html2pptx] skipped a non-data: background image');
     }
   } else if (slideData.background.type === 'color' && slideData.background.value) {
     targetSlide.background = { color: slideData.background.value };
@@ -150,18 +152,20 @@ function addElements(slideData, targetSlide, pres) {
       // `path:` for filesystem paths. The vanilla huashu code always
       // assigned to `path`, which caused "Unable to read media" when a
       // <canvas> was rasterized to a base64 dataURL by our preprocessor.
-      const imageOpts = {
+      //
+      // SDR-4437 F-CR-35: data: only — see addBackground. el.src is the
+      // deck's attribute, reported even when the slide CSP blocked the load.
+      if (!(typeof el.src === 'string' && el.src.startsWith('data:'))) {
+        console.error('[html2pptx] skipped a non-data: image');
+        continue;
+      }
+      targetSlide.addImage({
         x: el.position.x,
         y: el.position.y,
         w: el.position.w,
-        h: el.position.h
-      };
-      if (typeof el.src === 'string' && el.src.startsWith('data:')) {
-        imageOpts.data = el.src;
-      } else {
-        imageOpts.path = el.src.startsWith('file://') ? el.src.replace('file://', '') : el.src;
-      }
-      targetSlide.addImage(imageOpts);
+        h: el.position.h,
+        data: el.src
+      });
     } else if (el.type === 'line') {
       targetSlide.addShape(pres.ShapeType.line, {
         x: el.x1,
