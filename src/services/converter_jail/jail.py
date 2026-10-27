@@ -60,15 +60,17 @@ class ResourceLimits:
     nproc: Optional[int] = None  # None -> leave current soft limit
 
 
-def build_scrubbed_env() -> dict:
+def build_scrubbed_env(home: Optional[str] = None) -> dict:
     """Build the child environment: only PATH/LANG survive; HOME/TMPDIR point
-    at a fresh temp dir. No DATABRICKS_*, no Fernet key, no Lakebase creds."""
+    at ``home``, or a fresh temp dir the caller must remove when ``home`` is
+    None. No DATABRICKS_*, no Fernet key, no Lakebase creds."""
     env: dict = {}
     for key in _ENV_WHITELIST:
         if key in os.environ:
             env[key] = os.environ[key]
     env.setdefault("LANG", "C.UTF-8")
-    home = tempfile.mkdtemp(prefix="jail_home_")
+    if home is None:
+        home = tempfile.mkdtemp(prefix="jail_home_")
     env["HOME"] = home
     env["TMPDIR"] = home
     env["PYTHONHASHSEED"] = "0"

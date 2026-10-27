@@ -46,17 +46,45 @@ SIDECAR_SCRIPT = SIDECAR_DIR / "emit_deck.mjs"
 SIDECAR_SYS_LIBS_DIR = SIDECAR_DIR / "sys-libs"
 SIDECAR_TIMEOUT_SECONDS = 180  # huashu opens chromium per-slide; slower than pptx-emit
 
+# SDR-4437 F-CR-35: the only environment keys the node/Chromium child gets.
+# No DATABRICKS_*, no Fernet key, no Lakebase creds. HOME stays real (unlike
+# the converter jail's scrubbed env): Playwright finds Chromium under
+# ~/.cache/ms-playwright. Proxy and CA settings stay so the page can still
+# load Chart.js from its CDN.
+_SIDECAR_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "LD_LIBRARY_PATH",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    "XDG_CACHE_HOME",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+)
+
 
 def sidecar_subprocess_env() -> dict[str, str]:
     """Build the env dict for any node subprocess that ends up spawning
-    Chromium. Prepends ``services/pptx-emit-huashu/sys-libs/`` onto
+    Chromium: an allowlist of the app's environment (see
+    ``_SIDECAR_ENV_ALLOWLIST``), never a copy of it. Prepends
+    ``services/pptx-emit-huashu/sys-libs/`` onto
     ``LD_LIBRARY_PATH`` if the directory exists, so Chromium can find the
     bundled libnspr4/libnss3/etc. on Databricks Apps where the host glibc-
     next runtime libs aren't installed. Scoping it here (not as a global
     env in app.yaml) prevents the Python process from accidentally loading
     incompatible libs from the bundle.
     """
-    env = os.environ.copy()
+    env = {k: os.environ[k] for k in _SIDECAR_ENV_ALLOWLIST if k in os.environ}
     if SIDECAR_SYS_LIBS_DIR.exists():
         existing = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = (

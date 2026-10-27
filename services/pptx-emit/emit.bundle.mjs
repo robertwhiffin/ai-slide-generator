@@ -15451,15 +15451,9 @@ function emitRect(s, r) {
   }
 }
 function emitImage(s, r) {
-  const opts = { x: px(r.x), y: px(r.y), w: px(r.w), h: px(r.h) };
+  if (!(typeof r.src === "string" && r.src.startsWith("data:"))) return;
+  const opts = { x: px(r.x), y: px(r.y), w: px(r.w), h: px(r.h), data: r.src };
   if (r.rotate) opts.rotate = r.rotate;
-  if (typeof r.src === "string" && r.src.startsWith("data:")) {
-    opts.data = r.src;
-  } else if (r.src) {
-    opts.path = r.src;
-  } else {
-    return;
-  }
   s.addImage(opts);
 }
 function emitText(s, r, fontMode) {

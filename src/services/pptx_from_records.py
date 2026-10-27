@@ -26,6 +26,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from src.services.converter_jail.jail import build_scrubbed_env
+
 logger = logging.getLogger(__name__)
 
 def _resolve_sidecar_dir() -> Path:
@@ -81,6 +83,46 @@ def _sidecar_entrypoint() -> Path:
     return SIDECAR_BUNDLE if SIDECAR_BUNDLE.exists() else SIDECAR_SCRIPT
 
 
+def _drop_non_data_images(slides: list[Any]) -> list[Any]:
+    """Remove every image record whose ``src`` is not a ``data:`` URI.
+
+    SDR-4437 F-CR-35: pptxgenjs resolves any other ``src`` as a filesystem
+    path (``fs.readFileSync``) or an https URL and embeds the bytes in the
+    deck, so a client-supplied ``/proc/self/environ`` came back inside the
+    .pptx. The records are client-controlled, so this is the authoritative
+    gate; ``emit.mjs`` repeats it. Nothing legitimate is lost: the walker
+    emits ``data:`` URIs only, and the slide CSP (``img-src data:``) already
+    blocks any other ``<img>`` source in the preview.
+
+    The check mirrors ``emit.mjs`` exactly (``r.kind === 'image'``,
+    ``typeof src === 'string' && src.startsWith('data:')``), and the sidecar
+    receives this filtered structure re-serialized, so what passes here is
+    what the sidecar sees.
+    """
+    dropped = 0
+    cleaned: list[Any] = []
+    for slide in slides:
+        records = slide.get("records") if isinstance(slide, dict) else None
+        if isinstance(records, list):
+            kept = []
+            for record in records:
+                if isinstance(record, dict) and record.get("kind") == "image":
+                    src = record.get("src")
+                    if not (isinstance(src, str) and src.startswith("data:")):
+                        dropped += 1
+                        continue
+                kept.append(record)
+            slide = {**slide, "records": kept}
+        cleaned.append(slide)
+    if dropped:
+        logger.warning(
+            "Dropped %d image record(s) with a non-data: src before the "
+            "pptx-emit sidecar (SDR-4437 F-CR-35)",
+            dropped,
+        )
+    return cleaned
+
+
 def build_pptx(
     title: str,
     slides: list[dict[str, Any]],
@@ -108,7 +150,7 @@ def build_pptx(
     if font_mode not in ("universal", "custom", "google_slides"):
         font_mode = "universal"
 
-    payload = {"title": title, "font_mode": font_mode, "slides": slides}
+    payload = {"title": title, "font_mode": font_mode, "slides": _drop_non_data_images(slides)}
     payload_bytes = json.dumps(payload).encode("utf-8")
 
     with tempfile.TemporaryDirectory() as td:
@@ -119,12 +161,16 @@ def build_pptx(
             " ".join(cmd), len(payload_bytes), len(slides),
         )
         try:
+            # SDR-4437 F-CR-35: the sidecar holds no credentials of its own.
+            # Defence in depth only — it runs as the app's OS user, so the
+            # image-src filter above is what removes the file-read primitive.
             result = subprocess.run(
                 cmd,
                 input=payload_bytes,
                 capture_output=True,
                 timeout=SIDECAR_TIMEOUT_SECONDS,
                 check=False,
+                env=build_scrubbed_env(home=td),
             )
         except subprocess.TimeoutExpired as e:
             raise EmitError(f"Sidecar timed out after {SIDECAR_TIMEOUT_SECONDS}s") from e
