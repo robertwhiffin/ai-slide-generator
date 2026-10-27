@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol
 import requests
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied
+from databricks.sdk.service.catalog import ModelService, RateLimitRateLimitKey
 
 CatalogFailureCode = Literal["catalog_forbidden", "catalog_unavailable"]
 EndpointValidationCode = Literal[
@@ -24,6 +25,7 @@ EndpointValidationCode = Literal[
     "endpoint_update_canceled",
     "endpoint_not_gateway_model",
     "endpoint_not_chat_model",
+    "endpoint_rate_limited",
 ]
 
 
@@ -73,18 +75,14 @@ _TRANSPORT_FAILURES: tuple[type[BaseException], ...] = (
 )
 
 
-GATEWAY_ENDPOINTS_PATH = "/api/ai-gateway/v2/endpoints"
+#: Unity Catalog model services (``AiGatewayAPI``, databricks-sdk >= 0.123.0).
+#: Every foundation model lives in the ``system.ai`` schema; listing that schema
+#: returns them all in one page where an unscoped list takes ten.
+SYSTEM_AI_MODEL_SERVICES_PARENT = "schemas/system.ai"
 GATEWAY_CHAT_API_TYPE = "mlflow/v1/chat/completions"
 _GATEWAY_PREFIX = "databricks-"
 _SYSTEM_AI_PREFIX = "system.ai."
-
-
-def gateway_invocable_name(gateway_endpoint_name: str) -> str | None:
-    """``databricks-<m>`` -> ``system.ai.<m>`` (spec §2 naming rule); otherwise ``None``."""
-    if not gateway_endpoint_name.startswith(_GATEWAY_PREFIX):
-        return None
-    model = gateway_endpoint_name[len(_GATEWAY_PREFIX):]
-    return f"{_SYSTEM_AI_PREFIX}{model}" if model else None
+_MODEL_SERVICE_PREFIX = "model-services/"
 
 
 def gateway_endpoint_name(model_name: str) -> str:
@@ -92,6 +90,35 @@ def gateway_endpoint_name(model_name: str) -> str:
     if model_name.startswith(_SYSTEM_AI_PREFIX):
         return f"{_GATEWAY_PREFIX}{model_name[len(_SYSTEM_AI_PREFIX):]}"
     return model_name
+
+
+def model_service_resource_name(model_name: str) -> str:
+    """The model-service resource for a role's model name.
+
+    A legacy ``databricks-<m>`` serving-endpoint name is the ``system.ai.<m>``
+    service (spec §2 naming rule); any other name is looked up as-is.
+    """
+    if model_name.startswith(_GATEWAY_PREFIX) and len(model_name) > len(_GATEWAY_PREFIX):
+        model_name = f"{_SYSTEM_AI_PREFIX}{model_name[len(_GATEWAY_PREFIX):]}"
+    return f"{_MODEL_SERVICE_PREFIX}{model_name}"
+
+
+def _is_chat_model(service: ModelService) -> bool:
+    return GATEWAY_CHAT_API_TYPE in (service.supported_api_types or ())
+
+
+def _is_rate_limited_to_zero(service: ModelService) -> bool:
+    """A service-wide limit of zero requests or tokens refuses every caller.
+
+    Per-user, per-group and per-principal limits are ignored: they do not stop
+    the model working for everyone.
+    """
+    limits = (service.config.rate_limits if service.config else None) or ()
+    return any(
+        limit.key == RateLimitRateLimitKey.RATE_LIMIT_KEY_SERVICE
+        and (limit.requests == 0 or limit.tokens == 0)
+        for limit in limits
+    )
 
 
 class ModelEndpointCatalog(Protocol):
@@ -197,8 +224,13 @@ class DatabricksModelEndpointCatalog:
         self._workspace_client = workspace_client
 
     def list_system_models(self) -> SystemModelDiscovery:
+        # The SDK fetches pages lazily, so every page is read inside the guard.
         try:
-            listed = self._workspace_client.api_client.do("GET", GATEWAY_ENDPOINTS_PATH)
+            listed = list(
+                self._workspace_client.ai_gateway.list_model_services(
+                    parent=SYSTEM_AI_MODEL_SERVICES_PARENT
+                )
+            )
         except PermissionDenied as error:
             raise ModelEndpointCatalogFailure(
                 "catalog_forbidden",
@@ -213,18 +245,24 @@ class DatabricksModelEndpointCatalog:
             ) from error
 
         discovered: list[SystemModelEndpoint] = []
-        for entry in (listed or {}).get("endpoints") or ():
-            name = entry.get("name") if isinstance(entry, dict) else None
+        for service in listed:
+            name = service.name
             if not isinstance(name, str) or not name.strip():
                 raise ModelEndpointCatalogFailure(
                     "catalog_unavailable",
                     "Model endpoint discovery returned an endpoint without a name.",
                     True,
                 )
-            invocable = gateway_invocable_name(name)
-            # Offer only names the save rule accepts (validate_gateway_model_name),
-            # so the picker never lists a model the save then refuses with a 422.
-            if invocable is None or not _GATEWAY_MODEL_NAME.fullmatch(invocable):
+            if not name.startswith(_MODEL_SERVICE_PREFIX):
+                continue
+            invocable = name[len(_MODEL_SERVICE_PREFIX):]
+            # Offer only what the save accepts (validate_gateway_model_name and the
+            # remote check), so the picker never lists a model the save refuses.
+            if (
+                not _GATEWAY_MODEL_NAME.fullmatch(invocable)
+                or not _is_chat_model(service)
+                or _is_rate_limited_to_zero(service)
+            ):
                 continue
             discovered.append(
                 SystemModelEndpoint(name=invocable, display_name=None, description=None, docs=None)
@@ -236,9 +274,10 @@ class DatabricksModelEndpointCatalog:
     def validate_custom_endpoint_remote(self, name: str) -> None:
         # Defensive: never let a path-shaped name reach the interpolated request.
         validate_endpoint_name_policy(name)
-        path = f"{GATEWAY_ENDPOINTS_PATH}/{gateway_endpoint_name(name)}"
         try:
-            detail = self._workspace_client.api_client.do("GET", path)
+            service = self._workspace_client.ai_gateway.get_model_service(
+                name=model_service_resource_name(name)
+            )
         except NotFound as error:
             raise _validation_failure(
                 "endpoint_unknown", "Endpoint name was not found.", False
@@ -256,10 +295,15 @@ class DatabricksModelEndpointCatalog:
                 True,
             ) from error
 
-        api_types = (detail or {}).get("supported_api_types") or ()
-        if GATEWAY_CHAT_API_TYPE not in api_types:
+        if not _is_chat_model(service):
             raise _validation_failure(
                 "endpoint_not_chat_model", "Endpoint is not a chat model.", False
+            )
+        if _is_rate_limited_to_zero(service):
+            raise _validation_failure(
+                "endpoint_rate_limited",
+                "This model has a rate limit of zero, so it cannot be used.",
+                False,
             )
 
 

@@ -470,14 +470,24 @@ through the Unity AI Gateway rather than the Serving Endpoints API.
 
 ### Discovery (`src/services/model_endpoint_catalog.py`)
 
-`DatabricksModelEndpointCatalog.list_system_models` calls
-`GET /api/ai-gateway/v2/endpoints` as the app service principal, using the SDK's generic
-`api_client.do`. For each returned entry whose name begins with `databricks-`, it maps
-`databricks-<model>` → `system.ai.<model>` and surfaces the `system.ai.*` name in the
-picker. Entries without the `databricks-` prefix are dropped, because the naming rule
-gives them no invocable `system.ai` form. The list response carries no
-`supported_api_types`, so discovery does not filter by API type — embedding and other
-non-chat endpoints appear in the list and are refused at save time.
+`DatabricksModelEndpointCatalog.list_system_models` calls the SDK's
+`ai_gateway.list_model_services(parent="schemas/system.ai")`
+(`GET /api/2.1/unity-catalog/model-services`, databricks-sdk >= 0.123.0) as the app
+service principal. The SDK follows `next_page_token` lazily, so every page is read inside
+the failure mapping. Scoping the list to the `system.ai` schema returns every foundation
+model in one page (an unscoped list takes about ten pages and includes other catalogs'
+services). Each service is named `model-services/system.ai.<model>`; the picker shows the
+`system.ai.<model>` part.
+
+A service is left out of the picker when any of these hold, so the picker never offers a
+model the save then refuses:
+
+- its name fails the save rule below;
+- its `supported_api_types` lacks `mlflow/v1/chat/completions` (embedding models);
+- it has a service-wide rate limit (`RATE_LIMIT_KEY_SERVICE`) of zero requests or zero
+  tokens. Every call to such a model fails with 403 "rate limit set to 0". Per-user,
+  per-group and per-principal limits are ignored. The Model tab says "Models with a rate
+  limit of zero are not shown."
 
 There is no custom-name free-text input field. The workbench offers only models the
 Gateway list returns.
@@ -492,10 +502,11 @@ A save that leaves the model unchanged is not checked by this rule, which means 
 still named `databricks-*` continues saving normally until an admin changes its model.
 
 **Remote Gateway lookup.** `validate_custom_endpoint_remote` calls
-`GET /api/ai-gateway/v2/endpoints/<name>` through a bounded catalog client (5 s retry,
-3 s HTTP). It maps `system.ai.<m>` to `databricks-<m>` before the lookup. If the response
-`supported_api_types` does not contain `mlflow/v1/chat/completions`, the save is rejected
-with `endpoint_not_chat_model`.
+`ai_gateway.get_model_service(name="model-services/<name>")` through a bounded catalog
+client (5 s retry, 3 s HTTP). A legacy `databricks-<m>` name is looked up as
+`system.ai.<m>`. The save is rejected with `endpoint_not_chat_model` if
+`supported_api_types` lacks `mlflow/v1/chat/completions`, and with `endpoint_rate_limited`
+if the service has a service-wide rate limit of zero.
 
 ### Legacy names on stored releases
 
@@ -505,7 +516,13 @@ At runtime the name is passed through to the Gateway unchanged. The Gateway acce
 and `databricks-claude-opus-5-5` both answered on the Gateway route (ws2a spec §2
 platform-facts table). Task 9's live acceptance test re-confirms this for a pinned
 pre-ws2a conversation against the deployed instance. No rewriting or republishing is
-required. The v1 seed manifest is not changed.
+required.
+
+The v1 seed pins `system.ai.claude-opus-5-5` on four roles (architect, data_analyst,
+build_reviewer, fixer) and `system.ai.claude-haiku-4-5` on the other three; it moved off
+`claude-opus-5` when that model was rate-limited to zero. The seed is inserted only into
+an empty database, so a database seeded earlier keeps its stored v1 release until an
+admin publishes a new one.
 
 ---
 
