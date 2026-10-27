@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Iterator
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -65,7 +66,7 @@ def _legacy_manifest():
     for d in manifest.definitions:
         # Replace gateway endpoints with legacy databricks endpoints
         endpoint_map = {
-            "system.ai.claude-opus-5": "databricks-claude-opus-4-6",
+            "system.ai.claude-opus-5-5": "databricks-claude-opus-4-6",
             "system.ai.claude-haiku-4-5": "databricks-claude-haiku-5-5",
         }
         legacy_endpoint = endpoint_map.get(d.model.endpoint_name, d.model.endpoint_name)
@@ -3191,12 +3192,13 @@ class _RecordingRemoteEndpointValidator:
 
 
 class _RecordingApiClient:
-    """Minimal recording fake for the Unity AI Gateway detail lookup."""
+    """Minimal recording SDK transport below the real ``AiGatewayAPI`` model-service lookup."""
 
     def __init__(self, *, response=None, error=None):
         self._response = response
         self._error = error
         self.calls: list[tuple[str, str]] = []
+        self._cfg = SimpleNamespace(workspace_id=None)
 
     def do(self, method, path, **_kwargs):
         self.calls.append((method, path))
@@ -3469,13 +3471,13 @@ def test_current_endpoint_candidate_is_remotely_validated_once_immediately_befor
 
 
 def _catalog_remote_validator(api_client: _RecordingApiClient):
-    from types import SimpleNamespace
+    from databricks.sdk.service.catalog import AiGatewayAPI
 
     from src.services.graph_configuration import CatalogRemoteEndpointDraftValidator
     from src.services.model_endpoint_catalog import DatabricksModelEndpointCatalog
 
     catalog = DatabricksModelEndpointCatalog(
-        SimpleNamespace(api_client=api_client)
+        SimpleNamespace(ai_gateway=AiGatewayAPI(api_client))
     )
     return CatalogRemoteEndpointDraftValidator(lambda: catalog)
 
@@ -3515,6 +3517,23 @@ def _remote_table_cases():
             "endpoint_not_chat_model",
             "Endpoint is not a chat model.",
             id="not-chat-model",
+        ),
+        pytest.param(
+            _RecordingApiClient(
+                response={
+                    "name": f"model-services/{CUSTOM_ENDPOINT}",
+                    "supported_api_types": ["mlflow/v1/chat/completions"],
+                    "config": {"rate_limits": [{
+                        "key": "RATE_LIMIT_KEY_SERVICE",
+                        "renewal_period": "RATE_LIMIT_RENEWAL_PERIOD_MINUTE",
+                        "requests": 0,
+                        "tokens": 0,
+                    }]},
+                }
+            ),
+            "endpoint_rate_limited",
+            "This model has a rate limit of zero, so it cannot be used.",
+            id="rate-limited-to-zero",
         ),
     ]
 

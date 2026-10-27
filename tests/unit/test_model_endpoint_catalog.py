@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 from databricks.sdk.errors import DatabricksError, NotFound, PermissionDenied
+from databricks.sdk.service.catalog import AiGatewayAPI
 
 from src.services.model_endpoint_catalog import (
     CATALOG_RETRY_TIMEOUT_SECONDS,
@@ -15,97 +16,103 @@ from src.services.model_endpoint_catalog import (
     bounded_catalog_workspace_client,
     bounded_discovery_workspace_client,
     gateway_endpoint_name,
-    gateway_invocable_name,
+    model_service_resource_name,
     validate_endpoint_name_policy,
     validate_gateway_model_name,
 )
 
-
-class RecordingServingEndpoints:
-    def __init__(self, *, listed=(), detail=None, list_error=None, get_error=None):
-        self.listed = listed
-        self.detail = detail
-        self.list_error = list_error
-        self.get_error = get_error
-        self.list_calls = 0
-        self.get_calls: list[str] = []
-
-    def list(self):
-        self.list_calls += 1
-        if self.list_error is not None:
-            raise self.list_error
-        return iter(self.listed)
-
-    def get(self, name):
-        self.get_calls.append(name)
-        if self.get_error is not None:
-            raise self.get_error
-        return self.detail
-
-    def __getattr__(self, name):
-        raise AssertionError(f"unexpected serving API access: {name}")
+MODEL_SERVICES_PATH = "/api/2.1/unity-catalog/model-services"
+SYSTEM_AI_PARENT = "schemas/system.ai"
+CHAT_API_TYPES = (
+    "mlflow/v1/chat/completions",
+    "anthropic/v1/messages",
+    "cursor/v1/chat/completions",
+    "mlflow/v1/responses",
+)
 
 
-def catalog_for(serving_endpoints):
+class RecordingTransport:
+    """The SDK ``ApiClient`` below the real ``AiGatewayAPI``.
+
+    ``pages`` are list-response bodies served in order; ``details`` maps a GET
+    path to its body.  Either may hold an exception, raised when reached.
+    """
+
+    def __init__(self, *, pages=(), details=None):
+        self.pages = list(pages)
+        self.details = dict(details or {})
+        self.calls: list[tuple[str, str, dict]] = []
+        self._cfg = SimpleNamespace(workspace_id=None)
+
+    def do(self, method, path, query=None, headers=None):
+        # The SDK reuses and mutates one query dict across pages.
+        self.calls.append((method, path, dict(query or {})))
+        if path == MODEL_SERVICES_PATH:
+            outcome = self.pages.pop(0)
+        else:
+            outcome = self.details[path]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def model_services_catalog(transport):
     return DatabricksModelEndpointCatalog(
-        SimpleNamespace(serving_endpoints=serving_endpoints)
+        SimpleNamespace(ai_gateway=AiGatewayAPI(transport))
     )
 
 
-def endpoint(name, *foundation_models, task=None):
-    return SimpleNamespace(
-        name=name,
-        task=task,
-        config=SimpleNamespace(
-            served_entities=[
-                SimpleNamespace(foundation_model=foundation_model)
-                for foundation_model in foundation_models
-            ]
-        ),
-    )
+def service(model, *, api_types=CHAT_API_TYPES, rate_limits=None):
+    """A model service shaped like the BASIC view the workspace returns."""
+    config = {"routing": {}}
+    if rate_limits is not None:
+        config["rate_limits"] = rate_limits
+    return {
+        "config": config,
+        "create_time": "2026-09-22T00:00:00Z",
+        "created_by": "9b1dee82-5151-4a9a-9ea5-acc8bcc227ec",
+        "effective_owner": "9b1dee82-5151-4a9a-9ea5-acc8bcc227ec",
+        "etag": "CAESCAAAAaDM5FgU",
+        "metastore_id": "c0da88f1-c020-4992-b8c9-c828e556889d",
+        "name": f"model-services/{model}",
+        "supported_api_types": list(api_types),
+        "update_time": "2026-09-22T00:00:00Z",
+        "updated_by": "9b1dee82-5151-4a9a-9ea5-acc8bcc227ec",
+    }
 
 
-def foundation_model(*, display_name=None, description=None, docs=None):
-    return SimpleNamespace(
-        display_name=display_name,
-        description=description,
-        docs=docs,
-    )
+def rate_limit(key="RATE_LIMIT_KEY_SERVICE", *, requests=None, tokens=None):
+    limit = {"key": key, "renewal_period": "RATE_LIMIT_RENEWAL_PERIOD_MINUTE"}
+    if requests is not None:
+        limit["requests"] = requests
+    if tokens is not None:
+        limit["tokens"] = tokens
+    return limit
 
 
-class RecordingApiClient:
-    def __init__(self, *, responses=None, errors=None):
-        self.responses = dict(responses or {})
-        self.errors = dict(errors or {})
-        self.calls: list[tuple[str, str]] = []
-
-    def do(self, method, path, **kwargs):
-        assert not kwargs, f"unexpected request options: {kwargs}"
-        self.calls.append((method, path))
-        if path in self.errors:
-            raise self.errors[path]
-        return self.responses[path]
+def page(*services, next_page_token=None):
+    body = {"model_services": list(services)}
+    if next_page_token is not None:
+        body["next_page_token"] = next_page_token
+    return body
 
 
-def gateway_catalog(api_client):
-    return DatabricksModelEndpointCatalog(SimpleNamespace(api_client=api_client))
+def offered(transport):
+    return [item.name for item in model_services_catalog(transport).list_system_models().endpoints]
 
 
-LIST_PATH = "/api/ai-gateway/v2/endpoints"
+def test_list_system_models_lists_the_system_ai_schema_and_strips_the_resource_prefix_sorted():
+    transport = RecordingTransport(pages=[page(
+        service("system.ai.gpt-oss-120b"),
+        service("system.ai.claude-opus-5-5"),
+        service("system.ai.claude-haiku-4-5"),
+    )])
 
+    discovery = model_services_catalog(transport).list_system_models()
 
-def test_list_system_models_maps_gateway_endpoints_to_system_ai_names_sorted():
-    api = RecordingApiClient(responses={LIST_PATH: {"endpoints": [
-        {"name": "databricks-gpt-oss-120b"},
-        {"name": "databricks-claude-opus-5-5"},
-        {"name": "databricks-bge-large-en"},
-    ]}})
-
-    discovery = gateway_catalog(api).list_system_models()
-
-    assert api.calls == [("GET", LIST_PATH)]
+    assert transport.calls == [("GET", MODEL_SERVICES_PATH, {"parent": SYSTEM_AI_PARENT})]
     assert [item.name for item in discovery.endpoints] == [
-        "system.ai.bge-large-en",
+        "system.ai.claude-haiku-4-5",
         "system.ai.claude-opus-5-5",
         "system.ai.gpt-oss-120b",
     ]
@@ -115,78 +122,141 @@ def test_list_system_models_maps_gateway_endpoints_to_system_ai_names_sorted():
     )
 
 
-def test_list_system_models_drops_names_without_the_databricks_prefix():
-    api = RecordingApiClient(responses={LIST_PATH: {"endpoints": [
-        {"name": "my-provisioned-endpoint"},
-        {"name": "databricks-gemma-3-12b"},
-    ]}})
+def test_list_system_models_follows_every_page():
+    transport = RecordingTransport(pages=[
+        page(service("system.ai.claude-sonnet-5"), next_page_token="page-2"),
+        page(service("system.ai.claude-opus-5-5"), next_page_token="page-3"),
+        page(service("system.ai.gemma-3-12b")),
+    ])
 
-    assert [item.name for item in gateway_catalog(api).list_system_models().endpoints] == [
-        "system.ai.gemma-3-12b"
+    assert offered(transport) == [
+        "system.ai.claude-opus-5-5",
+        "system.ai.claude-sonnet-5",
+        "system.ai.gemma-3-12b",
+    ]
+    assert [call[2] for call in transport.calls] == [
+        {"parent": SYSTEM_AI_PARENT},
+        {"parent": SYSTEM_AI_PARENT, "page_token": "page-2"},
+        {"parent": SYSTEM_AI_PARENT, "page_token": "page-3"},
+    ]
+
+
+def test_list_system_models_drops_services_that_cannot_chat():
+    transport = RecordingTransport(pages=[page(
+        service("system.ai.bge-large-en", api_types=("mlflow/v1/embeddings",)),
+        service("system.ai.no-api-types", api_types=()),
+        service("system.ai.claude-opus-5-5"),
+    )])
+
+    assert offered(transport) == ["system.ai.claude-opus-5-5"]
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [
+        rate_limit(requests=0, tokens=0),
+        rate_limit(requests=0),
+        rate_limit(tokens=0),
+        rate_limit(requests=0, tokens=5000),
+    ],
+)
+def test_list_system_models_drops_a_service_rate_limited_to_zero_for_everyone(limit):
+    transport = RecordingTransport(pages=[page(
+        service("system.ai.claude-opus-5", rate_limits=[limit]),
+        service("system.ai.claude-opus-5-5"),
+    )])
+
+    assert offered(transport) == ["system.ai.claude-opus-5-5"]
+
+
+def test_list_system_models_keeps_nonzero_and_per_principal_rate_limits():
+    """Only a service-wide zero applies to every caller; a per-user, per-group or
+    per-principal zero, or a non-zero service limit, leaves the model usable."""
+    transport = RecordingTransport(pages=[page(
+        service("system.ai.claude-sonnet-5", rate_limits=[rate_limit(requests=60, tokens=100000)]),
+        service("system.ai.claude-haiku-4-5", rate_limits=[rate_limit(requests=60)]),
+        service("system.ai.claude-opus-5-5", rate_limits=[
+            rate_limit("RATE_LIMIT_KEY_USER", requests=0, tokens=0),
+            rate_limit("RATE_LIMIT_KEY_USER_GROUP", requests=0),
+            rate_limit("RATE_LIMIT_KEY_SERVICE_PRINCIPAL", tokens=0),
+            rate_limit("RATE_LIMIT_KEY_USER_DEFAULT", requests=0),
+        ]),
+    )])
+
+    assert offered(transport) == [
+        "system.ai.claude-haiku-4-5",
+        "system.ai.claude-opus-5-5",
+        "system.ai.claude-sonnet-5",
     ]
 
 
 def test_list_system_models_drops_names_the_save_rule_would_refuse():
     """Every offered name must pass ``validate_gateway_model_name``: an entry
-    with a trailing ``_``/``-``/``.`` or uppercase letters is dropped, not
-    offered and then refused at save with ``endpoint_not_gateway_model``."""
-    api = RecordingApiClient(responses={LIST_PATH: {"endpoints": [
-        {"name": "databricks-trailing_"},
-        {"name": "databricks-trailing-"},
-        {"name": "databricks-Claude-Upper"},
-        {"name": "databricks-gemma-3-12b"},
-    ]}})
+    with a trailing ``_``/``-``/``.``, uppercase letters, or outside
+    ``system.ai`` is dropped, not offered and then refused at save."""
+    transport = RecordingTransport(pages=[page(
+        service("system.ai.trailing_"),
+        service("system.ai.trailing-"),
+        service("system.ai.Claude-Upper"),
+        service("blau.ts_ai_gateway.tba-test"),
+        {**service("system.ai.unprefixed"), "name": "system.ai.unprefixed"},
+        service("system.ai.gemma-3-12b"),
+    )])
 
-    offered = [item.name for item in gateway_catalog(api).list_system_models().endpoints]
+    names = offered(transport)
 
-    assert offered == ["system.ai.gemma-3-12b"]
-    for name in offered:
+    assert names == ["system.ai.gemma-3-12b"]
+    for name in names:
         validate_gateway_model_name(name)
 
 
-def test_list_system_models_returns_empty_success_for_no_endpoints():
-    api = RecordingApiClient(responses={LIST_PATH: {}})
+def test_list_system_models_returns_empty_success_for_no_services():
+    transport = RecordingTransport(pages=[{}])
 
-    assert gateway_catalog(api).list_system_models() == SystemModelDiscovery(endpoints=())
+    assert model_services_catalog(transport).list_system_models() == SystemModelDiscovery(
+        endpoints=()
+    )
 
 
 def test_list_system_models_refuses_an_entry_without_a_name():
-    api = RecordingApiClient(responses={LIST_PATH: {"endpoints": [{"id": "x"}]}})
+    nameless = service("system.ai.x")
+    del nameless["name"]
+    transport = RecordingTransport(pages=[page(nameless)])
 
     with pytest.raises(ModelEndpointCatalogFailure) as caught:
-        gateway_catalog(api).list_system_models()
+        model_services_catalog(transport).list_system_models()
     assert caught.value.code == "catalog_unavailable"
 
 
-@pytest.mark.parametrize(
-    ("error", "code", "retryable"),
-    [
-        (PermissionDenied("PROVIDER_SECRET"), "catalog_forbidden", False),
-        (DatabricksError("PROVIDER_SECRET"), "catalog_unavailable", True),
-        (TimeoutError("PROVIDER_SECRET"), "catalog_unavailable", True),
-        (requests.exceptions.ConnectionError("PROVIDER_SECRET"), "catalog_unavailable", True),
-    ],
-)
+_LISTING_FAILURES = [
+    (PermissionDenied("PROVIDER_SECRET"), "catalog_forbidden", False),
+    (DatabricksError("PROVIDER_SECRET"), "catalog_unavailable", True),
+    (TimeoutError("PROVIDER_SECRET"), "catalog_unavailable", True),
+    (requests.exceptions.ConnectionError("PROVIDER_SECRET"), "catalog_unavailable", True),
+]
+
+
+@pytest.mark.parametrize(("error", "code", "retryable"), _LISTING_FAILURES)
 def test_list_system_models_maps_gateway_failures(error, code, retryable):
-    api = RecordingApiClient(errors={LIST_PATH: error})
+    transport = RecordingTransport(pages=[error])
 
     with pytest.raises(ModelEndpointCatalogFailure) as caught:
-        gateway_catalog(api).list_system_models()
+        model_services_catalog(transport).list_system_models()
     assert (caught.value.code, caught.value.retryable) == (code, retryable)
     assert "PROVIDER_SECRET" not in str(caught.value)
 
 
-@pytest.mark.parametrize(
-    ("gateway", "invocable"),
-    [
-        ("databricks-claude-opus-5-5", "system.ai.claude-opus-5-5"),
-        ("databricks-", None),
-        ("claude-opus-5-5", None),
-        ("xdatabricks-claude", None),
-    ],
-)
-def test_gateway_invocable_name(gateway, invocable):
-    assert gateway_invocable_name(gateway) == invocable
+@pytest.mark.parametrize(("error", "code", "retryable"), _LISTING_FAILURES)
+def test_list_system_models_maps_a_failure_on_a_later_page(error, code, retryable):
+    """The SDK fetches pages lazily, so a later page fails during iteration."""
+    transport = RecordingTransport(pages=[
+        page(service("system.ai.claude-opus-5-5"), next_page_token="page-2"),
+        error,
+    ])
+
+    with pytest.raises(ModelEndpointCatalogFailure) as caught:
+        model_services_catalog(transport).list_system_models()
+    assert (caught.value.code, caught.value.retryable) == (code, retryable)
 
 
 @pytest.mark.parametrize(
@@ -200,53 +270,93 @@ def test_gateway_endpoint_name(model, gateway):
     assert gateway_endpoint_name(model) == gateway
 
 
-def detail_path(gateway_name):
-    return f"{LIST_PATH}/{gateway_name}"
+@pytest.mark.parametrize(
+    ("model", "resource"),
+    [
+        ("system.ai.claude-opus-5-5", "model-services/system.ai.claude-opus-5-5"),
+        ("databricks-claude-opus-4-6", "model-services/system.ai.claude-opus-4-6"),
+        ("blau.ts_ai_gateway.test", "model-services/blau.ts_ai_gateway.test"),
+        ("databricks-", "model-services/databricks-"),
+    ],
+)
+def test_model_service_resource_name(model, resource):
+    assert model_service_resource_name(model) == resource
 
 
-def test_remote_check_looks_up_the_mapped_gateway_endpoint_once():
-    path = detail_path("databricks-claude-opus-5-5")
-    api = RecordingApiClient(responses={path: {
-        "name": "databricks-claude-opus-5-5",
-        "supported_api_types": ["mlflow/v1/chat/completions", "anthropic/v1/messages"],
-    }})
-
-    assert gateway_catalog(api).validate_custom_endpoint_remote("system.ai.claude-opus-5-5") is None
-    assert api.calls == [("GET", path)]
+def detail_path(model):
+    return f"{MODEL_SERVICES_PATH}/{model}"
 
 
-def test_remote_check_looks_up_a_legacy_name_as_is():
-    path = detail_path("databricks-claude-opus-4-6")
-    api = RecordingApiClient(responses={path: {
-        "name": "databricks-claude-opus-4-6",
-        "supported_api_types": ["mlflow/v1/chat/completions"],
-    }})
+def test_remote_check_looks_up_the_model_service_once():
+    path = detail_path("system.ai.claude-opus-5-5")
+    transport = RecordingTransport(details={path: service("system.ai.claude-opus-5-5")})
 
-    gateway_catalog(api).validate_custom_endpoint_remote("databricks-claude-opus-4-6")
-    assert api.calls == [("GET", path)]
+    assert (
+        model_services_catalog(transport).validate_custom_endpoint_remote(
+            "system.ai.claude-opus-5-5"
+        )
+        is None
+    )
+    assert transport.calls == [("GET", path, {})]
 
 
-def test_remote_check_refuses_an_embedding_endpoint():
-    path = detail_path("databricks-bge-large-en")
-    api = RecordingApiClient(responses={path: {
-        "name": "databricks-bge-large-en",
-        "supported_api_types": ["mlflow/v1/embeddings"],
-    }})
+def test_remote_check_looks_up_a_legacy_name_as_its_system_ai_service():
+    path = detail_path("system.ai.claude-opus-4-6")
+    transport = RecordingTransport(details={path: service("system.ai.claude-opus-4-6")})
+
+    model_services_catalog(transport).validate_custom_endpoint_remote("databricks-claude-opus-4-6")
+    assert transport.calls == [("GET", path, {})]
+
+
+def test_remote_check_refuses_an_embedding_service():
+    path = detail_path("system.ai.bge-large-en")
+    transport = RecordingTransport(details={
+        path: service("system.ai.bge-large-en", api_types=("mlflow/v1/embeddings",)),
+    })
 
     with pytest.raises(EndpointValidationFailure) as caught:
-        gateway_catalog(api).validate_custom_endpoint_remote("system.ai.bge-large-en")
+        model_services_catalog(transport).validate_custom_endpoint_remote("system.ai.bge-large-en")
     assert (caught.value.code, caught.value.message, caught.value.retryable) == (
         "endpoint_not_chat_model", "Endpoint is not a chat model.", False,
     )
 
 
-def test_remote_check_refuses_a_detail_without_api_types():
-    path = detail_path("databricks-x")
-    api = RecordingApiClient(responses={path: {"name": "databricks-x"}})
+def test_remote_check_refuses_a_service_without_api_types():
+    path = detail_path("system.ai.x")
+    body = service("system.ai.x")
+    del body["supported_api_types"]
+    transport = RecordingTransport(details={path: body})
 
     with pytest.raises(EndpointValidationFailure) as caught:
-        gateway_catalog(api).validate_custom_endpoint_remote("system.ai.x")
+        model_services_catalog(transport).validate_custom_endpoint_remote("system.ai.x")
     assert caught.value.code == "endpoint_not_chat_model"
+
+
+def test_remote_check_refuses_a_service_rate_limited_to_zero_for_everyone():
+    path = detail_path("system.ai.claude-opus-5")
+    transport = RecordingTransport(details={
+        path: service("system.ai.claude-opus-5", rate_limits=[rate_limit(requests=0, tokens=0)]),
+    })
+
+    with pytest.raises(EndpointValidationFailure) as caught:
+        model_services_catalog(transport).validate_custom_endpoint_remote("system.ai.claude-opus-5")
+    assert (caught.value.code, caught.value.message, caught.value.retryable) == (
+        "endpoint_rate_limited",
+        "This model has a rate limit of zero, so it cannot be used.",
+        False,
+    )
+
+
+def test_remote_check_accepts_a_per_user_zero_rate_limit():
+    path = detail_path("system.ai.claude-opus-5-5")
+    transport = RecordingTransport(details={
+        path: service(
+            "system.ai.claude-opus-5-5",
+            rate_limits=[rate_limit("RATE_LIMIT_KEY_USER", requests=0, tokens=0)],
+        ),
+    })
+
+    model_services_catalog(transport).validate_custom_endpoint_remote("system.ai.claude-opus-5-5")
 
 
 @pytest.mark.parametrize(
@@ -268,12 +378,13 @@ def test_remote_check_refuses_a_detail_without_api_types():
     ],
 )
 def test_remote_check_maps_gateway_lookup_failures(error, code, message, retryable):
-    api = RecordingApiClient(errors={detail_path("databricks-m"): error})
+    transport = RecordingTransport(details={detail_path("system.ai.m"): error})
 
     with pytest.raises(EndpointValidationFailure) as caught:
-        gateway_catalog(api).validate_custom_endpoint_remote("system.ai.m")
+        model_services_catalog(transport).validate_custom_endpoint_remote("system.ai.m")
     assert (caught.value.code, caught.value.message, caught.value.retryable) == (code, message, retryable)
     assert "PROVIDER_SECRET" not in caught.value.message
+
 
 
 @pytest.mark.parametrize("url", ["http://host", " https://host", "//host", "dbfs://host"])
@@ -364,13 +475,13 @@ def test_validate_endpoint_name_policy_accepts_other_endpoint_names_verbatim(nam
 
 @pytest.mark.parametrize("name", _PATH_SHAPED_NAMES)
 def test_validate_custom_endpoint_remote_refuses_a_path_shaped_name_before_any_get(name):
-    api = RecordingApiClient()
+    transport = RecordingTransport()
 
     with pytest.raises(EndpointValidationFailure) as failure:
-        gateway_catalog(api).validate_custom_endpoint_remote(name)
+        model_services_catalog(transport).validate_custom_endpoint_remote(name)
 
     assert failure.value.code == "endpoint_url_not_allowed"
-    assert api.calls == []
+    assert transport.calls == []
 
 
 # Controller ruling on correction 8: the remote check runs under the exclusive
@@ -451,7 +562,7 @@ def test_bounded_endpoint_catalog_client_turns_a_transport_outage_into_endpoint_
     assert failure.value.retryable is True
     assert isinstance(failure.value.__cause__, TimeoutError)
     assert requested and set(requested) == {
-        ("GET", "https://unit.invalid/api/ai-gateway/v2/endpoints/exact endpoint name")
+        ("GET", "https://unit.invalid/api/2.1/unity-catalog/model-services/exact endpoint name")
     }
     # Every attempt reached the transport with the bounded 3 s timeout.
     assert transport_timeouts and set(transport_timeouts) == {3}

@@ -56,6 +56,9 @@ export interface ModelEndpointCatalogView {
 export const EMPTY_MODEL_DISCOVERY_MESSAGE =
   'No Databricks foundation-model endpoints are available to this identity.';
 
+/** Discovery leaves out models whose service-wide rate limit is zero; say so beside the list. */
+export const ZERO_RATE_LIMIT_MODELS_NOTE = 'Models with a rate limit of zero are not shown.';
+
 function matchesModelSearch(item: SystemModelEndpoint, search: string): boolean {
   const needle = search.trim().toLocaleLowerCase();
   if (!needle) return true;
@@ -546,6 +549,7 @@ export function DefinitionEditor({
             className="block w-full rounded-md border border-gray-300 p-2 font-normal"
           />
           <p aria-live="polite" className="text-xs text-gray-600">{modelCatalogStatus}</p>
+          <p className="text-xs text-gray-500">{ZERO_RATE_LIMIT_MODELS_NOTE}</p>
           {modelCatalog.status === 'error' && modelCatalog.errorMessage !== null && (
             <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800">
               {modelCatalog.errorRetryable

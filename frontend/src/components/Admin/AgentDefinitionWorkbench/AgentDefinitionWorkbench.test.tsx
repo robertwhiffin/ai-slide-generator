@@ -2470,6 +2470,16 @@ describe('AgentDefinitionWorkbench Model-tab endpoint discovery', () => {
     expect(putCalls(fetchMock)).toHaveLength(0);
   });
 
+  it('notes on the Model tab that models with a rate limit of zero are not shown', async () => {
+    mockWorkbenchWithPuts(() => apiResponse(500, null));
+    render(<AgentDefinitionWorkbench />);
+    await loadedNodeNavigation();
+    const panel = openModelTab();
+
+    await within(panel).findByRole('radiogroup', { name: 'Discovered models' });
+    expect(within(panel).getByText('Models with a rate limit of zero are not shown.')).toBeVisible();
+  });
+
   it('says exactly when no foundation-model endpoint is available and keeps the saved endpoint', async () => {
     mockWorkbenchWithPuts(() => apiResponse(500, null), syntheticAgentDefinitionWorkbench, () => catalogResponse([]));
     render(<AgentDefinitionWorkbench />);

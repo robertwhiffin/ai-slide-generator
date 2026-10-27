@@ -114,11 +114,11 @@ EXPECTED_FOREMAN_NODE = {
 }
 LOWERCASE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 EXPECTED_ENDPOINTS = {
-    "architect": "system.ai.claude-opus-5",
-    "data_analyst": "system.ai.claude-opus-5",
+    "architect": "system.ai.claude-opus-5-5",
+    "data_analyst": "system.ai.claude-opus-5-5",
     "builder": "system.ai.claude-haiku-4-5",
-    "build_reviewer": "system.ai.claude-opus-5",
-    "fixer": "system.ai.claude-opus-5",
+    "build_reviewer": "system.ai.claude-opus-5-5",
+    "fixer": "system.ai.claude-opus-5-5",
     "fix_reviewer": "system.ai.claude-haiku-4-5",
     "deck_reviewer": "system.ai.claude-haiku-4-5",
 }

@@ -86,7 +86,7 @@ dependencies = [
     # langgraph-prebuilt 1.0.10→1.1.0, added langgraph-sdk==0.4.2. These match
     # the repo-root requirements.txt and pyproject.toml. MUST be re-verified via
     # a devloop deploy on db-tellr-dev-pinfix or equivalent before PR3 ships.
-    "databricks-sdk==0.120.0",
+    "databricks-sdk==0.157.0",
     "mlflow[databricks]==3.14.0",
     "mlflow-skinny==3.14.0",
     "databricks-agents==1.11.0",
