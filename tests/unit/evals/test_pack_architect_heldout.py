@@ -16,6 +16,7 @@ from src.domain.deck_spec_slides import (
 from src.domain.skill_io import ArchitectOutput, DataRequest
 from src.domain.slide_alignment import align_slides
 from src.domain.slide_numbering import architect_slide_payload
+from src.domain.slide_operations import OperationsResult, apply_operations, compose_edit_spec
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
 from src.services.template_sections import section_inventory
 
@@ -633,7 +634,8 @@ def _by_position(spec):
 # #314: an insert reference changes the slide count, so it is checked by alignment instead
 # (test_insert_references_are_unambiguous_to_production). A blank case's deck is not the gold
 # (test_blank_references_align_to_production). An edit-operations reference has no deck_spec; it
-# is composed by production's own semantics instead (test_eval_operations_scorer).
+# is composed by production's own semantics instead (test_eval_operations_scorer), and checked
+# against the gold by test_operations_references_change_only_what_the_message_names.
 @pytest.mark.parametrize(
     "cid",
     [c for c in EDIT_CASES
@@ -722,6 +724,38 @@ def test_resolved_references_equal_the_expected_edit_positions(cid):
     references = c.payload["slide_references"]
     assert sorted({p for r in references for p in r["positions"]}) == c.expect["positions"]
     assert all(r["out_of_range"] == [] for r in references)
+
+
+@pytest.mark.parametrize("cid", OPERATIONS_CASES)
+def test_operations_references_change_only_what_the_message_names(cid):
+    """The two checks above, for a reference given as operations, which neither can read.
+
+    The scorer compares a candidate's deck-level fields with the REFERENCE's, so a reference that
+    also rewrote the deck (a narrative_arc after a delete, say) would pass itself and fail every
+    correct answer. Only the gold catches that.
+    """
+    c = _load(cid)
+    out = ArchitectOutput.model_validate(c.reference)
+    gold = DeckSpec.model_validate(case.gold_deck_spec(DECK))
+    result = apply_operations(gold.slides, out.operations)
+    assert isinstance(result, OperationsResult), result
+    composed = compose_edit_spec(gold, result, out.deck_changes)
+    assert isinstance(composed, DeckSpec), composed
+    # Deck-level fields are the gold's: none of these messages asks for a deck-level change.
+    assert composed.model_dump(exclude={"slides"}) == gold.model_dump(exclude={"slides"})
+    # Every slide an operation names, as its subject or its anchor, is one the message names.
+    named = {p for r in c.payload["slide_references"] for p in r["positions"]}
+    touched = {
+        p for op in out.operations for p in (op.position, op.after_position)
+        if p is not None and p >= 0
+    }
+    assert touched == named
+    # An update revises its slide's brief and nothing else.
+    by_position = {s.position: s.model_dump(exclude={"position"}) for s in gold.slides}
+    for op in out.operations:
+        if op.op == "update":
+            new, old = op.slides[0].model_dump(), by_position[op.position]
+            assert {k for k in new if new[k] != old[k]} == {"content_brief"}, op.position
 
 
 def test_a_discuss_case_still_names_a_slide():
