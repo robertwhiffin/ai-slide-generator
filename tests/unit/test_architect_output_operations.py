@@ -190,6 +190,46 @@ def test_edit_with_nothing_still_rejected():
         assert "deck_changes" in message
 
 
+def test_edit_with_explicit_empty_operations_validates():
+    # The rule is ``operations is not None``, not truthiness: an explicit empty list
+    # is a valid edit here and reaches the node, which reports a retryable
+    # "nothing to do" instead of failing schema validation.
+    out = ArchitectOutput.model_validate({"intent": "edit", "message": "m", "operations": []})
+
+    assert out.operations == []
+    assert out.target_positions == []
+    assert out.deck_changes is None
+
+
+@pytest.mark.parametrize(
+    ("intent", "payload"),
+    [
+        ("discuss", {}),
+        ("build", {"deck_spec": _deck_spec()}),
+        ("ask_data", {"data_request": {"metric": "revenue"}}),
+        ("confirm_design_contract", {"proposed_design_contract": {"slide_style_id": 3}}),
+    ],
+)
+def test_non_edit_intents_do_not_reject_operations_or_deck_changes(
+    intent: str, payload: dict[str, Any]
+):
+    # Only the edit rule reads the new fields; no other intent's rule changed, so
+    # a stray operations / deck_changes on another intent is carried, not rejected.
+    out = ArchitectOutput.model_validate(
+        {
+            "intent": intent,
+            "message": "m",
+            **payload,
+            "operations": [{"op": "delete", "position": 0}],
+            "deck_changes": {"title": "t"},
+        }
+    )
+
+    assert out.intent == intent
+    assert [(o.op, o.position) for o in out.operations] == [("delete", 0)]
+    assert out.deck_changes.title == "t"
+
+
 def test_old_shape_still_valid():
     spec = _deck_spec()
 
