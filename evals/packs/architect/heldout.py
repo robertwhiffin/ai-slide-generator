@@ -56,6 +56,24 @@ MESSAGES = {
         "Please make slide 4 a quick guide to which of the four patterns fits which kind of task"
     ),
     "edit_beside_blank": "Can you add a one-line takeaway beneath the stats on the fifth slide?",
+    # Architect edit operations (spec §9): delete, move, replace and a mixed edit on deck 2.
+    "delete_slide": (
+        "Delete slide 4. We'll circulate the numbers in a follow-up doc, so leave everything else "
+        "alone."
+    ),
+    "move_slide": (
+        "Could you move slide 5 so it sits straight after slide 3? The workflow should follow the "
+        "techniques."
+    ),
+    "replace_slide_expand": (
+        "Replace slide 3 with these three slides: an overview of the four patterns, one on system "
+        "prompts and few-shot examples, and one on chain-of-thought and structured output"
+    ),
+    "mixed_operations": (
+        "Delete slide 1, change the callout on slide 3 to say when to combine few-shot examples "
+        "with chain-of-thought, and expand the bullets on slide 2 into three slides, one per pain "
+        "point"
+    ),
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
@@ -64,6 +82,7 @@ HAS_DECK = (
     "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
     "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
     "fill_blank_slide", "edit_beside_blank",
+    *m.OPERATIONS_CASES,
 )
 # The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
 BLANK_AT = 3
@@ -222,6 +241,90 @@ INVENTED_FILL = {
     "assumes": "Audience has just met the four core patterns",
     "hands_off": "The patterns are only worth adopting if the gains are real",
 }
+
+
+# Architect edit operations (spec §9) on deck 2; ``m._op`` and friends build the operations.
+# delete_slide: slide 4 (position 3, the impact numbers) goes; nothing is rebuilt.
+DELETE_POS = 3
+# move_slide: slide 5 (position 4, the workflow) goes straight after slide 3 (position 2).
+MOVE_POS, MOVE_AFTER = 4, 2
+# replace_slide_expand: slide 3 (position 2, the four patterns) becomes these three slides.
+REPLACE_POS = 2
+REPLACE_SLIDES = [
+    {
+        "purpose": "Introduce the core techniques: an overview of the four prompt design patterns",
+        "content_brief": (
+            "Overview slide naming the four key patterns — system-prompt framing, few-shot "
+            "examples, chain-of-thought reasoning, and structured output formatting — as four "
+            "labelled tiles, with a one-line note that the next two slides cover them in pairs"
+        ),
+        "assumes": "Audience understands the problem from the previous slide",
+        "hands_off": (
+            "Four composable patterns cover the vast majority of prompt optimisation needs"
+        ),
+    },
+    {
+        "purpose": "Explain the first two patterns: system-prompt framing and few-shot examples",
+        "content_brief": (
+            "Two-column slide with system-prompt framing (set the role, constraints and tone once) "
+            "on the left and few-shot examples (show two or three input-output pairs) on the "
+            "right, each with a one-line example and when to use it"
+        ),
+        "assumes": "Audience has just seen the four patterns named",
+        "hands_off": "Framing and examples show the model what a good answer looks like",
+    },
+    {
+        "purpose": (
+            "Explain the other two patterns: chain-of-thought reasoning and structured output"
+        ),
+        "content_brief": (
+            "Two-column slide with chain-of-thought reasoning (ask for the steps before the "
+            "answer) on the left and structured output formatting (a schema or template for the "
+            "reply) on the right, each with a one-line example and when to use it, and a callout "
+            "on when to combine the patterns"
+        ),
+        "assumes": "Audience knows system-prompt framing and few-shot examples from the last slide",
+        "hands_off": "Reasoning steps and a fixed output shape make answers reliable and checkable",
+    },
+]
+# mixed_operations: delete slide 1 (position 0, the cover), revise slide 3's callout (position
+# 2), and expand slide 2's bullets (position 1, the three pain points) into three slides.
+MIXED_DELETE, MIXED_UPDATE, MIXED_REPLACE = 0, 2, 1
+MIXED_CALLOUT = (
+    "with a callout on when to combine them",
+    "with a callout on when to combine few-shot examples with chain-of-thought: a task that needs "
+    "both a fixed answer format and several reasoning steps",
+)
+MIXED_SLIDES = [
+    {
+        "purpose": "Define the problem, pain point 1: inconsistent outputs",
+        "content_brief": (
+            "Bullet slide showing how the same ad-hoc prompt gives different answers from one run "
+            "to the next, with a callout on what that costs in review time and user trust"
+        ),
+        "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
+        "hands_off": "Ad-hoc prompts make a model's outputs unpredictable",
+    },
+    {
+        "purpose": "Define the problem, pain point 2: wasted tokens and cost",
+        "content_brief": (
+            "Bullet slide showing how unfocused prompts and retries burn tokens, with a callout on "
+            "how that cost compounds across every request"
+        ),
+        "assumes": "Audience has seen that ad-hoc outputs are inconsistent",
+        "hands_off": "Ad-hoc prompts waste money on every call",
+    },
+    {
+        "purpose": "Define the problem, pain point 3: slow iteration",
+        "content_brief": (
+            "Bullet slide showing how changing a prompt without a test set means guessing, "
+            "re-checking by hand and slipping deadlines, with a callout summarising the "
+            "opportunity cost of all three pain points"
+        ),
+        "assumes": "Audience has seen the consistency and cost problems",
+        "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",
+    },
+]
 
 
 def _checklist_brief(deck: dict, position: int) -> str:
@@ -444,6 +547,82 @@ def generate(out_dir: pathlib.Path | None = None):
             beside, [BLANK_AT, BESIDE_POS],
             m._replaced_spec(beside["deck_spec"], {BLANK_AT: INVENTED_FILL}),
         ),
+    )
+
+    # Architect edit operations (spec §9): the references answer in operations against deck 2.
+    # ``positions`` is the rebuild set and ``inserted`` the new slides, both in the edited deck's
+    # numbering; ``layout`` (persisted positions, null = new) says which slide went where.
+    delete_message = (
+        "I'll delete slide 4, the impact numbers; the workflow and checklist slides move up to "
+        "slides 4 and 5."
+    )
+    _write(
+        out, "delete_slide", "mutation",
+        "delete slide 4 (position 3): only it goes, nothing is rebuilt and the workflow and "
+        "checklist slides move up unchanged; deleting position 4 (slide 5) is the 1-based slip",
+        {"intent": "edit", "positions": [], "inserted": [],
+         "layout": [p for p in range(6) if p != DELETE_POS]},
+        m._operations_out(delete_message, [m._op("delete", position=DELETE_POS)]),
+        m._operations_out(delete_message, [m._op("delete", position=DELETE_POS + 1)]),
+    )
+    move_message = (
+        "I'll move slide 5, the workflow, to straight after slide 3: it becomes slide 4, and the "
+        "impact numbers become slide 5."
+    )
+    _write(
+        out, "move_slide", "mutation",
+        "move slide 5 (position 4) to after slide 3 (position 2): a reorder that rebuilds "
+        "nothing; slipping both numbers by one moves the checklist after the impact slide instead",
+        {"intent": "edit", "positions": [], "inserted": [], "layout": [0, 1, 2, 4, 3, 5]},
+        m._operations_out(
+            move_message, [m._op("move", position=MOVE_POS, after_position=MOVE_AFTER)]),
+        m._operations_out(
+            move_message, [m._op("move", position=MOVE_POS + 1, after_position=MOVE_AFTER + 1)]),
+    )
+    replace_ops = [
+        m._op("replace", position=REPLACE_POS, slides=[m._content(s) for s in REPLACE_SLIDES]),
+    ]
+    replace_positions = list(range(REPLACE_POS, REPLACE_POS + len(REPLACE_SLIDES)))
+    replace_message = (
+        "I'll replace slide 3 with three slides: slide 3 becomes an overview of the four "
+        "patterns, and new slides 4 and 5 cover system prompts with few-shot examples, and "
+        "chain-of-thought with structured output. The impact, workflow and checklist slides become "
+        "slides 6 to 8."
+    )
+    _write(
+        out, "replace_slide_expand", "mutation",
+        "replace slide 3 (position 2) with three slides: the first rewrites position 2 in place "
+        "and two new slides follow at positions 3-4; the same plan as a whole grown deck_spec is "
+        "refused by production's alignment as ambiguous",
+        {"intent": "edit", "positions": replace_positions, "inserted": replace_positions[1:]},
+        m._operations_out(replace_message, replace_ops),
+        m._out("edit", replace_message, target_positions=replace_positions,
+               deck_spec=m._composed_spec(gold, replace_ops)),
+    )
+    mixed_ops = [
+        m._op("delete", position=MIXED_DELETE),
+        m._op("update", position=MIXED_UPDATE,
+              slides=[m._revised_content(gold, MIXED_UPDATE, MIXED_CALLOUT)]),
+        m._op("replace", position=MIXED_REPLACE, slides=[m._content(s) for s in MIXED_SLIDES]),
+    ]
+    mixed_message = (
+        "I'll delete slide 1, the cover, expand the pain points into three slides — slides 1, 2 "
+        "and 3, one per pain point — and change the callout on the techniques slide, now slide 4, "
+        "to say when to combine few-shot examples with chain-of-thought."
+    )
+    _write(
+        out, "mixed_operations", "mutation",
+        "delete slide 1 (position 0), revise slide 3 (position 2) and expand slide 2 (position 1) "
+        "into three, in one edit: production rebuilds positions 0-3 of the 7-slide result and "
+        "nothing else; dropping one of the three pain-point slides builds only two",
+        {"intent": "edit", "positions": [0, 1, 2, 3], "inserted": [1, 2],
+         "layout": [1, None, None, 2, 3, 4, 5]},
+        m._operations_out(mixed_message, mixed_ops),
+        m._operations_out(mixed_message, [
+            mixed_ops[0], mixed_ops[1],
+            m._op("replace", position=MIXED_REPLACE,
+                  slides=[m._content(s) for s in MIXED_SLIDES[:2]]),
+        ]),
     )
 
 

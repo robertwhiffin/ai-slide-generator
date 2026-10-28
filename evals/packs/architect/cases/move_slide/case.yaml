@@ -1,0 +1,19 @@
+kind: mutation
+fault: 'move slide 7 (position 6) to after slide 4 (position 3): a reorder that rebuilds
+  nothing; anchoring it after position 4 (slide 5) is the 1-based slip'
+expect:
+  intent: edit
+  positions: []
+  inserted: []
+  layout:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 6
+  - 4
+  - 5
+  - 7
+  - 8
+  - 9
+design_system_active: true

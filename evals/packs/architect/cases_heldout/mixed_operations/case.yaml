@@ -1,0 +1,24 @@
+kind: mutation
+fault: 'delete slide 1 (position 0), revise slide 3 (position 2) and expand slide
+  2 (position 1) into three, in one edit: production rebuilds positions 0-3 of the
+  7-slide result and nothing else; dropping one of the three pain-point slides builds
+  only two'
+expect:
+  intent: edit
+  positions:
+  - 0
+  - 1
+  - 2
+  - 3
+  inserted:
+  - 1
+  - 2
+  layout:
+  - 1
+  - null
+  - null
+  - 2
+  - 3
+  - 4
+  - 5
+design_system_active: true

@@ -1,0 +1,17 @@
+{
+  "intent": "edit",
+  "message": "I'll move slide 5, the workflow, to straight after slide 3: it becomes slide 4, and the impact numbers become slide 5.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "move",
+      "position": 4,
+      "after_position": 2,
+      "slides": null
+    }
+  ],
+  "deck_changes": null
+}

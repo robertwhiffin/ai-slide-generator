@@ -31,7 +31,11 @@ INSERT_CASES = ["add_slide_anchor", "add_slide_end", "add_slide_as_number", "add
 # #314 follow-up (manual insert, plan Task 11): the same deck with a manually inserted blank slide
 # spliced into its spec at BLANK_AT. Folded into NEW_CASE_IDS like the insert cases.
 BLANK_CASES = ["fill_blank_slide", "edit_beside_blank"]
-NEW_CASE_IDS = CASES_313 + INSERT_CASES + BLANK_CASES
+# Architect edit operations (spec §9): delete, move, replace and mixed edits on the same deck,
+# whose references answer in operations (no deck_spec). Folded into NEW_CASE_IDS like the insert
+# cases; tests/unit/evals/test_eval_operations_scorer.py checks their content and scoring.
+OPERATIONS_CASES = ["delete_slide", "move_slide", "replace_slide_expand", "mixed_operations"]
+NEW_CASE_IDS = CASES_313 + INSERT_CASES + BLANK_CASES + OPERATIONS_CASES
 CASE_IDS = EXISTING_CASE_IDS + NEW_CASE_IDS
 MUTATIONS = ["edit_request", "ask_data", "confirm_design"] + NEW_CASE_IDS
 EXPECT = {
@@ -53,6 +57,19 @@ EXPECT = {
     # through production's alignment, so a new slide beside the blank fails (D10).
     "fill_blank_slide": {"intent": "edit", "positions": [5], "inserted": []},
     "edit_beside_blank": {"intent": "edit", "positions": [6], "inserted": []},
+    # Edit operations: positions is the rebuild set and inserted the new slides, both in the
+    # edited deck's numbering; layout is each index's persisted position (None = a new slide).
+    "delete_slide": {
+        "intent": "edit", "positions": [], "inserted": [], "layout": [0, 1, 2, 3, 4, 6, 7, 8, 9],
+    },
+    "move_slide": {
+        "intent": "edit", "positions": [], "inserted": [], "layout": [0, 1, 2, 3, 6, 4, 5, 7, 8, 9],
+    },
+    "replace_slide_expand": {"intent": "edit", "positions": [4, 5, 6, 7], "inserted": [5, 6, 7]},
+    "mixed_operations": {
+        "intent": "edit", "positions": [1, 6, 7, 8], "inserted": [7, 8],
+        "layout": [0, 1, 3, 4, 5, 6, 7, None, None, 8, 9],
+    },
 }
 HAS_DECK = {"edit_request", "confirm_design", "discuss"} | set(NEW_CASE_IDS)
 EDIT_CASES = [c for c in CASE_IDS if EXPECT[c]["intent"] == "edit"]
@@ -216,6 +233,23 @@ SLIDE_REFERENCES = {
     ],
     "edit_beside_blank": [
         {"text": "slide 7", "slide_numbers": [7], "positions": [6], "out_of_range": []},
+    ],
+    # Edit operations: references name current slides (the one deleted, moved or replaced, and an
+    # anchor), never the edited deck's numbers.
+    "delete_slide": [
+        {"text": "slide 6", "slide_numbers": [6], "positions": [5], "out_of_range": []},
+    ],
+    "move_slide": [
+        {"text": "slide 7", "slide_numbers": [7], "positions": [6], "out_of_range": []},
+        {"text": "slide 4", "slide_numbers": [4], "positions": [3], "out_of_range": []},
+    ],
+    "replace_slide_expand": [
+        {"text": "slide 5", "slide_numbers": [5], "positions": [4], "out_of_range": []},
+    ],
+    "mixed_operations": [
+        {"text": "slide 3", "slide_numbers": [3], "positions": [2], "out_of_range": []},
+        {"text": "slide 2", "slide_numbers": [2], "positions": [1], "out_of_range": []},
+        {"text": "slide 8", "slide_numbers": [8], "positions": [7], "out_of_range": []},
     ],
 }
 LAYOUT =case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
@@ -595,9 +629,11 @@ def test_calibration_should_fail_is_wrong_and_valid(cid):
 
 
 # #314 follow-up: a blank case's should_fail is an edit too (test_blank_calibration_is_pinned).
+# So is an edit-operations case's: a wrong plan for the same edit (test_eval_operations_scorer).
 @pytest.mark.parametrize(
     "cid",
-    [c for c in CASE_IDS if c not in ("edit_request", *SLIPPED, *INSERT_CASES, *BLANK_CASES)],
+    [c for c in CASE_IDS
+     if c not in ("edit_request", *SLIPPED, *INSERT_CASES, *BLANK_CASES, *OPERATIONS_CASES)],
 )
 def test_calibration_has_the_wrong_intent(cid):
     bad = _cal(cid)["should_fail"]
@@ -806,9 +842,12 @@ def _by_position(spec):
 
 # #314: an insert reference changes the slide count, so it is checked by alignment instead
 # (test_insert_references_are_unambiguous_to_production). A blank case's deck is not the gold
-# (test_blank_references_align_to_production).
+# (test_blank_references_align_to_production). An edit-operations reference has no deck_spec; it
+# is composed by production's own semantics instead (test_eval_operations_scorer).
 @pytest.mark.parametrize(
-    "cid", [c for c in EDIT_CASES if c not in INSERT_CASES and c not in BLANK_CASES]
+    "cid",
+    [c for c in EDIT_CASES
+     if c not in INSERT_CASES and c not in BLANK_CASES and c not in OPERATIONS_CASES],
 )
 def test_edit_references_revise_only_their_targets(cid):
     ref = case.load_case(AGENT, cid, root=CASES).reference
@@ -891,7 +930,11 @@ def test_slide_references_are_pinned(cid):
 
 
 # #314: an insert's references name current slides, not its new positions (test_insert_anchors).
-@pytest.mark.parametrize("cid", [c for c in EDIT_CASES if c not in INSERT_CASES])
+# So do an edit-operations case's: a deleted or moved slide, an anchor, a replaced slide
+# (test_slide_references_are_pinned), while its positions are the edited deck's rebuild set.
+@pytest.mark.parametrize(
+    "cid", [c for c in EDIT_CASES if c not in INSERT_CASES and c not in OPERATIONS_CASES]
+)
 def test_resolved_references_equal_the_expected_edit_positions(cid):
     """A2's deterministic proof on the eval messages: the resolver yields every expected target."""
     c = case.load_case(AGENT, cid, root=CASES)

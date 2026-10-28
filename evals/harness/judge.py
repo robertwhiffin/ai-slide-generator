@@ -8,6 +8,7 @@ from typing import Literal
 from mlflow.genai import make_judge
 
 from evals.harness.case import Case, load_cases, PACKS_DIR, cases_dirname, split_kwargs
+from evals.harness.scorers import compose_operations_answer
 
 JUDGE_ENDPOINT = "databricks-claude-sonnet-5"
 
@@ -50,10 +51,23 @@ def _measures_dict(measures):
     return dataclasses.asdict(measures)
 
 
+def _judged(case: Case, answer):
+    """``answer`` as the judge sees it: an architect edit given as operations is shown in its
+    composed full-deck form, so it reads like a deck_spec answer (C2). Anything else is as-is."""
+    if case.agent_key != "architect":
+        return answer
+    return compose_operations_answer(answer, (case.payload or {}).get("current_deck_spec"))
+
+
 def judge_payload(case: Case, result, measures) -> dict:
+    """Everything the judge sees: the candidate, the reference, the brief and the measures.
+
+    The one place both judge paths (``mlflow_run``'s ``judge`` scorer and ``calibrate``) build it,
+    through ``_verdict``, so the candidate and the reference are normalised alike on both.
+    """
     return {
-        "candidate": result.structured,
-        "reference": case.reference,
+        "candidate": _judged(case, result.structured),
+        "reference": _judged(case, case.reference),
         "brief_or_finding": _brief_or_finding(case),
         "measures": _measures_dict(measures),
     }
@@ -72,10 +86,10 @@ def _verdict(judge, case: Case, candidate, measures=None) -> tuple[str, str]:
     For pass/fail, ``detail`` is the judge's own rationale; for an error it names the error.
     """
     payload = judge_payload(case, types.SimpleNamespace(structured=candidate), measures)
-    payload.pop("candidate")
+    outputs = payload.pop("candidate")
     expectations = payload
     try:
-        fb = judge(outputs=candidate, expectations=expectations)
+        fb = judge(outputs=outputs, expectations=expectations)
     except Exception as e:  # noqa: BLE001 - a judge error is neither pass nor fail
         return "error", f"{type(e).__name__}: {e}"
     if getattr(fb, "error", None) is not None:

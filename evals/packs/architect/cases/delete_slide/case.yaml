@@ -1,0 +1,18 @@
+kind: mutation
+fault: 'delete slide 6 (position 5): only it goes, nothing is rebuilt and the later
+  slides move up unchanged; deleting position 6 (slide 7) is the 1-based slip'
+expect:
+  intent: edit
+  positions: []
+  inserted: []
+  layout:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 6
+  - 7
+  - 8
+  - 9
+design_system_active: true

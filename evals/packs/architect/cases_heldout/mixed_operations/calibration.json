@@ -1,0 +1,60 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll delete slide 1, the cover, expand the pain points into three slides — slides 1, 2 and 3, one per pain point — and change the callout on the techniques slide, now slide 4, to say when to combine few-shot examples with chain-of-thought.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null,
+    "operations": [
+      {
+        "op": "delete",
+        "position": 0,
+        "after_position": null,
+        "slides": null
+      },
+      {
+        "op": "update",
+        "position": 2,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Introduce the core techniques: give the audience a mental model of prompt design patterns",
+            "content_brief": "Bullet slide covering the four key patterns — system-prompt framing, few-shot examples, chain-of-thought reasoning, and structured output formatting — with a callout on when to combine few-shot examples with chain-of-thought: a task that needs both a fixed answer format and several reasoning steps",
+            "assumes": "Audience understands the problem from the previous slide",
+            "hands_off": "Four composable patterns cover the vast majority of prompt optimisation needs",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null
+          }
+        ]
+      },
+      {
+        "op": "replace",
+        "position": 1,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Define the problem, pain point 1: inconsistent outputs",
+            "content_brief": "Bullet slide showing how the same ad-hoc prompt gives different answers from one run to the next, with a callout on what that costs in review time and user trust",
+            "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
+            "hands_off": "Ad-hoc prompts make a model's outputs unpredictable",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null
+          },
+          {
+            "purpose": "Define the problem, pain point 2: wasted tokens and cost",
+            "content_brief": "Bullet slide showing how unfocused prompts and retries burn tokens, with a callout on how that cost compounds across every request",
+            "assumes": "Audience has seen that ad-hoc outputs are inconsistent",
+            "hands_off": "Ad-hoc prompts waste money on every call",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null
+          }
+        ]
+      }
+    ],
+    "deck_changes": null
+  }
+}

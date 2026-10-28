@@ -1,0 +1,14 @@
+kind: mutation
+fault: 'replace slide 3 (position 2) with three slides: the first rewrites position
+  2 in place and two new slides follow at positions 3-4; the same plan as a whole
+  grown deck_spec is refused by production''s alignment as ambiguous'
+expect:
+  intent: edit
+  positions:
+  - 2
+  - 3
+  - 4
+  inserted:
+  - 3
+  - 4
+design_system_active: true

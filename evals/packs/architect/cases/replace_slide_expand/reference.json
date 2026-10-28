@@ -1,0 +1,56 @@
+{
+  "intent": "edit",
+  "message": "I'll replace slide 5 with four slides: slide 5 becomes a short overview of design fidelity, and new slides 6, 7 and 8 cover web fonts, spacing and kerning, and theming with CSS. The slides after them move down three places.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "replace",
+      "position": 4,
+      "after_position": null,
+      "slides": [
+        {
+          "purpose": "Evidence beat 2 — Design fidelity: an overview",
+          "content_brief": "Introduce design fidelity as the second advantage: CSS gives HTML slides precise, reliable control over how every slide looks. A short framing statement with three signposts to the slides that follow: web fonts, spacing and kerning, and theming",
+          "assumes": "The audience has seen a PowerPoint deck where fonts broke on a different machine",
+          "hands_off": "CSS gives presenters design control that PowerPoint cannot match, in three ways",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "purpose": "Design fidelity 1 — Web fonts that load reliably",
+          "content_brief": "Show that HTML slides load web fonts through CSS with no embedding, so text renders the same on every machine, where PowerPoint substitutes a missing font. Bullet points with a callout featuring the 1,700+ fonts available via CSS",
+          "assumes": "The audience has just heard that CSS controls how every slide looks",
+          "hands_off": "With web fonts, a deck's type never breaks on someone else's machine",
+          "data_references": [
+            "css_font_availability"
+          ],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "purpose": "Design fidelity 2 — Precise spacing and kerning",
+          "content_brief": "Explain that CSS sets kerning, line-height and spacing exactly, so text sits where the designer put it at every screen size, where PowerPoint reflows and clips text boxes. Bullet points with a callout contrasting one CSS rule with nudging text boxes by hand",
+          "assumes": "The audience knows web fonts load reliably in HTML slides",
+          "hands_off": "CSS places every line of text exactly where it belongs",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "purpose": "Design fidelity 3 — Theming with CSS",
+          "content_brief": "Show that CSS variables hold a deck's colours, type scale and spacing in one place, so restyling every slide is one change, where PowerPoint needs each slide master edited by hand. Bullet points with a callout on keeping every slide on brand",
+          "assumes": "The audience has seen that CSS controls type and spacing precisely",
+          "hands_off": "With CSS, the whole deck's design lives in one place and stays consistent",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        }
+      ]
+    }
+  ],
+  "deck_changes": null
+}
