@@ -386,6 +386,9 @@ def _assert_refused(t: SimpleNamespace, code: str, user: str, message: Optional[
         "not be applied"
     )
     assert len(t.said) in (1, 2), t.said  # Task 5 drops the model's own line
+    # Planning emits nothing (spec §5: a retry re-plans), so the SSE stream holds
+    # at most the model's line and the refusal, as the transcript does.
+    assert len(t.architect_lines) in (1, 2), t.architect_lines
 
 
 @contextlib.contextmanager
@@ -945,6 +948,75 @@ def test_design_contract_change_rebuilds_all_but_untouched_blanks(
     else:
         assert named_warnings == []
         assert t.notices == []
+
+
+def test_gapped_identity_restyle_skips_the_untouched_blank(graph_env, monkeypatch):
+    """C10 meets #314 N1: on an IDENTITY layout the untouched blanks are decided in
+    PERSISTED positions, the numbering of the spec and of ``rebuild`` there.  Rows
+    and spec at ``(0, 2, 5)``, entry 2 blank; restyle and update 5.  Nothing moves,
+    and the rebuild-all is every persisted position but the blank: ``[0, 5]``.
+
+    Sabotage: compare composed indices with the spec's positions -> persisted 5 is
+    composed index 2, so the blank at 2 reads as touched and is rebuilt."""
+    _seed_rows(graph_env, {0: "MK-ALPHA", 5: "MK-CHARLIE"})
+    _seed_blank_row(graph_env, 2)
+    alpha, charlie = _spec_from(_content("ALPHA")), _spec_from(_content("CHARLIE"))
+    prior = _spec_of(make_spec((0,)), [(0, alpha), (2, _blank_entry()), (5, charlie)])
+    _persist(graph_env, prior)
+    rows_before = _rows(graph_env)
+    calls = _spy_on_the_layout(monkeypatch)
+    revised = _content("CHARLIE-REVISED")
+
+    t = _turn(
+        graph_env,
+        _ops_out([_update(5, revised)], DeckChanges(design_contract=RESTYLED)),
+    )
+
+    composed = _spec_of(
+        prior,
+        [(0, alpha), (2, _blank_entry()), (5, _spec_from(revised))],
+        design_contract=RESTYLED.model_dump(),
+    )
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["error_state"] is None
+    assert t.updates["target_positions"] == [0, 5]
+    assert t.updates["deck_spec"] == composed
+    assert _persisted_spec(graph_env) == composed
+    assert calls == [], "an identity layout must not reach apply_slide_layout"
+    assert _rows(graph_env) == rows_before
+    assert (7, 3) in graph_env.template.calls
+    assert t.notices == []
+
+
+def test_session_selection_unlike_the_spec_resolves_the_spec_brand(graph_env, monkeypatch):
+    """The re-resolve rule is today's: the brand is the COMMITTED contract's, not
+    the session selection's.  The spec is pinned to ``(7, 3)``, the session has
+    selected ``(8, 4)``, and the edit leaves ``design_contract`` alone.  The turn
+    starts with the selection's brand, then resolves the spec's, exactly as the
+    full-spec path does; no restyle is classified, so only the update is built.
+
+    Sabotage: compare the composed contract with the persisted one instead of the
+    one the inbound brand was resolved for -> equal, so the selection's brand
+    (template ``(8, 4)``) briefs the builders of a deck pinned to ``(7, 3)``."""
+    _seed_rows(graph_env, {0: "MK-ALPHA", 1: "MK-BRAVO"})
+    prior = make_spec((0, 1), design_system_id=7, template_id=3)
+    _persist(graph_env, prior)
+    monkeypatch.setattr(
+        "src.services.graph.nodes._session_contract",
+        lambda session_id: DesignContractRef(
+            design_system_id=8, template_id=4, slide_style_id=None
+        ),
+    )
+    calls = _spy_on_the_layout(monkeypatch)
+
+    t = _turn(graph_env, _ops_out([_update(1, _content("BRAVO-REVISED"))]))
+
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["error_state"] is None
+    assert graph_env.template.calls == [(8, 4), (7, 3)]
+    assert t.updates["target_positions"] == [1]
+    assert t.updates["deck_spec"].design_contract == prior.design_contract
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------
