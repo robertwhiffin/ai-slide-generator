@@ -384,10 +384,10 @@ def _assert_refused(t: SimpleNamespace, code: str, user: str, message: Optional[
         "the transcript (polling client, next turn) does not say the edit could "
         "not be applied"
     )
-    assert len(t.said) in (1, 2), t.said  # Task 5 drops the model's own line
-    # Planning emits nothing (spec §5: a retry re-plans), so the SSE stream holds
-    # at most the model's line and the refusal, as the transcript does.
-    assert len(t.architect_lines) in (1, 2), t.architect_lines
+    # Only the refusal is said (spec §7): a refused answer's own line waits for a
+    # plan that never lands, so it reaches neither surface.
+    assert t.said == [user], t.said
+    assert t.architect_lines == [user], t.architect_lines
 
 
 @contextlib.contextmanager

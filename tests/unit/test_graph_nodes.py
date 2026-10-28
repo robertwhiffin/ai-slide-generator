@@ -6306,9 +6306,11 @@ def _full_turn_prompts(env, monkeypatch, case):
 
     A persisted spec, a committed slide and a stored deck review authored by the
     user are seeded, then the architect commits a deck-level change, so the turn
-    makes all ten calls: analyst, architect, the deck-level re-review, builder
-    and its unsafe-output retry, build reviewer, fixer and its retry, fix
-    reviewer, deck reviewer.
+    makes all eleven calls: analyst, architect and its refused-plan retry, the
+    deck-level re-review, builder and its unsafe-output retry, build reviewer,
+    fixer and its retry, fix reviewer, deck reviewer.  The architect's first
+    answer binds a ``slide_type`` with no template section (refused, retryable),
+    exactly as the builder's first answer is unsafe HTML.
     """
     from src.api.services.deck_level_writer import write_deck_level_columns
     from src.database.models.session import SessionSlideDeck
@@ -6317,6 +6319,11 @@ def _full_turn_prompts(env, monkeypatch, case):
     collab = _collaboration(env)
     old_spec = make_spec((0,))
     new_spec = old_spec.model_copy(update={"audience": "the CFO, not engineers"})
+    # Half-bound on an unpinned deck: invalid_slide_type_binding, which the
+    # architect is asked once more to fix (the eleventh call, its retry).
+    refused_spec = new_spec.model_copy(
+        update={"slides": [new_spec.slides[0].model_copy(update={"slide_type": "title"})]}
+    )
     env.seed_slides([_COMMITTED_HTML])
     write_deck_level_columns(
         collab.owner_session_id, deck_spec=old_spec.to_json(), modified_by=USER
@@ -6352,7 +6359,7 @@ def _full_turn_prompts(env, monkeypatch, case):
                     sources=["c.s.t"],
                 )
             ],
-            "architect": [architect_build(new_spec)],
+            "architect": [architect_build(refused_spec), architect_build(new_spec)],
             "build_reviewer": [
                 review_out(0),
                 review_out(0, [finding("overflow")]),
@@ -6434,7 +6441,7 @@ class TestNoRolesModelPromptCarriesSessionIdentifiers:
     """The user's decision (#258), for EVERY role: the model sees content only.
 
     Asserted on the fully assembled prompt the model adapter is handed, for all
-    ten invocations of one turn, for an owner on their own deck and for a
+    eleven invocations of one turn, for an owner on their own deck and for a
     contributor (root != actor).  The payload key set is an exact positive
     assertion per call; the identifying VALUES are checked against the whole
     prompt, which also catches a value nested inside an allowed key.
@@ -6454,7 +6461,7 @@ class TestNoRolesModelPromptCarriesSessionIdentifiers:
 
         assert [key for key, _ in prompts] == [
             call[1] for call in _EVERY_MODEL_CALL
-        ], "the turn did not make the ten model calls this test enumerates"
+        ], "the turn did not make the eleven model calls this test enumerates"
         agent_key, prompt = prompts[index]
         assert agent_key == role
         payload = _largest_json_object(prompt)

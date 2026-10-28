@@ -9,8 +9,9 @@ may still carry identifier keys, so a test run projects it onto that role's
 production keys before the runtime sees it.
 
 Each role's key set is the **union of that role's production calls**, so the
-builder's includes the retry's ``corrective_instruction`` and the build
-reviewer's includes the deck-level re-review's ``deck_brief``.  The sets are
+builder's includes the retry's ``corrective_instruction``, the architect's its
+retry's ``rejected_edit``, and the build reviewer's includes the deck-level
+re-review's ``deck_brief``.  The sets are
 pinned to the literal per-call sets in ``tests/fixtures/model_payload_keys.py``,
 which ``tests/unit/test_graph_nodes.py`` pins production to, and the builder's to
 the production allowlist.  ``nodes.py`` does not call this module.
@@ -66,6 +67,7 @@ MODEL_PAYLOAD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "template_sections",
                 "resolved_style",
                 "design_system_library",
+                "rejected_edit",
             }
         ),
         "data_analyst": frozenset({"data_request", "deck_purpose"}),

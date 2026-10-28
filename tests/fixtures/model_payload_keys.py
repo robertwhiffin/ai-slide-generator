@@ -29,13 +29,35 @@ BUILDER_MODEL_KEYS = frozenset(
 )
 BUILDER_RETRY_MODEL_KEYS = BUILDER_MODEL_KEYS | {"corrective_instruction"}
 
+# The architect's model-facing payload, and its one retry (architect edit
+# operations, spec §5): the same payload plus ``rejected_edit``, the refused
+# answer and why, exactly as the builder's retry adds ``corrective_instruction``.
+ARCHITECT_MODEL_KEYS = frozenset(
+    {
+        "conversation",
+        "message",
+        "current_deck_spec",
+        "committed_slide_count",
+        "slide_numbering",
+        "slide_references",
+        "previous_deck_review",
+        "available_design_contract",
+        "template_sections",
+        "resolved_style",
+        "design_system_library",
+    }
+)
+ARCHITECT_RETRY_MODEL_KEYS = ARCHITECT_MODEL_KEYS | {"rejected_edit"}
+
 
 # Every role's model-facing payload, stated POSITIVELY as the user decided (#258):
 # nothing session-, user-, turn- or release-specific reaches ANY role's model.
 # Literals, not imports of production key sets, so a widened production payload
 # fails here instead of silently agreeing.  One entry per model invocation in the
 # order a full turn makes them; the deck-level re-review is the architect's own
-# build_reviewer pass, the one call that carries ``deck_brief``.
+# build_reviewer pass, the one call that carries ``deck_brief``.  Like the
+# builder's and the fixer's, the architect's retry is its own entry: the full
+# turn's first architect answer is refused, so the turn makes that call too.
 SLIDE_REVIEW_MODEL_KEYS = frozenset(
     {
         "position",
@@ -61,25 +83,8 @@ FIXER_MODEL_KEYS = frozenset(
 )
 EVERY_MODEL_CALL = (
     ("data_analyst", "data_analyst", frozenset({"data_request", "deck_purpose"})),
-    (
-        "architect",
-        "architect",
-        frozenset(
-            {
-                "conversation",
-                "message",
-                "current_deck_spec",
-                "committed_slide_count",
-                "slide_numbering",
-                "slide_references",
-                "previous_deck_review",
-                "available_design_contract",
-                "template_sections",
-                "resolved_style",
-                "design_system_library",
-            }
-        ),
-    ),
+    ("architect", "architect", ARCHITECT_MODEL_KEYS),
+    ("architect_retry", "architect", ARCHITECT_RETRY_MODEL_KEYS),
     (
         "deck_level_rereview",
         "build_reviewer",
@@ -108,6 +113,8 @@ EVERY_MODEL_CALL = (
 
 
 __all__ = [
+    "ARCHITECT_MODEL_KEYS",
+    "ARCHITECT_RETRY_MODEL_KEYS",
     "BUILDER_MODEL_KEYS",
     "BUILDER_RETRY_MODEL_KEYS",
     "EVERY_MODEL_CALL",

@@ -415,8 +415,11 @@ def test_case_contract(cid):
 
 
 def test_payload_keys_are_every_production_key():
-    """An eval payload carries every key the architect model sees in production, no fewer."""
-    assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT])
+    """An eval payload carries every key the architect model sees in production on
+    its first call, no fewer.  ``rejected_edit`` is the retry call's alone (as the
+    builder's ``corrective_instruction`` is), so no case carries it."""
+    assert "rejected_edit" in MODEL_PAYLOAD_KEYS[AGENT]
+    assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT]) - {"rejected_edit"}
     assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 11
 
 

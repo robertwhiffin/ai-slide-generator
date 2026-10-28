@@ -2758,7 +2758,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
     answer is checked by :func:`_plan_answer`, which says and writes nothing.  A
     refusal the model can fix (:data:`RETRYABLE_EDIT_CODES`) asks the architect
     once more, with ``rejected_edit`` naming its answer and the problems, and the
-    second answer is handled from the top.  A build's or an edit's own message
+    second answer is handled from the top.  A describe-only turn is never
+    retried, and a retry call that raises leaves the first answer's refusal
+    standing (the persisted-runtime family still fails the turn).  A build's or
+    an edit's own message
     is said only once its plan has landed; on any refusal only the refusal is
     said, and its row records why (:data:`REFUSAL_METADATA_KEY`) so the next
     turn's architect is told.
@@ -2876,21 +2879,47 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # intent, a discussion included, and it passes every check the first did.  At
     # most two calls per turn, by the loop's bound; a second refusal degrades
     # with the second answer's problems.  A row write that fails later is never
-    # retried: it is the deck's state, not the answer's.
+    # retried: it is the deck's state, not the answer's.  A describe-only turn
+    # (the arc-review sweeper) is never retried either: it is addressed to
+    # nobody and builds nothing, so a second model call buys it nothing.
     rejected_edit: Optional[Dict[str, Any]] = None
+    answer: Optional[_PlannedAnswer] = None
     for attempt in range(2):
-        out = get_agent_runtime().run(
-            "architect",
-            state["graph_release_id"],
-            # A NEW dict on the retry, never the first one mutated: the runtime,
-            # and the trace of the first call, keep the payload they were handed.
-            payload if rejected_edit is None else payload | {"rejected_edit": rejected_edit},
-            _assembly_context(
-                brand["design_system_active"],
-                state.get("root_session_id"),
-                state.get("actor_session_id"),
-            ),
-        ).output
+        try:
+            out = get_agent_runtime().run(
+                "architect",
+                state["graph_release_id"],
+                # A NEW dict on the retry, never the first one mutated: the
+                # runtime, and the trace of the first call, keep the payload they
+                # were handed.
+                payload if rejected_edit is None else payload | {"rejected_edit": rejected_edit},
+                _assembly_context(
+                    brand["design_system_active"],
+                    state.get("root_session_id"),
+                    state.get("actor_session_id"),
+                ),
+            ).output
+        except Exception as exc:
+            if answer is None:
+                # The first call fails the turn as it always has: there is no
+                # refusal to fall back on.
+                raise
+            # The retry is a second chance, not a new way to fail the turn: a
+            # retry call that raises (the endpoint, an answer that does not parse)
+            # leaves the turn refused exactly as the first answer earned, with
+            # its code, sentence and problems — `answer` is still the first
+            # one's.  The persisted-runtime family still fails the turn, as it
+            # does on every model call.
+            _raise_if_persisted_runtime_failure(exc)
+            logger.warning(
+                "architect_retry_failed: the architect's retry call raised %s; the "
+                "turn is refused with the first answer's refusal (%s)",
+                type(exc).__name__,
+                answer.refusal["code"],
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+            break
         answer = _plan_answer(
             state,
             out,
@@ -2903,7 +2932,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
             slide_payload=slide_payload,
         )
         refusal = answer.refusal
-        if attempt or refusal is None or refusal["code"] not in RETRYABLE_EDIT_CODES:
+        if (
+            attempt
+            or describe_only
+            or refusal is None
+            or refusal["code"] not in RETRYABLE_EDIT_CODES
+        ):
             break
         rejected_edit = {
             "your_previous_answer": out.model_dump(

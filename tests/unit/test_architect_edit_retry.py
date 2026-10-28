@@ -49,6 +49,7 @@ from src.domain.slide_operations import DeckChanges
 from src.services.graph import nodes
 from src.services.graph.event_emitter import set_event_emitter
 from src.services.graph.nodes import architect_node
+from src.services.graph.state import scoped
 from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
     architect_build,
     graph_env,
@@ -979,4 +980,137 @@ def test_ops_path_write_refusals_use_edit_neutral_wording(
     else:
         assert "the slide" in sentence, "precondition: today's insert sentence"
     _assert_nowhere(graph_env, t, A_MSG)
+    assert _db_state(graph_env) == snapshot
+
+
+# ---------------------------------------------------------------------------
+# 12. A retry call that raises is no new way to fail the turn (review C14)
+# ---------------------------------------------------------------------------
+
+
+class _RetryRaises(_Answers):
+    """Answers the first call; the retry call raises *error* (after recording it)."""
+
+    def __init__(self, first: Any, error: BaseException) -> None:
+        super().__init__(first)
+        self.error = error
+
+    def __call__(self, payload: Dict[str, Any]) -> Any:
+        self.seen.append(copy.deepcopy(payload))
+        if "rejected_edit" in payload:
+            raise self.error
+        return self.first
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("the serving endpoint went away"), ValueError("no parseable answer")],
+    ids=["provider-failure", "unparseable-answer"],
+)
+def test_a_failed_retry_refuses_with_the_first_answers_refusal(graph_env, caplog, error):
+    """The retry is a second chance, not a new way to fail: when the retry call
+    raises, the turn is refused with the FIRST answer's refusal — its code, its
+    sentence ("slide 30") and its row metadata — exactly as if no retry had been
+    asked for, with nothing written.  A WARNING names the retry's failure.
+
+    Sabotage: let the retry's exception propagate -> the turn raises; degrade
+    without the first answer's problems -> the metadata differs."""
+    _seeded(graph_env, range(22))
+    snapshot = _db_state(graph_env)
+    first = _ops_out([_replace(29, _content("X"))], message=A_MSG)
+    answers = _RetryRaises(first, error)
+
+    with caplog.at_level("WARNING", logger="src.services.graph.nodes"):
+        t = _turn(graph_env, answers)
+
+    assert _assert_retried_with(answers, graph_env, first) == [_unknown(29)]
+    sentence = REJECTED_PREFIX + "there is no slide 30 — the deck has 22 slides."
+    refusal = _assert_only_refusal(graph_env, t, "edit_operations_rejected", sentence)
+    assert t.updates["error_state"]["message"] == _unknown(29)["detail"]
+    assert refusal == {"code": "edit_operations_rejected", "problems": [_unknown(29)]}
+    _assert_nowhere(graph_env, t, A_MSG)
+    assert _db_state(graph_env) == snapshot
+    failures = [
+        record
+        for record in caplog.records
+        if record.levelname == "WARNING"
+        and record.exc_info
+        and record.exc_info[1] is error
+    ]
+    assert len(failures) == 1, "the retry's failure must be logged once, as a WARNING"
+    assert type(error).__name__ in failures[0].getMessage()
+
+
+def test_a_persisted_runtime_failure_on_the_retry_still_fails_the_turn(graph_env):
+    """The persisted-runtime family (the pinned release or its configuration is
+    unavailable) fails the turn on the retry exactly as it does on any model call
+    (``_raise_if_persisted_runtime_failure``): it is not something a refusal can
+    stand in for.  Nothing is said or written.
+
+    Sabotage: degrade on every exception from the retry -> no raise."""
+    from src.services.persisted_graph_release import GraphReleaseNotFoundError
+
+    _seeded(graph_env, range(22))
+    snapshot = _db_state(graph_env)
+    rows_before = len(graph_env.messages())
+    first = _ops_out([_replace(29, _content("X"))], message=A_MSG)
+    error = GraphReleaseNotFoundError("graph release 1 does not exist")
+    graph_env.skills.set("architect", _RetryRaises(first, error))
+
+    with pytest.raises(GraphReleaseNotFoundError):
+        architect_node(graph_env.state())
+
+    assert _calls(graph_env) == 2
+    assert len(graph_env.messages()) == rows_before, "a failed turn says nothing"
+    assert _db_state(graph_env) == snapshot
+
+
+def test_a_failed_first_call_still_fails_the_turn(graph_env):
+    """Only the RETRY degrades on a failure: a first call that raises fails the
+    turn as it always has, since there is no refusal to fall back on.
+
+    Sabotage: catch the first call's exception too -> no raise."""
+    _seeded(graph_env, range(22))
+
+    def _down(payload):
+        raise RuntimeError("the serving endpoint went away")
+
+    graph_env.skills.set("architect", _down)
+
+    with pytest.raises(RuntimeError, match="serving endpoint"):
+        architect_node(graph_env.state())
+
+    assert _calls(graph_env) == 1
+
+
+# ---------------------------------------------------------------------------
+# 13. A describe-only turn never retries (review C15)
+# ---------------------------------------------------------------------------
+
+
+def test_a_describe_only_turn_never_retries(graph_env):
+    """The arc-review sweeper's turn (``describe_only``) is addressed to nobody
+    and builds nothing, so a refusal on it is not worth a second model call: a
+    binding refusal (``slide_type`` with no index, retryable on a human's turn)
+    makes exactly ONE architect call, and B — which would land — is never asked
+    for.  The refusal stays out of the transcript as the turn's prose does.
+
+    Sabotage: drop the describe-only condition from the retry rule -> two calls
+    and B's re-description lands."""
+    prior, _ = _seeded(graph_env, (0, 1, 2))
+    snapshot = _db_state(graph_env)
+    first = _edit_out(make_spec((0, 1, 2), slide_type="title"), [0], message=A_MSG)
+    second = _edit_out(prior, [0], message=B_MSG)
+    answers = _Answers(first, second)
+
+    t = _turn(graph_env, answers, describe_only=scoped("turn-1", True))
+
+    assert _calls(graph_env) == 1, "a describe-only turn must not be retried"
+    assert len(answers.seen) == 1 and "rejected_edit" not in answers.seen[0]
+    assert t.updates["architect_intent"] == "discuss"
+    assert t.updates["error_state"]["code"] == "invalid_slide_type_binding"
+    assert t.updates["target_positions"] is None
+    assert "deck_spec" not in t.updates
+    assert t.said == [], "a describe-only turn adds nothing to the transcript"
+    _assert_nowhere(graph_env, t, A_MSG, B_MSG)
     assert _db_state(graph_env) == snapshot
