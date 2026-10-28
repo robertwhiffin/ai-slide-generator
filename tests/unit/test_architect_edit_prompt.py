@@ -35,13 +35,15 @@ from src.services.graph_definition_manifest import (
 
 # Pins updated for the endpoint switch to system.ai Gateway models, then for the
 # deck-parity architect and builder prompts, then for #313 slide references,
-# then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move.
-HEAD_ARCHITECT_CONTENT_HASH = "2311ded0e960e433e58f3ae83ce460175e85027b77e89a0732b6ade25dac96e9"
+# then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move,
+# then for the architect edit operations schema-contract re-pin.
+HEAD_ARCHITECT_CONTENT_HASH = "d4018d7bdc30121171482d9dbd8f6cd971735574190310f9072bdec85f676616"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
+# Re-pinned for the architect edit operations schema-contract digest.
 HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
-    "45a2ee67941b4409528b2bf4a7e81e6e690948d093735bf8f00a63e754626852"
+    "ec17918b9c66a86133c060c15c37b88a2139831bc910e8787ce3ef9a069d52d9"
 )
 
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
@@ -54,7 +56,7 @@ HEAD_OTHER_ROLE_CONTENT_HASHES = {
 }
 
 HEAD_V1_SCHEMA_DIGESTS = {
-    "architect": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
+    "architect": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -64,7 +66,7 @@ HEAD_V1_SCHEMA_DIGESTS = {
 }
 
 HEAD_V2_SCHEMA_DIGESTS = {
-    "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
+    "architect": "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
