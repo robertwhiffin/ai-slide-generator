@@ -1266,27 +1266,43 @@ def _drop_untouched_blanks(
     (*notified* is the turn's shared record).  The number is the user's own, from
     ``slide_numbering``.  The caller passes no references on an insert turn:
     they are numbered before the insert, and there a named slide is the anchor
-    ("after slide 3"), not a request to fill it.
-
-    On the operations path the caller passes references already mapped through
-    the plan's layout and the numbering of the deck the edit produced, because
-    *positions* are in that deck's numbering and the notice is written after the
-    rows have moved: the number it says is the one the slide panel shows once the
-    turn ends.
+    ("after slide 3"), not a request to fill it.  Nor on the operations path:
+    its targets never hold an untouched blank, so it says its named blanks once,
+    before any list is filtered, by C12's rule (:func:`_blanks_named_but_left_alone`).
     """
     if not untouched:
         return list(positions)
+    _say_named_blanks(
+        session_id,
+        [position for position in positions if position in untouched],
+        slide_references,
+        slide_numbering,
+        notified,
+    )
+    return [position for position in positions if position not in untouched]
+
+
+def _say_named_blanks(
+    session_id: str,
+    blanks: List[int],
+    slide_references: List[Dict[str, Any]],
+    slide_numbering: List[Dict[str, int]],
+    notified: Set[int],
+) -> None:
+    """Say each of *blanks* the user's message named, in order, once per turn (#314, N1).
+
+    One WARNING ``blank_named_but_not_described`` and one notice per blank;
+    *notified* is the turn's shared record, so a blank two callers both reach is
+    said once.  *blanks*, the references' positions and the numbering must be in
+    one numbering; the number said is the numbering's.
+    """
     named = {
         position
         for reference in slide_references
         for position in reference.get("positions") or ()
     }
     numbers = {entry["position"]: entry["slide_number"] for entry in slide_numbering}
-    kept: List[int] = []
-    for position in positions:
-        if position not in untouched:
-            kept.append(position)
-            continue
+    for position in blanks:
         if position not in named or position in notified:
             continue
         notified.add(position)
@@ -1304,7 +1320,48 @@ def _drop_untouched_blanks(
             f"Slide {number} is still blank, so I left it as it is. "
             "Tell me what to put on it.",
         )
-    return kept
+
+
+def _blanks_named_but_left_alone(
+    prior_spec: DeckSpec,
+    operations: Sequence[Any],
+    slide_references: List[Dict[str, Any]],
+) -> List[int]:
+    """The persisted blanks the user named that no operation acts on or anchors to (C12).
+
+    The operations path's form of "named but not described" (spec §4).  On the
+    full-spec path the notice rides on a build list dropping the blank; here no
+    list ever holds an untouched blank (the targets ARE ``rebuild``), so "fill
+    slide 2" answered by operations that never mention slide 2 would build
+    nothing there and say nothing.  Decided on the PERSISTED deck, which is what
+    the references and the operations both count:
+
+    * a slide that is the ``position`` of an operation was acted on — updated,
+      replaced, deleted or moved — so the user's naming it was answered;
+    * a slide that is the ``after_position`` of an insert or move was named as a
+      PLACE ("after slide 3"), not as a request to fill it — today's insert path
+      passes no references for the same reason.
+
+    Entry-based, like N1: the persisted entry is blank (``is_blank_slide_spec``),
+    whatever the row holds.  Ascending, and pure.
+    """
+    acted_on = {op.position for op in operations if op.position is not None}
+    anchors = {
+        op.after_position
+        for op in operations
+        if op.op in ("insert", "move") and op.after_position is not None
+    }
+    named = {
+        position
+        for reference in slide_references
+        for position in reference.get("positions") or ()
+    }
+    left_alone: List[int] = []
+    for position in sorted(named - acted_on - anchors):
+        slide = prior_spec.slide_at(position)
+        if slide is not None and is_blank_slide_spec(slide):
+            left_alone.append(position)
+    return left_alone
 
 
 def _resolve_deck_id(db, session_id: str) -> Optional[int]:
@@ -2704,40 +2761,38 @@ def architect_node(state: dict) -> Dict[str, Any]:
 
     # #314 follow-up (N1): an untouched blank is never built.  Insert-turn
     # references count the pre-insert deck and name an anchor, so none is passed.
+    blanks_said: Set[int] = set()
+    numbering = slide_payload["slide_numbering"]
     if plan is not None:
         # Decided on the composed deck (spec §4): a blank no insert, update or
-        # replace produced is untouched, wherever the layout moved it.  All three
-        # inputs are in the plan's own numbering — the spec's positions, its
-        # rebuild, and the user's references mapped through the layout (a
-        # reference to a deleted slide maps to nothing) — and the numbers said
-        # are the produced deck's, the order the panel shows once the turn ends.  The
-        # targets list is clean of untouched blanks by construction; the
-        # design-contract and deck-level lists below are what this filters.
+        # replace produced is untouched, wherever the layout moved it.  Both
+        # inputs are in the plan's own numbering, the spec's positions and its
+        # rebuild.  The targets list is clean of untouched blanks by
+        # construction; the design-contract and deck-level lists below are what
+        # this filters.
         untouched_blanks = _untouched_blank_positions(
             spec, None, False, rebuild=plan.rebuild
         )
-        blank_refs = [
-            {
-                **reference,
-                "positions": [
-                    plan.references_map[position]
-                    for position in reference.get("positions") or ()
-                    if position in plan.references_map
-                ],
-            }
-            for reference in slide_payload["slide_references"]
-        ]
-        numbering = [
-            {"position": slide.position, "slide_number": number}
-            for number, slide in enumerate(
-                sorted(spec.slides, key=lambda s: s.position), start=1
-            )
-        ]
+        # C12: the "still blank" notice is said HERE, once, for every blank the
+        # user named that no operation acted on or anchored to, in the user's own
+        # numbers (the pre-message deck the references count).  Not left to the
+        # lists' drops: the targets never hold the blank, so a plain edit would
+        # never say it, and a rebuild-all would say a blank the user named only
+        # as a place or to move it.  So those drops get no references.  After the
+        # rows have landed, so a refused edit says only its refusal.
+        _say_named_blanks(
+            session_id,
+            _blanks_named_but_left_alone(
+                prior_spec, out.operations or [], slide_payload["slide_references"]
+            ),
+            slide_payload["slide_references"],
+            numbering,
+            blanks_said,
+        )
+        blank_refs = []
     else:
         untouched_blanks = _untouched_blank_positions(spec, alignment, inserting)
         blank_refs = [] if inserting else slide_payload["slide_references"]
-        numbering = slide_payload["slide_numbering"]
-    blanks_said: Set[int] = set()
     if untouched_blanks:
         edit_targets = _drop_untouched_blanks(
             session_id, edit_targets, untouched_blanks, blank_refs, numbering, blanks_said

@@ -1019,6 +1019,108 @@ def test_session_selection_unlike_the_spec_resolves_the_spec_brand(graph_env, mo
     assert calls == []
 
 
+#: The #314 N1 notice for the blank at position 1, numbered as the user saw it.
+STILL_BLANK_2 = "Slide 2 is still blank, so I left it as it is. Tell me what to put on it."
+
+
+def _blank_second_slide(env) -> DeckSpec:
+    """Rows ``[ALPHA, BLANK, CHARLIE]`` at ``0..2``; the persisted entry 1 is blank."""
+    _seed_rows(env, {0: "MK-ALPHA", 2: "MK-CHARLIE"})
+    _seed_blank_row(env, 1)
+    prior = _canonical(make_spec((0,)), [
+        _spec_from(_content("ALPHA")), _blank_entry(), _spec_from(_content("CHARLIE")),
+    ])
+    _persist(env, prior)
+    return prior
+
+
+def _named_turn(env, caplog, out: ArchitectOutput, user_message: str) -> SimpleNamespace:
+    with caplog.at_level(logging.INFO, logger=NODES_LOGGER):
+        t = _turn(env, out, architect_message=user_message)
+    references = env.skills.calls_for("architect")[0]["payload"]["slide_references"]
+    assert [r["positions"] for r in references] == [[1]], "precondition: slide 2 is named"
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["error_state"] is None
+    return t
+
+
+def test_named_blank_no_operation_touches_is_said(graph_env, caplog):
+    """C12 (the reviewer's probe): "fill slide 2 with pricing" over a blank slide 2,
+    answered by operations that only update slide 3.  The full-spec path says
+    "Slide 2 is still blank…"; so must this one, once, in the user's own number,
+    although no list this turn builds ever held the blank (targets are ``rebuild``,
+    and nothing restyles or re-reviews).
+
+    Sabotage: notice only when a list drops the blank (the first cut) -> silent."""
+    _blank_second_slide(graph_env)
+
+    t = _named_turn(
+        graph_env,
+        caplog,
+        _ops_out([_update(2, _content("CHARLIE-PRICING"))], targets=[1]),
+        "fill slide 2 with pricing",
+    )
+
+    assert t.updates["target_positions"] == [2]
+    assert t.notices == [STILL_BLANK_2]
+    assert len(_named(caplog, "blank_named_but_not_described")) == 1
+
+
+@pytest.mark.parametrize("restyle", [False, True], ids=["plain", "with-restyle"])
+def test_named_blank_as_an_insert_anchor_is_not_said(graph_env, caplog, restyle):
+    """C12: "add a pricing slide after slide 2" names the blank as a PLACE (an
+    insert's ``after_position``), not a request to fill it, so nothing is said —
+    also when a restyle rebuilds every slide but the untouched blank, which is the
+    list that drops it (the blank moved nowhere: composed index 1).
+
+    Sabotage: say a named blank whatever names it, or let the rebuild-all's drop
+    say it -> one notice."""
+    _blank_second_slide(graph_env)
+    out = _ops_out(
+        [_insert(1, _content("PRICING"))],
+        DeckChanges(design_contract=RESTYLED) if restyle else None,
+    )
+
+    t = _named_turn(graph_env, caplog, out, "add a pricing slide after slide 2")
+
+    # Composed [ALPHA, BLANK, PRICING, CHARLIE]; the restyle skips the blank at 1.
+    assert t.updates["target_positions"] == ([0, 2, 3] if restyle else [2])
+    assert t.notices == []
+    assert _named(caplog, "blank_named_but_not_described") == []
+
+
+@pytest.mark.parametrize(
+    "ops, deck_changes, user_message, targets",
+    [
+        ([_update(1, _content("PRICING"))], None, "fill slide 2 with pricing", [1]),
+        (
+            [_move(1, 2)],
+            DeckChanges(design_contract=RESTYLED),
+            "move slide 2 to the end",
+            [0, 1],
+        ),
+    ],
+    ids=["updated", "moved-with-restyle"],
+)
+def test_named_blank_an_operation_acts_on_is_not_said(
+    graph_env, caplog, ops, deck_changes, user_message, targets
+):
+    """C12: a named blank that is the subject of an operation is not "left alone".
+    ``updated``: it is filled, and built.  ``moved-with-restyle``: the user named it
+    to move it; the restyle's rebuild-all still skips it (now at composed index 2,
+    composed ``[ALPHA, CHARLIE, BLANK]``) and says nothing.
+
+    Sabotage: map the reference through the layout and let the rebuild-all's drop
+    say it -> one notice on ``moved-with-restyle``."""
+    _blank_second_slide(graph_env)
+
+    t = _named_turn(graph_env, caplog, _ops_out(ops, deck_changes), user_message)
+
+    assert t.updates["target_positions"] == targets
+    assert t.notices == []
+    assert _named(caplog, "blank_named_but_not_described") == []
+
+
 # ---------------------------------------------------------------------------
 # 7. Problems degrade with a sentence that names them; nothing is written
 # ---------------------------------------------------------------------------
