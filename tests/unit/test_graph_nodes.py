@@ -960,12 +960,12 @@ class TestAnEditCarriesItsRevisedSpec:
         assert updates["target_positions"] == [0, 2]
 
     # ---- a refused edit is SAID, on both surfaces --------------------------
-    # architect_node emits and persists the model's own line ("Editing slide
-    # 1.") before the edit guards run.  A refusal that only rewrote
-    # architect_message in state would leave the user told an edit is under
-    # way and then shown nothing — the silent lost edit the product rule
-    # forbids.  So the refusal sentence goes to the SSE stream AND the
-    # transcript, after the model's line.
+    # architect_node says the model's own line ("Editing slide 1.") only once
+    # the plan has landed (architect edit operations, Task 5), so on a refusal
+    # that line is never said.  A refusal that only rewrote architect_message in
+    # state would leave the user shown nothing for a turn that called the model
+    # — the silent lost edit the product rule forbids.  So the refusal sentence
+    # goes to the SSE stream AND the transcript, and it is the only line said.
 
     def _run_and_capture(self, env, state=None):
         from src.api.services.session_manager import get_session_manager
@@ -1024,14 +1024,17 @@ class TestAnEditCarriesItsRevisedSpec:
         architect_lines = [
             e.content for e in events if (e.metadata or {}).get("node") == "architect"
         ]
-        assert architect_lines == [model_message, refusal], (
-            "the SSE client was not told the edit could not be applied"
+        assert architect_lines == [refusal], (
+            "the SSE client was not told the edit could not be applied, or was "
+            "also shown the refused answer's own line"
         )
+        assert model_message not in architect_lines
         assert events[-1].metadata.get("intent") == "discuss"
-        assert said == [model_message, refusal], (
+        assert said == [refusal], (
             "the transcript (polling client, next turn) does not say the edit "
-            "could not be applied"
+            "could not be applied, or also holds the refused answer's own line"
         )
+        assert model_message not in said
 
     def test_a_describe_only_refused_edit_adds_no_transcript_row(self, graph_env):
         """The sweeper's turn is addressed to nobody: a refusal on it stays out
@@ -1350,12 +1353,16 @@ class TestArchitectValidatesSlideTypeBindings:
         assert "Agenda Wide" in refusal
         assert "1" in refusal
         assert "invent" not in refusal.lower()
+        # Only the refusal is said: the build's own line ("Building your deck.")
+        # waits for the plan to land (architect edit operations, Task 5).
         architect_lines = [
             e.content for e in events if (e.metadata or {}).get("node") == "architect"
         ]
-        assert architect_lines == [model_message, refusal]
+        assert architect_lines == [refusal]
+        assert model_message not in architect_lines
         assert events[-1].metadata.get("intent") == "discuss"
-        assert said == [model_message, refusal]
+        assert said == [refusal]
+        assert model_message not in said
 
     def test_a_bound_pair_on_an_unpinned_deck_degrades(self, graph_env):
         """No template means no vocabulary: any non-null pair is invalid."""

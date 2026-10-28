@@ -77,7 +77,6 @@ from tests.unit.test_architect_insert_slide import (
     PENDING_HASH,
     PENDING_HTML,
     PENDING_VERDICT,
-    REFUSAL_TEXT,
     TURN,
     USER,
     _assert_shifted,
@@ -1247,10 +1246,12 @@ def test_index_only_binding_in_operations_is_completed(graph_env, monkeypatch):
     ids=["rows-changed", "any-other-error"],
 )
 def test_rows_changed_mid_plan_refuses_without_retry(graph_env, monkeypatch, error, code):
-    """The layout write refuses: today's two degrade dicts, reused (code and
-    sentence), nothing written, and no second architect call (the model cannot fix
-    a deck that changed under it).  ``SlideRowsChangedError`` is a
-    ``RuntimeError``, so catching ``Exception`` first would report it as a failure."""
+    """The layout write refuses: today's two degrade codes, with C11's edit-neutral
+    sentences (a delete was never "adding the slide"), nothing written, and no
+    second architect call (the model cannot fix a deck that changed under it).
+    Only the refusal is said: the model's own line waits for the plan to land
+    (Task 5).  ``SlideRowsChangedError`` is a ``RuntimeError``, so catching
+    ``Exception`` first would report it as a failure."""
     _seeded(graph_env, (0, 1, 2, 3))
 
     def _raise(self, *args, **kwargs):
@@ -1261,7 +1262,19 @@ def test_rows_changed_mid_plan_refuses_without_retry(graph_env, monkeypatch, err
 
     t = _turn(graph_env, _ops_out([_delete(1)], message="Deleting slide 2."))
 
-    _assert_refused(t, code, REFUSAL_TEXT[code], None)
+    user = {
+        "insert_rows_changed": (
+            "The deck changed while I was planning, so I have not made that edit. "
+            "Nothing has been changed; please ask again."
+        ),
+        "insert_rows_failed": (
+            "I could not make that edit, so nothing has been changed. "
+            "Please try asking again."
+        ),
+    }[code]
+    _assert_refused(t, code, user, None)
+    assert "Deleting slide 2." not in t.architect_lines
+    assert "Deleting slide 2." not in t.said
     assert _db_state(graph_env) == snapshot
     assert len(graph_env.skills.calls_for("architect")) == 1
 

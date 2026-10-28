@@ -241,6 +241,21 @@ _STALL_REASON = "Slide generation did not complete"
 _HUMAN_TYPES = {"user_query", "user_input", "chat"}
 _AI_TYPES = {"llm_response", "clarification"}
 
+# The metadata key a refused edit's transcript row carries its reasons under
+# (spec §7): ``{"code": <the degrade code>, "problems": [{"code", "positions",
+# "detail"}]}``.  The row itself stays an ordinary ``llm_response``, so the UI
+# shows the refusal as it always has; the key is what lets ``_conversation`` tell
+# the architect, next turn, that a check rejected its plan — the refusal's prose
+# alone reads as a reply the architect chose to give.
+REFUSAL_METADATA_KEY = "architect_refusal"
+
+# The opening of the ``system`` turn ``_conversation`` replays right after such a
+# row (spec §7).  The problems' details follow it.
+_REFUSAL_NOTE_PREFIX = (
+    "The edit above was NOT applied; nothing in the deck changed. "
+    "It was rejected because: "
+)
+
 # Appended to a `confirm_design_contract` message when confirming would drop the
 # deck's slide style (§L4).  ONE user action mutates TWO fields — setting
 # design_system_id and losing slide_style_id — and DesignContractRef's L1
@@ -279,7 +294,13 @@ def _emit(
     )
 
 
-def _say(state: dict, message: str, *, message_type: str = "llm_response") -> None:
+def _say(
+    state: dict,
+    message: str,
+    *,
+    message_type: str = "llm_response",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
     """Persist one assistant utterance so it survives the turn.  Never raises.
 
     **The durable half of speaking to the user, and it is not optional.**  An
@@ -311,6 +332,10 @@ def _say(state: dict, message: str, *, message_type: str = "llm_response") -> No
     writer for those, and it stays ungated because a failure notice's value is that
     it lands on every turn.  This one is for a node's own conversational turn.
 
+    *metadata* is stored on the row as given.  A refused edit uses it to record
+    why (:data:`REFUSAL_METADATA_KEY`), which ``_conversation`` reads back; an
+    ordinary utterance passes none.
+
     **A describe-only turn writes nothing.**  ws4d's arc-review sweeper invokes
     the graph with ``describe_only=True``, no emitter and no human waiting; its
     reply is addressed to nobody.  Persisting it would put machine-generated prose
@@ -335,6 +360,7 @@ def _say(state: dict, message: str, *, message_type: str = "llm_response") -> No
             role="assistant",
             content=message,
             message_type=message_type,
+            metadata=metadata,
             request_id=get_chat_request_id(),
         )
     except Exception:
@@ -1033,6 +1059,14 @@ def _conversation(session_id: str) -> List[Dict[str, str]]:
     Filtered exactly as ``chat_service._hydrate_chat_history`` filters:
     ``info`` is skipped, so the deck reviewer's advisory message never reaches
     the architect as prose.
+
+    **A refused edit is followed by a ``system`` turn** (spec §7).  The refusal
+    row replays as the assistant turn it is, and right after it comes
+    :func:`_refusal_note`, built from the row's :data:`REFUSAL_METADATA_KEY`.
+    Without it the architect reads its own refusal as a reply it chose to give,
+    so next turn it cannot tell that a check rejected the plan, nor why, and
+    proposes the same edit again.  A row without the key replays exactly as it
+    always has.
     """
     try:
         messages = get_session_manager().get_messages(session_id)
@@ -1050,7 +1084,32 @@ def _conversation(session_id: str) -> List[Dict[str, str]]:
             turns.append({"role": "user", "content": content})
         elif role == "assistant" and mtype in _AI_TYPES:
             turns.append({"role": "assistant", "content": content})
+            metadata = message.get("metadata")
+            refusal = (
+                metadata.get(REFUSAL_METADATA_KEY) if isinstance(metadata, dict) else None
+            )
+            if isinstance(refusal, dict):
+                turns.append({"role": "system", "content": _refusal_note(refusal)})
     return turns
+
+
+def _refusal_note(refusal: Dict[str, Any]) -> str:
+    """The ``system`` turn replayed after a refused edit: why it was refused.
+
+    The problems' model-facing details — the text a retry is handed, in
+    positions, not the user's slide numbers — ``; ``-joined.  A problem with no
+    detail is named by its code, and a refusal recorded with no problems by its
+    own code, so the note always gives a reason.  Tolerant of any shape: it reads
+    a stored row, and a malformed one must not cost the turn its conversation.
+    """
+    problems = refusal.get("problems")
+    reasons = [
+        str(problem.get("detail") or problem.get("code") or "")
+        for problem in (problems if isinstance(problems, list) else [])
+        if isinstance(problem, dict)
+    ]
+    because = "; ".join(reason for reason in reasons if reason)
+    return _REFUSAL_NOTE_PREFIX + (because or str(refusal.get("code") or "a check")) + "."
 
 
 def _committed_slide_rows(session_id: str) -> List[Dict[str, Any]]:
@@ -1860,11 +1919,13 @@ _ALIGNMENT_REFUSALS = {
 }
 
 # The two ways a row write planned against the committed rows can fail to land
-# (#314 D4), shared by the insert shift and the operations layout.  Their codes
-# and sentences predate the operations path and are kept as they are, so a user
-# (and the tests pinning them) sees one refusal per cause whichever path wrote.
-# The rows-changed one is NOT a failure: the deck moved under the planner (a
-# panel edit while the architect thought), so nothing the model could fix.
+# (#314 D4).  The insert shift and the operations layout share the CODES, so an
+# operator sees one code per cause whichever path wrote.  They do not share the
+# sentences (C11): the insert shift's predate the operations path and are kept
+# byte for byte, but "I have not added the slide" is false of a delete or a move,
+# so the operations layout says the edit-neutral twin.  The rows-changed one is
+# NOT a failure: the deck moved under the planner (a panel edit while the
+# architect thought), so nothing the model could fix.
 _ROWS_CHANGED_DEGRADE = {
     "code": "insert_rows_changed",
     "message": "the committed rows are not the rows the insert was "
@@ -1874,17 +1935,88 @@ _ROWS_CHANGED_DEGRADE = {
         "the slide. Nothing has been changed; please ask again."
     ),
 }
+_OPERATIONS_ROWS_CHANGED_DEGRADE = {
+    "code": "insert_rows_changed",
+    "message": "the committed rows are not the rows the edit was planned against",
+    "user": (
+        "The deck changed while I was planning, so I have not made that edit. "
+        "Nothing has been changed; please ask again."
+    ),
+}
 
 
-def _rows_failed_degrade(exc: Exception) -> Dict[str, str]:
-    """The refusal for a row write that raised anything else (the type, never the text)."""
+def _rows_failed_degrade(exc: Exception, *, operations: bool = False) -> Dict[str, str]:
+    """The refusal for a row write that raised anything else (the type, never the text).
+
+    *operations* selects the operations layout's edit-neutral sentence (C11).
+    """
     return {
         "code": "insert_rows_failed",
         "message": type(exc).__name__,
         "user": (
-            "I could not add the slide, so nothing has been changed. "
+            "I could not make that edit, so nothing has been changed. "
+            "Please try asking again."
+            if operations
+            else "I could not add the slide, so nothing has been changed. "
             "Please try asking again."
         ),
+    }
+
+
+# The planning refusals the model can fix (spec §5), by degrade code: operations
+# problems (and the DeckSpec problems composing reports with them), template
+# binding errors, and today's alignment and position-set refusals of a full-spec
+# edit.  On one of these the architect is asked ONCE more, told what it answered
+# and exactly why that was refused, and the turn degrades only if the second
+# answer is refused too.  Everything else is the deck's state, not the answer's —
+# no persisted spec, a spec the rows have outgrown, a spec-less edit the model
+# was already told to revise, and a row write that did not land — so asking
+# again would only spend a model call to reach the same refusal.
+RETRYABLE_EDIT_CODES = frozenset(
+    {
+        "edit_operations_rejected",
+        "invalid_slide_type_binding",
+        "edit_insert_ambiguous",
+        "edit_spec_moves_slides",
+        "edit_spec_positions_changed",
+    }
+)
+
+# What of a refused answer the retry hands back as ``your_previous_answer``
+# (spec §5): what the answer asked for, not its prose or its whole spec.
+_PREVIOUS_ANSWER_FIELDS = {"intent", "operations", "deck_changes", "target_positions"}
+
+
+def _binding_problems(binding_errors: Sequence[str]) -> Tuple[OperationProblem, ...]:
+    """Template binding errors as problems: one per bad slide, naming no position.
+
+    The slide may not have a persisted position (an insert, a build), and the
+    error already numbers it.
+    """
+    return tuple(
+        OperationProblem("invalid_slide_type_binding", (), error) for error in binding_errors
+    )
+
+
+def _refusal_problems(degrade: Dict[str, Any]) -> Tuple[OperationProblem, ...]:
+    """Why *degrade* refused, as problems: what a retry is told and the row records.
+
+    A planning refusal carries its own under ``"problems"`` (an operations list's,
+    one per binding error, an alignment's reason).  Any other refusal is one
+    problem: its code and its model-facing message.
+    """
+    problems = degrade.get("problems")
+    if problems:
+        return tuple(problems)
+    return (OperationProblem(degrade["code"], (), degrade["message"]),)
+
+
+def _problem_payload(problem: OperationProblem) -> Dict[str, Any]:
+    """*problem* as the JSON the model is shown and the row stores (spec §5)."""
+    return {
+        "code": problem.code,
+        "positions": list(problem.positions),
+        "detail": problem.detail,
     }
 
 
@@ -1897,7 +2029,7 @@ _OPERATIONS_REJECTED_PREFIX = (
 
 def _operations_rejected(
     problems: OperationProblems, slide_numbering: List[Dict[str, int]]
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """The degrade for an operations list that does not check out (spec §4-§5).
 
     Two audiences, two texts.  The user gets ``problem_sentence``'s clauses,
@@ -1907,7 +2039,7 @@ def _operations_rejected(
     gets the model-facing details, in positions, which is what an operator
     reading the turn needs and what the model itself can act on.  The deck's
     size is the numbering's: the slides the user can see, rows when the deck
-    has any.
+    has any.  The problems themselves travel too, for the retry and the row.
     """
     numbers = {entry["position"]: entry["slide_number"] for entry in slide_numbering}
     count = len(slide_numbering)
@@ -1921,16 +2053,22 @@ def _operations_rejected(
             )
             + "."
         ),
+        "problems": problems.problems,
     }
 
 
 def _degrade_edit(
-    state: dict, updates: Dict[str, Any], degrade: Dict[str, str]
+    state: dict, updates: Dict[str, Any], degrade: Dict[str, Any]
 ) -> Dict[str, Any]:
     """Turn an edit that cannot be applied into a discussion, said on both surfaces.
 
     Mutates *updates* (and returns it); callers then ``return updates`` so the
     node's state keys stay visible in the node itself.
+
+    The row records why (spec §7): ``metadata={REFUSAL_METADATA_KEY: {"code",
+    "problems"}}``, the problems being the ones a retry is handed
+    (:func:`_refusal_problems`).  ``_conversation`` replays them to the
+    architect next turn as a note after the refusal.
     """
     # An edit that cannot be applied.  Degrade to a discussion turn rather
     # than routing to a foreman that would cover no positions and reach deck
@@ -1950,14 +2088,20 @@ def _degrade_edit(
     # A failed shift degrades AFTER the edit's targets were set, and a refused
     # edit rebuilds nothing.
     updates["target_positions"] = None
-    # The model's own line ("Editing slide 2.") was already emitted and
-    # persisted above, so the refusal must be SAID too, on the same two
-    # surfaces — otherwise the user is told an edit is under way and then
-    # nothing happens.  A describe-only turn stays silent the same way the
+    # The refusal is the ONLY thing said (spec §7).  A build's or an edit's own
+    # line ("Editing slide 2.") waits until its plan has landed, so on a refusal
+    # it was never said — saying it would tell the user an edit is under way and
+    # then nothing happens.  The refusal is SAID, on the same two surfaces the
+    # model's line would have taken, or the user is shown nothing for a turn
+    # that called the model.  A describe-only turn stays silent the same way the
     # model's line does: _say suppresses it and the sweeper has no emitter.
     _emit(StreamEventType.ASSISTANT, content=degrade["user"],
           metadata={"node": "architect", "intent": "discuss"})
-    _say(state, degrade["user"])
+    refusal = {
+        "code": degrade["code"],
+        "problems": [_problem_payload(p) for p in _refusal_problems(degrade)],
+    }
+    _say(state, degrade["user"], metadata={REFUSAL_METADATA_KEY: refusal})
     return updates
 
 
@@ -2055,12 +2199,7 @@ def _plan_operations_edit(
     if binding_errors:
         # One problem per bad slide, naming no persisted position: the slide may
         # not have one (an insert), and the detail already numbers it.
-        return OperationProblems(
-            tuple(
-                OperationProblem("invalid_slide_type_binding", (), error)
-                for error in binding_errors
-            )
-        )
+        return OperationProblems(_binding_problems(binding_errors))
 
     persisted = tuple(sorted(slide.position for slide in prior_spec.slides))
     if result.layout == persisted:
@@ -2193,11 +2332,11 @@ def _apply_edit_plan(
                 exc_info=True,
                 extra={"session_id": session_id},
             )
-            return dict(_ROWS_CHANGED_DEGRADE)
+            return dict(_OPERATIONS_ROWS_CHANGED_DEGRADE)
         except Exception as exc:
             _raise_if_persisted_runtime_failure(exc)
             logger.exception("Laying out the rows for an operations edit failed")
-            return _rows_failed_degrade(exc)
+            return _rows_failed_degrade(exc, operations=True)
         logger.info(
             "Laid out the rows for an operations edit as %s (persisted positions "
             "%s); building %s",
@@ -2213,185 +2352,81 @@ def _apply_edit_plan(
     return None
 
 
-def architect_node(state: dict) -> Dict[str, Any]:
-    """Decide the turn's intent, commit the spec, resolve every brand value.
+def _say_architect_message(state: dict, message: str, intent: str) -> None:
+    """Say the architect's own message for the turn, on both surfaces.
 
-    Reads the **previous arc verdict** through
-    ``get_deck_review(db, deck_id, digest)`` — the ws4b signature, not the
-    plan's ``(session_id, deck_id)`` (§4).  The digest is of the **currently
-    committed** slides, i.e. what the deck looked like when the previous turn's
-    deck review ran, resolved before this turn changes anything.  Without it,
-    turn *n+1* re-proposes an arc the deck reviewer already rejected, forever.
+    BOTH surfaces, and the pairing is the fix.  The event is what an SSE client
+    sees as it happens; the row is what a POLLING client sees at all, and what
+    the architect reads back next turn as its own words.  An emit without a row
+    is the shape that shipped: the model was called, the turn completed, and the
+    user saw nothing.
 
-    **Sole resolver of everything brand-related** (§L5): the style branch and
-    the template bytes are resolved here, once per turn, so no builder
-    re-resolves inside its own branch.  The resolution runs twice only when the
-    architect changes the pin this turn — the flag the architect's own skill
-    call needs cannot be derived from a contract the architect has not yet
-    produced, so the inbound contract (the user's session selection, else the
-    persisted spec's) resolves it first, and the committed contract re-resolves
-    only if its ids differ.
+    WHEN it is said is the caller's (spec §7): straight away on a turn that
+    plans nothing, and on a build or an edit only once the plan has landed.
+    """
+    _emit(StreamEventType.ASSISTANT, content=message,
+          metadata={"node": "architect", "intent": intent})
+    _say(state, message)
 
-    Three keys are reset on every pass, and the reason is the same for all
-    three: ``target_positions``, ``fix_target`` and ``error_state`` are
-    single-writer keys with **no reducer and no turn scoping**, so turn 2 would
-    otherwise inherit turn 1's values from the checkpointer — an edit turn's
-    ``target_positions`` would silently narrow the next build turn's coverage to
-    the same slides.
 
-    Reads only fields ``ArchitectOutput`` declares: ``intent``, ``message``,
-    ``deck_spec``, ``data_request``, ``target_positions``,
-    ``proposed_design_contract``, ``operations``, ``deck_changes``.
+@dataclass(frozen=True)
+class _PlannedAnswer:
+    """One architect answer, checked (spec §5): what the turn does with it, or why not.
 
-    **§4.6 lives here, in two halves and one hole.**  A committed spec is
-    classified against the persisted one by :func:`classify_spec_change`.  A
-    ``design_contract`` change forces coverage to every position — the one place
-    a rebuild-all is correct — and a ``confirm_design_contract`` turn's message
-    is augmented to name the slide style that confirming would drop (§L4).  The
-    third case, a ``deck_level`` change, re-reviews every committed slide against
-    the new spec — SERIALLY, here, see ``rereview_committed_slides`` for the
-    measurement of why it cannot be a two-pass turn — and narrows coverage to the
-    slides that contradict it, so still-valid work including manual edits
-    survives.
+    Built by :func:`_plan_answer`, which says and writes nothing, so a refused
+    answer leaves no trace and the node can ask once more.  ``refusal`` is the
+    degrade the answer earns, ``None`` once it has passed every check.  ``message``
+    is the one the user is shown (a confirmation's carries §L4's note).  ``spec``
+    and ``brand`` are the turn's from here on: an operations ``plan``'s composed
+    spec and its brand, else the model's spec and the brand of its contract.
+    ``alignment`` is set on a full-spec edit that was aligned.
+    """
 
-    **An edit may add slides (#314).**  Which slides are new is derived by
-    aligning the edit's spec to the persisted one (``align_slides``), never read
-    off the model's targets; an alignment that would guess is refused.  The spec
-    is re-stamped to ``0..m-1`` and the rows are shifted to match
-    (``SlideWriter.insert_pending_slides``) before ``classify_spec_change``, and
-    only the new and revised slides are targeted.
+    out: Any
+    intent: str
+    message: str
+    spec: Optional[DeckSpec]
+    brand: Dict[str, Any]
+    plan: Optional[_EditPlan]
+    alignment: Optional[SlideAlignment]
+    refusal: Optional[Dict[str, Any]]
 
-    **An edit may instead list its changes as operations** (architect edit
-    operations, spec §4): insert, update, delete, replace and move, against the
-    persisted deck, plus ``deck_changes`` for the deck-level fields.  Nothing is
-    aligned or guessed then: :func:`_plan_operations_edit` composes the next spec
-    deterministically, :func:`_apply_edit_plan` lays the rows out in one
-    transaction, and exactly the inserted, updated and replaced slides are
-    targeted.  An edit with neither field takes the full-spec path above,
-    unchanged — older releases, the describe-only sweeper and a model that
-    ignores its prompt all rely on it.  Every other turn ignores both fields.
+
+def _plan_answer(
+    state: dict,
+    out: Any,
+    *,
+    describe_only: bool,
+    inbound_contract: Optional[DesignContractRef],
+    prior_spec: Optional[DeckSpec],
+    committed_rows: List[Dict[str, Any]],
+    committed_positions: Set[int],
+    brand: Dict[str, Any],
+    slide_payload: Dict[str, Any],
+) -> _PlannedAnswer:
+    """Check one architect answer from the top; say and write nothing (spec §5).
+
+    Everything ``architect_node`` decides about an answer before it may speak or
+    write: the operations-ignored rule, §L4's augmentation of a confirmation and,
+    for a build or an edit, every guard and check that can refuse it — the
+    persisted-spec guards, the operations plan, the position-set guard, the
+    template bindings and the alignment.  Free of side effects (it reads,
+    resolves brands and logs, nothing more), so the node can hand a refused
+    answer back to the model and plan the second answer exactly as it planned
+    the first: a retry may answer with another intent altogether.
+
+    *brand* is the inbound brand, the one the payload was built from; a plan or
+    a re-pinned spec resolves its own, and the result's ``brand`` carries it.
     """
     session_id = state["session_id"]
-    turn_id = state["turn_id"]
-    initiated_by = state.get("initiated_by")
-
-    # #319: the placeholder's first stage, for the whole architect call
-    report_phase(TurnPhase.PLANNING)
-
-    committed_rows = _committed_slide_rows(session_id)
-    committed_htmls = [row.get("html") or "" for row in committed_rows]
-    committed_positions = {
-        row.get("position")
-        for row in committed_rows
-        if row.get("position") is not None
-    }
-    prior_digest = compute_deck_digest(committed_htmls) if committed_htmls else None
-    prior_review = None
-    if prior_digest is not None:
-        try:
-            with get_db_session() as db:
-                deck_id = _resolve_deck_id(db, session_id)
-                stored = (
-                    get_deck_review(db, deck_id, prior_digest)
-                    if deck_id is not None
-                    else None
-                )
-            if stored is not None:
-                # get_deck_review returns Finding OBJECTS; the payload is
-                # serialised with json.dumps, where a pydantic model would land
-                # in the prompt as its repr.  The stored ``author`` is the
-                # reviewing user's identity and stays out (#258: nothing
-                # session- or user-specific reaches any role's model).
-                prior_review = {
-                    "digest": stored.get("digest"),
-                    "findings": [
-                        f.model_dump() if hasattr(f, "model_dump") else f
-                        for f in (stored.get("findings") or [])
-                    ],
-                }
-        except Exception:
-            logger.warning(
-                "Could not read the previous deck review; the architect will "
-                "re-propose without it",
-                exc_info=True,
-            )
-
-    persisted_spec_dict = None
-    try:
-        persisted_spec_dict = read_deck_spec(session_id)
-    except Exception:
-        logger.debug("No persisted deck spec", exc_info=True)
-    prior_spec: Optional[DeckSpec] = None
-    if isinstance(persisted_spec_dict, dict):
-        try:
-            prior_spec = DeckSpec.model_validate(persisted_spec_dict)
-        except Exception:
-            logger.warning("Persisted deck spec does not validate", exc_info=True)
-
-    inbound_contract = _session_contract(session_id)
-    if inbound_contract is None and prior_spec is not None:
-        inbound_contract = prior_spec.design_contract
-    brand = _resolve_brand(inbound_contract)
-
-    # ``describe_only`` is read ahead of the payload because a describe-only turn
-    # resolves no slide references (#313, D4); it is the one definition the edit
-    # guards below also use.
-    describe_only = bool(scoped_vals(state, "describe_only"))
-    conversation = _conversation(session_id)
-    slide_payload = architect_slide_payload(
-        conversation,
-        state.get("architect_message"),
-        _deck_positions(committed_positions, prior_spec),
-        describe_only=describe_only,
-    )
-
-    # The model-facing payload is content only (#258, user decision): no
-    # session, user, turn or release identifier.  This dict is built for the
-    # model alone, so it IS the architect's allowlist; ``session_id`` stays in
-    # the node for the reads above and the writes below, and the trace gets the
-    # root/actor pair through ``_assembly_context``.
-    payload = {
-        "conversation": conversation,
-        "message": state.get("architect_message"),
-        "current_deck_spec": persisted_spec_dict,
-        "committed_slide_count": len(committed_htmls),
-        # #313: the user's 1-based slide numbers mapped to positions, and every
-        # slide reference in the user's latest message already resolved
-        # (src/domain/slide_numbering.py), so the model copies positions instead
-        # of computing them.
-        "slide_numbering": slide_payload["slide_numbering"],
-        "slide_references": slide_payload["slide_references"],
-        "previous_deck_review": prior_review,
-        "available_design_contract": (
-            inbound_contract.model_dump() if inbound_contract else None
-        ),
-        "template_sections": brand["section_inventory"],
-        "resolved_style": brand["resolved_style"],
-        # §M1, as a PAYLOAD key and not a tool manifest — see
-        # _design_system_library.  Without this the architect cannot offer a
-        # brand it cannot see: available_design_contract carries only the ids
-        # already in force, so every other design system in the org is invisible.
-        "design_system_library": _design_system_library(),
-    }
-
-    out = get_agent_runtime().run(
-        "architect",
-        state["graph_release_id"],
-        payload,
-        _assembly_context(
-            brand["design_system_active"],
-            state.get("root_session_id"),
-            state.get("actor_session_id"),
-        ),
-    ).output
     intent = out.intent
     message = out.message
 
     # Only an edit that is not describe-only applies operations (spec §4).  Any
     # other turn carrying them is handled exactly as the same answer without
     # them — a build from its deck_spec, the sweeper's re-description through
-    # deck_spec, a discussion that ends the turn — and says so here, once,
-    # before the turns that return early.  Ignored, not refused: refusing would
+    # deck_spec, a discussion that ends the turn — and says so here, once per
+    # answer, before the turns that return early.  Ignored, not refused: refusing would
     # throw away an otherwise usable answer for a field that turn has no use for.
     operations_given = out.operations is not None or out.deck_changes is not None
     operations_edit = operations_given and intent == "edit" and not describe_only
@@ -2409,7 +2444,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # augmentation happens HERE, before the emit and before `updates` is built:
     # the emit is the streamed assistant turn and architect_message is the
     # persisted one, so augmenting either alone would show the user a sentence
-    # the transcript does not contain, or the reverse.
+    # the transcript does not contain, or the reverse.  Planning runs on every
+    # answer, so a confirmation given as the retry's answer is augmented too.
     if intent == "confirm_design_contract":
         dropped_style_id = _slide_style_being_dropped(
             out.proposed_design_contract, inbound_contract, prior_spec
@@ -2419,36 +2455,19 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 [message.rstrip(), _SLIDE_STYLE_DROPPED.format(dropped_style_id)]
             )
 
-    updates: Dict[str, Any] = {
-        "architect_intent": intent,
-        "architect_message": message,
-        "target_positions": None,
-        "fix_target": None,
-        "error_state": None,
-    }
-    # BOTH surfaces, and the pairing is the fix.  The event is what an SSE client
-    # sees as it happens; the row is what a POLLING client sees at all, and what
-    # the architect reads back next turn as its own words.  An emit without a row
-    # is the shape that shipped: the model was called, the turn completed, and the
-    # user saw nothing.
-    _emit(StreamEventType.ASSISTANT, content=message,
-          metadata={"node": "architect", "intent": intent})
-    _say(state, message)
-
-    if intent == "ask_data":
-        # GraphState declares no analyst channel and undeclared keys are
-        # silently dropped (§11), so the request travels in architect_message —
-        # the same key the analyst answers through.
-        updates["architect_message"] = "\n\n".join(
-            [message, "DATA REQUEST: " + out.data_request.model_dump_json()]
-        )
-        return updates
-
     if intent not in ("build", "edit"):
-        # discuss and confirm_design_contract both END the turn. A confirmation
-        # WAITS for the user, so nothing may restyle before they answer, and the
-        # proposal stays in proposed_design_contract — never in deck_spec (§M1).
-        return updates
+        # Nothing to plan: a discussion, a data request or a confirmation is
+        # never refused.
+        return _PlannedAnswer(
+            out=out,
+            intent=intent,
+            message=message,
+            spec=out.deck_spec,
+            brand=brand,
+            plan=None,
+            alignment=None,
+            refusal=None,
+        )
 
     # A build uses the architect's own spec.  An EDIT must also carry its spec
     # (the deck spec is the source of truth, so every edit returns it revised;
@@ -2479,7 +2498,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # read: the composed spec is the persisted spec plus ``deck_changes`` plus
     # the composed slides, so the spec-shape guards below do not apply to it.
     spec = out.deck_spec
-    edit_degrade: Optional[Dict[str, str]] = None
+    edit_degrade: Optional[Dict[str, Any]] = None
     plan: Optional[_EditPlan] = None
     if intent == "edit":
         if prior_spec is None and (spec is None or not describe_only):
@@ -2619,6 +2638,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     + "; ".join(binding_errors)
                     + ". Nothing has been changed."
                 ),
+                # One problem per bad slide, as on the operations path.
+                "problems": _binding_problems(binding_errors),
             }
 
     # #314 (D1): which slides an edit adds is DERIVED from the two specs by an
@@ -2650,10 +2671,293 @@ def architect_node(state: dict) -> Dict[str, Any]:
             code, user = _ALIGNMENT_REFUSALS.get(
                 exc.code, ("edit_spec_positions_changed", _POSITIONS_CHANGED_TEXT)
             )
-            edit_degrade = {"code": code, "message": exc.detail, "user": user}
+            edit_degrade = {
+                "code": code,
+                "message": exc.detail,
+                "user": user,
+                # What the retry is told (spec §5): the alignment's own reason.
+                # It names no position, because what it could not read is the
+                # relation between two lists, not a slide.  Its prefix keeps it
+                # apart from an operations problem's code.
+                "problems": (
+                    OperationProblem(f"alignment_{exc.code}", (), exc.detail),
+                ),
+            }
 
-    if edit_degrade is not None:
-        _degrade_edit(state, updates, edit_degrade)
+    return _PlannedAnswer(
+        out=out,
+        intent=intent,
+        message=message,
+        spec=spec,
+        brand=brand,
+        plan=plan,
+        alignment=alignment,
+        refusal=edit_degrade,
+    )
+
+
+def architect_node(state: dict) -> Dict[str, Any]:
+    """Decide the turn's intent, commit the spec, resolve every brand value.
+
+    Reads the **previous arc verdict** through
+    ``get_deck_review(db, deck_id, digest)`` — the ws4b signature, not the
+    plan's ``(session_id, deck_id)`` (§4).  The digest is of the **currently
+    committed** slides, i.e. what the deck looked like when the previous turn's
+    deck review ran, resolved before this turn changes anything.  Without it,
+    turn *n+1* re-proposes an arc the deck reviewer already rejected, forever.
+
+    **Sole resolver of everything brand-related** (§L5): the style branch and
+    the template bytes are resolved here, once per turn, so no builder
+    re-resolves inside its own branch.  The resolution runs twice only when the
+    architect changes the pin this turn — the flag the architect's own skill
+    call needs cannot be derived from a contract the architect has not yet
+    produced, so the inbound contract (the user's session selection, else the
+    persisted spec's) resolves it first, and the committed contract re-resolves
+    only if its ids differ.
+
+    Three keys are reset on every pass, and the reason is the same for all
+    three: ``target_positions``, ``fix_target`` and ``error_state`` are
+    single-writer keys with **no reducer and no turn scoping**, so turn 2 would
+    otherwise inherit turn 1's values from the checkpointer — an edit turn's
+    ``target_positions`` would silently narrow the next build turn's coverage to
+    the same slides.
+
+    Reads only fields ``ArchitectOutput`` declares: ``intent``, ``message``,
+    ``deck_spec``, ``data_request``, ``target_positions``,
+    ``proposed_design_contract``, ``operations``, ``deck_changes``.
+
+    **§4.6 lives here, in two halves and one hole.**  A committed spec is
+    classified against the persisted one by :func:`classify_spec_change`.  A
+    ``design_contract`` change forces coverage to every position — the one place
+    a rebuild-all is correct — and a ``confirm_design_contract`` turn's message
+    is augmented to name the slide style that confirming would drop (§L4).  The
+    third case, a ``deck_level`` change, re-reviews every committed slide against
+    the new spec — SERIALLY, here, see ``rereview_committed_slides`` for the
+    measurement of why it cannot be a two-pass turn — and narrows coverage to the
+    slides that contradict it, so still-valid work including manual edits
+    survives.
+
+    **An edit may add slides (#314).**  Which slides are new is derived by
+    aligning the edit's spec to the persisted one (``align_slides``), never read
+    off the model's targets; an alignment that would guess is refused.  The spec
+    is re-stamped to ``0..m-1`` and the rows are shifted to match
+    (``SlideWriter.insert_pending_slides``) before ``classify_spec_change``, and
+    only the new and revised slides are targeted.
+
+    **An edit may instead list its changes as operations** (architect edit
+    operations, spec §4): insert, update, delete, replace and move, against the
+    persisted deck, plus ``deck_changes`` for the deck-level fields.  Nothing is
+    aligned or guessed then: :func:`_plan_operations_edit` composes the next spec
+    deterministically, :func:`_apply_edit_plan` lays the rows out in one
+    transaction, and exactly the inserted, updated and replaced slides are
+    targeted.  An edit with neither field takes the full-spec path above,
+    unchanged — older releases, the describe-only sweeper and a model that
+    ignores its prompt all rely on it.  Every other turn ignores both fields.
+
+    **One retry, and nothing said before the plan lands** (spec §5, §7).  Each
+    answer is checked by :func:`_plan_answer`, which says and writes nothing.  A
+    refusal the model can fix (:data:`RETRYABLE_EDIT_CODES`) asks the architect
+    once more, with ``rejected_edit`` naming its answer and the problems, and the
+    second answer is handled from the top.  A build's or an edit's own message
+    is said only once its plan has landed; on any refusal only the refusal is
+    said, and its row records why (:data:`REFUSAL_METADATA_KEY`) so the next
+    turn's architect is told.
+    """
+    session_id = state["session_id"]
+    turn_id = state["turn_id"]
+    initiated_by = state.get("initiated_by")
+
+    # #319: the placeholder's first stage, for the whole architect call
+    report_phase(TurnPhase.PLANNING)
+
+    committed_rows = _committed_slide_rows(session_id)
+    committed_htmls = [row.get("html") or "" for row in committed_rows]
+    committed_positions = {
+        row.get("position")
+        for row in committed_rows
+        if row.get("position") is not None
+    }
+    prior_digest = compute_deck_digest(committed_htmls) if committed_htmls else None
+    prior_review = None
+    if prior_digest is not None:
+        try:
+            with get_db_session() as db:
+                deck_id = _resolve_deck_id(db, session_id)
+                stored = (
+                    get_deck_review(db, deck_id, prior_digest)
+                    if deck_id is not None
+                    else None
+                )
+            if stored is not None:
+                # get_deck_review returns Finding OBJECTS; the payload is
+                # serialised with json.dumps, where a pydantic model would land
+                # in the prompt as its repr.  The stored ``author`` is the
+                # reviewing user's identity and stays out (#258: nothing
+                # session- or user-specific reaches any role's model).
+                prior_review = {
+                    "digest": stored.get("digest"),
+                    "findings": [
+                        f.model_dump() if hasattr(f, "model_dump") else f
+                        for f in (stored.get("findings") or [])
+                    ],
+                }
+        except Exception:
+            logger.warning(
+                "Could not read the previous deck review; the architect will "
+                "re-propose without it",
+                exc_info=True,
+            )
+
+    persisted_spec_dict = None
+    try:
+        persisted_spec_dict = read_deck_spec(session_id)
+    except Exception:
+        logger.debug("No persisted deck spec", exc_info=True)
+    prior_spec: Optional[DeckSpec] = None
+    if isinstance(persisted_spec_dict, dict):
+        try:
+            prior_spec = DeckSpec.model_validate(persisted_spec_dict)
+        except Exception:
+            logger.warning("Persisted deck spec does not validate", exc_info=True)
+
+    inbound_contract = _session_contract(session_id)
+    if inbound_contract is None and prior_spec is not None:
+        inbound_contract = prior_spec.design_contract
+    brand = _resolve_brand(inbound_contract)
+
+    # ``describe_only`` is read ahead of the payload because a describe-only turn
+    # resolves no slide references (#313, D4); it is the one definition the edit
+    # guards below also use.
+    describe_only = bool(scoped_vals(state, "describe_only"))
+    conversation = _conversation(session_id)
+    slide_payload = architect_slide_payload(
+        conversation,
+        state.get("architect_message"),
+        _deck_positions(committed_positions, prior_spec),
+        describe_only=describe_only,
+    )
+
+    # The model-facing payload is content only (#258, user decision): no
+    # session, user, turn or release identifier.  This dict is built for the
+    # model alone, so it IS the architect's allowlist; ``session_id`` stays in
+    # the node for the reads above and the writes below, and the trace gets the
+    # root/actor pair through ``_assembly_context``.
+    payload = {
+        "conversation": conversation,
+        "message": state.get("architect_message"),
+        "current_deck_spec": persisted_spec_dict,
+        "committed_slide_count": len(committed_htmls),
+        # #313: the user's 1-based slide numbers mapped to positions, and every
+        # slide reference in the user's latest message already resolved
+        # (src/domain/slide_numbering.py), so the model copies positions instead
+        # of computing them.
+        "slide_numbering": slide_payload["slide_numbering"],
+        "slide_references": slide_payload["slide_references"],
+        "previous_deck_review": prior_review,
+        "available_design_contract": (
+            inbound_contract.model_dump() if inbound_contract else None
+        ),
+        "template_sections": brand["section_inventory"],
+        "resolved_style": brand["resolved_style"],
+        # §M1, as a PAYLOAD key and not a tool manifest — see
+        # _design_system_library.  Without this the architect cannot offer a
+        # brand it cannot see: available_design_contract carries only the ids
+        # already in force, so every other design system in the org is invisible.
+        "design_system_library": _design_system_library(),
+    }
+
+    # ---- ask, plan, and at most once ask again (spec §5) ---------------------
+    # Every answer is planned BEFORE anything is said or written: _plan_answer
+    # runs every check that can refuse it and has no side effects, so a refused
+    # answer leaves no trace.  When the refusal is one the model can fix
+    # (RETRYABLE_EDIT_CODES), the architect is asked once more with the SAME
+    # payload plus ``rejected_edit`` — what it answered and exactly why that was
+    # refused — and the second answer is planned from the top: it may be another
+    # intent, a discussion included, and it passes every check the first did.  At
+    # most two calls per turn, by the loop's bound; a second refusal degrades
+    # with the second answer's problems.  A row write that fails later is never
+    # retried: it is the deck's state, not the answer's.
+    rejected_edit: Optional[Dict[str, Any]] = None
+    for attempt in range(2):
+        out = get_agent_runtime().run(
+            "architect",
+            state["graph_release_id"],
+            # A NEW dict on the retry, never the first one mutated: the runtime,
+            # and the trace of the first call, keep the payload they were handed.
+            payload if rejected_edit is None else payload | {"rejected_edit": rejected_edit},
+            _assembly_context(
+                brand["design_system_active"],
+                state.get("root_session_id"),
+                state.get("actor_session_id"),
+            ),
+        ).output
+        answer = _plan_answer(
+            state,
+            out,
+            describe_only=describe_only,
+            inbound_contract=inbound_contract,
+            prior_spec=prior_spec,
+            committed_rows=committed_rows,
+            committed_positions=committed_positions,
+            brand=brand,
+            slide_payload=slide_payload,
+        )
+        refusal = answer.refusal
+        if attempt or refusal is None or refusal["code"] not in RETRYABLE_EDIT_CODES:
+            break
+        rejected_edit = {
+            "your_previous_answer": out.model_dump(
+                include=_PREVIOUS_ANSWER_FIELDS, mode="json"
+            ),
+            "problems": [_problem_payload(p) for p in _refusal_problems(refusal)],
+        }
+        logger.info(
+            "architect_retry: the architect's %s answer was refused (%s: %s); "
+            "asking once more with the problems",
+            out.intent,
+            refusal["code"],
+            refusal["message"],
+            extra={"session_id": session_id},
+        )
+
+    intent = answer.intent
+    message = answer.message
+    # From here on the answer's spec and brand ARE the turn's (an operations
+    # plan's composed spec and brand, else the model's spec and the brand of its
+    # contract): every later step — classify_spec_change, the re-review, state,
+    # the pre-fan-out write — reads `spec` and `brand`.
+    spec = answer.spec
+    brand = answer.brand
+    plan = answer.plan
+    alignment = answer.alignment
+
+    updates: Dict[str, Any] = {
+        "architect_intent": intent,
+        "architect_message": message,
+        "target_positions": None,
+        "fix_target": None,
+        "error_state": None,
+    }
+
+    if intent not in ("build", "edit"):
+        # Said straight away (spec §7): nothing is planned on these turns, so
+        # there is nothing to land first and nothing left that could refuse them.
+        _say_architect_message(state, message, intent)
+        if intent == "ask_data":
+            # GraphState declares no analyst channel and undeclared keys are
+            # silently dropped (§11), so the request travels in architect_message —
+            # the same key the analyst answers through.
+            updates["architect_message"] = "\n\n".join(
+                [message, "DATA REQUEST: " + out.data_request.model_dump_json()]
+            )
+            return updates
+        # discuss and confirm_design_contract both END the turn. A confirmation
+        # WAITS for the user, so nothing may restyle before they answer, and the
+        # proposal stays in proposed_design_contract — never in deck_spec (§M1).
+        return updates
+
+    if answer.refusal is not None:
+        _degrade_edit(state, updates, answer.refusal)
         return updates
 
     # ---- the operations path: land the plan (spec §4 step 4) ----------------
@@ -2759,46 +3063,6 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 extra={"session_id": session_id},
             )
 
-    # #314 follow-up (N1): an untouched blank is never built.  Insert-turn
-    # references count the pre-insert deck and name an anchor, so none is passed.
-    blanks_said: Set[int] = set()
-    numbering = slide_payload["slide_numbering"]
-    if plan is not None:
-        # Decided on the composed deck (spec §4): a blank no insert, update or
-        # replace produced is untouched, wherever the layout moved it.  Both
-        # inputs are in the plan's own numbering, the spec's positions and its
-        # rebuild.  The targets list is clean of untouched blanks by
-        # construction; the design-contract and deck-level lists below are what
-        # this filters.
-        untouched_blanks = _untouched_blank_positions(
-            spec, None, False, rebuild=plan.rebuild
-        )
-        # C12: the "still blank" notice is said HERE, once, for every blank the
-        # user named that no operation acted on or anchored to, in the user's own
-        # numbers (the pre-message deck the references count).  Not left to the
-        # lists' drops: the targets never hold the blank, so a plain edit would
-        # never say it, and a rebuild-all would say a blank the user named only
-        # as a place or to move it.  So those drops get no references.  After the
-        # rows have landed, so a refused edit says only its refusal.
-        _say_named_blanks(
-            session_id,
-            _blanks_named_but_left_alone(
-                prior_spec, out.operations or [], slide_payload["slide_references"]
-            ),
-            slide_payload["slide_references"],
-            numbering,
-            blanks_said,
-        )
-        blank_refs = []
-    else:
-        untouched_blanks = _untouched_blank_positions(spec, alignment, inserting)
-        blank_refs = [] if inserting else slide_payload["slide_references"]
-    if untouched_blanks:
-        edit_targets = _drop_untouched_blanks(
-            session_id, edit_targets, untouched_blanks, blank_refs, numbering, blanks_said
-        )
-        updates["target_positions"] = list(edit_targets)
-
     # A BUILD answer to an add rebuilds every position in place, so identity and
     # records stay by position and every slide after the new one is
     # mis-attributed (pre-existing build semantics, D1).  Diagnostic only: it
@@ -2877,6 +3141,56 @@ def architect_node(state: dict) -> Dict[str, Any]:
             list(alignment.revised_indices),
             extra={"session_id": session_id},
         )
+
+    # ---- spec §7: the plan has landed, so say what it does ------------------
+    # A build's or an edit's own message is said only HERE: once every check has
+    # passed and the rows are laid out (the operations layout or the insert shift
+    # above), so a refused answer's message is never shown — a refusal says only
+    # the refusal (_degrade_edit).  Before the notices about blanks below, which
+    # qualify it, and before classify_spec_change, so a deck-level re-review's
+    # notice follows the message it reports on.
+    _say_architect_message(state, message, intent)
+
+    # #314 follow-up (N1): an untouched blank is never built.  Insert-turn
+    # references count the pre-insert deck and name an anchor, so none is passed.
+    blanks_said: Set[int] = set()
+    numbering = slide_payload["slide_numbering"]
+    if plan is not None:
+        # Decided on the composed deck (spec §4): a blank no insert, update or
+        # replace produced is untouched, wherever the layout moved it.  Both
+        # inputs are in the plan's own numbering, the spec's positions and its
+        # rebuild.  The targets list is clean of untouched blanks by
+        # construction; the design-contract and deck-level lists below are what
+        # this filters.
+        untouched_blanks = _untouched_blank_positions(
+            spec, None, False, rebuild=plan.rebuild
+        )
+        # C12: the "still blank" notice is said HERE, once, for every blank the
+        # user named that no operation acted on or anchored to, in the user's own
+        # numbers (the pre-message deck the references count).  Not left to the
+        # lists' drops: the targets never hold the blank, so a plain edit would
+        # never say it, and a rebuild-all would say a blank the user named only
+        # as a place or to move it.  So those drops get no references.  After the
+        # rows have landed, so a refused edit says only its refusal, and after the
+        # model's message, so the notice follows the message it qualifies.
+        _say_named_blanks(
+            session_id,
+            _blanks_named_but_left_alone(
+                prior_spec, out.operations or [], slide_payload["slide_references"]
+            ),
+            slide_payload["slide_references"],
+            numbering,
+            blanks_said,
+        )
+        blank_refs = []
+    else:
+        untouched_blanks = _untouched_blank_positions(spec, alignment, inserting)
+        blank_refs = [] if inserting else slide_payload["slide_references"]
+    if untouched_blanks:
+        edit_targets = _drop_untouched_blanks(
+            session_id, edit_targets, untouched_blanks, blank_refs, numbering, blanks_said
+        )
+        updates["target_positions"] = list(edit_targets)
 
     # ---- §4.6: what does this commit change about the DECK, not a slide? ----
     # Classified AFTER the edit turn's target_positions is set, so the
