@@ -61,6 +61,14 @@ PROBLEM_CODES = (
 
 _START = -1  # the anchor "at the start of the deck"
 
+# OperationProblem has no field for an update's slide count, so problem_sentence
+# reads it back out of the detail. The format and the pattern live together so
+# they cannot drift apart.
+_UPDATE_COUNT_DETAIL = (
+    "the update of position {position} described {count} slides instead of one"
+)
+_UPDATE_COUNT = re.compile(r"described (\d+) slides instead of one")
+
 
 class SlideContent(BaseModel):
     """A ``SlideSpec`` without its position: what one slide must say and how it binds.
@@ -213,8 +221,12 @@ def apply_operations(
                 )
             continue
 
-        # update / delete / replace / move all act on a position.
-        if op.position is None:
+        # update / delete / replace / move all act on a position. Each fault of
+        # the op is checked independently, so a retry sees all of them at once.
+        position = op.position
+        after = op.after_position
+        position_ok = False
+        if position is None:
             problems.append(
                 _problem(
                     "missing_position",
@@ -222,80 +234,94 @@ def apply_operations(
                     f"a {op.op} did not give the position of the slide it acts on",
                 )
             )
-            continue
-        if op.op == "move" and op.after_position is None:
-            problems.append(
-                _problem(
-                    "missing_after_position",
-                    (),
-                    "a move did not give after_position (use -1 for the start)",
-                )
-            )
-            continue
+        else:
+            position_ok = check_position(position, "position")
 
-        ok = check_position(op.position, "position")
+        anchor_ok = True
         if op.op == "move":
-            ok = check_anchor(op.after_position) and ok  # type: ignore[arg-type]
-        if not ok:
-            continue
-
-        if op.position in subjects:
-            if not any(
-                p.code == "slide_targeted_twice" and p.positions == (op.position,)
-                for p in problems
-            ):
+            if after is None:
+                anchor_ok = False
                 problems.append(
                     _problem(
-                        "slide_targeted_twice",
-                        (op.position,),
-                        f"the slide at position {op.position} is the subject of "
-                        "more than one operation",
+                        "missing_after_position",
+                        (),
+                        "a move did not give after_position (use -1 for the start)",
                     )
                 )
-            continue
-        subjects.add(op.position)
+            elif after == position:
+                anchor_ok = position_ok  # an unknown self-anchor is already reported
+            else:
+                anchor_ok = check_anchor(after)
 
-        if op.op == "delete":
-            deleted.add(op.position)
-        elif op.op == "update":
+        # A known slide is claimed even by an otherwise faulty op, so a second
+        # op on the same slide is reported now rather than after the retry.
+        claimed = False
+        if position_ok:
+            assert position is not None
+            if position in subjects:
+                if not any(
+                    p.code == "slide_targeted_twice" and p.positions == (position,)
+                    for p in problems
+                ):
+                    problems.append(
+                        _problem(
+                            "slide_targeted_twice",
+                            (position,),
+                            f"the slide at position {position} is the subject of "
+                            "more than one operation",
+                        )
+                    )
+            else:
+                subjects.add(position)
+                claimed = True
+
+        content_ok = True
+        if position is not None and op.op == "update":
             if op.slides is None or len(op.slides) != 1:
+                content_ok = False
                 count = 0 if op.slides is None else len(op.slides)
                 problems.append(
                     _problem(
                         "update_needs_one_slide",
-                        (op.position,),
-                        f"the update of position {op.position} described {count} "
-                        "slides instead of one",
+                        (position,),
+                        _UPDATE_COUNT_DETAIL.format(position=position, count=count),
                     )
                 )
-                continue
-            updated[op.position] = op.slides[0]
-        elif op.op == "replace":
+        elif position is not None and op.op == "replace":
             if not op.slides:
+                content_ok = False
                 problems.append(
                     _problem(
                         "missing_slides",
-                        (op.position,),
-                        f"the replace of position {op.position} gave no slides",
+                        (position,),
+                        f"the replace of position {position} gave no slides",
                     )
                 )
-                continue
-            replaced[op.position] = list(op.slides)
+        elif position_ok and op.op == "move" and after == position:
+            content_ok = False
+            problems.append(
+                _problem(
+                    "move_after_itself",
+                    (position,),
+                    f"the slide at position {position} cannot be moved after itself",
+                )
+            )
+
+        if not (claimed and anchor_ok and content_ok):
+            continue
+        assert position is not None
+        if op.op == "delete":
+            deleted.add(position)
+        elif op.op == "update":
+            assert op.slides is not None
+            updated[position] = op.slides[0]
+        elif op.op == "replace":
+            assert op.slides is not None
+            replaced[position] = list(op.slides)
         else:  # move
-            after = op.after_position
             assert after is not None
-            if after == op.position:
-                problems.append(
-                    _problem(
-                        "move_after_itself",
-                        (op.position,),
-                        f"the slide at position {op.position} cannot be moved "
-                        "after itself",
-                    )
-                )
-                continue
-            moves[op.position] = after
-            followers.setdefault(after, []).append(("move", op.position))
+            moves[position] = after
+            followers.setdefault(after, []).append(("move", position))
 
     loops = _find_loops(moves)
     for members in loops:
@@ -450,7 +476,8 @@ def problem_sentence(
 
     ``slide_numbers`` maps a persisted position to its 1-indexed slide number in
     the pre-message deck; a position it does not hold is numbered ``position + 1``.
-    A code outside ``PROBLEM_CODES`` returns its ``detail`` unchanged.
+    A code outside ``PROBLEM_CODES``, or a problem missing what its sentence
+    needs, returns its ``detail`` unchanged.
     """
 
     def number(position: int) -> int:
@@ -469,12 +496,12 @@ def problem_sentence(
             return "the new slides at the start of the deck had no content"
         return f"the new slides for slide {number(first)} had no content"
     if code == "update_needs_one_slide" and first is not None:
-        found = re.search(r"described (\d+) slides", problem.detail)
-        count = int(found.group(1)) if found else 0
-        return (
-            f"the change to slide {number(first)} described {count} slides "
-            "instead of one"
-        )
+        found = _UPDATE_COUNT.search(problem.detail)
+        if found:  # without the count, fall back to the detail rather than guess one
+            return (
+                f"the change to slide {number(first)} described {found.group(1)} "
+                "slides instead of one"
+            )
     if code == "missing_position":
         return "one change did not say which slide it was for"
     if code == "missing_after_position":

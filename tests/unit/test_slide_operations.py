@@ -38,6 +38,7 @@ from __future__ import annotations
 import re
 
 import pytest
+from pydantic import ValidationError
 
 from src.domain.deck_spec import (
     DeckSpec,
@@ -671,6 +672,60 @@ def test_all_problems_collected_in_one_pass():
     ]
 
 
+@pytest.mark.parametrize(
+    "operations, expected",
+    [
+        pytest.param(
+            [move(2, 99), delete(2)],
+            [("unknown_slide", (99,)), ("slide_targeted_twice", (2,))],
+            id="bad-anchor-still-claims-its-slide",
+        ),
+        pytest.param(
+            [SlideOperation(op="move", position=2), delete(2)],
+            [("missing_after_position", ()), ("slide_targeted_twice", (2,))],
+            id="missing-anchor-still-claims-its-slide",
+        ),
+        pytest.param(
+            [SlideOperation(op="move", position=99)],
+            [("unknown_slide", (99,)), ("missing_after_position", ())],
+            id="unknown-subject-and-missing-anchor",
+        ),
+        pytest.param(
+            [SlideOperation(op="move", after_position=99)],
+            [("missing_position", ()), ("unknown_slide", (99,))],
+            id="missing-subject-and-unknown-anchor",
+        ),
+        pytest.param(
+            [SlideOperation(op="update", position=99, slides=[content("X"), content("Y")])],
+            [("unknown_slide", (99,)), ("update_needs_one_slide", (99,))],
+            id="unknown-subject-and-two-slide-update",
+        ),
+        pytest.param(
+            [SlideOperation(op="replace", position=99, slides=[])],
+            [("unknown_slide", (99,)), ("missing_slides", (99,))],
+            id="unknown-subject-and-empty-replace",
+        ),
+        pytest.param(
+            [
+                delete(2),
+                SlideOperation(op="update", position=2, slides=[content("X"), content("Y")]),
+            ],
+            [("slide_targeted_twice", (2,)), ("update_needs_one_slide", (2,))],
+            id="duplicate-subject-and-two-slide-update",
+        ),
+        pytest.param(
+            [move(99, 99)],
+            [("unknown_slide", (99,))],
+            id="unknown-self-move-reported-once",
+        ),
+    ],
+)
+def test_every_fault_of_one_operation_is_reported(operations, expected):
+    """One retry is all the model gets (spec §5), so an op with two independent
+    faults reports both, and a faulty op on a known slide still claims it."""
+    assert problems_of(apply_operations(deck(4), operations)) == expected
+
+
 # ---------------------------------------------------------------------------
 # Purity
 # ---------------------------------------------------------------------------
@@ -949,3 +1004,43 @@ def test_slide_content_mirrors_slide_spec():
     assert as_content.to_slide_spec(5) == original
     assert as_content.to_slide_spec(9) == SlideSpec(position=9, **_old_fields(5))
     assert content("X").to_slide_spec(0) == SlideSpec(position=0, **_new_fields("X"))
+
+
+def test_slide_content_applies_slide_specs_slide_type_rule():
+    """C9: whatever validates as SlideContent validates as the same SlideSpec,
+    so apply_operations never raises building a slide from new content."""
+    for slide_type, stored in ((None, None), ("hero", "hero"), ("  hero\t", "hero")):
+        fields = {**_new_fields("X"), "slide_type": slide_type}
+        built = SlideContent(**fields)
+        assert built.slide_type == stored
+        result = apply_operations(
+            deck(4), [SlideOperation(op="update", position=2, slides=[built])]
+        )
+        assert isinstance(result, OperationsResult)
+        assert result.slides[2] == SlideSpec(position=2, **fields)
+        assert result.slides[2].slide_type == stored
+
+    for blank in ("", "   ", "\n\t"):
+        fields = {**_new_fields("X"), "slide_type": blank}
+        with pytest.raises(ValidationError, match="slide_type must not be whitespace-only"):
+            SlideSpec(position=2, **fields)
+        with pytest.raises(ValidationError, match="slide_type must not be whitespace-only"):
+            SlideContent(**fields)
+
+
+def test_problem_sentence_passes_other_problems_through():
+    """C8: a code outside the table (later tasks add their own) returns its
+    detail unchanged, and so does a table code missing what its sentence needs."""
+    numbers = {p: p + 1 for p in range(8)}
+    for problem in (
+        OperationProblem(
+            "invalid_slide_type_binding",
+            (),
+            "slide 3 binds slide_type 'hero' to a section the template does not have",
+        ),
+        OperationProblem("alignment_overlap", (4,), "slide 5 overlaps the slide after it"),
+        OperationProblem(
+            "update_needs_one_slide", (2,), "the update had the wrong number of slides"
+        ),
+    ):
+        assert problem_sentence(problem, numbers, 8) == problem.detail
