@@ -95,8 +95,8 @@ jobs:
     timeout-minutes: 15
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    # Five modules under tests/unit/ carry `pytest.mark.postgres` and a sixth
-    # skips itself at import; all six create uuid-named throwaway databases off
+    # Six modules under tests/unit/ carry `pytest.mark.postgres` and a seventh
+    # skips itself at import; all seven create uuid-named throwaway databases off
     # TELLR_TEST_POSTGRES_URL and self-skip when it names nothing reachable.
     # Without this service they skipped in CI while passing on every developer's
     # laptop, which made CI strictly weaker than a laptop, silently.

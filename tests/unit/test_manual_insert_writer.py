@@ -968,10 +968,11 @@ def test_a_drifted_spec_is_spliced_at_the_landed_index_not_the_requested_one(fac
 
 
 def test_both_writers_shift_through_the_one_splice(factory):
-    """One shift primitive (§7): the manual insert and the graph's
-    ``insert_pending_slides`` both call ``_splice_slide_rows``, the manual insert
-    with exactly ``{landed: (slide, {})}`` over the re-read rows."""
-    real = session_manager._splice_slide_rows
+    """One shift primitive (§7): the manual insert (via ``_splice_slide_rows``) and
+    the graph's ``insert_pending_slides`` (via ``apply_slide_layout``) both call
+    ``_lay_out_slide_rows``, the manual insert with exactly
+    ``{landed: (slide, {})}`` over the re-read rows."""
+    real = session_manager._lay_out_slide_rows
     calls: List[Dict[str, Any]] = []
 
     def spy(*args, **kwargs):
@@ -984,11 +985,11 @@ def test_both_writers_shift_through_the_one_splice(factory):
     seed = _seed_six(factory)
     before = _rows(factory, seed["owner_pk"])
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch.object(session_manager, "_splice_slide_rows", spy))
-        if hasattr(slide_repository, "_splice_slide_rows"):
-            stack.enter_context(patch.object(slide_repository, "_splice_slide_rows", spy))
+        stack.enter_context(patch.object(session_manager, "_lay_out_slide_rows", spy))
+        if hasattr(slide_repository, "_lay_out_slide_rows"):
+            stack.enter_context(patch.object(slide_repository, "_lay_out_slide_rows", spy))
         _insert(factory, 1, before=before, release_id=seed["release_id"])
-        assert len(calls) == 1, f"the manual insert called the splice {len(calls)} times"
+        assert len(calls) == 1, f"the manual insert called _lay_out_slide_rows {len(calls)} times"
         (call,) = calls
         assert call["owner_id"] == seed["owner_pk"]
         assert call["old_slide_ids"] == [r["slide_id"] for r in before]
@@ -1011,7 +1012,7 @@ def test_both_writers_shift_through_the_one_splice(factory):
                     object_type="deck",
                 ),
             )
-        assert len(calls) == 1, "insert_pending_slides does not shift through the one splice"
+        assert len(calls) == 1, "insert_pending_slides does not shift through _lay_out_slide_rows"
         assert set(calls[0]["new_slides"]) == {0}
 
 

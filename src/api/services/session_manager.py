@@ -854,26 +854,78 @@ def _splice_slide_rows(
             f"{new_count} positions"
         )
 
+    layout = []
+    old_index = 0
+    for new_index in range(new_count):
+        if new_index in new_slides:
+            layout.append(None)
+        else:
+            layout.append(old_index)
+            old_index += 1
+    _lay_out_slide_rows(db, owner_id, old_rows, layout, new_slides)
+
+
+def _lay_out_slide_rows(
+    db: Session,
+    owner_id: int,
+    old_rows: List[SessionSlide],
+    layout: Sequence[Optional[int]],
+    new_slides: Mapping[int, Tuple[Dict[str, Any], Dict[str, Any]]],
+) -> None:
+    """THE shift primitive: lay a deck's rows out in any order, with the EXACT map.
+
+    ``layout[i]`` is the INDEX into ``old_rows`` (position order) whose row lands
+    at new index ``i``, or ``None`` for a new slide, whose
+    ``(slide_dict, incoming_record)`` is ``new_slides[i]``.  An old index may
+    appear at most once; one that is absent is deleted (pruned, with its record
+    and spec fragment).  ``_splice_slide_rows`` is the in-order special case.
+
+    1. Every old row is snapshotted (:func:`_snapshot_row`) and attributed
+       (:func:`_attribution_from`) BEFORE any write: ``_upsert_slide_row``
+       rewrites those ORM rows in place.
+    2. Every position is rewritten through ``_rewrite_slide_rows`` with that exact
+       map, never the attribution heuristic, and with ``now_dt=None`` /
+       ``author_fallback=None``, so a moved row with a NULL author or timestamp
+       stays NULL and no moved row gets a fresh ``modified_at``.
+    3. Rows beyond ``len(layout)`` are pruned (inside ``_rewrite_slide_rows``).
+
+    Raises:
+        ValueError: the layout is malformed (an old index repeated or outside
+            ``range(len(old_rows))``, or ``new_slides`` keys that are not exactly
+            the ``None`` indices).  Raised before anything is written.
+    """
+    layout = list(layout)
+    old_count = len(old_rows)
+    kept = [index for index in layout if index is not None]
+    bad = sorted({index for index in kept if not 0 <= index < old_count})
+    if bad:
+        raise ValueError(f"layout names old rows {bad} outside range({old_count})")
+    if len(set(kept)) != len(kept):
+        raise ValueError(f"layout names an old row more than once: {layout}")
+    new_positions = {i for i, index in enumerate(layout) if index is None}
+    if set(new_slides) != new_positions:
+        raise ValueError(
+            f"new_slides keys {sorted(new_slides)} are not the layout's new "
+            f"positions {sorted(new_positions)}"
+        )
+
     # 1. Snapshots and attributions from the ORM rows BEFORE any write.
     snapshots = [_snapshot_row(row) for row in old_rows]
     attributions = [_attribution_from(row) for row in old_rows]
 
-    # 2. The layout: each new slide at its index, the old rows in order around them.
     slides: List[Dict[str, Any]] = []
     attribution: Dict[int, SlideAttribution] = {}
     incoming: Dict[int, Dict[str, Any]] = {}
-    old_index = 0
-    for new_index in range(new_count):
-        if new_index in new_slides:
+    for new_index, old_index in enumerate(layout):
+        if old_index is None:
             slide_dict, record = new_slides[new_index]
             slides.append(slide_dict)
             incoming[new_index] = record
         else:
             slides.append(snapshots[old_index])
             attribution[new_index] = attributions[old_index]
-            old_index += 1
 
-    # 3. THE whole-deck rewrite, with the exact map.
+    # 2-3. THE whole-deck rewrite, with the exact map, then the prune.
     _rewrite_slide_rows(
         db,
         owner_id,

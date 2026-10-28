@@ -25,8 +25,8 @@ from sqlalchemy import and_
 from src.api.services.session_manager import (
     SessionManager,
     SlideRowsChangedError,
+    _lay_out_slide_rows,
     _snapshot_row,  # noqa: F401 — re-exported; it moved to session_manager
-    _splice_slide_rows,
     get_session_manager,
 )
 from src.core.database import get_db_session
@@ -465,8 +465,9 @@ class SlideWriter:
            EXACT old-row map, never the attribution heuristic, and with
            ``now_dt=None``/``author_fallback=None``, so a moved row with a NULL
            author or timestamp stays NULL and no moved row gets a fresh
-           ``modified_at``.  Steps 2-4 are ``session_manager._splice_slide_rows``,
-           the one shift primitive, shared with ``SessionManager.insert_slide``.
+           ``modified_at``.  Steps 2-4 are ``session_manager._lay_out_slide_rows``
+           (via :meth:`apply_slide_layout`), the one shift primitive, shared with
+           ``SessionManager.insert_slide``.
         5. ``deck_spec_json`` is set to *deck_spec*, ``version`` is bumped (which
            invalidates every worker's deck cache) and ``last_activity`` touched.
            ``slide_count`` is NOT written: its single writer is the post-commit
@@ -516,8 +517,103 @@ class SlideWriter:
                 "insert_pending_slides records an insert_slide/deck mutation, not "
                 f"{mutation.operation}/{mutation.object_type}"
             )
-        expected = [(slide_id, content_hash) for slide_id, content_hash in expected_rows]
         spec_count = len(spec.slides)
+        if insert_at[-1] >= spec_count:
+            raise ValueError(
+                f"insert_at {insert_at} is beyond the spec's {spec_count} slides"
+            )
+        layout: List[Optional[int]]
+        if not expected_rows:
+            # Row-less (spec-only) deck: no rows to lay out, only None slots.
+            layout = [None] * len(insert_at)
+        else:
+            new_count = len(expected_rows) + len(insert_at)
+            if insert_at[-1] >= new_count:
+                raise ValueError(
+                    f"insert_at {insert_at} is beyond the shifted deck's "
+                    f"{new_count} slides"
+                )
+            # The in-order layout: the old rows in order around each inserted index.
+            layout = []
+            old_index = 0
+            for new_index in range(new_count):
+                if new_index in insert_at:
+                    layout.append(None)
+                else:
+                    layout.append(old_index)
+                    old_index += 1
+        return self.apply_slide_layout(
+            session_id,
+            layout,
+            deck_spec=deck_spec,
+            expected_rows=expected_rows,
+            created_by=created_by,
+            mutation=mutation,
+        )
+
+    def apply_slide_layout(
+        self,
+        session_id: str,
+        layout: Sequence[Optional[int]],
+        *,
+        deck_spec: str,
+        expected_rows: Sequence[Tuple[Optional[str], str]],
+        created_by: Optional[str],
+        mutation: DeckMutationContext,
+    ) -> List[str]:
+        """Lay the deck's rows out as *layout*: move, delete and insert in one transaction.
+
+        The general form of :meth:`insert_pending_slides`.  ``layout[i]`` is the
+        INDEX into the current rows (position order) that lands at new index
+        ``i``, or ``None`` for a pending placeholder (``PENDING_SLIDE_TEXT``,
+        fresh ``slide_id``, authored by *created_by*).  A current row whose index
+        is absent is deleted.  Every kept row keeps its whole identity
+        (``slide_id``, authorship, timestamps, verification record, spec
+        fragment), through ``session_manager._lay_out_slide_rows``.
+
+        One ``get_db_session()`` transaction: the rows are re-read and
+        ``[(slide_id, content_hash)]`` must equal *expected_rows*
+        (:class:`SlideRowsChangedError` otherwise, also for a session with no deck
+        row); the layout is validated against the committed rows; the rows are
+        laid out; ``deck_spec_json`` is set to *deck_spec*, ``version`` bumped,
+        ``last_activity`` touched (``slide_count`` is NOT written); and ONE
+        mutation event is recorded.  A row-less (spec-only) deck takes the last
+        two steps only, and its layout must be all ``None``.
+
+        Args:
+            session_id: the requesting session (a contributor writes the owner's deck).
+            layout: see above.
+            deck_spec: the canonical spec JSON of the deck after the edit; with
+                rows, its slide count must equal ``len(layout)``.
+            expected_rows: ``[(slide_id, content_hash)]`` the caller planned against.
+            created_by: the author of the turn that opens the pending rows.
+            mutation: provenance; its actor must be the requesting session, its
+                object type ``deck`` and its operation
+                ``layout_mutation_operation(layout, len(rows))``.
+
+        Returns:
+            The new slides' ``slide_id`` values in ascending new-index order
+            (``[]`` for a row-less deck).
+
+        Raises:
+            ValueError: the layout is malformed or the identity; *deck_spec* is
+                not a valid DeckSpec or its count differs from the layout's;
+                *mutation* does not match the layout; or the evidence write
+                refuses the actor.
+            SlideRowsChangedError: the committed rows are not *expected_rows*, or
+                the session has no deck row.
+            SessionNotFoundError: *session_id* does not match any session.
+
+        Nothing is written on any raise.
+        """
+        layout = list(layout)
+        kept = [index for index in layout if index is not None]
+        if any(index < 0 for index in kept) or len(set(kept)) != len(kept):
+            raise ValueError(f"malformed layout: {layout}")
+        spec = DeckSpec.from_json(deck_spec)
+        if spec is None:
+            raise ValueError("deck_spec is not a valid DeckSpec")
+        expected = [(slide_id, content_hash) for slide_id, content_hash in expected_rows]
 
         with get_db_session() as db:
             session = self.session_manager._get_session_or_raise(db, session_id)
@@ -527,7 +623,7 @@ class SlideWriter:
                 # The caller's prior spec came from this row; its absence means
                 # the deck changed under the planner.
                 raise SlideRowsChangedError(
-                    f"session {session_id} has no deck row to insert into"
+                    f"session {session_id} has no deck row to lay out"
                 )
 
             # 1. The rows the caller planned against, or nothing is written.
@@ -546,29 +642,37 @@ class SlideWriter:
                     f"planned against ({len(committed)} committed, {len(expected)} "
                     "expected)"
                 )
-            if insert_at[-1] >= spec_count:
+
+            # 2. The layout against the committed rows, before any write.
+            if any(index >= len(old_rows) for index in kept):
                 raise ValueError(
-                    f"insert_at {insert_at} is beyond the spec's {spec_count} slides"
+                    f"layout {layout} names a row beyond the deck's {len(old_rows)}"
                 )
-            new_count = len(old_rows) + len(insert_at)
-            if old_rows and spec_count != new_count:
+            operation = layout_mutation_operation(layout, len(old_rows))
+            if mutation.operation != operation or mutation.object_type != "deck":
                 raise ValueError(
-                    f"deck_spec has {spec_count} slides, but {len(old_rows)} rows plus "
-                    f"{len(insert_at)} inserted make {new_count}"
+                    f"this layout records a {operation}/deck mutation, not "
+                    f"{mutation.operation}/{mutation.object_type}"
+                )
+            if old_rows and len(spec.slides) != len(layout):
+                raise ValueError(
+                    f"deck_spec has {len(spec.slides)} slides, but the layout "
+                    f"makes {len(layout)}"
                 )
 
             new_ids: List[str] = []
             now = datetime.utcnow()
             if old_rows:
-                # 2-4. A pending placeholder at each inserted index, spliced in
-                #      through THE shift (session_manager._splice_slide_rows):
-                #      snapshots and attributions before any write, then the
-                #      whole-deck rewrite with the exact old-row map.
+                # 3. A pending placeholder at each None, then THE shift
+                #    (session_manager._lay_out_slide_rows): snapshots and
+                #    attributions before any write, the exact-map rewrite, the prune.
                 pending_html, pending_record = placeholder_slide(
                     PENDING_SLIDE_MESSAGE, text=PENDING_SLIDE_TEXT
                 )
                 new_slides: Dict[int, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
-                for new_index in insert_at:
+                for new_index, old_index in enumerate(layout):
+                    if old_index is not None:
+                        continue
                     slide_id = str(uuid.uuid4())
                     new_ids.append(slide_id)
                     new_slides[new_index] = (
@@ -586,16 +690,16 @@ class SlideWriter:
                             for content_hash, verdict in pending_record.items()
                         },
                     )
-                _splice_slide_rows(db, deck_owner.id, old_rows, new_slides)
+                _lay_out_slide_rows(db, deck_owner.id, old_rows, layout, new_slides)
 
-            # 5. Deck columns, in the same transaction as the rows.
+            # 4. Deck columns, in the same transaction as the rows.
             deck.deck_spec_json = deck_spec
             deck.version = (deck.version or 0) + 1
             session.last_activity = now
             if session.id != deck_owner.id:
                 deck_owner.last_activity = now
 
-            # 6. Evidence; a refusal here rolls the whole shift back.
+            # 5. Evidence; a refusal here rolls the whole layout back.
             db.flush()
             record_shared_deck_mutation(
                 db,
@@ -603,11 +707,36 @@ class SlideWriter:
                 deck_owner=deck_owner,
                 deck=deck,
                 actor=mutation.actor,
-                operation="insert_slide",
+                operation=operation,
                 object_type="deck",
                 object_id=mutation.object_id,
             )
             return new_ids
+
+
+def layout_mutation_operation(layout: Sequence[Optional[int]], old_count: int) -> str:
+    """The ``MutationOperation`` that records *layout* over *old_count* current rows.
+
+    ``insert_slide`` when every old index is present in order and at least one
+    slot is ``None``; ``delete_slide`` when there is no ``None``, the kept
+    indices ascend and some are missing; ``reorder_slides`` when there is no
+    ``None``, every old index is present and they are out of order;
+    ``save_deck_slides`` for anything else (a mix).
+
+    Raises:
+        ValueError: the identity layout, which has nothing to write.
+    """
+    layout = list(layout)
+    kept = [index for index in layout if index is not None]
+    if len(kept) != len(layout):
+        return "insert_slide" if kept == list(range(old_count)) else "save_deck_slides"
+    if kept == list(range(old_count)):
+        raise ValueError("the identity layout changes nothing; there is nothing to write")
+    if all(a < b for a, b in zip(kept, kept[1:])):
+        return "delete_slide"
+    if len(kept) == old_count and set(kept) == set(range(old_count)):
+        return "reorder_slides"
+    return "save_deck_slides"
 
 
 # ------------------------------------------------------------------
