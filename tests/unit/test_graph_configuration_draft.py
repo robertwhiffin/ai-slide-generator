@@ -2106,7 +2106,7 @@ def _upgrade_schema(
 # produces SchemaContractMaterialChangedError before a single test runs).
 # Source of truth: src/services/agent_schema_registry._V2_DIGESTS.
 _V2_SCHEMA_DIGESTS: dict[str, str] = {
-    "architect": "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
+    "architect": "0db6fdaf0cec0c6dd2d1b0442c76eb3e41ff54834dd9975e7553a33d37480725",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",

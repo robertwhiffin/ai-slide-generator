@@ -33,6 +33,36 @@
       "The APAC `tier` column is unpopulated."
     ]
   },
+  "deck_style": {
+    "css": ".dk-stat {\n  font: 600 var(--fs-stat)/1 var(--font-sans);\n  color: var(--brand-core-primary);\n}\n.dk-stat-label { font-size: var(--fs-caption); color: var(--brand-core-muted); }\n.dk-note { font-size: var(--fs-body); color: var(--brand-core-text); }\n.dk-callout {\n  border-left: 4px solid var(--brand-accents-amber);\n  padding: 16px 24px;\n  background: var(--brand-core-surface);\n}",
+    "components": [
+      {
+        "name": "Big stat",
+        "class_names": [
+          "dk-stat",
+          "dk-stat-label"
+        ],
+        "use": "One headline number with a short label beneath it.",
+        "example_html": "<div class=\"dk-stat\">11.4%<span class=\"dk-stat-label\">churn</span></div>"
+      },
+      {
+        "name": "Note",
+        "class_names": [
+          "dk-note"
+        ],
+        "use": "A one-line aside under the exhibit.",
+        "example_html": "<p class=\"dk-note\">~30% of Q4</p>"
+      },
+      {
+        "name": "Callout",
+        "class_names": [
+          "dk-callout"
+        ],
+        "use": "The one sentence the reader must act on.",
+        "example_html": "<p class=\"dk-callout\">Approve two engineers for one quarter.</p>"
+      }
+    ]
+  },
   "slides": [
     {
       "position": 0,
@@ -44,6 +74,7 @@
         "churn_rate"
       ],
       "slide_type": "Cover",
+      "look": "The churn rate as one dk-stat centred under the title, the quarter as its label.",
       "template_section_index": 0
     },
     {
@@ -57,6 +88,7 @@
         "arr_at_risk"
       ],
       "slide_type": "Stats",
+      "look": "One dk-stat across the body; its share of Q4 in a dk-note beneath it, *not* a chart.",
       "template_section_index": 12
     },
     {
@@ -67,6 +99,7 @@
       "hands_off": "The deck ends on a decision the reader can make in the room.",
       "data_references": [],
       "slide_type": null,
+      "look": "The ask in a single dk-callout, its scope (two engineers | one quarter) under it.",
       "template_section_index": null
     }
   ]

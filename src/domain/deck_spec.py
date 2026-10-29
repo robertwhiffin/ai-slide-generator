@@ -13,6 +13,11 @@ L3  template_id requires design_system_id — a template belongs to exactly one
 M3  template_section_index is typed int | None; brand bytes never pass through
     the model.
     DesignContractRef stores a reference only — never compiled content.
+
+The deck style (``DeckStyle``) and a slide's ``look`` are type-checked only.
+Their content rules (class prefix, size, count, allowed CSS) belong to the
+deck-style sanitiser, never to a validator here: a schema rejection would fail
+the whole architect turn.
 """
 
 import logging
@@ -21,6 +26,17 @@ from typing import Optional
 from pydantic import BaseModel, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
+
+
+def look_or_none(v: Optional[str]) -> Optional[str]:
+    """A slide's ``look``, stripped; blank (or ``None``) becomes ``None``.
+
+    Shared by ``SlideSpec`` and ``SlideContent`` so a slide built from new
+    content stores exactly the look a spec would.
+    """
+    if v is None:
+        return None
+    return v.strip() or None
 
 
 class DesignContractRef(BaseModel):
@@ -77,6 +93,10 @@ class SlideSpec(BaseModel):
 
     ``template_section_index`` is an index into the template's section list,
     never markup (M3).
+
+    ``look`` says in plain language what the slide looks like: the layout of
+    its body and which deck-style (or template) pieces it uses.  Stripped; a
+    blank look is ``None``.
     """
 
     position: int
@@ -87,6 +107,7 @@ class SlideSpec(BaseModel):
     data_references: list[str]
     slide_type: Optional[str] = None
     template_section_index: Optional[int] = None
+    look: Optional[str] = None
 
     @field_validator("slide_type")
     @classmethod
@@ -103,6 +124,35 @@ class SlideSpec(BaseModel):
         if not stripped:
             raise ValueError("slide_type must not be whitespace-only")
         return stripped
+
+    @field_validator("look")
+    @classmethod
+    def _look_stripped_blank_is_none(cls, v: Optional[str]) -> Optional[str]:
+        return look_or_none(v)
+
+
+class DeckStyleComponent(BaseModel):
+    """One reusable piece of the deck style.
+
+    ``class_names`` are the classes from ``DeckStyle.css`` that make it,
+    ``use`` says when a slide should use it, and ``example_html`` is a minimal
+    snippet showing those classes in use.
+    """
+
+    name: str
+    class_names: list[str]
+    use: str
+    example_html: str
+
+
+class DeckStyle(BaseModel):
+    """The deck's own house style: ``css`` plus the catalogue of components it defines.
+
+    It adds to the brand (design system or slide style); it never replaces it.
+    """
+
+    css: str
+    components: list[DeckStyleComponent]
 
 
 class DeckSpec(BaseModel):
@@ -125,6 +175,7 @@ class DeckSpec(BaseModel):
     design_contract: DesignContractRef
     resolved_data: ResolvedData
     slides: list[SlideSpec]
+    deck_style: Optional[DeckStyle] = None
 
     @field_validator("title")
     @classmethod

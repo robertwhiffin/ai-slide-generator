@@ -8,7 +8,15 @@ spell out every field explicitly, and the .md must survive any checkout unchange
 import json
 from pathlib import Path
 
-from src.domain.deck_spec import DeckSpec, DesignContractRef, ResolvedData, ResolvedFigure, SlideSpec
+from src.domain.deck_spec import (
+    DeckSpec,
+    DeckStyle,
+    DeckStyleComponent,
+    DesignContractRef,
+    ResolvedData,
+    ResolvedFigure,
+    SlideSpec,
+)
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "frontend" / "tests" / "fixtures" / "deck-spec-markdown"
 
@@ -38,6 +46,14 @@ def test_fixture_spells_out_every_field_of_every_model():
         assert set(figure) == set(ResolvedFigure.model_fields)
     for slide in raw["slides"]:
         assert set(slide) == set(SlideSpec.model_fields)
+        # Deck style (C1): every slide spells out a look, so the renderer has one to show.
+        assert isinstance(slide["look"], str) and slide["look"].strip(), slide["position"]
+    # A null deck_style would spell out none of its fields (C1, C8).
+    assert isinstance(raw["deck_style"], dict)
+    assert set(raw["deck_style"]) == set(DeckStyle.model_fields)
+    assert raw["deck_style"]["components"]
+    for component in raw["deck_style"]["components"]:
+        assert set(component) == set(DeckStyleComponent.model_fields)
 
 
 def test_golden_markdown_is_lf_utf8_with_one_trailing_newline():

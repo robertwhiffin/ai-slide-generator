@@ -40,9 +40,11 @@ from pydantic import BaseModel, ValidationError, field_validator
 
 from src.domain.deck_spec import (
     DeckSpec,
+    DeckStyle,
     DesignContractRef,
     ResolvedData,
     SlideSpec,
+    look_or_none,
 )
 
 PROBLEM_CODES = (
@@ -83,10 +85,11 @@ class SlideContent(BaseModel):
     data_references: list[str]
     slide_type: Optional[str] = None
     template_section_index: Optional[int] = None
+    look: Optional[str] = None
 
     # Same rule as SlideSpec._slide_type_stripped_and_non_blank (duplicated so
-    # deck_spec.py stays untouched): whatever validates here must validate as a
-    # SlideSpec, so building one from a SlideContent never raises.
+    # SlideSpec's validator stays untouched): whatever validates here must
+    # validate as a SlideSpec, so building one from a SlideContent never raises.
     @field_validator("slide_type")
     @classmethod
     def _slide_type_stripped_and_non_blank(cls, v: Optional[str]) -> Optional[str]:
@@ -96,6 +99,12 @@ class SlideContent(BaseModel):
         if not stripped:
             raise ValueError("slide_type must not be whitespace-only")
         return stripped
+
+    # SlideSpec's own look rule (shared helper): stripped, blank becomes None.
+    @field_validator("look")
+    @classmethod
+    def _look_stripped_blank_is_none(cls, v: Optional[str]) -> Optional[str]:
+        return look_or_none(v)
 
     def to_slide_spec(self, position: int) -> SlideSpec:
         return SlideSpec(position=position, **self.model_dump())
@@ -132,6 +141,7 @@ class DeckChanges(BaseModel):
     narrative_arc: Optional[list[str]] = None
     design_contract: Optional[DesignContractRef] = None
     resolved_data: Optional[ResolvedData] = None
+    deck_style: Optional[DeckStyle] = None
 
 
 @dataclass(frozen=True)

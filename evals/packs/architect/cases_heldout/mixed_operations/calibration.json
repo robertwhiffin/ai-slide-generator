@@ -25,7 +25,8 @@
             "hands_off": "Four composable patterns cover the vast majority of prompt optimisation needs",
             "data_references": [],
             "slide_type": null,
-            "template_section_index": null
+            "template_section_index": null,
+            "look": null
           }
         ]
       },
@@ -41,7 +42,8 @@
             "hands_off": "Ad-hoc prompts make a model's outputs unpredictable",
             "data_references": [],
             "slide_type": null,
-            "template_section_index": null
+            "template_section_index": null,
+            "look": null
           },
           {
             "purpose": "Define the problem, pain point 2: wasted tokens and cost",
@@ -50,7 +52,8 @@
             "hands_off": "Ad-hoc prompts waste money on every call",
             "data_references": [],
             "slide_type": null,
-            "template_section_index": null
+            "template_section_index": null,
+            "look": null
           }
         ]
       }

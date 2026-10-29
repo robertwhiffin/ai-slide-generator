@@ -18,7 +18,8 @@
           "hands_off": "Four composable patterns cover the vast majority of prompt optimisation needs",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         },
         {
           "purpose": "Explain the first two patterns: system-prompt framing and few-shot examples",
@@ -27,7 +28,8 @@
           "hands_off": "Framing and examples show the model what a good answer looks like",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         },
         {
           "purpose": "Explain the other two patterns: chain-of-thought reasoning and structured output",
@@ -36,7 +38,8 @@
           "hands_off": "Reasoning steps and a fixed output shape make answers reliable and checkable",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         }
       ]
     }

@@ -21,7 +21,8 @@
         "Finish with a concrete checklist and the next steps"
       ],
       "design_contract": null,
-      "resolved_data": null
+      "resolved_data": null,
+      "deck_style": null
     }
   }
 }

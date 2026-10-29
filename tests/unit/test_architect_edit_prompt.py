@@ -44,14 +44,16 @@ from src.services.graph_definition_manifest import (
 # then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move,
 # then for the architect edit operations schema-contract re-pin, then for the
 # promoted edit-operations prompt (evals/configs/architect/edit-ops.yaml), then for
-# its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml).
-HEAD_ARCHITECT_CONTENT_HASH = "3da09952e7751cd967c3cee11b77628c51565e37fa1b75c1c6e9f92a92d3126b"
+# its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml), then for the
+# architect deck-style schema-contract re-pin (deck_style and look).
+HEAD_ARCHITECT_CONTENT_HASH = "42db22a8e622be1332f5b652375540e1ef2d8ba7857d7b7581623a01d74ffd7f"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
-# Re-pinned for the architect edit operations schema-contract digest.
+# Re-pinned for the architect edit operations schema-contract digest, then for the
+# architect deck-style schema-contract digest.
 HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
-    "ec17918b9c66a86133c060c15c37b88a2139831bc910e8787ce3ef9a069d52d9"
+    "de59d43a7ff03e4a6e303de0505f35733548af8eafec1d2a6f6b8cd1c0dc9d13"
 )
 
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
@@ -64,7 +66,7 @@ HEAD_OTHER_ROLE_CONTENT_HASHES = {
 }
 
 HEAD_V1_SCHEMA_DIGESTS = {
-    "architect": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+    "architect": "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -74,7 +76,7 @@ HEAD_V1_SCHEMA_DIGESTS = {
 }
 
 HEAD_V2_SCHEMA_DIGESTS = {
-    "architect": "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
+    "architect": "0db6fdaf0cec0c6dd2d1b0442c76eb3e41ff54834dd9975e7553a33d37480725",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
