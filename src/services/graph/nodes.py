@@ -2188,11 +2188,12 @@ def _deck_changes_of(
 ) -> Optional[DeckChanges]:
     """The answer's ``deck_changes``, plus a contract given only in ``deck_spec`` (C19).
 
-    The prompt names two homes for a confirmed contract: its DESIGN SYSTEMS block
-    commits it "inside deck_spec", its EDITING block in
-    ``deck_changes.design_contract``.  An operations answer that follows the
-    first would lose the contract, since the operations path reads nothing else
-    of ``deck_spec`` — and it still reads nothing else: not its slides, not its
+    The prompt commits a confirmed contract inside ``deck_spec`` on a build and in
+    ``deck_changes.design_contract`` on an edit (its DESIGN SYSTEMS block said
+    "inside deck_spec" only until the ``edit-ops-b`` follow-up).  This is a
+    tolerance for an operations answer that still puts it in ``deck_spec``: it
+    would lose the contract, since the operations path reads nothing else of
+    ``deck_spec`` — and it still reads nothing else: not its slides, not its
     other deck-level fields.  So when ``deck_changes`` sets no contract and
     ``deck_spec`` carries one whose ids differ from the persisted spec's, that
     contract is the edit's.  The same contract is no change and adopts nothing,

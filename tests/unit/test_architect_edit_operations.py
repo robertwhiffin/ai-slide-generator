@@ -1061,12 +1061,13 @@ def _model_spec(prior: DeckSpec, contract: DesignContractRef) -> DeckSpec:
     "case", ["update", "restyle-only", "deck-changes-without-contract"]
 )
 def test_contract_only_in_deck_spec_is_adopted(graph_env, monkeypatch, caplog, case):
-    """C19: the frozen prompt's DESIGN SYSTEMS block commits a confirmed contract
-    "inside deck_spec", its EDITING block in ``deck_changes.design_contract``.  An
-    operations answer that follows the former — ``deck_changes`` naming no
-    contract, ``deck_spec`` a new one — commits that contract: the composed spec
-    carries it, the brand is re-resolved for it, and the restyle rebuilds every
-    position but the untouched blank (``[0, 2]``).  Nothing ELSE is read out of
+    """C19: the prompt commits a confirmed contract inside ``deck_spec`` on a build
+    and in ``deck_changes.design_contract`` on an edit (its DESIGN SYSTEMS block said
+    "inside deck_spec" only until the ``edit-ops-b`` follow-up).  The node still
+    tolerates an operations answer that puts it in ``deck_spec`` — ``deck_changes``
+    naming no contract, ``deck_spec`` a new one — and commits that contract: the
+    composed spec carries it, the brand is re-resolved for it, and the restyle
+    rebuilds every position but the untouched blank (``[0, 2]``).  Nothing ELSE is read out of
     ``deck_spec``: not its audience, not its slides.  INFO
     ``operations_contract_from_deck_spec`` says so, once.
 

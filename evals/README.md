@@ -676,7 +676,7 @@ What it showed:
   operations (`delete` 5; `move` 6 after 3; `replace` 4 with four slides; `delete` 2, `update` 1 and
   `replace` 7 with three). No row failed, so there was no failure cause to aim a second candidate at,
   and `edit-ops-b` and `edit-ops-c` were not written (the skill's rule: one change per candidate,
-  aimed at a cause).
+  aimed at a cause). The follow-up pass below later used the name `edit-ops-b` for its own tweaks.
 - **Finalist, train (F1).** All 19 train cases passed every scored row: 3/3 each, except
   `discuss_slide_question` at 2/2 scored. Its third row hit a judge parse error, and its `contract`
   and `expected_category` passed. Every existing edit case (`edit_*`, `add_slide_*`,
@@ -710,8 +710,9 @@ What it showed:
   - This pass promoted the finalist, edited `INSTRUCTIONS` and committed. The skill leaves those to
     the user.
   - The skill's "architect edits must return the full revised `deck_spec`" trap no longer applies.
-- **Branch shipped.** `edit-ops` is the v1 default in `src/core/skills/architect.py` (`8f1493ef35f9`,
-  previously `d4018d7bdc30`). It was promoted with
+- **Branch shipped.** `edit-ops` became the v1 default in `src/core/skills/architect.py`
+  (`8f1493ef35f9`, previously `d4018d7bdc30`; since replaced by `edit-ops-b`, see the follow-up pass
+  below). It was promoted with
   `python -m evals.harness.promote --config architect=evals/configs/architect/edit-ops.yaml --run-id architect=c1bec24d8d694cf3a82440d3cc68d368`,
   and the frontend lifecycle contract was re-recorded. The architect prompt rows in the earlier tables
   describe previous prompts.
@@ -786,12 +787,17 @@ USD 5 cap.
   `move_slide` was `move` 6 after 3 each time, and `mixed_operations` was `delete` 2, `update` 1 and
   `replace` 7 with three slides. `redescribe_deck` was an `edit` with the full 10-slide `deck_spec`
   over positions 0..9, no `operations` and no `deck_changes`.
-- **Held-out (H1).** The aggregate is 1.00 over 3 judge-scored rows, with 1 judge error. An
-  aggregate-only count of the deterministic scorers (`contract` and `expected_category`) passed 4 of
-  4 rows, one row per case, so each case passed 1/1. No per-case held-out result was opened.
+- **Held-out (H1).** The harness's 1.00 is over 3 judge-scored rows. The fourth row, `move_slide`'s,
+  was skipped by a judge parse error (`MlflowException: Failed to parse response`), so the harness
+  logged no judge verdict for it and no `pass_rate/move_slide`. Its deterministic scorers
+  (`contract` and `expected_category`) passed, as on the other three rows. The pass ran only an
+  aggregate-only count (4 of 4 deterministic passes) and opened no per-case held-out result; the
+  follow-up review then read the row-level scorer verdicts in `mlflow.db` to name the skipped row.
+  So `confirm_design`, `mixed_operations` and `redescribe_deck` are 1/1 on every scorer, and
+  `move_slide` is 1/1 on the deterministic scorers only, with no judge verdict.
 - **Bar met.** Each of the four cases passed at least 2/3 on train (3/3) and 1/1 on held-out by the
-  deterministic scorer, and the unchanged blocks are pinned byte-identical
-  (`tests/unit/test_architect_edit_prompt.py`).
+  deterministic scorers (for `move_slide`, by those alone), and the unchanged blocks are pinned
+  byte-identical (`tests/unit/test_architect_edit_prompt.py`).
 - **Shipped.** `edit-ops-b` replaces `edit-ops` as the v1 default in `src/core/skills/architect.py`
   (`3da09952e775`, previously `8f1493ef35f9`). It was promoted with
   `python -m evals.harness.promote --config architect=evals/configs/architect/edit-ops-b.yaml --run-id architect=366f7035e8b043a88bf1be1263816369`,
