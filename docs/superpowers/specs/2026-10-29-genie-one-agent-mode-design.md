@@ -107,7 +107,7 @@ Requirements on the loop:
   - `final_answer`, the result rows (`columns`, `rows`, `truncated`), and the `deep_link`.
   - The rows are capped so a large result can't flood the context.
   - The whole result is marked as untrusted data with `spotlight()`, as `genie_tool.py` does. `narration_instruction` and Genie One's agent-directed HTML comments are dropped.
-- **Conversation:** the conversation id is stored on the deck owner's `genie_one` entry in `agent_config`, the way `_persist_genie_conversation_ids` (`src/api/services/chat_service.py:495`) stores Genie space conversation ids. Contributors to a shared deck use the owner's. The next turn on the deck continues the same Genie One conversation.
+- **Conversation:** the conversation id is kept per deck *and per user*, following how `_persist_genie_conversation_ids` (`src/api/services/chat_service.py:495`) persists Genie space conversation ids. The next turn by the same user on the same deck continues that user's Genie One conversation. A contributor to a shared deck never reuses another user's conversation id: Genie conversations are likely owned by whoever started them, and sharing one could fail or leak.
 - **Progress:** each question shows in the chat as a progress line ("Asking Genie One: …") while the turn is gathering data.
 
 ### Data back to the architect, and onto slides
@@ -140,7 +140,24 @@ Requirements on the loop:
 
 - **Prompts that change:** the data analyst (tool use, figures, budget), the architect (`data_references` from figures), and the builder (the source line).
 - **How they're made:** measured on the offline eval harness (`evals/`) with a fake Genie One tool that replays recorded real answers, then promoted into the packaged manifest with `evals/harness/promote.py`, following the `optimise-agent-prompt` skill.
+- **Recording the answers:** call Genie One directly with the scope-limited `scope-test` CLI profile (`ai-gateway` only), which is already proven to work against the gateway, using the probe scripts in `~/tellr-loop/genie-one/probes/`. Use a handful of questions on `samples.nyctaxi.trips`, including one multi-question data request and one that comes back `incomplete` or empty. This needs no app and no browser, so prompt work need not wait on the live check.
 - **How they reach installs:** prompt shipping takes them to untouched installs. Admins with edited prompts see its badge. Conversations pinned to an older release keep it.
+
+## Build order
+
+Both PRs are built in the same overnight run. Prompt shipping comes first, on `feat/prompt-shipping`. This PR is `feat/genie-one-agent`, rebased onto prompt shipping's final head. Neither PR is merged by the build. The owner merges.
+
+## Rollout (after merge, by the owner; not part of the build)
+
+- Run the new `tellr.update()` on each install (prod, staging, the logfood app) so the app gains the scopes. Existing users then follow the consent message once.
+- Users need `EXECUTE` on `system.ai.genie_one_mcp`. The docs say `system.ai` may carry a default grant. The live check confirms this for the owner's account only. Before announcing the feature, confirm with a non-admin user or grant it explicitly.
+- Any org approval for adding `ai-gateway` and `catalog.connections` to the app's scopes is outside this build.
+
+## Real response shapes, and what counts as proven (owner's ruling)
+
+- **Shapes come from local auth.** Capture every Genie One response shape the code handles with the owner's local credentials: the `tellr-dev` PAT for full answers, and the `scope-test` / `scope-test-2` profiles for scope-limited behaviour, including the exact missing-scope and permission-denied errors. Bake those shapes into the code's parsing and the test fixtures. The code is built against real responses, not the docs.
+- **The live check is not a gate.** If the app's forwarded token reaches Genie One and gets back an access-denied or missing-scope error, the plumbing is proven: the right API, the right URL, the user's identity. Building continues, and the error must surface through the consent or grant message. A full answer through the app is the best result, but it isn't required to finish the PR.
+- **Never fall back to the app's service principal for Genie One.** That would answer every user's questions with the app's data access instead of their own.
 
 ## Live verification (overnight, on devloop)
 
@@ -184,6 +201,9 @@ Requirements on the loop:
 7. **Genie One's output is marked as untrusted data,** and its instructions to agents are dropped.
 8. **Workbench and eval runs never call live Genie One.** Evals use recorded answers.
 9. **In a legacy deck, the Genie One chip says it works in agent mode only.**
+10. **Genie One conversations are per user,** never shared across the contributors of a deck.
+11. **The basic consent message is enough to ship:** both fixes listed, no Reset button. Reset and the single named cause are improvements the live check may unlock, not requirements.
+12. **Eval recordings come from direct calls with the `scope-test` CLI profile,** not through the app.
 
 ## Left to the builder
 
