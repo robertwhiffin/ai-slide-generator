@@ -85,6 +85,7 @@ from src.domain.slide_alignment import AlignmentRefused, SlideAlignment, align_s
 from src.domain.slide_deck import SlideDeck
 from src.domain.slide_numbering import architect_slide_payload, edit_ignores_references
 from src.domain.slide_operations import (
+    DeckChanges,
     OperationProblem,
     OperationProblems,
     apply_operations,
@@ -2140,6 +2141,44 @@ class _EditPlan:
     keeps_positions: bool
 
 
+def _deck_changes_of(
+    state: dict, out: Any, prior_spec: DeckSpec
+) -> Optional[DeckChanges]:
+    """The answer's ``deck_changes``, plus a contract given only in ``deck_spec`` (C19).
+
+    The prompt names two homes for a confirmed contract: its DESIGN SYSTEMS block
+    commits it "inside deck_spec", its EDITING block in
+    ``deck_changes.design_contract``.  An operations answer that follows the
+    first would lose the contract, since the operations path reads nothing else
+    of ``deck_spec`` — and it still reads nothing else: not its slides, not its
+    other deck-level fields.  So when ``deck_changes`` sets no contract and
+    ``deck_spec`` carries one whose ids differ from the persisted spec's, that
+    contract is the edit's.  The same contract is no change and adopts nothing,
+    so an echoed spec cannot turn ``nothing_to_do`` into a no-op edit.
+
+    Returns a copy; the answer is not mutated, so a retry plans from it afresh.
+    """
+    changes = out.deck_changes
+    if changes is not None and changes.design_contract is not None:
+        return changes
+    spec = out.deck_spec
+    if spec is None or _contract_ids(spec.design_contract) == _contract_ids(
+        prior_spec.design_contract
+    ):
+        return changes
+    logger.info(
+        "operations_contract_from_deck_spec: the architect's operations answer "
+        "sets no deck_changes.design_contract but its deck_spec carries %s (the "
+        "persisted spec has %s); committing that contract",
+        _contract_ids(spec.design_contract),
+        _contract_ids(prior_spec.design_contract),
+        extra={"session_id": state.get("session_id")},
+    )
+    return (changes or DeckChanges()).model_copy(
+        update={"design_contract": spec.design_contract}
+    )
+
+
 def _plan_operations_edit(
     state: dict,
     out: Any,
@@ -2160,7 +2199,9 @@ def _plan_operations_edit(
        empty list, which is the identity (C6), so a ``deck_changes``-only edit
        composes the same slides.
     2. ``compose_edit_spec``: the persisted spec, plus the ``deck_changes``
-       fields that are set, plus the composed slides, re-validated.
+       fields that are set, plus the composed slides, re-validated.  The one
+       field ever read out of ``deck_spec`` is a new ``design_contract`` that
+       ``deck_changes`` does not set (C19, :func:`_deck_changes_of`).
     3. The brand of the composed contract, by the node's own re-resolve rule.
     4. The template bindings, completed and checked on the COMPOSED spec — an
        inserted slide is checked like any other.  A binding error becomes an
@@ -2177,7 +2218,8 @@ def _plan_operations_edit(
     result = apply_operations(prior_spec.slides, out.operations or [])
     if isinstance(result, OperationProblems):
         return result
-    composed = compose_edit_spec(prior_spec, result, out.deck_changes)
+    deck_changes = _deck_changes_of(state, out, prior_spec)
+    composed = compose_edit_spec(prior_spec, result, deck_changes)
     if isinstance(composed, OperationProblems):
         return composed
 
@@ -2495,8 +2537,9 @@ def _plan_answer(
     # positions count the persisted deck, so a stale one would aim them at the
     # wrong slides — and then composes its spec instead of returning one
     # (``_plan_operations_edit``).  Whatever ``deck_spec`` it also carries is not
-    # read: the composed spec is the persisted spec plus ``deck_changes`` plus
-    # the composed slides, so the spec-shape guards below do not apply to it.
+    # read — but for a new contract ``deck_changes`` does not set (C19) — the
+    # composed spec is the persisted spec plus ``deck_changes`` plus the composed
+    # slides, so the spec-shape guards below do not apply to it.
     spec = out.deck_spec
     edit_degrade: Optional[Dict[str, Any]] = None
     plan: Optional[_EditPlan] = None

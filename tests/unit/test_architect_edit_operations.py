@@ -1,6 +1,6 @@
 # ruff: noqa: F811 — the conftest_graph fixtures are imported, then requested by name.
 """``architect_node`` applies an edit's operations (architect edit operations, plan
-Task 4; spec §4, §6; PLAN-CORRECTIONS C3, C6, C7, C8).
+Task 4; spec §4, §6; PLAN-CORRECTIONS C3, C6, C7, C8; C19 in section 6b).
 
 An ``edit`` answer that carries ``operations`` and/or ``deck_changes`` takes the
 "operations path": the node composes the next spec deterministically
@@ -1016,6 +1016,169 @@ def test_session_selection_unlike_the_spec_resolves_the_spec_brand(graph_env, mo
     assert t.updates["target_positions"] == [1]
     assert t.updates["deck_spec"].design_contract == prior.design_contract
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# 6b. A design contract carried only in deck_spec is adopted (C19)
+# ---------------------------------------------------------------------------
+
+#: A contract other than RESTYLED, for the answer whose deck_changes names one.
+OTHER_CONTRACT = DesignContractRef(design_system_id=9, template_id=5, slide_style_id=None)
+
+#: The named INFO log of the C19 adoption.
+CONTRACT_FROM_SPEC = "operations_contract_from_deck_spec"
+
+
+def _blank_middle_deck(env) -> DeckSpec:
+    """Rows ``[ALPHA, BLANK, CHARLIE]`` at 0..2 and their persisted, unpinned spec."""
+    _seed_rows(env, {0: "MK-ALPHA", 2: "MK-CHARLIE"})
+    _seed_blank_row(env, 1)
+    prior = _canonical(make_spec((0,)), [
+        _spec_from(_content("ALPHA")), _blank_entry(), _spec_from(_content("CHARLIE")),
+    ])
+    _persist(env, prior)
+    return prior
+
+
+def _model_spec(prior: DeckSpec, contract: DesignContractRef) -> DeckSpec:
+    """The ``deck_spec`` an operations answer also sends: *contract*, and an
+    audience and a first slide the operations do NOT say — so a composed spec
+    that read anything but the contract out of it shows."""
+    old = list(prior.slides)
+    return _canonical(
+        prior,
+        [_spec_from(_content("FROM-THE-DECK-SPEC")), old[1], old[2]],
+        design_contract=contract.model_dump(),
+        audience="the audience only deck_spec names",
+    )
+
+
+@pytest.mark.parametrize(
+    "case", ["update", "restyle-only", "deck-changes-without-contract"]
+)
+def test_contract_only_in_deck_spec_is_adopted(graph_env, monkeypatch, caplog, case):
+    """C19: the frozen prompt's DESIGN SYSTEMS block commits a confirmed contract
+    "inside deck_spec", its EDITING block in ``deck_changes.design_contract``.  An
+    operations answer that follows the former — ``deck_changes`` naming no
+    contract, ``deck_spec`` a new one — commits that contract: the composed spec
+    carries it, the brand is re-resolved for it, and the restyle rebuilds every
+    position but the untouched blank (``[0, 2]``).  Nothing ELSE is read out of
+    ``deck_spec``: not its audience, not its slides.  INFO
+    ``operations_contract_from_deck_spec`` says so, once.
+
+    ``restyle-only``: ``operations=[]`` with the contract in ``deck_spec`` alone is
+    a restyle, not ``nothing_to_do``.  ``deck-changes-without-contract``: a
+    ``deck_changes`` that sets other fields keeps them, and still takes the
+    contract from ``deck_spec``.
+
+    Sabotage: drop the adoption -> the contract is lost (the spec stays unpinned,
+    only the update is built; ``restyle-only`` refuses as ``nothing_to_do``)."""
+    prior = _blank_middle_deck(graph_env)
+    rows_before = _rows(graph_env)
+    calls = _spy_on_the_layout(monkeypatch)
+    revised = _content("CHARLIE-REVISED")
+    ops = [] if case == "restyle-only" else [_update(2, revised)]
+    deck_changes = (
+        DeckChanges(audience=NEW_AUDIENCE)
+        if case == "deck-changes-without-contract"
+        else None
+    )
+    out = _ops_out(ops, deck_changes, deck_spec=_model_spec(prior, RESTYLED))
+
+    with caplog.at_level(logging.INFO, logger=NODES_LOGGER):
+        t = _turn(graph_env, out)
+
+    old = list(prior.slides)
+    third = old[2] if case == "restyle-only" else _spec_from(revised)
+    deck = {"design_contract": RESTYLED.model_dump()}
+    if case == "deck-changes-without-contract":
+        deck["audience"] = NEW_AUDIENCE
+    composed = _canonical(prior, [old[0], old[1], third], **deck)
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["error_state"] is None
+    assert t.updates["deck_spec"] == composed
+    assert _persisted_spec(graph_env) == composed
+    # The design-contract rebuild-all, minus the untouched blank at 1.
+    assert t.updates["target_positions"] == [0, 2]
+    assert calls == [], "an identity layout must not reach apply_slide_layout"
+    assert _rows(graph_env) == rows_before
+    # The brand of the adopted contract briefs the builders.
+    assert (7, 3) in graph_env.template.calls
+    assert t.updates["token_css"] == TEMPLATE_TOKEN_CSS
+    adopted = _named(caplog, CONTRACT_FROM_SPEC, logging.INFO)
+    assert len(adopted) == 1, [r.getMessage() for r in caplog.records]
+    assert _named(caplog, "operations_ignored", logging.INFO) == []
+
+
+def test_contract_in_deck_changes_wins_over_deck_spec(graph_env, monkeypatch, caplog):
+    """C19 applies only when ``deck_changes`` names no contract: one that does is
+    the edit's contract whatever ``deck_spec`` says, and nothing is adopted.
+
+    Sabotage: adopt whenever ``deck_spec``'s contract is new -> the committed
+    contract is RESTYLED, not OTHER_CONTRACT, and the log fires."""
+    prior = _blank_middle_deck(graph_env)
+    revised = _content("CHARLIE-REVISED")
+    out = _ops_out(
+        [_update(2, revised)],
+        DeckChanges(design_contract=OTHER_CONTRACT),
+        deck_spec=_model_spec(prior, RESTYLED),
+    )
+
+    with caplog.at_level(logging.INFO, logger=NODES_LOGGER):
+        t = _turn(graph_env, out)
+
+    old = list(prior.slides)
+    composed = _canonical(
+        prior,
+        [old[0], old[1], _spec_from(revised)],
+        design_contract=OTHER_CONTRACT.model_dump(),
+    )
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["error_state"] is None
+    assert t.updates["deck_spec"] == composed
+    assert _persisted_spec(graph_env) == composed
+    assert t.updates["target_positions"] == [0, 2]
+    assert (9, 5) in graph_env.template.calls
+    assert (7, 3) not in graph_env.template.calls
+    assert _named(caplog, CONTRACT_FROM_SPEC, logging.INFO) == []
+
+
+@pytest.mark.parametrize("case", ["update", "no-operations"])
+def test_same_contract_in_deck_spec_changes_nothing(graph_env, monkeypatch, caplog, case):
+    """A ``deck_spec`` whose contract is the persisted one carries no contract
+    change, so nothing is adopted: an update builds only itself, with the
+    persisted contract and brand, and an answer with no operation and no
+    ``deck_changes`` is still ``nothing_to_do`` — echoing the spec back is not a
+    deck-level change.  Neither logs the adoption.
+
+    Sabotage: adopt whenever ``deck_changes`` names no contract -> the log fires,
+    and ``no-operations`` lands as a no-op edit instead of refusing."""
+    prior = _blank_middle_deck(graph_env)
+    snapshot = _db_state(graph_env)
+    revised = _content("CHARLIE-REVISED")
+    ops = [] if case == "no-operations" else [_update(2, revised)]
+    out = _ops_out(ops, deck_spec=_model_spec(prior, prior.design_contract))
+
+    with caplog.at_level(logging.INFO, logger=NODES_LOGGER):
+        t = _turn(graph_env, out)
+
+    assert _named(caplog, CONTRACT_FROM_SPEC, logging.INFO) == []
+    assert graph_env.template.calls == []
+    if case == "no-operations":
+        _assert_refused(
+            t,
+            "edit_operations_rejected",
+            REJECTED_PREFIX + "it did not list any change to make.",
+            "the edit listed no operation that changes the deck and no deck-level change",
+        )
+        assert _db_state(graph_env) == snapshot
+        return
+    old = list(prior.slides)
+    composed = _canonical(prior, [old[0], old[1], _spec_from(revised)])
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["error_state"] is None
+    assert t.updates["deck_spec"] == composed
+    assert t.updates["target_positions"] == [2]
 
 
 #: The #314 N1 notice for the blank at position 1, numbered as the user saw it.

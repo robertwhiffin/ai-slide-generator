@@ -21,13 +21,19 @@ the existing deck — translates directly to the architect: when given a committ
 deck and a message containing "add a slide", it must keep every committed slide and
 add exactly one.
 
-THE CONTRACT SINCE #314: AN ADD IS AN EDIT
-------------------------------------------
-Issue #314 made "add a slide to an existing deck" an ``edit``: the architect returns
-the revised ``deck_spec`` in full with the new ``SlideSpec`` at its position, every
-committed slide copied unchanged except that the slides after the new one move up by
-one, and ``target_positions`` naming only the new slide, so only the new slide is
-built.  (Before #314 an add came back as a ``build``, which rebuilt every slide.)
+THE CONTRACT: AN ADD IS AN EDIT, ANSWERED AS OPERATIONS
+-------------------------------------------------------
+Issue #314 made "add a slide to an existing deck" an ``edit``.  Since architect edit
+operations the prompt answers it with ``operations`` (an ``insert`` after the slide
+the new one follows) rather than a rewritten deck: ``architect_node`` composes the
+next deck itself (``apply_operations`` + ``compose_edit_spec`` over the persisted
+spec), keeps every committed slide as it was, and builds exactly the operations'
+``rebuild`` — the inserted slide.  The model's ``target_positions`` are not read on
+that path.  An answer without ``operations`` or ``deck_changes`` still takes the
+#314 full-spec path: the revised ``deck_spec`` in full, every committed slide copied
+unchanged but for the positions after the new one, and ``target_positions`` naming
+only the new slide.  The test accepts either shape and checks the same property on
+each.  (Before #314 an add came back as a ``build``, which rebuilt every slide.)
 
 This message states no place.  The product rule for that case (plan D6): the new
 slide goes where it fits the argument, before a closing or call-to-action slide,
@@ -36,12 +42,14 @@ slide and the new slide is not one, so it goes straight before that closing slid
 
 THE ASSERTION IS STRUCTURAL, NOT A WORDING CHECK
 -------------------------------------------------
-The test reads the returned spec's slides, not what the message says.  "Equal"
-means equal in every ``SlideSpec`` field but ``position``
+The test reads the resulting deck's slides — composed from the operations exactly
+as production composes them, or the returned spec's — not what the message says.
+"Equal" means equal in every ``SlideSpec`` field but ``position``
 (``src.domain.slide_alignment.slide_key``, the comparison production aligns with).
-The observable regressions: a one-slide spec (the committed slides destroyed), a
-rewritten neighbour, the new slide appended after the close, or ``target_positions``
-that would rebuild committed slides.
+The observable regressions: operations the node would refuse, a deck that lost a
+committed slide, a rewritten or moved neighbour, the new slide appended after the
+close, or a build (``rebuild``, or ``target_positions`` on a full spec) that would
+rebuild committed slides.
 
 RC10 is not this test
 ---------------------
@@ -59,13 +67,49 @@ from tests.agentic.payloads import architect_payload, deck_spec_dict, slide_spec
 pytestmark = LAYER3_MARKS
 
 
+def _applied(out, existing):
+    """What ``architect_node`` lands for an operations answer, without a database.
+
+    ``apply_operations`` over the payload's own deck, then ``compose_edit_spec`` with
+    the answer's ``deck_changes`` — the two pure steps the node's operations path
+    runs (``_plan_operations_edit``).  A refusal there would degrade the turn (after
+    one retry), so the new slide would not be added: it fails the test, naming the
+    problems.
+    """
+    from src.domain.deck_spec import DeckSpec
+    from src.domain.slide_operations import (
+        OperationProblems,
+        apply_operations,
+        compose_edit_spec,
+    )
+
+    current = DeckSpec.model_validate(existing)
+    result = apply_operations(current.slides, out.operations or [])
+    assert not isinstance(result, OperationProblems), (
+        "the architect's operations do not apply to the committed deck, so "
+        "architect_node would refuse the edit and the new slide would not be added.  "
+        f"problems={[(p.code, p.detail) for p in result.problems]!r}, "
+        f"operations={out.operations!r}"
+    )
+    composed = compose_edit_spec(current, result, out.deck_changes)
+    assert not isinstance(composed, OperationProblems), (
+        "the architect's operations and deck_changes do not compose into a valid "
+        "deck, so architect_node would refuse the edit.  "
+        f"problems={[(p.code, p.detail) for p in composed.problems]!r}, "
+        f"deck_changes={out.deck_changes!r}"
+    )
+    return result, composed
+
+
 def test_the_architect_adds_to_an_existing_deck_rather_than_replacing_it():
     """RC2 on the graph path: 'add a slide' is an edit that keeps the committed deck.
 
     Three slides are committed, the last a closing slide; the user asks for a new one
-    and states no place.  The returned spec must hold the three committed slides
+    and states no place.  The resulting deck must hold the three committed slides
     unchanged (ignoring position), in order, plus one new slide straight before the
-    closing slide, and ``target_positions`` must name only the new slide.
+    closing slide, and only the new slide may be built: the operations' ``rebuild``
+    when the answer carries operations, ``target_positions`` when it is a full
+    ``deck_spec``.
     """
     from src.domain.deck_spec import SlideSpec
     from src.domain.slide_alignment import slide_key
@@ -94,51 +138,97 @@ def test_the_architect_adds_to_an_existing_deck_rather_than_replacing_it():
     assert out.intent == "edit", (
         f"the architect returned intent={out.intent!r} for an 'add a slide' request "
         "against a three-slide deck.  Since #314 adding a slide to an existing deck is "
-        "an edit: the revised deck_spec carries the new slide, and target_positions "
-        "names only it, so only the new slide is built.  A 'build' would rebuild every "
-        "committed slide; a 'discuss' would add nothing.  "
-        f"target_positions={out.target_positions!r}, message={out.message!r}"
+        "an edit: an insert operation (or a revised deck_spec) carries the new slide, "
+        "and only the new slide is built.  A 'build' would rebuild every committed "
+        "slide; a 'discuss' would add nothing.  "
+        f"operations={out.operations!r}, target_positions={out.target_positions!r}, "
+        f"message={out.message!r}"
     )
-    assert out.deck_spec is not None, (
-        "the architect returned intent='edit' but no deck_spec.  An edit without "
-        "deck_spec cannot be applied (architect_node refuses it), so the new slide "
-        f"would be lost.  message={out.message!r}"
-    )
-    returned = sorted(out.deck_spec.slides, key=lambda slide: slide.position)
-    assert len(returned) == committed + 1, (
-        f"the architect returned {len(returned)} slide(s) for one 'add a slide' "
-        f"request against a {committed}-slide committed deck; exactly {committed + 1} "
-        "were expected (every committed slide plus the new one).  Fewer means a "
-        "committed slide was dropped; more means slides were invented.  "
-        f"Returned positions: {[s.position for s in returned]}"
-    )
-
     committed_keys = [slide_key(SlideSpec(**s)) for s in existing["slides"]]
-    new_indices = [i for i, s in enumerate(returned) if slide_key(s) not in committed_keys]
-    assert len(new_indices) == 1, (
-        f"{len(new_indices)} returned slide(s) differ from every committed slide "
-        "(comparing every field but position); exactly one, the new slide, should.  "
-        "More than one means a committed slide was rewritten to fit the new one.  "
-        f"Differing indices in position order: {new_indices}"
-    )
-    (new_index,) = new_indices
-    others = [slide_key(s) for i, s in enumerate(returned) if i != new_index]
-    assert others == committed_keys, (
-        "the slides other than the new one are not the committed slides, unchanged and "
-        "in their committed order (comparing every field but position).  An add must "
-        "copy every committed slide as it is; only the positions after the new slide "
-        "move up by one."
-    )
-    assert new_index == closing_index, (
-        f"the new slide is at index {new_index} of the returned deck (position order); "
-        f"the product rule puts it at index {closing_index}, straight before the "
-        "closing slide, when the user gives no place and the new slide is not itself "
-        "a closing slide.  Index "
-        f"{committed} means it was appended after the close."
-    )
-    assert out.target_positions == [returned[new_index].position], (
-        f"target_positions={out.target_positions!r}; on an add that changes nothing "
-        "else they must be exactly the new slide's position in the returned deck_spec, "
-        f"[{returned[new_index].position}].  Any committed slide's position here would "
-        "rebuild that slide."
-    )
+
+    if out.operations is not None or out.deck_changes is not None:
+        # The operations path: production composes the deck and builds `rebuild`,
+        # whatever deck_spec or target_positions the answer also carries.
+        result, composed = _applied(out, existing)
+        returned = list(composed.slides)
+        assert len(returned) == committed + 1, (
+            f"the architect's operations leave {len(returned)} slide(s) after one 'add "
+            f"a slide' request against a {committed}-slide committed deck; exactly "
+            f"{committed + 1} were expected (every committed slide plus the new one).  "
+            f"operations={out.operations!r}"
+        )
+        inserted = [i for i, persisted in enumerate(result.layout) if persisted is None]
+        assert inserted == [closing_index], (
+            f"the architect's operations insert new slides at {inserted} of the "
+            f"resulting deck (position order); the product rule puts one new slide at "
+            f"index {closing_index}, straight before the closing slide, when the user "
+            "gives no place and the new slide is not itself a closing slide.  Index "
+            f"{committed} means it was appended after the close.  "
+            f"operations={out.operations!r}"
+        )
+        kept = [persisted for persisted in result.layout if persisted is not None]
+        assert kept == list(range(committed)), (
+            f"the committed slides land in the order {kept}; an add must keep every "
+            f"committed slide, in its committed order {list(range(committed))} — "
+            "nothing deleted, nothing moved.  "
+            f"operations={out.operations!r}"
+        )
+        others = [slide_key(s) for i, s in enumerate(returned) if i != closing_index]
+        assert others == committed_keys, (
+            "the slides other than the new one are not the committed slides, "
+            "unchanged (comparing every field but position): an operation rewrote a "
+            "committed slide to fit the new one.  "
+            f"operations={out.operations!r}"
+        )
+        assert list(result.rebuild) == [closing_index], (
+            f"the architect's operations build {list(result.rebuild)}; on an add that "
+            "changes nothing else they must build exactly the new slide, "
+            f"[{closing_index}].  Any other index here would rebuild a committed slide.  "
+            f"operations={out.operations!r}"
+        )
+    else:
+        # The full-spec path (#314), unchanged.
+        assert out.deck_spec is not None, (
+            "the architect returned intent='edit' with neither operations nor a "
+            "deck_spec.  Such an edit cannot be applied (architect_node refuses it), "
+            f"so the new slide would be lost.  message={out.message!r}"
+        )
+        returned = sorted(out.deck_spec.slides, key=lambda slide: slide.position)
+        assert len(returned) == committed + 1, (
+            f"the architect returned {len(returned)} slide(s) for one 'add a slide' "
+            f"request against a {committed}-slide committed deck; exactly "
+            f"{committed + 1} were expected (every committed slide plus the new one).  "
+            "Fewer means a committed slide was dropped; more means slides were "
+            f"invented.  Returned positions: {[s.position for s in returned]}"
+        )
+
+        new_indices = [
+            i for i, s in enumerate(returned) if slide_key(s) not in committed_keys
+        ]
+        assert len(new_indices) == 1, (
+            f"{len(new_indices)} returned slide(s) differ from every committed slide "
+            "(comparing every field but position); exactly one, the new slide, should.  "
+            "More than one means a committed slide was rewritten to fit the new one.  "
+            f"Differing indices in position order: {new_indices}"
+        )
+        (new_index,) = new_indices
+        others = [slide_key(s) for i, s in enumerate(returned) if i != new_index]
+        assert others == committed_keys, (
+            "the slides other than the new one are not the committed slides, unchanged "
+            "and in their committed order (comparing every field but position).  An add "
+            "must copy every committed slide as it is; only the positions after the new "
+            "slide move up by one."
+        )
+        assert new_index == closing_index, (
+            f"the new slide is at index {new_index} of the returned deck (position "
+            f"order); the product rule puts it at index {closing_index}, straight before "
+            "the closing slide, when the user gives no place and the new slide is not "
+            f"itself a closing slide.  Index {committed} means it was appended after "
+            "the close."
+        )
+        assert out.target_positions == [returned[new_index].position], (
+            f"target_positions={out.target_positions!r}; on an add that changes nothing "
+            "else they must be exactly the new slide's position in the returned "
+            f"deck_spec, [{returned[new_index].position}].  Any committed slide's "
+            "position here would rebuild that slide."
+        )
