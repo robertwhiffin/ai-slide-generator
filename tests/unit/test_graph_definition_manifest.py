@@ -704,7 +704,7 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "8f1493ef35f9074a4a96285fa816e257fadd79bf1410cd1bf78088e14d15d453",
+    "architect": "3da09952e7751cd967c3cee11b77628c51565e37fa1b75c1c6e9f92a92d3126b",
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
     "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
@@ -1158,9 +1158,10 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
     # covers the architect prompt too; recomputed for the #313 slide-references prompt,
     # then for the #314 add-a-slide prompt, then for the claude-opus-5-5 seed move,
     # then for the architect edit operations schema-contract digest, then for the
-    # promoted architect edit operations prompt (edit-ops).
+    # promoted architect edit operations prompt (edit-ops), then for its follow-up
+    # tweaks (edit-ops-b).
     assert definition_content_hash(built({"1": "a"})) == (
-        "e0d21f9958784d63bf12dc3678bc19df4d150e9d534175efbaf72b492bdc8a95"
+        "b7036323132eb23b1fd9fa99a1093deb90ba09635b68f4210c5e0f62029e3476"
     )
 
 

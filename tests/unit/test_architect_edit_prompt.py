@@ -11,7 +11,8 @@ deck as it stands (the arc-review sweeper) still returns the full ``deck_spec``.
 This file pins what the v1 prompt must say, that the promoted manifest carries
 exactly that prompt, and that nothing else in the packaged release moved.  The
 EDITING phrase pins are taken from the promoted prompt's own sentences
-(``evals/configs/architect/edit-ops.md``, measured in ``evals/README.md``).
+(``evals/configs/architect/edit-ops.md``, then its follow-up ``edit-ops-b.md``, both
+measured in ``evals/README.md``).
 
 Every literal below is a HEAD value copied by hand — do not import them from the
 code under test.
@@ -42,8 +43,9 @@ from src.services.graph_definition_manifest import (
 # deck-parity architect and builder prompts, then for #313 slide references,
 # then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move,
 # then for the architect edit operations schema-contract re-pin, then for the
-# promoted edit-operations prompt (evals/configs/architect/edit-ops.yaml).
-HEAD_ARCHITECT_CONTENT_HASH = "8f1493ef35f9074a4a96285fa816e257fadd79bf1410cd1bf78088e14d15d453"
+# promoted edit-operations prompt (evals/configs/architect/edit-ops.yaml), then for
+# its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml).
+HEAD_ARCHITECT_CONTENT_HASH = "3da09952e7751cd967c3cee11b77628c51565e37fa1b75c1c6e9f92a92d3126b"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
@@ -90,7 +92,10 @@ HEAD_V2_SCHEMA_DIGESTS = {
 HEAD_UNCHANGED_BLOCK_HASHES = {
     "opening": "345a85e933fd76a597e00695029c5098e9de1534574c258d01689bcf36532034",
     "intent_classification": "dccff17eb03ebe5c411b07ec48cc8594aba6a617fc16288f1c9229550cd7d500",
-    "design_systems": "10d09b732446c3e369f99a664e999a4af69018b3e47becf5fa5d0e190dc15345",
+    # Re-pinned by the edit-ops follow-up (edit-ops-b): its one sentence on committing a
+    # confirmed contract now names both homes (DESIGN_SYSTEMS_CONTRACT_PHRASES); every other
+    # byte of the block is unchanged.
+    "design_systems": "4e4661d1287817ce62cccee3c556f3622308ec9457c2b070d9cba5ecd8f776bf",
     "closing": "4b4000313dfac2e346b4b524a6dab465eca1d9316b227e0374c17d1517e54d7b",
     # Architect edit operations rewrote only the PAYLOAD RULES edit line and the EDITING
     # and SLIDE NUMBERS blocks; every other block is pinned at its pre-change bytes
@@ -195,6 +200,9 @@ EDITING_RULE_PHRASES = (
     "placed after a moved slide, they follow it to its new place",
     "placed after a deleted slide, they fill its gap",
     "never move a slide after itself",
+    # edit-ops follow-up: apply_operations refuses a circle of moves as move_loop
+    "moves cannot form a loop: moving slide a after slide b and slide b after slide a in the "
+    "same edit, or any longer circle of moves, is refused with a move_loop problem",
     # targets, message, re-description
     "target_positions is not needed on an edit given as operations",
     "name each new or moved slide by its slide number in the revised deck and each deleted "
@@ -237,6 +245,13 @@ RETIRED_REFUSAL_PHRASES = (
     "removing or reordering slides is not an edit",
     "if the user asks for that, use discuss and explain that it cannot be applied as an edit",
     "cannot be applied as an edit",
+)
+# edit-ops follow-up: DESIGN SYSTEMS used to say a confirmed contract is committed only
+# "inside deck_spec", while EDITING says deck_changes.design_contract.  The one sentence now
+# names both homes, matched over the backtick-free, normalised DESIGN SYSTEMS block (_plain).
+DESIGN_SYSTEMS_CONTRACT_PHRASES = (
+    "only once the user has agreed may a later turn commit the new contract: inside deck_spec "
+    "on a build, or in deck_changes.design_contract on an edit",
 )
 
 
@@ -314,6 +329,13 @@ def test_prompt_states_the_editing_rule(phrase):
 @pytest.mark.parametrize("phrase", EDITING_GUARD_PHRASES)
 def test_editing_rule_keeps_contract_and_guards_the_edit(phrase):
     assert phrase in _plain(_editing_block(INSTRUCTIONS)), f"EDITING block lacks {phrase!r}"
+
+
+@pytest.mark.parametrize("phrase", DESIGN_SYSTEMS_CONTRACT_PHRASES)
+def test_design_systems_block_names_both_homes_of_a_confirmed_contract(phrase):
+    blocks = [b for b in INSTRUCTIONS.split("\n\n") if b.startswith("DESIGN SYSTEMS")]
+    assert len(blocks) == 1, "expected exactly one DESIGN SYSTEMS block"
+    assert phrase in _plain(blocks[0]), f"DESIGN SYSTEMS block lacks {phrase!r}"
 
 
 def test_prompt_no_longer_refuses_delete_or_reorder():

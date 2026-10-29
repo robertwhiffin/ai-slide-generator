@@ -749,4 +749,50 @@ split before the next prompt pass. No prompt changed and no real-model run was m
   `edit` that re-describes the narrative arc as `deck_changes`, with no `deck_spec`.
 - The architect now has twenty cases per split, 50 across the harness.
 - **Not calibrated or measured yet.** Calibrate it on both splits
-  (`--calibrate --cases redescribe_deck`) before relying on its judge verdict.
+  (`--calibrate --cases redescribe_deck`) before relying on its judge verdict. (Done in the
+  follow-up pass below: trusted on both splits.)
+
+### Follow-up pass: three prompt tweaks, 2026-10-29
+
+Three rule tweaks to the promoted `edit-ops` prompt, measured on the cases they can move and
+promoted. Setup as in the edit-operations pass above (agent `system.ai.claude-opus-5-5`, judge
+`databricks-claude-sonnet-5`, profile `tellr-dev`), except that cost is estimated at Opus 5.5's list
+price, USD 4 / 20 per million input / output tokens, plus USD 0.05 per judge call.
+
+- **The tweaks.** `edit-ops-b` (`3da09952`, `evals/configs/architect/edit-ops-b.md`) is `edit-ops`
+  with two sentences changed:
+  - EDITING's placement rules add that moves cannot form a loop (a circle of moves is refused by
+    `apply_operations` with a `move_loop` problem).
+  - DESIGN SYSTEMS' sentence on committing a confirmed contract now names both homes: inside
+    deck_spec on a build, or in deck_changes.design_contract on an edit, as EDITING already said.
+
+  Every other block is byte-identical to `edit-ops`, so the cases these sentences cannot move are
+  covered by the edit-operations measurement above. The third tweak (the re-description rule) was
+  conditional on `redescribe_deck` failing. It passed 3/3 with the sentence unchanged, so no
+  `edit-ops-c` was written.
+- **Calibration** (`--calibrate --cases redescribe_deck`): trusted on train, and trusted on held-out
+  after one re-run (the first held-out run hit a judge parse error on the should_fail).
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|
+| S1 366f7035 | edit-ops-b (3da09952) | train | 4 | 3 | 12 | 1.00 | 0 | 16.5k / 1.6k | 1.78 |
+| H1 e3eaa5e9 | edit-ops-b | held-out | 4 | 1 | 4 | 1.00 (3 scored) | 1 | 14.6k / 1.2k | 0.53 |
+
+The four cases are `confirm_design`, `move_slide`, `mixed_operations` and `redescribe_deck`.
+Calibration (6 judge calls, about USD 0.30) brings the total to **about USD 2.61**, inside the
+USD 5 cap.
+
+- **Train (S1).** 12 of 12, every scorer on every row. `confirm_design` kept its intent and proposal.
+  `move_slide` was `move` 6 after 3 each time, and `mixed_operations` was `delete` 2, `update` 1 and
+  `replace` 7 with three slides. `redescribe_deck` was an `edit` with the full 10-slide `deck_spec`
+  over positions 0..9, no `operations` and no `deck_changes`.
+- **Held-out (H1).** The aggregate is 1.00 over 3 judge-scored rows, with 1 judge error. An
+  aggregate-only count of the deterministic scorers (`contract` and `expected_category`) passed 4 of
+  4 rows, one row per case, so each case passed 1/1. No per-case held-out result was opened.
+- **Bar met.** Each of the four cases passed at least 2/3 on train (3/3) and 1/1 on held-out by the
+  deterministic scorer, and the unchanged blocks are pinned byte-identical
+  (`tests/unit/test_architect_edit_prompt.py`).
+- **Shipped.** `edit-ops-b` replaces `edit-ops` as the v1 default in `src/core/skills/architect.py`
+  (`3da09952e775`, previously `8f1493ef35f9`). It was promoted with
+  `python -m evals.harness.promote --config architect=evals/configs/architect/edit-ops-b.yaml --run-id architect=366f7035e8b043a88bf1be1263816369`,
+  and the frontend lifecycle contract was re-recorded.
