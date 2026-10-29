@@ -1,0 +1,27 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "Updated the deck's narrative arc so it describes the six slides as they now read.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null,
+    "operations": null,
+    "deck_changes": {
+      "title": null,
+      "audience": null,
+      "purpose": null,
+      "argument": null,
+      "call_to_action": null,
+      "narrative_arc": [
+        "Start with what bad prompts cost: wasted tokens, inconsistent outputs and frustrated users",
+        "Lay out the prompt design patterns that make the biggest difference",
+        "Measure the gains of structured prompting against ad-hoc prompting",
+        "Walk through an evaluation and iteration workflow the team can use straight away",
+        "Finish with a concrete checklist and the next steps"
+      ],
+      "design_contract": null,
+      "resolved_data": null
+    }
+  }
+}

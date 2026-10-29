@@ -250,6 +250,87 @@ def _operations_score(
     return True, rationale
 
 
+# --------------------------------------------------------------------------- describe-only
+
+#: The intents whose ``deck_spec`` a describe-only turn persists (``architect_node``): both reach
+#: ``_description_keeps_what_it_cannot_see`` and the same deck-level write, and ``architect_router``
+#: ends both turns before the foreman, so neither builds a slide.
+REDESCRIPTION_INTENTS = ("edit", "build")
+
+
+def _redescription_score(output: dict, expect: dict, current: dict | None) -> tuple[bool, str]:
+    """Score the arc-review sweeper's re-description (a case whose ``expect`` has
+    ``full_deck_spec``) with production's describe-only semantics.
+
+    ``spec_sync.run_arc_review`` runs the turn with ``describe_only=True``. On it ``architect_node``
+    applies no operations: it ignores ``operations`` and ``deck_changes``, persists the answer's
+    ``deck_spec``, keeps the persisted spec whole instead when the answer's slide positions differ
+    from it, and refuses an answer with no ``deck_spec`` without a retry. Any of those leaves the
+    spec stale while the sweeper clears its marker. The row passes only when:
+
+    * the intent is one of ``REDESCRIPTION_INTENTS``;
+    * ``deck_spec`` is a valid DeckSpec whose slide positions equal the current deck's exactly;
+    * ``operations`` and ``deck_changes`` are both None: a re-description is the full deck_spec
+      alone (production would ignore the extra form here, but the answer mixes two edit forms).
+
+    The model's own ``target_positions`` are noted, not failed: the turn builds nothing.
+    """
+    intent = output.get("intent") if isinstance(output, dict) else None
+    if intent not in REDESCRIPTION_INTENTS:
+        return False, (
+            f"Re-description: intent {intent!r}, expected {expect.get('intent')!r} (an edit or a "
+            "build); only those persist a deck_spec on a describe-only turn")
+    if current is None:
+        return False, "Re-description: cannot score without current_deck_spec"
+    prior, why = _validate_deck(current)
+    if prior is None:
+        return False, f"Re-description: current_deck_spec is not a valid DeckSpec ({why})"
+
+    given = [name for name in ("operations", "deck_changes") if output.get(name) is not None]
+    if output.get("deck_spec") is None:
+        instead = f", only {' and '.join(given)}" if given else ""
+        return False, (
+            f"Re-description: no deck_spec{instead}; a describe-only turn applies no operations or "
+            "deck_changes, so production persists nothing and the sweeper clears its marker with "
+            "the spec still stale")
+    deck, why = _validate_deck(output["deck_spec"])
+    if deck is None:
+        return False, f"Re-description: deck_spec is not a valid DeckSpec ({why})"
+
+    got = sorted(slide.position for slide in deck.slides)
+    want = sorted(slide.position for slide in prior.slides)
+    if got != want:
+        diff = [
+            f"{label} {sorted(positions)}"
+            for label, positions in (("missing", set(want) - set(got)),
+                                     ("added", set(got) - set(want)))
+            if positions
+        ]
+        return False, (
+            f"Re-description: deck_spec positions {got} != the current deck's {want} "
+            f"({', '.join(diff)}); production keeps the persisted spec and drops the "
+            "re-description")
+    if given:
+        return False, (
+            f"Re-description: the deck_spec comes with {' and '.join(given)}; a re-description is "
+            "the full deck_spec alone, with no operations or deck_changes")
+
+    rationale = (
+        f"Re-description: {intent} with the full deck_spec over positions {want}, no operations "
+        "or deck_changes")
+    targets = output.get("target_positions")
+    if intent == "edit" and isinstance(targets, list):
+        try:
+            got_targets = sorted(set(targets))
+        except TypeError:
+            got_targets = targets
+        if got_targets != want:
+            rationale += (
+                f"; model target_positions {got_targets} differ from {want} "
+                "(a describe-only turn builds nothing)")
+    return True, rationale
+
+
 def _insert_score(
     structured: dict, expect: dict, reference: dict | None, current_deck_spec: dict | None
 ) -> tuple[bool, str]:
@@ -331,8 +412,11 @@ def expected_category_score(
     """Role-dispatched expected category scorer.
 
     - architect: checks intent match, and for edit mode, target_positions match positions (as sets).
+      A case whose ``expect`` has ``full_deck_spec`` (the arc-review sweeper's describe-only turn)
+      is scored by ``_redescription_score`` alone, ahead of every other check, since production
+      applies no operations on that turn and persists a build's deck_spec as it does an edit's.
       An edit answer carrying ``operations`` or ``deck_changes`` is scored by ``_operations_score``
-      on every edit case, as production's operations path takes it whatever else it carries.
+      on every other edit case, as production's operations path takes it whatever else it carries.
       Otherwise an edit case whose ``expect`` has ``"inserted"`` is scored by ``_insert_score``.
       Both need the case's ``reference`` output and the payload's ``current_deck_spec``.
     - data_analyst: checks outcome match
@@ -343,6 +427,10 @@ def expected_category_score(
         return False, f"Structured output is not a dict: {type(structured).__name__}"
 
     if agent_key == "architect":
+        # The sweeper's describe-only re-description: no operations path, a build counts as an edit
+        if expect.get("full_deck_spec"):
+            return _redescription_score(structured, expect, current_deck_spec)
+
         # Check intent match
         if structured.get("intent") != expect.get("intent"):
             return False, f"Intent mismatch: got {structured.get('intent')!r}, expected {expect.get('intent')!r}"

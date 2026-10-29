@@ -53,8 +53,13 @@ def _measures_dict(measures):
 
 def _judged(case: Case, answer):
     """``answer`` as the judge sees it: an architect edit given as operations is shown in its
-    composed full-deck form, so it reads like a deck_spec answer (C2). Anything else is as-is."""
-    if case.agent_key != "architect":
+    composed full-deck form, so it reads like a deck_spec answer (C2). Anything else is as-is.
+
+    Not on a re-description case (``expect.full_deck_spec``, the sweeper's describe-only turn):
+    production composes no operations there, so an operations answer is shown as given rather
+    than as a full deck_spec production never persists.
+    """
+    if case.agent_key != "architect" or (case.expect or {}).get("full_deck_spec"):
         return answer
     return compose_operations_answer(answer, (case.payload or {}).get("current_deck_spec"))
 

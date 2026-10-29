@@ -1,0 +1,27 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I've re-described the deck's narrative arc to match the slides as they now stand.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null,
+    "operations": null,
+    "deck_changes": {
+      "title": null,
+      "audience": null,
+      "purpose": null,
+      "argument": null,
+      "call_to_action": null,
+      "narrative_arc": [
+        "Open on why presentations matter and how the tool shapes the outcome",
+        "Show where PowerPoint falls short on the qualities that matter most",
+        "Make the case for HTML slides with evidence: responsiveness, typography, interactivity, accessibility and collaboration",
+        "Take the objections and the learning curve head on",
+        "End with the verdict and a call to action"
+      ],
+      "design_contract": null,
+      "resolved_data": null
+    }
+  }
+}

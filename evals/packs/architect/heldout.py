@@ -8,6 +8,7 @@ import src.core.database  # noqa: F401  (break import cycle before src.services.
 from src.domain.deck_spec import DesignContractRef
 from src.domain.slide_numbering import architect_slide_payload
 from src.services.agent_model_payload import model_payload_for
+from src.services.spec_sync import ARC_REVIEW_MESSAGE
 from src.services.template_sections import section_inventory
 
 from evals.harness import case
@@ -74,6 +75,8 @@ MESSAGES = {
         "with chain-of-thought, and expand the bullets on slide 2 into three slides, one per pain "
         "point"
     ),
+    # The arc-review sweeper's describe-only turn: production's own message, as on train.
+    "redescribe_deck": ARC_REVIEW_MESSAGE,
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
@@ -83,6 +86,7 @@ HAS_DECK = (
     "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
     "fill_blank_slide", "edit_beside_blank",
     *m.OPERATIONS_CASES,
+    *m.DESCRIBE_ONLY_CASES,
 )
 # The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
 BLANK_AT = 3
@@ -96,6 +100,7 @@ EDIT_BRIEF = (
 
 def _payload(cid):
     has_deck = cid in HAS_DECK
+    describe_only = cid in m.DESCRIBE_ONLY_CASES
     msg = MESSAGES[cid]
     conversation = [{"role": "user", "content": msg}]
     if has_deck:
@@ -104,6 +109,8 @@ def _payload(cid):
             {"role": "assistant", "content": PRIOR_ASSISTANT},
             {"role": "user", "content": msg},
         ]
+    if describe_only:
+        conversation = conversation[:-1]  # the sweeper persists no user row for its message
     contract = DesignContractRef(
         design_system_id=m.MERIDIAN_ID, template_id=m.MERIDIAN_TEMPLATE
     ).model_dump(mode="json")
@@ -111,7 +118,8 @@ def _payload(cid):
     if cid in m.BLANK_CASES:
         deck = m._blank_deck(deck, BLANK_AT)
     slide_keys = architect_slide_payload(
-        conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else []
+        conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else [],
+        describe_only=describe_only,
     )
     return model_payload_for(AGENT, {
         "conversation": conversation,
@@ -324,6 +332,25 @@ MIXED_SLIDES = [
         "assumes": "Audience has seen the consistency and cost problems",
         "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",
     },
+]
+
+
+# redescribe_deck on deck 2 (``m.REDESCRIBE_FAULT`` says why the deck_changes form is dropped).
+REDESCRIBE_MESSAGE = (
+    "Re-described the deck as it now reads: the six slides are unchanged and in order, and the "
+    "specification describes each of them and the arc they make. No slide was rewritten, added, "
+    "removed or moved."
+)
+REDESCRIBE_ARC_MESSAGE = (
+    "Updated the deck's narrative arc so it describes the six slides as they now read."
+)
+# The should_fail's re-described arc: the deck-2 gold's five beats, reworded.
+REDESCRIBED_ARC = [
+    "Start with what bad prompts cost: wasted tokens, inconsistent outputs and frustrated users",
+    "Lay out the prompt design patterns that make the biggest difference",
+    "Measure the gains of structured prompting against ad-hoc prompting",
+    "Walk through an evaluation and iteration workflow the team can use straight away",
+    "Finish with a concrete checklist and the next steps",
 ]
 
 
@@ -623,6 +650,15 @@ def generate(out_dir: pathlib.Path | None = None):
             m._op("replace", position=MIXED_REPLACE,
                   slides=[m._content(s) for s in MIXED_SLIDES[:2]]),
         ]),
+    )
+
+    # The arc-review sweeper's re-description on deck 2: the full deck_spec as it stands, every
+    # position targeted, no operations; the arc as deck_changes is dropped.
+    _write(
+        out, "redescribe_deck", "mutation", m.REDESCRIBE_FAULT,
+        {"intent": "edit", "full_deck_spec": True},
+        m._redescribed(gold, REDESCRIBE_MESSAGE),
+        m._arc_as_deck_changes(REDESCRIBE_ARC_MESSAGE, REDESCRIBED_ARC),
     )
 
 

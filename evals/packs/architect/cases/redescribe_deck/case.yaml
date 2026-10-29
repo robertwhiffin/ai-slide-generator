@@ -1,0 +1,9 @@
+kind: mutation
+fault: 'the arc-review sweeper''s describe-only re-description: production persists
+  only a full deck_spec over the current positions on this turn and ignores operations
+  and deck_changes, so re-describing the narrative arc as deck_changes is silently
+  dropped while the sweeper clears its marker'
+expect:
+  intent: edit
+  full_deck_spec: true
+design_system_active: true

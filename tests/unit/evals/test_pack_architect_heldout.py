@@ -18,6 +18,7 @@ from src.domain.slide_alignment import align_slides
 from src.domain.slide_numbering import architect_slide_payload
 from src.domain.slide_operations import OperationsResult, apply_operations, compose_edit_spec
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
+from src.services.spec_sync import ARC_REVIEW_MESSAGE
 from src.services.template_sections import section_inventory
 
 from evals.harness import case
@@ -38,7 +39,12 @@ BLANK_CASES = ["fill_blank_slide", "edit_beside_blank"]
 # references answer in operations (no deck_spec). Folded into NEW_CASE_IDS like the insert cases;
 # tests/unit/evals/test_eval_operations_scorer.py checks their content and scoring.
 OPERATIONS_CASES = ["delete_slide", "move_slide", "replace_slide_expand", "mixed_operations"]
-NEW_CASE_IDS = CASES_313 + INSERT_CASES + BLANK_CASES + OPERATIONS_CASES
+# The arc-review sweeper's describe-only re-description on the same deck: its message is
+# spec_sync.ARC_REVIEW_MESSAGE, no user turn carries it and it resolves no references.
+# Folded into NEW_CASE_IDS; tests/unit/evals/test_eval_redescribe_case.py checks its content
+# and scoring.
+REDESCRIBE_CASES = ["redescribe_deck"]
+NEW_CASE_IDS = CASES_313 + INSERT_CASES + BLANK_CASES + OPERATIONS_CASES + REDESCRIBE_CASES
 CASE_IDS = EXISTING_CASE_IDS + NEW_CASE_IDS
 MUTATIONS = ["edit_request", "ask_data", "confirm_design"] + NEW_CASE_IDS
 EXPECT = {
@@ -71,6 +77,8 @@ EXPECT = {
         "intent": "edit", "positions": [0, 1, 2, 3], "inserted": [1, 2],
         "layout": [1, None, None, 2, 3, 4, 5],
     },
+    # The sweeper's re-description: a full deck_spec over the current positions, no operations.
+    "redescribe_deck": {"intent": "edit", "full_deck_spec": True},
 }
 HAS_DECK = {"edit_request", "confirm_design", "discuss"} | set(NEW_CASE_IDS)
 EDIT_CASES = [c for c in CASE_IDS if EXPECT[c]["intent"] == "edit"]
@@ -246,8 +254,10 @@ SLIDE_REFERENCES = {
         {"text": "slide 3", "slide_numbers": [3], "positions": [2], "out_of_range": []},
         {"text": "slide 2", "slide_numbers": [2], "positions": [1], "out_of_range": []},
     ],
+    # A describe-only turn resolves no references (architect_slide_payload, D4).
+    "redescribe_deck": [],
 }
-LAYOUT = case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
+LAYOUT =case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
 
 # ---- #314 (Appendix H): the insert cases' content, pinned literally ----
 INSERT_MESSAGES = {
@@ -477,7 +487,11 @@ def test_payload_is_the_production_shape(cid):
         else:
             assert p["current_deck_spec"] == gold
             assert p["committed_slide_count"] == 6
-        assert len(p["conversation"]) == 3
+        if cid in REDESCRIBE_CASES:
+            # The sweeper persists no user row (spec_sync.run_arc_review): the prior exchange only.
+            assert len(p["conversation"]) == 2
+        else:
+            assert len(p["conversation"]) == 3
         assert p["conversation"][0]["role"] == "user"
         assert p["conversation"][1]["role"] == "assistant"
     else:
@@ -488,7 +502,11 @@ def test_payload_is_the_production_shape(cid):
     for turn in p["conversation"]:
         assert set(turn) == {"role", "content"}
         assert isinstance(turn["content"], str) and turn["content"]
-    assert p["conversation"][-1] == {"role": "user", "content": p["message"]}
+    if cid in REDESCRIBE_CASES:
+        # Its message reaches the model as ``message`` alone, never as a user turn.
+        assert all(turn["content"] != p["message"] for turn in p["conversation"])
+    else:
+        assert p["conversation"][-1] == {"role": "user", "content": p["message"]}
 
 
 @pytest.mark.parametrize("cid", sorted(HAS_DECK))
@@ -573,7 +591,12 @@ def test_new_cases_continue_the_existing_prior_exchange(cid):
 def test_messages_differ_from_the_train_pack():
     from evals.packs.architect import mutations
 
+    # The re-description's message is production's own (spec_sync.ARC_REVIEW_MESSAGE) on both
+    # splits; only its deck differs (test_eval_redescribe_case).
     for cid in CASE_IDS:
+        if cid in REDESCRIBE_CASES:
+            assert _msg(cid) == mutations.MESSAGES[cid] == ARC_REVIEW_MESSAGE, cid
+            continue
         assert _msg(cid) != mutations.MESSAGES[cid], cid
 
 
@@ -635,11 +658,13 @@ def _by_position(spec):
 # (test_insert_references_are_unambiguous_to_production). A blank case's deck is not the gold
 # (test_blank_references_align_to_production). An edit-operations reference has no deck_spec; it
 # is composed by production's own semantics instead (test_eval_operations_scorer), and checked
-# against the gold by test_operations_references_change_only_what_the_message_names.
+# against the gold by test_operations_references_change_only_what_the_message_names. The
+# re-description revises nothing and expects no positions (test_eval_redescribe_case).
 @pytest.mark.parametrize(
     "cid",
     [c for c in EDIT_CASES
-     if c not in INSERT_CASES and c not in BLANK_CASES and c not in OPERATIONS_CASES],
+     if c not in INSERT_CASES and c not in BLANK_CASES and c not in OPERATIONS_CASES
+     and c not in REDESCRIBE_CASES],
 )
 def test_edit_references_revise_only_their_targets(cid):
     ref = _load(cid).reference
@@ -715,8 +740,11 @@ def test_slide_references_are_pinned(cid):
 # #314: an insert's references name current slides, not its new positions (test_insert_anchors).
 # So do an edit-operations case's: a deleted or moved slide, an anchor, a replaced slide
 # (test_slide_references_are_pinned), while its positions are the edited deck's rebuild set.
+# A describe-only turn resolves no references and expects no positions (test_eval_redescribe_case).
 @pytest.mark.parametrize(
-    "cid", [c for c in EDIT_CASES if c not in INSERT_CASES and c not in OPERATIONS_CASES]
+    "cid",
+    [c for c in EDIT_CASES
+     if c not in INSERT_CASES and c not in OPERATIONS_CASES and c not in REDESCRIBE_CASES],
 )
 def test_resolved_references_equal_the_expected_edit_positions(cid):
     """A2's deterministic proof on the eval messages: the resolver yields every expected target."""
@@ -833,10 +861,12 @@ def test_calibration_should_fail_is_wrong_and_valid(cid):
 
 # #314 follow-up: a blank case's should_fail is an edit too (test_blank_calibration_is_pinned).
 # So is an edit-operations case's: a wrong plan for the same edit (test_eval_operations_scorer).
+# And the re-description's: an edit given as deck_changes (test_eval_redescribe_case).
 @pytest.mark.parametrize(
     "cid",
     [c for c in CASE_IDS
-     if c not in ("edit_request", *SLIPPED, *INSERT_CASES, *BLANK_CASES, *OPERATIONS_CASES)],
+     if c not in ("edit_request", *SLIPPED, *INSERT_CASES, *BLANK_CASES, *OPERATIONS_CASES,
+                  *REDESCRIBE_CASES)],
 )
 def test_calibration_has_the_wrong_intent(cid):
     assert _cal(cid)["should_fail"]["intent"] != EXPECT[cid]["intent"]

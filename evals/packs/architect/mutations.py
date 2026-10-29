@@ -11,6 +11,7 @@ from src.domain.deck_spec_slides import spec_json_with_blank_entry
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_numbering import architect_slide_payload
 from src.domain.slide_operations import (
+    DeckChanges,
     OperationsResult,
     SlideContent,
     SlideOperation,
@@ -18,6 +19,7 @@ from src.domain.slide_operations import (
     compose_edit_spec,
 )
 from src.services.agent_model_payload import model_payload_for
+from src.services.spec_sync import ARC_REVIEW_MESSAGE
 from src.services.template_sections import section_inventory
 
 from evals.harness import case
@@ -108,10 +110,16 @@ MESSAGES = {
         "Delete slide 3, make slide 2's callout lead with the 8–15 MB file sizes, and expand the "
         "bullets on slide 8 into three slides: collaboration, version control and distribution"
     ),
+    # The arc-review sweeper's describe-only turn: production's own message, on both splits.
+    "redescribe_deck": ARC_REVIEW_MESSAGE,
 }
 
 # The edit-operations cases (spec §9): their references answer in operations, not a deck_spec.
 OPERATIONS_CASES = ("delete_slide", "move_slide", "replace_slide_expand", "mixed_operations")
+# The arc-review sweeper's turn (``spec_sync.run_arc_review``, ``describe_only=True``): it persists
+# no user row, so the conversation is the prior exchange alone and ARC_REVIEW_MESSAGE reaches the
+# model only as ``message``; and a describe-only turn resolves no slide references.
+DESCRIBE_ONLY_CASES = ("redescribe_deck",)
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
 HAS_DECK = (
     "edit_request", "confirm_design", "discuss",
@@ -119,6 +127,7 @@ HAS_DECK = (
     "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
     "fill_blank_slide", "edit_beside_blank",
     *OPERATIONS_CASES,
+    *DESCRIBE_ONLY_CASES,
 )
 # The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
 BLANK_CASES = ("fill_blank_slide", "edit_beside_blank")
@@ -142,6 +151,7 @@ def _dump(path, obj):
 
 def _payload(cid):
     has_deck = cid in HAS_DECK
+    describe_only = cid in DESCRIBE_ONLY_CASES
     msg = MESSAGES[cid]
     conversation = [{"role": "user", "content": msg}]
     if has_deck:
@@ -150,6 +160,8 @@ def _payload(cid):
             {"role": "assistant", "content": PRIOR_ASSISTANT},
             {"role": "user", "content": msg},
         ]
+    if describe_only:
+        conversation = conversation[:-1]  # the sweeper persists no user row for its message
     contract = DesignContractRef(
         design_system_id=MERIDIAN_ID, template_id=MERIDIAN_TEMPLATE
     ).model_dump(mode="json")
@@ -157,7 +169,8 @@ def _payload(cid):
     if cid in BLANK_CASES:
         deck = _blank_deck(deck, BLANK_AT)
     slide_keys = architect_slide_payload(
-        conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else []
+        conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else [],
+        describe_only=describe_only,
     )
     return model_payload_for(AGENT, {
         "conversation": conversation,
@@ -545,6 +558,52 @@ MIXED_OVERREACH_SUMMARY = (
     "collaboration with version control and distribution —",
 )
 
+# redescribe_deck: the arc-review sweeper's turn (``spec_sync.run_arc_review``, ``describe_only``).
+# ``architect_node`` applies no operations on it: it persists the answer's full deck_spec, keeps the
+# persisted spec instead when the answer's positions differ, and refuses (never retries) an answer
+# with no deck_spec. Shared by both splits; the messages and the arc are each split's own.
+REDESCRIBE_FAULT = (
+    "the arc-review sweeper's describe-only re-description: production persists only a full "
+    "deck_spec over the current positions on this turn and ignores operations and deck_changes, so "
+    "re-describing the narrative arc as deck_changes is silently dropped while the sweeper clears "
+    "its marker"
+)
+REDESCRIBE_MESSAGE = (
+    "I've re-described the deck as it stands: all ten slides in their current order, with the "
+    "narrative arc and each slide's description matching what the slides say. Nothing was "
+    "rewritten, added, removed or reordered."
+)
+REDESCRIBE_ARC_MESSAGE = (
+    "I've re-described the deck's narrative arc to match the slides as they now stand."
+)
+# The should_fail's re-described arc: the gold's five beats, reworded.
+REDESCRIBED_ARC = [
+    "Open on why presentations matter and how the tool shapes the outcome",
+    "Show where PowerPoint falls short on the qualities that matter most",
+    "Make the case for HTML slides with evidence: responsiveness, typography, interactivity, "
+    "accessibility and collaboration",
+    "Take the objections and the learning curve head on",
+    "End with the verdict and a call to action",
+]
+
+
+def _redescribed(deck: dict, message: str) -> dict:
+    """The sweeper's right answer: ``deck`` described as it stands, as the full deck_spec, with
+    every position in ``target_positions`` and no operations or deck_changes."""
+    return _out(
+        "edit", message, deck_spec=copy.deepcopy(deck),
+        target_positions=[s["position"] for s in deck["slides"]],
+        operations=None, deck_changes=None,
+    )
+
+
+def _arc_as_deck_changes(message: str, arc: list[str]) -> dict:
+    """The silent-drop shape: the arc re-described as ``deck_changes`` (the runner's dump form),
+    with no deck_spec. Production ignores deck_changes on a describe-only turn and persists
+    nothing."""
+    changes = DeckChanges(narrative_arc=list(arc)).model_dump(mode="json")
+    return _out("edit", message, operations=None, deck_changes=changes)
+
 
 def _write(out, cid, kind, fault, expect, reference, should_fail):
     d = out / cid
@@ -817,6 +876,15 @@ def generate(out_dir: pathlib.Path | None = None):
              _op("update", position=9,
                  slides=[_revised_content(gold, 9, MIXED_OVERREACH_SUMMARY)])],
         ),
+    )
+
+    # The arc-review sweeper's re-description: the full deck_spec of the deck as it stands (the
+    # current spec), every position targeted, no operations; the arc as deck_changes is dropped.
+    _write(
+        out, "redescribe_deck", "mutation", REDESCRIBE_FAULT,
+        {"intent": "edit", "full_deck_spec": True},
+        _redescribed(gold, REDESCRIBE_MESSAGE),
+        _arc_as_deck_changes(REDESCRIBE_ARC_MESSAGE, REDESCRIBED_ARC),
     )
 
 

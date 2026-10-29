@@ -9,7 +9,7 @@ Real-model runs; results are logged to MLflow.
 - **Configs** (`evals/configs/`). A config is a named variant of one agent's v1 definition.
   `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
   settings. Each config carries a `content_hash`, logged with every run.
-- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (nineteen for the architect), 49 in total across the seven
+- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (twenty for the architect), 50 in total across the seven
   roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
   `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
   `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
@@ -62,6 +62,18 @@ Real-model runs; results are logged to MLflow.
       model's own `target_positions` are noted, not failed. The judge sees an operations answer in its
       composed form (`compose_operations_answer`): the composed `deck_spec`, with `target_positions`
       = the rebuilt indices. A `deck_spec`-only insert answer is still scored by the insert check.
+      The one exception is the re-description case below.
+    - *Architect re-description* (the arc-review sweeper's describe-only turn). A case whose
+      `expect` has `full_deck_spec` is scored by `_redescription_score` alone, ahead of the intent
+      check and the operations check. On that turn `architect_node` applies no operations: it
+      persists the answer's `deck_spec`, keeps the persisted spec instead when the answer's slide
+      positions differ from it, and refuses an answer with no `deck_spec` without a retry. The row
+      passes only if all of these hold: the intent is `edit` or `build` (the node persists either
+      one's `deck_spec` the same way, and `architect_router` ends both turns before the foreman);
+      `deck_spec` is a valid DeckSpec whose slide positions equal `current_deck_spec`'s exactly;
+      and `operations` and `deck_changes` are both null. The model's own `target_positions` are
+      noted, not failed. The judge sees this case's answers as given, never composed
+      (`judge._judged`), because production composes nothing on that turn.
   - `render_measures`, for the builder and fixer: the slide is rendered in a browser (Meridian section
     CSS). It must have zero overflow, contrast of at least 4.5, no off-palette colours, no console
     errors and no `<style>` tag.
@@ -127,7 +139,7 @@ data_analyst prompt mentions Genie and a vector index, but neither is available 
 
 ## Held-out set
 
-Each agent has a second, separate set of cases (five per agent, nineteen for the architect; 49 in total) in `evals/packs/<agent>/cases_heldout/`,
+Each agent has a second, separate set of cases (five per agent, twenty for the architect; 50 in total) in `evals/packs/<agent>/cases_heldout/`,
 built from a different source deck than the train cases. It has the same four files per case and
 shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
 cases generalises, rather than having been fitted to them.
@@ -707,7 +719,7 @@ What it showed:
   - The architect judge prompt does not describe operations. It judges the composed form, and on
     train it cannot separate three of the four new should_fails.
   - No eval case covers the describe-only sweeper or the `rejected_edit` retry. Both were checked
-    once, by hand, above.
+    once, by hand, above. (The sweeper now has one: `redescribe_deck`, below.)
   - The yardstick still does not run production's binding validation (diagnostic by hand, as in #314),
     and the message wording (new slides by their revised number, deleted ones by their old number) is
     not scored.
@@ -715,3 +727,26 @@ What it showed:
   existing install keeps its persisted architect prompt until an admin publishes a release carrying
   the new one. The node behaviour applies at once on every release: the operations path whenever a
   model emits operations, the retry, the deferred message and the refusal note.
+
+## Architect: the sweeper's re-description case, 2026-10-29
+
+The arc-review sweeper (`spec_sync.run_arc_review`) asks the architect to re-describe a deck a
+person edited by hand: `ARC_REVIEW_MESSAGE`, with `describe_only=True`. It is the one edit that must
+still return a full `deck_spec`. An answer given as `operations` or `deck_changes` is silently
+dropped, and the sweeper clears its marker anyway. No case measured this, so one was added to each
+split before the next prompt pass. No prompt changed and no real-model run was made.
+
+- **`redescribe_deck`** (both splits, each on its own deck). The payload is what `architect_node`
+  sends on the sweeper's turn:
+  - `message` is `ARC_REVIEW_MESSAGE` on both splits, the one message the splits share.
+  - `conversation` is the prior exchange alone, because the sweeper saves no user message.
+  - `slide_references` is `[]` (`architect_slide_payload(..., describe_only=True)`), and
+    `slide_numbering` still numbers the deck.
+
+  `expect` is `{intent: edit, full_deck_spec: true}`, scored by the re-description check (see
+  Scorers). The reference is the current spec as `deck_spec`, with every position in
+  `target_positions` and no operations. The `should_fail` is the answer production drops: an
+  `edit` that re-describes the narrative arc as `deck_changes`, with no `deck_spec`.
+- The architect now has twenty cases per split, 50 across the harness.
+- **Not calibrated or measured yet.** Calibrate it on both splits
+  (`--calibrate --cases redescribe_deck`) before relying on its judge verdict.
