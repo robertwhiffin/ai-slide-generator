@@ -88,7 +88,7 @@ from src.services.graph_configuration_workbench import (
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.orm import Session, sessionmaker
 
 
 class GraphConfiguration(
@@ -171,6 +171,37 @@ def ship_packaged_graph_configuration(session_factory: sessionmaker) -> ShipOutc
     )
 
 
+def read_packaged_update_status(session: Session) -> PackagedUpdateStatus:
+    """The admin badge: the packaged manifest against the active release.  Read-only.
+
+    Loads the packaged manifest here, so callers (the admin routes) never read it.
+    """
+    from src.services.graph_definition_manifest import load_graph_v1_manifest
+
+    return GraphConfiguration().packaged_update_status(
+        session, manifest=load_graph_v1_manifest()
+    )
+
+
+def adopt_packaged_update(
+    session: Session, *, actor: str, expected_lock_version: int
+) -> AdoptOutcome:
+    """The admin's Adopt: publish the packaged manifest under ``actor``.
+
+    Loads the packaged manifest and names the installed app version in the
+    release note, as the startup wrapper does.
+    """
+    from src.services.graph_definition_manifest import load_graph_v1_manifest
+
+    return GraphConfiguration().adopt_packaged_manifest(
+        session,
+        manifest=load_graph_v1_manifest(),
+        app_version=_installed_app_version(),
+        actor=actor,
+        expected_lock_version=expected_lock_version,
+    )
+
+
 __all__ = [
     "ActiveReleaseSnapshot",
     "AdoptOutcome",
@@ -230,8 +261,10 @@ __all__ = [
     "ShipNothing",
     "ShipOutcome",
     "Shipped",
+    "adopt_packaged_update",
     "bootstrap_graph_configuration",
     "build_remote_endpoint_draft_validator",
     "definition_field_diffs",
+    "read_packaged_update_status",
     "ship_packaged_graph_configuration",
 ]

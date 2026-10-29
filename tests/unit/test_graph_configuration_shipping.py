@@ -28,6 +28,7 @@ from sqlalchemy import event, func, select, update
 from sqlalchemy.dialects import postgresql
 
 import src.services.graph_configuration_publication as publication_module
+import src.services.graph_definition_manifest as manifest_module
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     GraphRelease,
@@ -51,7 +52,9 @@ from src.services.graph_configuration import (
     ShipInvalid,
     ShipNothing,
     Shipped,
+    adopt_packaged_update,
     definition_field_diffs,
+    read_packaged_update_status,
     ship_packaged_graph_configuration,
 )
 from src.services.graph_configuration_content import definition_content_from_row
@@ -1374,3 +1377,65 @@ def test_startup_wrapper_names_the_app_version(factory, monkeypatch):
 
     ((_session_factory, _manifest_arg, app_version),) = calls
     assert app_version == expected
+
+
+# ---------------------------------------------------------------------------
+# The admin helpers (the routes' only way to the packaged manifest)
+# ---------------------------------------------------------------------------
+
+
+def _installed_version() -> str:
+    try:
+        return metadata.version("databricks-tellr-app")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def test_status_helper_reports_against_the_loaded_manifest(factory, monkeypatch):
+    import src.services.graph_configuration as facade
+
+    assert "read_packaged_update_status" in facade.__all__
+    manifest = _manifest(architect=_shipped_text("architect", "M"))
+    monkeypatch.setattr(manifest_module, "load_graph_v1_manifest", lambda: manifest)
+    before = _artifacts(factory)
+
+    with factory() as db:
+        reported = read_packaged_update_status(db)
+
+    # Only the patched manifest differs from the bootstrapped v1.
+    assert (reported.available, reported.differing_agents, reported.blocked_reason) == (
+        True,
+        ("architect",),
+        None,
+    )
+    assert reported.field_diffs["architect"] == (
+        FieldDiff("prompt_text", _v1_prompt("architect"), _shipped_text("architect", "M")),
+    )
+    assert _artifacts(factory) == before
+
+
+def test_adopt_helper_publishes_the_loaded_manifest(factory, monkeypatch):
+    import src.services.graph_configuration as facade
+
+    assert "adopt_packaged_update" in facade.__all__
+    install_release_clock(monkeypatch, factory)
+    hand_publish_prompt(factory, "builder")
+    manifest = _manifest(architect=_shipped_text("architect", "M"))
+    monkeypatch.setattr(manifest_module, "load_graph_v1_manifest", lambda: manifest)
+
+    with factory() as db:
+        outcome = adopt_packaged_update(
+            db, actor=_ADMIN, expected_lock_version=current_lock(factory)
+        )
+
+    assert isinstance(outcome, Shipped), outcome
+    release = outcome.published.release
+    assert (release.published_by, release.release_note) == (
+        _ADMIN,
+        f"Adopted shipped version (Tellr {_installed_version()})",
+    )
+    revisions = _mapped_revisions(factory, release.release_id)
+    assert {key: revision.content_hash for key, revision in revisions.items()} == (
+        _hashes(manifest)
+    )
+    assert revisions["architect"].created_by == "system:code-ship"
