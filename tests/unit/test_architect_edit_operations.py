@@ -49,6 +49,8 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import pytest
 
+from src.api.schemas.streaming import StreamEventType
+from src.api.services.session_manager import SessionManager
 from src.api.services.slide_repository import SlideRowsChangedError, SlideWriter
 from src.database.models.session import (
     SessionSlide,
@@ -59,6 +61,7 @@ from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
 from src.domain.deck_spec_slides import BLANK_DECK_SPEC_ENTRY
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_operations import DeckChanges, SlideContent, SlideOperation
+from src.services.graph import nodes
 from src.services.graph.event_emitter import set_event_emitter
 from src.services.graph.nodes import architect_node, build_branch_payload
 from src.services.graph.routers import architect_router, foreman_router
@@ -251,6 +254,7 @@ def _turn(env, out: ArchitectOutput, **state_overrides) -> SimpleNamespace:
         architect_lines=[
             e.content for e in events if (e.metadata or {}).get("node") == "architect"
         ],
+        rows=added,
         said=[m.get("content") for m in added if m.get("message_type") == "llm_response"],
         notices=[m.get("content") for m in added if m.get("message_type") == "info"],
     )
@@ -1206,26 +1210,72 @@ def _named_turn(env, caplog, out: ArchitectOutput, user_message: str) -> SimpleN
     return t
 
 
-def test_named_blank_no_operation_touches_is_said(graph_env, caplog):
+def _log_what_is_said(monkeypatch) -> List[tuple]:
+    """Record every ASSISTANT event and every transcript row, in one order log."""
+    log: List[tuple] = []
+    real_emit = nodes._emit
+
+    def emit_spy(event_type, **kwargs):
+        if event_type == StreamEventType.ASSISTANT:
+            log.append(("event", kwargs.get("content")))
+        return real_emit(event_type, **kwargs)
+
+    monkeypatch.setattr(nodes, "_emit", emit_spy)
+    real_add = SessionManager.add_message
+    signature = inspect.signature(real_add)
+
+    def add_spy(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        arguments = bound.arguments
+        log.append(("row", arguments["message_type"], arguments["content"]))
+        return real_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(SessionManager, "add_message", add_spy)
+    return log
+
+
+def test_named_blank_no_operation_touches_is_said(graph_env, caplog, monkeypatch):
     """C12 (the reviewer's probe): "fill slide 2 with pricing" over a blank slide 2,
     answered by operations that only update slide 3.  The full-spec path says
     "Slide 2 is still blank…"; so must this one, once, in the user's own number,
     although no list this turn builds ever held the blank (targets are ``rebuild``,
     and nothing restyles or re-reviews).
 
-    Sabotage: notice only when a list drops the blank (the first cut) -> silent."""
+    The notice qualifies the architect's message, so it is said AFTER it (spec §7;
+    final review M1): the persisted assistant rows are exactly ``[message
+    (llm_response), notice (info)]`` in that order, the message is the turn's only
+    ``ASSISTANT`` event (a notice is a row, never an event), and both the message's
+    event and its row are written before the notice's row.
+
+    Sabotage: notice only when a list drops the blank (the first cut) -> silent;
+    say the message after the notice -> the order is reversed."""
     _blank_second_slide(graph_env)
+    log = _log_what_is_said(monkeypatch)
+    message = "Adding pricing to slide 3."
 
     t = _named_turn(
         graph_env,
         caplog,
-        _ops_out([_update(2, _content("CHARLIE-PRICING"))], targets=[1]),
+        _ops_out([_update(2, _content("CHARLIE-PRICING"))], targets=[1], message=message),
         "fill slide 2 with pricing",
     )
 
     assert t.updates["target_positions"] == [2]
     assert t.notices == [STILL_BLANK_2]
     assert len(_named(caplog, "blank_named_but_not_described")) == 1
+    assert [
+        (m["content"], m["message_type"]) for m in t.rows if m["role"] == "assistant"
+    ] == [(message, "llm_response"), (STILL_BLANK_2, "info")], (
+        "the still-blank notice must follow the architect's message"
+    )
+    assert [e.content for e in t.events if e.type == StreamEventType.ASSISTANT] == [message]
+    said_event = log.index(("event", message))
+    said_row = log.index(("row", "llm_response", message))
+    notice_row = log.index(("row", "info", STILL_BLANK_2))
+    assert max(said_event, said_row) < notice_row, (
+        f"the architect's message was said after the still-blank notice: {log}"
+    )
 
 
 @pytest.mark.parametrize("restyle", [False, True], ids=["plain", "with-restyle"])

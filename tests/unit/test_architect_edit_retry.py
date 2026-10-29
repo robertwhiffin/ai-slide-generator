@@ -64,6 +64,7 @@ from tests.unit.test_architect_edit_operations import (
     _delete,
     _insert,
     _mk,
+    _move,
     _ops_out,
     _replace,
     _seeded,
@@ -123,6 +124,49 @@ STYLE_DROPPED = (
     "5). Confirming also rebuilds every slide against the new design, because a "
     "restyle affects all of them."
 )
+
+#: I1 (spec §4, final review): the tail of every problem a refused edit WITHOUT
+#: operations hands the retry — list the change as operations.  Node-side wording;
+#: the user's sentence and ``error_state`` keep their text.
+AS_OPERATIONS = (
+    "return this edit as `operations` (insert, update, delete, replace or move, "
+    "at the positions of current_deck_spec) instead of a revised deck_spec: "
+    "removing a slide is a delete and reordering slides is a move"
+)
+
+#: What the alignment could not read, as the retry is told it (never the
+#: alignment's own "is not supported" / "cannot move a slide").
+ALIGNMENT_DETAIL = {
+    "ambiguous": (
+        "your revised deck_spec can be matched to current_deck_spec in more than "
+        "one way, so it is unclear which slides are new and which were changed; "
+        + AS_OPERATIONS
+    ),
+    "moves_slides": (
+        "your revised deck_spec moves a slide: one of its slides is a copy of a "
+        "different slide of current_deck_spec; " + AS_OPERATIONS
+    ),
+}
+
+#: M4: an edit with neither ``operations`` nor ``deck_spec``, as the retry is told.
+NO_OPERATIONS_DETAIL = (
+    "your edit returned neither `operations` nor a deck_spec, so it changes "
+    "nothing; an edit must list its changes as `operations` (insert, update, "
+    "delete, replace or move, at the positions of current_deck_spec), or return "
+    "the full revised deck_spec only to re-describe the deck as it stands"
+)
+
+#: What a retry problem must never tell the model about a delete, a move or a
+#: renumbering: with operations, every one of them can be done.
+UNSUPPORTED_WORDING = ("not supported", "unsupported", "cannot", "can't", "only adds")
+
+
+def _positions_changed_detail(revised: Sequence[int], current: Sequence[int]) -> str:
+    return (
+        f"your revised deck_spec has slide positions {list(revised)} but "
+        f"current_deck_spec has {list(current)}; " + AS_OPERATIONS
+    )
+
 
 #: Distinct, greppable model messages: a refused answer's must appear nowhere.
 A_MSG = "FIRST-ANSWER: the edit is done."
@@ -447,9 +491,11 @@ def test_alignment_refusal_on_old_path_retries(graph_env, monkeypatch):
     """The production shape (spec "Why"): "replace slide 5 of 16 with an overview and
     six stage slides" returned as a grown ``deck_spec``.  The alignment refuses it as
     ``ambiguous``; the retry is told so (``alignment_ambiguous``, no positions,
-    the alignment's own detail) and answers with operations, which land.
+    what the alignment could not read and to answer with operations — spec §4) and
+    answers with operations, which land.
 
-    Sabotage: retry only operations problems -> one call and today's refusal."""
+    Sabotage: retry only operations problems -> one call and today's refusal;
+    hand the retry the alignment's own detail -> the pin differs."""
     prior, before = _seeded(graph_env, range(16))
     old = list(prior.slides)
     overview = old[4].model_copy(
@@ -469,7 +515,11 @@ def test_alignment_refusal_on_old_path_retries(graph_env, monkeypatch):
 
     problems = _assert_retried_with(answers, graph_env, first)
     assert problems == [
-        {"code": "alignment_ambiguous", "positions": [], "detail": refused.value.detail}
+        {
+            "code": "alignment_ambiguous",
+            "positions": [],
+            "detail": ALIGNMENT_DETAIL["ambiguous"],
+        }
     ]
     assert answers.seen[1]["rejected_edit"]["your_previous_answer"] == {
         "intent": "edit",
@@ -495,6 +545,119 @@ def test_alignment_refusal_on_old_path_retries(graph_env, monkeypatch):
     _assert_nowhere(graph_env, t, A_MSG)
 
 
+def _without_operations_case(case: str, prior):
+    """One refused edit WITHOUT operations on ``_seeded(…, (0, 1, 2))`` and the
+    operations answer that does what it meant.
+
+    Returns ``(first, problem_code, detail, second, composed, laid_out, targets)``.
+    """
+    a, b, c = prior.slides
+    if case == "ambiguous":
+        spec, targets = _ambiguous_three(prior)
+        with pytest.raises(AlignmentRefused) as refused:
+            align_slides(prior.slides, spec.slides)
+        assert refused.value.code == "ambiguous", "precondition"
+        rewritten, new = _content("REWRITTEN"), _content("NEW")
+        return (
+            _edit_out(spec, targets, message=A_MSG),
+            "alignment_ambiguous",
+            ALIGNMENT_DETAIL["ambiguous"],
+            _ops_out([_update(1, rewritten), _insert(1, new)], message=B_MSG),
+            _canonical(prior, [a, _spec_from(rewritten), _spec_from(new), c]),
+            [_mk(0), _mk(1), "PENDING", _mk(2)],
+            [1, 2],
+        )
+    if case == "moves":
+        spec, targets = _swap_three(prior)
+        with pytest.raises(AlignmentRefused) as refused:
+            align_slides(prior.slides, spec.slides)
+        assert refused.value.code == "moves_slides", "precondition"
+        return (
+            _edit_out(spec, targets, message=A_MSG),
+            "alignment_moves_slides",
+            ALIGNMENT_DETAIL["moves_slides"],
+            _ops_out([_move(0, 1)], message=B_MSG),
+            _canonical(prior, [b, a, c]),
+            [_mk(1), _mk(0), _mk(2)],
+            [],
+        )
+    if case == "shrink":
+        return (
+            _edit_out(_spec_of(prior, [(0, a), (1, b)]), [1], message=A_MSG),
+            "edit_spec_positions_changed",
+            _positions_changed_detail([0, 1], [0, 1, 2]),
+            _ops_out([_delete(2)], message=B_MSG),
+            _canonical(prior, [a, b]),
+            [_mk(0), _mk(1)],
+            [],
+        )
+    if case == "renumber":
+        return (
+            _edit_out(_spec_of(prior, [(0, a), (1, b), (3, c)]), [2], message=A_MSG),
+            "edit_spec_positions_changed",
+            _positions_changed_detail([0, 1, 3], [0, 1, 2]),
+            _ops_out([_move(2, -1)], message=B_MSG),
+            _canonical(prior, [c, a, b]),
+            [_mk(2), _mk(0), _mk(1)],
+            [],
+        )
+    updated = _content("UPDATED")
+    return (
+        _edit_out(None, [1], message=A_MSG),
+        "edit_without_revised_spec",
+        NO_OPERATIONS_DETAIL,
+        _ops_out([_update(1, updated)], message=B_MSG),
+        _canonical(prior, [a, _spec_from(updated), c]),
+        [_mk(0), _mk(1), _mk(2)],
+        [1],
+    )
+
+
+@pytest.mark.parametrize("case", ["ambiguous", "moves", "shrink", "renumber", "no-spec"])
+def test_refused_edit_without_operations_is_told_to_use_operations(graph_env, case):
+    """Spec §4 (final review I1, M4): an edit WITHOUT operations that the old path
+    refuses — the alignment's ``ambiguous`` and ``moves_slides``, the position-set
+    guard's shorter or renumbered spec — or that carries neither ``operations`` nor
+    ``deck_spec`` is retried, and the retry's problem says what went wrong and that
+    the edit must be listed as ``operations``.  It never says the change is
+    unsupported (the alignment's own "removing slides is not supported" / "an edit
+    cannot move a slide" would steer the model to ``discuss`` it as impossible).
+    The operations answer then lands: rows laid out, spec composed, only its
+    message said.
+
+    Sabotage: hand the retry the alignment's own detail -> "cannot" in the
+    payload; drop ``edit_without_revised_spec`` from the retryable codes -> one
+    call and a refusal."""
+    prior, before = _seeded(graph_env, (0, 1, 2))
+    first, code, detail, second, composed, laid_out, targets = _without_operations_case(
+        case, prior
+    )
+    answers = _Answers(first, second)
+
+    t = _turn(graph_env, answers)
+
+    problems = _assert_retried_with(answers, graph_env, first)
+    assert problems == [{"code": code, "positions": [], "detail": detail}]
+    told = problems[0]["detail"]
+    assert "`operations`" in told, f"the retry is not told to use operations: {told!r}"
+    for wording in UNSUPPORTED_WORDING:
+        assert wording not in told.lower(), (
+            f"the retry is told the change is unsupported ({wording!r}): {told!r}"
+        )
+
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["error_state"] is None
+    assert t.updates["architect_message"] == B_MSG
+    assert t.updates["target_positions"] == targets
+    assert t.updates["deck_spec"] == composed
+    assert _persisted_spec(graph_env) == composed
+    _assert_laid_out(graph_env, before, laid_out)
+    assert t.assistant == [B_MSG]
+    assert len(t.rows) == 1
+    _assert_plain_row(t.rows[0], B_MSG)
+    _assert_nowhere(graph_env, t, A_MSG)
+
+
 # ---------------------------------------------------------------------------
 # 5. What the model cannot fix is never retried
 # ---------------------------------------------------------------------------
@@ -514,21 +677,21 @@ def _raise_from(error: Exception) -> Callable:
         ("ops-rows-changed", "insert_rows_changed", OPS_ROWS_CHANGED),
         ("ops-rows-failed", "insert_rows_failed", OPS_ROWS_FAILED),
         ("edit_without_spec", "edit_without_spec", EDIT_WITHOUT_SPEC),
-        ("edit_without_revised_spec", "edit_without_revised_spec", EDIT_WITHOUT_REVISED_SPEC),
     ],
     ids=[
         "spec_positions_stale",
         "ops-rows-changed",
         "ops-rows-failed",
         "edit_without_spec",
-        "edit_without_revised_spec",
     ],
 )
 def test_non_retryable_refusals_call_once(graph_env, monkeypatch, case, code, sentence):
     """``spec_positions_stale`` (the persisted spec no longer describes the rows),
-    ``SlideRowsChangedError`` and any other error from the layout writer, and the two
-    spec-less refusals: the model cannot fix any of them, so exactly ONE architect
-    call, and only the refusal is said.  B would land if it were ever asked for.
+    ``SlideRowsChangedError`` and any other error from the layout writer, and
+    ``edit_without_spec`` (no persisted spec to edit): the model cannot fix any of
+    them, so exactly ONE architect call, and only the refusal is said.  B would land
+    if it were ever asked for.  (``edit_without_revised_spec`` is a model slip and
+    retries: ``test_refused_edit_without_operations_is_told_to_use_operations``.)
 
     Sabotage: retry every degrade -> two calls and B's edit applied."""
     if case == "spec_positions_stale":
@@ -544,11 +707,8 @@ def test_non_retryable_refusals_call_once(graph_env, monkeypatch, case, code, se
         )
         monkeypatch.setattr(SlideWriter, "apply_slide_layout", _raise_from(error))
         first = _ops_out([_delete(1)], message=A_MSG)
-    elif case == "edit_without_spec":
-        first = _ops_out([_update(0, _content("U"))], message=A_MSG)
     else:
-        _seeded(graph_env, (0, 1, 2))
-        first = _edit_out(None, [1], message=A_MSG)
+        first = _ops_out([_update(0, _content("U"))], message=A_MSG)
     second = _ops_out([_update(1, _content("B"))], message=B_MSG)
     snapshot = _db_state(graph_env)
     answers = _Answers(first, second)
@@ -567,6 +727,7 @@ def test_non_retryable_refusals_call_once(graph_env, monkeypatch, case, code, se
             "edit_insert_ambiguous",
             "edit_spec_moves_slides",
             "edit_spec_positions_changed",
+            "edit_without_revised_spec",
         }
     )
     assert code not in nodes.RETRYABLE_EDIT_CODES
@@ -762,45 +923,73 @@ def _swap_three(prior):
         ("ambiguous", "edit_insert_ambiguous"),
         ("moves", "edit_spec_moves_slides"),
         ("shrink", "edit_spec_positions_changed"),
+        ("no-spec", "edit_without_revised_spec"),
     ],
 )
 def test_refusal_row_carries_metadata(graph_env, case, code):
     """The refusal is saved as an ``llm_response`` (the UI shows it as today) with
     ``metadata == {"architect_refusal": {"code": …, "problems": […]}}`` naming the
-    SECOND answer's problems.  The non-operations refusals keep today's code and
-    sentence; an alignment refusal's problem is ``alignment_<code>`` with the
-    alignment's detail and no positions.  (The shrink refusal is today's
-    position-set guard: retryable, but its problem shape is not pinned by the plan.)
+    SECOND answer's problems.  The non-operations refusals keep today's code,
+    sentence and ``error_state`` message (an alignment refusal's is the alignment's
+    own detail); their problem — what the model is told, here and in the next
+    turn's note — says what went wrong and to answer with operations (spec §4,
+    final review I1/M4): ``alignment_<code>`` with no positions for an alignment
+    refusal, the position sets for the shrink, the missing fields for an edit with
+    neither ``operations`` nor ``deck_spec``.
 
-    Sabotage: save the refusal without metadata -> red; key it otherwise -> red."""
+    Sabotage: save the refusal without metadata -> red; key it otherwise -> red;
+    record the alignment's own detail as the problem -> red."""
     if case == "operations":
         _seeded(graph_env, range(22))
         first = _ops_out([_replace(29, _content("X"))], message=A_MSG)
         second = _ops_out([_delete(25)], message=B_MSG)
         sentence = REJECTED_PREFIX + "there is no slide 26 — the deck has 22 slides."
-        expected: Optional[List[Dict]] = [_unknown(25)]
+        expected: List[Dict] = [_unknown(25)]
+        message = _unknown(25)["detail"]
     else:
         prior, _ = _seeded(graph_env, (0, 1, 2))
         if case == "ambiguous":
             spec, targets = _ambiguous_three(prior)
         elif case == "moves":
             spec, targets = _swap_three(prior)
-        else:
+        elif case == "shrink":
             spec, targets = make_spec((0, 1)), [1]
+        else:
+            spec, targets = None, [1]
         first = _edit_out(spec, targets, message=A_MSG)
         second = _edit_out(spec, targets, message=B_MSG)
-        sentence = REFUSAL_TEXT[code]
-        expected = None
         if case in ("ambiguous", "moves"):
+            sentence = REFUSAL_TEXT[code]
             with pytest.raises(AlignmentRefused) as refused:
                 align_slides(prior.slides, spec.slides)
             expected = [
                 {
                     "code": f"alignment_{refused.value.code}",
                     "positions": [],
-                    "detail": refused.value.detail,
+                    "detail": ALIGNMENT_DETAIL[refused.value.code],
                 }
             ]
+            message = refused.value.detail
+        elif case == "shrink":
+            sentence = REFUSAL_TEXT[code]
+            expected = [
+                {
+                    "code": code,
+                    "positions": [],
+                    "detail": _positions_changed_detail([0, 1], [0, 1, 2]),
+                }
+            ]
+            message = (
+                "the edit's deck_spec has slide positions [0, 1] but the persisted "
+                "deck_spec has [0, 1, 2]"
+            )
+        else:
+            sentence = EDIT_WITHOUT_REVISED_SPEC
+            expected = [{"code": code, "positions": [], "detail": NO_OPERATIONS_DETAIL}]
+            message = (
+                "intent='edit' returned no deck_spec; the deck spec is the source "
+                "of truth so an edit must return it revised"
+            )
     snapshot = _db_state(graph_env)
     answers = _Answers(first, second)
 
@@ -815,10 +1004,10 @@ def test_refusal_row_carries_metadata(graph_env, case, code):
     assert row["metadata"]["architect_refusal"]["code"] == code
     retried = _assert_retried_with(answers, graph_env, first)
     refusal = _assert_only_refusal(graph_env, t, code, sentence)
-    if expected is not None:
-        assert retried == (expected if case != "operations" else [_unknown(29)])
-        assert row["metadata"] == {"architect_refusal": {"code": code, "problems": expected}}
-        assert refusal["problems"] == expected
+    assert t.updates["error_state"]["message"] == message
+    assert retried == (expected if case != "operations" else [_unknown(29)])
+    assert row["metadata"] == {"architect_refusal": {"code": code, "problems": expected}}
+    assert refusal["problems"] == expected
     _assert_nowhere(graph_env, t, A_MSG, B_MSG)
     assert _db_state(graph_env) == snapshot
     assert nodes.REFUSAL_METADATA_KEY == "architect_refusal"

@@ -1919,6 +1919,43 @@ _ALIGNMENT_REFUSALS = {
     ),
 }
 
+# What a refused edit without operations tells the MODEL (spec §4: "the problem
+# tells the model to list the changes as operations").  The user's sentence above
+# and ``error_state`` keep their text; only the retry's problem (and the refusal
+# row's, which the next turn's note replays) says this.  Each problem says what
+# went wrong and then how to answer instead — never that the change cannot be
+# made, because as operations it can: the prompt's ``rejected_edit`` rule turns
+# "cannot be done" into a ``discuss`` that tells the user deleting or moving is
+# impossible, the very symptom operations exist to remove.  So the alignment's
+# own detail ("removing slides is not supported", "an edit cannot move a slide")
+# reaches ``error_state`` only, never the model.
+_AS_OPERATIONS = (
+    "return this edit as `operations` (insert, update, delete, replace or move, "
+    "at the positions of current_deck_spec) instead of a revised deck_spec: "
+    "removing a slide is a delete and reordering slides is a move"
+)
+
+# What the alignment could not read, by ``AlignmentRefused.code``, in the model's
+# terms and with no verdict on what an edit may do.
+_ALIGNMENT_PROBLEM_DETAILS = {
+    "ambiguous": (
+        "your revised deck_spec can be matched to current_deck_spec in more than "
+        "one way, so it is unclear which slides are new and which were changed"
+    ),
+    "moves_slides": (
+        "your revised deck_spec moves a slide: one of its slides is a copy of a "
+        "different slide of current_deck_spec"
+    ),
+    "removes_slides": (
+        "your revised deck_spec has fewer slides than current_deck_spec"
+    ),
+}
+
+
+def _as_operations_problem(code: str, what_went_wrong: str) -> OperationProblem:
+    """A refused full-spec edit's problem: what went wrong, then answer as operations."""
+    return OperationProblem(code, (), f"{what_went_wrong}; {_AS_OPERATIONS}")
+
 # The two ways a row write planned against the committed rows can fail to land
 # (#314 D4).  The insert shift and the operations layout share the CODES, so an
 # operator sees one code per cause whichever path wrote.  They do not share the
@@ -1966,12 +2003,14 @@ def _rows_failed_degrade(exc: Exception, *, operations: bool = False) -> Dict[st
 
 # The planning refusals the model can fix (spec §5), by degrade code: operations
 # problems (and the DeckSpec problems composing reports with them), template
-# binding errors, and today's alignment and position-set refusals of a full-spec
-# edit.  On one of these the architect is asked ONCE more, told what it answered
-# and exactly why that was refused, and the turn degrades only if the second
-# answer is refused too.  Everything else is the deck's state, not the answer's —
-# no persisted spec, a spec the rows have outgrown, a spec-less edit the model
-# was already told to revise, and a row write that did not land — so asking
+# binding errors, today's alignment and position-set refusals of a full-spec
+# edit, and an edit that returned neither operations nor a spec (a slip the new
+# prompt's "deck_spec is not needed" invites).  The full-spec and spec-less ones
+# tell the model to answer with operations (_AS_OPERATIONS).  On one of these
+# the architect is asked ONCE more, told what it answered and exactly why that
+# was refused, and the turn degrades only if the second answer is refused too.
+# Everything else is the deck's state, not the answer's — no persisted spec, a
+# spec the rows have outgrown, and a row write that did not land — so asking
 # again would only spend a model call to reach the same refusal.
 RETRYABLE_EDIT_CODES = frozenset(
     {
@@ -1980,6 +2019,7 @@ RETRYABLE_EDIT_CODES = frozenset(
         "edit_insert_ambiguous",
         "edit_spec_moves_slides",
         "edit_spec_positions_changed",
+        "edit_without_revised_spec",
     }
 )
 
@@ -2003,8 +2043,10 @@ def _refusal_problems(degrade: Dict[str, Any]) -> Tuple[OperationProblem, ...]:
     """Why *degrade* refused, as problems: what a retry is told and the row records.
 
     A planning refusal carries its own under ``"problems"`` (an operations list's,
-    one per binding error, an alignment's reason).  Any other refusal is one
-    problem: its code and its model-facing message.
+    one per binding error, and for an edit without operations — refused by the
+    alignment or the position-set guard, or carrying no spec at all — one that
+    says what went wrong and to answer with operations).  Any other refusal is
+    one problem: its code and its model-facing message.
     """
     problems = degrade.get("problems")
     if problems:
@@ -2611,6 +2653,18 @@ def _plan_answer(
                     "plan for the deck, so nothing has been changed. Please "
                     "try asking again."
                 ),
+                # What the retry is told: a slip the model can fix (M4).
+                "problems": (
+                    OperationProblem(
+                        "edit_without_revised_spec",
+                        (),
+                        "your edit returned neither `operations` nor a deck_spec, "
+                        "so it changes nothing; an edit must list its changes as "
+                        "`operations` (insert, update, delete, replace or move, at "
+                        "the positions of current_deck_spec), or return the full "
+                        "revised deck_spec only to re-describe the deck as it stands",
+                    ),
+                ),
             }
         elif not describe_only and (
             len(spec.slides) < len(prior_spec.slides)
@@ -2625,14 +2679,25 @@ def _plan_answer(
             # shorter spec would silently drop a committed row's spec; an
             # equal-length one with other positions describes rows that are not
             # there.
+            revised_positions = sorted(s.position for s in spec.slides)
+            current_positions = sorted(s.position for s in prior_spec.slides)
             edit_degrade = {
                 "code": "edit_spec_positions_changed",
                 "message": (
-                    "the edit's deck_spec has slide positions "
-                    f"{sorted(s.position for s in spec.slides)} but the persisted "
-                    f"deck_spec has {sorted(s.position for s in prior_spec.slides)}"
+                    f"the edit's deck_spec has slide positions {revised_positions} "
+                    f"but the persisted deck_spec has {current_positions}"
                 ),
                 "user": _POSITIONS_CHANGED_TEXT,
+                # What the retry is told (spec §4): what went wrong, and to list
+                # the change as operations, where a delete or a move is fine.
+                "problems": (
+                    _as_operations_problem(
+                        "edit_spec_positions_changed",
+                        f"your revised deck_spec has slide positions "
+                        f"{revised_positions} but current_deck_spec has "
+                        f"{current_positions}",
+                    ),
+                ),
             }
 
     # #314 follow-up (N2): a describe-only turn sees no HTML, so on a deck its
@@ -2718,12 +2783,22 @@ def _plan_answer(
                 "code": code,
                 "message": exc.detail,
                 "user": user,
-                # What the retry is told (spec §5): the alignment's own reason.
+                # What the retry is told (spec §4-§5): what the alignment could
+                # not read, then to list the change as operations — not the
+                # alignment's own detail, whose "is not supported" / "cannot
+                # move" would steer the model to tell the user it is impossible.
                 # It names no position, because what it could not read is the
                 # relation between two lists, not a slide.  Its prefix keeps it
                 # apart from an operations problem's code.
                 "problems": (
-                    OperationProblem(f"alignment_{exc.code}", (), exc.detail),
+                    _as_operations_problem(
+                        f"alignment_{exc.code}",
+                        _ALIGNMENT_PROBLEM_DETAILS.get(
+                            exc.code,
+                            "your revised deck_spec does not line up with "
+                            "current_deck_spec",
+                        ),
+                    ),
                 ),
             }
 

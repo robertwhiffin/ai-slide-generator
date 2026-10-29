@@ -38,8 +38,9 @@ Real-model runs; results are logged to MLflow.
     not listed in `expect.criteria` fails the row. A fix_reviewer also checks `verdict`.
     - *Architect insert cases* (#314). A case whose `expect` has `inserted` is scored with
       production's own semantics, not by the model's `target_positions`, because `architect_node`
-      ignores those targets on an insert and derives the turn from `align_slides` (see "Adding a
-      slide (#314)" in `docs/technical/backend-overview.md`). `build_dataset` adds
+      ignores those targets on an insert and derives the turn from `align_slides` (see "Editing
+      the deck's slides", its "The spec path: alignment" part, in
+      `docs/technical/backend-overview.md`). `build_dataset` adds
       `expectations["current_deck_spec"]` (the payload's deck) for architect cases that have one,
       and omits the key when the deck is `None`. The row passes only if all of these hold:
       the intent is `edit`; the output carries a valid `deck_spec`;
@@ -490,7 +491,8 @@ shipped architect prompt told the model that adding or removing slides is not an
 refused any change of the slide-position set. This pass makes the yardstick score an insert the way
 production builds it, adds four insert cases per split, measures the shipped prompt, searches for a
 better one on train only, and promotes the finalist. The node behaviour is in
-`docs/technical/backend-overview.md`, "Adding a slide (#314)".
+`docs/technical/backend-overview.md`, "Editing the deck's slides" (the #314 alignment is its "The
+spec path: alignment" part).
 
 - **New cases, four per split** (same ids in both; held-out words them differently on its own deck, and
   its messages are not reproduced here).

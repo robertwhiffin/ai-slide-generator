@@ -712,8 +712,11 @@ def _rewrite_slide_rows(
 ) -> None:
     """THE per-slide rewrite of a whole deck: one copy, so its callers cannot diverge.
 
-    ``save_slide_deck``, ``restore_version`` and ``SlideWriter.insert_pending_slides``
-    all rewrite every row of a deck through here.  Hand-copied versions of this
+    ``save_slide_deck``, ``restore_version`` and :func:`_lay_out_slide_rows` all
+    rewrite every row of a deck through here.  ``_lay_out_slide_rows`` is the
+    exact-map shift behind ``SlideWriter.apply_slide_layout`` (and so its
+    ``insert_pending_slides`` special case) and, through :func:`_splice_slide_rows`,
+    the manual ``SessionManager.insert_slide``.  Hand-copied versions of this
     block once drifted apart, and a reorder then attached slide identity and
     verdicts to the wrong slide.
 
@@ -817,22 +820,22 @@ def _splice_slide_rows(
     old_rows: List[SessionSlide],
     new_slides: Mapping[int, Tuple[Dict[str, Any], Dict[str, Any]]],
 ) -> None:
-    """THE shift: splice new slides in among a deck's rows with the EXACT old-row map.
+    """Splice new slides in among a deck's rows, in order: the in-order wrapper.
 
-    Shared by the graph's ``SlideWriter.insert_pending_slides`` and the manual
-    ``SessionManager.insert_slide``, so there is one shift primitive and one row
-    writer.
+    The manual ``SessionManager.insert_slide``'s shift.  It only builds the
+    in-order layout and hands it to :func:`_lay_out_slide_rows`, THE shift
+    primitive, which the graph's ``SlideWriter.apply_slide_layout`` (and so its
+    ``insert_pending_slides`` special case) calls directly — so there is one
+    shift primitive and one row writer.
 
-    1. Every old row is snapshotted (:func:`_snapshot_row`) and attributed
-       (:func:`_attribution_from`) BEFORE any write: ``_upsert_slide_row``
-       rewrites those ORM rows in place.
-    2. ``len(old_rows) + len(new_slides)`` positions are laid out: position ``i``
+    1. ``len(old_rows) + len(new_slides)`` positions are laid out: position ``i``
        holds ``new_slides[i]``'s slide when ``i`` is a key, otherwise the next old
        row in order.
-    3. Every position is rewritten through ``_rewrite_slide_rows`` with that map,
-       never the attribution heuristic, and with ``now_dt=None`` /
-       ``author_fallback=None``, so a moved row with a NULL author or timestamp
-       stays NULL and no moved row gets a fresh ``modified_at``.
+    2. :func:`_lay_out_slide_rows` snapshots and attributes every old row BEFORE
+       any write and rewrites every position with that exact map, never the
+       attribution heuristic, and with ``now_dt=None`` / ``author_fallback=None``,
+       so a moved row with a NULL author or timestamp stays NULL and no moved row
+       gets a fresh ``modified_at``.
 
     Args:
         db: live SQLAlchemy session; the caller owns the transaction.
@@ -878,7 +881,11 @@ def _lay_out_slide_rows(
     at new index ``i``, or ``None`` for a new slide, whose
     ``(slide_dict, incoming_record)`` is ``new_slides[i]``.  An old index may
     appear at most once; one that is absent is deleted (pruned, with its record
-    and spec fragment).  ``_splice_slide_rows`` is the in-order special case.
+    and spec fragment).  Every exact-map writer goes through here:
+    ``SlideWriter.apply_slide_layout`` (the graph's operations layout, and its
+    ``insert_pending_slides`` special case) directly, and the manual
+    ``SessionManager.insert_slide`` through :func:`_splice_slide_rows`, the
+    in-order wrapper.
 
     1. Every old row is snapshotted (:func:`_snapshot_row`) and attributed
        (:func:`_attribution_from`) BEFORE any write: ``_upsert_slide_row``
@@ -2220,8 +2227,9 @@ class SessionManager:
         """Insert one slide (the viewer's manual insert) in ONE transaction.
 
         The manual insert shifts every later slide by one, so it moves rows with
-        the EXACT old-row map (:func:`_splice_slide_rows`, shared with the graph's
-        ``SlideWriter.insert_pending_slides``), never ``save_slide_deck``'s
+        the EXACT old-row map (:func:`_splice_slide_rows`, the in-order wrapper of
+        :func:`_lay_out_slide_rows`, the shift primitive the graph's
+        ``SlideWriter.apply_slide_layout`` also uses), never ``save_slide_deck``'s
         attribution heuristic.  Rows, spec, deck columns and evidence are written
         in one ``get_db_session()``, in this order:
 
