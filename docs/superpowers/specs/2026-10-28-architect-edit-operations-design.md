@@ -100,7 +100,7 @@ deck_changes: Optional[DeckChanges] = None
 
 - `SlideOperation` is **flat**, with the per-op rules checked in the domain module (§3), not in pydantic. A pydantic error fails the whole turn with a runtime error and gives the model no retry. A problem found by the domain check is retryable.
 - Every `position` and `after_position` is a `SlideSpec.position` of the **current** deck. The model reads them off `slide_numbering`/`slide_references`, exactly as it reads `target_positions` today.
-- `ArchitectOutput`'s validator today requires a non-empty `target_positions` on an edit. It becomes: an edit needs a non-empty `target_positions` **or** a non-empty `operations`. A delete- or move-only edit builds nothing and has no targets.
+- `ArchitectOutput`'s validator today requires a non-empty `target_positions` on an edit. It becomes: an edit needs a non-empty `target_positions` **or** `operations is not None` **or** `deck_changes is not None`. A delete- or move-only edit builds nothing and has no targets. An empty `operations` list passes the validator and reaches the retryable `nothing_to_do`, instead of a pydantic error that would fail the turn with no retry.
 - `SlideSpec` and `DeckSpec` do not change. `SlideContent` duplicates `SlideSpec`'s fields minus `position`, and a test pins that the two stay in step.
 
 ### 2. What the operations mean
@@ -255,7 +255,7 @@ This rewrites the EDITING and SLIDE NUMBERS blocks of `src/core/skills/architect
   - `move_slide`;
   - `replace_slide_expand`, which is the production transcript shape: rewrite slide N and add M−1 after it;
   - `mixed_operations`: delete + update + expand in one message.
-- **The existing `add_slide_*` and `edit_*` references** are converted to operations.
+- **The existing `add_slide_*` and `edit_*` references** stay `deck_spec`-shaped; operations answers are composed before the judge sees them (Task 6). *(Plan-time call.)*
 - **Scorer:** a case whose `expect` names operations is scored with production's own `apply_operations` on the payload's `current_deck_spec`. The row passes when there are no problems, the composed layout and `rebuild` set equal the expectation, untouched slides are byte-identical in spec, and deck-level fields equal the reference's. This is the same "production semantics" principle as the #314 insert scorer.
 - **Measure:** a measured run of the new prompt on train ×3 and held-out ×1 before promotion, with results recorded in `evals/README.md`. The prompt is then promoted into the frozen manifest with `evals.harness.promote` (the #314 precedent).
 - **Acceptance bar for promotion:**
@@ -309,3 +309,15 @@ The owner delegated these as long as they don't meaningfully change behaviour.
 - **Blank slides keep today's never-build-an-untouched-blank rule**, decided on the composed deck.
 - **Backend-only:** the two UI limits in §11 are accepted, not fixed. Fixing the chips would change how `diffNewSlides` treats replaces and restores.
 - **The eval bar and the USD 20 cap** in §9, and promoting the best candidate even if it misses the bar, flagged in the PR, so the dev deploy can exercise the feature.
+
+## Changes during the build
+
+Plan-time calls made while building, not owner decisions. The code is the authority where it differs from the text above.
+
+- **C10:** an identity layout over the persisted positions (update-only or `deck_changes`-only) keeps those positions and calls no writer; anything else re-stamps rows and spec to `0..m-1`.
+- **C11:** on the operations path the two row-write refusals use edit-neutral sentences; the spec path keeps its pinned wording.
+- **C12:** the "named but not described" blank notice fires for a named blank that is neither an operation's `position` nor an insert's or move's `after_position`.
+- **C13:** `rejected_edit` is a payload key of the architect's retry call (`MODEL_PAYLOAD_KEYS["architect"]`).
+- **C14:** if the retry call raises, the turn degrades with the first answer's refusal and logs the retry failure.
+- **C15:** a describe-only turn never retries.
+- **C19:** on the operations path a design contract carried only in `deck_spec` (ids differing from the persisted spec's) is adopted as `deck_changes.design_contract`, with an INFO log.

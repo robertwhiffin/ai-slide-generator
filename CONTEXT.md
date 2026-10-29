@@ -61,8 +61,24 @@ A phrase naming existing slides by number or ordinal ("slide 2", "slides 4-6", "
 _Avoid_: Slide context (the monolith's UI selection)
 
 **Slide Insertion**:
-An edit whose revised spec has more slides than the deck. New slides go where the user asked, later slides take a higher Slide Position and Slide Number (by the number of slides inserted before them) but keep their identity and records, and only new and revised slides are built. `architect_node` derives it by aligning the revised spec to the current one (`src/domain/slide_alignment.py`), never from the model's targets, and refuses when the alignment is ambiguous.
+An edit whose revised spec has more slides than the deck. New slides go where the user asked, later slides take a higher Slide Position and Slide Number (by the number of slides inserted before them) but keep their identity and records, and only new and revised slides are built. `architect_node` derives it from the edit's insert and replace Operations, or, for an edit with no Operations, by aligning the revised spec to the current one (`src/domain/slide_alignment.py`) and refusing when the alignment is ambiguous. It never uses the model's targets.
 _Avoid_: Add intent, build
+
+**Operation**:
+One step of an architect edit: `insert`, `update`, `delete`, `replace` or `move`, naming Slide Positions of the deck as it was before the message. The architect returns an ordered list of them and `src/domain/slide_operations.py` checks the whole list and composes the new deck, so the edit lands whole or not at all. Only inserted, updated and replaced slides are built.
+_Avoid_: Tool call, step
+
+**Replace**:
+The Operation "slide N becomes these M slides" (expand, split). The first new slide takes over the old slide's row and is rebuilt; the rest are new slides directly after it.
+_Avoid_: Delete and insert
+
+**Move**:
+The Operation that puts an existing slide directly after another (or at the start). It is a database change: the slide keeps its HTML, identity and records, is not rebuilt, and its spec entry moves with it.
+_Avoid_: Reorder (the slide panel's own action)
+
+**Rejected Edit**:
+An edit whose Operations or composed spec failed a check. Nothing is applied. The architect is asked once more with `rejected_edit` naming its answer and the problems, and if that fails too the user gets a sentence naming them. The refusal is saved with its problems, and next turn the architect is told by a system note that the edit was not applied and why.
+_Avoid_: Failed edit (a build or a write that failed after the plan was accepted)
 
 **Pending Slide**:
 The placeholder row an insertion commits at a new Slide Position until its slide lands. It reads "New slide — not built yet." If the build fails it becomes the failed placeholder.
