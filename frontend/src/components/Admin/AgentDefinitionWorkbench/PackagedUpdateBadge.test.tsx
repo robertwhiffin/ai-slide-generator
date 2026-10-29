@@ -152,18 +152,18 @@ describe('PackagedUpdateBadge', () => {
     render(<PackagedUpdateBadge onAdopted={vi.fn()} />);
     await screen.findByText(TITLE);
 
-    expect(screen.queryByTestId('release-diff-model.temperature')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('release-diff-model.max_tokens')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('packaged-diff-model.temperature')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('packaged-diff-model.max_tokens')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
-    expect(screen.getByTestId('release-diff-model.temperature')).toHaveTextContent('0.1 → 0.2');
-    expect(screen.getByTestId('release-diff-model.max_tokens')).toHaveTextContent('100 → 200');
+    expect(screen.getByTestId('packaged-diff-model.temperature')).toHaveTextContent('0.1 → 0.2');
+    expect(screen.getByTestId('packaged-diff-model.max_tokens')).toHaveTextContent('100 → 200');
     expect(screen.getByText('Architect')).toBeInTheDocument();
     expect(screen.getByText('Builder')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }));
-    expect(screen.queryByTestId('release-diff-model.temperature')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('release-diff-model.max_tokens')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('packaged-diff-model.temperature')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('packaged-diff-model.max_tokens')).not.toBeInTheDocument();
   });
 
   it('confirms, posts the status lock_version, and calls onAdopted on 200', async () => {
@@ -195,6 +195,21 @@ describe('PackagedUpdateBadge', () => {
 
     expect(adoptCalls(mock)).toHaveLength(0);
     expect(onAdopted).not.toHaveBeenCalled();
+  });
+
+  it('shows the invalid-response message on a malformed adopt 200 and reloads through onAdopted', async () => {
+    stubFetch(reply(200, status()), reply(200, { ...adoptSuccess(), draft_effect: { architect: 'kept' } }));
+    const onAdopted = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<PackagedUpdateBadge onAdopted={onAdopted} />);
+    await screen.findByText(TITLE);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Adopt shipped version' }));
+
+    expect(await screen.findByText(
+      'The adopt response was invalid. Reloading the workbench to show the current Graph Version.',
+    )).toBeInTheDocument();
+    expect(onAdopted).toHaveBeenCalledTimes(1);
   });
 
   it('shows the stale-draft message on a 409 stale_publication and does not call onAdopted', async () => {

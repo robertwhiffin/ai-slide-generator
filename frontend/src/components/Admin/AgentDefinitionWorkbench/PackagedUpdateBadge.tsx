@@ -1,24 +1,23 @@
 import { useEffect, useState } from 'react';
 import {
   AgentDefinitionApiError,
+  InvalidReleaseResponseError,
   adoptPackagedUpdate,
   getPackagedUpdate,
 } from '../../../api/agentDefinitions';
-import type { AgentKey, PackagedUpdate } from '../../../api/agentDefinitions';
+import type { PackagedUpdate } from '../../../api/agentDefinitions';
 import { FieldDiffView } from '../GraphRelease/FieldDiffView';
+import { ROLE_LABELS } from '../GraphRelease/reviewAndPublishState';
 
 const CONFIRM_ADOPT = 'Publish the shipped version as the next Graph Version? Pending draft edits are kept.';
 const STALE_MESSAGE = 'The draft changed since you loaded it. Reload and try again.';
-
-function agentName(key: AgentKey): string {
-  return key.split('_').map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
-}
+const INVALID_RESPONSE_MESSAGE = 'The adopt response was invalid. Reloading the workbench to show the current Graph Version.';
 
 function reasonCopy(status: PackagedUpdate): string {
   switch (status.blocked_reason) {
     case 'hand_edited':
       return `Not applied automatically because these agents were edited here: ${
-        status.hand_edited_agents.map(agentName).join(', ')}.`;
+        status.hand_edited_agents.map((key) => ROLE_LABELS[key]).join(', ')}.`;
     case 'rollback':
       return 'Not applied automatically because the live release is a rollback.';
     case 'invalid':
@@ -29,6 +28,7 @@ function reasonCopy(status: PackagedUpdate): string {
 }
 
 function adoptErrorMessage(error: unknown): string {
+  if (error instanceof InvalidReleaseResponseError) return INVALID_RESPONSE_MESSAGE;
   if (error instanceof AgentDefinitionApiError) {
     const payload = error.payload as { code?: string } | null;
     if (payload?.code === 'stale_publication') return STALE_MESSAGE;
@@ -69,6 +69,8 @@ export function PackagedUpdateBadge({ onAdopted }: { onAdopted: () => void }) {
       onAdopted();
     } catch (adoptError: unknown) {
       setError(adoptErrorMessage(adoptError));
+      // A malformed response may follow a publish that did happen: reload to show the truth.
+      if (adoptError instanceof InvalidReleaseResponseError) onAdopted();
     } finally {
       setAdopting(false);
     }
@@ -104,7 +106,7 @@ export function PackagedUpdateBadge({ onAdopted }: { onAdopted: () => void }) {
         <div className="mt-3 space-y-3">
           {status.diffs.map((diff) => (
             <div key={diff.agent_key}>
-              <h4 className="font-medium">{agentName(diff.agent_key)}</h4>
+              <h4 className="font-medium">{ROLE_LABELS[diff.agent_key]}</h4>
               <div className="mt-1 space-y-2">
                 {diff.field_diffs.map((fieldDiff) => (
                   <div key={fieldDiff.field}>
@@ -113,6 +115,7 @@ export function PackagedUpdateBadge({ onAdopted }: { onAdopted: () => void }) {
                       field={fieldDiff.field}
                       before={fieldDiff.published}
                       after={fieldDiff.candidate}
+                      testIdPrefix="packaged-diff"
                     />
                   </div>
                 ))}

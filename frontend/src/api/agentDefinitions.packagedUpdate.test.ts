@@ -105,6 +105,14 @@ describe('adoptPackagedUpdate', () => {
     await expect(adoptPackagedUpdate(7)).rejects.toBeInstanceOf(InvalidReleaseResponseError);
   });
 
+  it('rejects a draft_effect with the seven roles out of Graph order', async () => {
+    stub(200, {
+      ...validAdopt(),
+      draft_effect: Object.fromEntries([...KEYS].reverse().map((key) => [key, 'kept'])),
+    });
+    await expect(adoptPackagedUpdate(7)).rejects.toBeInstanceOf(InvalidReleaseResponseError);
+  });
+
   it.each([
     [409, { code: 'nothing_to_adopt' }],
     [422, { code: 'packaged_invalid', errors: [{ field: 'architect.prompt_text', code: 'x', message: 'bad' }] }],

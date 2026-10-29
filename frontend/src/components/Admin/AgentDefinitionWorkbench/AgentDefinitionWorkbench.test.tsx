@@ -620,40 +620,85 @@ describe('AgentDefinitionWorkbench', () => {
       lock_version: 0,
     };
 
-    function routePackaged(packaged: (url: string) => unknown) {
+    function routePackaged(
+      packaged: (url: string) => unknown,
+      workbench: () => unknown = () => syntheticAgentDefinitionWorkbench,
+    ) {
       const fetchMock = vi.fn().mockImplementation(async (url: string) => {
         if (String(url).includes('/graph-shipping/')) return packaged(String(url));
         if (isAgentTestUrl(url)) throw new Error(`unexpected Agent Test request ${url}`);
-        return mockedResponse(url, 200, syntheticAgentDefinitionWorkbench);
+        return mockedResponse(url, 200, workbench());
       });
       vi.stubGlobal('fetch', fetchMock);
       return fetchMock;
     }
 
-    it('re-fetches the workbench after a successful adopt (C4)', async () => {
+    function statusGets(fetchMock: ReturnType<typeof vi.fn>) {
+      return fetchMock.mock.calls.filter(([url]) =>
+        String(url).endsWith('/api/admin/graph-shipping/packaged-update'));
+    }
+
+    it('re-fetches the workbench and remounts the editor from the fresh snapshot after a successful adopt (C4)', async () => {
+      const shippedRelease = {
+        release_id: 42, version_number: 2, previous_release_id: 41, restored_from_release_id: null,
+        release_note: 'Shipped', published_by: 'system:ship', published_at: '2026-09-25T12:00:00Z',
+        effective_from: '2026-09-25T12:00:00Z', effective_to: null,
+      };
       const adoptBody = {
-        release: {
-          release_id: 9, version_number: 2, previous_release_id: 1, restored_from_release_id: null,
-          release_note: 'Shipped', published_by: 'system', published_at: '2026-09-25T12:00:00Z',
-          effective_from: '2026-09-25T12:00:00Z', effective_to: null,
-        },
+        release: shippedRelease,
         changed_agent_keys: ['architect'],
         draft_effect: Object.fromEntries(
           ['architect', 'data_analyst', 'builder', 'build_reviewer', 'fixer', 'fix_reviewer', 'deck_reviewer']
             .map((key) => [key, 'unchanged']),
         ),
       };
-      const fetchMock = routePackaged((url) =>
-        url.endsWith('/adopt') ? apiResponse(200, adoptBody) : apiResponse(200, PACKAGED_STATUS));
+      // The snapshot after the adopt: a new active release and a rebased draft.
+      const adoptedWorkbench = {
+        ...structuredClone(syntheticAgentDefinitionWorkbench),
+        active_release: shippedRelease,
+        draft: {
+          ...syntheticAgentDefinitionWorkbench.draft,
+          base_release_id: 42,
+          base_version_number: 2,
+          lock_version: 1,
+        },
+      };
+      let adopted = false;
+      const fetchMock = routePackaged(
+        (url) => {
+          if (url.endsWith('/adopt')) {
+            adopted = true;
+            return apiResponse(200, adoptBody);
+          }
+          return apiResponse(200, adopted
+            ? {
+              ...PACKAGED_STATUS, available: false, differing_agents: [], diffs: [],
+              active_version_number: 2, lock_version: 1,
+            }
+            : PACKAGED_STATUS);
+        },
+        () => (adopted ? adoptedWorkbench : syntheticAgentDefinitionWorkbench),
+      );
       vi.spyOn(window, 'confirm').mockReturnValue(true);
       render(<AgentDefinitionWorkbench />);
       await loadedNodeNavigation();
       expect(workbenchGets(fetchMock)).toHaveLength(1);
+      expect(await screen.findByText('A newer shipped version is available')).toBeInTheDocument();
+      // Both read the draft editor's state, which only a remount re-initialises.
+      expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version0');
+      expect(screen.getByText('Draft base').parentElement).toHaveTextContent('Graph Version 1');
 
-      fireEvent.click(await screen.findByRole('button', { name: 'Adopt shipped version' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Adopt shipped version' }));
 
       await waitFor(() => expect(workbenchGets(fetchMock)).toHaveLength(2));
-      await loadedNodeNavigation();
+      await waitFor(() =>
+        expect(screen.getByText('Lock version').parentElement).toHaveTextContent('Lock version1'));
+      expect(screen.getByText('Draft base').parentElement).toHaveTextContent('Graph Version 2');
+      expect(screen.getByRole('heading', { name: 'Graph Version 2' })).toBeVisible();
+      // The remounted badge re-read its status, which no longer offers an update.
+      await waitFor(() => expect(statusGets(fetchMock)).toHaveLength(2));
+      await waitFor(() =>
+        expect(screen.queryByText('A newer shipped version is available')).not.toBeInTheDocument());
     });
 
     it('still renders the workbench when the status request fails', async () => {
