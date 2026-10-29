@@ -9,7 +9,7 @@ Real-model runs; results are logged to MLflow.
 - **Configs** (`evals/configs/`). A config is a named variant of one agent's v1 definition.
   `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
   settings. Each config carries a `content_hash`, logged with every run.
-- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (fifteen for the architect), 45 in total across the seven
+- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (nineteen for the architect), 49 in total across the seven
   roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
   `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
   `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
@@ -50,6 +50,17 @@ Real-model runs; results are logged to MLflow.
       test pins them equal to `nodes._DECK_LEVEL_FIELDS`. A model whose own `target_positions`
       differ is noted in the rationale and not failed. A missing `reference` or `current_deck_spec`
       fails the row with an explicit rationale. Every other case scores exactly as before.
+    - *Architect operations answers* (architect edit operations). An `edit` answer carrying
+      `operations` or `deck_changes` is scored on every edit case, whatever else it carries, the way
+      production composes it: `apply_operations` plus `compose_edit_spec` over
+      `current_deck_spec`. The row passes only if production would not refuse it; the rebuilt
+      indices equal `expect.positions`; the new slides equal `expect.inserted` (default none);
+      the layout equals `expect.layout` when the case gives one (what tells a delete or a move
+      apart); every slide not rebuilt equals, field for field, the current deck's slide whose row it
+      keeps; and the deck-level fields and design contract equal the (composed) reference's. The
+      model's own `target_positions` are noted, not failed. The judge sees an operations answer in its
+      composed form (`compose_operations_answer`): the composed `deck_spec`, with `target_positions`
+      = the rebuilt indices. A `deck_spec`-only insert answer is still scored by the insert check.
   - `render_measures`, for the builder and fixer: the slide is rendered in a browser (Meridian section
     CSS). It must have zero overflow, contrast of at least 4.5, no off-palette colours, no console
     errors and no `<style>` tag.
@@ -115,7 +126,7 @@ data_analyst prompt mentions Genie and a vector index, but neither is available 
 
 ## Held-out set
 
-Each agent has a second, separate set of cases (five per agent, fifteen for the architect; 45 in total) in `evals/packs/<agent>/cases_heldout/`,
+Each agent has a second, separate set of cases (five per agent, nineteen for the architect; 49 in total) in `evals/packs/<agent>/cases_heldout/`,
 built from a different source deck than the train cases. It has the same four files per case and
 shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
 cases generalises, rather than having been fitted to them.
@@ -581,3 +592,124 @@ What it showed:
   behaviour at once (alignment, the shift and the refusals) but keeps answering an add with `discuss`
   until an admin publishes a release carrying the new prompt (see "Rollout" in
   `docs/technical/backend-overview.md`).
+
+## Architect: edit operations, 2026-10-28
+
+A production user asked to replace one slide of a 16-slide deck with seven; the architect planned it
+right twice and the code refused it both times, because a whole revised `deck_spec` cannot say which
+slide was rewritten and which are new (`align_slides` ties and refuses `ambiguous`), and delete and
+reorder were not supported at all. An edit now returns an ordered `operations` list (insert, update,
+delete, replace, move) plus an optional `deck_changes`, which `architect_node` composes over the
+persisted spec (design: `docs/superpowers/specs/2026-10-28-architect-edit-operations-design.md`). This
+pass adds four cases per split, measures a new prompt on train and held-out, and promotes it.
+
+- **New cases, four per split** (same ids in both; held-out words them differently on its own deck, and
+  its messages are not reproduced here). They are scored by the operations check (see Scorers).
+
+  | Case id | Tests |
+  |---|---|
+  | `delete_slide` | one slide deleted: nothing is rebuilt and the later slides move up unchanged |
+  | `move_slide` | one slide moved after a named slide: a reorder that rebuilds nothing |
+  | `replace_slide_expand` | one slide replaced by four (the production transcript's shape): the first rewrites it in place, three new slides follow |
+  | `mixed_operations` | a delete, an update and an expand into three in one message: only those slides are built |
+
+  The architect now has nineteen cases per split, 49 across the harness. Each train `should_fail` is
+  one wrong way to do it (for the delete and the move, the 1-based slip; for the replace, the same plan as
+  a whole grown `deck_spec`, which production's alignment refuses; for the mixed edit, also rewriting
+  the untouched closing slide).
+- **Calibration** (judge `databricks-claude-sonnet-5`, `--calibrate --cases` the four new ids):
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `delete_slide` | trusted | trusted |
+  | `move_slide` | not trusted (judge passed the should_fail) | trusted |
+  | `replace_slide_expand` | not trusted (judge passed the should_fail) | not trusted (judge passed the should_fail) |
+  | `mixed_operations` | not trusted (judge passed the should_fail) | trusted (one re-run after a judge `KeyError: 'result'`) |
+
+  An untrusted case is scored by its deterministic checks (`contract` and `expected_category`, the
+  operations check), as `fill_blank_slide` is: its judge verdict is reported, not counted.
+  `replace_slide_expand` was expected to be deterministic-only, because its should_fail composes to
+  the same deck as the reference. On train the judge also cannot separate the move's and the mixed
+  edit's should_fail from the reference. In every run below the judge passed those rows as well, so
+  the rule changed no outcome.
+- **Setup.** Agent `system.ai.claude-opus-5-5` (manifest v1), judge `databricks-claude-sonnet-5`,
+  profile `tellr-dev`. `prices.yaml` has no entry for the agent's endpoint, so the harness logged no
+  `est_cost_usd`. Cost is estimated from the logged mean tokens at USD 5 / 25 per million input / output
+  (the #313 and #314 rate; Opus 5.5's list price is USD 4 / 20, so this is an upper bound) plus
+  USD 0.05 per judge call (also an upper bound: the architect judge payloads measure about 6.5k to 11k
+  tokens, about USD 0.02 to 0.04).
+
+"v1" before this change is the shipped prompt (content hash `d4018d7b`, the #314 `add-slide-b` text on
+the opus-5-5 seed). `edit-ops` (`8f1493ef`) is the candidate (`evals/configs/architect/edit-ops.md`).
+It is the shipped prompt with three parts rewritten: the PAYLOAD RULES edit line, the EDITING block,
+and the SLIDE NUMBERS block. Every other block is byte-identical. S is the screen, F the finalist runs.
+Pass rate is the harness's, over scored rows (judge errors are skipped). Run ids are from the
+`architect-edit-ops` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|
+| S1 ec4a9f2c | edit-ops (8f1493ef) | train | 4 new | 3 | 12 | 1.00 | 0 | 16.5k / 0.9k | 1.85 |
+| F1 c1bec24d | edit-ops | train | all 19 | 3 | 57 | 1.00 (56 scored) | 1 | 16.0k / 0.9k | 8.69 |
+| F2 bcf7d542 | edit-ops | held-out | all 19 | 1 | 19 | 1.00 | 0 | 14.3k / 0.8k | 2.68 |
+
+Calibration (18 judge calls, about USD 0.90) and two ad-hoc live checks (about USD 0.28, no judge,
+described below) bring the total to **about USD 14.40**, inside the USD 20 cap. Held-out is an
+aggregate only (F2).
+
+What it showed:
+
+- **The screen found nothing to fix.** S1 passed 12 of 12: each new case 3/3, every answer given as
+  operations (`delete` 5; `move` 6 after 3; `replace` 4 with four slides; `delete` 2, `update` 1 and
+  `replace` 7 with three). No row failed, so there was no failure cause to aim a second candidate at,
+  and `edit-ops-b` and `edit-ops-c` were not written (the skill's rule: one change per candidate,
+  aimed at a cause).
+- **Finalist, train (F1).** All 19 train cases passed every scored row: 3/3 each, except
+  `discuss_slide_question` at 2/2 scored. Its third row hit a judge parse error, and its `contract`
+  and `expected_category` passed. Every existing edit case (`edit_*`, `add_slide_*`,
+  `fill_blank_slide`, `edit_beside_blank`) was answered with operations, and the operations check
+  passed it. `build_request`, `ask_data`, `confirm_design` and both `discuss` cases kept their intent.
+- **Finalist, held-out (F2).** 19 of 19, 0 judge errors, 0 infra errors. Every scorer passed on every
+  row, so each new case passed 1/1 by its deterministic scorer.
+- **Production binding refusals.** The #314 diagnostic (production's `complete_index_only_bindings` +
+  `invalid_slide_bindings` over each row's composed spec and the payload's `template_sections`), run by
+  hand over F1: 0 of 45 spec-bearing rows would be refused.
+- **Ad-hoc checks** (not eval cases, train payloads only):
+  - The arc-review sweeper's message (`spec_sync.ARC_REVIEW_MESSAGE`) on the `edit_request` deck came
+    back as `edit` with the full 10-slide `deck_spec`, no `operations`, and every position in
+    `target_positions`. That is the describe-only path, unchanged.
+  - The `move_slide` payload plus a `rejected_edit` (a previous answer moving the slide after itself,
+    with the `move_after_itself` problem) came back corrected (`move` 6 after 3).
+- **Acceptance bar** (spec §9 with PLAN-CORRECTIONS C5). **Met.**
+  1. Every existing case passed at least its recorded v1 rate. The recorded rates are all 1.00: the
+     four inserts 3/3 (#314 F1), the nine older cases 1/1 (#314 F2), and `fill_blank_slide` and
+     `edit_beside_blank` 3/3 (`630beeaf`). F1 got 3/3 on each, and 2/2 scored on
+     `discuss_slide_question`.
+  2. Each new case passed at least 2/3 on train and 1/1 on held-out by the deterministic scorer. Got
+     3/3 on train and 1/1 on held-out.
+  3. The judge's calibration is recorded (above).
+- **Overrides of `optimise-agent-prompt`**, delegated by the owner for this change (PLAN-CORRECTIONS
+  C18):
+  - The candidate was screened on the four new cases ×3, and the finalist confirmed on all train ×3
+    and held-out ×1. The skill says ×5 and ×3.
+  - No fresh `v1-baseline` run was made: the old prompt cannot express a delete or a move, so the
+    existing cases' bar is the recorded numbers.
+  - This pass promoted the finalist, edited `INSTRUCTIONS` and committed. The skill leaves those to
+    the user.
+  - The skill's "architect edits must return the full revised `deck_spec`" trap no longer applies.
+- **Branch shipped.** `edit-ops` is the v1 default in `src/core/skills/architect.py` (`8f1493ef35f9`,
+  previously `d4018d7bdc30`). It was promoted with
+  `python -m evals.harness.promote --config architect=evals/configs/architect/edit-ops.yaml --run-id architect=c1bec24d8d694cf3a82440d3cc68d368`,
+  and the frontend lifecycle contract was re-recorded. The architect prompt rows in the earlier tables
+  describe previous prompts.
+- **Still open.**
+  - The architect judge prompt does not describe operations. It judges the composed form, and on
+    train it cannot separate three of the four new should_fails.
+  - No eval case covers the describe-only sweeper or the `rejected_edit` retry. Both were checked
+    once, by hand, above.
+  - The yardstick still does not run production's binding validation (diagnostic by hand, as in #314),
+    and the message wording (new slides by their revised number, deleted ones by their old number) is
+    not scored.
+- **Rollout caveat.** As for #313 and #314, the Graph V1 manifest only seeds a fresh bootstrap, so an
+  existing install keeps its persisted architect prompt until an admin publishes a release carrying
+  the new one. The node behaviour applies at once on every release: the operations path whenever a
+  model emits operations, the retry, the deferred message and the refusal note.
