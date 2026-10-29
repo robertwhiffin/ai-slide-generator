@@ -32,6 +32,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 import tinycss2
+from tinycss2.serializer import serialize_identifier
 
 from src.domain.deck_spec import DeckStyle
 
@@ -43,14 +44,25 @@ DECK_STYLE_MAX_COMPONENTS = 12
 
 _MAX_TOKEN_VALUE_CHARS = 120
 _MAX_TEMPLATE_CLASSES = 300
+_MAX_NOTE_CHARS = 200
+_MAX_QUOTED_CHARS = 60
 
 _STYLE_OPEN = re.compile(r"\A\s*<style\b[^>]*>", re.IGNORECASE)
 _STYLE_CLOSE = re.compile(r"</style\s*>\s*\Z", re.IGNORECASE)
 _STYLE_TEXT = re.compile(r"</?\s*style", re.IGNORECASE)
 _REMOTE_TEXT = re.compile(r"https?:|//", re.IGNORECASE)
+# A browser's URL parser removes these before it reads a scheme or "//".
+_URL_IGNORED_CHARS = re.compile(r"[\t\n\r]")
+
+# Functions that load or paint an image from a string, URL or element (R15).
+_IMAGE_FUNCTIONS = frozenset(
+    {"image-set", "-webkit-image-set", "cross-fade", "-webkit-cross-fade", "src", "element", "-moz-element"}
+)
 
 # At-rules whose block holds ordinary rules, so selectors inside carry classes.
-_NESTING_AT_RULES = frozenset({"media", "supports", "layer", "container", "document"})
+_NESTING_AT_RULES = frozenset(
+    {"media", "supports", "layer", "container", "document", "scope", "starting-style"}
+)
 
 
 # --- class scanning -----------------------------------------------------------
@@ -89,6 +101,9 @@ def _classes_in_rules(rules: list) -> set[str]:
         if rule.type == "qualified-rule":
             found |= _classes_in_tokens(rule.prelude)
         elif rule.type == "at-rule" and rule.content and rule.lower_at_keyword in _NESTING_AT_RULES:
+            if rule.lower_at_keyword == "scope":
+                # "@scope (.root) to (.limit)": the prelude holds selectors too.
+                found |= _classes_in_tokens(rule.prelude)
             inner = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
             found |= _classes_in_rules(inner)
     return found
@@ -116,8 +131,15 @@ def html_class_names(html: str) -> frozenset[str]:
 # --- sanitiser ----------------------------------------------------------------
 
 
-def _squash(text: str) -> str:
-    return " ".join(text.split())
+def _short(text: str) -> str:
+    """``text`` with whitespace squashed, cut short enough to quote in a note."""
+    text = " ".join(text.split())
+    return text if len(text) <= _MAX_QUOTED_CHARS else text[: _MAX_QUOTED_CHARS - 1] + "…"
+
+
+def _capped(notes: list[str]) -> tuple[str, ...]:
+    """Notes cut to ``_MAX_NOTE_CHARS`` each: they quote model-written CSS into a retry prompt."""
+    return tuple(n if len(n) <= _MAX_NOTE_CHARS else n[: _MAX_NOTE_CHARS - 1] + "…" for n in notes)
 
 
 def _split_selectors(prelude: list) -> list[list]:
@@ -197,6 +219,8 @@ def _value_text(tokens: list, *, parts: list[str]) -> str | None:
             name = tok.lower_name
             if name == "expression":
                 return "expression()"
+            if name in _IMAGE_FUNCTIONS:
+                return f"{name}() is not allowed"
             if name == "url":
                 args = [a for a in tok.arguments if a.type != "whitespace"]
                 first = args[0] if args else None
@@ -225,7 +249,8 @@ def _declaration_problem(decl: Any) -> str | None:
     if reason:
         return reason
     text = "".join(parts)
-    if _REMOTE_TEXT.search(text):
+    # Read the text as a URL parser does: "/\t/x" and "\\x" both mean "//x".
+    if _REMOTE_TEXT.search(_URL_IGNORED_CHARS.sub("", text).replace("\\", "/")):
         return "remote address (http:, https: or //)"
     if _STYLE_TEXT.search(tinycss2.serialize(decl.value)) or _STYLE_TEXT.search(text):
         return "<style text"
@@ -233,8 +258,10 @@ def _declaration_problem(decl: Any) -> str | None:
 
 
 def _serialise_declaration(decl: Any) -> str:
+    # tinycss2 unescapes the name: written back raw, "\7d" would be a live "}"
+    # and "\3c\2fstyle" a live "</style".
     important = " !important" if decl.important else ""
-    return f"{decl.name}:{tinycss2.serialize(decl.value).strip()}{important}"
+    return f"{serialize_identifier(decl.name)}:{tinycss2.serialize(decl.value).strip()}{important}"
 
 
 def _clean_rule(rule: Any, *, design_system_active: bool, notes: list[str]) -> str | None:
@@ -242,7 +269,7 @@ def _clean_rule(rule: Any, *, design_system_active: bool, notes: list[str]) -> s
     selectors = _split_selectors(rule.prelude)
     selector_texts = [tinycss2.serialize(s).strip() for s in selectors]
     is_root = len(selector_texts) == 1 and selector_texts[0].lower() == ":root"
-    label = _squash(tinycss2.serialize(rule.prelude))
+    label = _short(tinycss2.serialize(rule.prelude))
 
     if is_root and design_system_active:
         notes.append(":root rule dropped: the design system supplies the tokens")
@@ -254,11 +281,11 @@ def _clean_rule(rule: Any, *, design_system_active: bool, notes: list[str]) -> s
         kept_selectors = []
         for tokens, text in zip(selectors, selector_texts):
             if _STYLE_TEXT.search(text):
-                notes.append(f"selector {_squash(text)!r} dropped: contains <style text")
+                notes.append(f"selector {_short(text)!r} dropped: contains <style text")
             elif _is_scoped(tokens):
                 kept_selectors.append(text)
             else:
-                notes.append(f"selector {_squash(text)!r} dropped: not scoped to a dk- class")
+                notes.append(f"selector {_short(text)!r} dropped: not scoped to a dk- class")
         if not kept_selectors:
             return None
 
@@ -268,18 +295,20 @@ def _clean_rule(rule: Any, *, design_system_active: bool, notes: list[str]) -> s
         seen_content = True
         if item.type == "declaration":
             if is_root and not item.name.startswith(DECK_STYLE_VAR_PREFIX):
-                notes.append(f":root declaration {item.name!r} dropped: only --dk- custom properties are kept")
+                notes.append(
+                    f":root declaration {_short(item.name)!r} dropped: only --dk- custom properties are kept"
+                )
                 continue
             problem = _declaration_problem(item)
             if problem:
-                notes.append(f"{label}: declaration {item.name!r} dropped ({problem})")
+                notes.append(f"{label}: declaration {_short(item.name)!r} dropped ({problem})")
                 continue
             declarations.append(_serialise_declaration(item))
         elif item.type == "qualified-rule":
-            nested = _squash(tinycss2.serialize(item.prelude))
+            nested = _short(tinycss2.serialize(item.prelude))
             notes.append(f"{label}: nested rule {nested!r} dropped")
         elif item.type == "at-rule":
-            notes.append(f"{label}: nested @{item.at_keyword} dropped")
+            notes.append(f"{label}: nested @{_short(item.at_keyword)} dropped")
         else:
             notes.append(f"{label}: unparseable declaration dropped")
 
@@ -290,15 +319,14 @@ def _clean_rule(rule: Any, *, design_system_active: bool, notes: list[str]) -> s
     return f"{', '.join(kept_selectors)}{{{';'.join(declarations)}}}"
 
 
-def _clean_css(css: str, *, design_system_active: bool, notes: list[str]) -> str | None:
-    """Clean ``css``; returns the new text, or ``None`` when nothing needed removing."""
+def _clean_css(css: str, *, design_system_active: bool, notes: list[str]) -> tuple[list[str], bool]:
+    """Clean ``css``; returns the rebuilt text of each kept rule, and whether anything was removed."""
     start = len(notes)
     stripped = css
     if _STYLE_OPEN.search(stripped) or _STYLE_CLOSE.search(stripped):
         stripped = _STYLE_CLOSE.sub("", _STYLE_OPEN.sub("", stripped, count=1), count=1)
         notes.append("removed the <style> wrapper")
-    if _STYLE_TEXT.search(stripped):
-        notes.append("removed text containing <style from the CSS")
+    parsed_from = len(notes)
 
     rules: list[str] = []
     for node in tinycss2.parse_stylesheet(stripped, skip_comments=True, skip_whitespace=True):
@@ -307,10 +335,30 @@ def _clean_css(css: str, *, design_system_active: bool, notes: list[str]) -> str
             if text is not None:
                 rules.append(text)
         elif node.type == "at-rule":
-            notes.append(f"@{node.at_keyword} rule dropped: at-rules are not allowed in a deck style")
+            notes.append(f"@{_short(node.at_keyword)} rule dropped: at-rules are not allowed in a deck style")
         else:
             notes.append("unparseable CSS dropped")
-    return "\n".join(rules) if len(notes) > start else None
+
+    # "</style" in a comment is skipped by the parse without a note of its own,
+    # yet it must force the rebuild that leaves the comment out.
+    if _STYLE_TEXT.search(stripped) and not any("<style" in n for n in notes[parsed_from:]):
+        notes.append("removed text containing <style from the CSS")
+    return rules, len(notes) > start
+
+
+def _rebuild_problem(css: str, *, design_system_active: bool) -> str | None:
+    """Why rebuilt CSS fails the R15 post-condition, or ``None``.
+
+    Rebuilt text must be a fixed point: sanitising it again removes nothing, and
+    it holds no ``<style`` text.
+    """
+    again: list[str] = []
+    _, changed = _clean_css(css, design_system_active=design_system_active, notes=again)
+    if changed:
+        return again[0]
+    if _STYLE_TEXT.search(css):
+        return "<style text"
+    return None
 
 
 def _component_problem(component: Any, defined: frozenset[str]) -> str | None:
@@ -319,10 +367,10 @@ def _component_problem(component: Any, defined: frozenset[str]) -> str | None:
         return "it lists no classes"
     bad = [n for n in names if not n.startswith(DECK_STYLE_CLASS_PREFIX)]
     if bad:
-        return f"class {bad[0]!r} lacks the {DECK_STYLE_CLASS_PREFIX} prefix"
+        return f"class {_short(bad[0])!r} lacks the {DECK_STYLE_CLASS_PREFIX} prefix"
     missing = [n for n in names if n not in defined]
     if missing:
-        return f"class {missing[0]!r} is not defined in the CSS"
+        return f"class {_short(missing[0])!r} is not defined in the CSS"
     return None
 
 
@@ -331,40 +379,47 @@ def sanitise_deck_style(
 ) -> tuple[DeckStyle | None, tuple[str, ...]]:
     """Clean an architect-authored deck style.
 
-    Returns the cleaned style and one note per thing removed. A style that needs
-    no change comes back as the same object with ``()`` notes. ``(None, notes)``
-    is returned when the cleaned CSS is blank or longer than
-    ``DECK_STYLE_MAX_CHARS``. Components are checked against the cleaned CSS.
+    Returns the cleaned style and one note per thing removed, each at most
+    ``_MAX_NOTE_CHARS`` long. A style that needs no change comes back as the same
+    object with ``()`` notes. ``(None, notes)`` is returned when no rule is left
+    (blank or comment-only CSS), when the rebuilt CSS fails the post-condition,
+    or when the CSS is longer than ``DECK_STYLE_MAX_CHARS``. Components are
+    checked against the cleaned CSS.
     """
     if style is None:
         return None, ()
 
     notes: list[str] = []
-    rebuilt = _clean_css(style.css, design_system_active=design_system_active, notes=notes)
-    css = style.css if rebuilt is None else rebuilt
+    rules, changed = _clean_css(style.css, design_system_active=design_system_active, notes=notes)
+    if not rules:
+        notes.append("deck style dropped: its CSS has no rules after cleaning")
+        return None, _capped(notes)
 
-    if not css.strip():
-        notes.append("deck style dropped: its CSS is empty after cleaning")
-        return None, tuple(notes)
+    css = "\n".join(rules) if changed else style.css
+    if changed:
+        problem = _rebuild_problem(css, design_system_active=design_system_active)
+        if problem:
+            notes.append(f"deck style dropped: post-condition failed on the rebuilt CSS ({problem})")
+            return None, _capped(notes)
     if len(css) > DECK_STYLE_MAX_CHARS:
         notes.append(f"deck style dropped: its CSS is {len(css)} characters, over the {DECK_STYLE_MAX_CHARS} limit")
-        return None, tuple(notes)
+        return None, _capped(notes)
 
     defined = css_class_names(css)
     components = []
     for component in style.components:
         problem = _component_problem(component, defined)
         if problem:
-            notes.append(f"component {component.name!r} dropped: {problem}")
+            notes.append(f"component {_short(component.name)!r} dropped: {problem}")
         else:
             components.append(component)
     for extra in components[DECK_STYLE_MAX_COMPONENTS:]:
-        notes.append(f"component {extra.name!r} dropped: more than {DECK_STYLE_MAX_COMPONENTS} components")
+        notes.append(f"component {_short(extra.name)!r} dropped: more than {DECK_STYLE_MAX_COMPONENTS} components")
     components = components[:DECK_STYLE_MAX_COMPONENTS]
 
     if not notes:
         return style, ()
-    return DeckStyle(css=css, components=components), tuple(notes)
+    return DeckStyle(css=css, components=components), _capped(notes)
 
 
 # --- prior vs new style -------------------------------------------------------

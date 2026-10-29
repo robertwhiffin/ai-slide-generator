@@ -1038,6 +1038,293 @@ def test_context_of_empty_inputs_is_empty():
     assert _ds().deck_style_context("", "") == {"design_tokens": {}, "template_classes": []}
 
 
+# --- review fixes: escaped declaration names ---------------------------------
+# tinycss2 hands back a declaration name unescaped. Written out raw on a
+# rebuild, "\3c\2fstyle\3e" becomes a live "</style>" (deck.css is inlined in a
+# <style> element) and "\7d" a live "}" that opens a body rule. Each case also
+# holds "body{…}", so the CSS is rebuilt.
+
+
+def _selectors_of(css):
+    """Top-level selectors of ``css``; raises unless every node is a rule of declarations."""
+    selectors = []
+    for node in tinycss2.parse_stylesheet(css, skip_whitespace=True, skip_comments=True):
+        assert node.type == "qualified-rule", f"not a rule: {node!r}"
+        for item in tinycss2.parse_blocks_contents(
+            node.content, skip_whitespace=True, skip_comments=True
+        ):
+            assert item.type == "declaration", f"non-declaration in {node!r}: {item!r}"
+        selectors.append(_squash(tinycss2.serialize(node.prelude)))
+    return selectors
+
+
+_ESCAPED_NAMES = [
+    pytest.param(
+        r".dk-a{color:red;\3c\2fstyle\3e\3cscript\3e alert\28 1\29\3c\2fscript\3e:1}"
+        "\nbody{color:red}",
+        id="name-decodes-to-end-style-tag",
+    ),
+    pytest.param(
+        r".dk-a{color:red;x\7d body\7b background\3a red\3b x:1}" "\nbody{color:red}",
+        id="name-decodes-to-a-body-rule",
+    ),
+]
+
+
+@pytest.mark.parametrize("css", _ESCAPED_NAMES)
+def test_escaped_declaration_name_stays_escaped_through_a_rebuild(css, active):
+    comp = _comp("A", "dk-a")
+    out, notes = _sanitise(_style(css, comp), active=active)
+    assert out is not None, notes
+    assert out.components == [comp]
+    # Only "</style" ends the <style> element; an escaped "\<script" inside it is inert.
+    assert "</style" not in out.css.lower()
+    assert _selectors_of(out.css) == [".dk-a"]
+    _assert_notes(notes, "body", count=1)
+
+
+def test_escaped_root_custom_property_name_stays_escaped_through_a_rebuild():
+    comp = _comp("A", "dk-a")
+    css = (
+        r":root{--dk-\7d body\7b background\3a red\3b --dk-x:1}"
+        "\n.dk-a{color:red}\nbody{color:red}"
+    )
+    out, notes = _sanitise(_style(css, comp), active=False)
+    assert out is not None, notes
+    assert out.components == [comp]
+    assert _selectors_of(out.css) == [":root", ".dk-a"]
+    _assert_notes(notes, "body", count=1)
+
+
+# --- review fixes: the rebuild post-condition (R15) -----------------------------
+# Rebuilt CSS must be a fixed point: sanitising it again removes nothing, and it
+# holds no <style text. A serialiser bug must drop the style, not ship it.
+
+_BAD_SERIALISER_OUTPUT = [
+    pytest.param("color:red}body{color:blue", "body", id="emits-a-body-rule"),
+    pytest.param('content:"</style><script>x()</script>"', "<style", id="emits-end-style-tag"),
+]
+
+
+@pytest.mark.parametrize("emitted, needle", _BAD_SERIALISER_OUTPUT)
+def test_rebuilt_css_failing_the_post_condition_drops_the_style(
+    emitted, needle, active, monkeypatch
+):
+    ds = _ds()
+    monkeypatch.setattr(ds, "_serialise_declaration", lambda decl: emitted)
+    out, notes = _sanitise(
+        _style(".dk-a{color:red}\nbody{color:red}", _comp("A", "dk-a")), active=active
+    )
+    assert out is None
+    _assert_notes(notes, "post-condition", needle)
+
+
+@pytest.mark.parametrize("is_active", [True, False], ids=["design-system", "no-design-system"])
+def test_rebuilt_css_is_a_fixed_point(is_active):
+    style = _style(_KITCHEN_CSS, _comp("Card", "dk-card", "dk-card__title"), _comp("Pill", "dk-pill"))
+    out, notes = _sanitise(style, active=is_active)
+    assert notes and out is not None
+    again, notes_again = _sanitise(out, active=is_active)
+    assert notes_again == ()
+    assert again is out
+
+
+# --- review fixes: the remote scan reads text as a URL parser does ------------
+# A URL parser removes tab, LF and CR, and reads "\" as "/" in http(s) URLs, so
+# "\\host", "/\host" and "/<TAB>/host" all mean "//host". None of these values
+# uses an image function, so only the normalised scan catches them.
+
+_NORMALISED_REMOTE_DECLS = [
+    pytest.param(r'content:"\\\\evil.example/a.png"', id="double-backslash"),
+    pytest.param(r'content:"/\\evil.example/a.png"', id="slash-backslash"),
+    pytest.param(r'content:"/\9/evil.example/a.png"', id="tab-inside-double-slash"),
+    pytest.param(r'content:"/\a /evil.example/a.png"', id="lf-inside-double-slash"),
+    pytest.param(r'content:"/\d /evil.example/a.png"', id="cr-inside-double-slash"),
+    pytest.param(r'content:"\5c\5c evil.example/a.png"', id="escaped-backslashes"),
+    # Kept from the image-set case, which an image function now drops first.
+    pytest.param('content:"HTTPS:evil.example/a.png"', id="upper-case-scheme-without-slashes"),
+]
+
+
+@pytest.mark.parametrize("decl", _NORMALISED_REMOTE_DECLS)
+def test_address_spelt_for_the_url_parser_is_dropped(decl, active):
+    comp = _comp("A", "dk-a")
+    out, notes = _sanitise(_style(f".dk-a{{{decl};color:red}}", comp), active=active)
+    assert _canon(out.css) == ".dk-a{color:red}"
+    assert out.components == [comp]
+    _assert_notes(notes, "remote address", count=1)
+
+
+def test_root_custom_property_with_a_backslash_address_is_dropped():
+    comp = _comp("A", "dk-a")
+    css = (
+        r':root{--dk-img:"\\\\evil.example/a.png";--dk-accent:#f00}'
+        "\n.dk-a{color:var(--dk-accent)}"
+    )
+    out, notes = _sanitise(_style(css, comp), active=False)
+    assert _canon(out.css) == ":root{--dk-accent:#f00}\n.dk-a{color:var(--dk-accent)}"
+    _assert_notes(notes, "remote address", count=1)
+
+
+# The five bypasses found in review, verbatim. Both the normalised scan and the
+# image-function rule now drop them.
+_REVIEW_BYPASS_DECLS = [
+    pytest.param(r'background-image:image-set("\\\\evil.example/a.png" 1x)', id="backslashes"),
+    pytest.param(r'background-image:image-set("/\\evil.example/a.png" 1x)', id="slash-backslash"),
+    pytest.param(r'background-image:image-set("/\9/evil.example/a.png" 1x)', id="tab"),
+    pytest.param(
+        r'background-image:-webkit-image-set("\5c\5c evil.example/a.png" 1x)',
+        id="webkit-escaped-backslashes",
+    ),
+]
+
+
+@pytest.mark.parametrize("decl", _REVIEW_BYPASS_DECLS)
+def test_review_bypass_is_dropped(decl, active):
+    comp = _comp("A", "dk-a")
+    out, notes = _sanitise(_style(f".dk-a{{{decl};color:red}}", comp), active=active)
+    assert _canon(out.css) == ".dk-a{color:red}"
+    _assert_notes(notes, count=1)
+
+
+def test_review_bypass_through_a_root_variable_is_dropped():
+    comp = _comp("A", "dk-a")
+    css = (
+        r':root{--dk-i:"\\\\evil.example/a.png";--dk-accent:#f00}'
+        "\n.dk-a{background-image:image-set(var(--dk-i) 1x);color:red}"
+    )
+    out, notes = _sanitise(_style(css, comp), active=False)
+    assert _canon(out.css) == ":root{--dk-accent:#f00}\n.dk-a{color:red}"
+    _assert_notes(notes, "--dk-i", "image-set(", count=2)
+
+
+# --- review fixes: image functions are dropped (R15) ---------------------------
+# A string inside image-set() is a URL, so a relative or slash-less one gets
+# past any address scan. These functions are dropped whatever their arguments,
+# data: URLs included.
+
+_IMAGE_FUNCTION_VALUES = [
+    pytest.param('image-set("/api/sessions" 1x)', "image-set(", id="image-set-relative-path"),
+    pytest.param('image-set("file:/etc/hosts" 1x)', "image-set(", id="image-set-file-scheme"),
+    pytest.param(
+        "image-set(url(data:image/png;base64,AAAA) 1x)", "image-set(", id="image-set-of-a-data-url"
+    ),
+    pytest.param('IMAGE-SET("a.png" 1x)', "image-set(", id="image-set-upper-case"),
+    pytest.param(r'im\61ge-set("a.png" 1x)', "image-set(", id="image-set-css-escaped"),
+    pytest.param('-webkit-image-set("a.png" 1x)', "-webkit-image-set(", id="webkit-image-set"),
+    pytest.param(
+        "cross-fade(url(data:image/png;base64,AAAA), url(data:image/png;base64,BBBB), 50%)",
+        "cross-fade(",
+        id="cross-fade",
+    ),
+    pytest.param(
+        "-webkit-cross-fade(url(data:image/png;base64,AAAA), url(data:image/png;base64,BBBB), 50%)",
+        "-webkit-cross-fade(",
+        id="webkit-cross-fade",
+    ),
+    pytest.param('src("a.png")', "src(", id="src"),
+    pytest.param('SRC("a.png")', "src(", id="src-upper-case"),
+    pytest.param("element(#dk-a)", "element(", id="element"),
+    pytest.param("-moz-element(#dk-a)", "-moz-element(", id="moz-element"),
+    pytest.param('var(--dk-bg, image-set("a.png" 1x))', "image-set(", id="inside-a-var-fallback"),
+]
+
+
+@pytest.mark.parametrize("value, needle", _IMAGE_FUNCTION_VALUES)
+def test_image_function_declaration_is_dropped(value, needle, active):
+    comp = _comp("A", "dk-a")
+    out, notes = _sanitise(
+        _style(f".dk-a{{background-image:{value};color:red}}", comp), active=active
+    )
+    assert _canon(out.css) == ".dk-a{color:red}"
+    assert out.components == [comp]
+    _assert_notes(notes, needle, count=1)
+
+
+def test_root_custom_property_holding_an_image_function_is_dropped():
+    comp = _comp("A", "dk-a")
+    css = ':root{--dk-bg:image-set("a.png" 1x);--dk-accent:#f00}\n.dk-a{color:var(--dk-accent)}'
+    out, notes = _sanitise(_style(css, comp), active=False)
+    assert _canon(out.css) == ":root{--dk-accent:#f00}\n.dk-a{color:var(--dk-accent)}"
+    _assert_notes(notes, "image-set(", count=1)
+
+
+# --- review fixes: comment-only CSS, note length, one note per <style item -----
+
+
+@pytest.mark.parametrize(
+    "css",
+    [
+        pytest.param("/* nothing yet */", id="one-comment"),
+        pytest.param("/* a */\n\n  /* b */  ", id="two-comments"),
+    ],
+)
+def test_style_with_only_comments_is_dropped(css, active):
+    out, notes = _sanitise(_style(css), active=active)
+    assert out is None
+    _assert_notes(notes)
+
+
+def test_style_with_only_comments_and_a_component_is_dropped(active):
+    out, notes = _sanitise(_style("/* nothing yet */", _comp("A", "dk-a")), active=active)
+    assert out is None
+    _assert_notes(notes)
+
+
+def _long_dirty_style():
+    css = (
+        ".x" + "y" * 500 + "{color:red}\n"
+        "@" + "k" * 300 + " foo;\n"
+        ".dk-a{color:red;" + "p" * 300 + ":url(https://x/p.png)}"
+    )
+    return _style(css, _comp("Z" * 500, "dk-missing"), _comp("A", "dk-a"))
+
+
+def test_every_note_is_at_most_200_characters_and_keeps_its_reason(active):
+    # Notes quote model-written CSS into the retry prompt (R4), so they are cut.
+    # The quoted part is shortened first, so the reason after it survives.
+    out, notes = _sanitise(_long_dirty_style(), active=active)
+    assert _canon(out.css) == ".dk-a{color:red}"
+    assert len(notes) == 4, notes
+    assert all(len(n) <= 200 for n in notes), [len(n) for n in notes]
+    _assert_notes(notes, ".xyyy", "@kkk", "url(", "ZZZ")
+
+
+def test_note_cap_holds_even_when_quoted_text_is_not_shortened(active, monkeypatch):
+    monkeypatch.setattr(_ds(), "_MAX_QUOTED_CHARS", 10_000)
+    out, notes = _sanitise(_long_dirty_style(), active=active)
+    assert len(notes) == 4, notes
+    assert all(len(n) <= 200 for n in notes), [len(n) for n in notes]
+
+
+@pytest.mark.parametrize(
+    "css",
+    [
+        pytest.param('.dk-a{color:red;content:"</style>"}', id="in-a-declaration"),
+        pytest.param(".dk-a{color:red}\n</style> .dk-b{color:red}", id="in-a-selector"),
+        pytest.param(".dk-a{color:red}\n/* </style> */", id="in-a-comment"),
+    ],
+)
+def test_style_text_gets_exactly_one_note(css, active):
+    out, notes = _sanitise(_style(css, _comp("A", "dk-a")), active=active)
+    assert _canon(out.css) == ".dk-a{color:red}"
+    assert "</style" not in out.css.lower()
+    _assert_notes(notes, "<style", count=1)
+
+
+# --- review fixes: classes inside @scope and @starting-style -------------------
+
+
+def test_css_class_names_reads_inside_scope_and_starting_style():
+    css = (
+        "@scope (.dk-card) to (.dk-card__body){.dk-title{color:red}}\n"
+        "@starting-style{.dk-pop{opacity:0}}\n"
+    )
+    assert _ds().css_class_names(css) == frozenset(
+        {"dk-card", "dk-card__body", "dk-title", "dk-pop"}
+    )
+
+
 # --- R13 model guard (passes today; red if a strip validator is added) --------
 
 
