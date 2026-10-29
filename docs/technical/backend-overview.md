@@ -524,6 +524,16 @@ build_reviewer, fixer) and `system.ai.claude-haiku-4-5` on the other three; it m
 an empty database, so a database seeded earlier keeps its stored v1 release until an
 admin publishes a new one.
 
+### Prompt shipping
+
+- A fresh install bootstraps Graph V1 from the packaged manifest (`bootstrap_graph_configuration`).
+- On every startup, `init_database` (`packages/databricks-tellr-app/databricks_tellr_app/run.py`) calls `ship_packaged_graph_configuration` after bootstrap.
+- If every live definition was created by `system:*` (or already equals the packaged one) and the live release is not a rollback, the packaged manifest is published as the next Graph Version, `published_by` `system:code-ship`, note "Shipped with Tellr <version>". No smoke-run approval is needed.
+- Otherwise the packaged revisions are inserted without publishing. Admins see a "newer shipped version" badge on the Agent Definitions page, with an Adopt action that publishes them.
+- Conversations pinned to an older release keep that release.
+- A ship failure is logged and startup continues. Unlike bootstrap, it never exits the process.
+- Design: `docs/superpowers/specs/2026-10-29-prompt-shipping-design.md`.
+
 ---
 
 ## Contributor Sessions Architecture
@@ -590,7 +600,7 @@ Users say "slide 2"; the graph keys everything on `SlideSpec.position` (0-based)
 
 **The prompt rule.** The architect's SLIDE NUMBERS rule tells the model to take `target_positions` from `slide_references`, to look any other number or ordinal up in `slide_numbering`, never to compute a position as the slide number minus one, and, when a reference has `out_of_range` numbers, not to edit but to discuss and say how many slides the deck has. It also says a reference does not by itself mean the user wants a change.
 
-**Rollout.** The Graph V1 manifest only seeds a fresh bootstrap: `bootstrap_v1` in `src/services/graph_configuration_bootstrap.py` returns early, validating the persisted history, when any Graph Release exists, and loads the manifest only when none does. An existing install therefore keeps its persisted architect prompt. It gets the two payload keys immediately (they are built in code), but the new SLIDE NUMBERS text only when an admin publishes a release carrying it, the same as earlier prompt promotions (for example 45ce906c).
+**Rollout.** A fresh install bootstraps v1 from the packaged manifest. On every later startup, `ship_packaged_graph_configuration` compares the packaged manifest with the active release. If every live definition was created by `system:*`, or already equals the packaged one, and the live release is not a rollback, it publishes the packaged manifest as the next Graph Version, with `published_by` `system:code-ship`, the note "Shipped with Tellr <version>", and no smoke-run approval. Otherwise it inserts the packaged revisions without publishing, and admins see a "newer shipped version" badge on the Agent Definitions page with an Adopt action. Conversations pinned to an older release keep it. See "Prompt shipping" below.
 
 **Known limits.**
 - SpecView labels slides `position + 1` (`SpecView.tsx`), so on a gapped deck its label differs from the panel's number, which is what the graph follows.

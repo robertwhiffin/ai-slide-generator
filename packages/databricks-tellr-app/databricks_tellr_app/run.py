@@ -68,6 +68,32 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         logger.error(f"Failed to bootstrap Graph Configuration: {e}\n{tb}")
         raise SystemExit(1) from e
 
+    # Ship packaged prompts after bootstrap. Best-effort by design: a failure is
+    # logged and startup continues, unlike the bootstrap block above.
+    logger.info("Shipping packaged Graph Configuration...")
+    try:
+        from src.core.database import get_session_local
+        from src.services.graph_configuration import ship_packaged_graph_configuration
+
+        outcome = ship_packaged_graph_configuration(get_session_local())
+        if hasattr(outcome, "published"):
+            logger.info(
+                "Packaged Graph Configuration published: version=%s",
+                outcome.published.release.version_number,
+            )
+        elif hasattr(outcome, "reason"):
+            logger.info("Packaged Graph Configuration not published: %s", outcome.reason)
+        elif hasattr(outcome, "issues"):
+            logger.info(
+                "Packaged Graph Configuration invalid: %s",
+                [getattr(i, "code", i) for i in outcome.issues],
+            )
+        else:
+            logger.info("Packaged Graph Configuration: %s", type(outcome).__name__)
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Failed to ship packaged Graph Configuration: {e}\n{tb}")
+
     # Data migrations/backfills that used to run in the FastAPI lifespan now run
     # HERE, once, before the server forks its workers — the uvicorn workers must
     # never execute migration code (4 of them racing the migration chain on boot

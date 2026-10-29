@@ -1439,3 +1439,26 @@ def test_adopt_helper_publishes_the_loaded_manifest(factory, monkeypatch):
         _hashes(manifest)
     )
     assert revisions["architect"].created_by == "system:code-ship"
+
+
+def test_startup_wrapper_uses_the_installed_databricks_tellr_app_version(monkeypatch):
+    import src.services.graph_configuration as facade
+
+    def fake_version(name):
+        if name == "databricks-tellr-app":
+            return "7.7.7"
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(facade.metadata, "version", fake_version)
+    captured = {}
+
+    def fake_ship(self, session_factory, *, manifest, app_version):
+        captured["app_version"] = app_version
+        return "outcome"
+
+    monkeypatch.setattr(GraphConfiguration, "ship_packaged_manifest", fake_ship)
+
+    result = facade.ship_packaged_graph_configuration(object())
+
+    assert result == "outcome"
+    assert captured["app_version"] == "7.7.7"

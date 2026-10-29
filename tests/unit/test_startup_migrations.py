@@ -38,6 +38,11 @@ def test_init_database_runs_profile_and_session_migrations(monkeypatch):
         lambda sf: calls.append(("bootstrap_graph_configuration", sf))
         or SimpleNamespace(release_id=1, version_number=1, created=True),
     )
+    monkeypatch.setattr(
+        "src.services.graph_configuration.ship_packaged_graph_configuration",
+        lambda sf: calls.append(("ship_packaged_graph_configuration", sf))
+        or SimpleNamespace(),
+    )
     # These two record into `calls` as well, so the ORDER assertion at the end is
     # real: with them silent, "the strip ran last" held even when the strip was moved
     # ahead of both — an assertion that could not fail.
@@ -78,6 +83,7 @@ def test_init_database_runs_profile_and_session_migrations(monkeypatch):
     assert calls == [
         ("init_db", None),
         ("bootstrap_graph_configuration", "SESSION_FACTORY"),
+        ("ship_packaged_graph_configuration", "SESSION_FACTORY"),
         ("migrate_profiles", "SESSION_FACTORY"),
         ("backfill_sessions", "SESSION_FACTORY"),
         ("backfill_unmigrated_decks", "SESSION_FACTORY"),
@@ -105,6 +111,11 @@ def test_init_database_bootstrap_failure_aborts_before_later_stages(monkeypatch)
         "src.services.graph_configuration.bootstrap_graph_configuration", fail_bootstrap
     )
     monkeypatch.setattr(
+        "src.services.graph_configuration.ship_packaged_graph_configuration",
+        lambda sf: calls.append(("ship_packaged_graph_configuration", sf))
+        or SimpleNamespace(),
+    )
+    monkeypatch.setattr(
         "src.core.migrate_profiles_to_agent_config.migrate_profiles",
         lambda sf: calls.append(("migrate_profiles", sf)),
     )
@@ -117,6 +128,82 @@ def test_init_database_bootstrap_failure_aborts_before_later_stages(monkeypatch)
         ("init_db", None),
         ("bootstrap_graph_configuration", "SESSION_FACTORY"),
     ]
+    # Bootstrap failed, so the ship step must never have run.
+    assert "ship_packaged_graph_configuration" not in [name for name, _ in calls]
+
+
+def test_init_database_ship_failure_is_logged_and_startup_continues(
+    monkeypatch, caplog
+):
+    """Shipping is best-effort: a failure is logged, never fatal, and every later
+    stage still runs."""
+    import logging
+
+    run = _load_run_module()
+    calls = []
+    monkeypatch.setattr(
+        "src.core.database.init_db", lambda: calls.append(("init_db", None))
+    )
+    monkeypatch.setattr("src.core.database.get_session_local", lambda: "SESSION_FACTORY")
+    monkeypatch.setattr(
+        "src.services.graph_configuration.bootstrap_graph_configuration",
+        lambda sf: calls.append(("bootstrap_graph_configuration", sf))
+        or SimpleNamespace(release_id=1, version_number=1, created=False),
+    )
+
+    def fail_ship(sf):
+        calls.append(("ship_packaged_graph_configuration", sf))
+        raise RuntimeError("ship failed")
+
+    monkeypatch.setattr(
+        "src.services.graph_configuration.ship_packaged_graph_configuration", fail_ship
+    )
+    monkeypatch.setattr(
+        "src.core.migrate_profiles_to_agent_config.migrate_profiles",
+        lambda sf: calls.append(("migrate_profiles", sf)) or 0,
+    )
+    monkeypatch.setattr(
+        "src.core.migrate_profiles_to_agent_config.backfill_sessions",
+        lambda sf: calls.append(("backfill_sessions", sf)) or 0,
+    )
+    monkeypatch.setattr(
+        "src.core.backfill_session_slides_startup.backfill_unmigrated_decks",
+        lambda sf: calls.append(("backfill_unmigrated_decks", sf)) or 0,
+    )
+    monkeypatch.setattr(
+        "src.core.init_default_profile.seed_defaults",
+        lambda include_databricks: calls.append(("seed_defaults", include_databricks)),
+    )
+    monkeypatch.setattr(
+        "src.core.encryption.ensure_encryption_key",
+        lambda: calls.append(("ensure_encryption_key", None)),
+    )
+    monkeypatch.setattr(
+        "src.core.strip_retired_prompt_keys.strip_retired_prompt_keys",
+        lambda sf: calls.append(("strip_retired_prompt_keys", sf)) or 0,
+    )
+
+    with caplog.at_level(logging.INFO):
+        run.init_database()  # must not raise SystemExit
+
+    assert calls == [
+        ("init_db", None),
+        ("bootstrap_graph_configuration", "SESSION_FACTORY"),
+        ("ship_packaged_graph_configuration", "SESSION_FACTORY"),
+        ("migrate_profiles", "SESSION_FACTORY"),
+        ("backfill_sessions", "SESSION_FACTORY"),
+        ("backfill_unmigrated_decks", "SESSION_FACTORY"),
+        ("seed_defaults", False),
+        ("ensure_encryption_key", None),
+        ("strip_retired_prompt_keys", "SESSION_FACTORY"),
+    ]
+    errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+        and "Failed to ship packaged Graph Configuration" in r.getMessage()
+    ]
+    assert len(errors) == 1
 
 
 def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):
@@ -131,6 +218,10 @@ def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):
     monkeypatch.setattr(
         "src.services.graph_configuration.bootstrap_graph_configuration",
         lambda sf: SimpleNamespace(release_id=1, version_number=1, created=False),
+    )
+    monkeypatch.setattr(
+        "src.services.graph_configuration.ship_packaged_graph_configuration",
+        lambda sf: SimpleNamespace(),
     )
     monkeypatch.setattr(
         "src.core.init_default_profile.seed_defaults", lambda include_databricks: None
@@ -197,6 +288,11 @@ def test_init_database_no_longer_backfills_pins(monkeypatch):
             lambda sf: calls.append("bootstrap_graph_configuration")
             or SimpleNamespace(release_id=v1.release_id, version_number=1, created=False),
         )
+        monkeypatch.setattr(
+            "src.services.graph_configuration.ship_packaged_graph_configuration",
+            lambda sf: calls.append("ship_packaged_graph_configuration")
+            or SimpleNamespace(),
+        )
         for target in (
             "src.core.migrate_profiles_to_agent_config.migrate_profiles",
             "src.core.migrate_profiles_to_agent_config.backfill_sessions",
@@ -220,6 +316,7 @@ def test_init_database_no_longer_backfills_pins(monkeypatch):
         assert calls == [
             "init_db",
             "bootstrap_graph_configuration",
+            "ship_packaged_graph_configuration",
             "migrate_profiles",
             "backfill_sessions",
             "backfill_unmigrated_decks",
