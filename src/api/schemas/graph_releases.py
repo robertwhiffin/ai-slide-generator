@@ -190,3 +190,59 @@ class PublicationNotReadyResponse(_StrictResponse):
 class PublicationValidationErrorResponse(_StrictResponse):
     code: Literal["invalid_publication"]
     errors: list[DraftFieldErrorResponse]
+
+
+# --- Packaged prompt update: status and adopt ----------------------------------------
+
+PackagedBlockReasonWire = Literal["hand_edited", "rollback", "invalid"]
+PackagedDraftEffectWire = Literal["reset", "kept", "unchanged"]
+
+
+class AdoptPackagedUpdateRequest(BaseModel):
+    """Exactly ``{"lock_version"}``.  Types only: the lock range is the service's."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    lock_version: int
+
+
+class PackagedAgentDiffResponse(_StrictResponse):
+    agent_key: AgentKey
+    field_diffs: list[FieldDiffResponse]
+
+
+class PackagedUpdateResponse(_StrictResponse):
+    available: bool
+    differing_agents: list[AgentKey]
+    blocked_reason: PackagedBlockReasonWire | None
+    hand_edited_agents: list[AgentKey]
+    validation_issues: list[DraftFieldErrorResponse]
+    diffs: list[PackagedAgentDiffResponse]
+    active_version_number: Annotated[int, Field(ge=1)]
+    lock_version: Annotated[int, Field(ge=0)]
+
+
+class PackagedAdoptSuccessResponse(_StrictResponse):
+    release: ActiveReleaseResponse
+    changed_agent_keys: list[AgentKey]
+    draft_effect: dict[AgentKey, PackagedDraftEffectWire]
+
+    @model_validator(mode="after")
+    def require_exact_role_set(self) -> PackagedAdoptSuccessResponse:
+        if list(self.draft_effect) != list(GRAPH_V1_AGENT_KEYS):
+            raise ValueError("draft_effect must list exactly the seven roles in Graph order")
+        return self
+
+
+class NothingToAdoptResponse(_StrictResponse):
+    code: Literal["nothing_to_adopt"]
+
+
+class PackagedInvalidResponse(_StrictResponse):
+    code: Literal["packaged_invalid"]
+    errors: list[DraftFieldErrorResponse]
+
+
+class AdoptValidationErrorResponse(_StrictResponse):
+    code: Literal["invalid_adopt_request"]
+    errors: Annotated[list[DraftFieldErrorResponse], Field(min_length=1)]

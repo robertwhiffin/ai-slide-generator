@@ -11,9 +11,10 @@ serialised in the response, or any service is invoked.
 Fix round 1: the require_admin check now scans the full /api/admin namespace
 (not just /api/admin/agent-definitions) so an unguarded route registered
 directly on ``app`` at any /api/admin/* path is caught.  A second test asserts
-the full /api/admin/* route set equals the known 35 pairs.
+the full /api/admin/* route set equals the known 37 pairs.
 
 Known /api/admin/* routes outside agent-definitions (all carry require_admin):
+  src.api.routes.graph_shipping — packaged-update status (GET) and adopt (POST)
   src.api.routes.admin        — judge-backend (GET, PUT), google-credentials
                                 (POST, GET /status, DELETE)
   src.api.routes.admin_usage  — usage/summary, daily, top-users, funnel,
@@ -33,8 +34,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 — register ORM metadata before create_all
+import src.services.graph_definition_manifest as manifest_module
 from src.api.routes import _authz
 from src.api.routes import agent_definitions as routes_module
+from src.api.routes import graph_shipping
 from src.api.routes._authz import require_admin
 from src.core.database import Base, get_db
 from src.core.user_context import set_current_user
@@ -98,14 +101,22 @@ _SINGLE_ROUTER_MODULE = "src.api.routes.agent_definitions"
 _TEST_USER = "task9-user@example.com"
 
 # ---------------------------------------------------------------------------
-# All 35 known /api/admin/* (method, path) pairs — the agent-definitions 24
-# plus the 11 routes from src.api.routes.admin and src.api.routes.admin_usage.
+# All 37 known /api/admin/* (method, path) pairs — the agent-definitions 24,
+# the 2 graph-shipping routes, plus the 11 routes from src.api.routes.admin and src.api.routes.admin_usage.
 # A route registered at /api/admin/* that is absent from this set is a gap
 # in the inventory and must be enrolled here before it ships.
 # ---------------------------------------------------------------------------
 
+EXPECTED_SHIPPING_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/admin/graph-shipping/packaged-update"),
+        ("POST", "/api/admin/graph-shipping/packaged-update/adopt"),
+    }
+)
+
 EXPECTED_ALL_ADMIN_ROUTES: frozenset[tuple[str, str]] = frozenset(
     EXPECTED_ADMIN_ROUTES
+    | EXPECTED_SHIPPING_ROUTES
     | {
         # src.api.routes.admin
         ("DELETE", "/api/admin/google-credentials"),
@@ -180,6 +191,7 @@ def _non_admin_app(
 
     app = FastAPI()
     app.include_router(routes_module.router)
+    app.include_router(graph_shipping.router)
 
     def _override_db() -> Iterator[Session]:
         with session_factory() as session:
@@ -198,6 +210,14 @@ def _non_admin_app(
 # ---------------------------------------------------------------------------
 # Inventory tests — structural assertions on the live app.
 # ---------------------------------------------------------------------------
+
+
+def test_the_expected_route_sets_have_exactly_24_2_and_37_pairs() -> None:
+    """The literal sets themselves: an entry dropped from both the app and the
+    set would otherwise pass the equality tests below."""
+    assert len(EXPECTED_ADMIN_ROUTES) == 24
+    assert len(EXPECTED_SHIPPING_ROUTES) == 2
+    assert len(EXPECTED_ALL_ADMIN_ROUTES) == 37
 
 
 def test_app_has_exactly_the_expected_24_admin_route_pairs() -> None:
@@ -302,11 +322,11 @@ def test_all_admin_routes_are_from_the_one_agent_definitions_router() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Non-admin 403 gate — parametric over all 24 routes.
+# Non-admin 403 gate — parametric over all 26 routes (24 + 2 graph-shipping).
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(("method", "url"), sorted(EXPECTED_ADMIN_ROUTES))
+@pytest.mark.parametrize(("method", "url"), sorted(EXPECTED_ADMIN_ROUTES | EXPECTED_SHIPPING_ROUTES))
 def test_non_admin_is_denied_before_body_or_service_is_read(
     session_factory: sessionmaker,
     monkeypatch: pytest.MonkeyPatch,
@@ -315,12 +335,15 @@ def test_non_admin_is_denied_before_body_or_service_is_read(
 ) -> None:
     """require_admin fires before any body parse, manifest read, or service call.
 
-    Covers all 24 routes so a newly added route cannot silently bypass the gate
+    Covers all 26 routes so a newly added route cannot silently bypass the gate
     without also triggering the inventory test above.
 
     The Request.json patch turns any body parse into a hard test failure.
     The GraphConfiguration and AgentTestWorkbench spies turn any service
-    invocation into a hard test failure.
+    invocation into a hard test failure; the packaged-update routes reach the
+    shipping service only through facade helpers that load the packaged manifest
+    first, so a refusing ``graph_definition_manifest.load_graph_v1_manifest``
+    covers them too.
     The manifest check proves the response body leaks no prompt text.
     """
     _force_admin(monkeypatch, is_admin=False)
@@ -341,6 +364,8 @@ def test_non_admin_is_denied_before_body_or_service_is_read(
         "preview_rollback",
         "compare_with_active",
         "get_draft_legacy_prompt_source",
+        "packaged_update_status",
+        "adopt_packaged_manifest",
     ):
         monkeypatch.setattr(
             GraphConfiguration, attr, _must_not(f"GraphConfiguration.{attr}")
@@ -373,6 +398,13 @@ def test_non_admin_is_denied_before_body_or_service_is_read(
     load_graph_v1_manifest.cache_clear()
     manifest = load_graph_v1_manifest()
     prompt_excerpts = [defn.prompt_text[:40] for defn in manifest.definitions]
+    # Then refuse any later load: the facade helpers import the loader from this
+    # module at call time, so a route that reached them before 403 fails here.
+    monkeypatch.setattr(
+        manifest_module,
+        "load_graph_v1_manifest",
+        _must_not("graph_definition_manifest.load_graph_v1_manifest"),
+    )
 
     with _non_admin_app(session_factory) as client:
         response = client.request(
