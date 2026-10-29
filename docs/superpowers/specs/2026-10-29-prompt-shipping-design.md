@@ -62,12 +62,12 @@ At startup, compare the active release's seven definitions with the packaged man
 
 **"Untouched" means both of these hold:**
 
-- Every definition revision in the active release has a `created_by` that starts with `system:`. The bootstrap writes `system:bootstrap`, and this work writes `system:code-ship`. Revisions are deduplicated by `(agent_key, content_hash)` (`materialize_or_reuse_revision`), so a prompt that an admin edited and later set back to the shipped text counts as untouched. That is correct, because the content is the shipped content.
+- Every definition revision in the active release either has a `created_by` that starts with `system:`, or already equals the packaged definition for its role. The bootstrap writes `system:bootstrap`, and this work writes `system:code-ship`. The second clause exists because revisions are deduplicated by `(agent_key, content_hash)` (`materialize_or_reuse_revision`): a revision keeps whoever first wrote that exact text. A role whose live content already *is* the shipped content has no human choice that a ship could override.
 - The active release is not a rollback, meaning its `restored_from_release_id` is null. A rollback is a person's decision. Without this check, a rollback from shipped v3 to shipped v2 would be undone on the next restart, because v2's revisions are all system-created.
 
 A model-setting change counts as an edit with no special handling. The model is part of `DefinitionContent`, so changing it creates a revision created by the admin.
 
-**Known edge case:** an admin might type the exact text of a future shipped prompt by hand before that code ships. Deduplication then keeps the admin as that revision's creator, and the shipped version reuses the admin's revision. The install counts as touched and the badge shows. One adopt of the next shipped version clears it. It needs no special handling, because it costs at most one extra click and never overrides a human choice.
+**Known edge case:** an admin might type the exact text of a future shipped prompt by hand before that code ships. Deduplication then keeps the admin as that revision's creator. While the packaged prompt for that role stays the same, the role matches the packaged definition and counts as untouched, so later ships of other roles still apply. When a later version changes that role's prompt, the admin-created revision is still the live one. The install counts as touched, the badge shows, and one adopt clears it. That costs at most one click and never overrides a human choice.
 
 ### Publishing a code-shipped release
 
@@ -108,7 +108,7 @@ Adoption publishes `system:code-ship` revisions. If the startup step didn't alre
 2. **The adopt action exists and skips smoke runs.** "A little badge" alone would leave an admin with no way to take the update except copying prompts by hand. Adopting publishes exactly the shipped content, which decision 2 already lets skip smoke runs.
 3. **A failed ship does not stop startup.** The ship transaction rolls back, an error is logged, and the app starts on its current release. The badge then shows, because the manifest still differs. This is separate from bootstrap integrity failures, which stay fatal.
 4. **The release note names the app version,** so release history shows where a release came from.
-5. **"Untouched" is a check on who created each revision, not on its content.** You described it as "the same as the previous one in the codebase", which is a content check. An install has no record of every version code ever shipped, though, so a revision's creator is the nearest available equivalent. The two differ only in the edge case above. A true content check would need a new table of every hash ever shipped.
+5. **"Untouched" is mainly a check on who created each revision, with a content fallback.** You described it as "the same as the previous one in the codebase", which is a content check. An install has no record of every version code ever shipped, though, so a revision's creator is the nearest available equivalent. A role whose live content equals the packaged content also counts as untouched, which covers the edge case above. A full content check would need a new table of every hash ever shipped.
 6. **Devloop gets branch prompts as a side effect.** A devloop fork of an untouched prod picks up the branch's packaged prompts on deploy. A fork of a prod that has been edited does not, and shows the badge.
 
 ## Left to the builder
