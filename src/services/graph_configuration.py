@@ -1,11 +1,13 @@
 """Stable external interface for the shared Graph Configuration aggregate.
 
 The implementation is divided by reason to change: bootstrap/write/history
-validation and locked workbench reads. Both cross the same semantic-content seam.
+validation, locked workbench reads, draft writes, publication, rollback and
+prompt shipping. All cross the same semantic-content seam.
 """
 
 from __future__ import annotations
 
+from importlib import metadata
 from typing import TYPE_CHECKING
 
 from src.services.graph_configuration_bootstrap import (
@@ -61,6 +63,19 @@ from src.services.graph_configuration_rollback import (
     _GraphConfigurationRollback,
 )
 from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
+from src.services.graph_configuration_shipping import (
+    CODE_SHIP_ACTOR,
+    SYSTEM_ACTOR_PREFIX,
+    AdoptOutcome,
+    PackagedBlockReason,
+    PackagedUpdateStatus,
+    ShipBlocked,
+    ShipInvalid,
+    ShipNothing,
+    ShipOutcome,
+    Shipped,
+    _GraphConfigurationShipping,
+)
 from src.services.graph_configuration_workbench import (
     ActiveReleaseSnapshot,
     DeterministicAgentNodeSnapshot,
@@ -77,17 +92,19 @@ if TYPE_CHECKING:
 
 
 class GraphConfiguration(
+    _GraphConfigurationShipping,
     _GraphConfigurationRollback,
     _GraphConfigurationPublication,
     _GraphConfigurationDraft,
     _GraphConfigurationWorkbench,
     _GraphConfigurationBootstrap,
 ):
-    """Read, edit, publish, roll back, or bootstrap the Graph Configuration aggregate.
+    """Read, edit, publish, roll back, ship, or bootstrap the Graph Configuration aggregate.
 
     ``_GraphConfigurationBootstrap``, ``_GraphConfigurationPublication`` and
     ``_GraphConfigurationRollback`` rely on ``_GraphConfigurationWorkbench``'s
-    parent lock through this MRO.
+    parent lock through this MRO.  ``_GraphConfigurationShipping`` comes first:
+    it reuses rollback's draft rebase and bootstrap's advisory lock.
     """
 
 
@@ -124,10 +141,42 @@ def bootstrap_graph_configuration(session_factory: sessionmaker) -> BootstrapRes
     return GraphConfiguration().bootstrap_v1(session_factory)
 
 
+_APP_PACKAGE_NAME = "databricks-tellr-app"
+
+
+def _installed_app_version() -> str:
+    """The installed ``databricks-tellr-app`` version, else ``"unknown"``.
+
+    Not ``src.__version__``, which is a stale hard-coded value.
+    """
+    try:
+        return metadata.version(_APP_PACKAGE_NAME)
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def ship_packaged_graph_configuration(session_factory: sessionmaker) -> ShipOutcome:
+    """Packaged-startup wrapper: ship the packaged manifest to an untouched install.
+
+    Runs after bootstrap.  Bootstrap loads the packaged manifest only for an
+    empty database, so on an existing install this is the startup step that
+    reads it; the shipping service itself takes it as a parameter.
+    """
+    from src.services.graph_definition_manifest import load_graph_v1_manifest
+
+    return GraphConfiguration().ship_packaged_manifest(
+        session_factory,
+        manifest=load_graph_v1_manifest(),
+        app_version=_installed_app_version(),
+    )
+
+
 __all__ = [
     "ActiveReleaseSnapshot",
+    "AdoptOutcome",
     "AgentComparison",
     "BootstrapResult",
+    "CODE_SHIP_ACTOR",
     "CatalogRemoteEndpointDraftValidator",
     "ChangedDefinitionPreview",
     "DeterministicAgentNodeSnapshot",
@@ -152,6 +201,8 @@ __all__ = [
     "GraphWorkbenchSnapshot",
     "ModelAgentNodeSnapshot",
     "NothingToPublish",
+    "PackagedBlockReason",
+    "PackagedUpdateStatus",
     "PublicationConflict",
     "PublicationEvidenceGate",
     "PublicationGap",
@@ -173,7 +224,14 @@ __all__ = [
     "RollbackOutcome",
     "RollbackPreview",
     "RollbackSourceActive",
+    "SYSTEM_ACTOR_PREFIX",
+    "ShipBlocked",
+    "ShipInvalid",
+    "ShipNothing",
+    "ShipOutcome",
+    "Shipped",
     "bootstrap_graph_configuration",
     "build_remote_endpoint_draft_validator",
     "definition_field_diffs",
+    "ship_packaged_graph_configuration",
 ]
