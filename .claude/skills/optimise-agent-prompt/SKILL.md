@@ -84,5 +84,6 @@ promote({"<agent>": load_config("evals/configs/<agent>/<name>.yaml")}, dry_run=T
   the schema.
 - **Shared judge prompts** for the deck_reviewer and data_analyst mention train-deck examples. Do not
   copy those examples into a candidate prompt.
-- **Architect edits** must return the full revised `deck_spec`; this is a product rule, not a tuning
-  choice.
+- **Architect edits** return `operations` (plus `deck_changes` for a deck-level change), and are scored
+  by production's own `apply_operations` semantics; this is a product rule, not a tuning choice. The
+  full `deck_spec` is only for building a deck or re-describing it.

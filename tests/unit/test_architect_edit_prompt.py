@@ -1,15 +1,21 @@
-"""Prompt contract: the architect returns the revised DeckSpec on an edit.
+"""Prompt contract: the architect's v1 prompt, and what an edit must return.
 
-The builder is briefed only from the persisted SlideSpec, never from the user's
-message, so an edit that omits ``deck_spec`` loses the requested change.  Task 1
-made ``architect_node`` refuse such an edit (``edit_without_revised_spec``); the
-output schema was deliberately NOT changed (its source is hashed into the frozen
-schema-contract digest).  This file pins what the v1 prompt must now say, that
-the promoted manifest carries exactly that prompt, and that nothing else in the
-packaged release moved.
+History: an edit first had to return the full revised ``deck_spec`` (the builder
+is briefed only from the persisted SlideSpec); #314 made adding a slide an edit.
+Architect edit operations (2026-10-28) replaces that: an edit now returns an
+ordered ``operations`` list (insert / update / delete / replace / move) plus an
+optional ``deck_changes``, which ``architect_node`` composes over the persisted
+spec, and deleting and moving slides are edits.  Only a re-description of the
+deck as it stands (the arc-review sweeper) still returns the full ``deck_spec``.
 
-Every literal below is a HEAD (d3f150799) value copied by hand — do not import
-them from the code under test.
+This file pins what the v1 prompt must say, that the promoted manifest carries
+exactly that prompt, and that nothing else in the packaged release moved.  The
+EDITING phrase pins are taken from the promoted prompt's own sentences
+(``evals/configs/architect/edit-ops.md``, then its follow-up ``edit-ops-b.md``, both
+measured in ``evals/README.md``).
+
+Every literal below is a HEAD value copied by hand — do not import them from the
+code under test.
 """
 
 from __future__ import annotations
@@ -35,13 +41,17 @@ from src.services.graph_definition_manifest import (
 
 # Pins updated for the endpoint switch to system.ai Gateway models, then for the
 # deck-parity architect and builder prompts, then for #313 slide references,
-# then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move.
-HEAD_ARCHITECT_CONTENT_HASH = "2311ded0e960e433e58f3ae83ce460175e85027b77e89a0732b6ade25dac96e9"
+# then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move,
+# then for the architect edit operations schema-contract re-pin, then for the
+# promoted edit-operations prompt (evals/configs/architect/edit-ops.yaml), then for
+# its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml).
+HEAD_ARCHITECT_CONTENT_HASH = "3da09952e7751cd967c3cee11b77628c51565e37fa1b75c1c6e9f92a92d3126b"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
+# Re-pinned for the architect edit operations schema-contract digest.
 HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
-    "45a2ee67941b4409528b2bf4a7e81e6e690948d093735bf8f00a63e754626852"
+    "ec17918b9c66a86133c060c15c37b88a2139831bc910e8787ce3ef9a069d52d9"
 )
 
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
@@ -54,7 +64,7 @@ HEAD_OTHER_ROLE_CONTENT_HASHES = {
 }
 
 HEAD_V1_SCHEMA_DIGESTS = {
-    "architect": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
+    "architect": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -64,7 +74,7 @@ HEAD_V1_SCHEMA_DIGESTS = {
 }
 
 HEAD_V2_SCHEMA_DIGESTS = {
-    "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
+    "architect": "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -82,8 +92,19 @@ HEAD_V2_SCHEMA_DIGESTS = {
 HEAD_UNCHANGED_BLOCK_HASHES = {
     "opening": "345a85e933fd76a597e00695029c5098e9de1534574c258d01689bcf36532034",
     "intent_classification": "dccff17eb03ebe5c411b07ec48cc8594aba6a617fc16288f1c9229550cd7d500",
-    "design_systems": "10d09b732446c3e369f99a664e999a4af69018b3e47becf5fa5d0e190dc15345",
+    # Re-pinned by the edit-ops follow-up (edit-ops-b): its one sentence on committing a
+    # confirmed contract now names both homes (DESIGN_SYSTEMS_CONTRACT_PHRASES); every other
+    # byte of the block is unchanged.
+    "design_systems": "4e4661d1287817ce62cccee3c556f3622308ec9457c2b070d9cba5ecd8f776bf",
     "closing": "4b4000313dfac2e346b4b524a6dab465eca1d9316b227e0374c17d1517e54d7b",
+    # Architect edit operations rewrote only the PAYLOAD RULES edit line and the EDITING
+    # and SLIDE NUMBERS blocks; every other block is pinned at its pre-change bytes
+    # (recompute from `git show 2b653079:src/core/skills/architect.py`).
+    "deckspec_construction": "93b9501662090b81d922ae546fd6fc6ba329861ee8830cc055b77ccc29bfaf02",
+    "deck_scale_and_structure": "7ece01e9ffbada7e8273f132640a9c2355177135584273a35f1c56981a45dcdc",
+    "vary_the_exhibits": "be654859ee8af4682e4f33380da40ccd3d57b07af10f278287b5064dc47aa0f0",
+    "slidespec_fields": "513b1ead3e1e8338b1090fc30f8e7a6145f96d6f9d2e12fdc6ae22d82fb46fcf",
+    "visual_template_binding": "15a0f8ff68e3a2cba12c68358dadc90165005b814daafb7f2340c32f7a16171e",
 }
 
 # The pre-Task-5 SLIDESPEC FIELDS block.  It must no longer appear verbatim.
@@ -124,34 +145,113 @@ HEAD_DECKSPEC_FIELD_LINES = (
 
 # --- Pinned phrases the new prompt must contain (whitespace- and case-normalised)
 
+# Architect edit operations (C16): the edit line asks for operations / deck_changes and no
+# longer for target_positions + deck_spec, except on a re-description of the deck.
 EDIT_PAYLOAD_PHRASES = (
-    "target_positions must be a non-empty list",
-    "deck_spec must be set",
+    "operations must be set for slide changes",
+    "deck_changes for a deck-level change the user asks for",
+    "target_positions and deck_spec are not needed",
+    "re-describing the deck as it stands returns the full deck_spec",
 )
-EDIT_WITHOUT_SPEC_PHRASE = "an edit without deck_spec cannot be applied"
+# The retired edit-line rule: an edit had to carry targets and the whole revised spec.
+RETIRED_EDIT_PAYLOAD_PHRASES = (
+    "target_positions must be a non-empty list",
+    "an edit without deck_spec cannot be applied",
+)
 DECKSPEC_HEADING = "DECKSPEC CONSTRUCTION (build and edit intents):"
+# Every phrase is a sentence fragment of the promoted prompt's EDITING block, matched over
+# the backtick-free, whitespace- and case-normalised block (_plain).  Grouped by the rule.
 EDITING_RULE_PHRASES = (
-    "start from current_deck_spec",
-    "return it in full",
-    "revise only what the user asked for on the target slides",
-    "keep every slide's position and every other slide unchanged",
-    "change deck-level fields only when the user asks",
-    # #314 retired "adding or removing slides is not an edit": adding is now an edit
-    # (Task 11 property 1), and only removing or reordering stays discuss (property 6).
-    "adding one or more new slides to an existing deck is an edit",
-    "removing or reordering slides is not an edit",
+    # operations replace the whole revised deck_spec, and land as one change
+    "on an edit, return operations instead of deck_spec",
+    "they are applied together as one change",
+    "every position and after_position is a position of current_deck_spec, the deck before "
+    "this edit",
+    "a slide can be the position of at most one operation",
+    # an entry of slides is a SlideContent: no position field
+    "each entry of slides is a slidespec without position",
+    # update
+    "update — position and slides with exactly one entry",
+    "changing what a slide says or shows is an update",
+    # "rebuild slide N" with no content change (spec §8)
+    "rebuilding a slide without changing its content is an update with its current content",
+    # replace (expand / split / replace slide N with ...); the first slide keeps the row
+    "replace — position and slides with one or more entries: that slide becomes these slides",
+    "the first takes its place and the rest follow it directly",
+    "expanding a slide into several slides, splitting a slide, or replacing a slide with one "
+    "or more new slides is a replace",
+    # insert
+    "insert — after_position and slides with one or more entries",
+    "adding slides is an insert",
+    # delete
+    "delete — position: that slide is removed, and nothing is rebuilt",
+    "removing a slide is a delete",
+    # move
+    "move — position and after_position: that slide moves to directly after the "
+    "after_position slide",
+    "it is not rebuilt and its content does not change",
+    "reordering slides is a move",
+    # -1 = at the start
+    "after_position -1 puts them at the start of the deck",
+    "(-1 = to the start)",
+    # placement rules (spec §2)
+    "slides placed after the same slide go directly after it, in the order of their operations",
+    "placed after a replaced slide, they follow all of its replacement slides",
+    "placed after a moved slide, they follow it to its new place",
+    "placed after a deleted slide, they fill its gap",
+    "never move a slide after itself",
+    # edit-ops follow-up: apply_operations refuses a circle of moves as move_loop
+    "moves cannot form a loop: moving slide a after slide b and slide b after slide a in the "
+    "same edit, or any longer circle of moves, is refused with a move_loop problem",
+    # targets, message, re-description
+    "target_positions is not needed on an edit given as operations",
+    "name each new or moved slide by its slide number in the revised deck and each deleted "
+    "slide by the number it had",
+    "when the message asks you to re-describe the deck as it now stands rather than change "
+    "it, return the full deck_spec",
 )
 # Review F1/F2 (controller ruling): an edit never silently restyles — the node treats
 # a changed design_contract on an edit as an answered confirmation and rebuilds every
-# slide — and a remove/reorder request has a named path instead of a dead end.
+# slide.  Architect edit operations adds: deck-level changes travel in deck_changes and
+# only when asked, the edit touches no slide it was not asked about, and a refused
+# answer handed back as rejected_edit is fixed and answered again.
 EDITING_GUARD_PHRASES = (
+    # deck_changes
+    "change deck-level fields only when the user asks",
+    "put only the changed fields in deck_changes",
+    "otherwise leave deck_changes unset",
+    "do not change narrative_arc to reflect an added, deleted or moved slide unless the user "
+    "asks for that change",
     "keep design_contract unchanged on an edit",
     # ...but the turn that APPLIES an agreed proposal is itself an edit carrying the new
     # contract (test_deck_spec_change_turn.py), so the rule must not forbid that turn.
     "unless the user has agreed to the contract you proposed with confirm_design_contract",
+    "commit it in deck_changes.design_contract",
     "a change of design system or slide style still goes through confirm_design_contract",
     "keep resolved_data unchanged unless new data has been fetched for this edit",
+    # don't touch other slides
+    "touch only the slides the user asks about",
+    "every other slide keeps its content exactly, and only its number may change",
+    "do not change any other slide to reflect the edit, not a neighbour's assumes or hands_off "
+    "and not a slide that lists or sums up the deck, unless the user asks for that change",
+    # rejected_edit
+    "when the payload carries rejected_edit, your previous answer to this message "
+    "(your_previous_answer) was not applied",
+    "problems lists every reason it was refused",
+    "fix every listed problem and answer again with the whole corrected answer",
+)
+# The retired remove/reorder dead end (#314 property 6): deleting and moving are edits now.
+RETIRED_REFUSAL_PHRASES = (
+    "removing or reordering slides is not an edit",
     "if the user asks for that, use discuss and explain that it cannot be applied as an edit",
+    "cannot be applied as an edit",
+)
+# edit-ops follow-up: DESIGN SYSTEMS used to say a confirmed contract is committed only
+# "inside deck_spec", while EDITING says deck_changes.design_contract.  The one sentence now
+# names both homes, matched over the backtick-free, normalised DESIGN SYSTEMS block (_plain).
+DESIGN_SYSTEMS_CONTRACT_PHRASES = (
+    "only once the user has agreed may a later turn commit the new contract: inside deck_spec "
+    "on a build, or in deck_changes.design_contract on an edit",
 )
 
 
@@ -193,14 +293,16 @@ def test_manifest_architect_prompt_is_the_skill_instructions():
     assert _architect_definition().prompt_text == INSTRUCTIONS
 
 
-def test_edit_payload_rule_requires_deck_spec():
+def test_edit_payload_rule_asks_for_operations():
     line = _edit_payload_line(INSTRUCTIONS)
     for phrase in EDIT_PAYLOAD_PHRASES:
         assert phrase in _norm(line), f"edit payload line lacks {phrase!r}: {line!r}"
 
 
-def test_prompt_says_an_edit_without_deck_spec_cannot_be_applied():
-    assert EDIT_WITHOUT_SPEC_PHRASE in _norm(INSTRUCTIONS)
+def test_prompt_no_longer_requires_targets_and_deck_spec_on_an_edit():
+    text = _norm(INSTRUCTIONS)
+    for phrase in RETIRED_EDIT_PAYLOAD_PHRASES:
+        assert phrase not in text, f"the retired edit rule is still stated: {phrase!r}"
 
 
 def test_payload_rules_do_not_claim_schema_rejects_a_spec_less_edit():
@@ -219,15 +321,34 @@ def test_deckspec_heading_covers_build_and_edit():
     assert f"{DECKSPEC_HEADING}\n{HEAD_DECKSPEC_FIELD_LINES}" in INSTRUCTIONS
 
 
-def test_prompt_states_the_editing_rule():
-    text = _norm(INSTRUCTIONS)
-    missing = [p for p in EDITING_RULE_PHRASES if p not in text]
-    assert not missing, f"editing rule phrases missing: {missing}"
+@pytest.mark.parametrize("phrase", EDITING_RULE_PHRASES)
+def test_prompt_states_the_editing_rule(phrase):
+    assert phrase in _plain(_editing_block(INSTRUCTIONS)), f"EDITING block lacks {phrase!r}"
 
 
 @pytest.mark.parametrize("phrase", EDITING_GUARD_PHRASES)
-def test_editing_rule_keeps_contract_and_names_the_remove_reorder_path(phrase):
-    assert phrase in _norm(_editing_block(INSTRUCTIONS)), f"EDITING block lacks {phrase!r}"
+def test_editing_rule_keeps_contract_and_guards_the_edit(phrase):
+    assert phrase in _plain(_editing_block(INSTRUCTIONS)), f"EDITING block lacks {phrase!r}"
+
+
+@pytest.mark.parametrize("phrase", DESIGN_SYSTEMS_CONTRACT_PHRASES)
+def test_design_systems_block_names_both_homes_of_a_confirmed_contract(phrase):
+    blocks = [b for b in INSTRUCTIONS.split("\n\n") if b.startswith("DESIGN SYSTEMS")]
+    assert len(blocks) == 1, "expected exactly one DESIGN SYSTEMS block"
+    assert phrase in _plain(blocks[0]), f"DESIGN SYSTEMS block lacks {phrase!r}"
+
+
+def test_prompt_no_longer_refuses_delete_or_reorder():
+    # Architect edit operations: the #314 dead end ("removing or reordering slides is not
+    # an edit ... use discuss") is gone, and nothing else says a delete or move is not one.
+    text = _plain(INSTRUCTIONS)
+    still = [p for p in RETIRED_REFUSAL_PHRASES if p in text]
+    assert not still, f"the prompt still refuses deleting or reordering: {still}"
+    # "not an edit" and "never treated as an edit" alike: a reworded refusal is still one.
+    assert not re.search(
+        r"\b(remov|delet|reorder|mov)\w*\b[^.:;]{0,60}\b(not|never)\b[^.:;]{0,20}\ban edit\b",
+        text,
+    ), "the prompt still says removing, deleting, reordering or moving slides is not an edit"
 
 
 def test_prompt_no_longer_says_adding_a_slide_is_not_an_edit():
@@ -483,10 +604,11 @@ SLIDE_NUMBERS_RULES = (
         r"slide_references\b[^.]{0,100}\b(message|turn|request)\b[^.]{0,80}\bresolved\b",
     ),
     (
-        "target_positions come from slide_references when the phrase was resolved",
-        r"target_positions\b[^.]{0,60}slide_references\b[^.]{0,80}\bresolved\b|"
-        r"\bresolved\b[^.]{0,80}slide_references\b[^.]{0,80}target_positions|"
-        r"slide_references\b[^.]{0,80}\bresolved\b[^.]{0,80}target_positions",
+        # Architect edit operations: an edit's positions are its operations' position and
+        # after_position (target_positions is not needed with operations).
+        "each operation's position and after_position come from slide_references when "
+        "the phrase was resolved",
+        r"\bposition and after_position\b[^.]{0,40}slide_references\b[^.]{0,80}\bresolved\b",
     ),
     (
         "a number or ordinal that does not resolve is looked up in slide_numbering",
@@ -535,6 +657,12 @@ def test_slide_numbers_block_states_rule(description, pattern):
 # and 7, over the plain block that carries it.  Properties 1 and 6 are the phrase pins
 # in EDITING_RULE_PHRASES.  Each regex is kept to one sentence ([^.]), so deleting a
 # sentence turns only its own rules red.
+#
+# Architect edit operations re-cut the rows that described a full-spec insert (the
+# model renumbering the later slides itself, target_positions in the returned spec, the
+# add exception to taking targets from slide_references): an insert is now an operation
+# whose after_position counts the deck before the edit, and the code renumbers.  Those
+# rows now pin the operations wording of the same property; the rest are unchanged.
 
 _DO_NOT = r"(\bdo not\b|\bdon't\b|\bnever\b)"
 _NAMED = r"(named slide|anchor)"
@@ -561,65 +689,71 @@ INSERTION_RULES = (
         r"[^.]{0,20}\bclosing\b",
     ),
     (
-        "property 2: message says where the new slide went",
+        # Re-cut (spec §7): the message says what the edit will do, new slides by their
+        # number in the revised deck and deleted slides by the number they had.
+        "property 2: message names new slides by revised number, deleted ones by old number",
         "EDITING",
-        r"\bmessage\b[^.]{0,40}\bwhere\b[^.]{0,30}\bnew slide\b[^.]{0,10}"
-        r"\b(went|goes|is|landed)\b",
+        r"\bmessage\b[^.]{0,60}\bnew\b[^.]{0,30}\bslide number in the revised deck\b"
+        r"[^.]{0,40}\bdeleted slide\b[^.]{0,30}\bnumber it had\b",
     ),
     (
-        "property 3: slide numbers are read against slide_numbering, the deck before the insert",
+        # Re-cut: every slide number of an edit, not only an insert's, counts the deck
+        # before the edit.
+        "property 3: slide numbers are read against slide_numbering, the deck before the edit",
         "SLIDE NUMBERS",
-        r"slide_numbering\b[^.]{0,60}\bbefore\b[^.]{0,30}\b(new slide|insert\w*)|"
-        r"\bbefore\b[^.]{0,30}\b(new slide|insert\w*)[^.]{0,60}slide_numbering\b",
+        r"slide_numbering\b[^.]{0,60}\bthe deck before the edit\b",
     ),
     (
-        "property 4: every slide after the new one keeps every field; only its position goes up",
+        # Re-cut: the model no longer renumbers the later slides; they keep their content
+        # and only their number changes.
+        "property 4: every slide the edit does not touch keeps its content; only its number moves",
         "EDITING",
-        r"\b(every|each) slide after (it|the new (slide|one))\b[^.]{0,40}"
-        r"\b(every field|unchanged|exactly)\b[^.]{0,200}\bonly\b[^.]{0,10}\bposition\b"
-        r"[^.]{0,20}\b(goes up|increases|rises|moves up)\b[^.]{0,10}\bby one\b",
+        r"\bevery other slide keeps its content exactly\b[^.]{0,40}"
+        r"\bonly its number may change\b",
     ),
     (
-        "property 4: no other slide and no deck-level field changes unless the user asks",
+        "property 4: no other slide changes to reflect the edit unless the user asks",
         "EDITING",
-        rf"{_DO_NOT}[^.]{{0,10}}\bchange\b[^.]{{0,10}}\b(any )?other slides?\b[^.]{{0,240}}"
-        r"\bdeck-level fields?\b[^.]{0,60}\bunless\b[^.]{0,20}\buser asks\b",
+        rf"{_DO_NOT}[^.]{{0,10}}\bchange\b[^.]{{0,10}}\b(any )?other slides?\b[^.]{{0,200}}"
+        r"\bunless\b[^.]{0,20}\buser asks\b",
     ),
     (
-        "property 5: target_positions are the new and changed slides' returned positions",
+        "property 4: narrative_arc does not change for an added, deleted or moved slide",
         "EDITING",
-        r"target_positions\b[^.]{0,40}\bpositions?\b[^.]{0,20}\b(in|of) the (returned|revised) "
-        r"deck_spec\b[^.]{0,40}\b(every|each|the) new slides?\b[^.]{0,60}\basked to change\b",
+        rf"{_DO_NOT}[^.]{{0,10}}\bchange narrative_arc\b[^.]{{0,80}}\bunless\b[^.]{{0,20}}"
+        r"\buser asks\b",
     ),
     (
-        "property 5: a named slide also asked to change is a target at its returned position",
-        "SLIDE NUMBERS",
-        r"\bnamed slide\b[^.]{0,40}\b(asks?|asked|wants?) to change\b[^.]{0,40}\btarget\b"
-        r"[^.]{0,60}\b(returned|revised) deck_spec\b",
+        # Re-cut: the operations say what is built; target_positions is not needed.
+        "property 5: target_positions is not needed with operations",
+        "EDITING",
+        r"\btarget_positions is not needed\b[^.]{0,40}\boperations\b",
     ),
     (
-        "property 7: an add is the exception to taking target_positions from slide_references",
-        "SLIDE NUMBERS",
-        r"\bexception\b[^.]{0,60}target_positions\b[^.]{0,30}slide_references\b[^.]{0,60}"
-        r"\badd\w*\b",
+        # Re-cut: a named slide is never renumbered by the model, even after an insert.
+        "property 5: positions count the deck before the edit even after an earlier operation",
+        "EDITING",
+        r"\bposition of current_deck_spec, the deck before this edit\b[^.]{0,40}"
+        r"\bearlier operation\b[^.]{0,30}\bshifts\b",
     ),
     (
-        "property 7: the slide named to place the new one is its anchor, not a target",
+        "property 7: the slide named to place a new or moved one is its anchor, not a target",
         "SLIDE NUMBERS",
         r"\b(names?|named|naming|referenc\w*|mention\w*)\b[^.]{0,80}\banchor\b[^.]{0,20}"
-        r"\bnot (a |the )?targets?\b",
+        r"\bnot (a |the )?(targets?|slide to change)\b",
     ),
     (
-        "property 7: placed after the anchor, the new slide takes the position after it",
+        "property 7: placed after the anchor, it takes the anchor's position as after_position",
         "SLIDE NUMBERS",
-        rf"\b(after|following) the {_NAMED}\b[^.]{{0,30}}\btakes?\b[^.]{{0,20}}"
-        rf"\bposition after (it|the {_NAMED})\b",
+        rf"\b(after|following) the {_NAMED}\b[^.]{{0,20}}\btakes?\b[^.]{{0,10}}"
+        rf"\bthe {_NAMED}'s position as after_position\b",
     ),
     (
-        "property 7: placed before the anchor, it takes the anchor's position; the anchor moves up",
+        "property 7: placed before the anchor, after_position is the slide before it, or -1",
         "SLIDE NUMBERS",
-        rf"\bbefore the {_NAMED}\b[^.]{{0,80}}\btakes?\b[^.]{{0,10}}\bthe {_NAMED}'s position\b"
-        rf"[^.]{{0,60}}\b{_NAMED}\b[^.]{{0,10}}\bmoves? up by one\b",
+        rf"\bbefore the {_NAMED}\b[^.]{{0,80}}\btakes?\b[^.]{{0,10}}\bas after_position\b"
+        r"[^.]{0,20}\bthe position of the slide just before\b[^.]{0,80}"
+        rf"\bor -1 when the {_NAMED} is the first\b",
     ),
 )
 

@@ -994,7 +994,9 @@ export const CANONICAL_FIELD_DESCRIPTORS: Record<AgentKey, CanonicalFieldDescrip
     {"name": "deck_spec", "type": "DeckSpec | null", "required": false, "enum": null, "default": null},
     {"name": "data_request", "type": "DataRequest | null", "required": false, "enum": null, "default": null},
     {"name": "target_positions", "type": "array<integer>", "required": false, "enum": null, "default": []},
-    {"name": "proposed_design_contract", "type": "DesignContractRef | null", "required": false, "enum": null, "default": null}
+    {"name": "proposed_design_contract", "type": "DesignContractRef | null", "required": false, "enum": null, "default": null},
+    {"name": "operations", "type": "array<SlideOperation> | null", "required": false, "enum": null, "default": null},
+    {"name": "deck_changes", "type": "DeckChanges | null", "required": false, "enum": null, "default": null}
   ],
   "data_analyst": [
     {"name": "outcome", "type": "string", "required": true, "enum": ["success", "missing_data", "no_tool"]},

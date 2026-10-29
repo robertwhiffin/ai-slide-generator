@@ -1,0 +1,45 @@
+{
+  "intent": "edit",
+  "message": "I'll replace slide 3 with three slides: slide 3 becomes an overview of the four patterns, and new slides 4 and 5 cover system prompts with few-shot examples, and chain-of-thought with structured output. The impact, workflow and checklist slides become slides 6 to 8.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "replace",
+      "position": 2,
+      "after_position": null,
+      "slides": [
+        {
+          "purpose": "Introduce the core techniques: an overview of the four prompt design patterns",
+          "content_brief": "Overview slide naming the four key patterns — system-prompt framing, few-shot examples, chain-of-thought reasoning, and structured output formatting — as four labelled tiles, with a one-line note that the next two slides cover them in pairs",
+          "assumes": "Audience understands the problem from the previous slide",
+          "hands_off": "Four composable patterns cover the vast majority of prompt optimisation needs",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "purpose": "Explain the first two patterns: system-prompt framing and few-shot examples",
+          "content_brief": "Two-column slide with system-prompt framing (set the role, constraints and tone once) on the left and few-shot examples (show two or three input-output pairs) on the right, each with a one-line example and when to use it",
+          "assumes": "Audience has just seen the four patterns named",
+          "hands_off": "Framing and examples show the model what a good answer looks like",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "purpose": "Explain the other two patterns: chain-of-thought reasoning and structured output",
+          "content_brief": "Two-column slide with chain-of-thought reasoning (ask for the steps before the answer) on the left and structured output formatting (a schema or template for the reply) on the right, each with a one-line example and when to use it, and a callout on when to combine the patterns",
+          "assumes": "Audience knows system-prompt framing and few-shot examples from the last slide",
+          "hands_off": "Reasoning steps and a fixed output shape make answers reliable and checkable",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        }
+      ]
+    }
+  ],
+  "deck_changes": null
+}

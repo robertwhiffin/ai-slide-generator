@@ -824,14 +824,20 @@ class TestNothingChanges:
         architect_lines = [
             e.content for e in events if (e.metadata or {}).get("node") == "architect"
         ]
-        assert architect_lines == [model_message, refusal], (
-            "the SSE client was not told the edit could not be applied"
+        # Only the refusal is said (architect edit operations, Task 5): the
+        # model's own line waits for the plan to land, so a refused answer's line
+        # reaches neither surface.
+        assert architect_lines == [refusal], (
+            "the SSE client was not told the edit could not be applied, or was "
+            "also shown the refused answer's own line"
         )
+        assert model_message not in architect_lines
         assert events[-1].metadata.get("intent") == "discuss"
-        assert said == [model_message, refusal], (
+        assert said == [refusal], (
             "the transcript (polling client, next turn) does not say the edit "
-            "could not be applied"
+            "could not be applied, or also holds the refused answer's own line"
         )
+        assert model_message not in said
 
     def test_a_failed_top_of_node_read_still_shifts_and_is_refused(
         self, graph_env, monkeypatch

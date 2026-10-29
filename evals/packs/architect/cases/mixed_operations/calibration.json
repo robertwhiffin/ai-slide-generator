@@ -1,0 +1,88 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll delete slide 3, make slide 2's callout lead with the 8–15 MB file sizes, and expand the collaboration slide into three: slides 7, 8 and 9 on collaboration, version control and distribution. The objections and closing slides become slides 10 and 11. I'll also update the summary on the closing slide to match.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null,
+    "operations": [
+      {
+        "op": "delete",
+        "position": 2,
+        "after_position": null,
+        "slides": null
+      },
+      {
+        "op": "update",
+        "position": 1,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Frame the problem — why presentation quality matters and where PowerPoint falls short",
+            "content_brief": "Explain that presentations are a primary vehicle for persuasion and decision-making, yet most are constrained by a 30-year-old format. Use bullet points with a callout that leads with bloated file sizes (8–15 MB average), then the other common PowerPoint pain points: font substitution, fixed-resolution layouts and version-control headaches",
+            "assumes": "The audience has experienced frustration with PowerPoint at least once",
+            "hands_off": "PowerPoint's legacy architecture imposes real limits on presentation quality",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null
+          }
+        ]
+      },
+      {
+        "op": "replace",
+        "position": 7,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Evidence beat 5 — Collaboration",
+            "content_brief": "Show that HTML slide source is plain text, so a team edits one deck together through pull requests and diff reviews instead of emailing copies around. Bullet points on collaborative editing with a callout contrasting one reviewed change with a folder of final_v3.pptx files",
+            "assumes": "The audience is familiar with collaborative workflows, even if not with Git specifically",
+            "hands_off": "HTML slides let a team work on one deck the way it works on code",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null
+          },
+          {
+            "purpose": "Evidence beat 5, continued — Version control",
+            "content_brief": "Explain that a deck kept in Git has a full history: every change is recorded, any earlier version can be restored, and CI/CD can check and publish each one. Bullet points on history, rollback and automated checks",
+            "assumes": "The audience has seen that the deck's source is plain text a team can review",
+            "hands_off": "Every version of the deck is recorded and can be brought back",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null
+          },
+          {
+            "purpose": "Evidence beat 5, continued — Distribution",
+            "content_brief": "Show that an HTML deck is shared as a URL, not a 15 MB email attachment, and opens in any browser. Bullet points on sharing and access with a callout contrasting file sizes: 8–15 MB .pptx vs. under 1 MB HTML deck",
+            "assumes": "The audience has seen how a team edits and versions the deck",
+            "hands_off": "An HTML deck reaches every audience with a single link",
+            "data_references": [
+              "pptx_average_file_size",
+              "html_deck_file_size"
+            ],
+            "slide_type": null,
+            "template_section_index": null
+          }
+        ]
+      },
+      {
+        "op": "update",
+        "position": 9,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Closing slide — verdict and call to action with a visual scorecard",
+            "content_brief": "Summarise the five advantage dimensions — responsiveness, typography, interactivity, accessibility, and collaboration with version control and distribution — as three stat cards (grouping related dimensions). Each card shows a dimension label and a concise verdict. Deliver the final claim: HTML slides are the stronger format. End with the call to action: try an HTML slide framework for your next presentation",
+            "assumes": "The audience has absorbed the evidence from the preceding slides",
+            "hands_off": "HTML slides are the future of presentations — start using them now",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null
+          }
+        ]
+      }
+    ],
+    "deck_changes": null
+  }
+}

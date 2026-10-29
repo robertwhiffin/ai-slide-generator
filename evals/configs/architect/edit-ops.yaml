@@ -1,0 +1,8 @@
+# Architect v1 prompt (architect edit operations), candidate A: an edit returns an ordered
+# `operations` list (insert / update / delete / replace / move) plus optional `deck_changes`
+# instead of the whole revised deck_spec. Rewrites the PAYLOAD RULES edit line and the EDITING
+# and SLIDE NUMBERS blocks; every other block is the shipped prompt's.
+agent_key: architect
+name: edit-ops
+base: v1
+prompt_file: edit-ops.md

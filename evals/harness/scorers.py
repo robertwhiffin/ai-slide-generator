@@ -1,13 +1,22 @@
 """Deterministic scorers for the eval harness."""
 from __future__ import annotations
 
+from typing import NamedTuple
+
 from src.core import database  # noqa: F401 - break import cycle before src.* imports
 from pydantic import ValidationError
 
 from evals.harness.render import RenderMeasures
-from src.domain.deck_spec import DeckSpec
+from src.domain.deck_spec import DeckSpec, SlideSpec
 from src.domain.finding import CRITERIA
+from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_alignment import AlignmentRefused, align_slides
+from src.domain.slide_operations import (
+    OperationProblems,
+    OperationsResult,
+    apply_operations,
+    compose_edit_spec,
+)
 
 
 #: Longest error detail quoted in a contract-fail rationale; longer is cut + marked.
@@ -45,14 +54,281 @@ def contract_score(
     return False, rationale
 
 
+def _first_error(e: ValidationError) -> str:
+    first = e.errors()[0]
+    where = ".".join(str(part) for part in first["loc"]) or "<root>"
+    return f"{e.error_count()} validation error(s), first at {where}: {first['msg']}"
+
+
 def _validate_deck(value) -> tuple[DeckSpec | None, str]:
     """Validate ``value`` as a ``DeckSpec``; the reason is empty on success."""
     try:
         return DeckSpec.model_validate(value), ""
     except ValidationError as e:
-        first = e.errors()[0]
-        where = ".".join(str(part) for part in first["loc"]) or "<root>"
-        return None, f"{e.error_count()} validation error(s), first at {where}: {first['msg']}"
+        return None, _first_error(e)
+
+
+# --------------------------------------------------------------------------- operations edits
+
+class _Composed(NamedTuple):
+    """An operations edit as production reads it: the answer, the deck it edits, the result."""
+
+    out: ArchitectOutput
+    prior: DeckSpec
+    result: OperationsResult
+    spec: DeckSpec
+
+
+def _operations_given(structured) -> bool:
+    """Production's routing rule (``architect_node``): an ``edit`` carrying ``operations`` or
+    ``deck_changes`` (either one not None) takes the operations path, whatever else it carries."""
+    return (
+        isinstance(structured, dict)
+        and structured.get("intent") == "edit"
+        and (structured.get("operations") is not None
+             or structured.get("deck_changes") is not None)
+    )
+
+
+def _refusal(problems: OperationProblems) -> str:
+    codes = ", ".join(p.code for p in problems.problems)
+    details = "; ".join(p.detail for p in problems.problems)
+    return f"production would refuse ({codes}): {details}"
+
+
+def _compose(structured: dict, current_deck_spec) -> _Composed | str:
+    """Compose an operations edit over the current deck exactly as production does.
+
+    ``apply_operations`` over the persisted slides (``operations=None`` is the empty list, the
+    identity), then ``compose_edit_spec`` with the ``deck_changes``. A ``str`` says why it does not
+    compose: an invalid answer or deck, or the problems production would refuse it with.
+    """
+    try:
+        out = ArchitectOutput.model_validate(structured)
+    except ValidationError as e:
+        return f"the answer is not a valid ArchitectOutput ({_first_error(e)})"
+    prior, why = _validate_deck(current_deck_spec)
+    if prior is None:
+        return f"current_deck_spec is not a valid DeckSpec ({why})"
+    result = apply_operations(prior.slides, out.operations or [])
+    if isinstance(result, OperationProblems):
+        return _refusal(result)
+    spec = compose_edit_spec(prior, result, out.deck_changes)
+    if isinstance(spec, OperationProblems):
+        return _refusal(spec)
+    return _Composed(out, prior, result, spec)
+
+
+def compose_operations_answer(output: dict, current_deck_spec: dict | None) -> dict:
+    """An architect answer as the judge sees it: an operations edit in its composed form (C2).
+
+    An ``edit`` carrying ``operations``/``deck_changes`` gets ``deck_spec``, the JSON dump of the
+    spec production composes over ``current_deck_spec``, and ``target_positions``, the slides
+    production builds (``rebuild``); every other key is kept. So an operations answer and a
+    deck_spec answer (every existing reference and calibration) read alike to the judge.
+
+    Any other answer comes back unchanged, and so does one production would refuse or that has
+    no deck to compose against: failing it is the deterministic scorer's job. ``output`` is never
+    mutated. Both judge paths (the ``judge`` scorer and ``calibrate``) reach this through
+    ``judge.judge_payload``, for the candidate and for the reference.
+    """
+    if not _operations_given(output):
+        return output
+    composed = _compose(output, current_deck_spec)
+    if isinstance(composed, str):
+        return output
+    return {
+        **output,
+        "deck_spec": composed.spec.model_dump(mode="json"),
+        "target_positions": list(composed.result.rebuild),
+    }
+
+
+def _reference_deck(reference: dict | None, current_deck_spec) -> tuple[DeckSpec | None, str]:
+    """The deck the case's reference answer leaves: its ``deck_spec``, or, for a reference given
+    as operations, the spec they compose to. The reason is empty on success."""
+    if _operations_given(reference):
+        composed = _compose(reference, current_deck_spec)
+        if isinstance(composed, str):
+            return None, composed
+        return composed.spec, ""
+    return _validate_deck((reference or {}).get("deck_spec"))
+
+
+def _operations_score(
+    output: dict, expect: dict, current: dict | None, reference: dict | None
+) -> tuple[bool, str]:
+    """Score an architect edit given as operations with production's own semantics (spec §9).
+
+    Production composes ``operations``/``deck_changes`` over the persisted deck
+    (``apply_operations`` + ``compose_edit_spec``), builds exactly the ``rebuild`` set, and ignores
+    the model's ``target_positions`` and any ``deck_spec`` on this path; so that is what is
+    checked. The row passes only when:
+
+    * the intent is ``edit``;
+    * production composes the answer: no operations problem, and a valid composed spec;
+    * ``rebuild`` equals ``expect.positions``;
+    * the new slides (the ``None`` entries of ``layout``) are ``expect.inserted`` (default none);
+    * ``layout`` equals ``expect.layout`` when the case gives one (persisted positions, ``None``
+      for a new slide: what tells a delete or a move apart);
+    * every slide not rebuilt equals, field for field, the current deck's slide at the persisted
+      position its row comes from;
+    * ``DECK_LEVEL_FIELDS`` and the design contract equal the reference's, composed when the
+      reference is itself given as operations.
+    """
+    intent = output.get("intent") if isinstance(output, dict) else None
+    if intent != "edit" or expect.get("intent") != "edit":
+        return False, (
+            f"Operations: intent {intent!r}, expected {expect.get('intent')!r}; only an edit "
+            "is composed")
+    missing = [
+        name for name, value in (("reference", reference), ("current_deck_spec", current))
+        if value is None
+    ]
+    if missing:
+        return False, f"Operations: cannot score without {' and '.join(missing)}"
+
+    composed = _compose(output, current)
+    if isinstance(composed, str):
+        return False, f"Operations: {composed}"
+    ref_deck, why = _reference_deck(reference, current)
+    if ref_deck is None:
+        return False, f"Operations: the reference has no valid deck_spec ({why})"
+    out, prior, result, spec = composed
+
+    got_rebuild = list(result.rebuild)
+    want_rebuild = sorted(expect.get("positions", []))
+    if got_rebuild != want_rebuild:
+        return False, f"Operations: production rebuilds {got_rebuild} != positions {want_rebuild}"
+    got_layout = list(result.layout)
+    got_inserted = [index for index, persisted in enumerate(got_layout) if persisted is None]
+    want_inserted = sorted(expect.get("inserted", []))
+    if got_inserted != want_inserted:
+        return False, f"Operations: inserted {got_inserted} != {want_inserted}"
+    if "layout" in expect and got_layout != list(expect["layout"]):
+        return False, f"Operations: layout {got_layout} != {list(expect['layout'])}"
+
+    # A slide production does not rebuild keeps its row and its spec entry, so its composed spec
+    # must be the current deck's, read from the deck itself rather than from the composition.
+    current_by_position = {slide.position: slide for slide in prior.slides}
+    rebuilt = set(got_rebuild)
+    for index, (slide, persisted) in enumerate(zip(spec.slides, got_layout)):
+        if index in rebuilt:
+            continue
+        before = current_by_position.get(persisted)
+        if before is None:
+            return False, (
+                f"Operations: untouched slide {index} comes from position {persisted!r}, "
+                "which the current deck does not have")
+        changed = [
+            name for name in SlideSpec.model_fields
+            if name != "position" and getattr(slide, name) != getattr(before, name)
+        ]
+        if changed:
+            return False, (
+                f"Operations: untouched slide {index} (current position {persisted}) changed "
+                f"{', '.join(changed)}")
+
+    for field in DECK_LEVEL_FIELDS:
+        if getattr(spec, field) != getattr(ref_deck, field):
+            return False, (
+                f"Operations: deck-level field {field} differs from the reference's "
+                "(a change re-reviews every slide)")
+    if spec.design_contract != ref_deck.design_contract:
+        return False, (
+            "Operations: deck-level field design_contract differs from the reference's "
+            "(a change rebuilds every slide)")
+
+    rationale = (
+        f"Architect intent and operations match (rebuild {got_rebuild}, inserted {got_inserted}, "
+        f"layout {got_layout})")
+    targets = sorted(set(out.target_positions))
+    if targets and targets != got_rebuild:
+        rationale += (
+            f"; model target_positions {targets} differ from {got_rebuild} "
+            "(production ignores them on the operations path)")
+    return True, rationale
+
+
+# --------------------------------------------------------------------------- describe-only
+
+#: The intents whose ``deck_spec`` a describe-only turn persists (``architect_node``): both reach
+#: ``_description_keeps_what_it_cannot_see`` and the same deck-level write, and ``architect_router``
+#: ends both turns before the foreman, so neither builds a slide.
+REDESCRIPTION_INTENTS = ("edit", "build")
+
+
+def _redescription_score(output: dict, expect: dict, current: dict | None) -> tuple[bool, str]:
+    """Score the arc-review sweeper's re-description (a case whose ``expect`` has
+    ``full_deck_spec``) with production's describe-only semantics.
+
+    ``spec_sync.run_arc_review`` runs the turn with ``describe_only=True``. On it ``architect_node``
+    applies no operations: it ignores ``operations`` and ``deck_changes``, persists the answer's
+    ``deck_spec``, keeps the persisted spec whole instead when the answer's slide positions differ
+    from it, and refuses an answer with no ``deck_spec`` without a retry. Any of those leaves the
+    spec stale while the sweeper clears its marker. The row passes only when:
+
+    * the intent is one of ``REDESCRIPTION_INTENTS``;
+    * ``deck_spec`` is a valid DeckSpec whose slide positions equal the current deck's exactly;
+    * ``operations`` and ``deck_changes`` are both None: a re-description is the full deck_spec
+      alone (production would ignore the extra form here, but the answer mixes two edit forms).
+
+    The model's own ``target_positions`` are noted, not failed: the turn builds nothing.
+    """
+    intent = output.get("intent") if isinstance(output, dict) else None
+    if intent not in REDESCRIPTION_INTENTS:
+        return False, (
+            f"Re-description: intent {intent!r}, expected {expect.get('intent')!r} (an edit or a "
+            "build); only those persist a deck_spec on a describe-only turn")
+    if current is None:
+        return False, "Re-description: cannot score without current_deck_spec"
+    prior, why = _validate_deck(current)
+    if prior is None:
+        return False, f"Re-description: current_deck_spec is not a valid DeckSpec ({why})"
+
+    given = [name for name in ("operations", "deck_changes") if output.get(name) is not None]
+    if output.get("deck_spec") is None:
+        instead = f", only {' and '.join(given)}" if given else ""
+        return False, (
+            f"Re-description: no deck_spec{instead}; a describe-only turn applies no operations or "
+            "deck_changes, so production persists nothing and the sweeper clears its marker with "
+            "the spec still stale")
+    deck, why = _validate_deck(output["deck_spec"])
+    if deck is None:
+        return False, f"Re-description: deck_spec is not a valid DeckSpec ({why})"
+
+    got = sorted(slide.position for slide in deck.slides)
+    want = sorted(slide.position for slide in prior.slides)
+    if got != want:
+        diff = [
+            f"{label} {sorted(positions)}"
+            for label, positions in (("missing", set(want) - set(got)),
+                                     ("added", set(got) - set(want)))
+            if positions
+        ]
+        return False, (
+            f"Re-description: deck_spec positions {got} != the current deck's {want} "
+            f"({', '.join(diff)}); production keeps the persisted spec and drops the "
+            "re-description")
+    if given:
+        return False, (
+            f"Re-description: the deck_spec comes with {' and '.join(given)}; a re-description is "
+            "the full deck_spec alone, with no operations or deck_changes")
+
+    rationale = (
+        f"Re-description: {intent} with the full deck_spec over positions {want}, no operations "
+        "or deck_changes")
+    targets = output.get("target_positions")
+    if intent == "edit" and isinstance(targets, list):
+        try:
+            got_targets = sorted(set(targets))
+        except TypeError:
+            got_targets = targets
+        if got_targets != want:
+            rationale += (
+                f"; model target_positions {got_targets} differ from {want} "
+                "(a describe-only turn builds nothing)")
+    return True, rationale
 
 
 def _insert_score(
@@ -76,7 +352,9 @@ def _insert_score(
     current, why = _validate_deck(current_deck_spec)
     if current is None:
         return False, f"Insert: current_deck_spec is not a valid DeckSpec ({why})"
-    ref_deck, why = _validate_deck((reference or {}).get("deck_spec"))
+    # A reference given as operations (the edit-operations cases) is read in its composed form,
+    # so a deck_spec answer to such a case still fails for production's own reason.
+    ref_deck, why = _reference_deck(reference, current_deck_spec)
     if ref_deck is None:
         return False, f"Insert: the reference has no valid deck_spec ({why})"
 
@@ -134,8 +412,13 @@ def expected_category_score(
     """Role-dispatched expected category scorer.
 
     - architect: checks intent match, and for edit mode, target_positions match positions (as sets).
-      An edit case whose ``expect`` has ``"inserted"`` is scored by ``_insert_score`` instead, which
-      needs the case's ``reference`` output and the payload's ``current_deck_spec``.
+      A case whose ``expect`` has ``full_deck_spec`` (the arc-review sweeper's describe-only turn)
+      is scored by ``_redescription_score`` alone, ahead of every other check, since production
+      applies no operations on that turn and persists a build's deck_spec as it does an edit's.
+      An edit answer carrying ``operations`` or ``deck_changes`` is scored by ``_operations_score``
+      on every other edit case, as production's operations path takes it whatever else it carries.
+      Otherwise an edit case whose ``expect`` has ``"inserted"`` is scored by ``_insert_score``.
+      Both need the case's ``reference`` output and the payload's ``current_deck_spec``.
     - data_analyst: checks outcome match
     - build_reviewer/fix_reviewer/deck_reviewer: checks findings against expected criteria/positions,
       guards unknown criteria, and optionally checks verdict for fix_reviewer
@@ -144,9 +427,17 @@ def expected_category_score(
         return False, f"Structured output is not a dict: {type(structured).__name__}"
 
     if agent_key == "architect":
+        # The sweeper's describe-only re-description: no operations path, a build counts as an edit
+        if expect.get("full_deck_spec"):
+            return _redescription_score(structured, expect, current_deck_spec)
+
         # Check intent match
         if structured.get("intent") != expect.get("intent"):
             return False, f"Intent mismatch: got {structured.get('intent')!r}, expected {expect.get('intent')!r}"
+
+        # An edit given as operations is scored as production composes it (spec §9)
+        if _operations_given(structured):
+            return _operations_score(structured, expect, current_deck_spec, reference)
 
         # An insert is scored with production's own alignment, not the model's targets
         if structured.get("intent") == "edit" and "inserted" in expect:

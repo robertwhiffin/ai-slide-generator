@@ -1,0 +1,17 @@
+{
+  "intent": "edit",
+  "message": "I'll delete slide 4, the impact numbers; the workflow and checklist slides move up to slides 4 and 5.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "delete",
+      "position": 3,
+      "after_position": null,
+      "slides": null
+    }
+  ],
+  "deck_changes": null
+}

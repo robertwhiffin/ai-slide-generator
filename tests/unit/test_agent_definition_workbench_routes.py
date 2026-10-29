@@ -3286,6 +3286,8 @@ EXPECTED_CANONICAL_FIELDS: dict[str, list[dict[str, object]]] = {
         _optional("data_request", "DataRequest | null", None),
         _optional("target_positions", "array<integer>", []),
         _optional("proposed_design_contract", "DesignContractRef | null", None),
+        _optional("operations", "array<SlideOperation> | null", None),
+        _optional("deck_changes", "DeckChanges | null", None),
     ],
     "data_analyst": [
         _required("outcome", "string", ["success", "missing_data", "no_tool"]),

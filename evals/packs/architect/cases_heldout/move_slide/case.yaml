@@ -1,0 +1,16 @@
+kind: mutation
+fault: 'move slide 5 (position 4) to after slide 3 (position 2): a reorder that rebuilds
+  nothing; slipping both numbers by one moves the checklist after the impact slide
+  instead'
+expect:
+  intent: edit
+  positions: []
+  inserted: []
+  layout:
+  - 0
+  - 1
+  - 2
+  - 4
+  - 3
+  - 5
+design_system_active: true

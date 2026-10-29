@@ -1,0 +1,17 @@
+{
+  "intent": "edit",
+  "message": "I'll delete slide 6 on interactivity; slides 7 to 10 move up one place.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "delete",
+      "position": 5,
+      "after_position": null,
+      "slides": null
+    }
+  ],
+  "deck_changes": null
+}

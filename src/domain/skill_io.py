@@ -26,6 +26,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from src.domain.deck_spec import DeckSpec, DesignContractRef
 from src.domain.finding import DeckReviewOutput, SlideReviewOutput
+from src.domain.slide_operations import DeckChanges, SlideOperation
 
 # ---------------------------------------------------------------------------
 # Primitive unions — CLOSED
@@ -70,13 +71,23 @@ class ArchitectOutput(BaseModel):
     ----------------------
     - ``intent='build'``                     → ``deck_spec`` must be present
     - ``intent='ask_data'``                  → ``data_request`` must be present
-    - ``intent='edit'``                      → ``target_positions`` must be non-empty
+    - ``intent='edit'``                      → ``target_positions`` must be non-empty,
+                                               or ``operations`` / ``deck_changes``
+                                               must be present
     - ``intent='confirm_design_contract'``   → ``proposed_design_contract`` must be present
     - ``intent='discuss'``                   → no payload required
 
     ``confirm_design_contract`` holds its proposal in ``proposed_design_contract``
     — never in ``deck_spec`` — so no downstream node restyles before the user
     answers (§4.6/§M1).
+
+    ``operations`` and ``deck_changes`` are the operations form of an edit: slide
+    operations against the persisted deck plus deck-level field changes, composed
+    into the next ``DeckSpec`` by the graph node.  Both are optional and default to
+    ``None`` so every output valid before they existed stays valid (the frozen
+    schema contract's historical digests rely on that).  An explicit empty
+    ``operations`` list is a valid edit here on purpose; the node reports it as a
+    retryable "nothing to do".
     """
 
     intent: ArchitectIntent
@@ -85,6 +96,8 @@ class ArchitectOutput(BaseModel):
     data_request: Optional[DataRequest] = None
     target_positions: List[int] = []
     proposed_design_contract: Optional[DesignContractRef] = None
+    operations: Optional[List[SlideOperation]] = None
+    deck_changes: Optional[DeckChanges] = None
 
     @model_validator(mode="after")
     def _intent_payload_consistency(self) -> "ArchitectOutput":
@@ -98,10 +111,16 @@ class ArchitectOutput(BaseModel):
                 "intent='ask_data' requires data_request; "
                 "the analyst node reads this to know what to fetch"
             )
-        if self.intent == "edit" and not self.target_positions:
+        if (
+            self.intent == "edit"
+            and not self.target_positions
+            and self.operations is None
+            and self.deck_changes is None
+        ):
             raise ValueError(
-                "intent='edit' requires a non-empty target_positions list; "
-                "the router fans out one builder per position"
+                "intent='edit' requires a non-empty target_positions list, "
+                "or operations, or deck_changes; "
+                "the router fans out one builder per changed position"
             )
         if (
             self.intent == "confirm_design_contract"

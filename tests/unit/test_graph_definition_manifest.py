@@ -704,7 +704,7 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "2311ded0e960e433e58f3ae83ce460175e85027b77e89a0732b6ade25dac96e9",
+    "architect": "3da09952e7751cd967c3cee11b77628c51565e37fa1b75c1c6e9f92a92d3126b",
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
     "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
@@ -714,7 +714,7 @@ PACKAGED_V1_CONTENT_HASHES = {
 }
 
 V1_SCHEMA_CONTRACT_DIGESTS = {
-    "architect": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
+    "architect": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -724,7 +724,7 @@ V1_SCHEMA_CONTRACT_DIGESTS = {
 }
 
 V2_SCHEMA_CONTRACT_DIGESTS = {
-    "architect": "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
+    "architect": "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -934,7 +934,7 @@ def test_assembly_upgrade_leaves_the_schema_contract_untouched() -> None:
     }
     assert upgraded.schema_contract.model_dump() == {
         "version": 1,
-        "digest": "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
+        "digest": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
     }
     assert upgraded.schema_overlay == original.schema_overlay
 
@@ -978,13 +978,13 @@ def test_stored_identity_resolves_the_exact_role_and_version_bundle(
         (
             "not_a_role",
             1,
-            "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
+            "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
             "unknown role",
         ),
         (
             "architect",
             3,
-            "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
+            "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
             "unknown version",
         ),
         (
@@ -996,19 +996,19 @@ def test_stored_identity_resolves_the_exact_role_and_version_bundle(
         (
             "builder",
             1,
-            "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
+            "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
             "another role's digest",
         ),
         (
             "architect",
             2,
-            "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285",
+            "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
             "v1 digest under v2",
         ),
         (
             "architect",
             1,
-            "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9",
+            "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
             "v2 digest under v1",
         ),
         (
@@ -1156,9 +1156,12 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
 
     # The string-keyed sibling is unaffected, so no existing hash moves.  The literal
     # covers the architect prompt too; recomputed for the #313 slide-references prompt,
-    # then for the #314 add-a-slide prompt, then for the claude-opus-5-5 seed move.
+    # then for the #314 add-a-slide prompt, then for the claude-opus-5-5 seed move,
+    # then for the architect edit operations schema-contract digest, then for the
+    # promoted architect edit operations prompt (edit-ops), then for its follow-up
+    # tweaks (edit-ops-b).
     assert definition_content_hash(built({"1": "a"})) == (
-        "1b0a923d5a62cd0934fdb4e9478daa3e6852fd35bfd066ca7125ac3511e89941"
+        "b7036323132eb23b1fd9fa99a1093deb90ba09635b68f4210c5e0f62029e3476"
     )
 
 

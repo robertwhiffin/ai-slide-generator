@@ -1,0 +1,17 @@
+{
+  "intent": "edit",
+  "message": "I'll move slide 7, on accessibility, up to just after slide 4: it becomes slide 5, and the typography and interactivity slides become slides 6 and 7.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "move",
+      "position": 6,
+      "after_position": 3,
+      "slides": null
+    }
+  ],
+  "deck_changes": null
+}

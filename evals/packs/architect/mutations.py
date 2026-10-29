@@ -10,7 +10,16 @@ from src.domain.deck_spec import DeckSpec, DesignContractRef
 from src.domain.deck_spec_slides import spec_json_with_blank_entry
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_numbering import architect_slide_payload
+from src.domain.slide_operations import (
+    DeckChanges,
+    OperationsResult,
+    SlideContent,
+    SlideOperation,
+    apply_operations,
+    compose_edit_spec,
+)
 from src.services.agent_model_payload import model_payload_for
+from src.services.spec_sync import ARC_REVIEW_MESSAGE
 from src.services.template_sections import section_inventory
 
 from evals.harness import case
@@ -85,14 +94,40 @@ MESSAGES = {
     "edit_beside_blank": (
         "Trim slide 7 to live code demos, embedded video and interactive charts; drop the rest"
     ),
+    # Architect edit operations (spec §9): delete, move, replace and a mixed edit on the deck.
+    "delete_slide": (
+        "Please delete slide 6. I'll show the interactivity live in a demo, so the rest of the "
+        "deck can stay exactly as it is."
+    ),
+    "move_slide": (
+        "Move slide 7 up to just after slide 4, so accessibility follows responsive design"
+    ),
+    "replace_slide_expand": (
+        "Replace slide 5 with these four slides: a short overview of design fidelity, then one "
+        "slide each on web fonts, spacing and kerning, and theming with CSS"
+    ),
+    "mixed_operations": (
+        "Delete slide 3, make slide 2's callout lead with the 8–15 MB file sizes, and expand the "
+        "bullets on slide 8 into three slides: collaboration, version control and distribution"
+    ),
+    # The arc-review sweeper's describe-only turn: production's own message, on both splits.
+    "redescribe_deck": ARC_REVIEW_MESSAGE,
 }
 
+# The edit-operations cases (spec §9): their references answer in operations, not a deck_spec.
+OPERATIONS_CASES = ("delete_slide", "move_slide", "replace_slide_expand", "mixed_operations")
+# The arc-review sweeper's turn (``spec_sync.run_arc_review``, ``describe_only=True``): it persists
+# no user row, so the conversation is the prior exchange alone and ARC_REVIEW_MESSAGE reaches the
+# model only as ``message``; and a describe-only turn resolves no slide references.
+DESCRIBE_ONLY_CASES = ("redescribe_deck",)
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
 HAS_DECK = (
     "edit_request", "confirm_design", "discuss",
     "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
     "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
     "fill_blank_slide", "edit_beside_blank",
+    *OPERATIONS_CASES,
+    *DESCRIBE_ONLY_CASES,
 )
 # The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
 BLANK_CASES = ("fill_blank_slide", "edit_beside_blank")
@@ -116,6 +151,7 @@ def _dump(path, obj):
 
 def _payload(cid):
     has_deck = cid in HAS_DECK
+    describe_only = cid in DESCRIBE_ONLY_CASES
     msg = MESSAGES[cid]
     conversation = [{"role": "user", "content": msg}]
     if has_deck:
@@ -124,6 +160,8 @@ def _payload(cid):
             {"role": "assistant", "content": PRIOR_ASSISTANT},
             {"role": "user", "content": msg},
         ]
+    if describe_only:
+        conversation = conversation[:-1]  # the sweeper persists no user row for its message
     contract = DesignContractRef(
         design_system_id=MERIDIAN_ID, template_id=MERIDIAN_TEMPLATE
     ).model_dump(mode="json")
@@ -131,7 +169,8 @@ def _payload(cid):
     if cid in BLANK_CASES:
         deck = _blank_deck(deck, BLANK_AT)
     slide_keys = architect_slide_payload(
-        conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else []
+        conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else [],
+        describe_only=describe_only,
     )
     return model_payload_for(AGENT, {
         "conversation": conversation,
@@ -369,6 +408,203 @@ def _edited_deck_spec():
     return _revised_spec(case.gold_deck_spec(), {1: EDIT_BRIEF_1})
 
 
+# Architect edit operations (spec §9): the references answer in operations, as ArchitectOutput
+# dumps them, with ``deck_spec`` null (§8). Positions are the CURRENT deck's (0-based).
+def _op(op: str, **fields) -> dict:
+    """One operation as the architect's structured output dumps it (every key, unset ones null)."""
+    return SlideOperation.model_validate({"op": op, **fields}).model_dump(mode="json")
+
+
+def _content(fields: dict) -> dict:
+    """A new slide's ``SlideContent`` dump: its text fields, no data unless given."""
+    return SlideContent.model_validate({**NEW_SLIDE_DEFAULTS, **fields}).model_dump(mode="json")
+
+
+def _revised_content(deck: dict, position: int, phrase: tuple[str, str]) -> dict:
+    """The ``SlideContent`` of ``deck``'s slide at ``position``, its brief's ``phrase`` swapped."""
+    old, new = phrase
+    slide = next(s for s in deck["slides"] if s["position"] == position)
+    assert slide["content_brief"].count(old) == 1, position
+    fields = {k: v for k, v in slide.items() if k != "position"}
+    fields["content_brief"] = slide["content_brief"].replace(old, new)
+    return SlideContent.model_validate(fields).model_dump(mode="json")
+
+
+def _operations_out(message: str, operations: list[dict]) -> dict:
+    """An edit given as operations, in the ArchitectOutput dump's own key order."""
+    return _out("edit", message, operations=operations, deck_changes=None)
+
+
+def _composed_spec(deck: dict, operations: list[dict]) -> dict:
+    """The whole deck_spec production composes ``operations`` into over ``deck``.
+
+    A replace case's should_fail is this, returned the old way: the right plan as a full grown
+    deck_spec, which production's alignment cannot read (the production failure, spec "Why").
+    """
+    prior = DeckSpec.model_validate(deck)
+    result = apply_operations(prior.slides, [SlideOperation.model_validate(o) for o in operations])
+    assert isinstance(result, OperationsResult), result
+    spec = compose_edit_spec(prior, result, None)
+    assert isinstance(spec, DeckSpec), spec
+    return spec.model_dump(mode="json")
+
+
+# delete_slide: slide 6 (position 5, Evidence beat 3 — interactivity) goes; nothing is rebuilt.
+DELETE_POS = 5
+# move_slide: slide 7 (position 6, accessibility) goes straight after slide 4 (position 3).
+MOVE_POS, MOVE_AFTER = 6, 3
+# replace_slide_expand: slide 5 (position 4, typography) becomes these four slides.
+REPLACE_POS = 4
+REPLACE_SLIDES = [
+    {
+        "purpose": "Evidence beat 2 — Design fidelity: an overview",
+        "content_brief": (
+            "Introduce design fidelity as the second advantage: CSS gives HTML slides precise, "
+            "reliable control over how every slide looks. A short framing statement with three "
+            "signposts to the slides that follow: web fonts, spacing and kerning, and theming"
+        ),
+        "assumes": (
+            "The audience has seen a PowerPoint deck where fonts broke on a different machine"
+        ),
+        "hands_off": (
+            "CSS gives presenters design control that PowerPoint cannot match, in three ways"
+        ),
+    },
+    {
+        "purpose": "Design fidelity 1 — Web fonts that load reliably",
+        "content_brief": (
+            "Show that HTML slides load web fonts through CSS with no embedding, so text renders "
+            "the same on every machine, where PowerPoint substitutes a missing font. Bullet points "
+            "with a callout featuring the 1,700+ fonts available via CSS"
+        ),
+        "assumes": "The audience has just heard that CSS controls how every slide looks",
+        "hands_off": "With web fonts, a deck's type never breaks on someone else's machine",
+        "data_references": ["css_font_availability"],
+    },
+    {
+        "purpose": "Design fidelity 2 — Precise spacing and kerning",
+        "content_brief": (
+            "Explain that CSS sets kerning, line-height and spacing exactly, so text sits where "
+            "the designer put it at every screen size, where PowerPoint reflows and clips text "
+            "boxes. Bullet points with a callout contrasting one CSS rule with nudging text boxes "
+            "by hand"
+        ),
+        "assumes": "The audience knows web fonts load reliably in HTML slides",
+        "hands_off": "CSS places every line of text exactly where it belongs",
+    },
+    {
+        "purpose": "Design fidelity 3 — Theming with CSS",
+        "content_brief": (
+            "Show that CSS variables hold a deck's colours, type scale and spacing in one place, "
+            "so restyling every slide is one change, where PowerPoint needs each slide master "
+            "edited by hand. Bullet points with a callout on keeping every slide on brand"
+        ),
+        "assumes": "The audience has seen that CSS controls type and spacing precisely",
+        "hands_off": "With CSS, the whole deck's design lives in one place and stays consistent",
+    },
+]
+# mixed_operations: delete slide 3 (position 2), revise slide 2's callout (position 1), and
+# expand slide 8 (position 7, collaboration) into three slides, in one message.
+MIXED_DELETE, MIXED_UPDATE, MIXED_REPLACE = 2, 1, 7
+MIXED_CALLOUT = (
+    "a callout highlighting common PowerPoint pain points: font substitution, fixed-resolution "
+    "layouts, bloated file sizes (8–15 MB average), and version-control headaches",
+    "a callout that leads with bloated file sizes (8–15 MB average), then the other common "
+    "PowerPoint pain points: font substitution, fixed-resolution layouts and version-control "
+    "headaches",
+)
+MIXED_SLIDES = [
+    {
+        "purpose": "Evidence beat 5 — Collaboration",
+        "content_brief": (
+            "Show that HTML slide source is plain text, so a team edits one deck together through "
+            "pull requests and diff reviews instead of emailing copies around. Bullet points on "
+            "collaborative editing with a callout contrasting one reviewed change with a folder "
+            "of final_v3.pptx files"
+        ),
+        "assumes": (
+            "The audience is familiar with collaborative workflows, even if not with Git "
+            "specifically"
+        ),
+        "hands_off": "HTML slides let a team work on one deck the way it works on code",
+    },
+    {
+        "purpose": "Evidence beat 5, continued — Version control",
+        "content_brief": (
+            "Explain that a deck kept in Git has a full history: every change is recorded, any "
+            "earlier version can be restored, and CI/CD can check and publish each one. Bullet "
+            "points on history, rollback and automated checks"
+        ),
+        "assumes": "The audience has seen that the deck's source is plain text a team can review",
+        "hands_off": "Every version of the deck is recorded and can be brought back",
+    },
+    {
+        "purpose": "Evidence beat 5, continued — Distribution",
+        "content_brief": (
+            "Show that an HTML deck is shared as a URL, not a 15 MB email attachment, and opens in "
+            "any browser. Bullet points on sharing and access with a callout contrasting file "
+            "sizes: 8–15 MB .pptx vs. under 1 MB HTML deck"
+        ),
+        "assumes": "The audience has seen how a team edits and versions the deck",
+        "hands_off": "An HTML deck reaches every audience with a single link",
+        "data_references": ["pptx_average_file_size", "html_deck_file_size"],
+    },
+]
+# mixed_operations' should_fail also rewrites the untouched closing slide (gold position 9).
+MIXED_OVERREACH_SUMMARY = (
+    "five advantage dimensions — responsiveness, typography, interactivity, accessibility, "
+    "collaboration —",
+    "five advantage dimensions — responsiveness, typography, interactivity, accessibility, and "
+    "collaboration with version control and distribution —",
+)
+
+# redescribe_deck: the arc-review sweeper's turn (``spec_sync.run_arc_review``, ``describe_only``).
+# ``architect_node`` applies no operations on it: it persists the answer's full deck_spec, keeps the
+# persisted spec instead when the answer's positions differ, and refuses (never retries) an answer
+# with no deck_spec. Shared by both splits; the messages and the arc are each split's own.
+REDESCRIBE_FAULT = (
+    "the arc-review sweeper's describe-only re-description: production persists only a full "
+    "deck_spec over the current positions on this turn and ignores operations and deck_changes, so "
+    "re-describing the narrative arc as deck_changes is silently dropped while the sweeper clears "
+    "its marker"
+)
+REDESCRIBE_MESSAGE = (
+    "I've re-described the deck as it stands: all ten slides in their current order, with the "
+    "narrative arc and each slide's description matching what the slides say. Nothing was "
+    "rewritten, added, removed or reordered."
+)
+REDESCRIBE_ARC_MESSAGE = (
+    "I've re-described the deck's narrative arc to match the slides as they now stand."
+)
+# The should_fail's re-described arc: the gold's five beats, reworded.
+REDESCRIBED_ARC = [
+    "Open on why presentations matter and how the tool shapes the outcome",
+    "Show where PowerPoint falls short on the qualities that matter most",
+    "Make the case for HTML slides with evidence: responsiveness, typography, interactivity, "
+    "accessibility and collaboration",
+    "Take the objections and the learning curve head on",
+    "End with the verdict and a call to action",
+]
+
+
+def _redescribed(deck: dict, message: str) -> dict:
+    """The sweeper's right answer: ``deck`` described as it stands, as the full deck_spec, with
+    every position in ``target_positions`` and no operations or deck_changes."""
+    return _out(
+        "edit", message, deck_spec=copy.deepcopy(deck),
+        target_positions=[s["position"] for s in deck["slides"]],
+        operations=None, deck_changes=None,
+    )
+
+
+def _arc_as_deck_changes(message: str, arc: list[str]) -> dict:
+    """The silent-drop shape: the arc re-described as ``deck_changes`` (the runner's dump form),
+    with no deck_spec. Production ignores deck_changes on a describe-only turn and persists
+    nothing."""
+    changes = DeckChanges(narrative_arc=list(arc)).model_dump(mode="json")
+    return _out("edit", message, operations=None, deck_changes=changes)
+
+
 def _write(out, cid, kind, fault, expect, reference, should_fail):
     d = out / cid
     d.mkdir(parents=True, exist_ok=True)
@@ -566,6 +802,89 @@ def generate(out_dir: pathlib.Path | None = None):
             beside, [BLANK_AT, BESIDE_POS],
             _replaced_spec(beside["deck_spec"], {BLANK_AT: INVENTED_FILL}),
         ),
+    )
+
+    # Architect edit operations (spec §9): the references answer in operations against the gold
+    # deck. ``positions`` is the rebuild set and ``inserted`` the new slides, both in the edited
+    # deck's numbering; ``layout`` (persisted positions, null = new) says which slide went where.
+    delete_message = "I'll delete slide 6 on interactivity; slides 7 to 10 move up one place."
+    _write(
+        out, "delete_slide", "mutation",
+        "delete slide 6 (position 5): only it goes, nothing is rebuilt and the later slides move "
+        "up unchanged; deleting position 6 (slide 7) is the 1-based slip",
+        {"intent": "edit", "positions": [], "inserted": [],
+         "layout": [p for p in range(10) if p != DELETE_POS]},
+        _operations_out(delete_message, [_op("delete", position=DELETE_POS)]),
+        _operations_out(delete_message, [_op("delete", position=DELETE_POS + 1)]),
+    )
+    move_message = (
+        "I'll move slide 7, on accessibility, up to just after slide 4: it becomes slide 5, and "
+        "the typography and interactivity slides become slides 6 and 7."
+    )
+    _write(
+        out, "move_slide", "mutation",
+        "move slide 7 (position 6) to after slide 4 (position 3): a reorder that rebuilds "
+        "nothing; anchoring it after position 4 (slide 5) is the 1-based slip",
+        {"intent": "edit", "positions": [], "inserted": [],
+         "layout": [0, 1, 2, 3, 6, 4, 5, 7, 8, 9]},
+        _operations_out(move_message, [_op("move", position=MOVE_POS, after_position=MOVE_AFTER)]),
+        _operations_out(
+            move_message, [_op("move", position=MOVE_POS, after_position=MOVE_AFTER + 1)]),
+    )
+    replace_ops = [
+        _op("replace", position=REPLACE_POS, slides=[_content(s) for s in REPLACE_SLIDES]),
+    ]
+    replace_positions = list(range(REPLACE_POS, REPLACE_POS + len(REPLACE_SLIDES)))
+    replace_message = (
+        "I'll replace slide 5 with four slides: slide 5 becomes a short overview of design "
+        "fidelity, and new slides 6, 7 and 8 cover web fonts, spacing and kerning, and theming "
+        "with CSS. The slides after them move down three places."
+    )
+    _write(
+        out, "replace_slide_expand", "mutation",
+        "replace slide 5 (position 4) with four slides: the first rewrites position 4 in place and "
+        "three new slides follow at positions 5-7; the same plan as a whole grown deck_spec is "
+        "refused by production's alignment as ambiguous",
+        {"intent": "edit", "positions": replace_positions, "inserted": replace_positions[1:]},
+        _operations_out(replace_message, replace_ops),
+        _out("edit", replace_message, target_positions=replace_positions,
+             deck_spec=_composed_spec(gold, replace_ops)),
+    )
+    mixed_ops = [
+        _op("delete", position=MIXED_DELETE),
+        _op("update", position=MIXED_UPDATE,
+            slides=[_revised_content(gold, MIXED_UPDATE, MIXED_CALLOUT)]),
+        _op("replace", position=MIXED_REPLACE, slides=[_content(s) for s in MIXED_SLIDES]),
+    ]
+    mixed_message = (
+        "I'll delete slide 3, make slide 2's callout lead with the 8–15 MB file sizes, and expand "
+        "the collaboration slide into three: slides 7, 8 and 9 on collaboration, version control "
+        "and distribution. The objections and closing slides become slides 10 and 11."
+    )
+    _write(
+        out, "mixed_operations", "mutation",
+        "delete slide 3 (position 2), revise slide 2 (position 1) and expand slide 8 (position 7) "
+        "into three, in one edit: production rebuilds positions 1 and 6-8 of the 11-slide result "
+        "and nothing else; rewriting the untouched closing slide too builds a slide nobody asked "
+        "for",
+        {"intent": "edit", "positions": [1, 6, 7, 8], "inserted": [7, 8],
+         "layout": [0, 1, 3, 4, 5, 6, 7, None, None, 8, 9]},
+        _operations_out(mixed_message, mixed_ops),
+        _operations_out(
+            mixed_message + " I'll also update the summary on the closing slide to match.",
+            [*mixed_ops,
+             _op("update", position=9,
+                 slides=[_revised_content(gold, 9, MIXED_OVERREACH_SUMMARY)])],
+        ),
+    )
+
+    # The arc-review sweeper's re-description: the full deck_spec of the deck as it stands (the
+    # current spec), every position targeted, no operations; the arc as deck_changes is dropped.
+    _write(
+        out, "redescribe_deck", "mutation", REDESCRIBE_FAULT,
+        {"intent": "edit", "full_deck_spec": True},
+        _redescribed(gold, REDESCRIBE_MESSAGE),
+        _arc_as_deck_changes(REDESCRIBE_ARC_MESSAGE, REDESCRIBED_ARC),
     )
 
 

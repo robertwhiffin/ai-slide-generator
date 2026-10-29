@@ -1,0 +1,9 @@
+# Architect v1 prompt (architect edit operations), follow-up candidate B: the promoted
+# `edit-ops` text plus two rule tweaks. EDITING's placement rules add that moves cannot form a
+# loop (refused as `move_loop`), and the DESIGN SYSTEMS sentence on committing a confirmed
+# contract names both homes: inside deck_spec on a build, deck_changes.design_contract on an
+# edit. Every other block is byte-identical to `edit-ops`.
+agent_key: architect
+name: edit-ops-b
+base: v1
+prompt_file: edit-ops-b.md
