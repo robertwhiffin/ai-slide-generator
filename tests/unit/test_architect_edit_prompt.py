@@ -163,11 +163,16 @@ EDITING_RULE_PHRASES = (
     "every position and after_position is a position of current_deck_spec, the deck before "
     "this edit",
     "a slide can be the position of at most one operation",
+    # an entry of slides is a SlideContent: no position field
+    "each entry of slides is a slidespec without position",
     # update
     "update — position and slides with exactly one entry",
     "changing what a slide says or shows is an update",
-    # replace (expand / split / replace slide N with ...)
+    # "rebuild slide N" with no content change (spec §8)
+    "rebuilding a slide without changing its content is an update with its current content",
+    # replace (expand / split / replace slide N with ...); the first slide keeps the row
     "replace — position and slides with one or more entries: that slide becomes these slides",
+    "the first takes its place and the rest follow it directly",
     "expanding a slide into several slides, splitting a slide, or replacing a slide with one "
     "or more new slides is a replace",
     # insert
@@ -184,7 +189,10 @@ EDITING_RULE_PHRASES = (
     # -1 = at the start
     "after_position -1 puts them at the start of the deck",
     "(-1 = to the start)",
-    # placement rules
+    # placement rules (spec §2)
+    "slides placed after the same slide go directly after it, in the order of their operations",
+    "placed after a replaced slide, they follow all of its replacement slides",
+    "placed after a moved slide, they follow it to its new place",
     "placed after a deleted slide, they fill its gap",
     "never move a slide after itself",
     # targets, message, re-description
@@ -314,8 +322,10 @@ def test_prompt_no_longer_refuses_delete_or_reorder():
     text = _plain(INSTRUCTIONS)
     still = [p for p in RETIRED_REFUSAL_PHRASES if p in text]
     assert not still, f"the prompt still refuses deleting or reordering: {still}"
+    # "not an edit" and "never treated as an edit" alike: a reworded refusal is still one.
     assert not re.search(
-        r"\b(remov|delet|reorder|mov)\w*\b[^.:;]{0,60}\bnot an edit\b", text
+        r"\b(remov|delet|reorder|mov)\w*\b[^.:;]{0,60}\b(not|never)\b[^.:;]{0,20}\ban edit\b",
+        text,
     ), "the prompt still says removing, deleting, reordering or moving slides is not an edit"
 
 
