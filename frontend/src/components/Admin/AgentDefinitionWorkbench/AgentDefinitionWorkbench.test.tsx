@@ -202,7 +202,10 @@ function workbenchGets(fetchMock = vi.mocked(fetch)) {
 
 /** Every GET to any URL: the "exactly these reads and no others" backstop. */
 function allGets(fetchMock = vi.mocked(fetch)) {
-  return fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'GET');
+  // The badge's one status read on mount is pinned by its own tests; these tests count draft-operation reads only.
+  return fetchMock.mock.calls.filter(([url, init]) =>
+    !String(url).includes('/api/admin/graph-shipping/')
+    && (init as RequestInit | undefined)?.method === 'GET');
 }
 
 function catalogGets(fetchMock = vi.mocked(fetch)) {
@@ -602,12 +605,74 @@ describe('AgentDefinitionWorkbench', () => {
     expect(() => expectNoForbiddenActionNames()).toThrow();
   });
 
+  describe('shipped-version badge (prompt shipping)', () => {
+    const PACKAGED_STATUS = {
+      available: true,
+      differing_agents: ['architect'],
+      blocked_reason: null,
+      hand_edited_agents: [],
+      validation_issues: [],
+      diffs: [{
+        agent_key: 'architect',
+        field_diffs: [{ field: 'model.temperature', published: 0.1, candidate: 0.2 }],
+      }],
+      active_version_number: 1,
+      lock_version: 0,
+    };
+
+    function routePackaged(packaged: (url: string) => unknown) {
+      const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/graph-shipping/')) return packaged(String(url));
+        if (isAgentTestUrl(url)) throw new Error(`unexpected Agent Test request ${url}`);
+        return mockedResponse(url, 200, syntheticAgentDefinitionWorkbench);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('re-fetches the workbench after a successful adopt (C4)', async () => {
+      const adoptBody = {
+        release: {
+          release_id: 9, version_number: 2, previous_release_id: 1, restored_from_release_id: null,
+          release_note: 'Shipped', published_by: 'system', published_at: '2026-09-25T12:00:00Z',
+          effective_from: '2026-09-25T12:00:00Z', effective_to: null,
+        },
+        changed_agent_keys: ['architect'],
+        draft_effect: Object.fromEntries(
+          ['architect', 'data_analyst', 'builder', 'build_reviewer', 'fixer', 'fix_reviewer', 'deck_reviewer']
+            .map((key) => [key, 'unchanged']),
+        ),
+      };
+      const fetchMock = routePackaged((url) =>
+        url.endsWith('/adopt') ? apiResponse(200, adoptBody) : apiResponse(200, PACKAGED_STATUS));
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      render(<AgentDefinitionWorkbench />);
+      await loadedNodeNavigation();
+      expect(workbenchGets(fetchMock)).toHaveLength(1);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Adopt shipped version' }));
+
+      await waitFor(() => expect(workbenchGets(fetchMock)).toHaveLength(2));
+      await loadedNodeNavigation();
+    });
+
+    it('still renders the workbench when the status request fails', async () => {
+      routePackaged(() => { throw new Error('network down'); });
+      render(<AgentDefinitionWorkbench />);
+
+      await loadedNodeNavigation();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByText('A newer shipped version is available')).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+  });
+
   it('issues exactly the workbench read and the readiness read when mounted', async () => {
     renderSuccessfulWorkbench();
     await loadedNodeNavigation();
 
-    // #268 C24: the workbench GET, then the one readiness GET on load.
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    // #268 C24: the workbench GET, then the one readiness GET on load. Plus the shipped-version badge's status GET.
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
     expect(workbenchGets()).toHaveLength(1);
     expect(readinessGets()).toHaveLength(1);
     expect(catalogGets()).toHaveLength(0);
@@ -2013,10 +2078,12 @@ describe('AgentDefinitionWorkbench Output Schema tab', () => {
     render(<AgentDefinitionWorkbench />);
     const navigation = await loadedNodeNavigation();
     // The workbench GET and #268's one on-load readiness GET (C24), answered 500 here.
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    // The badge's one status read on mount is pinned by its own tests; these counts exclude it.
+    const requests = () => fetchMock.mock.calls
+      .filter(([url]) => !String(url).includes('/api/admin/graph-shipping/')).length;
+    await waitFor(() => expect(requests()).toBe(2));
     expect(workbenchGets(fetchMock)).toHaveLength(1);
     expect(readinessGets(fetchMock)).toHaveLength(1);
-    const requests = () => fetchMock.mock.calls.length;
 
     fireEvent.click(screen.getByRole('tab', { name: 'Output Schema' }));
     expect(requests()).toBe(2);
