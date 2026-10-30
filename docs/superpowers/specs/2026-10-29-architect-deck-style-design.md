@@ -236,3 +236,81 @@ Bars missed and known gaps:
 - No eval case has a deck style on a deck with no design system, for the architect or the builder, so the ground-piece rule is shown non-breaking, not working.
 - The architect cases carry no labelled template sections.
 - The build-reviewer gap is unmeasured: its new cases are caught today by `rogue_colour`, so no gap was shown.
+
+## Addendum A (2026-10-30): brand assets, page numbers, one ground
+
+### Why
+
+The owner compared a devloop agent deck with legacy, built from the same prompt. Three gaps remain:
+
+- **No icons or logo.** Legacy places product icons (Lakebase, Delta, Unity Catalog) and a Databricks logo in every footer, using the `search_brand_assets` tool. Graph roles have no tool, and the compiled design-system style deliberately does not list brand images. So a graph builder only sees asset handles that happen to sit in the bound template section's sample markup. Its prompt also says "If no image ids are supplied, build the slide without images".
+- **No page numbers.** The spec's §1 ruling ruled them out because baked-in numbers go stale; the owner wants them.
+- **White slides.** The template's Two-column section ships `slide white`, and the builder keeps a section's ground as shipped, so some content slides are white and others oat.
+
+### Decisions made with the owner
+
+1. **Builders search the design system for relevant icons themselves.** The architect does not pick icons: knowing the whole library is unreasonable. Its look only states intent ("an icon on each box").
+2. **The logo is resolved once and placed by the architect in the footer piece**, so it is identical on every slide. (Proposed; owner: "lgtm".)
+3. **Page numbers** appear as `n / N` on every slide except the cover.
+4. **Light template sections render on the deck's own ground.** Dark sections (cover, dividers) stay dark.
+
+### Design
+
+**A1. A tool loop for builders and fixers.**
+- The agent runtime gains support for role tool grants. Today it binds only the output schema.
+- `builder` and `fixer` are granted `search_brand_assets`, the existing tool in `src/services/tools/ds_asset_tool.py`, scoped to the deck's design system.
+- The loop binds the search tool and the output schema. The model may search up to 3 times, then must return its output through the schema tool as today. A reply with no output still fails as today.
+- Tool results are untrusted data, spotlighted like other tool output.
+- **The tool is bound only when a design system is active and the payload carries a `deck_style`.** A deck built by an older release, or a deck without a style, keeps today's single-tool binding byte for byte, so prod behaviour before a publish is unchanged.
+- The same runtime path serves production, workbench test runs and the eval harness.
+- Grants stay code-owned. They are not in the frozen manifest, so no content hash or digest moves; the `skills/__init__` rule "data_analyst is the ONLY skill with non-empty tool_grants" is updated. The data analyst's grants stay unread.
+
+**A2. Logo context.** `deck_style_context` gains `logos`: up to 12 rows of `{handle, filename}` from `search_assets(kind="logo")` for the active design system. The architect picks the variant that suits the ground and puts it in the deck style's footer piece. Builders copy the footer piece.
+
+**A3. Page-number tokens.**
+- The footer piece carries `{{slide:number}}` and `{{slide:count}}`.
+- They are filled in wherever a deck's `{{ds-asset:ID}}` handles are resolved for a reader: UI reads, exports, Google Slides and thumbnails. Values come from the slide's index in the deck's current order, so they are always right after inserts, deletes and moves.
+- Stored HTML keeps the tokens.
+- Legacy decks never contain them, so substitution is a no-op there.
+
+**A4. One ground.**
+- Builder rule: a light section treatment (`white` or default) renders on the deck's default ground, so the `white` token is dropped on content slides.
+- Dark and event treatments are never changed.
+- The build reviewer is unchanged (R10). Its `off_template_treatment` judges light-for-dark flips only, which this rule never makes.
+
+**A5. Prompts.**
+- **Architect:**
+  - the deck style always includes a footer piece holding the chosen logo handle and the page tokens;
+  - every content slide's look uses it;
+  - looks state icon intent but never name icon handles.
+- **Builder and fixer:**
+  - place the brand assets the deck style catalogue names;
+  - when the look asks for icons, or the slide shows products or concepts, search the design system and place what it returns;
+  - never invent a handle;
+  - follow the one-ground rule.
+- All three are re-measured and promoted.
+
+**A6. Evals.**
+- The harness gets a small fake asset index for the Meridian fixture: a few logos and product icons with handles. Searches during eval runs resolve against it.
+- **New builder case:** a look that asks for icons. It passes when the builder searched and placed a handle from the index, never an invented one.
+- **Architect build cases:** the footer piece holds a handle from `deck_style_context.logos` plus both page tokens.
+- Scoring is deterministic.
+
+**A7. Cost and safety.**
+- A slide whose builder searches costs one extra model round trip.
+- Searches are read-only and scoped to the deck's design system.
+- A wrong handle is left unresolved: it shows as a broken image and never resolves to another system's bytes.
+
+### Non-goals
+
+- The build reviewer.
+- Legacy mode.
+- Missing assets in a design system's library (e.g. no Lakebase icon).
+- Any change to how assets are stored.
+
+### Left to the builder
+
+- The loop's exact implementation and how the design-system id reaches the runtime.
+- The logo cap's ordering heuristic.
+- Final token spellings.
+- Which response-boundary helper hosts the page-token substitution, as long as every reader path uses it.
