@@ -1,0 +1,6 @@
+# Builder candidate deck-style-b: deck-style plus 'token values count too' and where an
+# unstyled extra heading or label gets its type from.
+agent_key: builder
+name: builder-deck-style-b
+base: v1
+prompt_file: deck-style-b.md

@@ -846,4 +846,117 @@ real-model run was made.
   on their judge verdicts:
   `python -m evals.run_eval --agent builder --calibrate --cases deck_style_code,deck_style_table [--split heldout]`
   and the same for `--agent build_reviewer --cases deck_style_inline_paint,deck_style_clean`. Neither
-  judge prompt describes `deck_style`; the judge sees it in the brief.
+  judge prompt describes `deck_style`; the judge sees it in the brief. (The builder's two cases are
+  calibrated in the pass below.)
+
+## Builder and fixer: build to the deck style, 2026-10-30
+
+The builder and fixer prompts gain a `DECK STYLE (when deck_style is present)` block (spec
+`docs/superpowers/specs/2026-10-29-architect-deck-style-design.md` §3). With a deck style, the
+builder builds the slide to its `look`, uses the catalogue's pieces exactly as their
+`example_html` shows, keeps a bound section's frame and lays out its body as the look says, uses
+token-span classes only inside their piece, and uses no class (and no `dk-` class) that the deck
+style, the bound section or the design system does not define. Inline styles are for layout only,
+in any deck. The fixer gets the same block, aimed at fixing toward the deck style and keeping the
+look. Without a deck style the block is skipped, and every other block is byte-identical, except
+that INPUT names the two optional inputs. This pass measured three builder candidates and one fixer
+candidate on train, ran the builder finalist on held-out once, and promoted both.
+
+- **Setup.** Builder agent `system.ai.claude-haiku-4-5`, fixer agent `system.ai.claude-opus-5-5`
+  (manifest v1), judge `databricks-claude-sonnet-5`, profile `tellr-dev`. `prices.yaml` prices
+  neither agent endpoint, so the harness logged no `est_cost_usd`. Cost is estimated from the
+  logged mean tokens at list price (Haiku 4.5 USD 1 / 5, Opus 5.5 USD 4 / 20 per million input /
+  output) plus USD 0.05 per judge call (an upper bound).
+- **Calibration** (`--calibrate --cases deck_style_code,deck_style_table`):
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `deck_style_code` | trusted | not trusted (judge failed the reference) |
+  | `deck_style_table` | trusted | not trusted (judge failed the reference) |
+
+  Both held-out references pass the deterministic scorers (`render_measures`, with
+  `deck_style_use_score`; pinned by `test_pack_builder_heldout.py` and
+  `test_eval_deck_style_scorer.py`). So on held-out these two cases are decided by `contract` and
+  `render_measures`, as `fill_blank_slide` is; the judge verdict is reported, not counted. The
+  judge prompt still does not describe `deck_style`.
+- **Baseline.** Task 7a added two cases, so the builder's `cases_digest` (`1b9e3b28`) differs from
+  every recorded builder table. B0 is the then-promoted v1 prompt (`181a982b`) on the current train
+  cases, the comparable baseline.
+- **Candidates** (`evals/configs/builder/`), one change each:
+  - `deck-style` (`d7b7e1ee`): the block above.
+  - `deck-style-b` (`615ba622`): `deck-style`, plus "token values count too" and "an extra heading
+    or label takes a design-system class that fits, or none". Aimed at S1's one cause.
+  - `deck-style-c` (`42c6fccb`): `deck-style`, plus a last check: before returning, keep only
+    layout properties in every style attribute, even a `var(--…)` value. Aimed at the same cause.
+  - Fixer `deck-style` (`69eb6ea5`, `evals/configs/fixer/deck-style.yaml`): the fixer block.
+
+S are screens, T tie-breaks, F finalist runs, D cause checks. Pass rate is the harness's, over
+scored rows. Run ids are from the `architect-styling` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|
+| B0 fac70627 | builder v1-baseline (181a982b) | train | all 7 | 1 | 7 | 0.71 | 0 | 6.9k / 1.2k | 0.44 |
+| S1 c0c9a056 | deck-style (d7b7e1ee) | train | 2 new | 3 | 6 | 0.67 | 0 | 8.7k / 0.8k | 0.38 |
+| S2 79edfe83 | deck-style-b (615ba622) | train | 2 new | 3 | 6 | 0.50 | 0 | 8.7k / 0.9k | 0.38 |
+| S3 633c66e8 | deck-style-c (42c6fccb) | train | 2 new | 3 | 6 | 0.67 | 0 | 8.7k / 0.9k | 0.38 |
+| T1 05b01b4f | deck-style | train | `deck_style_code` | 5 | 5 | 0.20 | 0 | 8.7k / 0.8k | 0.31 |
+| T2 13d59e38 | deck-style-c | train | `deck_style_code` | 5 | 5 | 0.00 | 0 | 8.7k / 0.9k | 0.32 |
+| F1 74fe64e6 | deck-style | train | all 7 | 1 | 7 | 0.57 | 0 | 7.4k / 1.2k | 0.44 |
+| F2 fc286840 | deck-style | held-out | all 7 | 1 | 7 | 0.71 | 0 | 7.1k / 0.7k | 0.42 |
+| D3 f06f0d37 | builder v1-baseline | train | `gold_chart`, `too_much_content` | 3 | 6 | 0.50 | 0 | 6.6k / 1.6k | 0.39 |
+| D4 3de9f411 | deck-style | train | `gold_chart`, `too_much_content` | 3 | 6 | 0.83 | 0 | 7.1k / 1.2k | 0.38 |
+| X1 485948a7 | fixer deck-style (69eb6ea5) | train | all 5 | 1 | 5 | 0.80 | 0 | 8.8k / 0.7k | 0.49 |
+| D1 cc147802 | fixer v1-baseline (83424386) | train | `source_contradiction` | 3 | 3 | 0.00 | 0 | 8.9k / 0.7k | 0.30 |
+| D2 4d063603 | fixer deck-style | train | `source_contradiction` | 3 | 3 | 0.00 | 0 | 9.4k / 0.7k | 0.31 |
+
+Calibration (8 judge calls, about USD 0.40) brings the total to **about USD 5.34**, inside the
+USD 10 cap. Held-out is an aggregate only (F2), plus the deterministic verdicts of the two
+deck-style cases, which the bar needs.
+
+What it showed:
+
+- **One cause, on `deck_style_code`.** Every failing row of the three candidates (and B0's row)
+  fails `deck_style_use_score` alone: the builder adds a heading or label over each column and
+  paints it inline with token values (`font-size: var(--fs-subtitle); color:
+  var(--brand-core-ink)`). The judge passed every one of those rows. Neither targeted change moved
+  it: `deck-style` 1/3 (S1), 2/9 pooled with T1 and F1; `deck-style-b` 0/3; `deck-style-c` 1/3, 1/8
+  pooled with T2. `deck_style_table` passed every row of every candidate (3/3 in each screen, 1/1
+  in F1).
+- **Finalist: `deck-style`**, the best of three on the screen and the tie-break. Held-out (F2):
+  0.71 (5 of 7), 0 judge errors; both deck-style cases 1/1 by the deterministic scorers. The
+  recorded v1 held-out builder rate is 0.40 (2026-10-08, another digest, model and prompt), so F2
+  is not below it. No same-digest v1 held-out run was made.
+- **Existing cases** (F1 against B0, each ×1; D3 and D4 ×3): `chart_no_data` 0/1 → 1/1,
+  `gold_bullets`, `gold_stats` and `deck_style_table` 1/1 → 1/1, `gold_chart` 1/1 → 0/1 (D: v1 1/3,
+  `deck-style` 3/3), `too_much_content` 1/1 → 0/1 (D: 2/3 each). The F1 drops are known v1 causes:
+  inline paint on an added heading with a hard-coded chart hex (judge), and overflow on the
+  overloaded brief. Neither case carries a deck style, so the block does not apply to them.
+- **Fixer** (X1): `brief_not_delivered`, `contrast_failure`, `overflow` and `rogue_colour` 1/1.
+  `source_contradiction` 0/1, and 0/3 for both v1 (D1) and the candidate (D2): the fixer corrects
+  the figure and returns `scripts: ""`, which drops the chart's init (`chart-init-timeout`). The
+  fixer's OUTPUT line says "updated Chart.js init code if charts changed; otherwise empty string",
+  and production applies the empty scripts (`fixed_scripts`, `src/services/graph/nodes.py`). This is
+  a v1 defect, unchanged by this pass. The recorded 1.00 is from 2026-10-06 (another model and
+  prompt).
+- **Acceptance bar** (plan Task 9). **Missed on one point.**
+  1. `deck_style_code` at least 2/3 on train: **missed** (1/3 in S1; 2/9 pooled). 1/1 on held-out:
+     met.
+  2. `deck_style_table` at least 2/3 on train and 1/1 on held-out: met (3/3, 1/1).
+  3. Every existing builder and fixer case at least its recorded rate minus one row: met (above).
+  After three builder candidates the best one was promoted, as the brief directs, and the gap is
+  recorded here: the Haiku builder still paints an added heading inline with token values.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller for this change:
+  screened ×3 on the two new cases, with the finalist on all train ×1 and held-out ×1 (the skill
+  says ×5 and ×3); the tie-break and cause-check runs (T, D) are train only; the deterministic
+  verdicts of the two held-out deck-style cases were read to apply the bar; and the pass promoted,
+  edited `INSTRUCTIONS` and committed.
+- **Shipped.** `deck-style` is the builder's v1 prompt in `src/core/skills/builder.py`
+  (`d7b7e1ee35c9`, previously `181a982b59e1`), and the fixer's `deck-style` is the fixer's
+  (`69eb6ea52400`, previously `8342438644d4`). Promoted with
+  `python -m evals.harness.promote --config builder=evals/configs/builder/deck-style.yaml --run-id builder=74fe64e68bb247259c235d43b9c029c8 --config fixer=evals/configs/fixer/deck-style.yaml --run-id fixer=485948a7ff6940ada5fcbc8d650eb3f6`,
+  and the frontend lifecycle contract was re-recorded. The builder and fixer rows in the earlier
+  tables describe previous prompts.
+- **Still open.**
+  - `deck_style_code`'s inline-painted headings (above).
+  - The fixer drops a chart's script on a text-only fix (`source_contradiction`).
+  - The builder judge prompt does not describe `deck_style`, and it fails both held-out references.

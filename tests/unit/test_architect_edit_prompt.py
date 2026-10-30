@@ -56,11 +56,13 @@ HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
     "de59d43a7ff03e4a6e303de0505f35733548af8eafec1d2a6f6b8cd1c0dc9d13"
 )
 
+# builder and fixer re-pinned for their promoted deck-style prompts
+# (evals/configs/builder/deck-style.yaml, evals/configs/fixer/deck-style.yaml).
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
+    "builder": "d7b7e1ee35c9017817a5af2bae4102496718de62dd1e9125be2a6f56103224dc",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
-    "fixer": "8342438644d4665e929d7fdbd694d0024e401546ae06a9566161b309adb4c82a",
+    "fixer": "69eb6ea52400cc241d716da61bf9bb7f1260bf6526303045abd0e357c9ac865a",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }

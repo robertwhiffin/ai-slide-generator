@@ -1,0 +1,6 @@
+# Fixer v1 prompt: fix toward the architect's deck style (DECK STYLE block) when the payload
+# carries deck_style; today's rules unchanged without one.
+agent_key: fixer
+name: fixer-deck-style
+base: v1
+prompt_file: deck-style.md
