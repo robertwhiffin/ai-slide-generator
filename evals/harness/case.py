@@ -125,24 +125,45 @@ def meridian_section_css() -> str:
         return f.read()
 
 
-def meridian_deck_style_context() -> dict:
-    """The architect's ``deck_style_context`` for the Meridian bundle.
+MERIDIAN_TEMPLATE_ENTRY = "templates/standard/index.html"
 
-    Production computes it as ``deck_style_context(token_css, style_block)``
-    (``architect_node``).  For Meridian, ``token_css`` is the bundle's
-    ``colors_and_type.css`` and ``style_block`` is the ``<style>`` element of the
-    standard template layout, the two inputs ``section_css.txt`` is the
-    concatenation of.
+
+def meridian_deck_style_context() -> dict:
+    """The architect's ``deck_style_context`` for the Meridian bundle, as production derives it.
+
+    Production: the bundle import keeps the declared CSS sources
+    (``design_system_service._declared_css_paths``) and the template entry HTML;
+    ``materialize_templates`` builds the template row (``token_css`` joined by
+    ``_build_token_css``, ``layout_html`` asset-rewritten and root-tag normalised);
+    ``resolve_template_bytes`` takes the ``<style>`` CSS out of that layout
+    (``_extract_style_blocks_css``, ``""`` when there is none); and ``architect_node``
+    sends ``deck_style_context(token_css, style_block)``.  This runs those same
+    functions over the fixture bundle, with no database, so it cannot drift from them.
     """
-    import re
+    from types import SimpleNamespace
 
     from src.domain.deck_style import deck_style_context
+    from src.services.design_system_service import _declared_css_paths
+    from src.services.design_system_templates import materialize_templates
+    from src.services.template_sections import _extract_style_blocks_css
 
     bundle = MERIDIAN_DIR / "bundle"
-    token_css = (bundle / "colors_and_type.css").read_text()
-    layout = (bundle / "templates" / "standard" / "index.html").read_text()
-    style_block = re.search(r"<style[^>]*>(.*?)</style>", layout, re.S).group(1)
-    return deck_style_context(token_css, style_block)
+    manifest = json.loads((bundle / "_ds_manifest.json").read_text())
+
+    def _file(path: str, kind: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            path=path, kind=kind, data=(bundle / path).read_bytes(), asset_id=None, mime=""
+        )
+
+    files = [_file(p, "css") for p in _declared_css_paths(manifest) if (bundle / p).is_file()]
+    files += [_file(t["entryPath"], "template") for t in manifest["templates"]]
+    design_system = SimpleNamespace(id=None, manifest_json=manifest, files=files, templates=[])
+    template = next(
+        t for t in materialize_templates(design_system) if t.entry_path == MERIDIAN_TEMPLATE_ENTRY
+    )
+    return deck_style_context(
+        template.token_css or "", _extract_style_blocks_css(template.layout_html or "")
+    )
 
 
 def meridian_resolved_style() -> str:

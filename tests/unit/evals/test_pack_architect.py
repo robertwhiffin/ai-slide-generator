@@ -701,10 +701,14 @@ def _serialised(obj) -> bytes:
 
 
 def _without_slide_keys(data: bytes) -> bytes:
-    """A payload.json's bytes with the two #313 keys removed, re-serialised as the generator does.
+    """A payload.json's bytes with the two #313 keys and ``deck_style_context`` removed,
+    re-serialised as the generator does.
 
     The file must already be in the generator's serialisation, so re-serialising cannot hide a
     formatting change; removing the keys then leaves every other key, value and order as written.
+    The removed keys' values are pinned elsewhere, by
+    ``test_committed_slide_keys_are_the_production_helper`` and
+    ``test_committed_deck_style_context_is_the_production_derivation``.
     """
     obj = json.loads(data)
     assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
@@ -717,7 +721,8 @@ def _without_deck_style_context(data: bytes) -> bytes:
     """A payload.json's bytes with only ``deck_style_context`` removed (deck-style Task 5).
 
     The key was added to every architect payload on purpose; a payload.json digest is checked on
-    the payload without it, so no case is re-pinned.
+    the payload without it, so no case is re-pinned.  Its value is pinned instead by
+    ``test_committed_deck_style_context_is_the_production_derivation``.
     """
     obj = json.loads(data)
     assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
@@ -727,7 +732,8 @@ def _without_deck_style_context(data: bytes) -> bytes:
 def test_existing_cases_are_byte_identical(generated):
     """D7, D11: the five existing cases are their 679d2f21 bytes.
 
-    payload.json is compared with the two #313 keys stripped: it may differ only by those keys.
+    payload.json is compared with the two #313 keys and ``deck_style_context`` stripped: it may
+    differ only by those three keys.
     """
     got = {
         path: hashlib.sha256(
@@ -1037,6 +1043,23 @@ def test_committed_slide_keys_are_the_production_helper(cid):
     assert {k: p[k] for k in SLIDE_KEYS} == architect_slide_payload(
         p["conversation"], p["message"], positions
     )
+
+
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_committed_deck_style_context_is_the_production_derivation(cid):
+    """Each committed payload's ``deck_style_context`` is what ``architect_node`` sends for the
+    Meridian brand (deck-style Task 5).
+
+    The byte-identity digests strip this key, so its value is pinned here.
+    ``case.meridian_deck_style_context`` runs production's own import, materialise and
+    extraction functions over the bundle; the guard keeps it from passing on an empty context:
+    the tokens come from the bundle's CSS and the classes from the template's ``<style>``.
+    """
+    ctx = case.load_case(AGENT, cid, root=COMMITTED).payload[DECK_STYLE_CONTEXT_KEY]
+    assert ctx == case.meridian_deck_style_context()
+    assert set(ctx) == {"design_tokens", "template_classes"}
+    assert ctx["design_tokens"].get("--brand-core-primary") == "#0F766E"
+    assert {"slide", "stat-value"} <= set(ctx["template_classes"])
 
 
 def test_edit_calibration_still_fails_on_the_off_by_one():
