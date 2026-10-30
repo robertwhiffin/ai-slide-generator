@@ -169,3 +169,56 @@ describe('ChatPanel carries notice details onto chat messages', () => {
     expect(within(disclosures[0]).getByText('foreman')).toBeInTheDocument();
   });
 });
+
+describe('ChatPanel carries the data analyst tag onto chat messages', () => {
+  const REPORT = 'Trips rose 4% in 10001. | zip | trips |\n| 10001 | 1227 |';
+
+  beforeEach(() => {
+    getSession.mockReset();
+    sendChatMessage.mockReset();
+  });
+
+  it('reload: a history row with metadata.agent renders the analyst card; others do not', async () => {
+    getSession.mockResolvedValue({
+      session_id: 'notice-session',
+      messages: [
+        row('architect reply', { node: 'architect' }),
+        row(REPORT, { agent: 'data_analyst' }),
+      ],
+    });
+
+    mount();
+
+    await screen.findByText('Data analyst');
+    const cards = screen.getAllByTestId('analyst-report');
+    expect(cards).toHaveLength(1);
+    expect(screen.getByText('architect reply')).toBeInTheDocument();
+    expect(within(cards[0]).getByText('Data analyst')).toBeInTheDocument();
+  });
+
+  it('poll/stream: an assistant event with agent data_analyst renders the card; one without does not', async () => {
+    getSession.mockResolvedValue({
+      session_id: 'notice-session',
+      messages: [row('earlier line', null)],
+    });
+    sendChatMessage.mockImplementation(
+      (_sessionId: string, _message: string, _ctx: unknown, onEvent: (e: unknown) => void) => {
+        onEvent({ type: 'assistant', content: 'plain reply' });
+        onEvent({ type: 'assistant', content: REPORT, agent: 'data_analyst' });
+        return () => {};
+      },
+    );
+
+    const ref = createRef<ChatPanelHandle>();
+    mount(ref);
+    await screen.findByText('earlier line');
+
+    await act(async () => {
+      ref.current!.sendMessage('hi');
+    });
+
+    await screen.findByText('Data analyst');
+    expect(screen.getAllByTestId('analyst-report')).toHaveLength(1);
+    expect(screen.getByText('plain reply')).toBeInTheDocument();
+  });
+});

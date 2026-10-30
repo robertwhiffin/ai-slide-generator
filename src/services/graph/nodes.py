@@ -307,6 +307,7 @@ def _emit(
     content: Optional[str] = None,
     error: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    agent: Optional[str] = None,
 ) -> None:
     """Queue one event, or do nothing when no emitter is installed.
 
@@ -315,7 +316,8 @@ def _emit(
     """
     emit_event(
         StreamEvent(
-            type=event_type, content=content, error=error, metadata=metadata
+            type=event_type, content=content, error=error, metadata=metadata,
+            agent=agent,
         )
     )
 
@@ -4009,6 +4011,7 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         StreamEventType.ASSISTANT,
         content=message,
         metadata={"node": "data_analyst", "outcome": out.outcome},
+        agent="data_analyst",
     )
     # Persisted as ``info``, NOT ``llm_response``, and the difference is not
     # cosmetic.  This is user-facing prose from a node that speaks to the user, so
@@ -4021,7 +4024,7 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     # (GraphState declares no analyst channel, Ruling C-7), which is the field the
     # architect answers from.  ``info`` is the shipped type for exactly this:
     # durable and visible, deliberately outside ``_AI_TYPES``.
-    _say(state, message, message_type="info")
+    _say(state, message, message_type="info", metadata={"agent": "data_analyst"})
     if genie is not None:
         _say_genie_one_access(state, genie)
 

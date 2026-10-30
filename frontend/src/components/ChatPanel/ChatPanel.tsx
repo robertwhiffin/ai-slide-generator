@@ -160,6 +160,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
             arguments: msg.metadata.tool_input || {},
           } : undefined,
           details: readMessageDetails(msg.metadata?.details),
+          agent: typeof msg.metadata?.agent === 'string' ? msg.metadata.agent : undefined,
         }));
         setMessages(uiMessages);
       } else {
@@ -358,6 +359,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
                 content: event.content!,
                 timestamp: new Date().toISOString(),
                 details: readMessageDetails(event.metadata?.details),
+                agent: event.agent,
               },
             ]);
           }

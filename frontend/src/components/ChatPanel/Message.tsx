@@ -131,6 +131,45 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
     );
   }
 
+  // The data analyst's report: a violet, collapsed-by-default card (first sentence as the preview).
+  if (message.role === 'assistant' && message.agent === 'data_analyst') {
+    const firstSentence = (message.content.trim().split(/(?<=[.!?])\s/)[0] ?? '').split('\n')[0];
+    const preview =
+      firstSentence.length > 140 ? `${firstSentence.slice(0, 139)}…` : firstSentence;
+    return (
+      <div className="flex justify-start">
+        <div
+          className="max-w-[85%] rounded-xl border border-violet-200 bg-violet-50 px-3.5 py-2.5"
+          data-testid="analyst-report"
+        >
+          <button
+            onClick={() => setIsExpanded(prev => !prev)}
+            className="group flex w-full items-center justify-between gap-2 text-left text-sm font-medium text-violet-900 hover:text-violet-700 transition-colors"
+            type="button"
+            aria-expanded={isExpanded}
+          >
+            <span className="flex-1">
+              <span className="block">Data analyst</span>
+              {preview && (
+                <span className="block text-xs font-normal text-violet-700 mt-0.5">{preview}</span>
+              )}
+            </span>
+            {isExpanded ? (
+              <ChevronDown className="size-4 shrink-0 text-violet-700" />
+            ) : (
+              <ChevronRight className="size-4 shrink-0 text-violet-700" />
+            )}
+          </button>
+          {isExpanded && (
+            <pre className="mt-2 whitespace-pre-wrap break-words font-sans text-[13px] leading-relaxed text-foreground">
+              {message.content}
+            </pre>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // Regular user/assistant messages with v0 styling
   const isUser = message.role === 'user';
   // #321: a failure notice's technical half (metadata.details), assistant messages only.

@@ -1789,3 +1789,44 @@ def test_the_users_token_is_kept_out_of_the_runs_repr(graph_env):
     assert run is not None and run.token == TOKEN
     assert TOKEN not in repr(run)
     assert "token=" not in repr(run)
+
+
+# ---------------------------------------------------------------------------
+# The analyst's report is tagged ``agent: "data_analyst"`` so the chat can draw
+# it as its own collapsed card.  It stays ``info`` (never replayed to models:
+# see test_architect_edit_retry's ``_conversation`` test and
+# test_conversation_turns, which pin ``info`` outside ``_AI_TYPES``).
+# ---------------------------------------------------------------------------
+
+
+def test_the_analyst_report_is_tagged_agent_data_analyst_with_genie_one(graph_env, monkeypatch):
+    _sign_in()
+    _set_agent_config(graph_env, graph_env.session_id, GENIE_ONE_ONLY)
+    _serve(monkeypatch, _Replay(q1_replies()))
+    _install(monkeypatch, _ToolLoopRuntime(_success(), [Q1]))
+
+    t = _run_analyst(_analyst_state(graph_env))
+
+    assistant = [e for e in t.events if e.type == StreamEventType.ASSISTANT]
+    assert [e.agent for e in assistant] == ["data_analyst"]
+    info = [r for r in t.rows if r["message_type"] == "info"]
+    assert len(info) == 1
+    assert (info[0]["metadata"] or {}).get("agent") == "data_analyst"
+    # Progress lines are not the report: they carry no agent tag.
+    for r in t.rows:
+        if r["message_type"] == "tool_call":
+            assert "agent" not in (r["metadata"] or {})
+
+
+def test_the_analyst_report_is_tagged_agent_data_analyst_without_genie_one(graph_env, monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    _serve(monkeypatch, _Replay(q1_replies()))
+    _install(monkeypatch, _ToolLoopRuntime(_success(["genie"]), [Q1]))
+
+    t = _run_analyst(_analyst_state(graph_env))
+
+    assistant = [e for e in t.events if e.type == StreamEventType.ASSISTANT]
+    assert [e.agent for e in assistant] == ["data_analyst"]
+    info = [r for r in t.rows if r["message_type"] == "info"]
+    assert [r["content"] for r in info] == [TODAY_MESSAGE]
+    assert (info[0]["metadata"] or {}).get("agent") == "data_analyst"

@@ -4218,6 +4218,8 @@ class SessionManager:
             "tool_input": metadata.get("tool_input"),
             "tool_output": msg["content"] if event_type == "tool_result" else None,
             "message_id": msg["id"],
+            # Which agent spoke (the data analyst's report is drawn as its own card).
+            "agent": metadata.get("agent"),
             # Only a failure notice's technical detail (#321) — never the row's whole
             # metadata, which for a tool row carries its input. None on every other
             # row, including every row persisted before notices had details.
