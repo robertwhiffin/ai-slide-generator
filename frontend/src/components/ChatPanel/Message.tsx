@@ -133,7 +133,9 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
 
   // The data analyst's report: a violet, collapsed-by-default card (first sentence as the preview).
   if (message.role === 'assistant' && message.agent === 'data_analyst') {
-    const firstSentence = (message.content.trim().split(/(?<=[.!?])\s/)[0] ?? '').split('\n')[0];
+    // A lookahead, not a lookbehind: Safari before 16.4 rejects lookbehind regex literals at parse time.
+    const trimmed = message.content.trim();
+    const firstSentence = (trimmed.match(/^[\s\S]*?[.!?](?=\s|$)/)?.[0] ?? trimmed).split('\n')[0];
     const preview =
       firstSentence.length > 140 ? `${firstSentence.slice(0, 139)}…` : firstSentence;
     return (
