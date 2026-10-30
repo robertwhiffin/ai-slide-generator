@@ -308,6 +308,7 @@ const SLOTS: Slot[] = [
   { name: 'narrative_arc[0] (ordered item start)', set: (s, v) => { s.narrative_arc[0] = v; } },
   { name: 'slides[0].purpose (after a bold label)', set: (s, v) => { s.slides[0].purpose = v; } },
   { name: 'slides[0].slide_type (after a bold label)', set: (s, v) => { s.slides[0].slide_type = v; } },
+  { name: 'slides[0].look (after a bold label)', set: (s, v) => { s.slides[0].look = v; } },
   { name: 'slides[0].data_references[0] (after a bold label)', set: (s, v) => { s.slides[0].data_references[0] = v; } },
   { name: 'figures[0].key (bullet start)', set: (s, v) => { s.resolved_data.figures[0].key = v; } },
   { name: 'figures[0].value (after "key: ")', set: (s, v) => { s.resolved_data.figures[0].value = v; } },
@@ -558,6 +559,13 @@ describe('empty and optional values (D2)', () => {
     const spec = golden();
     spec.slides[0].slide_type = '';
     expect(slideBlock(render(spec), 'Slide 1')).toContain('\n- **Slide type:** Not set.\n');
+  });
+
+  it('an empty-string look is non-null, so its line is kept and reads Not set.', () => {
+    // Sabotage target: a truthiness test `if (slide.look)` instead of `!= null`.
+    const spec = golden();
+    spec.slides[0].look = '';
+    expect(slideBlock(render(spec), 'Slide 1')).toContain('\n- **Look:** Not set.\n');
   });
 
   const DATA_DEFAULTS = '## Data\n\n### Synthesis\n\nNot set.\n\n### Figures\n\nNone.\n\n### Gaps\n\nNone.\n';
