@@ -1405,8 +1405,141 @@ scores its use. No prompt changed and no real-model run was made.
   logo and both page tokens). It is added in the architect generator only; the shared
   `deck_style_technical.json` is unchanged. The architect `cases_digest` moves for this case alone.
   The promoted architect prompt still says "No page numbers", so it fails `build_technical_deck`
-  by design until its prompt pass.
+  by design until its prompt pass. (That pass is below: the baseline failed it 0/2 on the footer,
+  and `brand-footer` is now promoted.)
 - The builder now has eight cases per split, 57 per split across the harness.
 - **Not measured.** No fixer case carries a deck style, so the fixer's tool path is bound and
   tested but not measured. The new case is not calibrated:
   `python -m evals.run_eval --agent builder --calibrate --cases deck_style_icons [--split heldout]`.
+
+## Architect: brand footer, page numbers and icon intent (Addendum A), 2026-10-30
+
+The architect prompt now gives every deck-style build a footer with the brand logo and the page
+number (spec Addendum A §A2, §A5, calls Q1 and Q3). The Task 8 rule "No page numbers" is retired
+(Ruling RA4). This pass calibrated the judge on the two cases whose payload or reference moved,
+ran the promoted prompt as the baseline on the build cases, screened one candidate, ran it on the
+rest of train and on held-out, and promoted it.
+
+- **Setup.** As in the deck-style pass above: architect `system.ai.claude-opus-5-5`, judge
+  `databricks-claude-sonnet-5`, profile `tellr-dev`. The cost is estimated at USD 4 / 20 per million
+  agent input / output tokens. The judge is costed at USD 0.03 a call. That is its payload sized
+  from this pass's train answers: USD 0.029 a call on edits and 0.032 to 0.038 on builds. The
+  USD 0.05 upper bound is given beside it.
+- **Calibration** (`--calibrate --cases build_technical_deck,restyle_deck`, both splits). B4
+  added the footer piece to `build_technical_deck`'s reference, and B2 added `logos` to every
+  payload.
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `build_technical_deck` | reference passed; should_fail passed (not trusted) | same |
+  | `restyle_deck` | reference passed; should_fail passed (not trusted) | trusted |
+
+  The judge passes both new references, so nothing changed. As before (Ruling R30), both cases are
+  decided by `contract` and `expected_category`. The footer check is in `_deck_style_score`. The
+  judge verdicts are reported, not counted.
+- **The candidate** `brand-footer` (`47c7a388`, `evals/configs/architect/`) is `deck-style-b` with
+  these changes:
+  - DECK STYLE: the "No page numbers" sentence is replaced by four:
+    - On a build, the deck style always includes a footer piece (named footer, class
+      `dk-footer`) styled to match the template's footer. Its `example_html` holds a logo handle
+      from `deck_style_context.logos` and `{{slide:number}} / {{slide:count}}`. It reuses a
+      template footer class and its two slots: the logo in the first, the tokens in the second,
+      never a third child. The template's sample number is placeholder (correction A21).
+    - It picks two logos, one for light grounds and a light-on-dark one for dark slides, named in
+      the piece's use line. It uses only handles from `logos`.
+    - Every slide except the cover carries one footer. A bound slide fills its template's own
+      footer, and an unbound slide uses the piece (Q1). Each look except the cover's names its
+      footer, and a dark slide's look says it uses the light-on-dark logo (Q3).
+    - Content slides share the default light ground, and dark sections stay dark.
+  - The look rule gains: a look may ask for icons but never names an icon handle, because builders
+    search for icons themselves.
+  - One edit bullet: a deck style without a footer piece gains one only when the user asks for it
+    or for a full rebuild. Without it, a restyle of an older deck-style deck could rebuild every
+    slide to add footers.
+  - VISUAL / TEMPLATE BINDING's brand-furniture sentence now says this: furniture in the selected
+    section's markup stays as it ships; the footer logo comes from `deck_style_context.logos`, and
+    icons from the builders' search (Ruling RA11).
+  - Every other byte is unchanged.
+- No second candidate was written. The screen showed no prompt-caused failure, and the cap left no
+  room for one.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD (judge 0.05) |
+|---|---|---|---|---|---|---|---|---|---|
+| calibration | — | both | 2 | — | 8 judge calls | see above | 0 | — | 0.24 (0.40) |
+| S1 ec1798ba | brand-footer (47c7a388) | train | 3 | 3 | 9 | 0.89 | 0 | 18.6k / 7.0k | 2.20 (2.38) |
+| B1 e64bb2ef | v1-baseline (3527e7bc) | train | 2 builds | 2 | 4 | 0.50 | 0 | 16.0k / 8.4k | 1.05 (1.13) |
+| F1 e66eb3cb | brand-footer | train | the other 19 | 2 | 38 | 1.00 | 2 | 20.4k / 1.0k | 5.02 (5.78) |
+| H1 f84c20e5 | brand-footer | held-out | all 22 | 1 | 22 | 1.00 | 0 | 18.5k / 1.7k | 3.02 (3.46) |
+
+S1's cases are `build_technical_deck`, `restyle_deck` and `build_request`. S1 and F1 together cover
+every train case at ×2 or more. **Total about USD 11.5** with the judge at USD 0.03 (agent USD 9.09,
+81 judge calls), under the USD 12 cap. It is USD 13.1 at the USD 0.05 upper bound. Held-out is
+reported as an aggregate only (H1).
+
+What it showed:
+
+- **Baseline (B1).** `build_request` passed 2/2. `build_technical_deck` failed 0/2 on its
+  deterministic scorer: "no footer piece … to carry the page number and count".
+- **Screen (S1).** `build_request` 3/3 and `restyle_deck` 3/3. The restyle was
+  `deck_changes.deck_style` alone, with no operations and no footer added. `build_technical_deck`
+  passed `contract` and `expected_category` 3/3, and so the footer check too.
+  - One of its rows failed the judge, for a 17-slide deck against the 7-slide reference. B1 had the
+    same complaint on a baseline row, and the prompt asks for 14 to 20 slides. It is the case's
+    known judge gap, not a prompt cause.
+  - Every build row wrote the footer piece the rules ask for. It was named `footer`, on
+    `slide-footer dk-footer`, with the logo inside the first span and the tokens in the second. Its
+    use line names `{{ds-asset:9001}}` for light slides and the reverse `{{ds-asset:9002}}` for
+    dark ones.
+  - Every cover look said "no footer". Every other look named the footer, and every dark divider
+    or closing look named the light-on-dark logo.
+  - Five of the six rows asked for icons in a look ("each with an icon"), and no look named an
+    asset handle.
+  - Every slide was unbound: no case has a bindable section.
+- **The other 19 train cases (F1).** All passed 2/2 on every scored row. `confirm_design` and
+  `discuss` each had one judge parse error (the row is skipped), with `contract` and
+  `expected_category` passing on both rows. Every edit was answered with operations, and
+  `redescribe_deck` with the full spec.
+- **Held-out (H1).** 1.00 (22 of 22), with 0 judge errors and 0 infra errors. So every held-out
+  case passed 1/1, the two deck-style cases included.
+- **Acceptance bar** (Task B5a). **Met.**
+  1. Every existing case passed at least its baseline minus one row. `build_request` was 3/3
+     against B1's 2/2. The other 19 were 2/2 each.
+     - Their baseline was not re-run, to stay inside the cap. The same prompt (`3527e7bc`) passed
+       each 2/2 in the deck-style pass's F1 (f6766e50), on payloads that differ only by the
+       `logos` key.
+     - So the strictest bar applies: at least 1/2 each. All 19 clear it.
+  2. `build_technical_deck` and `restyle_deck` each passed at least 2/3 on train and 1/1 on
+     held-out. `build_technical_deck` scored 2/3 by the harness and 3/3 on its deterministic
+     scorers, `restyle_deck` 3/3, and both passed 1/1 on held-out (H1 1.00).
+- **Output tokens on the build cases** (no bar). The mean was 9,321 over S1's six build rows,
+  against 8,372 over B1's four: +949 (+11%). Against the ten `deck-style-b` build rows of the
+  deck-style pass (9,020), it is +301.
+  - The answers grew by about 550 characters (about 150 tokens): the footer piece and "dk-footer"
+    in each look. The rest is reasoning, whose spread is wide on both prompts: about 2.5k to 5.2k
+    per row.
+  - On the build rows, mean call time was 79.3 s against B1's 71.9 s.
+  - The size and reasoning sentences of `deck-style-b` are unchanged, and the CSS stayed at
+    2,880 to 3,200 characters.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller:
+  - the screen ran ×3 on three cases, the finalist ran train ×2 and held-out ×1;
+  - B1 covered the two build cases only;
+  - the finalist's train evidence is two runs, S1 (×3) and F1 (×2);
+  - this pass edited `INSTRUCTIONS`, promoted and committed.
+- **Shipped.** `brand-footer` is the architect's v1 prompt in `src/core/skills/architect.py`
+  (`47c7a388cb95`, previously `3527e7bcafc4`). It was promoted with
+  `python -m evals.harness.promote --config architect=evals/configs/architect/brand-footer.yaml --run-id architect=e66eb3cbb723442a8fbfa011195e3cc8`
+  (screen run ec1798baa4d647ec85c19b0cfc24f84a).
+  - The content hash and the hashing literal were re-pinned by hand.
+  - The `visual_template_binding` block hash was re-pinned (RA11). `BINDING_RULES` still holds
+    unchanged.
+  - The frontend lifecycle contract was re-recorded.
+  - `deck-style{,-b}.md` keep the retired ban; they describe the previous prompts.
+- **Still open.**
+  - No architect case has a bindable section, so the bound-slide footer rule (Q1) is not measured
+    offline.
+  - The builders' use of the footer piece and its dark-slide logo is measured in the builder pass
+    (B5b), not here.
+  - The build reviewer may flag a dark divider's footer.
+  - The deck-style pass's "prompt wording to revisit" items are still open.
+  - The judge's slide-count complaint on `build_technical_deck`: the reference has 7 slides, and
+    the prompt asks for 14 to 20. It is a case and judge-prompt issue for the owner.

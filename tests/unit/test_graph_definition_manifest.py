@@ -704,7 +704,7 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "3527e7bcafc444f397047e9018121c6a57028e3efcfe5364f854a4419db760b8",
+    "architect": "47c7a388cb9522c9c9446effa8f8480d565594248d140cd482bd4fe46d9fb72f",
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
     "builder": "0e60b438e4beaabb66c1b48db07416cdffa30471a5debf73d6447801086d28cc",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
@@ -1160,9 +1160,10 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
     # then for the architect edit operations schema-contract digest, then for the
     # promoted architect edit operations prompt (edit-ops), then for its follow-up
     # tweaks (edit-ops-b), then for the architect deck-style schema-contract digest, then
-    # for the promoted architect deck-style prompt (deck-style-b).
+    # for the promoted architect deck-style prompt (deck-style-b), then for the promoted
+    # brand-footer prompt (Addendum A).
     assert definition_content_hash(built({"1": "a"})) == (
-        "f1a7e50420abd2760c0ce4e32d7b514710e231634fcbf61a63d7fa9c50155213"
+        "fb6e6174eb539e1361cb859e47a2a5337119949ce4d74e96046a2be227bee68d"
     )
 
 

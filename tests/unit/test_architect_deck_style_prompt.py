@@ -3,7 +3,18 @@
 Plan Task 8 (architect deck style).  Spec:
 docs/superpowers/specs/2026-10-29-architect-deck-style-design.md, sections 1, 2 and 5,
 plus the Task 8 brief's prompt changes and its controller overrides (Rulings R19 and
-R26, m4, the sanitiser rules, no page numbers) and PLAN-CORRECTIONS C25.
+R26, m4, the sanitiser rules) and PLAN-CORRECTIONS C25.  Task 8's "no page numbers"
+rule is retired (Addendum A, Ruling RA4, PLAN-CORRECTIONS-A A19).
+
+Addendum A (Task B5a; spec Addendum A section A5 and calls Q1 and Q3) adds FOOTER_RULES,
+ICON_RULES and GROUND_RULES: the deck style always has a footer piece (a component whose
+name or class names contain "footer", the eval scorer's definition, A17) holding the logo
+handles chosen from ``deck_style_context.logos`` (one for light grounds, a light-on-dark
+one for dark slides) and both page tokens ``{{slide:number}}`` and ``{{slide:count}}``;
+every slide except the cover carries a footer (a bound slide fills its template's own
+footer, an unbound one uses the footer piece, never two footers); a look states icon
+intent but never names an icon handle, because builders search for icons themselves;
+content slides share the deck's default light ground while dark sections stay dark.
 
 The architect's ``deck_spec`` gains ``deck_style`` = ``{css, components: [{name,
 class_names, use, example_html}]}`` and each SlideSpec a ``look``; an edit restyles
@@ -42,8 +53,11 @@ Guards that are green today and must stay green (C25):
 
 Traps for the prompt author, pinned elsewhere: test_architect_edit_prompt.py's
 ``FORBIDDEN_BINDING_PATTERNS`` reject "every slide must have / should carry ..." and
-"non-null" anywhere in the prompt (write "write a look for every slide" instead), and
-test_skills.py rejects ``88px``, ``72px``, ``56px`` and ``1280x720`` in any skill.
+"non-null" anywhere in the prompt (write "write a look for every slide" or "every slide
+except the cover uses the footer piece" instead), its ``_slide_numbers_block`` needs
+exactly one paragraph starting ``SLIDE NUMBERS`` (so do not head the footer rule that
+way), and test_skills.py rejects ``88px``, ``72px``, ``56px`` and ``1280x720`` in any
+skill (Meridian's footer sits at ``bottom: 56px``: never quote it).
 """
 
 from __future__ import annotations
@@ -429,18 +443,10 @@ SANITISER_RULES: tuple[Rule, ...] = (
         (_forbids(r"\b(image functions?|image-set|cross-fade)\b", 30),),
         1,
     ),
-    (
-        "no_page_numbers",
-        "no page numbers",
-        (
-            _forbids(
-                r"(\bpage numb(ers?|ering)\b|\bnumber(s|ing)? (the )?(pages|slides)\b"
-                r"|\b(page|slide) (counters?|numbers? (in|on) (the |a )?footer)\b|\bn / n\b)",
-                30,
-            ),
-        ),
-        1,
-    ),
+    # "no_page_numbers" is retired (Ruling RA4, PLAN-CORRECTIONS-A A19): the owner reversed
+    # the section 1 ruling, so the footer piece now carries the page tokens
+    # (FOOTER_RULES "footer_piece_holds_both_page_tokens"), and
+    # test_the_page_number_ban_is_retired pins that the ban is gone.
 )
 
 LOOK_RULES: tuple[Rule, ...] = (
@@ -641,6 +647,218 @@ RULES: tuple[Rule, ...] = BUILD_RULES + SANITISER_RULES + LOOK_RULES + BINDING_R
 
 
 # ---------------------------------------------------------------------------
+# Addendum A (Task B5a): footer, page tokens, logos, icon intent, one ground
+# ---------------------------------------------------------------------------
+
+FOOTER = r"\bfooters?\b"
+#: The footer piece: "footer piece", "the component ... footer", or a dk- footer class
+#: (dk-footer, .dk-slide-footer).
+FOOTER_PIECE = (
+    r"(\bfooter (piece|component)s?\b|(?<![\w-])\.?dk-[\w-]*footer\b"
+    r"|\b(piece|component)s?\b[^.]{0,30}\bfooter\b)"
+)
+#: The eval scorer's definition of a footer piece (PLAN-CORRECTIONS-A A17): a component
+#: whose name or class names contain "footer".  A dk- footer class (every class starts
+#: with dk-) or the definition said in words.
+FOOTER_NAMED = (
+    r"((?<![\w-])\.?dk-[\w-]*footer\b"
+    r"|\b(name|names|class(es| names?|_names)?)\b[^.]{0,30}\b(contains?|includes?|with)\b"
+    r"[^.]{0,15}\bfooter\b"
+    r"|\b(named|called)\b[^.]{0,15}\bfooter\b)"
+)
+#: Where the logo handles come from: the payload's deck_style_context.logos.
+LOGOS_SOURCE = (
+    r"(\bdeck_style_context\.logos\b"
+    r"|\b(from|in|among|of)\s+(the\s+)?(payload's\s+)?(deck_style_context's\s+)?logos\b)"
+)
+NUMBER_TOKEN = r"\{\{slide:number\}\}"
+COUNT_TOKEN = r"\{\{slide:count\}\}"
+PAGE_TOKEN = r"\{\{slide:(number|count)\}\}"
+LIGHT_GROUND = r"\blight (grounds?|slides?|backgrounds?|sections?)\b"
+DARK_SLIDES = r"\bdark (slides?|sections?|grounds?|backgrounds?)\b|\bdividers?\b"
+#: The light-on-dark logo variant: "light-on-dark", "the reverse logo", "the light logo".
+LIGHT_ON_DARK = (
+    r"(\blight-on-dark\b|\bon-dark\b"
+    r"|\b(reverse[ds]?|white|knock-?out|inverse|negative|light) (logo|mark|variant|version|one"
+    r"|lockup)s?\b)"
+)
+#: "look" or "looks" (the plural reads "looks state icon intent").
+LOOKS = r"(?<![\w-])looks?(?![\w-])"
+ICON = r"\bicons?\b"
+#: Naming an icon: "an icon handle", "the icon's handle", "handles for icons", "pick icons".
+ICON_HANDLE = (
+    r"(\bicons?('s|s')? (handles?|ids?)\b|\bhandles? (for|of) (an |the |any )?icons?\b"
+    r"|\b(pick|picks|choose|chooses|select|selects)\b[^.;]{0,10}\bicons?\b)"
+)
+
+#: The retired Task 8 ban ("no page numbers"): its needle, kept to prove the ban is gone.
+PAGE_NUMBERS = (
+    r"(\bpage numb(ers?|ering)\b|\bnumber(s|ing)? (the )?(pages|slides)\b"
+    r"|\b(page|slide) (counters?|numbers? (in|on) (the |a )?footer)\b|\bn / n\b)"
+)
+PAGE_NUMBER_BAN = _forbids(PAGE_NUMBERS, 30)
+
+FOOTER_RULES: tuple[Rule, ...] = (
+    (
+        "deck_style_always_has_a_footer_piece",
+        "the deck style always includes a footer piece",
+        (DECK_STYLE, r"\balways\b|\bevery deck[_ ]style\b", FOOTER_PIECE),
+        1,
+    ),
+    (
+        "footer_piece_is_named_footer",
+        'A17: the footer piece\'s name or class names contain "footer" (dk-footer)',
+        (FOOTER_PIECE, FOOTER_NAMED),
+        1,
+    ),
+    (
+        "footer_piece_holds_both_page_tokens",
+        "RA4: the footer piece holds both page tokens, {{slide:number}} and {{slide:count}} "
+        "(replaces the retired no_page_numbers)",
+        (
+            FOOTER,
+            NUMBER_TOKEN,
+            COUNT_TOKEN,
+            r"\b(hold|holds|holding|carr(y|ies|ying)|include|includes|including|contain"
+            r"|contains|containing|has|have|with|show|shows|showing|put|puts)\b",
+        ),
+        2,
+    ),
+    (
+        "footer_piece_holds_logo_handles_from_logos",
+        "the footer piece holds the logo handle(s) chosen from deck_style_context.logos",
+        (FOOTER, r"\blogos?\b", r"\bhandles?\b", LOGOS_SOURCE),
+        2,
+    ),
+    # Width 1: at width 2 the one-ground sentence ("default light ground; dark sections
+    # ... stay dark") beside the footer sentence ("logo", "two footers") satisfied it with
+    # the light-ground logo clause deleted (B5a scratch sabotage).
+    (
+        "two_logos_one_for_light_grounds_one_for_dark",
+        "Q3: two logo handles, one for light grounds and one for dark slides",
+        (
+            r"\blogos?\b",
+            LIGHT_GROUND,
+            DARK_SLIDES,
+            r"\b(two|both|one|pair|second|other)\b",
+        ),
+        1,
+    ),
+    (
+        "dark_slides_use_the_light_on_dark_logo",
+        "Q3: dark slides (dividers, closing) use the light-on-dark logo",
+        (
+            DARK_SLIDES,
+            LIGHT_ON_DARK,
+            r"\b(use|uses|using|for|on|carr(y|ies)|gets?|takes?)\b",
+        ),
+        1,
+    ),
+    (
+        "every_slide_except_the_cover_carries_a_footer",
+        "every slide except the cover carries a footer",
+        (
+            r"\b(every|each|all)\b[^.]{0,20}\bslides?\b",
+            r"(\b(except|but|other than|apart from|save|besides)\b[^.]{0,15}\bcover\b"
+            r"|\bcover\b[^.]{0,40}\b(no|without|not)\b[^.]{0,20}\bfooter\b"
+            r"|\bnot (on )?the cover\b)",
+            FOOTER,
+        ),
+        1,
+    ),
+    (
+        "a_bound_slide_fills_its_template_footer",
+        "Q1: a bound slide fills its template's own footer",
+        (
+            r"\bbound\b",
+            r"(\b(template|section)('s|s')?\b[^.]{0,30}\bfooters?\b|\bown footers?\b"
+            r"|\bits footer\b)",
+            r"\b(fill|fills|filled|filling)\b",
+        ),
+        1,
+    ),
+    (
+        "an_unbound_slide_uses_the_footer_piece",
+        "Q1: an unbound slide uses the deck style's footer piece",
+        (
+            r"\bunbound\b|\bnot bound\b|\bno section\b|\bwithout a (bound )?section\b",
+            FOOTER_PIECE,
+            r"\b(use|uses|using|carr(y|ies)|gets?|takes?|cop(y|ies)|place|places)\b",
+        ),
+        1,
+    ),
+    (
+        "never_two_footers",
+        "Q1: a slide never carries two footers",
+        (
+            r"(\b(never|not|no|nor)\b[^.;]{0,30}\b(two|a second|double|another|both)\b"
+            r"[^.;]{0,10}\bfooters?\b"
+            r"|\b(one|a single|only one|just one) footer\b[^.;]{0,20}\b(per|on (each|every|a|any))"
+            r" slide\b"
+            r"|\b(never|not|no)\b[^.;]{0,20}\bfooters? twice\b)",
+        ),
+        1,
+    ),
+)
+
+ICON_RULES: tuple[Rule, ...] = (
+    (
+        "looks_state_icon_intent",
+        'a look states icon intent ("an icon on each box")',
+        (
+            LOOKS,
+            ICON,
+            r"\b(intent|state|states|stating|say|says|ask|asks|asking|describe|describes|want"
+            r"|wants|call for|calls for|request|requests)\b",
+        ),
+        1,
+    ),
+    (
+        "looks_never_name_icon_handles",
+        "a look never names an icon handle",
+        (LOOKS, _forbids(ICON_HANDLE, 40)),
+        2,
+    ),
+    (
+        "builders_search_for_icons_themselves",
+        "builders search the design system for icons themselves",
+        (
+            r"\bbuilders?\b",
+            r"\b(search|searches|searching|find|finds|look up|looks up|fetch|fetches)\b",
+            ICON,
+        ),
+        2,
+    ),
+)
+
+GROUND_RULES: tuple[Rule, ...] = (
+    (
+        "content_slides_share_the_default_light_ground",
+        "one ground: content slides share the deck's default light ground",
+        (
+            r"\bcontent slides?\b",
+            r"\bground\b",
+            r"\b(default|light)\b",
+            r"\b(share|shares|same|one|single|all|every)\b|\bdeck's\b",
+        ),
+        1,
+    ),
+    (
+        "dark_sections_stay_dark",
+        "dark sections (cover, dividers) stay dark",
+        (
+            r"\b(cover|covers|dividers?|closing)\b",
+            r"(\b(stay|stays|remain|remains|keep|keeps|kept|left)\b[^.]{0,20}\bdark\b"
+            r"|\bdark\b[^.]{0,20}\b(stay|stays|remain|remains|unchanged)\b)",
+        ),
+        2,
+    ),
+)
+
+ADDENDUM_A_RULES: tuple[Rule, ...] = FOOTER_RULES + ICON_RULES + GROUND_RULES
+
+
+# ---------------------------------------------------------------------------
 # The new rules (red until the deck-style prompt is promoted)
 # ---------------------------------------------------------------------------
 
@@ -650,6 +868,46 @@ RULES: tuple[Rule, ...] = BUILD_RULES + SANITISER_RULES + LOOK_RULES + BINDING_R
 )
 def test_architect_prompt_states_deck_style_rule(rule_id, description, needles, width):
     assert _holds(_instructions(), needles, width), f"architect prompt lacks: {description}"
+
+
+@pytest.mark.parametrize(
+    ("rule_id", "description", "needles", "width"),
+    ADDENDUM_A_RULES,
+    ids=[r[0] for r in ADDENDUM_A_RULES],
+)
+def test_architect_prompt_states_addendum_a_rule(rule_id, description, needles, width):
+    assert _holds(_instructions(), needles, width), f"architect prompt lacks: {description}"
+
+
+def _page_number_bans(text: str) -> list[str]:
+    """Clauses that forbid page numbers outright.
+
+    Two kinds of clause are not the retired ban: one with a page token in it or in a
+    neighbouring clause ("Never type a page number yourself. The footer holds
+    {{slide:number}} ..."), and one that exempts the cover ("the cover carries no page
+    number").
+    """
+    clauses = _clauses(text)
+    bans = []
+    for i, clause in enumerate(clauses):
+        if re.search(PAGE_NUMBER_BAN, clause):
+            near = " ".join(clauses[max(i - 1, 0) : i + 2])
+            if not (re.search(PAGE_TOKEN, near) or re.search(r"\bcover\b", clause)):
+                bans.append(clause)
+    return bans
+
+
+def test_the_page_number_ban_is_retired():
+    # Ruling RA4 / A19: the owner reversed the section 1 ruling.  Task 8's sentence ("No page
+    # numbers: ... a footer piece may style the footer but never numbers the slides") is
+    # gone, and no other clause bans page numbers outright.
+    plain = _plain(_instructions())
+    assert "no page numbers:" not in plain, "the retired 'No page numbers:' rule is still stated"
+    assert "never numbers the slides" not in plain, (
+        "the prompt still says the footer piece never numbers the slides"
+    )
+    bans = _page_number_bans(_instructions())
+    assert not bans, f"the prompt still bans page numbers: {bans}"
 
 
 def test_slidespec_fields_list_look():

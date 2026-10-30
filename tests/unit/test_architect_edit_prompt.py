@@ -46,8 +46,9 @@ from src.services.graph_definition_manifest import (
 # promoted edit-operations prompt (evals/configs/architect/edit-ops.yaml), then for
 # its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml), then for the
 # architect deck-style schema-contract re-pin (deck_style and look), then for the
-# promoted deck-style prompt (evals/configs/architect/deck-style-b.yaml).
-HEAD_ARCHITECT_CONTENT_HASH = "3527e7bcafc444f397047e9018121c6a57028e3efcfe5364f854a4419db760b8"
+# promoted deck-style prompt (evals/configs/architect/deck-style-b.yaml), then for the
+# promoted brand-footer prompt (evals/configs/architect/brand-footer.yaml, Addendum A).
+HEAD_ARCHITECT_CONTENT_HASH = "47c7a388cb9522c9c9446effa8f8480d565594248d140cd482bd4fe46d9fb72f"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
@@ -118,7 +119,11 @@ HEAD_UNCHANGED_BLOCK_HASHES = {
     # byte of these three blocks is unchanged.
     "deckspec_construction": "1beac208b08cfe80d0ca0baa9c52cd60ca43885a55e394740efa2b9af59b46c3",
     "slidespec_fields": "96ccd2ce7e8b332243dbef4add8d762be19b8481cce1b152522831c0c3a9ac39",
-    "visual_template_binding": "ab5b09f3d23ec5bbf875b671188a1798e2ad1a80cb48fa82117e6aba60574e56",
+    # Re-pinned by the brand-footer prompt (Addendum A, Ruling RA11): the brand-furniture
+    # sentence now sends the footer logo to deck_style_context.logos and icons to the
+    # builders' search, while furniture in the selected section's markup stays as it ships
+    # (BINDING_RULES still holds).  Every other byte of the block is unchanged.
+    "visual_template_binding": "7d27ec3cebd400f1ee6cfb79be97881df8d03c3fe8d0e61628ba1abbc6e556ed",
 }
 
 # The pre-Task-5 SLIDESPEC FIELDS block.  It must no longer appear verbatim.
