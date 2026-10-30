@@ -86,7 +86,7 @@ Today `AgentRuntime.run` makes one structured-output call per agent. For an agen
 
 - **Binding:** the model gets the granted tools plus the output schema as its final-answer tool.
 - **Each round:** run the tool calls, feed back the results, and repeat until the model calls the output schema.
-- **Code-enforced budget:** wall clock and question count. At the cap, the model gets one last round with tools withheld and an instruction to report what it has.
+- **Code-enforced budget:** wall clock and question count. When the budget runs out, the model gets a one-time budget notice telling it to report what it has; any later tool call is refused in-band with the same text. The tools stay bound (one binding).
 - **Everything else stays one call:** agents with no granted, configured tool, which today means everything except an analyst on a Genie One deck, keep exactly today's single call.
 
 Requirements on the loop:
@@ -94,7 +94,7 @@ Requirements on the loop:
 - It is the one tool-capable path, so the next tool type adds a registry entry, not a new loop.
 - **Registry:** agent-config tool type → agent-mode tool. Only `genie_one` is registered. The analyst's `TOOL_GRANTS` gains `genie_one`.
 - **Identity:** tool calls run as the user (`get_user_client()`), since the analyst is the user-scoped boundary (`src/core/skills/__init__.py`, Ruling C-11). Model calls keep their current identity.
-- **Isolation:** `run_candidate` (the admin workbench and the offline eval harness) gets no live tools. The eval harness can inject a fake tool.
+- **Isolation:** `run_candidate` (the admin workbench and the offline eval harness) gets no live tools: it refuses any toolset, so the eval harness cannot inject a fake tool either. Prompt work is measured on payloads that already carry figures, as the builder's source line was.
 - Identity logging, persisted-configuration errors and parse-error handling stay as they are.
 
 ### The Genie One tool
@@ -196,7 +196,7 @@ Both PRs are built in the same overnight run. Prompt shipping comes first, on `f
 2. **Scopes and consent ship in this PR,** because Genie One cannot work without `ai-gateway`.
 3. **Provenance uses the existing fields:** `ResolvedFigure.source` and `data_references`, plus a builder prompt line. No new SlideSpec field.
 4. **Figures travel to `resolved_data` through a declared state key and code,** so no model retypes a number between the analyst and the slide.
-5. **Code enforces the budget** (clock and question count), with one final round where the analyst reports without tools.
+5. **Code enforces the budget** (clock and question count), with a one-time budget notice telling the analyst to report what it has.
 6. **The longer limit applies to graph-mode jobs only.**
 7. **Genie One's output is marked as untrusted data,** and its instructions to agents are dropped.
 8. **Workbench and eval runs never call live Genie One.** Evals use recorded answers.
@@ -230,3 +230,16 @@ These override earlier sections of this document where they conflict. Each is re
 6. **At most 2 analyst rounds per turn.** A third `ask_data` in the same turn gets a code-owned "plan with what you have" message. *Why:* LangGraph's recursion limit (10007) is the only bound today, and each round can take minutes.
 7. **Genie figures stay code-owned across turns.** On a turn without new analyst figures, the prior spec's `Genie One` figures are re-applied verbatim, so an architect full-spec edit can't retype them.
 8. **Missing-scope detection matches both real texts:** `…does not have required scopes…`, seen in staging logs, and `…Invalid scope, required scopes…`, recorded from the SDK as a `PermissionDenied` parse error. The fixtures are in `tests/fixtures/genie_one/`.
+
+## Calls made during the build (2026-10-30, final review)
+
+These override earlier sections where they conflict. The owner reviews them.
+
+1. **A gateway 401, and a 403 for a token known to lack `ai-gateway`, are a missing scope (the consent message), not a missing grant.** This reverses Task 4's "a gateway 403 is `access_denied`" for the case where the token's scopes are known. The node also runs a pre-flight: it reads the user token's `scope` (else `scp`) claim, unverified, and when that claim is present and holds neither `ai-gateway` nor `all-apis`, it says the consent message once and runs the analyst without tools. A token whose scopes can't be read (not a JWT, or no claim) is never refused up front, and a 403 for it stays `access_denied` unless the error body names a scope.
+   - *Why:* the whole-branch review drove the real `databricks_mcp` / `httpx` stack against a local server. A 403 whose body said "Invalid scope, required scopes: ai-gateway" came back as `access_denied` (`raise_for_status` drops the body), and a 401 came back as a generic error. A missing `ai-gateway` is the most likely day-one failure, since existing users keep their old consent until they re-approve.
+   - *Evidence:* real tokens carry a space-separated `scope` claim (`ai-gateway offline_access` for `scope-test`; `all-apis offline_access` for a full CLI token, which is why `all-apis` counts). A bogus token sent to the real gateway gets HTTP 401.
+   - *Cost if wrong:* a real `EXECUTE` refusal for a token that lacks `ai-gateway` is labelled a consent problem (both need fixing then anyway). An expired or invalid token's 401 also shows the consent message.
+2. **Genie One is called with a fixed bearer, not `databricks_mcp`'s OAuth provider.** The client is still `DatabricksMCPClient`, whose `call_tool` (`asyncio.run`, error handling) is kept. Only its session's auth is swapped: the user's token from the `WorkspaceClient`, plus reading a 4xx/5xx body before `raise_for_status` sees it.
+   - *Why:* the provider answers a 401 by starting an OAuth discovery flow from an empty server URL. That flow fails with an unrelated `httpx.UnsupportedProtocol`, so a 401 could never be classified.
+   - *Evidence:* the fixed-bearer path was checked live, side-effect free, with the `scope-test` token: a poll for a bogus conversation got HTTP 200 and an in-band "Conversation not found".
+   - *Cost if wrong:* the override replaces the base class's private `_call_tools_async` (a dozen lines, on the non-deprecated `streamable_http_client`). A `databricks-mcp` upgrade that renames it would silently bring the provider back. The local-server 401 test would then fail.
