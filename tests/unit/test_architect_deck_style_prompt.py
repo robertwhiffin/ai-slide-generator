@@ -512,6 +512,11 @@ BINDING_RULES: tuple[Rule, ...] = (
 )
 
 EDIT_RULES: tuple[Rule, ...] = (
+    # Width 1 for these two: at width 2 the shipped prompt's neighbouring bullets (the
+    # missing-piece bullet's deck_changes.deck_style beside the contract bullet's "every
+    # slide ... deck style", and the m4 bullet's deck_changes.deck_style) satisfied them, so a
+    # deck-wide bullet rewritten to "a full deck_spec holding the whole revised style" stayed
+    # green (Task 8 review, I1).
     (
         "deck_wide_style_request_is_deck_changes_deck_style",
         "a deck-wide style request is deck_changes.deck_style",
@@ -521,13 +526,13 @@ EDIT_RULES: tuple[Rule, ...] = (
             rf"|\bstyle\b[^.]{{0,40}}{DECK_WIDE}|{DECK_WIDE}[^.]{{0,40}}\bstyle\b",
             DECK_CHANGES_STYLE,
         ),
-        2,
+        1,
     ),
     (
         "restyle_carries_the_whole_revised_style",
         "deck_changes.deck_style carries the whole revised style",
         (DECK_CHANGES_STYLE, WHOLE_STYLE),
-        2,
+        1,
     ),
     (
         "no_operations_unless_markup_must_change",
@@ -614,6 +619,21 @@ EDIT_RULES: tuple[Rule, ...] = (
             rf"|{DECK_STYLE}[^.]{{0,20}}\b(afresh|from scratch|anew)\b",
         ),
         2,
+    ),
+    (
+        "an_older_deck_keeps_no_deck_style_unless_asked",
+        "an older deck with no deck style keeps none unless the user asks for a style change or a "
+        "full rebuild (spec section 5)",
+        (
+            r"\b(older deck|deck (that )?(has|with) no deck[_ ]style|without a deck[_ ]style"
+            r"|has no deck[_ ]style)\b",
+            r"\b(keeps? none|keeps? no deck[_ ]style|stays? without"
+            r"|leave (it )?(absent|without))\b",
+            r"\b(unless|until|only (if|when))\b[^.]{0,40}\b(asks?|requests?)\b",
+            r"\bstyle change\b|\brestyl\w*",
+            r"\b(full )?rebuild\b",
+        ),
+        1,
     ),
 )
 

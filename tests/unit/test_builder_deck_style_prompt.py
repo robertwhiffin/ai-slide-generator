@@ -296,6 +296,20 @@ BUILDER_RULES: tuple[Rule, ...] = (
         (r"(bound|section)", r"replac[^.]{0,60}\bbody\b|\bbody\b[^.]{0,60}replac"),
         2,
     ),
+    (
+        # Ruling R26 (Task 8): without a design system an unbound slide's ground is the
+        # deck style's ground piece, since the block bans an inline background.
+        "without a design system, an unbound slide's ground is the deck style's ground piece "
+        "that the look names, its class on the slide's root element",
+        (
+            r"(no bound section|unbound|not bound|section_html is empty)",
+            r"(design_system_active is false|without a design system|no design system)",
+            r"\bground piece\b|\bground\b[^.]{0,60}\b(piece|class)\b",
+            LOOK + r"[^.]{0,20}\bnames?\b|\bnames?\b[^.]{0,30}" + LOOK,
+            r"\bclass\b[^.]{0,40}\broot\b|\broot\b[^.]{0,40}\bclass\b",
+        ),
+        1,
+    ),
 )
 
 FIXER_RULES: tuple[Rule, ...] = (

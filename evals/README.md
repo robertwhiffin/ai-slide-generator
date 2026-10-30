@@ -1237,10 +1237,41 @@ What it showed:
   previous prompts.
 - **Still open.**
   - The output-token bar, above. A build now reasons about twice as long as before. The CSS
-    itself is about 1k tokens.
+    itself is about 1k tokens. Split by case (B0 against the ten `deck-style-b` build rows):
+    - `build_technical_deck`: 7.2k → 9.1k (+1.9k), inside the bar. B0 already wrote a deck
+      style there, with unprefixed classes.
+    - `build_request`: 4.2k → 8.9k (+4.7k). B0 wrote no deck style there.
+    - On `build_request` the answer grew by about 6.9k characters (about 1.9k tokens, the
+      style and the looks), so reasoning added roughly 2.8k. On `build_technical_deck`
+      reasoning added roughly 1.3k.
   - The architect judge prompt does not describe `deck_style` or `look`, so the judge cannot
     separate either new case.
   - No architect case builds without a design system, so neither the `--dk-` palette nor the
     ground piece is measured. No builder case renders a no-design-system deck style either.
+  - No architect case has a bindable template section. In every case payload, train and
+    held-out, all four `template_sections` entries have `label: null` (so on main too). Every
+    build row binds 0 slides, so the bind-where-it-fits and frame-only sentences are not
+    measured offline.
+  - Spend: with the judge at its USD 0.05 upper bound the architect total is USD 22.02, USD 0.02
+    over the USD 22 cap. H1 was run with the running estimate at 18.69, to get the held-out
+    result the bar needs. With the judge at its measured USD 0.03 a call the total is about
+    USD 19.3.
   - S1's one `incomplete` build answer (a `deck_spec` with no `slides`) did not recur in the
     finalist's ten build rows.
+  - **Prompt wording to revisit in the next measured architect pass.** That pass should add a
+    case with no design system and a narrative (non-technical) build case. The Task 8 review
+    found these points, and none of them was measured:
+    - "It adds pieces and never restates the brand: no resets, type scale, slide frame or
+      token values of its own" has no condition. Without a design system, the lines after it
+      require a `--dk-` `:root` palette (token values of its own) and a ground piece (a slide
+      frame). Under a design system the finalist already writes full-slide pieces, e.g. a
+      `.dk-divider` that paints the slide's background with `height: 100%` and the slide
+      padding. Scope the ban: "With a design system, …".
+    - The size sentence gives two targets: "about 4,000 characters" (pinned) and "2,000 to
+      3,000". The model wrote 3,000 to 4,000. Its "do not draft or check the CSS or the looks
+      in your reasoning" sits beside rules that invite a check: "every component's
+      class_names are defined in its css" and "Name only pieces that exist".
+    - "The one deck-level change you make unasked" (a missing piece) is absolute. Yet a
+      confirmed design-contract change also brings a fresh deck style that the user did not
+      ask for in words. EDITING's "Change deck-level fields only when the user asks" does not
+      point to either exception.
