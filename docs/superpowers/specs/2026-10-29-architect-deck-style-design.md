@@ -314,3 +314,25 @@ The owner compared a devloop agent deck with legacy, built from the same prompt.
 - The logo cap's ordering heuristic.
 - Final token spellings.
 - Which response-boundary helper hosts the page-token substitution, as long as every reader path uses it.
+
+### Calls made without the owner (Addendum A; review these)
+
+- **One footer per slide** (Q1).
+  - On a bound slide the builder fills the template's own footer: its label slot, its number slot with `{{slide:number}} / {{slide:count}}`, and the logo.
+  - On an unbound slide it uses the deck style's footer piece, which the architect styles to match the template footer.
+  - A slide never carries two footers.
+- **Page numbers survive hand edits** (Q2).
+  - Substitution renders each value as `<span data-tellr-slide="number">3</span>` (and `"count"` for the total).
+  - Every slide save path (`update_slide` and the visual and HTML editors' saves) turns such spans back into tokens before storing.
+  - If an editor strips the marker, the number stays baked into that one slide; that is accepted.
+  - Today's baking of ds-asset data URIs is out of scope.
+- **Dark slides** (Q3). Every slide except the cover is numbered. The architect picks two logo handles from `logos`, one for light grounds and one for dark. Dark slides (dividers, closing) use the light-on-dark logo in their footer.
+- **Streaming** (Q4).
+  - Mid-build `slide_ready` events and `/chat/poll` slides substitute page tokens only. The number is position + 1 and the count is the spec's slide count. There is no DB read.
+  - ds-asset handles stay unresolved mid-build, as they are today, until the `complete` refetch.
+- **Bars and budget** (Q5).
+  - The +30 s time-to-first-slide bar is waived for search latency, because the owner chose builder search. Latency is measured and reported.
+  - The addendum gets its own eval cap of USD 25: architect ≤ 12, builder + fixer ≤ 11, slack 2.
+- **Workbench runs** (Q6). The tool is unbound in workbench test runs, which carry no design system. Publish approvals exercise the prompts only; the eval harness covers the tool path.
+- **Build reviewer and the dropped `white`** (Q7). If measurement shows the frozen reviewer flagging `off_template_treatment` on light-to-default grounds, the fallback is architect-side: prefer default-ground sections, or leave a slide unbound. The reviewer is not changed.
+- **Logo kinds.** `logos` draws on assets of kind `logo` and `lockup`, then ranks: default-ground variant first, SVG before raster.
