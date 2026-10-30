@@ -244,19 +244,25 @@ def test_dry_run_with_default_repo_root_reads_the_real_repo_and_writes_nothing()
     assert open(m.__file__, "rb").read() == before
 
 
-def test_changing_data_analyst_prompt_is_blocked_by_default(tree):
-    cfg = config.v1_baseline("data_analyst")
-    changed = config.AgentEvalConfig(
-        "data_analyst",
-        "x",
-        cfg.content.model_copy(update={"prompt_text": cfg.content.prompt_text + "\n\nEXTRA"}),
-        "ignored",
-    )
+def test_data_analyst_prompt_only_config_is_promotable_in_dry_run(tree):
+    """The data analyst ships on protected assembly v2, so the legacy-v1 lock no longer
+    applies: a prompt-only config is accepted and changes only that role's prompt_text."""
+    cfg = _changed("data_analyst", prompt_suffix="\n\nEXTRA")
     before = _read_all(tree)
-    with pytest.raises(promote.PromoteBlocked) as e:
-        promote.promote({"data_analyst": changed}, repo_root=tree)
-    assert "data_analyst" in str(e.value)
+    result = promote.promote({"data_analyst": cfg}, dry_run=True, repo_root=tree)
     assert _read_all(tree) == before
+    assert result["data_analyst"] == cfg.content_hash
+    assert {k: v for k, v in result.items() if k != "data_analyst"} == {
+        k: v for k, v in _current_hashes().items() if k != "data_analyst"
+    }
+    assert result["data_analyst"] != _current_hashes()["data_analyst"]
+
+
+def test_build_reviewer_prompt_change_is_still_refused_while_on_legacy_v1(tree):
+    cfg = _changed("build_reviewer", prompt_suffix="\n\nEXTRA")
+    with pytest.raises(promote.PromoteBlocked) as e:
+        promote.promote({"build_reviewer": cfg}, dry_run=True, repo_root=tree)
+    assert "build_reviewer" in str(e.value)
 
 
 def test_promote_blocked_is_a_runtime_error():
@@ -280,11 +286,7 @@ def test_non_dry_promote_of_empty_choice_is_byte_identical(tree, capsys):
 
 def test_non_dry_promote_of_all_seven_baselines_is_byte_identical(tree, capsys):
     before = _read_all(tree)
-    # The data analyst ships upgraded to protected assembly v2, so its prompt is no longer
-    # the transition's source composite and the transition lock refuses even its no-op
-    # baseline: promote cannot carry the data analyst at all until that lock is revisited.
-    promotable = [key for key in GRAPH_V1_AGENT_KEYS if key != "data_analyst"]
-    chosen = {key: config.v1_baseline(key) for key in promotable}
+    chosen = {key: config.v1_baseline(key) for key in GRAPH_V1_AGENT_KEYS}
     result = promote.promote(chosen, repo_root=tree)
     assert _read_all(tree) == before
     assert result == _current_hashes()
@@ -378,7 +380,7 @@ def test_pin_replacement_is_scoped_to_the_packaged_hashes_block(tree):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("role", ["build_reviewer", "data_analyst"])
+@pytest.mark.parametrize("role", ["build_reviewer"])
 def test_transition_locked_prompt_change_is_blocked_and_writes_nothing(tree, role, capsys):
     before = _read_all(tree)
     cfg = _changed(role, prompt_suffix="\n\nEXTRA RULE.")  # correctly hashed
@@ -495,7 +497,7 @@ def test_pin_entry_not_found_exactly_once_aborts_after_compute_and_writes_nothin
     assert _read_all(tree) == before
 
 
-@pytest.mark.parametrize("role", ["build_reviewer", "data_analyst"])
+@pytest.mark.parametrize("role", ["build_reviewer"])
 def test_lock_compares_against_transition_source_not_a_drifted_manifest(tree, role):
     """If the repo_root manifest's locked prompt has drifted from the transition's
     source_composite_prompt (e.g. hand-edited), a config carrying that drifted prompt
@@ -574,12 +576,12 @@ def test_cli_real_run_writes_the_promotion(tree, tmp_path):
 
 def test_cli_exits_non_zero_on_a_blocked_prompt_change(tree, tmp_path, capsys):
     cfg_path = _yaml(tmp_path, "d.yaml",
-                     'agent_key: data_analyst\nname: cli-blocked\nprompt_text: "CHANGED"\n')
+                     'agent_key: build_reviewer\nname: cli-blocked\nprompt_text: "CHANGED"\n')
     before = _read_all(tree)
-    code = promote.main(["--config", f"data_analyst={cfg_path}", "--repo-root", str(tree)])
+    code = promote.main(["--config", f"build_reviewer={cfg_path}", "--repo-root", str(tree)])
     err = capsys.readouterr().err
     assert code != 0
-    assert "data_analyst" in err and "prompt" in err
+    assert "build_reviewer" in err and "prompt" in err
     assert _read_all(tree) == before
 
 
