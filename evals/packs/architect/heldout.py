@@ -77,6 +77,17 @@ MESSAGES = {
     ),
     # The arc-review sweeper's describe-only turn: production's own message, as on train.
     "redescribe_deck": ARC_REVIEW_MESSAGE,
+    # Architect deck style: a fresh technical build on its own public topic, and a restyle of the
+    # code blocks on deck 2.
+    "build_technical_deck": (
+        "Build a deck for backend engineers on choosing a pgvector index for semantic search in "
+        "Postgres. Show the index definitions and a sample nearest-neighbour query as code, add a "
+        "comparison table of HNSW, IVFFlat and exact search, and badge each figure as measured or "
+        "untested. Measured on 1 million 768-dimension embeddings: HNSW answered in 4 ms at 98% "
+        "recall, IVFFlat in 9 ms at 92% recall, and exact search in 310 ms. Untested: our estimate "
+        "that building the HNSW index on 10 million rows takes 2 hours."
+    ),
+    "restyle_deck": "Please give every code listing a dark background and light lettering",
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
@@ -87,6 +98,7 @@ HAS_DECK = (
     "fill_blank_slide", "edit_beside_blank",
     *m.OPERATIONS_CASES,
     *m.DESCRIBE_ONLY_CASES,
+    *m.STYLED_DECK_CASES,
 )
 # The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
 BLANK_AT = 3
@@ -117,6 +129,8 @@ def _payload(cid):
     deck = case.gold_deck_spec(DECK) if has_deck else None
     if cid in m.BLANK_CASES:
         deck = m._blank_deck(deck, BLANK_AT)
+    if cid in m.STYLED_DECK_CASES:
+        deck = m._styled_deck(deck, RESTYLE_LOOKS)
     slide_keys = architect_slide_payload(
         conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else [],
         describe_only=describe_only,
@@ -353,6 +367,193 @@ REDESCRIBED_ARC = [
     "Walk through an evaluation and iteration workflow the team can use straight away",
     "Finish with a concrete checklist and the next steps",
 ]
+
+
+# Architect deck style on its own build topic and on deck 2 (``m._technical_deck``, ``m._restyled``
+# and ``m.RESTYLE_FAULT`` say what each case and its should_fail are).
+TECH_BUILD_MESSAGE = (
+    "Here is a 6-slide deck on choosing a pgvector index: the index definitions and a sample query "
+    "as code, a comparison table of HNSW, IVFFlat and exact search, and every figure badged "
+    "measured or untested."
+)
+TECH_DECK = {
+    "title": "Choosing a pgvector Index for Semantic Search",
+    "audience": "Backend engineers adding semantic search to a Postgres application",
+    "purpose": (
+        "Help the team choose a pgvector index by comparing HNSW, IVFFlat and exact search on "
+        "speed, recall and build cost"
+    ),
+    "argument": (
+        "HNSW answers fastest at the highest recall in the benchmark, IVFFlat is the cheaper "
+        "fallback and exact search only suits small tables; the HNSW build time at full size is "
+        "still untested"
+    ),
+    "call_to_action": (
+        "Use HNSW for the search feature, and time a full-size index build before the launch"
+    ),
+    "narrative_arc": [
+        "Open on the choice: which pgvector index to use for semantic search",
+        "Compare HNSW, IVFFlat and exact search side by side",
+        "Show the index definitions and a sample query as code",
+        "Report what the benchmark measured and what is still untested",
+        "Close with the recommendation and the next steps",
+    ],
+    "resolved_data": {
+        "synthesis": (
+            "On 1 million 768-dimension embeddings HNSW answered in 4 ms at 98% recall, IVFFlat in "
+            "9 ms at 92% recall and exact search in 310 ms. The 2-hour estimate for building the "
+            "HNSW index on 10 million rows is untested."
+        ),
+        "figures": [
+            {"key": "hnsw_query", "value": "HNSW answered in 4 ms at 98% recall",
+             "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"},
+            {"key": "ivfflat_query", "value": "IVFFlat answered in 9 ms at 92% recall",
+             "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"},
+            {"key": "exact_query", "value": "exact search answered in 310 ms",
+             "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"},
+            {"key": "hnsw_build_estimate",
+             "value": "an estimated 2 hours to build the HNSW index on 10 million rows",
+             "source": "The user's estimate (untested)"},
+        ],
+        "gaps": [],
+    },
+}
+QUERY_FIGURES = ["hnsw_query", "ivfflat_query", "exact_query"]
+TECH_SLIDES = [
+    {
+        "purpose": "Open the deck: choosing a pgvector index for semantic search",
+        "content_brief": (
+            "Cover slide with the title 'Choosing a pgvector Index for Semantic Search' and a "
+            "subtitle naming the three options: HNSW, IVFFlat and exact search"
+        ),
+        "assumes": "The audience knows the application stores its embeddings in Postgres",
+        "hands_off": "The index choice decides how fast and how accurate the search is",
+        "look": (
+            "Meridian cover: the title large on the left and the subtitle beneath it; no "
+            "deck-style pieces"
+        ),
+    },
+    {
+        "purpose": "Compare the three ways to search the embeddings",
+        "content_brief": (
+            "Comparison table of HNSW, IVFFlat and exact search, one row per option, with columns "
+            "for query time, recall, build cost and memory; a one-line takeaway beneath: HNSW is "
+            "the fastest at the highest recall, and costs the most to build"
+        ),
+        "assumes": "The audience has heard of approximate nearest-neighbour search",
+        "hands_off": "HNSW leads on speed and recall; its build cost is the price",
+        "data_references": QUERY_FIGURES,
+        "look": (
+            "Slide title above a full-width dk-table, one row per option; the takeaway in a "
+            "dk-callout beneath it"
+        ),
+    },
+    {
+        "purpose": "Show how each index is defined",
+        "content_brief": (
+            "Code listing of the index definitions: enable the vector extension, create an HNSW "
+            "index with its m and ef_construction settings, and the IVFFlat alternative with its "
+            "lists setting; two short bullets on what each setting trades"
+        ),
+        "assumes": "The audience can read SQL",
+        "hands_off": "Each index is one statement, and its settings trade build cost for recall",
+        "look": (
+            "Two short bullets on the left; a dk-code listing of the index statements on the "
+            "right, with keywords and comments marked"
+        ),
+    },
+    {
+        "purpose": "Show a nearest-neighbour query and how to tune it",
+        "content_brief": (
+            "Code listing of a sample query that orders the rows by cosine distance to a query "
+            "embedding and returns the top 10, with the ef_search setting above it, and a one-line "
+            "note beneath on raising ef_search for recall"
+        ),
+        "assumes": "The audience has seen the index definitions",
+        "hands_off": "One query and one setting control the speed-recall trade at search time",
+        "look": (
+            "A dk-code listing of the query across the left two-thirds; a dk-note beneath it on "
+            "ef_search"
+        ),
+    },
+    {
+        "purpose": "Report what the benchmark measured",
+        "content_brief": (
+            "Three stat cards from the benchmark on 1 million 768-dimension embeddings, each "
+            "badged measured: HNSW at 4 ms and 98% recall, IVFFlat at 9 ms and 92% recall, and "
+            "exact search at 310 ms"
+        ),
+        "assumes": "The audience has seen the options and how each is queried",
+        "hands_off": "HNSW was the fastest and the most accurate in the benchmark",
+        "data_references": QUERY_FIGURES,
+        "look": (
+            "The template's three stat cards, one per option, each with a dk-badge "
+            "dk-badge--measured beside its number"
+        ),
+    },
+    {
+        "purpose": "Close with the recommendation, what is still untested and the next steps",
+        "content_brief": (
+            "Recommend HNSW for the search feature; badge the estimated 2 hours to build it on 10 "
+            "million rows as untested; then the next steps in order: build the index on a "
+            "full-size copy, time the build, tune ef_search, then launch; end with the call to "
+            "action"
+        ),
+        "assumes": "The audience has seen what the benchmark measured",
+        "hands_off": "Choose HNSW, and time a full-size build before the launch",
+        "data_references": ["hnsw_build_estimate"],
+        "look": (
+            "The recommendation in a dk-callout; the build estimate with a dk-badge "
+            "dk-badge--untested beside it; the next steps as dk-steps"
+        ),
+    },
+]
+# The technical deck style on this topic: the fixture's CSS, with its components' examples about
+# pgvector.
+TECH_EXAMPLES = {
+    "code block": (
+        '<pre class="dk-code"><span class="cm">-- the ten nearest documents</span>\n'
+        '<span class="kw">SELECT</span> id <span class="kw">FROM</span> docs '
+        '<span class="kw">ORDER BY</span> embedding &lt;=&gt; <span class="str">\'[0.12, 0.08]\''
+        '</span> <span class="kw">LIMIT</span> 10;</pre>'
+    ),
+    "data table": (
+        '<table class="dk-table"><thead><tr><th>Index</th><th>Query time</th></tr></thead>'
+        '<tbody><tr><td>HNSW</td><td>4 ms</td></tr></tbody></table>'
+    ),
+    "steps": '<ol class="dk-steps"><li>Build the index</li><li>Tune ef_search</li></ol>',
+    "callout": '<div class="dk-callout">HNSW answers in 4 ms at 98% recall.</div>',
+    "note": '<p class="dk-note">Measured on 1 million 768-dimension embeddings.</p>',
+}
+# Deck 2's looks for restyle_deck, by position: what a deck-style build would have given it.
+RESTYLE_LOOKS = {
+    0: "Meridian cover: the deck title large and the subtitle beneath it; no deck-style pieces",
+    1: "The three pain points as bullets; the opportunity cost in a dk-callout beneath them",
+    2: (
+        "The four patterns as bullets on the left; a short dk-code listing of a system prompt "
+        "with a structured-output schema on the right; when to combine them in a dk-callout"
+    ),
+    3: "The template's three stat cards, one per figure; their source in a dk-note beneath them",
+    4: "The evaluation loop as dk-steps on the left; the commentary bullets on the right",
+    5: "The five-item checklist as dk-steps; the call to action in a dk-callout beneath it",
+}
+RESTYLE_MESSAGE = (
+    "I'll give every code listing a dark navy background with light text, and lighten the "
+    "keyword, function, string and comment colours so they stay readable on it. Nothing else "
+    "changes and no slide is rebuilt."
+)
+RESTYLE_RENAMED_MESSAGE = (
+    "I'll restyle the code listings as a new dark piece, dk-code-dark: a navy background with "
+    "light text. Nothing else changes and no slide is rebuilt."
+)
+
+
+def _tech_style() -> dict:
+    """The fixture with this topic's component examples."""
+    style = m.deck_style_fixture()
+    for component in style["components"]:
+        component["example_html"] = TECH_EXAMPLES.get(component["name"], component["example_html"])
+    return style
 
 
 def _checklist_brief(deck: dict, position: int) -> str:
@@ -660,6 +861,21 @@ def generate(out_dir: pathlib.Path | None = None):
         {"intent": "edit", "full_deck_spec": True},
         m._redescribed(gold, REDESCRIBE_MESSAGE),
         m._arc_as_deck_changes(REDESCRIBE_ARC_MESSAGE, REDESCRIBED_ARC),
+    )
+
+    # Architect deck style: the technical build (its should_fail authors no deck style and no
+    # looks) and the restyle of deck 2's code blocks (its should_fail renames dk-code).
+    tech = m._technical_deck(TECH_DECK, TECH_SLIDES, _tech_style())
+    _write(
+        out, "build_technical_deck", "positive", "", {"intent": "build", "deck_style": True},
+        m._out("build", TECH_BUILD_MESSAGE, deck_spec=tech),
+        m._out("build", TECH_BUILD_MESSAGE, deck_spec=m._unstyled(tech)),
+    )
+    _write(
+        out, "restyle_deck", "mutation", m.RESTYLE_FAULT,
+        {"intent": "edit", "positions": [], "deck_style_keeps": [m.CODE_CLASS]},
+        m._restyled(RESTYLE_MESSAGE),
+        m._restyled(RESTYLE_RENAMED_MESSAGE, renamed=True),
     )
 
 

@@ -165,8 +165,43 @@ def _reference_deck(reference: dict | None, current_deck_spec) -> tuple[DeckSpec
     return _validate_deck((reference or {}).get("deck_spec"))
 
 
+def _deck_style_keeps_problem(
+    out: ArchitectOutput, keeps: list[str], design_system_active: bool | None
+) -> str:
+    """Why a restyle answer does not keep ``keeps`` (``expect.deck_style_keeps``); empty if it does.
+
+    Production restyles a deck only through ``deck_changes.deck_style``, and cleans it with
+    ``sanitise_deck_style`` under the design-system flag before anything reads it. A style the
+    sanitiser drops whole refuses the edit, and a class the cleaned CSS no longer defines (one
+    defined only inside an ``@media`` block, say) is stripped from every kept slide that uses it.
+    So the classes are read from the SANITISED CSS (Ruling R27), never the answer's raw text.
+    """
+    changes = out.deck_changes
+    style = changes.deck_style if changes is not None else None
+    if style is None:
+        return (
+            "deck_changes.deck_style is missing; this restyle is expected to change the deck "
+            f"style and keep {', '.join(keeps)}")
+    cleaned, notes = sanitise_deck_style(style, design_system_active=bool(design_system_active))
+    if cleaned is None:
+        return (
+            f"the sanitiser drops deck_changes.deck_style whole ({'; '.join(notes)}), so "
+            f"production refuses the edit and the deck loses {', '.join(keeps)}")
+    missing = [name for name in keeps if name not in css_class_names(cleaned.css)]
+    if missing:
+        return (
+            f"deck_changes.deck_style, once sanitised, does not define {', '.join(missing)}; "
+            "every kept slide that uses it would lose its style")
+    return ""
+
+
 def _operations_score(
-    output: dict, expect: dict, current: dict | None, reference: dict | None
+    output: dict,
+    expect: dict,
+    current: dict | None,
+    reference: dict | None,
+    *,
+    design_system_active: bool | None = None,
 ) -> tuple[bool, str]:
     """Score an architect edit given as operations with production's own semantics (spec §9).
 
@@ -184,7 +219,10 @@ def _operations_score(
     * every slide not rebuilt equals, field for field, the current deck's slide at the persisted
       position its row comes from;
     * ``DECK_LEVEL_FIELDS`` and the design contract equal the reference's, composed when the
-      reference is itself given as operations.
+      reference is itself given as operations;
+    * when the case gives ``expect.deck_style_keeps`` (a restyle), ``_deck_style_keeps_problem``
+      finds nothing: ``deck_changes.deck_style`` is present and still defines every listed class
+      once sanitised under ``design_system_active`` (the case's), as production cleans it.
     """
     intent = output.get("intent") if isinstance(output, dict) else None
     if intent != "edit" or expect.get("intent") != "edit":
@@ -249,9 +287,17 @@ def _operations_score(
             "Operations: deck-level field design_contract differs from the reference's "
             "(a change rebuilds every slide)")
 
+    keeps = expect.get("deck_style_keeps")
+    if keeps is not None:
+        problem = _deck_style_keeps_problem(out, list(keeps), design_system_active)
+        if problem:
+            return False, f"Operations: {problem}"
+
     rationale = (
         f"Architect intent and operations match (rebuild {got_rebuild}, inserted {got_inserted}, "
         f"layout {got_layout})")
+    if keeps is not None:
+        rationale += f"; deck_changes.deck_style keeps {', '.join(keeps)}"
     targets = sorted(set(out.target_positions))
     if targets and targets != got_rebuild:
         rationale += (
@@ -586,7 +632,9 @@ def expected_category_score(
       A case whose ``expect`` has ``deck_style: true`` also needs ``_deck_style_score`` to pass,
       checked right after the intent (``design_system_active`` is the case's).
       An edit answer carrying ``operations`` or ``deck_changes`` is scored by ``_operations_score``
-      on every other edit case, as production's operations path takes it whatever else it carries.
+      on every other edit case, as production's operations path takes it whatever else it carries;
+      on a case whose ``expect`` has ``deck_style_keeps`` (a restyle) it also checks the sanitised
+      ``deck_changes.deck_style`` (``design_system_active`` is the case's).
       Otherwise an edit case whose ``expect`` has ``"inserted"`` is scored by ``_insert_score``.
       Both need the case's ``reference`` output and the payload's ``current_deck_spec``.
     - data_analyst: checks outcome match
@@ -613,7 +661,9 @@ def expected_category_score(
 
         # An edit given as operations is scored as production composes it (spec §9)
         if _operations_given(structured):
-            return _operations_score(structured, expect, current_deck_spec, reference)
+            return _operations_score(
+                structured, expect, current_deck_spec, reference,
+                design_system_active=design_system_active)
 
         # An insert is scored with production's own alignment, not the model's targets
         if structured.get("intent") == "edit" and "inserted" in expect:

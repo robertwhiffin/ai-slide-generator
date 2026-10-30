@@ -1,0 +1,184 @@
+{
+  "intent": "build",
+  "message": "Here is a 6-slide deck on choosing a pgvector index: the index definitions and a sample query as code, a comparison table of HNSW, IVFFlat and exact search, and every figure badged measured or untested.",
+  "deck_spec": {
+    "title": "Choosing a pgvector Index for Semantic Search",
+    "audience": "Backend engineers adding semantic search to a Postgres application",
+    "purpose": "Help the team choose a pgvector index by comparing HNSW, IVFFlat and exact search on speed, recall and build cost",
+    "argument": "HNSW answers fastest at the highest recall in the benchmark, IVFFlat is the cheaper fallback and exact search only suits small tables; the HNSW build time at full size is still untested",
+    "call_to_action": "Use HNSW for the search feature, and time a full-size index build before the launch",
+    "narrative_arc": [
+      "Open on the choice: which pgvector index to use for semantic search",
+      "Compare HNSW, IVFFlat and exact search side by side",
+      "Show the index definitions and a sample query as code",
+      "Report what the benchmark measured and what is still untested",
+      "Close with the recommendation and the next steps"
+    ],
+    "design_contract": {
+      "design_system_id": 3,
+      "template_id": 5
+    },
+    "resolved_data": {
+      "synthesis": "On 1 million 768-dimension embeddings HNSW answered in 4 ms at 98% recall, IVFFlat in 9 ms at 92% recall and exact search in 310 ms. The 2-hour estimate for building the HNSW index on 10 million rows is untested.",
+      "figures": [
+        {
+          "key": "hnsw_query",
+          "value": "HNSW answered in 4 ms at 98% recall",
+          "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"
+        },
+        {
+          "key": "ivfflat_query",
+          "value": "IVFFlat answered in 9 ms at 92% recall",
+          "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"
+        },
+        {
+          "key": "exact_query",
+          "value": "exact search answered in 310 ms",
+          "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"
+        },
+        {
+          "key": "hnsw_build_estimate",
+          "value": "an estimated 2 hours to build the HNSW index on 10 million rows",
+          "source": "The user's estimate (untested)"
+        }
+      ],
+      "gaps": []
+    },
+    "slides": [
+      {
+        "position": 0,
+        "purpose": "Open the deck: choosing a pgvector index for semantic search",
+        "content_brief": "Cover slide with the title 'Choosing a pgvector Index for Semantic Search' and a subtitle naming the three options: HNSW, IVFFlat and exact search",
+        "assumes": "The audience knows the application stores its embeddings in Postgres",
+        "hands_off": "The index choice decides how fast and how accurate the search is",
+        "data_references": [],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "Meridian cover: the title large on the left and the subtitle beneath it; no deck-style pieces"
+      },
+      {
+        "position": 1,
+        "purpose": "Compare the three ways to search the embeddings",
+        "content_brief": "Comparison table of HNSW, IVFFlat and exact search, one row per option, with columns for query time, recall, build cost and memory; a one-line takeaway beneath: HNSW is the fastest at the highest recall, and costs the most to build",
+        "assumes": "The audience has heard of approximate nearest-neighbour search",
+        "hands_off": "HNSW leads on speed and recall; its build cost is the price",
+        "data_references": [
+          "hnsw_query",
+          "ivfflat_query",
+          "exact_query"
+        ],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "Slide title above a full-width dk-table, one row per option; the takeaway in a dk-callout beneath it"
+      },
+      {
+        "position": 2,
+        "purpose": "Show how each index is defined",
+        "content_brief": "Code listing of the index definitions: enable the vector extension, create an HNSW index with its m and ef_construction settings, and the IVFFlat alternative with its lists setting; two short bullets on what each setting trades",
+        "assumes": "The audience can read SQL",
+        "hands_off": "Each index is one statement, and its settings trade build cost for recall",
+        "data_references": [],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "Two short bullets on the left; a dk-code listing of the index statements on the right, with keywords and comments marked"
+      },
+      {
+        "position": 3,
+        "purpose": "Show a nearest-neighbour query and how to tune it",
+        "content_brief": "Code listing of a sample query that orders the rows by cosine distance to a query embedding and returns the top 10, with the ef_search setting above it, and a one-line note beneath on raising ef_search for recall",
+        "assumes": "The audience has seen the index definitions",
+        "hands_off": "One query and one setting control the speed-recall trade at search time",
+        "data_references": [],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "A dk-code listing of the query across the left two-thirds; a dk-note beneath it on ef_search"
+      },
+      {
+        "position": 4,
+        "purpose": "Report what the benchmark measured",
+        "content_brief": "Three stat cards from the benchmark on 1 million 768-dimension embeddings, each badged measured: HNSW at 4 ms and 98% recall, IVFFlat at 9 ms and 92% recall, and exact search at 310 ms",
+        "assumes": "The audience has seen the options and how each is queried",
+        "hands_off": "HNSW was the fastest and the most accurate in the benchmark",
+        "data_references": [
+          "hnsw_query",
+          "ivfflat_query",
+          "exact_query"
+        ],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "The template's three stat cards, one per option, each with a dk-badge dk-badge--measured beside its number"
+      },
+      {
+        "position": 5,
+        "purpose": "Close with the recommendation, what is still untested and the next steps",
+        "content_brief": "Recommend HNSW for the search feature; badge the estimated 2 hours to build it on 10 million rows as untested; then the next steps in order: build the index on a full-size copy, time the build, tune ef_search, then launch; end with the call to action",
+        "assumes": "The audience has seen what the benchmark measured",
+        "hands_off": "Choose HNSW, and time a full-size build before the launch",
+        "data_references": [
+          "hnsw_build_estimate"
+        ],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "The recommendation in a dk-callout; the build estimate with a dk-badge dk-badge--untested beside it; the next steps as dk-steps"
+      }
+    ],
+    "deck_style": {
+      "css": "/* Technical deck style on Meridian: code, tables, status badges, steps, callouts and notes. */\n.dk-code {\n  margin: 0;\n  padding: var(--space-md);\n  background: var(--brand-core-surface);\n  border: 1px solid var(--brand-core-border);\n  border-radius: var(--radius-md);\n  color: var(--brand-core-ink);\n  font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, monospace;\n  font-size: calc(var(--fs-body) - 2px);\n  line-height: 1.6;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n}\n/* Token spans: only inside a code block. */\n.dk-code .kw { color: var(--brand-core-primary); font-weight: 600; }\n.dk-code .fn { color: var(--brand-accents-violet); }\n.dk-code .str { color: var(--brand-accents-sky); }\n.dk-code .cm { color: var(--brand-core-muted); font-style: italic; }\n\n.dk-table {\n  width: 100%;\n  border-collapse: collapse;\n  font-size: var(--fs-body);\n  font-variant-numeric: tabular-nums;\n}\n.dk-table th {\n  padding: var(--space-sm) var(--space-md);\n  background: var(--brand-core-primary);\n  color: var(--brand-core-background);\n  font-size: var(--fs-caption);\n  font-weight: 600;\n  letter-spacing: 0.06em;\n  text-align: left;\n  text-transform: uppercase;\n}\n.dk-table td {\n  padding: var(--space-sm) var(--space-md);\n  border-bottom: 1px solid var(--brand-core-border);\n  color: var(--brand-core-text);\n}\n.dk-table tbody tr:nth-child(even) td { background: var(--brand-core-surface); }\n\n.dk-badge {\n  display: inline-block;\n  padding: 2px 10px;\n  border-radius: 999px;\n  font-size: var(--fs-caption);\n  font-weight: 600;\n  letter-spacing: 0.04em;\n  line-height: 1.6;\n  text-transform: uppercase;\n}\n.dk-badge--measured { background: var(--brand-core-primary); color: var(--brand-core-background); }\n.dk-badge--untested {\n  background: var(--brand-core-surface);\n  color: var(--brand-core-muted);\n  border: 1px dashed var(--brand-core-muted);\n}\n\n.dk-steps { margin: 0; padding-left: 1.4em; }\n.dk-steps li { margin-bottom: var(--space-sm); padding-left: 0.3em; }\n.dk-steps li::marker { color: var(--brand-core-primary); font-weight: 700; }\n\n.dk-callout {\n  border-left: 4px solid var(--brand-core-primary);\n  padding: var(--space-sm) var(--space-md);\n  background: var(--brand-core-surface);\n  color: var(--brand-core-ink);\n}\n.dk-note { margin: 0; font-size: var(--fs-caption); color: var(--brand-core-muted); }\n",
+      "components": [
+        {
+          "name": "code block",
+          "class_names": [
+            "dk-code"
+          ],
+          "use": "Any SQL, shell or config listing. Mark keywords kw, function names fn, strings str and comments cm.",
+          "example_html": "<pre class=\"dk-code\"><span class=\"cm\">-- the ten nearest documents</span>\n<span class=\"kw\">SELECT</span> id <span class=\"kw\">FROM</span> docs <span class=\"kw\">ORDER BY</span> embedding &lt;=&gt; <span class=\"str\">'[0.12, 0.08]'</span> <span class=\"kw\">LIMIT</span> 10;</pre>"
+        },
+        {
+          "name": "data table",
+          "class_names": [
+            "dk-table"
+          ],
+          "use": "A comparison or results table of up to six rows; the header row names each column.",
+          "example_html": "<table class=\"dk-table\"><thead><tr><th>Index</th><th>Query time</th></tr></thead><tbody><tr><td>HNSW</td><td>4 ms</td></tr></tbody></table>"
+        },
+        {
+          "name": "status badge",
+          "class_names": [
+            "dk-badge",
+            "dk-badge--measured",
+            "dk-badge--untested"
+          ],
+          "use": "Marks a figure as measured or untested; place it beside the figure it qualifies.",
+          "example_html": "<span class=\"dk-badge dk-badge--measured\">Measured</span> <span class=\"dk-badge dk-badge--untested\">Untested</span>"
+        },
+        {
+          "name": "steps",
+          "class_names": [
+            "dk-steps"
+          ],
+          "use": "An ordered procedure of three to six steps.",
+          "example_html": "<ol class=\"dk-steps\"><li>Build the index</li><li>Tune ef_search</li></ol>"
+        },
+        {
+          "name": "callout",
+          "class_names": [
+            "dk-callout"
+          ],
+          "use": "The one takeaway of a technical slide, under its exhibit.",
+          "example_html": "<div class=\"dk-callout\">HNSW answers in 4 ms at 98% recall.</div>"
+        },
+        {
+          "name": "note",
+          "class_names": [
+            "dk-note"
+          ],
+          "use": "A one-line caveat or source under an exhibit.",
+          "example_html": "<p class=\"dk-note\">Measured on 1 million 768-dimension embeddings.</p>"
+        }
+      ]
+    }
+  },
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

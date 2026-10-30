@@ -1,0 +1,74 @@
+{
+  "intent": "edit",
+  "message": "I'll put every code block on a dark navy ground with light text, and lighten the keyword, function, string and comment colours so they stay readable on it. Nothing else changes and no slide is rebuilt.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": null,
+  "deck_changes": {
+    "title": null,
+    "audience": null,
+    "purpose": null,
+    "argument": null,
+    "call_to_action": null,
+    "narrative_arc": null,
+    "design_contract": null,
+    "resolved_data": null,
+    "deck_style": {
+      "css": "/* Technical deck style on Meridian: code, tables, status badges, steps, callouts and notes. */\n.dk-code {\n  margin: 0;\n  padding: var(--space-md);\n  background: var(--brand-core-ink);\n  border: 1px solid var(--brand-core-ink);\n  border-radius: var(--radius-md);\n  color: var(--brand-core-surface);\n  font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, monospace;\n  font-size: calc(var(--fs-body) - 2px);\n  line-height: 1.6;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n}\n/* Token spans: only inside a code block. */\n.dk-code .kw { color: var(--brand-core-background); font-weight: 600; }\n.dk-code .fn { color: var(--brand-core-background); }\n.dk-code .str { color: var(--brand-core-border); }\n.dk-code .cm { color: var(--brand-core-border); font-style: italic; }\n\n.dk-table {\n  width: 100%;\n  border-collapse: collapse;\n  font-size: var(--fs-body);\n  font-variant-numeric: tabular-nums;\n}\n.dk-table th {\n  padding: var(--space-sm) var(--space-md);\n  background: var(--brand-core-primary);\n  color: var(--brand-core-background);\n  font-size: var(--fs-caption);\n  font-weight: 600;\n  letter-spacing: 0.06em;\n  text-align: left;\n  text-transform: uppercase;\n}\n.dk-table td {\n  padding: var(--space-sm) var(--space-md);\n  border-bottom: 1px solid var(--brand-core-border);\n  color: var(--brand-core-text);\n}\n.dk-table tbody tr:nth-child(even) td { background: var(--brand-core-surface); }\n\n.dk-badge {\n  display: inline-block;\n  padding: 2px 10px;\n  border-radius: 999px;\n  font-size: var(--fs-caption);\n  font-weight: 600;\n  letter-spacing: 0.04em;\n  line-height: 1.6;\n  text-transform: uppercase;\n}\n.dk-badge--measured { background: var(--brand-core-primary); color: var(--brand-core-background); }\n.dk-badge--untested {\n  background: var(--brand-core-surface);\n  color: var(--brand-core-muted);\n  border: 1px dashed var(--brand-core-muted);\n}\n\n.dk-steps { margin: 0; padding-left: 1.4em; }\n.dk-steps li { margin-bottom: var(--space-sm); padding-left: 0.3em; }\n.dk-steps li::marker { color: var(--brand-core-primary); font-weight: 700; }\n\n.dk-callout {\n  border-left: 4px solid var(--brand-core-primary);\n  padding: var(--space-sm) var(--space-md);\n  background: var(--brand-core-surface);\n  color: var(--brand-core-ink);\n}\n.dk-note { margin: 0; font-size: var(--fs-caption); color: var(--brand-core-muted); }\n",
+      "components": [
+        {
+          "name": "code block",
+          "class_names": [
+            "dk-code"
+          ],
+          "use": "Any SQL, shell or config listing. Mark keywords kw, function names fn, strings str and comments cm.",
+          "example_html": "<pre class=\"dk-code\"><span class=\"cm\">-- publish every table</span>\n<span class=\"kw\">CREATE PUBLICATION</span> lakehouse <span class=\"kw\">FOR ALL TABLES</span>;</pre>"
+        },
+        {
+          "name": "data table",
+          "class_names": [
+            "dk-table"
+          ],
+          "use": "A comparison or results table of up to six rows; the header row names each column.",
+          "example_html": "<table class=\"dk-table\"><thead><tr><th>Mode</th><th>Lag</th></tr></thead><tbody><tr><td>Logical</td><td>2 s</td></tr></tbody></table>"
+        },
+        {
+          "name": "status badge",
+          "class_names": [
+            "dk-badge",
+            "dk-badge--measured",
+            "dk-badge--untested"
+          ],
+          "use": "Marks a figure as measured or untested; place it beside the figure it qualifies.",
+          "example_html": "<span class=\"dk-badge dk-badge--measured\">Measured</span> <span class=\"dk-badge dk-badge--untested\">Untested</span>"
+        },
+        {
+          "name": "steps",
+          "class_names": [
+            "dk-steps"
+          ],
+          "use": "An ordered procedure of three to six steps.",
+          "example_html": "<ol class=\"dk-steps\"><li>Create the publication</li><li>Start the subscriber</li></ol>"
+        },
+        {
+          "name": "callout",
+          "class_names": [
+            "dk-callout"
+          ],
+          "use": "The one takeaway of a technical slide, under its exhibit.",
+          "example_html": "<div class=\"dk-callout\">Replication lag stays under two seconds.</div>"
+        },
+        {
+          "name": "note",
+          "class_names": [
+            "dk-note"
+          ],
+          "use": "A one-line caveat or source under an exhibit.",
+          "example_html": "<p class=\"dk-note\">Measured on a four-node cluster.</p>"
+        }
+      ]
+    }
+  }
+}
