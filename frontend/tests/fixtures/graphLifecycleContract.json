@@ -1,6 +1,6 @@
 {
   "contract_version": 1,
-  "recorded_at_commit": "b78b5d5d037377180171c0c7f8af934677671ca7",
+  "recorded_at_commit": "851e9f399f15879395b3b5cdc80dbadaf0709549",
   "exchanges": [
     {
       "id": "S01-workbench",
@@ -16,8 +16,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-30T05:40:04.800535Z",
-          "effective_from": "2026-10-30T05:40:04.800535Z",
+          "published_at": "2026-10-30T06:30:51.585456Z",
+          "effective_from": "2026-10-30T06:30:51.585456Z",
           "effective_to": null
         },
         "draft": {
@@ -26,7 +26,7 @@
           "base_version_number": 1,
           "lock_version": 0,
           "updated_by": "system:bootstrap",
-          "updated_at": "2026-10-30T05:40:04.800535Z"
+          "updated_at": "2026-10-30T06:30:51.585456Z"
         },
         "nodes": [
           {
@@ -1405,9 +1405,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -1519,9 +1519,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -1835,8 +1835,8 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:04.943430",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.726495",
         "deck_mode": null,
         "graph_version": 1,
         "active_graph_version": 1,
@@ -1858,8 +1858,8 @@
         "session_id": "control-legacy",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:04.946403",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.729458",
         "deck_mode": null,
         "graph_version": null,
         "active_graph_version": 1,
@@ -1882,8 +1882,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-30T05:40:04.800535Z",
-          "effective_from": "2026-10-30T05:40:04.800535Z",
+          "published_at": "2026-10-30T06:30:51.585456Z",
+          "effective_from": "2026-10-30T06:30:51.585456Z",
           "effective_to": null
         },
         "draft": {
@@ -1892,7 +1892,7 @@
           "base_version_number": 1,
           "lock_version": 0,
           "updated_by": "system:bootstrap",
-          "updated_at": "2026-10-30T05:40:04.800535Z"
+          "updated_at": "2026-10-30T06:30:51.585456Z"
         },
         "nodes": [
           {
@@ -3271,9 +3271,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -3385,9 +3385,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -3712,7 +3712,7 @@
           "base_version_number": 1,
           "lock_version": 1,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:04.970768Z"
+          "updated_at": "2026-10-30T06:30:51.754914Z"
         },
         "definition": {
           "base_revision_id": 1,
@@ -3986,7 +3986,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -4053,7 +4053,7 @@
           "base_version_number": 1,
           "lock_version": 2,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:04.983283Z"
+          "updated_at": "2026-10-30T06:30:51.768029Z"
         },
         "definition": {
           "base_revision_id": 3,
@@ -4297,7 +4297,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -4379,7 +4379,7 @@
             "base_version_number": 1,
             "lock_version": 2,
             "updated_by": "lifecycle-admin@example.com",
-            "updated_at": "2026-10-30T05:40:04.983283Z"
+            "updated_at": "2026-10-30T06:30:51.768029Z"
           },
           "definitions": {
             "architect": {
@@ -5043,9 +5043,9 @@
             },
             "fix_reviewer": {
               "base_revision_id": 6,
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -5263,8 +5263,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-30T05:40:04.800535Z",
-          "effective_from": "2026-10-30T05:40:04.800535Z",
+          "published_at": "2026-10-30T06:30:51.585456Z",
+          "effective_from": "2026-10-30T06:30:51.585456Z",
           "effective_to": null
         },
         "draft": {
@@ -5273,7 +5273,7 @@
           "base_version_number": 1,
           "lock_version": 2,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:04.983283Z"
+          "updated_at": "2026-10-30T06:30:51.768029Z"
         },
         "nodes": [
           {
@@ -6652,9 +6652,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -6766,9 +6766,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -7084,7 +7084,7 @@
           "base_version_number": 1,
           "lock_version": 3,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.008069Z"
+          "updated_at": "2026-10-30T06:30:51.793029Z"
         },
         "definition": {
           "base_revision_id": 3,
@@ -7350,7 +7350,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -7423,7 +7423,7 @@
           "base_version_number": 1,
           "lock_version": 4,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.015474Z"
+          "updated_at": "2026-10-30T06:30:51.800325Z"
         },
         "definition": {
           "base_revision_id": 3,
@@ -7691,7 +7691,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -7749,7 +7749,7 @@
           "base_version_number": 1,
           "lock_version": 5,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.023711Z"
+          "updated_at": "2026-10-30T06:30:51.808451Z"
         },
         "definition": {
           "base_revision_id": 1,
@@ -8028,7 +8028,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -8107,7 +8107,7 @@
           "base_version_number": 1,
           "lock_version": 6,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.034210Z"
+          "updated_at": "2026-10-30T06:30:51.818853Z"
         },
         "definition": {
           "base_revision_id": 1,
@@ -8394,7 +8394,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -8476,8 +8476,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-30T05:40:04.800535Z",
-          "effective_from": "2026-10-30T05:40:04.800535Z",
+          "published_at": "2026-10-30T06:30:51.585456Z",
+          "effective_from": "2026-10-30T06:30:51.585456Z",
           "effective_to": null
         },
         "draft": {
@@ -8486,7 +8486,7 @@
           "base_version_number": 1,
           "lock_version": 6,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.034210Z"
+          "updated_at": "2026-10-30T06:30:51.818853Z"
         },
         "nodes": [
           {
@@ -9901,9 +9901,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -10015,9 +10015,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -10342,7 +10342,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.054740Z"
+          "updated_at": "2026-10-30T06:30:51.839702Z"
         },
         "definition": {
           "base_revision_id": 5,
@@ -10600,7 +10600,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -10657,8 +10657,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-30T05:40:04.800535Z",
-          "effective_from": "2026-10-30T05:40:04.800535Z",
+          "published_at": "2026-10-30T06:30:51.585456Z",
+          "effective_from": "2026-10-30T06:30:51.585456Z",
           "effective_to": null
         },
         "draft": {
@@ -10667,7 +10667,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.054740Z"
+          "updated_at": "2026-10-30T06:30:51.839702Z"
         },
         "nodes": [
           {
@@ -12082,9 +12082,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -12196,9 +12196,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -12535,9 +12535,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-10-30T05:40:04.800535Z",
+            "created_at": "2026-10-30T06:30:51.585456Z",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-10-30T05:40:04.800535Z",
+            "updated_at": "2026-10-30T06:30:51.585456Z",
             "is_synthetic_data_warning": true
           }
         ]
@@ -12624,11 +12624,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.023792003048583865,
+        "latency_ms": 0.025124987587332726,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-30T05:40:05.078180Z",
+        "run_at": "2026-10-30T06:30:51.863477Z",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -12717,11 +12717,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.023792003048583865,
+            "latency_ms": 0.025124987587332726,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-30T05:40:05.078180Z",
+            "run_at": "2026-10-30T06:30:51.863477Z",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -12852,7 +12852,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -12942,9 +12942,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-10-30T05:40:04.800535Z",
+            "created_at": "2026-10-30T06:30:51.585456Z",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-10-30T05:40:04.800535Z",
+            "updated_at": "2026-10-30T06:30:51.585456Z",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13042,11 +13042,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.018708000425249338,
+        "latency_ms": 0.018749997252598405,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-30T05:40:05.091720Z",
+        "run_at": "2026-10-30T06:30:51.877232Z",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -13146,11 +13146,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.018708000425249338,
+            "latency_ms": 0.018749997252598405,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-30T05:40:05.091720Z",
+            "run_at": "2026-10-30T06:30:51.877232Z",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -13281,7 +13281,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -13370,9 +13370,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-10-30T05:40:04.800535Z",
+            "created_at": "2026-10-30T06:30:51.585456Z",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-10-30T05:40:04.800535Z",
+            "updated_at": "2026-10-30T06:30:51.585456Z",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13478,11 +13478,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.01824999344535172,
+        "latency_ms": 0.018416991224512458,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-30T05:40:05.104378Z",
+        "run_at": "2026-10-30T06:30:51.889681Z",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -13590,11 +13590,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.01824999344535172,
+            "latency_ms": 0.018416991224512458,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-30T05:40:05.104378Z",
+            "run_at": "2026-10-30T06:30:51.889681Z",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -13725,7 +13725,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -13858,14 +13858,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.018708000425249338,
+        "latency_ms": 0.018749997252598405,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-30T05:40:05.091720Z",
+        "run_at": "2026-10-30T06:30:51.877232Z",
         "verdict": "rejected",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-10-30T05:40:05.111719Z",
+        "verdict_at": "2026-10-30T06:30:51.897576Z",
         "verdict_notes": "Lifecycle: rerun.",
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -13991,7 +13991,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -14113,14 +14113,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.023792003048583865,
+        "latency_ms": 0.025124987587332726,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-30T05:40:05.078180Z",
+        "run_at": "2026-10-30T06:30:51.863477Z",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-10-30T05:40:05.118441Z",
+        "verdict_at": "2026-10-30T06:30:51.904199Z",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14245,7 +14245,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -14386,14 +14386,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.01824999344535172,
+        "latency_ms": 0.018416991224512458,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-30T05:40:05.104378Z",
+        "run_at": "2026-10-30T06:30:51.889681Z",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-10-30T05:40:05.124141Z",
+        "verdict_at": "2026-10-30T06:30:51.910082Z",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14517,7 +14517,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -14650,11 +14650,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.01737498678267002,
+        "latency_ms": 0.017332989955320954,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-30T05:40:05.133501Z",
+        "run_at": "2026-10-30T06:30:51.919606Z",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -14754,11 +14754,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.01737498678267002,
+            "latency_ms": 0.017332989955320954,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-30T05:40:05.133501Z",
+            "run_at": "2026-10-30T06:30:51.919606Z",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -14847,14 +14847,14 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.018708000425249338,
+            "latency_ms": 0.018749997252598405,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-10-30T05:40:05.091720Z",
+            "run_at": "2026-10-30T06:30:51.877232Z",
             "verdict": "rejected",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-10-30T05:40:05.111719Z",
+            "verdict_at": "2026-10-30T06:30:51.897576Z",
             "verdict_notes": "Lifecycle: rerun.",
             "candidate_is_current": null,
             "base_release_is_current": null
@@ -14980,7 +14980,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -15113,14 +15113,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.01737498678267002,
+        "latency_ms": 0.017332989955320954,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-10-30T05:40:05.133501Z",
+        "run_at": "2026-10-30T06:30:51.919606Z",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-10-30T05:40:05.140703Z",
+        "verdict_at": "2026-10-30T06:30:51.927129Z",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -15242,7 +15242,7 @@
           },
           {
             "agent_key": "fix_reviewer",
-            "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "is_changed_from_base": false,
             "ready": true,
             "missing_required_case": false,
@@ -15298,7 +15298,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.054740Z"
+          "updated_at": "2026-10-30T06:30:51.839702Z"
         },
         "active_release": {
           "release_id": 1,
@@ -15307,8 +15307,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-30T05:40:04.800535Z",
-          "effective_from": "2026-10-30T05:40:04.800535Z",
+          "published_at": "2026-10-30T06:30:51.585456Z",
+          "effective_from": "2026-10-30T06:30:51.585456Z",
           "effective_to": null
         },
         "next_version_number": 2,
@@ -15541,7 +15541,7 @@
             },
             {
               "agent_key": "fix_reviewer",
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "is_changed_from_base": false,
               "ready": true,
               "missing_required_case": false,
@@ -15600,8 +15600,8 @@
         "session_id": "mid-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:05.152419",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.939412",
         "deck_mode": null,
         "graph_version": 1,
         "active_graph_version": 1,
@@ -15633,7 +15633,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.054740Z"
+          "updated_at": "2026-10-30T06:30:51.839702Z"
         }
       },
       "response_model": "src.api.schemas.graph_releases.StalePublicationResponse",
@@ -15656,8 +15656,8 @@
           "restored_from_release_id": null,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-30T05:40:05.157563Z",
-          "effective_from": "2026-10-30T05:40:05.157563Z",
+          "published_at": "2026-10-30T06:30:51.944711Z",
+          "effective_from": "2026-10-30T06:30:51.944711Z",
           "effective_to": null
         },
         "previous_release_id": 1,
@@ -15694,7 +15694,7 @@
           },
           "fix_reviewer": {
             "agent_definition_revision_id": 6,
-            "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "reused": true
           },
           "deck_reviewer": {
@@ -15732,7 +15732,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.157563Z"
+          "updated_at": "2026-10-30T06:30:51.944711Z"
         }
       },
       "response_model": "src.api.schemas.graph_releases.PublishReleaseSuccessResponse",
@@ -15752,8 +15752,8 @@
           "restored_from_release_id": null,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-30T05:40:05.157563Z",
-          "effective_from": "2026-10-30T05:40:05.157563Z",
+          "published_at": "2026-10-30T06:30:51.944711Z",
+          "effective_from": "2026-10-30T06:30:51.944711Z",
           "effective_to": null
         },
         "draft": {
@@ -15762,7 +15762,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.157563Z"
+          "updated_at": "2026-10-30T06:30:51.944711Z"
         },
         "nodes": [
           {
@@ -17213,9 +17213,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -17327,9 +17327,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -17643,8 +17643,8 @@
         "session_id": "new-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:05.179827",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.967246",
         "deck_mode": null,
         "graph_version": 2,
         "active_graph_version": 2,
@@ -17660,12 +17660,12 @@
       "request": null,
       "status": 200,
       "body": {
-        "session_id": "YEzJMEkTfQMEabB3g8lvsddyDkcM8Q-YhtfIpOMxOWY",
+        "session_id": "ANk9vPJ0qQ8GS37QbCD2Eu7oSuDAchJ-pM-TcmypvOA",
         "created_by": "contributor@example.com",
-        "title": "Session 2026-10-30 05:40",
+        "title": "Session 2026-10-30 06:30",
         "parent_session_id": "old-root",
         "is_contributor_session": true,
-        "created_at": "2026-10-30T05:40:05.190879",
+        "created_at": "2026-10-30T06:30:51.978399",
         "my_permission": "CAN_VIEW"
       },
       "response_model": null,
@@ -17678,10 +17678,10 @@
       "request": null,
       "status": 201,
       "body": {
-        "session_id": "wK1QYc-GEgRDQja_aYHi3-gArYHOQ4OargDlULg03MA",
-        "title": "Copy of Session 2026-10-30 05:40",
+        "session_id": "iUlLo2urTmgxcr0xEimD69Mw55IbdKfHXELcQqx4Tqs",
+        "title": "Copy of Session 2026-10-30 06:30",
         "created_by": "contributor@example.com",
-        "created_at": "2026-10-30T05:40:05.194676",
+        "created_at": "2026-10-30T06:30:51.982240",
         "slide_count": 1,
         "source_session_id": "old-root"
       },
@@ -17699,9 +17699,9 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:04.943430",
-        "last_activity": "2026-10-30T05:40:04.954979",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.726495",
+        "last_activity": "2026-10-30T06:30:51.738478",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -17724,7 +17724,7 @@
             "role": "user",
             "content": "USE AGENT MODE build the lifecycle deck",
             "message_type": null,
-            "created_at": "2026-10-30T05:40:04.948200",
+            "created_at": "2026-10-30T06:30:51.731324",
             "metadata": null
           }
         ],
@@ -17742,17 +17742,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-10-30T05:40:04.952378Z",
+              "created_at": "2026-10-30T06:30:51.735698Z",
               "modified_by": null,
-              "modified_at": "2026-10-30T05:40:04.952378Z",
+              "modified_at": "2026-10-30T06:30:51.735698Z",
               "content_hash": "0861ce3c3874c657",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-10-30T05:40:04.951164Z",
+          "created_at": "2026-10-30T06:30:51.734463Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-10-30T05:40:04.952615Z",
+          "modified_at": "2026-10-30T06:30:51.735942Z",
           "version": 1,
           "deck_spec": null,
           "findings": [],
@@ -17774,9 +17774,9 @@
         "session_id": "mid-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:05.152419",
-        "last_activity": "2026-10-30T05:40:05.152419",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.939412",
+        "last_activity": "2026-10-30T06:30:51.939413",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -17803,17 +17803,17 @@
     {
       "id": "S12-get-contributor",
       "method": "GET",
-      "path": "/api/sessions/YEzJMEkTfQMEabB3g8lvsddyDkcM8Q-YhtfIpOMxOWY",
+      "path": "/api/sessions/ANk9vPJ0qQ8GS37QbCD2Eu7oSuDAchJ-pM-TcmypvOA",
       "request": null,
       "status": 200,
       "body": {
         "id": 5,
-        "session_id": "YEzJMEkTfQMEabB3g8lvsddyDkcM8Q-YhtfIpOMxOWY",
+        "session_id": "ANk9vPJ0qQ8GS37QbCD2Eu7oSuDAchJ-pM-TcmypvOA",
         "user_id": null,
         "created_by": "contributor@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:05.190879",
-        "last_activity": "2026-10-30T05:40:05.190883",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.978399",
+        "last_activity": "2026-10-30T06:30:51.978400",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -17845,17 +17845,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-10-30T05:40:04.952378Z",
+              "created_at": "2026-10-30T06:30:51.735698Z",
               "modified_by": null,
-              "modified_at": "2026-10-30T05:40:04.952378Z",
+              "modified_at": "2026-10-30T06:30:51.735698Z",
               "content_hash": "0861ce3c3874c657",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-10-30T05:40:04.951164Z",
+          "created_at": "2026-10-30T06:30:51.734463Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-10-30T05:40:04.952615Z",
+          "modified_at": "2026-10-30T06:30:51.735942Z",
           "version": 1,
           "deck_spec": null,
           "findings": [],
@@ -17880,13 +17880,13 @@
             "actor_label": "Contributor 1",
             "graph_version": 2,
             "mutation_count": 2,
-            "last_mutation_at": "2026-10-30T05:40:05.217628"
+            "last_mutation_at": "2026-10-30T06:30:52.005825"
           },
           {
             "actor_label": "Contributor 2",
             "graph_version": 1,
             "mutation_count": 4,
-            "last_mutation_at": "2026-10-30T05:40:05.213239"
+            "last_mutation_at": "2026-10-30T06:30:52.001153"
           }
         ]
       },
@@ -17911,8 +17911,8 @@
             "is_active": true,
             "release_note": "Lifecycle Graph Version 2.",
             "published_by": "lifecycle-admin@example.com",
-            "published_at": "2026-10-30T05:40:05.157563Z",
-            "effective_from": "2026-10-30T05:40:05.157563Z",
+            "published_at": "2026-10-30T06:30:51.944711Z",
+            "effective_from": "2026-10-30T06:30:51.944711Z",
             "effective_to": null,
             "previous": {
               "release_id": 1,
@@ -17932,9 +17932,9 @@
             "is_active": false,
             "release_note": "Bootstrap Graph Version 1",
             "published_by": "system:bootstrap",
-            "published_at": "2026-10-30T05:40:04.800535Z",
-            "effective_from": "2026-10-30T05:40:04.800535Z",
-            "effective_to": "2026-10-30T05:40:05.157563Z",
+            "published_at": "2026-10-30T06:30:51.585456Z",
+            "effective_from": "2026-10-30T06:30:51.585456Z",
+            "effective_to": "2026-10-30T06:30:51.944711Z",
             "previous": null,
             "restored_from": null,
             "restored_by": [],
@@ -17966,9 +17966,9 @@
           "is_active": false,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-10-30T05:40:04.800535Z",
-          "effective_from": "2026-10-30T05:40:04.800535Z",
-          "effective_to": "2026-10-30T05:40:05.157563Z",
+          "published_at": "2026-10-30T06:30:51.585456Z",
+          "effective_from": "2026-10-30T06:30:51.585456Z",
+          "effective_to": "2026-10-30T06:30:51.944711Z",
           "previous": null,
           "restored_from": null,
           "restored_by": [],
@@ -18285,11 +18285,11 @@
           },
           "fix_reviewer": {
             "agent_definition_revision_id": 6,
-            "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "content": {
               "agent_key": "fix_reviewer",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -18420,8 +18420,8 @@
           "is_active": true,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-30T05:40:05.157563Z",
-          "effective_from": "2026-10-30T05:40:05.157563Z",
+          "published_at": "2026-10-30T06:30:51.944711Z",
+          "effective_from": "2026-10-30T06:30:51.944711Z",
           "effective_to": null,
           "previous": {
             "release_id": 1,
@@ -18720,11 +18720,11 @@
           },
           "fix_reviewer": {
             "agent_definition_revision_id": 6,
-            "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "content": {
               "agent_key": "fix_reviewer",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -18847,10 +18847,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-10-30T05:40:05.118441Z",
+            "verdict_at": "2026-10-30T06:30:51.904199Z",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-10-30T05:40:05.078180Z"
+            "run_at": "2026-10-30T06:30:51.863477Z"
           },
           {
             "agent_test_run_id": 104,
@@ -18861,10 +18861,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-10-30T05:40:05.140703Z",
+            "verdict_at": "2026-10-30T06:30:51.927129Z",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-10-30T05:40:05.133501Z"
+            "run_at": "2026-10-30T06:30:51.919606Z"
           },
           {
             "agent_test_run_id": 103,
@@ -18875,10 +18875,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-10-30T05:40:05.124141Z",
+            "verdict_at": "2026-10-30T06:30:51.910082Z",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-10-30T05:40:05.104378Z"
+            "run_at": "2026-10-30T06:30:51.889681Z"
           }
         ]
       },
@@ -19273,7 +19273,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.157563Z"
+          "updated_at": "2026-10-30T06:30:51.944711Z"
         }
       },
       "response_model": "src.api.schemas.graph_release_history.StaleRollbackResponse",
@@ -19296,8 +19296,8 @@
           "restored_from_release_id": 1,
           "release_note": "Roll back to Graph Version 1.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-30T05:40:05.244994Z",
-          "effective_from": "2026-10-30T05:40:05.244994Z",
+          "published_at": "2026-10-30T06:30:52.032743Z",
+          "effective_from": "2026-10-30T06:30:52.032743Z",
           "effective_to": null
         },
         "restored_from": {
@@ -19338,7 +19338,7 @@
           },
           "fix_reviewer": {
             "agent_definition_revision_id": 6,
-            "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+            "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
             "reused": true
           },
           "deck_reviewer": {
@@ -19354,7 +19354,7 @@
           "base_version_number": 3,
           "lock_version": 9,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.244994Z"
+          "updated_at": "2026-10-30T06:30:52.032743Z"
         },
         "draft_effect": {
           "architect": "reset",
@@ -19383,8 +19383,8 @@
           "restored_from_release_id": 1,
           "release_note": "Roll back to Graph Version 1.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-10-30T05:40:05.244994Z",
-          "effective_from": "2026-10-30T05:40:05.244994Z",
+          "published_at": "2026-10-30T06:30:52.032743Z",
+          "effective_from": "2026-10-30T06:30:52.032743Z",
           "effective_to": null
         },
         "draft": {
@@ -19393,7 +19393,7 @@
           "base_version_number": 3,
           "lock_version": 9,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-10-30T05:40:05.244994Z"
+          "updated_at": "2026-10-30T06:30:52.032743Z"
         },
         "nodes": [
           {
@@ -20772,9 +20772,9 @@
             "changed": false,
             "published": {
               "revision_id": 6,
-              "content_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "content_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -20886,9 +20886,9 @@
             },
             "draft": {
               "base_revision_id": 6,
-              "candidate_hash": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+              "candidate_hash": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
               "definition_version": 2,
-              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
+              "prompt_text": "You are a fix reviewer.  Verify that the fixer addressed the reported finding and review the corrected slide for any remaining or new issues.\n\nINPUT:\n  finding       \u2014 the Finding that was reported by the build reviewer\n  html          \u2014 the corrected slide HTML produced by the fixer\n  original_html \u2014 the slide HTML as it was before the fix\n\nYOUR JOB:\n1. Check whether the specific finding was addressed.  If the corrected HTML still exhibits the same issue, re-report it.\n2. Check whether the fix introduced new issues, including semantic/content changes:\n   - Does the corrected HTML preserve the original meaning and claims?\n   - Did the fixer change any content, wording, or data that was not part of the fix?\n   - If the corrected slide now makes a different claim or has different content than the original, this is a brief_not_delivered violation\n3. Compare against original_html: the fix should change only what the finding requires.  If the fixer altered content, messaging or styling unrelated to the finding, report it as a new finding.\n4. Return a SlideReviewOutput with the full current finding set.\n\nDECK STYLE (when the payload carries deck_style):\n  deck_style is the deck's house style: css that the deck CSS carries after section_css, and a components catalogue whose entries give each piece's name, class_names, use and example_html.\n  - The colours that deck_style.css gives its pieces are part of the contract, as the resolved style's are: do not report them as rogue_colour\n  - A fix that paints colour, background or font-size inline (in a style attribute, even with var(--\u2026) token values) counts against the fix: report it as rogue_colour\n  - A fix that restyles a piece the deck style provides, by overriding its colours, borders or type or by hand-building it instead of using its classes, counts against the fix: report it as rogue_colour\n  - Judge the cascade with deck_style.css applied after section_css: where both style an element, the deck style's rule is the one that renders, and contrast is judged on it\n  - Without a deck style (deck_style absent), skip this block: the other rules apply as written\n\nVERDICT RULES:\n  clean    \u2192 no remaining findings\n  fixed    \u2192 the original finding was resolved and no new findings are present (findings list must be empty)\n  surfaced \u2192 new findings are present (whether or not the original was resolved)\n\nVALID CRITERION NAMES (use only these for any findings you report):\n  - overflow\n  - contrast_failure\n  - rogue_colour\n  - distorted_image\n  - source_contradiction\n  - brief_not_delivered\n  - arc_gap\n  - cross_slide_repetition\n  - missing_conclusion\n\nIMPORTANT: When verdict is \"fixed\", your findings list must be empty. Never echo or re-report the original finding; if there are no remaining issues, findings must be an empty list.\n\nSet slide_index to the slide's position integer.\n",
               "model": {
                 "endpoint_name": "system.ai.claude-haiku-4-5",
                 "temperature": 0.7,
@@ -21202,8 +21202,8 @@
         "session_id": "post-rollback-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:05.266613",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:52.054748",
         "deck_mode": null,
         "graph_version": 3,
         "active_graph_version": 3,
@@ -21223,9 +21223,9 @@
         "session_id": "new-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:05.179827",
-        "last_activity": "2026-10-30T05:40:05.179828",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.967246",
+        "last_activity": "2026-10-30T06:30:51.967246",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -21260,9 +21260,9 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-10-30 05:40",
-        "created_at": "2026-10-30T05:40:04.943430",
-        "last_activity": "2026-10-30T05:40:05.216054",
+        "title": "Session 2026-10-30 06:30",
+        "created_at": "2026-10-30T06:30:51.726495",
+        "last_activity": "2026-10-30T06:30:52.004194",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -21285,7 +21285,7 @@
             "role": "user",
             "content": "USE AGENT MODE build the lifecycle deck",
             "message_type": null,
-            "created_at": "2026-10-30T05:40:04.948200",
+            "created_at": "2026-10-30T06:30:51.731324",
             "metadata": null
           }
         ],
@@ -21303,17 +21303,17 @@
               "slide_id": "slide-one",
               "scripts": "",
               "created_by": null,
-              "created_at": "2026-10-30T05:40:05.214595Z",
+              "created_at": "2026-10-30T06:30:52.002672Z",
               "modified_by": null,
-              "modified_at": "2026-10-30T05:40:05.214595Z",
+              "modified_at": "2026-10-30T06:30:52.002672Z",
               "content_hash": "dfc4a0562849c398",
               "verification": null
             }
           ],
           "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-10-30T05:40:04.951164Z",
+          "created_at": "2026-10-30T06:30:51.734463Z",
           "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-10-30T05:40:05.214692Z",
+          "modified_at": "2026-10-30T06:30:52.002760Z",
           "version": 3,
           "deck_spec": null,
           "findings": [],

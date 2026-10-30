@@ -1,0 +1,6 @@
+# Fix reviewer v1 prompt: judge the fix against the architect's deck style (DECK STYLE block)
+# when the payload carries deck_style; today's rules unchanged without one.
+agent_key: fix_reviewer
+name: fix_reviewer-deck-style
+base: v1
+prompt_file: deck-style.md

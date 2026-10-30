@@ -847,7 +847,8 @@ real-model run was made.
   `python -m evals.run_eval --agent builder --calibrate --cases deck_style_code,deck_style_table [--split heldout]`
   and the same for `--agent build_reviewer --cases deck_style_inline_paint,deck_style_clean`. Neither
   judge prompt describes `deck_style`; the judge sees it in the brief. (The builder's two cases are
-  calibrated in the pass below.)
+  calibrated in the pass below, and the build reviewer's in "Fix reviewer: judge fixes against the
+  deck style".)
 
 ## Builder and fixer: build to the deck style, 2026-10-30
 
@@ -960,3 +961,81 @@ What it showed:
   - `deck_style_code`'s inline-painted headings (above).
   - The fixer drops a chart's script on a text-only fix (`source_contradiction`).
   - The builder judge prompt does not describe `deck_style`, and it fails both held-out references.
+
+## Fix reviewer: judge fixes against the deck style; build reviewer gap, 2026-10-30
+
+The fix reviewer's prompt gains a `DECK STYLE (when the payload carries deck_style)` block, placed
+after YOUR JOB. With a deck style, the colours that `deck_style.css` gives its pieces are part of the
+contract, not `rogue_colour`. A fix that paints colour, background or font-size inline, or that
+restyles a piece the deck style provides, counts against the fix and is reported as `rogue_colour`.
+The cascade is judged with `deck_style.css` applied after `section_css`. Without a deck style the
+block is skipped, and the rest of the prompt is byte-identical. No criterion was added
+(`src/domain/finding.py` is unchanged). This pass measured that one candidate on the fix_reviewer
+train pack and promoted it. It also measured the **unchanged** build reviewer on its two deck-style
+cases.
+
+- **Setup.** Fix reviewer agent `system.ai.claude-haiku-4-5`, build reviewer agent
+  `system.ai.claude-opus-5-5` (manifest v1), judge `databricks-claude-sonnet-5`, profile
+  `tellr-dev`. `prices.yaml` prices neither agent endpoint, so cost is estimated as in the builder
+  pass above: list price (Haiku 4.5 USD 1 / 5, Opus 5.5 USD 4 / 20 per million input / output
+  tokens), plus USD 0.05 per judge call (an upper bound).
+- **Calibration.** fix_reviewer train, all 5 cases: trusted. build_reviewer
+  `deck_style_inline_paint` and `deck_style_clean`: trusted on train and on held-out. The held-out
+  `deck_style_inline_paint` needed one re-run after a judge error on the reference
+  (`KeyError: 'result'`); it was not a misclassification.
+- **Baseline.** No earlier fix_reviewer run is comparable. The last recorded rate, train 1.00
+  (8f85585e, run 2404f31f), was on `databricks-claude-haiku-5-5`, and the fix_reviewer payloads have
+  changed since then (5653f3ec). R0 is the promoted v1 prompt (`ff14c8e8`) on the current train cases
+  (`cases_digest` `e320f95d`).
+- **Candidate:** `evals/configs/fix_reviewer/deck-style.{md,yaml}` (`1050287f`), the block above.
+
+R are fix_reviewer runs and G are the build-reviewer gap runs. Run ids are from the
+`architect-styling` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|
+| R0 d7941c58 | fix_reviewer v1-baseline (ff14c8e8) | train | all 5 | 1 | 5 | 0.40 | 0 | 6.8k / 0.4k | 0.29 |
+| R1 53fb2e4c | fix_reviewer deck-style (1050287f) | train | all 5 | 1 | 5 | 0.60 | 0 | 7.0k / 0.4k | 0.30 |
+| G1 a88f0049 | build_reviewer v1-baseline (0a8f6a7c) | train | 2 deck-style | 3 | 6 | 1.00 | 0 | 10.0k / 1.6k | 0.73 |
+| G2 c4be1d01 | build_reviewer v1-baseline | held-out | 2 deck-style | 1 | 2 | 1.00 (1 row scored) | 1 | 9.4k / 1.2k | 0.22 |
+| G3 108deeb2 | build_reviewer v1-baseline | held-out | 2 deck-style | 1 | 2 | 1.00 | 0 | 9.4k / 1.2k | 0.22 |
+
+G3 is G2 re-run because of G2's judge error. Calibration took 20 judge calls (about USD 1.00), which
+brings the total to **about USD 2.76**, inside the USD 6 cap. Held-out is reported as aggregates
+only.
+
+What it showed:
+
+- **Fix reviewer, per case (R0 → R1).** `good_fix_accept` 1 → 1, `good_contrast_fix_accept` 1 → 1,
+  `restyle_reject` 0 → 1, `fault_left_reject` 0 → 0, `content_broken_reject` 0 → 0. No case dropped,
+  so the bar (no existing case drops by more than one row) is met. No fix_reviewer case carries a
+  deck style, so the block does not apply to any of them. The `restyle_reject` gain is a single row
+  and is treated as noise.
+- **One cause, in v1, on both runs.** Each failing row returns verdict `fixed` with no findings for
+  a bad fix: the overflow is still there (`fault_left_reject`) or the claim was reversed
+  (`content_broken_reject`). The judge and `expected_category` both fail those rows. The Haiku 4.5
+  fix reviewer accepts bad fixes. This pass did not change that, and it is still open.
+- **Shipped.** `deck-style` is the fix reviewer's v1 prompt in `src/core/skills/fix_reviewer.py`
+  (`1050287f9dfc`, previously `ff14c8e8b162`). It was promoted with
+  `python -m evals.harness.promote --config fix_reviewer=evals/configs/fix_reviewer/deck-style.yaml --run-id fix_reviewer=53fb2e4c149c45e3b4b276f68466f7ef`,
+  and the frontend lifecycle contract was re-recorded.
+- **Build reviewer, unchanged (G1 to G3).** `deck_style_inline_paint` passed 3/3 on train and
+  `deck_style_clean` passed 3/3. Held-out was 2 of 2 rows (aggregate). Today's prompt reports the
+  inline-painted code block as `rogue_colour`, because the case paints it in off-palette hexes
+  (`#1E293B`, `#F8FAFC`, ...) and today's `rogue_colour` description catches those. It also does not
+  flag the deck style's token colours on the clean slide. **So these two cases show no gap.** They do
+  not exercise what the rule would add: inline paint in on-palette token values, an on-palette
+  restyle of a provided piece, and the order of `deck_style.css` after `section_css`. A case built
+  for any of those is needed to measure the gap. The cases were not changed.
+- **The build-reviewer deck-style rule is not shipped** (Ruling R10, correction C27 option c). The
+  build reviewer is a `LegacyV1PromptTransition` source, so `promote` refuses to change its prompt.
+  Editing its v1 composite (`INSTRUCTIONS`) would make `upgrade_definition_to_v2` refuse the
+  persisted v1 build-reviewer definitions on released 0.5.x installs ("Legacy protected prompt
+  content was edited"). Editing its authored v2 target moves `_V2_DIGEST`
+  (`src/services/prompt_assembler.py` raises at import). With the rates above, nothing measured here
+  argues for the change. Shipping it needs an **owner decision on a migration**: either a
+  transition that accepts both the 0.5.x composite and the new one, or a protected conditional stage
+  like `DECK_BRIEF_REVIEW`.
+- **Override of `optimise-agent-prompt`, delegated by the controller:** one candidate at ×1 on train
+  (the skill says ×5), no held-out fix_reviewer run, and the pass promoted, edited `INSTRUCTIONS` and
+  committed.
