@@ -2732,6 +2732,17 @@ def _changes_beside_deck_style(out: Any, prior_spec: DeckSpec) -> bool:
     return _contract_from_deck_spec(out, prior_spec) is not None
 
 
+def _brand_css_missing(brand: Dict[str, Any]) -> bool:
+    """Whether *brand* asked for template bytes and got none (final review MF1).
+
+    The contract, after the default-template fill, names a design system and a
+    template, yet ``resolve_template_bytes`` failed closed (a transient DB error,
+    a deactivated design system, a deleted template).  The pre-fan-out write then
+    leaves ``deck.css`` as stored.
+    """
+    return not brand["deterministic_css"] and bool(brand.get("template_requested", False))
+
+
 def _resanitise_committed_deck_style(
     spec: DeckSpec, brand: Dict[str, Any], session_id: str
 ) -> DeckSpec:
@@ -2743,12 +2754,20 @@ def _resanitise_committed_deck_style(
     changed on the same contract ids was never applied to it.  *spec* itself when
     it has no deck style or the style is clean under the flag (a fixed point,
     C24); a style that cleans to nothing commits as ``deck_style=None``.
+
+    On a brand miss (:func:`_brand_css_missing`) the flag is forced on (Ruling
+    R32): ``deck.css`` keeps its stored token and template CSS, and a deck-style
+    ``:root`` would replace the token ``:root`` in the post-commit merge — which
+    happens exactly when the miss is a deactivated design system, whose style
+    source then reports none.
     """
     style = spec.deck_style
     if style is None:
         return spec
     cleaned, notes = sanitise_deck_style(
-        style, design_system_active=bool(brand["design_system_active"])
+        style,
+        design_system_active=bool(brand["design_system_active"])
+        or _brand_css_missing(brand),
     )
     if cleaned is style:
         return spec
@@ -3914,8 +3933,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # it is, and that was sanitised under the flag of the turn that wrote it: a
     # design system reactivated on the same contract ids (or a style source that
     # swallowed an error and said "none") would let its :root palette replace
-    # the template's in the post-commit merge.  A clean style is a fixed point
-    # (C24), so this is the same object on every other turn.
+    # the template's in the post-commit merge.  On a brand miss the flag is forced
+    # on (R32): the stored token :root stays in deck.css and must not be replaced.
+    # A clean style is a fixed point (C24), so this is the same object on every
+    # other turn.
     spec = _resanitise_committed_deck_style(spec, brand, session_id)
     # Its CSS follows the template block in both places it is written — the css
     # column below and emitted_style_blocks — so the post-commit merge keeps that
@@ -3987,11 +4008,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "modified_by": initiated_by,
         "user_visible": not describe_only,
     }
-    brand_css_missing = not brand["deterministic_css"] and brand.get(
-        "template_requested", False
-    )
     css = _concat_css(brand["deterministic_css"], style_css)
-    if brand_css_missing and style_css:
+    if _brand_css_missing(brand) and style_css:
         logger.warning(
             "brand_css_missing: contract %s resolved no template CSS; deck.css is "
             "left as stored and the post-commit merge applies the deck style",

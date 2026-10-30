@@ -1459,6 +1459,51 @@ def test_css_that_ends_open_is_rebuilt_closed(css, expected, needle, active):
     assert notes_again == () and again is out, notes_again
 
 
+_SMUGGLED_PROBES = [
+    # Ruling R32: a style that writes the closure check's own probe rule, then
+    # opens a comment, swallows the appended probe and leaves its copy last.
+    # Before the fix each came back unchanged, with no notes, still open.
+    pytest.param(".dk-sentinel-probe{color:red}/*", id="probe-then-comment"),
+    pytest.param(
+        ".dk-a{color:red}\n.dk-sentinel-probe{color:red/*", id="probe-block-left-open-by-comment"
+    ),
+    pytest.param(".dk-sentinel-pro\\62 e{color:red}\n/*", id="escaped-probe-then-comment"),
+    pytest.param(
+        ".dk-sentinel-probe { color : red ; } /* trailing", id="spaced-probe-then-comment"
+    ),
+]
+
+
+@pytest.mark.parametrize("css", _SMUGGLED_PROBES)
+def test_a_style_holding_the_probe_rule_cannot_fool_the_closure_check(css, active):
+    style = _style(css)
+    out, notes = _sanitise(style, active=active)
+    assert out is not style, "returned unchanged: the open style passed the closure check"
+    assert notes, "an open style must be noted"
+    if out is not None:
+        assert _follower_parses_after(out.css), out.css
+        again, notes_again = _sanitise(out, active=active)
+        assert notes_again == () and again is out, notes_again
+
+
+@pytest.mark.parametrize(
+    "css",
+    [
+        pytest.param(".dk-a{color:red}", id="clean"),
+        pytest.param(".dk-a{color:red}\n<!--", id="trailing-cdo"),
+        pytest.param(".dk-a{color:red}\n-->", id="trailing-cdc"),
+        pytest.param("<!--\n.dk-a{color:red}\n-->", id="cdo-cdc-wrapped"),
+        pytest.param(".dk-a{color:red}/* closed */", id="closed-comment"),
+        pytest.param(".dk-sentinel-probe{color:red}", id="probe-rule-closed"),
+    ],
+)
+def test_closed_styles_stay_the_same_object_under_the_rule_count_check(css, active):
+    # C24: the R32 check adds nothing for a style that closes.
+    style = _style(css, _comp("A", *sorted(_ds().css_class_names(css))))
+    out, notes = _sanitise(style, active=active)
+    assert out is style and notes == (), notes
+
+
 _OPEN_REBUILDS = [
     # A rebuild drops html{} and re-serialises the rest; each of these
     # serialisations used to end open or escape the character after it.

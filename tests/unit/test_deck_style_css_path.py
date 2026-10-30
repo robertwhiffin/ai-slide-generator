@@ -1250,6 +1250,59 @@ def test_design_system_without_a_template_still_replaces_the_column_with_the_sty
     assert graph_env.deck_row().css == NEW_STYLE.css
 
 
+def test_restyle_on_a_brand_miss_cannot_replace_the_stored_token_root(graph_env, monkeypatch):
+    """Ruling R32 (re-review b3).  A pinned deck whose design system was
+    deactivated: the style source reports no design system AND the template
+    bytes resolve empty.  The restyle carries a no-design-system palette
+    (``:root{--dk-ink}``), which the answer sanitiser keeps under that flag.
+    Because ``deck.css`` keeps its stored token and template CSS on a brand miss,
+    the committed style is sanitised with the design-system flag on: its
+    ``:root`` goes, so the post-commit merge cannot replace the token ``:root``.
+
+    Sabotage: sanitise under the brand's own flag -> ``--brand`` is gone after
+    the post-commit merge."""
+    from src.api.services.deck_level_writer import write_deck_level_columns
+
+    prior_plain, _ = _seeded(graph_env, (0, 1, 2))
+    _persist(
+        graph_env,
+        _with_style(
+            prior_plain.model_copy(update={"design_contract": PINNED_CONTRACT}), OLD_STYLE
+        ),
+    )
+    write_deck_level_columns(graph_env.session_id, css=STORED_PINNED_CSS)
+    _brand_resolves_empty(graph_env)
+    graph_env.style.design_system_active = False  # the deactivated design system
+    palette = DeckStyle(
+        css=":root{--dk-ink:#000}\n.dk-code{background:var(--dk-ink)}", components=[]
+    )
+    kept, _ = sanitise_deck_style(palette, design_system_active=False)
+    assert kept is palette, "fixture: the palette is clean without a design system"
+    calls = _spy_on_deck_writes(monkeypatch)
+
+    t = _turn(
+        graph_env,
+        _ops_out([_update(1, _content("UPDATED"))], DeckChanges(deck_style=palette)),
+    )
+
+    assert t.updates["error_state"] is None, t.updates["error_state"]
+    assert t.updates["design_system_active"] is False
+    committed = t.updates["deck_spec"].deck_style
+    assert committed is not None and ":root" not in committed.css, committed
+    assert ".dk-code" in committed.css
+    assert _persisted_spec(graph_env).deck_style == committed
+    for block in t.updates["emitted_style_blocks"]["vals"]:
+        assert "--dk-ink:" not in block, block
+    (write,) = _architect_writes(calls)
+    assert "css" not in write, f"the column was overwritten: {write.get('css')!r}"
+    assert graph_env.deck_row().css == STORED_PINNED_CSS
+
+    _post_commit(graph_env, t.merged)
+    post = graph_env.deck_row().css
+    assert "--brand" in post and "#123456" in post, post
+    assert "--dk-ink:" not in post and ".dk-code" in post, post
+
+
 # ---------------------------------------------------------------------------
 # 13. MF2: the deck style written into deck.css closes, and always serialises
 # ---------------------------------------------------------------------------

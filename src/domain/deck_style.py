@@ -213,13 +213,19 @@ def _leaves_open(css: str) -> bool:
     what follows it (MF2), and every view surface writes trusted CSS after
     ``deck.css`` in the same ``<style>``.  So the probe rule, after a newline as
     the frontend writes it, must be the last top-level rule, exactly as written.
+
+    It must also be a rule of its OWN: the probe adds exactly one top-level node.
+    Otherwise a style could write the probe rule itself and then open a comment,
+    which swallows the appended probe and leaves the style's copy last (R32).
     """
+    alone = tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True)
     nodes = tinycss2.parse_stylesheet(
         css + "\n" + _FOLLOWER_RULE, skip_comments=True, skip_whitespace=True
     )
     last = nodes[-1] if nodes else None
     if (
-        last is None
+        len(nodes) != len(alone) + 1
+        or last is None
         or last.type != "qualified-rule"
         or tinycss2.serialize(last.prelude).strip() != _FOLLOWER_SELECTOR
     ):
