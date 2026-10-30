@@ -521,8 +521,20 @@ required.
 The v1 seed pins `system.ai.claude-opus-5-5` on four roles (architect, data_analyst,
 build_reviewer, fixer) and `system.ai.claude-haiku-4-5` on the other three; it moved off
 `claude-opus-5` when that model was rate-limited to zero. The seed is inserted only into
-an empty database, so a database seeded earlier keeps its stored v1 release until an
-admin publishes a new one.
+an empty database. A database seeded earlier gets a changed packaged manifest through
+prompt shipping (below): it is published on the next startup if no person has chosen the
+live graph, and otherwise an admin adopts it from the Agent Definitions page.
+
+### Prompt shipping
+
+- A fresh install bootstraps Graph V1 from the packaged manifest (`bootstrap_graph_configuration`).
+- On every startup, `init_database` (`packages/databricks-tellr-app/databricks_tellr_app/run.py`) calls `ship_packaged_graph_configuration` after bootstrap.
+- A role is hand-edited when its live content differs from the packaged definition and the release that introduced its live revision was not published by `system:*`. That release is found by walking back from the active release through `previous_release_id` while the role keeps the same revision. The revision's own `created_by` does not decide it: revisions are deduplicated by hash, so an admin who puts earlier system content back, by typing it or by a restore, publishes the old `system:*` revision again.
+- If no role is hand-edited and the live release is not a rollback (`restored_from_release_id` is null), the packaged manifest is published as the next Graph Version, `published_by` `system:code-ship`, note `Shipped with Tellr <version>`. No smoke-run approval is needed.
+- Otherwise the packaged revisions are inserted without publishing. Admins see a "newer shipped version" badge on the Agent Definitions page, with an Adopt action that publishes them as `system:adopt:<admin>`. The admin stays visible in release history, and the install counts as untouched again, so later shipped versions apply on their own.
+- Conversations pinned to an older release keep that release.
+- A ship failure is logged and startup continues. Unlike bootstrap, it never exits the process.
+- Design: `docs/superpowers/specs/2026-10-29-prompt-shipping-design.md`.
 
 ---
 
@@ -590,7 +602,7 @@ Users say "slide 2"; the graph keys everything on `SlideSpec.position` (0-based)
 
 **The prompt rule.** The architect's SLIDE NUMBERS rule tells the model to take `target_positions` from `slide_references`, to look any other number or ordinal up in `slide_numbering`, never to compute a position as the slide number minus one, and, when a reference has `out_of_range` numbers, not to edit but to discuss and say how many slides the deck has. It also says a reference does not by itself mean the user wants a change.
 
-**Rollout.** The Graph V1 manifest only seeds a fresh bootstrap: `bootstrap_v1` in `src/services/graph_configuration_bootstrap.py` returns early, validating the persisted history, when any Graph Release exists, and loads the manifest only when none does. An existing install therefore keeps its persisted architect prompt. It gets the two payload keys immediately (they are built in code), but the new SLIDE NUMBERS text only when an admin publishes a release carrying it, the same as earlier prompt promotions (for example 45ce906c).
+**Rollout.** A fresh install bootstraps v1 from the packaged manifest. On every later startup, `ship_packaged_graph_configuration` compares the packaged manifest with the active release. If no differing role got its live revision from a release a person published, and the live release is not a rollback, it publishes the packaged manifest as the next Graph Version, with `published_by` `system:code-ship`, the note `Shipped with Tellr <version>`, and no smoke-run approval. Otherwise it inserts the packaged revisions without publishing, and admins see a "newer shipped version" badge on the Agent Definitions page with an Adopt action. Conversations pinned to an older release keep it. See "Prompt shipping" above.
 
 **Known limits.**
 - SpecView labels slides `position + 1` (`SpecView.tsx`), so on a gapped deck its label differs from the panel's number, which is what the graph follows.
@@ -702,7 +714,7 @@ No in-process state is added (multi-worker coherence): the writer re-reads the r
 
 **Evals.** The architect pack scores an operations answer with production's `apply_operations` on the payload's `current_deck_spec`, and composes it into a spec before the judge sees it (`evals/README.md`). Existing `add_slide_*` and `edit_*` references stay `deck_spec`-shaped. The layer-3 tests (`test_rc2_*`, `test_rc9_*`) are live and not run in CI.
 
-**Rollout.** The Graph V1 manifest only seeds a fresh bootstrap (see "Rollout" above). An existing install gets the node behaviour at once, on every release: the deferred message, the retry, the refusal note, and the operations path whenever a model emits `operations`. It keeps its persisted architect prompt, which never asks for operations, until an admin publishes a release carrying the new one, and only new conversations pick that up. Older releases receive the optional output fields in the schema but never use them; everything is additive.
+**Rollout.** A fresh install bootstraps from the Graph V1 manifest, and an existing install receives a changed manifest through prompt shipping (see "Prompt shipping" and "Rollout" above). An existing install gets the node behaviour at once, on every release: the deferred message, the retry, the refusal note, and the operations path whenever a model emits `operations`. Its persisted architect prompt, which never asks for operations, is replaced by the packaged one on the next startup if no person has chosen the live graph, and otherwise when an admin adopts the shipped version. Only new conversations pick it up. Older releases receive the optional output fields in the schema but never use them; everything is additive.
 
 **Limits of this path.**
 - An edit without `operations` still cannot delete or reorder slides: the spec path refuses it (`edit_spec_positions_changed`, `edit_spec_moves_slides`), and the one retry tells the model to send it as operations.

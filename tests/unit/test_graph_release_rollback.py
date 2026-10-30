@@ -885,10 +885,21 @@ def test_rollback_module_imports_no_evidence_or_workbench_module_at_module_scope
     assert "src.services.agent_runtime" not in imported
 
 
-def test_facade_puts_rollback_first_in_its_bases():
+def test_facade_bases_order():
+    """Prompt shipping goes first (it reuses rollback's rebase), then rollback, then the rest."""
+    from src.services.graph_configuration_bootstrap import _GraphConfigurationBootstrap
     from src.services.graph_configuration_rollback import _GraphConfigurationRollback
+    from src.services.graph_configuration_shipping import _GraphConfigurationShipping
+    from src.services.graph_configuration_workbench import _GraphConfigurationWorkbench
 
-    assert GraphConfiguration.__bases__[0] is _GraphConfigurationRollback
+    assert GraphConfiguration.__bases__ == (
+        _GraphConfigurationShipping,
+        _GraphConfigurationRollback,
+        publication_module._GraphConfigurationPublication,
+        draft_module._GraphConfigurationDraft,
+        _GraphConfigurationWorkbench,
+        _GraphConfigurationBootstrap,
+    )
 
 
 # ===========================================================================

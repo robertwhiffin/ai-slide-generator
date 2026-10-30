@@ -21,6 +21,7 @@ import {
   validateDraftForm,
   type TestOperationKind,
 } from './draftEditorState';
+import { PackagedUpdateBadge } from './PackagedUpdateBadge';
 import { TestRunPanel } from './TestRunPanel';
 import { useDraftEditor } from './useDraftEditor';
 
@@ -83,7 +84,13 @@ function useModelEndpointCatalog() {
   return { catalog, open, refresh };
 }
 
-function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchResponse }) {
+function WorkbenchContent({
+  workbench,
+  onReload,
+}: {
+  workbench: AgentDefinitionWorkbenchResponse;
+  onReload: () => void;
+}) {
   const [selectedKey, setSelectedKey] = useState(workbench.nodes[0]?.agent_key);
   const editor = useDraftEditor(workbench);
   const modelCatalog = useModelEndpointCatalog();
@@ -140,6 +147,7 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
         >
           Review & Publish
         </a>
+        <PackagedUpdateBadge onAdopted={onReload} />
       </header>
 
       <div data-testid="workbench-overflow" className="max-w-full overflow-x-auto pb-2">
@@ -287,6 +295,7 @@ function WorkbenchContent({ workbench }: { workbench: AgentDefinitionWorkbenchRe
 export function AgentDefinitionWorkbench() {
   const [workbench, setWorkbench] = useState<AgentDefinitionWorkbenchResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -295,7 +304,7 @@ export function AgentDefinitionWorkbench() {
       (requestError: unknown) => { if (active) setError(requestError); },
     );
     return () => { active = false; };
-  }, []);
+  }, [reloadToken]);
 
   let content;
   if (error) {
@@ -309,7 +318,14 @@ export function AgentDefinitionWorkbench() {
   } else if (!workbench) {
     content = <div role="status" className="p-6 text-sm text-gray-600">Loading Agent Definitions…</div>;
   } else {
-    content = <WorkbenchContent workbench={workbench} />;
+    content = (
+      <WorkbenchContent
+        // A fresh snapshot remounts the editor so it re-initialises from it (C4).
+        key={`${workbench.active_release.release_id}:${workbench.draft.lock_version}`}
+        workbench={workbench}
+        onReload={() => setReloadToken((token) => token + 1)}
+      />
+    );
   }
 
   return (
