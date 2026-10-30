@@ -77,6 +77,7 @@ from tests.unit.test_architect_insert_slide import (
     _revised,
     _rows,
 )
+from tests.unit.test_deck_style_module import _follower_parses_after
 
 # ---------------------------------------------------------------------------
 # Deck styles
@@ -795,33 +796,24 @@ def test_each_sanitiser_note_is_logged_with_the_session_id(graph_env, caplog, wh
 
 
 @pytest.mark.parametrize(
-    "dropped, with_update",
-    [
-        (UNSCOPED_STYLE, False),
-        (OVERSIZED_STYLE, False),
-        (UNSCOPED_STYLE, True),
-    ],
-    ids=["unscoped-only", "oversized", "beside-an-update"],
+    "dropped", [UNSCOPED_STYLE, OVERSIZED_STYLE], ids=["unscoped-only", "oversized"]
 )
-def test_edit_with_dropped_deck_style_is_refused_with_its_notes(
-    graph_env, dropped, with_update
-):
-    """An edit whose ``deck_changes.deck_style`` the sanitiser drops entirely is
-    refused, and the one retry is told why: a single ``invalid_deck_changes``
-    problem, no positions, whose detail starts ``deck_changes.deck_style was
-    dropped:`` and carries the sanitiser's notes — never C12's unexplained
-    ``nothing_to_do``.  The refusal stands even beside a valid update.  The retry
-    (a clean deck-style edit) lands; nothing of the dropped style is committed or
-    written.
+def test_edit_with_dropped_deck_style_is_refused_with_its_notes(graph_env, dropped):
+    """An edit whose ONLY change is a ``deck_changes.deck_style`` the sanitiser
+    drops entirely is refused, and the one retry is told why: a single
+    ``invalid_deck_changes`` problem, no positions, whose detail starts
+    ``deck_changes.deck_style was dropped:`` and carries the sanitiser's notes —
+    never C12's unexplained ``nothing_to_do``.  The retry (a clean deck-style
+    edit) lands; nothing of the dropped style is committed or written.  (Beside
+    other changes the style is ignored instead, Ruling R31: the next test.)
 
-    Sabotage: let the style drop silently (nothing_to_do / the update lands with
-    no style), or refuse without the notes -> red."""
+    Sabotage: let the style drop silently (nothing_to_do), or refuse without the
+    notes -> red."""
     prior, _ = _seeded(graph_env, (0, 1, 2))
     rows_before = _rows(graph_env)
     _, notes = sanitise_deck_style(dropped, design_system_active=False)
     assert notes, "the fixture style must be one the sanitiser drops with notes"
-    operations = [_update(1, _content("UPDATED"))] if with_update else []
-    first = _ops_out(operations, DeckChanges(deck_style=dropped), message="FIRST")
+    first = _ops_out([], DeckChanges(deck_style=dropped), message="FIRST")
     second = _ops_out([], DeckChanges(deck_style=NEW_STYLE), message="SECOND")
     answers = _Answers(first, second)
 
@@ -875,6 +867,61 @@ def test_dropped_deck_style_refusal_degrades_with_its_notes_when_the_retry_is_re
         assert note in refusal["problems"][0]["detail"]
     assert graph_env.deck_row().css == css_before
     assert graph_env.deck_row().deck_spec_json == spec_before
+
+
+@pytest.mark.parametrize("beside", ["beside-an-update", "beside-a-title-change"])
+def test_dropped_deck_style_beside_other_changes_is_ignored_and_the_rest_applies(
+    graph_env, caplog, beside
+):
+    """Ruling R31 (final review risk 1): an edit whose ``deck_changes.deck_style``
+    the sanitiser drops whole, but which ALSO carries operations or another
+    ``deck_changes`` field, is not refused.  The style is ignored, its notes are
+    logged with the session id, and the rest lands in one call: the update (or
+    the new title) is committed and the persisted deck style is kept.  An old
+    prompt that fills ``deck_style`` with unprefixed classes no longer costs the
+    user their slide edits.
+
+    Sabotage: refuse as R4 does for a style-only edit (a retry, and the update
+    never lands without one), or skip the log -> red."""
+    prior_plain, _ = _seeded(graph_env, (0, 1, 2))
+    prior = _with_style(prior_plain, OLD_STYLE)
+    _persist(graph_env, prior)
+    _, notes = sanitise_deck_style(UNSCOPED_STYLE, design_system_active=False)
+    assert notes, "the fixture style must be one the sanitiser drops with notes"
+    if beside == "beside-an-update":
+        out = _ops_out(
+            [_update(1, _content("UPDATED"))],
+            DeckChanges(deck_style=UNSCOPED_STYLE),
+            message="Updating slide 2.",
+        )
+    else:
+        out = _ops_out(
+            [],
+            DeckChanges(title="A NEW TITLE", deck_style=UNSCOPED_STYLE),
+            message="Retitling.",
+        )
+
+    with caplog.at_level(logging.DEBUG):
+        t = _turn(graph_env, out)
+
+    assert len(graph_env.skills.calls_for("architect")) == 1, "R31: the edit is not retried"
+    assert t.updates["error_state"] is None, t.updates["error_state"]
+    assert t.updates["architect_intent"] == "edit"
+    persisted = _persisted_spec(graph_env)
+    assert t.updates["deck_spec"].deck_style == OLD_STYLE
+    assert persisted.deck_style == OLD_STYLE, "the persisted deck style must be kept"
+    if beside == "beside-an-update":
+        assert t.updates["target_positions"] == [1]
+        assert persisted.slides[1].content_brief == "brief UPDATED"
+    else:
+        assert t.updates["target_positions"] == []
+        assert persisted.title == "A NEW TITLE"
+    assert "body" not in (graph_env.deck_row().css or "")
+
+    ignored = _logged_with_session(caplog, "deck_style_ignored", graph_env.session_id)
+    assert ignored, "the ignored style must be logged with the session id"
+    for note in notes:
+        assert any(note in r.getMessage() for r in ignored), (note, ignored)
 
 
 # ---------------------------------------------------------------------------
@@ -1102,3 +1149,195 @@ def test_failed_pre_fan_out_write_still_lands_the_deck_style_post_commit(
     post = graph_env.deck_row().css
     assert ".slide" in post and ".dk-code" in post and "#fff" in post, post
     assert post.index(".slide") < post.index(".dk-code"), post
+
+
+# ---------------------------------------------------------------------------
+# 12. MF1: a pinned deck whose brand resolves empty keeps its stored CSS
+# ---------------------------------------------------------------------------
+
+#: A styled pinned deck's column, as the turn that wrote it left it.
+STORED_PINNED_CSS = "\n\n".join((TEMPLATE_TOKEN_CSS, TEMPLATE_STYLE_BLOCK, OLD_STYLE.css))
+
+
+def _brand_resolves_empty(env) -> None:
+    """``resolve_template_bytes`` failing closed: a transient DB error, a
+    deactivated design system or a deleted template all return ``("", "", "")``."""
+    env.template.layout = ""
+    env.template.style_block = ""
+    env.template.token_css = ""
+
+
+@pytest.mark.parametrize("restyle", [False, True], ids=["keeps-its-style", "restyles"])
+def test_styled_pinned_deck_keeps_its_brand_css_when_the_brand_resolves_empty(
+    graph_env, monkeypatch, restyle
+):
+    """The final review's MF1 probe.  A deck pinned to 7/3 with a deck style, whose
+    brand resolves empty this turn, takes one ``update`` edit (and, in
+    ``restyles``, a new deck style).  The pre-fan-out write leaves ``deck.css``
+    alone, as main does when the deterministic CSS is empty, so the token and
+    template CSS survive; the post-commit merge then applies the committed deck
+    style over them.
+
+    Sabotage: write ``css`` whenever the deck style is non-empty -> the column
+    becomes the deck style alone and every slide renders unbranded."""
+    from src.api.services.deck_level_writer import write_deck_level_columns
+
+    _pin(graph_env)
+    prior_plain, _ = _seeded(graph_env, (0, 1, 2))
+    _persist(
+        graph_env,
+        _with_style(
+            prior_plain.model_copy(update={"design_contract": PINNED_CONTRACT}), OLD_STYLE
+        ),
+    )
+    write_deck_level_columns(graph_env.session_id, css=STORED_PINNED_CSS)
+    _brand_resolves_empty(graph_env)
+    calls = _spy_on_deck_writes(monkeypatch)
+
+    t = _turn(
+        graph_env,
+        _ops_out(
+            [_update(1, _content("UPDATED"))],
+            DeckChanges(deck_style=NEW_STYLE) if restyle else None,
+        ),
+    )
+
+    assert t.updates["error_state"] is None, t.updates["error_state"]
+    assert (7, 3) in graph_env.template.calls, "fixture: the pinned template was resolved"
+    assert t.updates["deterministic_css"] == ""
+    committed = NEW_STYLE if restyle else OLD_STYLE
+    assert t.updates["deck_spec"].deck_style == committed
+    assert t.updates["emitted_style_blocks"] == scoped(TURN, [committed.css])
+    (write,) = _architect_writes(calls)
+    assert "css" not in write, f"the column was overwritten: {write.get('css')!r}"
+    assert graph_env.deck_row().css == STORED_PINNED_CSS
+
+    _post_commit(graph_env, t.merged)
+    post = graph_env.deck_row().css
+    assert "--brand" in post and ".slide" in post and "#123456" in post, post
+    assert ".dk-code" in post, post
+    if restyle:
+        assert "#000" in post and "#fff" not in post, post
+    else:
+        assert "#fff" in post, post
+
+
+def test_design_system_without_a_template_still_replaces_the_column_with_the_style(
+    graph_env,
+):
+    """MF1's guard does not reach a design system with no template (and no
+    default one): no template bytes were asked for, so an empty deterministic CSS
+    is no failure, and the committed deck style replaces the column whole, as on
+    an unpinned deck.
+
+    Sabotage: omit ``css`` whenever the contract names a design system -> the old
+    style's ``#fff`` stays in the column."""
+    from src.api.services.deck_level_writer import write_deck_level_columns
+
+    _pin(graph_env)
+    ds_only = make_spec((0,), design_system_id=7).design_contract
+    prior_plain, _ = _seeded(graph_env, (0, 1, 2))
+    _persist(
+        graph_env,
+        _with_style(prior_plain.model_copy(update={"design_contract": ds_only}), OLD_STYLE),
+    )
+    write_deck_level_columns(graph_env.session_id, css=OLD_STYLE.css)
+
+    t = _turn(graph_env, _ops_out([], DeckChanges(deck_style=NEW_STYLE)))
+
+    assert t.updates["error_state"] is None, t.updates["error_state"]
+    assert graph_env.template.calls == [], "fixture: no template is pinned or defaulted"
+    assert graph_env.deck_row().css == NEW_STYLE.css
+
+
+# ---------------------------------------------------------------------------
+# 13. MF2: the deck style written into deck.css closes, and always serialises
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "open_css",
+    [
+        ".dk-a{color:red}\n/*",
+        ".dk-b{color:blue",
+        '.dk-a{color:red;content:"abc',
+        ".dk-a{width:calc(1px",
+        ".dk-a{color:red;background:url(data:image/png;base64,AAAA",
+    ],
+    ids=["comment", "block", "string", "calc", "unquoted-url"],
+)
+def test_build_with_an_open_deck_style_writes_css_that_closes(graph_env, open_css):
+    """A rule the frontend writes after ``deck.css`` in the same ``<style>`` (the
+    frame contract, the preview reset) must still parse as its own rule: in the
+    pre-fan-out column, in ``emitted_style_blocks`` and after the post-commit
+    merge, which does not close an unquoted ``url(``.
+
+    Sabotage: return an open style unchanged -> the follower is swallowed."""
+    _pin(graph_env)
+    graph_env.skills.set(
+        "architect",
+        architect_build(_with_style(_pinned_spec(), DeckStyle(css=open_css, components=[]))),
+    )
+
+    state = graph_env.state()
+    updates = architect_node(state)
+
+    assert updates["error_state"] is None, updates["error_state"]
+    assert updates["deck_spec"].deck_style is not None
+    pre = graph_env.deck_row().css
+    assert TEMPLATE_STYLE_BLOCK in pre and _follower_parses_after(pre), pre
+    for block in updates["emitted_style_blocks"]["vals"]:
+        assert _follower_parses_after(block), block
+
+    _land_rows(graph_env, 2)
+    _post_commit(graph_env, {**state, **updates})
+    post = graph_env.deck_row().css
+    assert ".slide" in post and ".dk-" in post, post
+    assert _follower_parses_after(post), post
+
+
+def test_build_with_a_surrogate_escape_in_its_deck_style_does_not_crash_the_turn(graph_env):
+    """``\\D800`` decodes to a lone surrogate on a rebuild (here forced by the
+    ``html`` rule).  Written back raw, ``spec.to_json()`` raised outside the write's
+    try and killed the build turn.  The sanitiser maps it to U+FFFD, so the turn
+    commits, the spec persists and ``deck.css`` encodes as UTF-8.
+
+    Sabotage: emit the decoded surrogate -> ``PydanticSerializationError``."""
+    _pin(graph_env)
+    style = DeckStyle(css='.dk-a{content:"\\D800"}\nhtml{color:red}', components=[])
+    graph_env.skills.set("architect", architect_build(_with_style(_pinned_spec(), style)))
+
+    state = graph_env.state()
+    updates = architect_node(state)
+
+    assert updates["error_state"] is None, updates["error_state"]
+    committed = updates["deck_spec"].deck_style
+    assert committed is not None and committed.css == '.dk-a{content:"\ufffd"}'
+    assert _persisted_spec(graph_env).deck_style == committed
+    css = graph_env.deck_row().css
+    css.encode("utf-8")
+    assert committed.css in css and "html" not in css, css
+
+    _land_rows(graph_env, 2)
+    review = _post_commit(graph_env, {**state, **updates})
+    assert review.get("error_state") is None
+    graph_env.deck_row().css.encode("utf-8")
+
+
+def test_a_spec_that_cannot_serialise_fails_the_deck_write_not_the_turn(graph_env, monkeypatch):
+    """Defence in depth for MF2: whatever the sanitiser returns, ``spec.to_json()``
+    for the pre-fan-out write runs inside the write's ``try``.  With the sanitiser
+    stubbed to pass a lone surrogate through, the turn records
+    ``deck_level_write_failed`` instead of raising.
+
+    Sabotage: serialise the spec before the ``try`` -> the node raises."""
+    monkeypatch.setattr(
+        nodes, "sanitise_deck_style", lambda style, *, design_system_active: (style, ())
+    )
+    style = DeckStyle(css='.dk-a{content:"\ud800"}', components=[])
+    graph_env.skills.set("architect", architect_build(_with_style(make_spec((0, 1)), style)))
+
+    updates = architect_node(graph_env.state())
+
+    assert updates["architect_intent"] == "build"
+    assert updates["error_state"]["code"] == "deck_level_write_failed", updates["error_state"]

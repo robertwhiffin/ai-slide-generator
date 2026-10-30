@@ -27,7 +27,17 @@ Sanitising rules (see :func:`sanitise_deck_style`):
   to the last occurrence (``merge_css`` would otherwise keep only the last).
 - Empty rules are dropped, CSS with no rule left is blank, and ``<style`` /
   ``</style`` text never survives.
-- A rebuilt sheet must re-sanitise with no notes, or the style is dropped.
+- A selector or value that ends in a bare ``\\``, or holds a bad or unterminated
+  string or url, is dropped: written back, it would escape or swallow what
+  follows it.
+- The CSS never leaves a construct open: a rule written after it must parse as
+  its own rule. Every view writes trusted CSS after ``deck.css`` in the same
+  ``<style>``, so a trailing ``/*``, an open ``{``, string, ``calc(`` or
+  ``url(`` would swallow it. Open text is rebuilt from its rules, which close.
+- Lone surrogates (``\\D800`` decodes to one) become U+FFFD in the CSS, the
+  components and the notes, so every string encodes as UTF-8.
+- A rebuilt sheet must re-sanitise with no notes and close, or the style is
+  dropped.
 - Each note is capped at 200 characters.
 
 When nothing is removed the input object comes back with its CSS text
@@ -63,6 +73,23 @@ _STYLE_TEXT = re.compile(r"</?\s*style", re.IGNORECASE)
 _REMOTE_TEXT = re.compile(r"https?:|//", re.IGNORECASE)
 # A browser's URL parser removes these before it reads a scheme or "//".
 _URL_IGNORED_CHARS = re.compile(r"[\t\n\r]")
+# The only code points UTF-8 cannot encode.  tinycss2 decodes "\D800" to one,
+# where a browser reads U+FFFD.
+_SURROGATES = re.compile("[\ud800-\udfff]")
+# Parse errors whose token tinycss2 writes back as open text: '"[bad string]' and
+# 'url([bad url])' for a bad token, and the original text without its closing
+# quote or ")" for one cut off by the end of the CSS.
+_OPEN_TOKEN_ERRORS = {
+    "bad-string": "a bad string",
+    "bad-url": "a bad url",
+    "eof-in-string": "a string left open at the end",
+    "eof-in-url": "a url left open at the end",
+}
+
+# The closure post-condition's probe: a rule written after the deck style, as
+# every view surface writes its trusted CSS after deck.css in one <style>.
+_FOLLOWER_SELECTOR = ".dk-sentinel-probe"
+_FOLLOWER_RULE = _FOLLOWER_SELECTOR + "{color:red}"
 
 # Functions that load or paint an image from a string, URL or element (R15).
 _IMAGE_FUNCTIONS = frozenset(
@@ -148,8 +175,63 @@ def _short(text: str) -> str:
 
 
 def _capped(notes: list[str]) -> tuple[str, ...]:
-    """Notes cut to ``_MAX_NOTE_CHARS`` each: they quote model-written CSS into a retry prompt."""
+    """Notes cut to ``_MAX_NOTE_CHARS`` each: they quote model-written CSS into a retry prompt.
+
+    Lone surrogates become U+FFFD first: a note reaches the retry payload and
+    the refusal row, and both are serialised.
+    """
+    notes = [_without_surrogates(n) for n in notes]
     return tuple(n if len(n) <= _MAX_NOTE_CHARS else n[: _MAX_NOTE_CHARS - 1] + "…" for n in notes)
+
+
+def _without_surrogates(text: str) -> str:
+    """*text* with every lone surrogate replaced by U+FFFD, so it encodes as UTF-8."""
+    return _SURROGATES.sub("�", text)
+
+
+def _ends_in_bare_backslash(text: str) -> bool:
+    """True when *text* ends in an odd run of ``\\``: the last one escapes what is written next."""
+    return (len(text) - len(text.rstrip("\\"))) % 2 == 1
+
+
+def _holds_parse_error(tokens: list) -> bool:
+    """True when *tokens*, or any block or function inside them, holds a parse error."""
+    return any(
+        tok.type == "error"
+        or (
+            tok.type in ("function", "() block", "[] block", "{} block")
+            and _holds_parse_error(_tokens_in(tok))
+        )
+        for tok in tokens
+    )
+
+
+def _leaves_open(css: str) -> bool:
+    """True when a rule written after *css* would not parse as its own rule.
+
+    A trailing ``/*``, an open ``{`` block, string, ``calc(`` or ``url(`` swallows
+    what follows it (MF2), and every view surface writes trusted CSS after
+    ``deck.css`` in the same ``<style>``.  So the probe rule, after a newline as
+    the frontend writes it, must be the last top-level rule, exactly as written.
+    """
+    nodes = tinycss2.parse_stylesheet(
+        css + "\n" + _FOLLOWER_RULE, skip_comments=True, skip_whitespace=True
+    )
+    last = nodes[-1] if nodes else None
+    if (
+        last is None
+        or last.type != "qualified-rule"
+        or tinycss2.serialize(last.prelude).strip() != _FOLLOWER_SELECTOR
+    ):
+        return True
+    items = tinycss2.parse_blocks_contents(last.content, skip_comments=True, skip_whitespace=True)
+    return not (
+        len(items) == 1
+        and items[0].type == "declaration"
+        and items[0].name == "color"
+        and not items[0].important
+        and tinycss2.serialize(items[0].value).strip() == "red"
+    )
 
 
 def _split_selectors(prelude: list) -> list[list]:
@@ -222,6 +304,8 @@ def _value_text(tokens: list, *, parts: list[str]) -> str | None:
     """
     for tok in tokens:
         kind = tok.type
+        if kind == "error" and tok.kind in _OPEN_TOKEN_ERRORS:
+            return f"unparseable value: {_OPEN_TOKEN_ERRORS[tok.kind]}"
         if kind == "url":
             if not tok.value.strip().lower().startswith("data:"):
                 return "url() other than data:"
@@ -258,6 +342,9 @@ def _declaration_problem(decl: Any) -> str | None:
     reason = _value_text(decl.value, parts=parts)
     if reason:
         return reason
+    # Rebuilt as "name:value;", a bare trailing "\" would escape the ";" or "}".
+    if _ends_in_bare_backslash(tinycss2.serialize(decl.value).strip()):
+        return "its value ends in a bare \\"
     text = "".join(parts)
     # Read the text as a URL parser does: "/\t/x" and "\\x" both mean "//x".
     if _REMOTE_TEXT.search(_URL_IGNORED_CHARS.sub("", text).replace("\\", "/")):
@@ -294,6 +381,11 @@ def _clean_rule(
         for tokens, text in zip(selectors, selector_texts):
             if _STYLE_TEXT.search(text):
                 notes.append(f"selector {_short(text)!r} dropped: contains <style text")
+            elif _ends_in_bare_backslash(text):
+                # Rebuilt, it would escape the "," or "{" after it.
+                notes.append(f"selector {_short(text)!r} dropped: it ends in a bare \\")
+            elif _holds_parse_error(tokens):
+                notes.append(f"selector {_short(text)!r} dropped: it holds unparseable text")
             elif _is_scoped(tokens):
                 kept_selectors.append(text)
             else:
@@ -388,6 +480,25 @@ def _rebuild_problem(css: str, *, design_system_active: bool) -> str | None:
     return None
 
 
+def _utf8_safe_component(component: Any) -> Any:
+    """*component* with lone surrogates in its strings replaced by U+FFFD.
+
+    The same object when it holds none.
+    """
+    update: dict[str, Any] = {
+        field: _without_surrogates(value)
+        for field, value in (
+            ("name", component.name),
+            ("use", component.use),
+            ("example_html", component.example_html),
+        )
+        if _SURROGATES.search(value)
+    }
+    if any(_SURROGATES.search(name) for name in component.class_names):
+        update["class_names"] = [_without_surrogates(name) for name in component.class_names]
+    return component.model_copy(update=update) if update else component
+
+
 def _component_problem(component: Any, defined: frozenset[str]) -> str | None:
     names = component.class_names
     if not names:
@@ -409,9 +520,11 @@ def sanitise_deck_style(
     Returns the cleaned style and one note per thing removed, each at most
     ``_MAX_NOTE_CHARS`` long. A style that needs no change comes back as the same
     object with ``()`` notes. ``(None, notes)`` is returned when no rule is left
-    (blank or comment-only CSS), when the rebuilt CSS fails the post-condition,
-    or when the CSS is longer than ``DECK_STYLE_MAX_CHARS``. Components are
-    checked against the cleaned CSS.
+    (blank or comment-only CSS), when the rebuilt CSS fails a post-condition
+    (it must re-sanitise with no notes, and a rule written after it must parse
+    as its own), or when the CSS is longer than ``DECK_STYLE_MAX_CHARS``.
+    Components are checked against the cleaned CSS. Every string returned
+    encodes as UTF-8, so the spec carrying it always serialises.
     """
     if style is None:
         return None, ()
@@ -423,8 +536,23 @@ def sanitise_deck_style(
         return None, _capped(notes)
 
     css = "\n".join(rules) if changed else style.css
+    if not changed and _leaves_open(css):
+        # Nothing was dropped, but the text ends inside a comment, a block, a
+        # string or a function.  Its parsed rules are rebuilt closed.
+        notes.append(
+            "the CSS left a comment, block, string or function open at its end; "
+            "it was rebuilt from its rules"
+        )
+        css = "\n".join(rules)
+        changed = True
+    if _SURROGATES.search(css):
+        notes.append("lone surrogate code points in the CSS were replaced with U+FFFD")
+        css = _without_surrogates(css)
+        changed = True
     if changed:
         problem = _rebuild_problem(css, design_system_active=design_system_active)
+        if not problem and _leaves_open(css):
+            problem = "it leaves a comment, block, string or function open"
         if problem:
             notes.append(f"deck style dropped: post-condition failed on the rebuilt CSS ({problem})")
             return None, _capped(notes)
@@ -435,6 +563,13 @@ def sanitise_deck_style(
     defined = css_class_names(css)
     components = []
     for component in style.components:
+        safe = _utf8_safe_component(component)
+        if safe is not component:
+            notes.append(
+                f"component {_short(safe.name)!r}: lone surrogate code points "
+                "were replaced with U+FFFD"
+            )
+            component = safe
         problem = _component_problem(component, defined)
         if problem:
             notes.append(f"component {_short(component.name)!r} dropped: {problem}")

@@ -92,9 +92,12 @@ from tests.unit.test_architect_insert_slide import (
     _rows,
 )
 from tests.unit.test_deck_style_css_path import (
+    C11_TEMPLATE_BLOCK,
+    C11_TEMPLATE_ROOT_AFTER_MERGE,
     _architect_writes,
     _dispatch,
     _pin,
+    _post_commit,
     _sent_positions,
     _spy_on_deck_writes,
 )
@@ -762,6 +765,56 @@ def test_full_spec_edit_changing_the_contract_keeps_the_answers_sanitised_style(
     css = graph_env.deck_row().css or ""
     assert clean.css in css and "@import" not in css and "body" not in css, css
     assert t.updates["target_positions"] == [0, 1, 2]
+
+
+#: A palette plus a piece: clean on a deck with no design system, and not on one.
+PALETTE_STYLE = DeckStyle(
+    css=":root{--dk-ink:#000}\n" + NOTE_CSS, components=[STYLE.components[0]]
+)
+
+
+@pytest.mark.parametrize("kind", _FULL_SPEC_KINDS)
+def test_same_contract_carry_is_resanitised_when_the_design_system_flag_flips(
+    graph_env, kind
+):
+    """Final review SF1.  The persisted style was committed while the deck's
+    design system resolved as inactive (deactivated, or the style source
+    swallowed an error and said so), so it kept its ``:root{--dk-…}`` palette.
+    This turn the SAME contract resolves as a design system.  R8/R23 carry the
+    persisted style on a same-contract full-spec answer without sanitising it
+    again, so the write site re-sanitises it under the committed brand's final
+    flag: the palette is gone from the committed spec, ``deck.css`` and
+    ``emitted_style_blocks``, and the template's ``:root`` survives the
+    post-commit merge.
+
+    Sabotage: write the carried style as it is -> ``--dk-ink`` reaches
+    ``deck.css`` and replaces the template's ``:root`` after the merge."""
+    clean, notes = sanitise_deck_style(PALETTE_STYLE, design_system_active=False)
+    assert clean is PALETTE_STYLE and notes == (), "fixture: clean without a design system"
+    expected, _ = sanitise_deck_style(PALETTE_STYLE, design_system_active=True)
+    assert expected is not None and ":root" not in expected.css
+    _pin(graph_env)
+    graph_env.template.style_block = C11_TEMPLATE_BLOCK
+    prior, _ = _styled_deck(
+        graph_env, (0, 1, 2), note_on=(1,), style=PALETTE_STYLE, contract=PINNED_CONTRACT
+    )
+    write_deck_level_columns(graph_env.session_id, css=PALETTE_STYLE.css)
+
+    t, _ = _full_spec_turn(graph_env, prior, kind, None)
+
+    assert t.updates["error_state"] is None, t.updates["error_state"]
+    assert t.updates["design_system_active"] is True
+    assert t.updates["deck_spec"].deck_style == expected
+    assert _persisted_spec(graph_env).deck_style == expected
+    css = graph_env.deck_row().css
+    assert C11_TEMPLATE_BLOCK in css and "--dk-ink" not in css, css
+    for block in t.updates["emitted_style_blocks"]["vals"]:
+        assert "--dk-ink" not in block, block
+
+    _post_commit(graph_env, t.merged)
+    post = graph_env.deck_row().css
+    assert C11_TEMPLATE_ROOT_AFTER_MERGE in post, post
+    assert "--dk-ink" not in post and ".dk-note" in post, post
 
 
 # ---------------------------------------------------------------------------

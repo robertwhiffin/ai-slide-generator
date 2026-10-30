@@ -211,6 +211,7 @@ Sanitiser (`src/domain/deck_style.py`):
 - Empty rules are dropped, `<style` text never survives, a rebuilt sheet must re-sanitise with no notes, and notes are capped at 200 characters (R14, R15).
 - On a build, a style the sanitiser empties is dropped and the deck builds without one. On an edit, a dropped `deck_changes.deck_style` refuses the edit, with the notes, through the one-retry path (R4).
 - A style carried into a new contract is re-sanitised under the committed contract's flag (R17).
+- Final review fixes: the cleaned CSS never leaves a construct open and always encodes as UTF-8; the committed style is re-sanitised once at the write under the final design-system flag; a pinned deck whose brand resolves empty keeps its stored `deck.css` (the post-commit merge applies the style); and a dropped `deck_changes.deck_style` beside operations or other `deck_changes` is ignored and logged, refusing only when it was the edit's only change (R31).
 
 Edits:
 - A dropped class used by a kept slide refuses the edit with a slide-numbered sentence (`deck_style_drops_used_class`, R6). The check runs only when both a prior and a new style exist and the contract is unchanged (R7). It excludes classes the template owns and `slide`, and counts every other class (R22).

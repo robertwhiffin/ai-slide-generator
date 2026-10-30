@@ -1380,6 +1380,223 @@ def test_css_class_names_reads_inside_scope_and_starting_style():
     )
 
 
+# --- final review MF2: the cleaned CSS never leaves a construct open ----------
+# Every view surface inlines deck.css as <style>${css}\n${trusted}</style>, and
+# the legacy engine appends after the stored sheet, so a deck style that ends
+# inside a comment, a block, a string or a function swallows the trusted CSS
+# that follows it. A rule written after the cleaned CSS must parse as its own
+# top-level rule, exactly as written.
+
+_FOLLOWER = ".dk-zz-follower{color:red}"
+
+
+def _follower_parses_after(css):
+    """True when ``_FOLLOWER`` written after *css* parses as its own last rule."""
+    nodes = tinycss2.parse_stylesheet(
+        css + "\n" + _FOLLOWER, skip_whitespace=True, skip_comments=True
+    )
+    if not nodes or nodes[-1].type != "qualified-rule":
+        return False
+    last = nodes[-1]
+    decls = tinycss2.parse_declaration_list(last.content, skip_whitespace=True, skip_comments=True)
+    return (
+        _squash(tinycss2.serialize(last.prelude)) == ".dk-zz-follower"
+        and len(decls) == 1
+        and decls[0].type == "declaration"
+        and decls[0].name == "color"
+        and _squash(tinycss2.serialize(decls[0].value)) == "red"
+    )
+
+
+def test_follower_check_catches_every_open_ending():
+    # The test's own oracle: each of the reviewer's probe inputs swallows a
+    # following rule, and a closed sheet does not.
+    assert _follower_parses_after(".dk-a{color:red}")
+    for css in (
+        ".dk-a{color:red}\n/*",
+        ".dk-b{color:blue",
+        '.dk-a{color:red;content:"abc',
+        ".dk-a{width:calc(1px",
+        ".dk-a{background:url(data:image/png;base64,AAAA",
+        ".dk-a{color:red \\}",
+    ):
+        assert not _follower_parses_after(css), css
+
+
+_OPEN_ENDINGS = [
+    # Before the fix each came back byte-identical, with no notes.  A comment,
+    # block or function is closed by the rebuild; a string or url cut off by the
+    # end of the CSS is written back open by tinycss2, so its declaration goes.
+    pytest.param(
+        ".dk-a{color:red}\n/*", ".dk-a{color:red}", "open at its end", id="trailing-comment"
+    ),
+    pytest.param(".dk-b{color:blue", ".dk-b{color:blue}", "open at its end", id="open-block"),
+    pytest.param(
+        '.dk-a{color:red;content:"abc', ".dk-a{color:red}", "string left open", id="open-string"
+    ),
+    pytest.param(
+        ".dk-a{width:calc(1px", ".dk-a{width:calc(1px)}", "open at its end", id="open-calc"
+    ),
+    pytest.param(
+        ".dk-a{color:red;background:url(data:image/png;base64,AAAA",
+        ".dk-a{color:red}",
+        "url left open",
+        id="open-unquoted-url",
+    ),
+]
+
+
+@pytest.mark.parametrize("css, expected, needle", _OPEN_ENDINGS)
+def test_css_that_ends_open_is_rebuilt_closed(css, expected, needle, active):
+    comp = _comp("A", *sorted(_ds().css_class_names(css)))
+    out, notes = _sanitise(_style(css, comp), active=active)
+    assert out is not None, notes
+    assert _follower_parses_after(out.css), out.css
+    assert _canon(out.css) == expected
+    assert out.components == [comp]
+    _assert_notes(notes, needle, count=1)
+    again, notes_again = _sanitise(out, active=active)
+    assert notes_again == () and again is out, notes_again
+
+
+_OPEN_REBUILDS = [
+    # A rebuild drops html{} and re-serialises the rest; each of these
+    # serialisations used to end open or escape the character after it.
+    pytest.param(
+        "html{x:1}\n.dk-a{color:red \\\n}", None, "bare \\", id="value-ends-in-backslash"
+    ),
+    pytest.param(
+        "html{x:1}\n.dk-a{color:red \\\n;background:#fff}",
+        ".dk-a{background:#fff}",
+        "bare \\",
+        id="value-backslash-escapes-the-semicolon",
+    ),
+    pytest.param(
+        "html{x:1}\n.dk-a\\\n{color:red}\n.dk-b{color:blue}",
+        ".dk-b{color:blue}",
+        "bare \\",
+        id="selector-ends-in-backslash",
+    ),
+    pytest.param(
+        "html{x:1}\n.dk-a\\\n, .dk-b{color:red}",
+        ".dk-b{color:red}",
+        "bare \\",
+        id="listed-selector-backslash-escapes-the-comma",
+    ),
+    pytest.param(
+        'html{x:1}\n.dk-a{content:"abc\n;color:red}',
+        ".dk-a{color:red}",
+        "unparseable",
+        id="bad-string-value",
+    ),
+    pytest.param(
+        "html{x:1}\n.dk-a{background:url(data:x y);color:red}",
+        ".dk-a{color:red}",
+        "unparseable",
+        id="bad-url-value",
+    ),
+    pytest.param(
+        'html{x:1}\n.dk-a "abc\n{color:red}\n.dk-b{color:blue}',
+        ".dk-b{color:blue}",
+        "unparseable",
+        id="bad-string-selector",
+    ),
+]
+
+
+@pytest.mark.parametrize("css, expected, needle", _OPEN_REBUILDS)
+def test_rebuilt_css_never_ends_open_or_escapes_what_follows(css, expected, needle, active):
+    out, notes = _sanitise(_style(css), active=active)
+    _assert_notes(notes, "html", needle)
+    if expected is None:
+        assert out is None
+        return
+    assert out is not None, notes
+    assert _follower_parses_after(out.css), out.css
+    assert _canon(out.css) == expected
+
+
+@pytest.mark.parametrize(
+    "emitted",
+    [
+        pytest.param("color:red/*", id="opens-a-comment"),
+        pytest.param("color:red;x:{", id="opens-a-block"),
+    ],
+)
+def test_style_whose_rebuild_still_ends_open_is_dropped(emitted, active, monkeypatch):
+    # A serialiser bug that leaves a comment or a block open passes the R15
+    # fixed-point check (re-cleaning the open text removes nothing), so the
+    # closure check is what must drop it.
+    monkeypatch.setattr(_ds(), "_serialise_declaration", lambda decl: emitted)
+    out, notes = _sanitise(
+        _style(".dk-a{color:red}\nbody{color:red}", _comp("A", "dk-a")), active=active
+    )
+    assert out is None
+    _assert_notes(notes, "post-condition", "open")
+
+
+def _encodes(text):
+    text.encode("utf-8")
+    return True
+
+
+def test_surrogate_escape_decoded_by_a_rebuild_becomes_u_fffd(active):
+    # tinycss2 decodes "\D800" to a lone surrogate; written back raw, it made
+    # spec.to_json() raise on the build's commit path.
+    out, notes = _sanitise(
+        _style('.dk-a{content:"\\D800"}\nhtml{color:red}', _comp("A", "dk-a")), active=active
+    )
+    assert out is not None, notes
+    assert _encodes(out.css)
+    assert _canon(out.css) == '.dk-a{content:"\ufffd"}'
+    _assert_notes(notes, "html", "U+FFFD")
+    json.loads(out.model_dump_json())
+    again, notes_again = _sanitise(out, active=active)
+    assert notes_again == () and again is out, notes_again
+
+
+def test_lone_surrogate_in_the_input_css_becomes_u_fffd(active):
+    out, notes = _sanitise(_style('.dk-a{content:"\ud800"}', _comp("A", "dk-a")), active=active)
+    assert out is not None, notes
+    assert out.css == '.dk-a{content:"\ufffd"}'
+    _assert_notes(notes, "U+FFFD", count=1)
+    json.loads(out.model_dump_json())
+
+
+def test_lone_surrogates_in_component_strings_become_u_fffd(active):
+    comp = DeckStyleComponent(
+        name="Card \udc00",
+        class_names=["dk-a"],
+        use="use \ud800 it",
+        example_html='<p class="dk-a">\udfff</p>',
+    )
+    out, notes = _sanitise(_style(".dk-a{color:red}", comp), active=active)
+    assert out is not None, notes
+    (kept,) = out.components
+    assert (kept.name, kept.use, kept.example_html, kept.class_names) == (
+        "Card \ufffd",
+        "use \ufffd it",
+        '<p class="dk-a">\ufffd</p>',
+        ["dk-a"],
+    )
+    assert out.css == ".dk-a{color:red}"
+    _assert_notes(notes, "U+FFFD")
+    json.loads(out.model_dump_json())
+
+
+def test_notes_quoting_a_surrogate_encode_as_utf_8(active):
+    # Notes reach the retry payload and the refusal row, both serialised. A
+    # declaration note quotes its rule's selector unescaped.
+    out, notes = _sanitise(
+        _style(".dk-a\\D800{background:url(https://x/y.png);color:red}"), active=active
+    )
+    assert out is not None, notes
+    assert _encodes(out.css)
+    assert _canon(out.css) == ".dk-a�{color:red}"
+    _assert_notes(notes, "url(")
+    assert all(_encodes(n) for n in notes), notes
+
+
 # --- R13 model guard (passes today; red if a strip validator is added) --------
 
 
