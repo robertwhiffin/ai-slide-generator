@@ -44,8 +44,9 @@ from src.services.graph_definition_manifest import (
 # then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move,
 # then for the architect edit operations schema-contract re-pin, then for the
 # promoted edit-operations prompt (evals/configs/architect/edit-ops.yaml), then for
-# its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml).
-HEAD_ARCHITECT_CONTENT_HASH = "3da09952e7751cd967c3cee11b77628c51565e37fa1b75c1c6e9f92a92d3126b"
+# its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml), then for the Genie One
+# ask_data line (evals/configs/architect/genie-questions.yaml).
+HEAD_ARCHITECT_CONTENT_HASH = "8be2ca68dd31598fcff738328365066b3a14cf257b1a8347ab37e0d9ec6e3274"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
@@ -55,8 +56,9 @@ HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
 )
 
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
-    "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
+    # Re-pinned: the data analyst was upgraded to protected assembly v2 with a Genie One prompt.
+    "data_analyst": "5bc26a1779f5e9d0da693356b2c77ed2093273912d400c8f98adad7c6b872c96",
+    "builder": "025f6a714ecd88ce68f7ba289f0fdc302298ab4ed66d456a7fcae45f46ca5f7d",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "8342438644d4665e929d7fdbd694d0024e401546ae06a9566161b309adb4c82a",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
@@ -123,10 +125,10 @@ HEAD_SLIDESPEC_FIELD_LINES = (
     "(empty list if the slide needs no data)",
 )
 
-# PAYLOAD RULES lines for the other intents, unchanged.
+# PAYLOAD RULES lines for the other intents, unchanged.  The ask_data line left this list
+# when it gained the Genie One question rule (ASK_DATA_PAYLOAD_PHRASES pins it instead).
 HEAD_UNCHANGED_PAYLOAD_LINES = (
     "  build                  → deck_spec must be set",
-    "  ask_data               → data_request must be set",
     "  confirm_design_contract → proposed_design_contract must be set; "
     "never set deck_spec until the user confirms",
     "  discuss                → message only; no payload required",
@@ -152,6 +154,16 @@ EDIT_PAYLOAD_PHRASES = (
     "deck_changes for a deck-level change the user asks for",
     "target_positions and deck_spec are not needed",
     "re-describing the deck as it stands returns the full deck_spec",
+)
+# Genie One (agent mode) plans its own queries, so the ask_data line asks for the business
+# question in plain language in data_request.metric, and for time_bound and grouping only
+# when the user gave them (evals/configs/architect/genie-questions.md).
+ASK_DATA_PAYLOAD_PHRASES = (
+    "data_request must be set",
+    "state the business question the deck needs answered, in plain language, "
+    "in data_request.metric",
+    '"which pickup areas are busiest, and how do their fares compare?"',
+    "fill time_bound and grouping only when the user specified them",
 )
 # The retired edit-line rule: an edit had to carry targets and the whole revised spec.
 RETIRED_EDIT_PAYLOAD_PHRASES = (
@@ -286,6 +298,16 @@ def _edit_payload_line(prompt: str) -> str:
     return lines[0]
 
 
+def _ask_data_payload_line(prompt: str) -> str:
+    lines = [
+        line
+        for line in _payload_rules_block(prompt).splitlines()
+        if re.match(r"^\s*ask_data\s+→", line)
+    ]
+    assert len(lines) == 1, "expected exactly one `ask_data →` line in PAYLOAD RULES"
+    return lines[0]
+
+
 # --- The model sees the new prompt -------------------------------------------
 
 
@@ -297,6 +319,12 @@ def test_edit_payload_rule_asks_for_operations():
     line = _edit_payload_line(INSTRUCTIONS)
     for phrase in EDIT_PAYLOAD_PHRASES:
         assert phrase in _norm(line), f"edit payload line lacks {phrase!r}: {line!r}"
+
+
+def test_ask_data_payload_rule_asks_for_a_plain_language_business_question():
+    line = _ask_data_payload_line(INSTRUCTIONS)
+    for phrase in ASK_DATA_PAYLOAD_PHRASES:
+        assert phrase in _norm(line), f"ask_data payload line lacks {phrase!r}: {line!r}"
 
 
 def test_prompt_no_longer_requires_targets_and_deck_spec_on_an_edit():

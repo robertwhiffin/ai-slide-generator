@@ -35,7 +35,11 @@ const ToolChip: React.FC<{
   onEdit?: () => void;
   sessionId?: string | null;
 }> = ({ tool, onRemove, onEdit, sessionId }) => {
-  const label = tool.type === 'genie'
+  const { storedDeckMode, selectedDeckMode } = useSession();
+  const legacyDeck = (storedDeckMode ?? selectedDeckMode) === 'legacy';
+  const label = tool.type === 'genie_one'
+    ? 'Genie One'
+    : tool.type === 'genie'
     ? tool.space_name
     : tool.type === 'mcp'
     ? tool.server_name
@@ -48,7 +52,8 @@ const ToolChip: React.FC<{
   const badgeLabel = TOOL_TYPE_BADGE_LABELS[tool.type];
 
   // Derive a hover background class from the chip's color class
-  const hoverBgClass = tool.type === 'genie' ? 'hover:bg-blue-200'
+  const hoverBgClass = tool.type === 'genie_one' ? 'hover:bg-sky-200'
+    : tool.type === 'genie' ? 'hover:bg-blue-200'
     : tool.type === 'mcp' ? 'hover:bg-green-200'
     : tool.type === 'vector_index' ? 'hover:bg-indigo-200'
     : tool.type === 'model_endpoint' ? 'hover:bg-amber-200'
@@ -68,7 +73,10 @@ const ToolChip: React.FC<{
   };
 
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${colorClasses}`}>
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${colorClasses}`}
+      title={tool.type === 'genie_one' && legacyDeck ? 'Genie One works in agent mode only' : undefined}
+    >
       <span className="uppercase text-[10px] font-bold opacity-70 mr-0.5">{badgeLabel}</span>
       {onEdit ? (
         <button
@@ -80,6 +88,9 @@ const ToolChip: React.FC<{
         </button>
       ) : (
         <span>{label}</span>
+      )}
+      {tool.type === 'genie_one' && legacyDeck && (
+        <span className="text-gray-500 font-normal">{' · agent mode only'}</span>
       )}
       {conversationId && (
         <button
@@ -583,12 +594,15 @@ export const AgentConfigBar: React.FC = () => {
   }, []);
 
   const handleEditChip = useCallback((tool: ToolEntry) => {
+    if (tool.type === 'genie_one') {
+      return;
+    }
     if (tool.type === 'genie') {
       setDetailTool(tool);
       setDetailMode('edit');
       setEditingNonGenieTool(null);
     } else {
-      setEditingNonGenieTool(tool as MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool);
+      setEditingNonGenieTool(tool);
       setDetailTool(null);
     }
   }, []);
@@ -699,7 +713,7 @@ export const AgentConfigBar: React.FC = () => {
                   key={`${tool.type}-${'space_id' in tool ? tool.space_id : 'connection_name' in tool ? tool.connection_name : 'endpoint_name' in tool ? tool.endpoint_name : idx}-${idx}`}
                   tool={tool}
                   onRemove={() => removeTool(tool)}
-                  onEdit={() => handleEditChip(tool)}
+                  onEdit={tool.type === 'genie_one' ? undefined : () => handleEditChip(tool)}
                   sessionId={sessionId}
                 />
               ))}

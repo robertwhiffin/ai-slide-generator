@@ -1,0 +1,9 @@
+# Architect v1 prompt (Genie One agent mode): the PAYLOAD RULES ask_data line now says to put
+# the business question the deck needs answered, in plain language, in data_request.metric, and
+# to fill time_bound and grouping only when the user specified them. Genie One plans its own
+# queries, so a SQL-like spec of columns and grouping misleads it. Every other line is the
+# shipped (`edit-ops-b`) prompt's. Owner-tested on devloop; no eval run backs it.
+agent_key: architect
+name: genie-questions
+base: v1
+prompt_file: genie-questions.md

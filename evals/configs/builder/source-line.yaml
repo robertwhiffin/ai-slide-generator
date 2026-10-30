@@ -1,0 +1,6 @@
+# Builder v1 prompt (Genie One plan, Task 8): add a small "Source: ..." line to slides that show
+# figures from resolved_data.figures, naming only the figures' source fields; nothing else changes.
+agent_key: builder
+name: source-line
+base: v1
+prompt_file: source-line.md

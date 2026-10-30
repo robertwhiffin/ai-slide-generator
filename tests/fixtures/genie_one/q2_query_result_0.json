@@ -1,0 +1,54 @@
+{
+  "isError": false,
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"conversation_id\":\"84cb39d7434e46c29b823d3f152d88c4\",\"response_id\":\"3a871b51e03e46278aac99b55b408f5c\",\"item_id\":\"pub_toolu_bdrk_01G1EQ1WYJUZgueEf8tipeQE_output\",\"statement_state\":\"SUCCEEDED\",\"ready\":true,\"columns\":[{\"name\":\"pickup_zip\",\"type_text\":\"STRING\"},{\"name\":\"trip_count\",\"type_text\":\"BIGINT\"},{\"name\":\"avg_fare_amount\",\"type_text\":\"DOUBLE\"}],\"rows\":[[\"10011\",\"1129\",\"10.91\"],[\"10003\",\"1181\",\"10.98\"],[\"10001\",\"1227\",\"10.62\"],[\"All 3 combined\",\"3537\",\"10.83\"]],\"total_row_count\":4,\"truncated\":false}"
+    }
+  ],
+  "structuredContent": {
+    "conversation_id": "84cb39d7434e46c29b823d3f152d88c4",
+    "response_id": "3a871b51e03e46278aac99b55b408f5c",
+    "item_id": "pub_toolu_bdrk_01G1EQ1WYJUZgueEf8tipeQE_output",
+    "statement_state": "SUCCEEDED",
+    "ready": true,
+    "columns": [
+      {
+        "name": "pickup_zip",
+        "type_text": "STRING"
+      },
+      {
+        "name": "trip_count",
+        "type_text": "BIGINT"
+      },
+      {
+        "name": "avg_fare_amount",
+        "type_text": "DOUBLE"
+      }
+    ],
+    "rows": [
+      [
+        "10011",
+        "1129",
+        "10.91"
+      ],
+      [
+        "10003",
+        "1181",
+        "10.98"
+      ],
+      [
+        "10001",
+        "1227",
+        "10.62"
+      ],
+      [
+        "All 3 combined",
+        "3537",
+        "10.83"
+      ]
+    ],
+    "total_row_count": 4,
+    "truncated": false
+  }
+}

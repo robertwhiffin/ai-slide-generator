@@ -37,6 +37,15 @@ from src.services.graph_definition_manifest import (
     load_graph_v1_manifest,
 )
 from src.services.prompt_assembler import PromptAssembler, PromptAssemblyRejected
+from tests.fixtures.legacy_v1_definitions import LEGACY_V1_DATA_ANALYST, legacy_v1_manifest
+
+V1_PROTECTED_DIGEST = "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
+V2_PROTECTED_DIGEST = "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854"
+#: The packaged roles that ship upgraded to protected assembly v2 (with an empty set of
+#: custom blocks); every other packaged role is still on the Graph Version 1 assembly.
+#: The data analyst was upgraded for its Genie One prompt; its v1 form lives on in
+#: ``tests.fixtures.legacy_v1_definitions``.
+PACKAGED_V2_ASSEMBLY_ROLES = ("data_analyst",)
 
 EXPECTED_COMMON_BLOCKS = [
     ("authored_prompt", "always", None),
@@ -271,17 +280,24 @@ def test_packaged_v1_manifest_hashes_and_contracts_match_stable_literals():
     """Compare manifest against literals and load_skill as a test-side historical record."""
     manifest = load_graph_v1_manifest()
     assert tuple(item.agent_key for item in manifest.definitions) == MODEL_DRIVEN_AGENT_KEYS
-    # Protected-assembly oracle: the one shared digest literal.
-    expected_protected_digest = "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
     for item in manifest.definitions:
-        # load_skill is the test-side historical record: the manifest's prompt_text must
-        # equal the shipped skill instructions (C-24: a literal, not an import).
-        assert item.prompt_text == load_skill(item.agent_key).instructions
         assert definition_content_hash(item) == PACKAGED_V1_CONTENT_HASHES[item.agent_key]
         assert item.schema_contract.version == 1
         assert item.schema_contract.digest == V1_SCHEMA_CONTRACT_DIGESTS[item.agent_key]
+        if item.agent_key in PACKAGED_V2_ASSEMBLY_ROLES:
+            # An upgraded role's authored prompt is no longer the v1 composite; its
+            # bytes are pinned by the content hash above.
+            assert item.prompt_text != load_skill(item.agent_key).instructions
+            assert item.protected_assembly.version == 2
+            assert item.protected_assembly.digest == V2_PROTECTED_DIGEST
+            continue
+        # load_skill is the test-side historical record: the manifest's prompt_text must
+        # equal the shipped skill instructions (C-24: a literal, not an import).
+        assert item.prompt_text == load_skill(item.agent_key).instructions
         assert item.protected_assembly.version == 1
-        assert item.protected_assembly.digest == expected_protected_digest
+        assert item.protected_assembly.digest == V1_PROTECTED_DIGEST
+    # The legacy v1 data analyst is still the skill composite on the v1 assembly.
+    assert LEGACY_V1_DATA_ANALYST.prompt_text == load_skill("data_analyst").instructions
 
 
 def test_v1_definition_versions_are_frozen_at_two():
@@ -342,8 +358,10 @@ def test_nested_overlay_containers_are_immutable_but_dump_as_json_containers():
 
 
 def test_static_assembly_rule_shapes_are_literal_and_role_specific():
-    manifest = load_graph_v1_manifest()
-    for item in manifest.definitions:
+    for item in load_graph_v1_manifest().definitions:
+        if item.agent_key in PACKAGED_V2_ASSEMBLY_ROLES:
+            assert item.assembly_rules == AssemblyRulesV2(format_version=2, custom_blocks=())
+    for item in legacy_v1_manifest().definitions:
         expected = (
             EXPECTED_BUILD_REVIEWER_BLOCKS
             if item.agent_key == "build_reviewer"
@@ -355,7 +373,7 @@ def test_static_assembly_rule_shapes_are_literal_and_role_specific():
 
 
 def test_generated_v1_rules_use_the_frozen_v1_model_and_reject_literal_changes():
-    for content in load_graph_v1_manifest().definitions:
+    for content in legacy_v1_manifest().definitions:
         assert isinstance(content.assembly_rules, AssemblyRulesV1)
         for index, _block in enumerate(content.assembly_rules.blocks):
             raw = content.model_dump(mode="python")
@@ -375,7 +393,8 @@ def test_manifest_assembly_replays_exact_runtime_prompt(
         if agent_key == "build_reviewer"
         else {"synthetic": True}
     )
-    manifest_definition = _definition_by_key(load_graph_v1_manifest(), agent_key)
+    # The v1 rules replay: the data analyst's v1 form (the packaged one is v2).
+    manifest_definition = _definition_by_key(legacy_v1_manifest(), agent_key)
     actual = PromptAssembler().assemble(
         definition=manifest_definition,
         payload=payload,
@@ -399,7 +418,18 @@ def test_frozen_v1_manifest_identity_remains_exact_for_protected_assembler() -> 
         "digest": "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852",
     }
     assert {
-        definition.protected_assembly for definition in load_graph_v1_manifest().definitions
+        definition.agent_key: definition.protected_assembly.model_dump()
+        for definition in load_graph_v1_manifest().definitions
+    } == {
+        key: {
+            "version": 2 if key in PACKAGED_V2_ASSEMBLY_ROLES else 1,
+            "digest": V2_PROTECTED_DIGEST if key in PACKAGED_V2_ASSEMBLY_ROLES
+            else V1_PROTECTED_DIGEST,
+        }
+        for key in MODEL_DRIVEN_AGENT_KEYS
+    }
+    assert {
+        definition.protected_assembly for definition in legacy_v1_manifest().definitions
     } == {V1_PROTECTED_ASSEMBLY_IDENTITY}
 
 
@@ -704,9 +734,9 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "3da09952e7751cd967c3cee11b77628c51565e37fa1b75c1c6e9f92a92d3126b",
-    "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
+    "architect": "8be2ca68dd31598fcff738328365066b3a14cf257b1a8347ab37e0d9ec6e3274",
+    "data_analyst": "5bc26a1779f5e9d0da693356b2c77ed2093273912d400c8f98adad7c6b872c96",
+    "builder": "025f6a714ecd88ce68f7ba289f0fdc302298ab4ed66d456a7fcae45f46ca5f7d",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "8342438644d4665e929d7fdbd694d0024e401546ae06a9566161b309adb4c82a",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
@@ -913,9 +943,10 @@ def test_schema_contract_upgrade_changes_the_hash_and_only_the_schema_identity(
 
     # Schema and assembly versions are not coupled: the #265 assembly identity,
     # its rules and the prompt are untouched by a schema-contract upgrade.
+    upgraded_role = agent_key in PACKAGED_V2_ASSEMBLY_ROLES
     assert upgraded.protected_assembly.model_dump() == {
-        "version": 1,
-        "digest": "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852",
+        "version": 2 if upgraded_role else 1,
+        "digest": V2_PROTECTED_DIGEST if upgraded_role else V1_PROTECTED_DIGEST,
     }
     assert upgraded.assembly_rules == original.assembly_rules
     assert upgraded.prompt_text == original.prompt_text
@@ -1159,9 +1190,9 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
     # then for the #314 add-a-slide prompt, then for the claude-opus-5-5 seed move,
     # then for the architect edit operations schema-contract digest, then for the
     # promoted architect edit operations prompt (edit-ops), then for its follow-up
-    # tweaks (edit-ops-b).
+    # tweaks (edit-ops-b), then for the Genie One ask_data line (genie-questions).
     assert definition_content_hash(built({"1": "a"})) == (
-        "b7036323132eb23b1fd9fa99a1093deb90ba09635b68f4210c5e0f62029e3476"
+        "c965e3f6b0adfbb0589cb175e0204ee61bed4818ec64fd05ab335bb85c69022f"
     )
 
 

@@ -174,6 +174,7 @@ def test_stage_progress_never_enters_the_events_list(poll_client, poll_manager):
             "tool_input": None,
             "tool_output": None,
             "message_id": 11,
+            "agent": None,
             # #321: every event carries `metadata`, null except on a failure notice.
             "metadata": None,
         }

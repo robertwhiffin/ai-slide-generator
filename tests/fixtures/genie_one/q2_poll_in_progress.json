@@ -1,0 +1,21 @@
+{
+  "isError": false,
+  "content": [
+    {
+      "type": "text",
+      "text": "Still running. 1 progress step so far:\n\n  \u2022 Running SQL: SELECT CAST(`pickup_zip` AS STRING) AS pickup_zip, COUNT(*) AS trip_count, ROUND(AVG(`fare_amount`), 2) AS avg_fare_amount FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IN (10001, 10003, 10011) GROUP BY `pickup_zip` UNION ALL SELECT 'All 3 combined', COUNT(*), ROUND(AVG(`fare_amount`), 2) FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IN (10001, 10003, 10011) ORDER BY trip_count ASC\n\nBriefly share what Genie is doing with the user \u2014 one short sentence using the specific table, query, or result detail from the most recent progress step, then call `genie_poll_response` again to continue.\n\n```sql\nSELECT CAST(`pickup_zip` AS STRING) AS pickup_zip, COUNT(*) AS trip_count, ROUND(AVG(`fare_amount`), 2) AS avg_fare_amount FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IN (10001, 10003, 10011) GROUP BY `pickup_zip`\nUNION ALL\nSELECT 'All 3 combined', COUNT(*), ROUND(AVG(`fare_amount`), 2) FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IN (10001, 10003, 10011)\nORDER BY trip_count ASC\n```\n\n[Explore in Databricks](https://example-workspace.cloud.databricks.com/one/chat/threads/84cb39d7434e46c29b823d3f152d88c4?o=1234567890123456&utm_source=genie_chat_mcp)"
+    }
+  ],
+  "structuredContent": {
+    "response_id": "3a871b51e03e46278aac99b55b408f5c",
+    "conversation_id": "84cb39d7434e46c29b823d3f152d88c4",
+    "status": "in_progress",
+    "deep_link": "https://example-workspace.cloud.databricks.com/one/chat/threads/84cb39d7434e46c29b823d3f152d88c4?o=1234567890123456&utm_source=genie_chat_mcp",
+    "final_answer": null,
+    "progress_steps": [
+      "Running SQL: SELECT CAST(`pickup_zip` AS STRING) AS pickup_zip, COUNT(*) AS trip_count, ROUND(AVG(`fare_amount`), 2) AS avg_fare_amount FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IN (10001, 10003, 10011) GROUP BY `pickup_zip` UNION ALL SELECT 'All 3 combined', COUNT(*), ROUND(AVG(`fare_amount`), 2) FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IN (10001, 10003, 10011) ORDER BY trip_count ASC"
+    ],
+    "narration_instruction": "Briefly share what Genie is doing with the user \u2014 one short sentence using the specific table, query, or result detail from the most recent progress step, then call `genie_poll_response` again to continue.",
+    "query_items": null
+  }
+}

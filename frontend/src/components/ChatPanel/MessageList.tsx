@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { Trash2 } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
 import { Message } from './Message';
+import { ToolActivityBar } from './ToolActivityBar';
 import { ChatWelcome } from './ChatWelcome';
 import { Button } from '@/ui/button';
 import { DEFAULT_TURN_LABEL } from '../../utils/turnProgress';
@@ -22,6 +23,27 @@ interface MessageListProps {
   deleteAction?: MessageDeleteAction;
 }
 
+const isToolMessage = (m: MessageType): boolean => Boolean(m.tool_call) || m.role === 'tool';
+
+type Row =
+  | { kind: 'tool'; start: number; messages: MessageType[] }
+  | { kind: 'message'; start: number; message: MessageType };
+
+/** Group each consecutive run of tool messages into one row; other messages stay single rows. */
+function groupRows(messages: MessageType[]): Row[] {
+  const rows: Row[] = [];
+  messages.forEach((message, index) => {
+    const prev = rows[rows.length - 1];
+    if (isToolMessage(message)) {
+      if (prev?.kind === 'tool') prev.messages.push(message);
+      else rows.push({ kind: 'tool', start: index, messages: [message] });
+    } else {
+      rows.push({ kind: 'message', start: index, message });
+    }
+  });
+  return rows;
+}
+
 export const MessageList: React.FC<MessageListProps> = ({
   messages,
   isLoading,
@@ -39,9 +61,18 @@ export const MessageList: React.FC<MessageListProps> = ({
     <div className="p-4 space-y-4">
       {messages.length === 0 && !isLoading && <ChatWelcome />}
 
-      {messages.map((message, index) => (
+      {groupRows(messages).map((row) => {
+        if (row.kind === 'tool') {
+          return (
+            <div key={row.start} data-testid="chat-message-row">
+              <ToolActivityBar messages={row.messages} />
+            </div>
+          );
+        }
+        const message = row.message;
+        return (
         // A named group: Message's own `group-hover` chevrons must not react to this row's hover.
-        <div key={index} className="group/row relative" data-testid="chat-message-row">
+        <div key={row.start} className="group/row relative" data-testid="chat-message-row">
           <Message message={message} />
           {deleteAction && message.role === 'user' && typeof message.id === 'number' && (
             <Button
@@ -62,8 +93,9 @@ export const MessageList: React.FC<MessageListProps> = ({
             </Button>
           )}
         </div>
-      ))}
-      
+        );
+      })}
+
       {isLoading && (
         <div
           className="flex items-center space-x-2 text-gray-500"

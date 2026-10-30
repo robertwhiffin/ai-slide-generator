@@ -145,7 +145,9 @@ def test_resolves_the_complete_typed_v1_snapshot_and_caches_exact_release_id(
         assert definition.graph_release_id == v1_release_id
         assert definition.agent_key == key
         assert isinstance(definition.content, DefinitionContent)
-        assert isinstance(definition.content.assembly_rules, AssemblyRulesV1)
+        # The packaged data analyst ships upgraded to protected assembly v2.
+        expected_rules = AssemblyRulesV2 if key == "data_analyst" else AssemblyRulesV1
+        assert isinstance(definition.content.assembly_rules, expected_rules)
         assert definition.content.agent_key == key
         assert definition.content_hash == definition.content_hash.lower()
 

@@ -1,0 +1,42 @@
+{
+  "isError": false,
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"conversation_id\":\"84cb39d7434e46c29b823d3f152d88c4\",\"response_id\":\"04413f08119a48ba80a08d3383714512\",\"item_id\":\"pub_toolu_bdrk_014oCWtLZYcPd9qqBS47LMAC_output\",\"statement_state\":\"SUCCEEDED\",\"ready\":true,\"columns\":[{\"name\":\"pickup_zip\",\"type_text\":\"INT\"},{\"name\":\"trip_count\",\"type_text\":\"BIGINT\"}],\"rows\":[[\"10001\",\"1227\"],[\"10003\",\"1181\"],[\"10011\",\"1129\"]],\"total_row_count\":3,\"truncated\":false}"
+    }
+  ],
+  "structuredContent": {
+    "conversation_id": "84cb39d7434e46c29b823d3f152d88c4",
+    "response_id": "04413f08119a48ba80a08d3383714512",
+    "item_id": "pub_toolu_bdrk_014oCWtLZYcPd9qqBS47LMAC_output",
+    "statement_state": "SUCCEEDED",
+    "ready": true,
+    "columns": [
+      {
+        "name": "pickup_zip",
+        "type_text": "INT"
+      },
+      {
+        "name": "trip_count",
+        "type_text": "BIGINT"
+      }
+    ],
+    "rows": [
+      [
+        "10001",
+        "1227"
+      ],
+      [
+        "10003",
+        "1181"
+      ],
+      [
+        "10011",
+        "1129"
+      ]
+    ],
+    "total_row_count": 3,
+    "truncated": false
+  }
+}

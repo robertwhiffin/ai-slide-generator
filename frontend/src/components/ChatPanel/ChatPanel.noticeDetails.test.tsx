@@ -103,10 +103,10 @@ describe('ChatPanel carries notice details onto chat messages', () => {
 
     mount();
 
-    // All four rows render (the tool row as its collapsed tool-call header).
+    // All four rows render (the tool row as its collapsed tool-activity bar).
     await screen.findByText('new notice');
     expect(screen.getByText('old notice')).toBeInTheDocument();
-    expect(screen.getByText('Tool call: q')).toBeInTheDocument();
+    expect(screen.getByTestId('tool-activity-bar').textContent).toContain('1 tool call · q');
     expect(screen.getByText('tour reply')).toBeInTheDocument();
     expect(getSession).toHaveBeenCalledWith('notice-session');
 
@@ -167,5 +167,81 @@ describe('ChatPanel carries notice details onto chat messages', () => {
     expect(within(bubbleOf('plain reply')).queryByTestId('message-details')).toBeNull();
     expect(within(bubbleOf('progress line')).queryByTestId('message-details')).toBeNull();
     expect(within(disclosures[0]).getByText('foreman')).toBeInTheDocument();
+  });
+});
+
+describe('ChatPanel history collapses tool rows into one activity bar', () => {
+  it('a tool_call history row renders a single tool-activity-bar, not a card', async () => {
+    getSession.mockResolvedValue({
+      session_id: 'notice-session',
+      messages: [
+        {
+          id: 7,
+          role: 'assistant',
+          content: 'Using tool: genie_one',
+          message_type: 'tool_call',
+          created_at: '2026-10-19T00:00:00Z',
+          metadata: { tool_name: 'genie_one', tool_input: { question: 'Q' } },
+        },
+      ],
+    });
+    mount();
+    const bar = await screen.findByTestId('tool-activity-bar');
+    expect(screen.getAllByTestId('tool-activity-bar')).toHaveLength(1);
+    expect(bar.textContent).toContain('1 tool call · Genie One');
+    expect(screen.queryByText('Tool call: genie_one')).toBeNull();
+  });
+});
+
+describe('ChatPanel carries the data analyst tag onto chat messages', () => {
+  const REPORT = 'Trips rose 4% in 10001. | zip | trips |\n| 10001 | 1227 |';
+
+  beforeEach(() => {
+    getSession.mockReset();
+    sendChatMessage.mockReset();
+  });
+
+  it('reload: a history row with metadata.agent renders the analyst card; others do not', async () => {
+    getSession.mockResolvedValue({
+      session_id: 'notice-session',
+      messages: [
+        row('architect reply', { node: 'architect' }),
+        row(REPORT, { agent: 'data_analyst' }),
+      ],
+    });
+
+    mount();
+
+    await screen.findByText('Data analyst');
+    const cards = screen.getAllByTestId('analyst-report');
+    expect(cards).toHaveLength(1);
+    expect(screen.getByText('architect reply')).toBeInTheDocument();
+    expect(within(cards[0]).getByText('Data analyst')).toBeInTheDocument();
+  });
+
+  it('poll/stream: an assistant event with agent data_analyst renders the card; one without does not', async () => {
+    getSession.mockResolvedValue({
+      session_id: 'notice-session',
+      messages: [row('earlier line', null)],
+    });
+    sendChatMessage.mockImplementation(
+      (_sessionId: string, _message: string, _ctx: unknown, onEvent: (e: unknown) => void) => {
+        onEvent({ type: 'assistant', content: 'plain reply' });
+        onEvent({ type: 'assistant', content: REPORT, agent: 'data_analyst' });
+        return () => {};
+      },
+    );
+
+    const ref = createRef<ChatPanelHandle>();
+    mount(ref);
+    await screen.findByText('earlier line');
+
+    await act(async () => {
+      ref.current!.sendMessage('hi');
+    });
+
+    await screen.findByText('Data analyst');
+    expect(screen.getAllByTestId('analyst-report')).toHaveLength(1);
+    expect(screen.getByText('plain reply')).toBeInTheDocument();
   });
 });

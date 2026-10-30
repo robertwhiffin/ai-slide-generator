@@ -17,7 +17,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { ContributorsManager } from './ContributorsManager';
 
 interface ToolEntry {
-  type: 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
+  type: 'genie_one' | 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
   space_id?: string;
   space_name?: string;
   description?: string;
@@ -53,6 +53,7 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
   const mcpTools = tools.filter(t => t.type === 'mcp');
   const vectorTools = tools.filter(t => t.type === 'vector_index');
   const modelTools = tools.filter(t => t.type === 'model_endpoint');
+  const genieOneTools = tools.filter(t => t.type === 'genie_one');
   const agentTools = tools.filter(t => t.type === 'agent_bricks');
   const styleName = cfg.slide_style_id != null
     ? names.slideStyles.get(cfg.slide_style_id) ?? `Unknown (ID ${cfg.slide_style_id})`
@@ -72,6 +73,12 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
             <span className="ml-2 text-muted-foreground">None configured</span>
           ) : (
             <div className="mt-1 flex flex-wrap gap-1.5">
+              {genieOneTools.map((_, i) => (
+                <Badge key={`genie_one-${i}`} variant="outline" className="text-xs font-normal gap-1 bg-sky-50 text-sky-800 border-sky-200">
+                  <MessageSquare className="size-3" />
+                  Genie One
+                </Badge>
+              ))}
               {genieTools.map(t => (
                 <Badge key={t.space_id} variant="outline" className="text-xs font-normal gap-1 bg-blue-50 text-blue-800 border-blue-200">
                   <MessageSquare className="size-3" />

@@ -5,7 +5,7 @@
  * written before #321 — must render exactly as before, with no disclosure.
  */
 import { describe, it, expect } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import { Message } from './Message';
 import type { Message as MessageType } from '../../types/message';
 
@@ -101,5 +101,58 @@ describe('Message details disclosure', () => {
     expect(screen.getByText(NOTICE)).toBeInTheDocument();
     expect(screen.queryByTestId('message-details')).toBeNull();
     expect(screen.queryByText('Details')).toBeNull();
+  });
+});
+
+describe('Message data analyst card', () => {
+  const REPORT =
+    'Trips rose 4% in zip 10001. Details follow.\n\n| zip | trips |\n| 10001 | 1227 |\n\nSQL: SELECT 1\nSources: Genie One';
+
+  const analyst = (overrides: Partial<MessageType> = {}) =>
+    message({ content: REPORT, agent: 'data_analyst', ...overrides } as Partial<MessageType>);
+
+  it('renders a violet card labelled "Data analyst"', () => {
+    render(<Message message={analyst()} />);
+
+    const card = screen.getByTestId('analyst-report');
+    expect(within(card).getByText('Data analyst')).toBeInTheDocument();
+    const classes = [card, ...Array.from(card.querySelectorAll('*'))]
+      .map(el => el.getAttribute('class') ?? '')
+      .join(' ');
+    expect(classes).toContain('violet');
+  });
+
+  it('is collapsed by default and previews the first sentence', () => {
+    render(<Message message={analyst()} />);
+
+    // The first sentence, with or without its closing full stop; nothing after it.
+    expect(screen.getByText(/^Trips rose 4% in zip 10001\.?$/)).toBeInTheDocument();
+    expect(screen.queryByText(/Details follow/)).toBeNull();
+    expect(screen.queryByText(/\| 10001 \| 1227 \|/)).toBeNull();
+    expect(screen.queryByText(/Sources: Genie One/)).toBeNull();
+  });
+
+  it('caps a long first sentence at 140 characters with an ellipsis', () => {
+    render(<Message message={analyst({ content: 'x'.repeat(300) })} />);
+
+    // Capped at 140 characters: 139 + the ellipsis, or 140 then the ellipsis.
+    expect(screen.getByText(/^x{139,140}…$/)).toBeInTheDocument();
+  });
+
+  it('expands on click to the full content, whitespace preserved', () => {
+    render(<Message message={analyst()} />);
+
+    fireEvent.click(within(screen.getByTestId('analyst-report')).getByRole('button'));
+
+    const full = screen.getByText((_, el) => el?.tagName === 'PRE' && el.textContent === REPORT);
+    expect(full.textContent).toContain('| 10001 | 1227 |');
+  });
+
+  it('leaves a normal assistant message without agent as before', () => {
+    render(<Message message={message({ content: REPORT })} />);
+
+    expect(screen.queryByTestId('analyst-report')).toBeNull();
+    expect(screen.queryByText('Data analyst')).toBeNull();
+    expect(screen.getByText(/\| 10001 \| 1227 \|/)).toBeInTheDocument();
   });
 });

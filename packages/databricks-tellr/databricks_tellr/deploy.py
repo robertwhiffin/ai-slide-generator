@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from importlib import metadata, resources
 from pathlib import Path
 from string import Template
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Sequence
 
 import yaml
 from databricks.sdk import WorkspaceClient
@@ -62,6 +62,19 @@ except ImportError:
     pass
 
 logger = logging.getLogger(__name__)
+
+# OAuth scopes the app's user-token calls need. Requested on create, and
+# ensured on every update so apps created before a scope was added get it.
+REQUIRED_USER_API_SCOPES: tuple[str, ...] = (
+    "sql",
+    "dashboards.genie",
+    "catalog.tables:read",
+    "catalog.schemas:read",
+    "catalog.catalogs:read",
+    "serving.serving-endpoints",
+    "ai-gateway",
+    "catalog.connections",
+)
 
 
 def _strip_str(val: Any) -> str:
@@ -670,6 +683,22 @@ def _update_databricks(
             )
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
+
+        # Ensure the app carries every required user API scope before deploying.
+        # A failure here (a workspace that restricts scopes, a caller who may
+        # not update the app) must not abort the update: the new version still
+        # ships, and the admin is told what to add by hand.
+        try:
+            _ensure_app_user_api_scopes(ws, app_name)
+        except Exception as exc:  # noqa: BLE001 — the deploy continues without them
+            print(
+                f"   WARNING: could not add scopes "
+                f"({', '.join(REQUIRED_USER_API_SCOPES)}) to {app_name}: {exc}"
+            )
+            print(
+                "   Genie One needs ai-gateway — add it in the app settings "
+                "(the MCP picker also needs catalog.connections)."
+            )
 
         # Trigger new deployment
         print("   Deploying...")
@@ -1674,19 +1703,47 @@ def _create_app(
         compute_size=compute_size_enum,
         default_source_code_path=workspace_path,
         resources=app_resources,
-        user_api_scopes=[
-            "sql",
-            "dashboards.genie",
-            "catalog.tables:read",
-            "catalog.schemas:read",
-            "catalog.catalogs:read",
-            "serving.serving-endpoints",
-        ],
+        user_api_scopes=list(REQUIRED_USER_API_SCOPES),
     )
 
     ws.apps.create_and_wait(app)
 
     return ws.apps.get(name=app_name)
+
+
+def _ensure_app_user_api_scopes(
+    ws: WorkspaceClient,
+    app_name: str,
+    required: Sequence[str] = REQUIRED_USER_API_SCOPES,
+) -> list[str]:
+    """Add any ``required`` user API scopes the app is missing.
+
+    Existing scopes are kept in place and missing ones are appended in
+    ``required`` order. ``apps.update`` is a full replace on the fields it
+    accepts, so every mutable field is carried explicitly and ``compute_size``
+    is omitted (the update API rejects it).
+
+    Returns:
+        The scopes that were added. ``[]`` means no update call was made.
+    """
+    cur = ws.apps.get(name=app_name)
+    existing = list(cur.user_api_scopes or [])
+    missing = [s for s in required if s not in existing]
+    if not missing:
+        return []
+    ws.apps.update(
+        name=app_name,
+        app=App(
+            name=app_name,
+            description=cur.description,
+            default_source_code_path=cur.default_source_code_path,
+            user_api_scopes=existing + missing,
+            resources=cur.resources,
+            # compute_size deliberately omitted — passing it is rejected.
+        ),
+    )
+    print(f"   Scopes added: {', '.join(missing)}")
+    return missing
 
 
 def _deploy_app(ws: WorkspaceClient, app_name: str, workspace_path: str) -> App:

@@ -2306,7 +2306,19 @@ export const api = {
    */
   async discoverMCPConnections(): Promise<DiscoveryResponse> {
     const response = await fetch(`${API_BASE_URL}/api/tools/discover/mcp`);
-    if (!response.ok) return { items: [] };
+    if (!response.ok) {
+      const fallback = `Could not list MCP connections (${response.status}).`;
+      try {
+        const body = await response.json();
+        return {
+          items: body?.items ?? [],
+          error: body?.error ?? fallback,
+          error_code: body?.error_code,
+        };
+      } catch {
+        return { items: [], error: fallback };
+      }
+    }
     return response.json();
   },
 

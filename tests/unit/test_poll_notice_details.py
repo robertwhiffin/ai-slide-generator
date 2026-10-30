@@ -59,6 +59,7 @@ def test_an_info_row_with_details_forwards_them():
         "tool_input": None,
         "tool_output": None,
         "message_id": 7,
+        "agent": None,
         "metadata": {"details": DETAILS},
     }
 
@@ -82,6 +83,7 @@ def test_an_old_info_row_without_metadata_projects_none():
         "tool_input": None,
         "tool_output": None,
         "message_id": 8,
+        "agent": None,
         "metadata": None,
     }
 
@@ -106,6 +108,7 @@ def test_a_tool_call_row_never_leaks_its_input_into_metadata():
         "tool_input": {"query": "secret"},
         "tool_output": None,
         "message_id": 9,
+        "agent": None,
         "metadata": None,
     }
 
@@ -128,6 +131,7 @@ def test_a_tool_result_row_projects_as_today_with_no_metadata():
         "tool_input": None,
         "tool_output": "rows: 3",
         "message_id": 10,
+        "agent": None,
         "metadata": None,
     }
 
@@ -150,6 +154,7 @@ def test_a_tour_row_projects_as_today_with_no_metadata():
         "tool_input": None,
         "tool_output": None,
         "message_id": 11,
+        "agent": None,
         "metadata": None,
     }
 

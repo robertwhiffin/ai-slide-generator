@@ -203,6 +203,21 @@ class TestBuilderProse:
         kept the template's Unity Catalog lockup whatever its topic."""
         assert "Sample furniture is placeholder too" in load_skill("builder").instructions
 
+    def test_builder_adds_a_source_line_for_sourced_figures(self):
+        """Genie One (Task 8): a slide that shows resolved_data.figures cites each
+        figure's source field, and only that.  Both the skill body and the packaged
+        v1 builder prompt carry the rule, so neither can drift from the other."""
+        heading = "SOURCE LINE (only when the slide shows figures from resolved_data.figures):"
+        no_invention = "never invent a source"
+        instructions = load_skill("builder").instructions
+        assert heading in instructions
+        assert no_invention in instructions
+
+        manifest = load_graph_v1_manifest()
+        builder = next(d for d in manifest.definitions if d.agent_key == "builder")
+        assert heading in builder.prompt_text
+        assert no_invention in builder.prompt_text
+
 
 class TestArchitectProse:
     """The architect plans a full deck from reusable sections (deck-parity loop)."""
@@ -298,3 +313,57 @@ class TestDataAnalystProse:
             f"data_analyst instructions must contain the UNTRUSTED_DATA_NOTICE text; "
             f"expected to find {distinctive_token!r}"
         )
+
+
+class TestPackagedDataAnalystPrompt:
+    """The packaged analyst asks Genie One business questions and synthesises the answer.
+
+    The Graph Version 1 composite (``skill.instructions`` above) told the model to send
+    SQL-shaped specs to a ``genie`` SQL tool, to fall back to ``vector_index`` (never bound
+    in agent mode) and to pass a single source through verbatim.  The packaged definition
+    is upgraded to protected assembly v2 with its own authored prompt instead.
+    """
+
+    REQUIRED = (
+        "natural-language data analyst",
+        "Ask ONE question",
+        "Write a synthesis, not a copy",
+    )
+    FORBIDDEN = ("pass it through verbatim", "vector_index")
+
+    @staticmethod
+    def _analyst():
+        manifest = load_graph_v1_manifest()
+        return next(d for d in manifest.definitions if d.agent_key == "data_analyst")
+
+    @pytest.mark.parametrize("phrase", REQUIRED)
+    def test_packaged_prompt_states(self, phrase):
+        assert phrase in self._analyst().prompt_text
+
+    @pytest.mark.parametrize("phrase", FORBIDDEN)
+    def test_packaged_prompt_does_not_state(self, phrase):
+        assert phrase not in self._analyst().prompt_text
+
+    def test_packaged_prompt_is_assembled_inside_the_untrusted_data_notice(self):
+        """The authored prompt no longer embeds UNTRUSTED_DATA_NOTICE, so the v2
+        assembler's role notice and delimiters are what guard the payload."""
+        from dataclasses import dataclass
+
+        from src.services.prompt_assembler import ROLE_UNTRUSTED_DATA_NOTICE, PromptAssembler
+
+        @dataclass(frozen=True)
+        class _Context:
+            design_system_active: bool
+
+        analyst = self._analyst()
+        assert analyst.protected_assembly.version == 2
+        prompt = PromptAssembler().assemble(
+            definition=analyst,
+            payload={"data_request": "DR-SENTINEL", "deck_purpose": None},
+            context=_Context(design_system_active=False),
+        ).prompt
+        notice = ROLE_UNTRUSTED_DATA_NOTICE["data_analyst"]
+        assert prompt.index(analyst.prompt_text) < prompt.index(notice)
+        assert prompt.index(notice) < prompt.index("<untrusted-data>")
+        assert prompt.index("<untrusted-data>") < prompt.index("DR-SENTINEL")
+        assert prompt.index("DR-SENTINEL") < prompt.index("</untrusted-data>")

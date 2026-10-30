@@ -16,7 +16,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
 from src.api.schemas.agent_config import (
+    GenieOneTool,
     normalize_agent_config_dict,
+    resolve_agent_config,
     sanitize_agent_config_for_persist,
 )
 from src.core.database import get_db_session
@@ -1695,6 +1697,44 @@ class SessionManager:
 
             logger.info(
                 "Updated Genie conversation ID",
+                extra={"session_id": session_id, "conversation_id": conversation_id},
+            )
+
+    def set_genie_one_conversation_id(self, session_id: str, conversation_id: str) -> None:
+        """Store *conversation_id* on this row's ``genie_one`` agent-config entry.
+
+        Per user per deck: *session_id* is the ACTOR's row (a contributor's own
+        row, never the deck owner's), and only its ``genie_one`` entry changes.
+        A targeted read-modify-write in one transaction, the row locked, so a
+        config saved between the turn's read and this write is not lost.  The
+        config is re-serialized through ``AgentConfig``, as every agent-config
+        write path does.  A row with no ``genie_one`` entry (the user removed it
+        mid-turn) is left alone.
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .with_for_update()
+                .first()
+            )
+            if session is None:
+                raise SessionNotFoundError(f"Session not found: {session_id}")
+            config = resolve_agent_config(session.agent_config)
+            entry = next((t for t in config.tools if isinstance(t, GenieOneTool)), None)
+            if entry is None:
+                logger.info(
+                    "No Genie One entry to store a conversation ID on",
+                    extra={"session_id": session_id},
+                )
+                return
+            if entry.conversation_id == conversation_id:
+                return
+            entry.conversation_id = conversation_id
+            session.agent_config = config.model_dump()
+
+            logger.info(
+                "Updated Genie One conversation ID",
                 extra={"session_id": session_id, "conversation_id": conversation_id},
             )
 
@@ -4178,6 +4218,8 @@ class SessionManager:
             "tool_input": metadata.get("tool_input"),
             "tool_output": msg["content"] if event_type == "tool_result" else None,
             "message_id": msg["id"],
+            # Which agent spoke (the data analyst's report is drawn as its own card).
+            "agent": metadata.get("agent"),
             # Only a failure notice's technical detail (#321) — never the row's whole
             # metadata, which for a tool row carries its input. None on every other
             # row, including every row persisted before notices had details.
