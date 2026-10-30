@@ -1544,9 +1544,178 @@ What it showed:
 - **Still open.**
   - No architect case has a bindable section, so the bound-slide footer rule (Q1) is not measured
     offline.
-  - The builders' use of the footer piece and its dark-slide logo is measured in the builder pass
-    (B5b), not here.
+  - The builders' use of the footer piece and its dark-slide logo was left to the builder pass
+    (B5b). It is not measured there either, because no builder case has a footer piece (see the
+    next section).
   - The build reviewer may flag a dark divider's footer.
   - The deck-style pass's "prompt wording to revisit" items are still open.
   - The judge's slide-count complaint on `build_technical_deck`: the reference has 7 slides, and
     the prompt asks for 14 to 20. It is a case and judge-prompt issue for the owner.
+
+## Builder and fixer: brand assets, one footer, one ground (Addendum A), 2026-10-30
+
+**Spend: about USD 11.07, with the judge at its USD 0.05 a call upper bound.** That is inside the
+USD 11.9 left for builder plus fixer (Ruling RA13: the USD 25 cap less the architect's USD 13.1).
+Both agents are costed at USD 4 / 20 per million input / output tokens. That is the fixer's Opus 5.5
+list price, and above the USD 2 / 10 Sonnet 5.5 rate of the builder pass above, so it is an upper
+bound for the builder too. Agent tokens come to USD 6.62 at that rate, plus 89 judge calls. With the
+judge at the USD 0.03 a call its payloads measure, the spend is about USD 9.29. Costing the builder
+at the Sonnet rate as well brings it to about USD 6.38.
+
+The builder and fixer prompts' DECK STYLE blocks gain the Addendum A rules (spec Addendum A §A4 and
+§A5, calls Q1 and Q3, corrections A20 and A21, Ruling RA5). Every new rule is inside the block, so
+without a deck style each prompt is byte-identical to before
+(`test_prompt_outside_the_deck_style_block_is_unchanged`). The IMAGE RULES line "If no image ids are
+supplied, build the slide without images" stays as written. Instead, the builder block's precedence
+sentence now names IMAGE RULES beside BOUND TEMPLATE SECTION and NO BOUND SECTION.
+
+- **Builder** (`brand-assets-c`, `693f0101`):
+  - **Brand assets.** Place the brand assets the catalogue's pieces name, such as the footer
+    piece's logo, with their handles as written. The logo comes from the footer piece alone, so it
+    is the same on every slide, and the builder never searches for one (spec decision 2). IMAGE
+    RULES govern `{{image:ID}}` images only.
+  - **Icons.** When the `search_brand_assets` tool is available (correction A20), search when the
+    look asks for icons or the slide shows products or concepts. Search by kind or by one short
+    file-name word, because the query matches file names. Place the icons it returns that fit, as
+    `<img>` sized with layout styles only. Never invent a handle, and never hand-draw an icon.
+  - **Footers** (deck-style decks only; without `deck_style` no page tokens):
+    - no footer on the cover, and never two footers;
+    - a bound slide fills its template's own footer: a label, `{{slide:number}} / {{slide:count}}`
+      over the template's sample number, and the logo inside the label's span, never a third
+      child (correction A21);
+    - a bound slide never adds the footer piece, even when the piece's use line says every slide,
+      because the piece is for unbound slides only (the B5a review's two-footer risk);
+    - an unbound slide uses the footer piece;
+    - a dark slide uses the light-on-dark logo the piece's use line names (Q3).
+  - **One ground** (A4). A light template section (`white` or the default) renders on the deck's
+    default ground, so content slides carry no `white`. Dark and event treatments never change.
+- **Fixer** (`brand-assets-b`, `b365679a`):
+  - keep the assets the pieces name (the logo is never searched);
+  - search only when the finding requires an asset the slide and catalogue lack, and only when the
+    tool is available (A20, MINIMAL CHANGE);
+  - never invent a handle;
+  - the same footer rules, when the finding concerns a footer;
+  - never drop `white` or another treatment class from the outer root (RA5: one ground is the
+    builder's rule).
+- **Setup.** Builder `system.ai.claude-sonnet-5-5`, fixer `system.ai.claude-opus-5-5` (manifest
+  v1, inherited through `base: v1`), judge `databricks-claude-sonnet-5`, profile `tellr-dev`.
+  Builder cases digest `eb3f1cde` (train) and `04278c99` (held-out), fixer `e9ba7698`. The three
+  deck-style builder cases ran with the fake search bound, as production would.
+- **Calibration** (`--calibrate --cases deck_style_icons`, both splits; B4 left it uncalibrated):
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `deck_style_icons` | reference passed; should_fail passed (not trusted) | same |
+
+  The judge cannot see the asset index, so invented handles and hand-drawn glyphs look fine to it.
+  As for the other deck-style cases (Ruling R30), the case is decided by `contract` and
+  `render_measures`, whose `brand_asset_use_score` fails both should_fail outputs. The judge passed
+  every candidate row anyway.
+- **Candidates**, one change each:
+  - builder `brand-assets` (`222abc0a`): the rules above, without the logo sentence or the footer
+    fence;
+  - builder `brand-assets-b` (`e47310f3`): plus "the logo comes from the footer piece alone ...
+    never search for a logo", aimed at S1's cause;
+  - builder `brand-assets-c` (`693f0101`): plus the footer fence "(deck-style decks only; without
+    deck_style, write no {{slide:number}} or {{slide:count}})", aimed at F1's cause;
+  - fixer `brand-assets-b` (`b365679a`): the fixer rules above, logo sentence included. A first
+    draft without that sentence was never run and is not kept.
+
+S are screens, F finalist runs, H held-out, D a cause check. Run ids are from the
+`architect-styling` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 (judge 0.03) |
+|---|---|---|---|---|---|---|---|---|---|
+| calibration | — | both | `deck_style_icons` | — | 4 judge calls | see above | 0 | — | 0.20 (0.12) |
+| B0 05129e17 | builder v1-baseline (0e60b438) | train | all 8 | 2 | 16 | 0.88 | 0 | 11.3k / 1.8k | 2.09 (1.77) |
+| X0 4b1abcb2 | fixer v1-baseline (69eb6ea5) | train | all 5 | 1 | 5 | 0.80 | 0 | 8.8k / 0.7k | 0.49 (0.39) |
+| S1 8ab7306d | brand-assets (222abc0a) | train | 3 deck-style | 2 | 6 | 1.00 | 0 | 18.9k / 1.5k | 0.93 (0.81) |
+| S2 92643560 | brand-assets-b (e47310f3) | train | 3 deck-style | 2 | 6 | 1.00 | 0 | 16.7k / 1.4k | 0.87 (0.75) |
+| F1 3ce85acf | brand-assets-b | train | all 8 | 2 | 16 | 1.00 | 0 | 12.2k / 1.8k | 2.15 (1.83) |
+| H1 24b2aa39 | brand-assets-b | held-out | all 8 | 1 | 8 | 1.00 | 0 | 11.7k / 1.4k | 0.99 (0.83) |
+| X1 956d5f18 | fixer brand-assets-b (b365679a) | train | all 5 | 1 | 5 | 0.60 | 0 | 9.3k / 0.7k | 0.51 (0.41) |
+| D1 66dce7e7 | fixer v1-baseline | train | `brief_not_delivered` | 3 | 3 | 0.33 | 0 | 8.3k / 0.8k | 0.30 (0.24) |
+| D2 6e84a664 | fixer brand-assets-b | train | `brief_not_delivered` | 3 | 3 | 0.67 | 0 | 8.8k / 0.8k | 0.30 (0.24) |
+| F2 b81e7bbe | brand-assets-c (693f0101) | train | all 8 | 1 | 8 | 1.00 | 0 | 12.3k / 1.6k | 1.05 (0.89) |
+| F3 469de7fd | brand-assets-c | train | `deck_style_icons` | 1 | 1 | 1.00 | 0 | 25.9k / 1.6k | 0.19 (0.17) |
+| H2 aba3b83e | brand-assets-c | held-out | all 8 | 1 | 8 | 1.00 | 0 | 11.7k / 1.3k | 0.99 (0.83) |
+
+The "3 deck-style" cases are `deck_style_icons`, `deck_style_code` and `deck_style_table`. Held-out
+is reported as an aggregate (H1, H2), plus the one `deck_style_icons` row the bar needs. No other
+held-out case was read.
+
+What it showed:
+
+- **The baseline already searches.** On today's prompt, Sonnet passed `deck_style_icons` 2/2 (B0).
+  Each row made one `search_brand_assets(kind="icon")` call, prompted by the tool's own
+  description, and placed three index icons. Every finalist row did the same, with exactly one
+  icon search.
+- **S1's cause: logo searches.** `brand-assets` passed 6/6, but 3 of its 6 rows also searched
+  `kind="logo"`, including a `deck_style_code` slide that asks for no asset. These deck styles have
+  no footer piece, so the logo was never placed: a round trip for nothing (27k against 12k input
+  tokens). B0 made no logo search. `brand-assets-b` made none in S2 or F1.
+- **F1's cause: the footer rules leaked out of the block.** `brand-assets-b` passed 16/16 on train
+  and 8/8 on held-out. But on all 10 rows of the five cases without a deck style, it wrote
+  `{{slide:number}} / {{slide:count}}` into the footer it improvises from `section_css`'s
+  `.slide-footer`. B0 wrote the template's sample `1` there, and no tokens. The block says to skip
+  it without a deck style, so this is a behaviour change for old decks, and the judge passed it.
+  `brand-assets-c` fences the footer rules: 0 of its 5 no-deck-style rows carry a token (F2), and
+  its deck-style rows are unchanged. The sample `1` in those improvised footers is today's
+  behaviour, and it is out of scope here.
+- **Fixer** (X1 against X0, ×1). `contrast_failure`, `overflow` and `rogue_colour` passed 1/1 on
+  both. `source_contradiction` failed 0/1 on both, the known v1 defect: the fixer returns
+  `scripts: ""` and the chart's init is dropped. `brief_not_delivered` went 1/1 → 0/1.
+  - In that row the fixer left the slide unchanged and cited the finding's `objective: false`,
+    which the v1 rule 4 outside the block ("the criterion is not objective, return the original
+    HTML unchanged") tells it to do.
+  - The cause check (D1, D2, ×3 each) gave v1 1/3 and the candidate 2/3, so the drop is that rule's
+    variance, not the block, which this payload skips.
+  - In production `build_reviewer_node` sends only objective findings to the fixer, and
+    `brief_not_delivered` is the one subjective criterion. The case and v1 rule 4 disagree; that is
+    for the owner.
+  - No fixer row wrote a page token or searched (no fixer case has a deck style).
+- **Cost and latency.** The block adds about 790 input tokens to every builder call, with or without
+  a deck style (`gold_bullets` 8,936 → 9,758), because it is always in the prompt. That is about
+  USD 0.0016 a slide at Sonnet's rate. Mean latency is unchanged: 14.6 s (B0), 14.2 s (F1),
+  14.3 s (F2). The icon case's one search costs a second round, 25.9k against 12.1k input tokens
+  for a deck-style slide without one.
+- **Acceptance bar** (Task B5b), for builder `brand-assets-c` and fixer `brand-assets-b`.
+  **Met.**
+  1. `deck_style_icons` at least 2 of its 3 rows: 3/3 (F2 1/1, F3 1/1, H2 1/1), deterministic
+     scorers and judge alike.
+  2. No existing case regresses by more than one row against the baseline. On the builder, every
+     case passed its row in F2, against B0's 2/2 (`chart_no_data` 0/2). On the fixer,
+     `brief_not_delivered` dropped one row (1/1 → 0/1; D: 1/3 → 2/3), and every other case held.
+- **Scope cuts, by the implementer**, to fit the cap after F1 found the leak:
+  - `brand-assets-c` ran train ×1 on all 8 cases, plus one more `deck_style_icons` row, where the
+    other finalists ran ×2. The bar was made stricter to match: every existing case had to pass
+    its only row, where ×2 would have allowed 1/2. F1 ran `brand-assets-b`, which differs from C
+    only in the fence, and it passed 16/16 at ×2 as supporting evidence.
+  - The fixer was not re-run for C, because C changes the builder only; X1 and D2 are the promoted
+    fixer config.
+  - The screens ran only the three deck-style cases, the only ones the block applies to, at ×2.
+  - No baseline was cut: B0 covered every train case ×2 and X0 every fixer case.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller:
+  - finalists ran train ×2 (×1 for C, above) and held-out ×1, where the skill says ×5 and ×3;
+  - two finalists, B and C, each scored held-out once;
+  - the bar's held-out `deck_style_icons` verdict was read;
+  - the pass edited `INSTRUCTIONS`, promoted and committed.
+- **Shipped.**
+  - `brand-assets-c` is the builder's v1 prompt in `src/core/skills/builder.py` (`693f010178f3`,
+    previously `0e60b438e4be`), and `brand-assets-b` is the fixer's (`b365679aa152`, previously
+    `69eb6ea52400`). They were promoted with
+    `python -m evals.harness.promote --config builder=evals/configs/builder/brand-assets-c.yaml --run-id builder=b81e7bbe53044baeaff2bf7f975db129 --config fixer=evals/configs/fixer/brand-assets-b.yaml --run-id fixer=956d5f18af274c9ea2057535d0870c6b`.
+  - `HEAD_OTHER_ROLE_CONTENT_HASHES` (builder, fixer) was re-pinned by hand, and the frontend
+    lifecycle contract was re-recorded.
+  - The out-of-block digests and every existing prompt pin are unchanged.
+- **Not measured** (Ruling RA7 and the cases):
+  - No fixer case carries a deck style, so the fixer's tool path and brand rules are bound and
+    tested but not measured. "The fixer pack ×1" proves non-regression only.
+  - No builder case has a footer piece, a bound section or a `white` section on either split, so
+    these are pinned by `test_builder_deck_style_prompt.py` but not measured offline:
+    - the footer rules: a bound footer's tokens and logo, the footer piece, the dark-slide logo,
+      and never two footers;
+    - the one-ground rule.
+
+    A devloop deck is the first real check. The cases did show the negative: with no footer
+    piece, no deck-style row added a footer.

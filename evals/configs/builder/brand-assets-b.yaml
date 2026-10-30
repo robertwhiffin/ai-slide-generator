@@ -1,0 +1,9 @@
+# Builder candidate B (deck style addendum A, Task B5b): `brand-assets` plus one sentence in its
+# Brand assets bullet: the logo comes from the footer piece alone, so it is the same on every
+# slide, and the builder never searches for a logo (spec Addendum A, decision 2). Aimed at the
+# screen's one cause: `brand-assets` searched kind "logo" on 3 of 6 deck-style rows whose deck
+# style has no footer piece, a round trip that placed nothing.
+agent_key: builder
+name: builder-brand-assets-b
+base: v1
+prompt_file: brand-assets-b.md

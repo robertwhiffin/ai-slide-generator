@@ -706,9 +706,9 @@ def test_assembly_rules_for_rejects_unknown_roles():
 PACKAGED_V1_CONTENT_HASHES = {
     "architect": "47c7a388cb9522c9c9446effa8f8480d565594248d140cd482bd4fe46d9fb72f",
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "0e60b438e4beaabb66c1b48db07416cdffa30471a5debf73d6447801086d28cc",
+    "builder": "693f010178f385140d89ebcd44a053c4066d489b96ae2388ea328526cd1a9137",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
-    "fixer": "69eb6ea52400cc241d716da61bf9bb7f1260bf6526303045abd0e357c9ac865a",
+    "fixer": "b365679aa152c9a7a6ba9efb4cd8a4d74e4c75e987d7a6a676b7d671898b3f1b",
     "fix_reviewer": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
