@@ -910,6 +910,46 @@ def _without_callout(style: dict) -> dict:
     return style
 
 
+# Addendum A (A17, Ruling RA5): a build's deck style carries a footer piece, the template's own
+# slide footer with a logo the architect was shown (``deck_style_context.logos``) and both page
+# tokens, which production swaps for the slide's number and the deck's count. It is added here,
+# to each build reference's style, and never to the shared fixture (whose other consumers, the
+# builder and build_reviewer packs, stay as they are).
+FOOTER_CSS = (
+    "\n/* The footer: the template's slide footer, the brand logo beside the page number. */\n"
+    ".dk-footer { align-items: center; }\n"
+    ".dk-footer img { height: 24px; width: auto; }\n"
+)
+FOOTER_USE = (
+    "Every slide except the cover: the template's slide footer, the brand logo on the left and "
+    "the slide's number out of the deck's count (n / N) on the right."
+)
+
+
+def logo_handles() -> list[str]:
+    """The handles of the logos a deck-style build's payload shows the architect
+    (``deck_style_context.logos``), in its order: the build case's ``expect.logo_handles``."""
+    return [row["handle"] for row in case.meridian_deck_style_context()["logos"]]
+
+
+def _with_footer(style: dict) -> dict:
+    """``style`` with the footer piece added last: its rule after the style's CSS and its
+    component after the others, holding the first (default-ground) logo and both page tokens."""
+    style = copy.deepcopy(style)
+    logo = logo_handles()[0]
+    style["css"] = style["css"] + FOOTER_CSS
+    style["components"] = [*style["components"], {
+        "name": "footer",
+        "class_names": ["dk-footer"],
+        "use": FOOTER_USE,
+        "example_html": (
+            f'<div class="slide-footer dk-footer"><img src="{logo}" alt="Meridian"/>'
+            "<span>{{slide:number}} / {{slide:count}}</span></div>"
+        ),
+    }]
+    return style
+
+
 def _technical_deck(deck: dict, slides: list[dict], style: dict) -> dict:
     """A technical build's deck_spec on the Meridian contract: ``deck``'s deck-level fields and
     resolved data, ``slides`` numbered 0..n-1 (no data unless given, no template binding, each
@@ -1264,10 +1304,14 @@ def generate(out_dir: pathlib.Path | None = None):
     )
 
     # Architect deck style: the technical build (its should_fail authors no deck style and no
-    # looks) and the restyle of the code blocks (its should_fail renames dk-code).
-    tech = _technical_deck(TECH_DECK, TECH_SLIDES, _without_callout(deck_style_fixture()))
+    # looks) and the restyle of the code blocks (its should_fail renames dk-code). The build's
+    # style is the fixture without its callout, plus the footer piece; its expect names the
+    # payload's logos, which the footer must hold one of.
+    tech = _technical_deck(
+        TECH_DECK, TECH_SLIDES, _with_footer(_without_callout(deck_style_fixture())))
     _write(
-        out, "build_technical_deck", "positive", "", {"intent": "build", "deck_style": True},
+        out, "build_technical_deck", "positive", "",
+        {"intent": "build", "deck_style": True, "logo_handles": logo_handles()},
         _out("build", TECH_BUILD_MESSAGE, deck_spec=tech),
         _out("build", TECH_BUILD_MESSAGE, deck_spec=_unstyled(tech)),
     )

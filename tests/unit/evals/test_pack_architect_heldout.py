@@ -95,8 +95,14 @@ EXPECT = {
     "redescribe_deck": {"intent": "edit", "full_deck_spec": True},
     # Deck style: the build must author a clean deck style and a look on every slide; the restyle
     # rebuilds nothing and its deck_changes.deck_style must still define dk-code and its token
-    # spans (R29).
-    "build_technical_deck": {"intent": "build", "deck_style": True},
+    # spans (R29). Addendum A (A17, RA5): the build's deck style also needs a footer piece holding
+    # a logo handle from the payload's deck_style_context.logos, written here by the generator.
+    "build_technical_deck": {
+        "intent": "build", "deck_style": True,
+        "logo_handles": [
+            "{{ds-asset:9001}}", "{{ds-asset:9002}}", "{{ds-asset:9003}}", "{{ds-asset:9004}}",
+        ],
+    },
     "restyle_deck": {
         "intent": "edit", "positions": [], "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"],
     },
@@ -871,6 +877,16 @@ def test_committed_deck_style_context_is_the_production_derivation(cid):
     assert ctx["logos"], "the Meridian logos are missing"
     assert ctx["design_tokens"].get("--brand-core-primary") == "#0F766E"
     assert {"slide", "stat-value"} <= set(ctx["template_classes"])
+
+
+@pytest.mark.parametrize("cid", DECK_STYLE_BUILD_CASES)
+def test_deck_style_build_expect_names_the_payload_logos(cid):
+    """A17: ``_deck_style_score`` cannot see the payload, so the generator writes the logo handles
+    the architect was shown into the case's expect, in the payload's order."""
+    c = case.load_case(AGENT, cid, root=CASES)
+    logos = c.payload[DECK_STYLE_CONTEXT_KEY]["logos"]
+    assert logos
+    assert c.expect["logo_handles"] == [row["handle"] for row in logos]
 
 
 def test_ask_data_reference_has_a_data_request():

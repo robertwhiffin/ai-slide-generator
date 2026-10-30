@@ -3,4 +3,9 @@ fault: ''
 expect:
   intent: build
   deck_style: true
+  logo_handles:
+  - '{{ds-asset:9001}}'
+  - '{{ds-asset:9002}}'
+  - '{{ds-asset:9003}}'
+  - '{{ds-asset:9004}}'
 design_system_active: true

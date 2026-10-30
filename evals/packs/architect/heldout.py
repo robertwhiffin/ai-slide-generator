@@ -938,9 +938,11 @@ def generate(out_dir: pathlib.Path | None = None):
 
     # Architect deck style: the technical build on its own pieces (its should_fail authors no deck
     # style and no looks) and the restyle of deck 2's code blocks (its should_fail renames dk-code).
-    tech = m._technical_deck(TECH_DECK, TECH_SLIDES, TECH_STYLE)
+    # Its style carries the footer piece too (Addendum A), and its expect the payload's logos.
+    tech = m._technical_deck(TECH_DECK, TECH_SLIDES, m._with_footer(TECH_STYLE))
     _write(
-        out, "build_technical_deck", "positive", "", {"intent": "build", "deck_style": True},
+        out, "build_technical_deck", "positive", "",
+        {"intent": "build", "deck_style": True, "logo_handles": m.logo_handles()},
         m._out("build", TECH_BUILD_MESSAGE, deck_spec=tech),
         m._out("build", TECH_BUILD_MESSAGE, deck_spec=m._unstyled(tech)),
     )

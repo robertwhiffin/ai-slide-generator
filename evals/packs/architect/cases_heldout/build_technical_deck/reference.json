@@ -111,7 +111,7 @@
       }
     ],
     "deck_style": {
-      "css": "/* Rollout deck style on Meridian: a dated timeline, a KPI band and notes. The template's callout and bullets are reused. */\n.dk-timeline {\n  display: grid;\n  grid-auto-flow: column;\n  grid-auto-columns: 1fr;\n  gap: var(--space-md);\n  margin: 0;\n  padding: 0;\n  list-style: none;\n  border-top: 4px solid var(--brand-core-primary);\n}\n.dk-timeline li {\n  position: relative;\n  padding-top: var(--space-md);\n  font-size: var(--fs-body);\n  color: var(--brand-core-text);\n}\n/* A dot on the rule above each milestone. */\n.dk-timeline li::before {\n  content: \"\";\n  position: absolute;\n  top: -9px;\n  left: 0;\n  width: 14px;\n  height: 14px;\n  border-radius: 50%;\n  background: var(--brand-core-primary);\n}\n.dk-timeline time {\n  display: block;\n  margin-bottom: 4px;\n  font-size: var(--fs-eyebrow);\n  font-weight: 700;\n  letter-spacing: 0.06em;\n  text-transform: uppercase;\n  color: var(--brand-core-primary);\n}\n\n.dk-kpi-band {\n  display: grid;\n  grid-auto-flow: column;\n  grid-auto-columns: 1fr;\n  margin: 0;\n  padding: var(--space-md) 0;\n  border-top: 1px solid var(--brand-core-border);\n  border-bottom: 1px solid var(--brand-core-border);\n}\n.dk-kpi-band > div { padding: 0 var(--space-md); border-left: 1px solid var(--brand-core-border); }\n.dk-kpi-band > div:first-child { padding-left: 0; border-left: 0; }\n.dk-kpi-value {\n  display: block;\n  font-size: var(--fs-title);\n  font-weight: 700;\n  line-height: 1.1;\n  font-variant-numeric: tabular-nums;\n  color: var(--brand-core-primary);\n}\n.dk-kpi-label { display: block; margin-top: 4px; font-size: var(--fs-body); color: var(--brand-core-text); }\n\n.dk-note { margin: var(--space-sm) 0 0; font-size: var(--fs-caption); color: var(--brand-core-muted); }\n",
+      "css": "/* Rollout deck style on Meridian: a dated timeline, a KPI band and notes. The template's callout and bullets are reused. */\n.dk-timeline {\n  display: grid;\n  grid-auto-flow: column;\n  grid-auto-columns: 1fr;\n  gap: var(--space-md);\n  margin: 0;\n  padding: 0;\n  list-style: none;\n  border-top: 4px solid var(--brand-core-primary);\n}\n.dk-timeline li {\n  position: relative;\n  padding-top: var(--space-md);\n  font-size: var(--fs-body);\n  color: var(--brand-core-text);\n}\n/* A dot on the rule above each milestone. */\n.dk-timeline li::before {\n  content: \"\";\n  position: absolute;\n  top: -9px;\n  left: 0;\n  width: 14px;\n  height: 14px;\n  border-radius: 50%;\n  background: var(--brand-core-primary);\n}\n.dk-timeline time {\n  display: block;\n  margin-bottom: 4px;\n  font-size: var(--fs-eyebrow);\n  font-weight: 700;\n  letter-spacing: 0.06em;\n  text-transform: uppercase;\n  color: var(--brand-core-primary);\n}\n\n.dk-kpi-band {\n  display: grid;\n  grid-auto-flow: column;\n  grid-auto-columns: 1fr;\n  margin: 0;\n  padding: var(--space-md) 0;\n  border-top: 1px solid var(--brand-core-border);\n  border-bottom: 1px solid var(--brand-core-border);\n}\n.dk-kpi-band > div { padding: 0 var(--space-md); border-left: 1px solid var(--brand-core-border); }\n.dk-kpi-band > div:first-child { padding-left: 0; border-left: 0; }\n.dk-kpi-value {\n  display: block;\n  font-size: var(--fs-title);\n  font-weight: 700;\n  line-height: 1.1;\n  font-variant-numeric: tabular-nums;\n  color: var(--brand-core-primary);\n}\n.dk-kpi-label { display: block; margin-top: 4px; font-size: var(--fs-body); color: var(--brand-core-text); }\n\n.dk-note { margin: var(--space-sm) 0 0; font-size: var(--fs-caption); color: var(--brand-core-muted); }\n\n/* The footer: the template's slide footer, the brand logo beside the page number. */\n.dk-footer { align-items: center; }\n.dk-footer img { height: 24px; width: auto; }\n",
       "components": [
         {
           "name": "dated timeline",
@@ -138,6 +138,14 @@
           ],
           "use": "A one-line caveat or source under an exhibit.",
           "example_html": "<p class=\"dk-note\">Measured on the canary, 5% of traffic.</p>"
+        },
+        {
+          "name": "footer",
+          "class_names": [
+            "dk-footer"
+          ],
+          "use": "Every slide except the cover: the template's slide footer, the brand logo on the left and the slide's number out of the deck's count (n / N) on the right.",
+          "example_html": "<div class=\"slide-footer dk-footer\"><img src=\"{{ds-asset:9001}}\" alt=\"Meridian\"/><span>{{slide:number}} / {{slide:count}}</span></div>"
         }
       ]
     }

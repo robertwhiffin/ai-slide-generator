@@ -159,6 +159,9 @@ def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: 
             "status": result.status,
             "infra_error": result.infra_error,
             "error_detail": result.error_detail,
+            # The run's brand-asset searches (``RunResult.tool_calls``), which render_measures reads
+            # for a brand-asset case; a runner result written before the field existed has none.
+            "tool_calls": list(getattr(result, "tool_calls", ()) or ()),
         }
 
     return predict_fn
@@ -217,16 +220,24 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
         html = (outputs.get("structured") or {}).get("html", "")
         ok, why = det.render_measures_score(m, html)
         # A case whose slide is built on a deck style also scores its use (C21): the payload, which
-        # holds the deck style and the template CSS, is the row's own case's.
+        # holds the deck style and the template CSS, is the row's own case's. A brand-asset case
+        # (Addendum A) also scores the icons it places against the run's searches. Each is ANDed:
+        # a failing row names only what failed; a passing row names every check.
         case = load_case(
             inputs["agent_key"], inputs["case_id"], **split_kwargs(inputs.get("split", "train")))
-        if "deck_style_classes" in (case.expect or {}):
-            use_ok, use_why = det.deck_style_use_score(html, case.payload or {}, case.expect)
-            if not use_ok:
-                why = use_why if ok else f"{why}; {use_why}"
+        expect = case.expect or {}
+        checks = []
+        if "deck_style_classes" in expect:
+            checks.append(det.deck_style_use_score(html, case.payload or {}, expect))
+        if "brand_assets" in expect:
+            checks.append(det.brand_asset_use_score(
+                html, case.payload or {}, expect, tool_calls=outputs.get("tool_calls")))
+        for check_ok, check_why in checks:
+            if not check_ok:
+                why = check_why if ok else f"{why}; {check_why}"
             elif ok:
-                why = f"{why}; {use_why}"
-            ok = ok and use_ok
+                why = f"{why}; {check_why}"
+            ok = ok and check_ok
         return _fb(ok, why)
 
     @scorer(name="judge")

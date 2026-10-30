@@ -14,13 +14,19 @@ from evals.harness import case, render
 AGENT = "builder"
 CASE_IDS = [
     "gold_bullets", "gold_chart", "gold_stats", "too_much_content", "chart_no_data",
-    "deck_style_code", "deck_style_table",
+    "deck_style_code", "deck_style_table", "deck_style_icons",
 ]
 POSITIVES = {"gold_bullets": 1, "gold_chart": 3, "gold_stats": 9}
 MUTATIONS = ["too_much_content", "chart_no_data"]
 # Positive cases whose payload carries the technical deck style; each must use (at least) its piece.
 DECK_STYLE_CASES = {"deck_style_code": "dk-code", "deck_style_table": "dk-table"}
+# Addendum A, B4 (A16): a deck-style case whose look asks for icons, which only the brand-asset
+# search can supply; its expect adds ``brand_assets``, the Meridian fake asset index's handles.
+BRAND_ASSET_CASES = ["deck_style_icons"]
+STYLED_CASES = [*DECK_STYLE_CASES, *BRAND_ASSET_CASES]
 DECK_STYLE_FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
+ASSET_INDEX = case.MERIDIAN_DIR / "assets.json"
+DS_ASSET = re.compile(r"\{\{ds-asset:\d+\}\}")
 FILES = ("case.yaml", "payload.json", "reference.json", "calibration.json")
 PACK_DIR = case.PACKS_DIR / AGENT
 
@@ -96,14 +102,17 @@ def test_case_contract(cid):
     assert c.payload["section_css"] == case.meridian_section_css()
     assert c.payload["resolved_style"] == case.meridian_resolved_style()
     assert c.payload["design_system_active"] is True
-    if cid in DECK_STYLE_CASES:
+    if cid in BRAND_ASSET_CASES:
+        assert set(c.expect) == {"deck_style_classes", "brand_assets"}
+        assert "deck_style" in c.payload
+    elif cid in DECK_STYLE_CASES:
         assert set(c.expect) == {"deck_style_classes"}
         assert "deck_style" in c.payload
     else:
         assert c.expect == {}
         assert "deck_style" not in c.payload  # an old deck's payload carries no deck_style key
     assert set(c.reference) >= {"position", "html", "scripts"}
-    assert c.kind == ("positive" if cid in POSITIVES or cid in DECK_STYLE_CASES else "mutation")
+    assert c.kind == ("positive" if cid in POSITIVES or cid in STYLED_CASES else "mutation")
     assert (c.fault == "") == (c.kind == "positive")
 
 
@@ -240,7 +249,7 @@ def test_payload_validates_against_real_models(cid):
 
 # ---- deck-style cases ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("cid", list(DECK_STYLE_CASES))
+@pytest.mark.parametrize("cid", STYLED_CASES)
 def test_deck_style_case_carries_the_fixture_style_and_a_look(cid):
     c = case.load_case(AGENT, cid, root=CASES)
     assert c.payload["deck_style"] == _fixture_style()
@@ -266,6 +275,56 @@ def test_deck_style_case_expect_lists_pieces_the_style_defines(cid, piece):
     assert len(classes) == len(set(classes))
     assert piece in classes
     assert set(classes) <= css_class_names(_fixture_style()["css"])
+
+
+# ---- deck_style_icons (Addendum A, B4) ---------------------------------------------------------
+
+def _index():
+    return json.loads(ASSET_INDEX.read_text())
+
+
+@pytest.mark.parametrize("cid", BRAND_ASSET_CASES)
+def test_brand_asset_case_expect_is_the_fake_asset_index(cid):
+    """``expect.brand_assets`` is every handle of the index the harness's fake search answers
+    from, in the file's order: the scorer holds the slide to exactly those."""
+    want = [row["handle"] for row in _index()]
+    assert want and len(want) == len(set(want))
+    assert case.load_case(AGENT, cid, root=CASES).expect["brand_assets"] == want
+
+
+@pytest.mark.parametrize("cid", BRAND_ASSET_CASES)
+def test_brand_asset_case_expect_lists_pieces_its_look_names(cid):
+    c = case.load_case(AGENT, cid, root=CASES)
+    classes = c.expect["deck_style_classes"]
+    assert isinstance(classes, list) and classes
+    assert len(classes) == len(set(classes))
+    assert set(classes) <= css_class_names(_fixture_style()["css"])
+    look = c.payload["slide_spec"]["look"]
+    for name in classes:
+        assert name in look, (name, look)
+
+
+@pytest.mark.parametrize("cid", BRAND_ASSET_CASES)
+def test_brand_asset_case_look_asks_for_icons_and_names_no_handle(cid):
+    """Only a search can supply a handle: nothing the builder is given names one."""
+    c = case.load_case(AGENT, cid, root=CASES)
+    look = c.payload["slide_spec"]["look"]
+    assert "icon" in look.lower(), look
+    assert not DS_ASSET.search(json.dumps(c.payload)), "the payload names an asset handle"
+
+
+@pytest.mark.parametrize("cid", BRAND_ASSET_CASES)
+def test_brand_asset_case_reference_places_index_icons(cid):
+    c = case.load_case(AGENT, cid, root=CASES)
+    index = _index()
+    icons = {row["handle"] for row in index if row["kind"] == "icon"}
+    used = set(DS_ASSET.findall(c.reference["html"]))
+    assert used & icons, "the reference places no icon from the index"
+    assert used <= {row["handle"] for row in index}, sorted(used)
+    assert not c.reference["scripts"].strip()
+    # The should_fail goes wrong on its brand assets: it never places index handles alone.
+    bad = set(DS_ASSET.findall(_cal(cid)["should_fail"]["html"]))
+    assert not (bad and bad <= {row["handle"] for row in index}), sorted(bad)
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)

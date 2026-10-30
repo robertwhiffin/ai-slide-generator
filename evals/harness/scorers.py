@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import NamedTuple
 
@@ -27,6 +28,7 @@ from src.domain.slide_operations import (
     apply_operations,
     compose_edit_spec,
 )
+from src.utils.ds_asset_utils import DS_ASSET_PLACEHOLDER_PATTERN
 
 
 #: Longest error detail quoted in a contract-fail rationale; longer is cut + marked.
@@ -547,7 +549,11 @@ def _deck_style_score(
     * every slide has a non-blank ``look``;
     * with a design system active, its CSS holds no hex colour literal (the design system supplies
       the colours as tokens). A ``:root`` rule needs no exemption here: under a design system the
-      sanitiser drops it, which already fails the row.
+      sanitiser drops it, which already fails the row;
+    * when ``expect`` has ``logo_handles`` (Addendum A: the handles of the payload's
+      ``deck_style_context.logos``, written by the generator, since this scorer cannot see the
+      payload), the style has a footer piece (``_footer_problem``) holding both page tokens and,
+      when the list is not empty, one of those logos. Without the key no footer is required.
 
     A failure's rationale names its cause; a sanitiser failure quotes the notes.
     """
@@ -577,9 +583,54 @@ def _deck_style_score(
         hexes = _hex_colour_problem(style.css)
         if hexes:
             return False, f"Deck style: {hexes}"
+    footer = ""
+    if "logo_handles" in (expect or {}):
+        problem = _footer_problem(style.components, list(expect["logo_handles"] or []))
+        if problem:
+            return False, f"Deck style: {problem}"
+        footer = ", a footer piece with the page tokens"
+        if expect["logo_handles"]:
+            footer += " and a logo"
     return True, (
         f"Deck style: clean ({count} components, {len(style.css)} characters, every slide has a "
-        "look)")
+        f"look{footer})")
+
+
+#: The page tokens a deck style's footer piece carries (production swaps them for the slide's
+#: number and the deck's count on every read).
+PAGE_TOKENS = ("{{slide:number}}", "{{slide:count}}")
+
+
+def _is_footer_piece(component) -> bool:
+    """A footer piece: a component whose name or one of whose class names contains "footer" (any
+    case). Deterministic, so the architect prompt can name the same rule."""
+    return "footer" in component.name.lower() or any(
+        "footer" in name.lower() for name in component.class_names)
+
+
+def _footer_problem(components, logo_handles: list[str]) -> str:
+    """Why no footer piece of ``components`` qualifies; empty when one does.
+
+    A footer piece qualifies when its ``example_html`` holds both ``PAGE_TOKENS`` and, when
+    ``logo_handles`` is not empty, one of them. Tokens or a logo elsewhere in the style do not
+    count. The rationale names each footer piece's missing items.
+    """
+    footers = [comp for comp in components if _is_footer_piece(comp)]
+    if not footers:
+        return (
+            'no footer piece (a component whose name or class names contain "footer") to carry '
+            "the page number and count")
+    problems = []
+    for comp in footers:
+        example = comp.example_html or ""
+        missing = [f"the page token {token}" for token in PAGE_TOKENS if token not in example]
+        if logo_handles and not any(handle in example for handle in logo_handles):
+            missing.append(
+                "a logo from deck_style_context.logos (" + ", ".join(logo_handles) + ")")
+        if not missing:
+            return ""
+        problems.append(f"the footer piece {comp.name!r} lacks {' and '.join(missing)}")
+    return "; ".join(problems)
 
 
 class _InlineStyles(HTMLParser):
@@ -645,6 +696,72 @@ def deck_style_use_score(html: str, payload: dict, expect: dict) -> tuple[bool, 
     return True, (
         f"Deck style use: uses {', '.join(wanted) or 'no listed class'}; no inline paint; every "
         "class is defined")
+
+
+# --------------------------------------------------------------------------- brand assets
+
+#: The production brand-asset search's tool name (``build_ds_asset_tool``), as a run records it.
+BRAND_SEARCH_TOOL = "search_brand_assets"
+
+
+def _asset_handles(text: str) -> list[str]:
+    """The ``{{ds-asset:N}}`` handles in ``text``, in order, each once."""
+    found: list[str] = []
+    for match in DS_ASSET_PLACEHOLDER_PATTERN.finditer(text or ""):
+        if match.group(0) not in found:
+            found.append(match.group(0))
+    return found
+
+
+def _payload_handles(payload: dict) -> set[str]:
+    """The handles the role was given: the template section's (``section_html``) and those in the
+    deck style's component examples."""
+    payload = payload or {}
+    given = set(_asset_handles(payload.get("section_html") or ""))
+    for component in ((payload.get("deck_style") or {}).get("components") or []):
+        given.update(_asset_handles((component or {}).get("example_html") or ""))
+    return given
+
+
+def brand_asset_use_score(
+    html: str, payload: dict, expect: dict, *, tool_calls
+) -> tuple[bool, str]:
+    """Score the brand assets a builder slide places (a case whose ``expect`` has
+    ``brand_assets``: the handles of the asset index the run's search answers from). It is pure:
+    the index is ``expect["brand_assets"]``. The row passes only when:
+
+    * ``html`` places at least one ``{{ds-asset:N}}`` from the index (a handle the payload itself
+      carries does not count: re-using the template's sample image is not a searched asset);
+    * every other handle in ``html`` is in the index or one the payload carries
+      (``section_html``, a deck-style component's ``example_html``): an invented one fails;
+    * ``tool_calls`` (the run's record; ``()``, ``None`` or MLflow's list) holds a
+      ``search_brand_assets`` call. Another tool's call does not count.
+
+    Every failing condition is named in the rationale.
+    """
+    index = list((expect or {}).get("brand_assets") or [])
+    used = _asset_handles(html or "")
+    given = _payload_handles(payload)
+    placed = [h for h in used if h in index]
+    outside = [h for h in used if h not in index and h not in given]
+    searched = any(
+        isinstance(call, Mapping) and call.get("name") == BRAND_SEARCH_TOOL
+        for call in (tool_calls or ())
+    )
+
+    reasons = []
+    if not placed:
+        reasons.append("places no brand-asset handle from the asset index")
+    if outside:
+        reasons.append(
+            f"places asset(s) neither in the index nor given in the payload: {', '.join(outside)}")
+    if not searched:
+        reasons.append(f"the run made no {BRAND_SEARCH_TOOL} call")
+    if reasons:
+        return False, "Brand assets: " + "; ".join(reasons)
+    return True, (
+        f"Brand assets: places {', '.join(placed)} from the asset index, after a "
+        f"{BRAND_SEARCH_TOOL} call")
 
 
 def expected_category_score(

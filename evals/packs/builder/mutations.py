@@ -220,6 +220,91 @@ def _table_slide(table):
 """
 
 
+# ---- deck_style_icons (Addendum A): the look asks for icons, which only the brand-asset search ---
+# supplies. Nothing the builder is given names an asset; the harness binds a fake search over the
+# Meridian fake asset index, and the expect lists that index's handles (``brand_assets``).
+
+#: The Meridian fake asset index the harness's fake ``search_brand_assets`` answers from.
+ASSET_INDEX = case.MERIDIAN_DIR / "assets.json"
+
+
+def brand_asset_handles() -> list[str]:
+    """Every handle of the fake asset index, in the file's order: a brand-asset case's
+    ``expect.brand_assets``."""
+    return [row["handle"] for row in json.loads(ASSET_INDEX.read_text())]
+
+
+def _icon_handle(filename: str) -> str:
+    """The fake index's handle for the icon ``icons/<filename>``."""
+    rows = json.loads(ASSET_INDEX.read_text())
+    (row,) = [r for r in rows if r["kind"] == "icon" and r["filename"] == f"icons/{filename}"]
+    return row["handle"]
+
+
+def _icon(src: str) -> str:
+    """A decorative brand icon beside its text: sized inline (layout only), its paint the asset's."""
+    return f'<img src="{src}" alt="" style="width:40px;height:40px;flex:none;"/>'
+
+
+ICONS_POSITION = 7
+ICONS_BRIEF = (
+    "Show that HTML slide source is plain text: it lives in Git, supports pull requests and diff "
+    "reviews, and runs through CI/CD pipelines, each collaboration advantage led by a brand icon. "
+    "Contrast typical file sizes in a small table, 8–15 MB .pptx vs. under 1 MB HTML deck. "
+    "Distribution is a URL, not a 15 MB email attachment"
+)
+ICONS_LOOK = (
+    "Two columns: on the left three collaboration advantages (version control, CI/CD pipelines, "
+    "review before release), each led by a product icon from the brand library; on the right a "
+    "dk-table of typical deck size by format with a dk-note naming its source beneath. The callout "
+    "runs full width beneath."
+)
+ICONS_CLASSES = ["dk-table", "dk-note"]
+# The advantages, each with the index icon that fits it (the reference) and the asset id a model
+# that invents ids instead of searching would write (the should_fail).
+_ADVANTAGES = [
+    ("icon-integrations.svg", 101, "Version control:",
+     "every change is tracked in Git and reviewed line by line in a pull request"),
+    ("icon-automation.svg", 102, "CI/CD pipelines:",
+     "lint, test and deploy on every merge, with no manual export step"),
+    ("icon-security.svg", 103, "Reviewed before release:",
+     "nothing reaches the audience until a teammate has approved the diff"),
+]
+
+
+def _icons_slide(srcs) -> str:
+    """The collaboration slide with ``srcs`` as its three advantages' icons."""
+    items = "\n".join(
+        '        <li style="display:flex;align-items:center;gap:var(--space-sm);">'
+        f"{_icon(src)}<span><strong>{label}</strong> {text}</span></li>"
+        for src, (_, _, label, text) in zip(srcs, _ADVANTAGES)
+    )
+    return f"""<section class="slide">
+  <p class="eyebrow">Collaboration &amp; Distribution</p>
+  <h2 class="slide-title">HTML decks live in Git, ship as a URL, and weigh 10× less</h2>
+  <div class="content">
+    <div class="grid-2">
+      <ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--space-md);">
+{items}
+      </ul>
+      <div style="display:flex;flex-direction:column;gap:var(--space-sm);justify-content:center;">
+        <table class="dk-table">
+          <thead><tr><th>Format</th><th>Typical size</th></tr></thead>
+          <tbody>
+            <tr><td>PowerPoint (.pptx)</td><td>8–15 MB</td></tr>
+            <tr><td>HTML deck</td><td>&lt; 1 MB</td></tr>
+          </tbody>
+        </table>
+        <p class="dk-note">Typical file sizes, from the deck's collaboration comparison.</p>
+      </div>
+    </div>
+    <div class="callout">A URL replaces the 15 MB email attachment, and every edit is reviewable before it ships.</div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>7</span></div>
+</section>
+"""
+
+
 def _dump(path, obj):
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n")
 
@@ -337,6 +422,19 @@ def generate(out_dir: pathlib.Path | None = None):
             {"position": pos, "html": bad, "scripts": ""},
             expect=expect,
         )
+
+    # deck_style_icons: the reference places the index icons a search finds; the should_fail
+    # places the same slide's icons under invented asset ids, as a model that never searched would.
+    searched = [_icon_handle(name) for name, *_ in _ADVANTAGES]
+    invented = ["{{ds-asset:%d}}" % n for _, n, *_ in _ADVANTAGES]
+    _write(
+        out, "deck_style_icons", "positive", "",
+        _payload(_styled_slide(slides[ICONS_POSITION], ICONS_BRIEF, ICONS_LOOK), gold_rd,
+                 deck_style=style),
+        {"position": ICONS_POSITION, "html": _icons_slide(searched), "scripts": ""},
+        {"position": ICONS_POSITION, "html": _icons_slide(invented), "scripts": ""},
+        expect={"deck_style_classes": list(ICONS_CLASSES), "brand_assets": brand_asset_handles()},
+    )
 
 
 if __name__ == "__main__":

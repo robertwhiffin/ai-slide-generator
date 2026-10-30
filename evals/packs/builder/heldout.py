@@ -186,6 +186,71 @@ def _table_slide(table):
 """
 
 
+# ---- deck_style_icons (Addendum A, the train generator's shape on deck 2): the look asks for icons
+# beside the checklist, which only the brand-asset search supplies.
+
+ICONS_POSITION = 5
+ICONS_BRIEF = (
+    "A five-item prompt optimisation checklist (define task scope, choose patterns, write eval "
+    "criteria, run test suite, document winning prompt), with three brand icons marking how the "
+    "team measures, automates and safeguards the work, and a callout stating the call to action: "
+    "adopt this checklist for every new LLM feature starting this sprint"
+)
+ICONS_LOOK = (
+    "Two columns: the five steps as a dk-steps checklist on the left; on the right three brand "
+    "icons from the design system's library, each beside a one-line caption (measure, automate, "
+    "safeguard). The call-to-action callout runs full width beneath."
+)
+ICONS_CLASSES = ["dk-steps"]
+_STEPS = [
+    ("Define task scope", "input, output format and constraints"),
+    ("Choose prompt patterns", "few-shot, chain-of-thought or structured"),
+    ("Write eval criteria", "accuracy, consistency and token efficiency"),
+    ("Run your test suite", "edge cases over 3–5 iteration cycles"),
+    ("Document the winning prompt", "the prompt, its rationale and its eval results"),
+]
+# The captions, each with the index icon that fits it.
+_PRACTICES = [
+    ("icon-analytics.svg", "Measure every prompt change against the eval criteria"),
+    ("icon-automation.svg", "Automate the test suite so it runs on every edit"),
+    ("icon-security.svg", "Safeguard the winning prompt under review"),
+]
+# What a model that never searched draws instead of brand icons: a hand-made glyph.
+_DRAWN_ICON = (
+    '<svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true" style="flex:none;">'
+    '<circle cx="20" cy="20" r="16" fill="none" stroke="currentColor" stroke-width="3"/></svg>'
+)
+
+
+def _checklist_slide(icons) -> str:
+    """The checklist slide with ``icons`` (one ``<img>`` or glyph per practice) beside its
+    captions."""
+    steps = "\n".join(
+        f"        <li><strong>{name}</strong>: {detail}</li>" for name, detail in _STEPS)
+    practices = "\n".join(
+        '        <div style="display:flex;align-items:center;gap:var(--space-sm);">'
+        f"{icon}<span>{caption}</span></div>"
+        for icon, (_, caption) in zip(icons, _PRACTICES)
+    )
+    return f"""<section class="slide">
+  <p class="eyebrow">Action Plan</p>
+  <h2 class="slide-title">Adopt this five-step checklist for every new LLM feature</h2>
+  <div class="content">
+    <div class="grid-2">
+      <ol class="dk-steps">
+{steps}
+      </ol>
+      <div style="display:flex;flex-direction:column;gap:var(--space-md);justify-content:center;">
+{practices}
+      </div>
+    </div>
+    <div class="callout"><strong>Start this sprint:</strong> apply the checklist to your next LLM feature, with no new tooling required.</div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>5</span></div>
+</section>
+"""
+
+
 def _gold_rd():
     return copy.deepcopy(case.gold_deck_spec(DECK)["resolved_data"])
 
@@ -238,6 +303,20 @@ def generate(out_dir: pathlib.Path | None = None):
             {"position": pos, "html": bad, "scripts": ""},
             expect=expect,
         )
+
+    # deck_style_icons: the reference places the index icons a search finds; the should_fail
+    # draws its own glyphs instead and places no brand asset.
+    m._write(
+        out, "deck_style_icons", "positive", "",
+        m._payload(m._styled_slide(slides[ICONS_POSITION], ICONS_BRIEF, ICONS_LOOK), rd,
+                   deck_style=style),
+        {"position": ICONS_POSITION,
+         "html": _checklist_slide([m._icon(m._icon_handle(name)) for name, _ in _PRACTICES]),
+         "scripts": ""},
+        {"position": ICONS_POSITION, "html": _checklist_slide([_DRAWN_ICON] * len(_PRACTICES)),
+         "scripts": ""},
+        expect={"deck_style_classes": list(ICONS_CLASSES), "brand_assets": m.brand_asset_handles()},
+    )
 
 
 if __name__ == "__main__":

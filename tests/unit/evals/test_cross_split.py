@@ -15,7 +15,7 @@ from evals.harness import case
 HELDOUT_CASE_IDS = {
     "builder": {
         "cover_slide", "bullets_problem", "stat_cards", "too_much_content", "stat_no_data",
-        "deck_style_code", "deck_style_table",
+        "deck_style_code", "deck_style_table", "deck_style_icons",
     },
     "build_reviewer": {
         "clean", "broken_handoff", "rogue_colour", "overflow", "source_contradiction",
@@ -76,10 +76,12 @@ def _tree(root):
 def test_total_heldout_case_count():
     # Five per agent, twenty-two for the architect (#313 added four, #314 four more, the #314
     # manual-insert follow-up two, the edit-operations cases four, the sweeper's re-description
-    # one, the deck-style build and restyle two), seven for the builder and build_reviewer (two
-    # deck-style cases each): 4 x 5 + 2 x 7 + 22.
-    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 56
+    # one, the deck-style build and restyle two), seven for the build_reviewer (two deck-style
+    # cases) and eight for the builder (those two plus Addendum A's deck_style_icons):
+    # 4 x 5 + 7 + 8 + 22.
+    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 57
     assert len(HELDOUT_CASE_IDS["architect"]) == 22
+    assert len(HELDOUT_CASE_IDS["builder"]) == 8
 
 
 @pytest.mark.parametrize("agent", AGENTS)

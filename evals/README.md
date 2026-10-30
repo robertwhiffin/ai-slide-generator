@@ -9,8 +9,8 @@ Real-model runs; results are logged to MLflow.
 - **Configs** (`evals/configs/`). A config is a named variant of one agent's v1 definition.
   `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
   settings. Each config carries a `content_hash`, logged with every run.
-- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (seven for the builder and the
-  build_reviewer, twenty-two for the architect), 56 in total across the seven
+- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (eight for the builder, seven
+  for the build_reviewer, twenty-two for the architect), 57 in total across the seven
   roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
   `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
   `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
@@ -80,7 +80,13 @@ Real-model runs; results are logged to MLflow.
       passes only if `deck_style` is present, has 1 to 12 components and at most 10,000 characters
       of CSS, `sanitise_deck_style` returns it unchanged (the same object, no notes), every slide
       has a non-blank `look`, and, with a design system active, its CSS holds no hex colour
-      literal. The scorer passes the case's `design_system_active` through.
+      literal. The scorer passes the case's `design_system_active` through. When the `expect` also
+      has `logo_handles` (the handles of the payload's `deck_style_context.logos`, written by the
+      generator, since the scorer cannot see the payload), the style must have a footer piece (a
+      component whose `name` or one of whose `class_names` contains `footer`, any case) whose
+      `example_html` holds both page tokens, `{{slide:number}}` and `{{slide:count}}`, and, when
+      the list is not empty, one of those logo handles. Tokens or a logo elsewhere in the style do
+      not count. Without the key no footer is required.
     - *Architect restyle.* A case whose `expect` has `deck_style_keeps` (a list of classes) is a
       restyle given in `deck_changes.deck_style`, the only way production restyles a deck (a
       full-spec edit keeps the persisted style). An operations answer passes only if it passes
@@ -101,7 +107,13 @@ Real-model runs; results are logged to MLflow.
     `expect` has `deck_style_classes` must also pass `deck_style_use_score`: every listed class is
     used, no inline `color`, `background`, `background-color`, `font-size`, `font-family` or
     `border-color` is declared, and every class used is defined by the payload's `section_css` or
-    its deck style. The scorer loads the row's own case (split included) for the payload.
+    its deck style. The scorer loads the row's own case (split included) for the payload. A case
+    whose `expect` has `brand_assets` (the fake asset index's handles) must also pass
+    `brand_asset_use_score`: the slide places at least one `{{ds-asset:N}}` from that list (a
+    handle the payload itself carries does not count), every other handle is in the list or
+    carried by the payload (`section_html`, a deck-style component's `example_html`), and the run's
+    `tool_calls` record holds a `search_brand_assets` call. Like the deck-style use, it is ANDed
+    into `render_measures` and so skips with `--no-render`.
   - `judge`: an LLM judge (`mlflow.genai.make_judge`) using the pack's `judge_prompt.md`. It compares
     the candidate with the reference and the brief and returns pass or fail. For the builder and the
     build_reviewer, the brief also carries the payload's `deck_style` when it has one.
@@ -165,8 +177,8 @@ data_analyst prompt mentions Genie and a vector index, but neither is available 
 
 ## Held-out set
 
-Each agent has a second, separate set of cases (five per agent, seven for the builder and the
-build_reviewer, twenty-two for the architect; 56 in total) in `evals/packs/<agent>/cases_heldout/`,
+Each agent has a second, separate set of cases (five per agent, eight for the builder, seven for
+the build_reviewer, twenty-two for the architect; 57 in total) in `evals/packs/<agent>/cases_heldout/`,
 built from a different source deck than the train cases. It has the same four files per case and
 shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
 cases generalises, rather than having been fitted to them.
@@ -1363,3 +1375,35 @@ What it showed:
   - The owner judges cost and latency on the devloop.
   - The single 106 s call (N1). One row in 27 is too few to call it a pattern.
   - The fix_reviewer and deck_reviewer still run on Haiku 4.5. They were out of scope.
+
+## Deck style addendum A: the brand-asset search and the footer, 2026-10-30
+
+Production now binds a `search_brand_assets` tool for a builder or fixer whose payload has a deck
+style while a design system is active (`nodes._brand_search_tools`). The harness follows it and
+scores its use. No prompt changed and no real-model run was made.
+
+- **The fake search** (`evals/harness/runner.py`). `Runner.run` puts one tool on the run's
+  `AgentAssemblyContext` exactly when the role is `builder` or `fixer`, the run's
+  `design_system_active` is true and the payload has a `deck_style`. Every other run binds no tool,
+  as before. To the model the tool is production's: the same name, arguments (`query`, `kind`) and
+  description. It answers from `evals/fixtures/meridian/assets.json` (the fake asset index the
+  architect's logos come from), filtered and ranked as `design_system_service.search_assets` does,
+  in `build_ds_asset_tool`'s JSON. Each call is recorded per attempt; `RunResult.tool_calls` and
+  the predict output's `tool_calls` carry the record. `deck_style_code` and `deck_style_table`
+  (both splits) now run with the search bound too, as production would run them.
+- **`deck_style_icons`** (builder, both splits; train slide 7, held-out slide 5). A positive whose
+  look asks for brand icons and names its deck-style pieces (`dk-table` and `dk-note` on train,
+  `dk-steps` on held-out). Nothing in the payload names an asset handle, so only a search can supply
+  one. `expect.brand_assets` lists every handle of the index. The reference places index icons. The
+  `should_fail` places invented asset ids (train) or hand-drawn glyphs (held-out).
+  `brand_asset_use_score` fails both (see Scorers).
+- **The architect footer.** The `build_technical_deck` expect gains `logo_handles`, and both
+  reference styles gain a footer piece (`dk-footer` on the template's `slide-footer`, the first
+  logo and both page tokens). It is added in the architect generator only; the shared
+  `deck_style_technical.json` is unchanged. The architect `cases_digest` moves for this case alone.
+  The promoted architect prompt still says "No page numbers", so it fails `build_technical_deck`
+  by design until its prompt pass.
+- The builder now has eight cases per split, 57 per split across the harness.
+- **Not measured.** No fixer case carries a deck style, so the fixer's tool path is bound and
+  tested but not measured. The new case is not calibrated:
+  `python -m evals.run_eval --agent builder --calibrate --cases deck_style_icons [--split heldout]`.
