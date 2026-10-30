@@ -1098,7 +1098,9 @@ def test_expected_category_scorer_passes_reference_and_current_spec_by_keyword(m
     assert seen == [
         ("architect", with_deck.expect,
          {"reference": with_deck.reference,
-          "current_deck_spec": with_deck.payload["current_deck_spec"]}),
+          "current_deck_spec": with_deck.payload["current_deck_spec"],
+          "design_system_active": with_deck.design_system_active}),
         ("architect", deckless.expect,
-         {"reference": deckless.reference, "current_deck_spec": None}),
+         {"reference": deckless.reference, "current_deck_spec": None,
+          "design_system_active": deckless.design_system_active}),
     ]

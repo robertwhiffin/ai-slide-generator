@@ -10,8 +10,8 @@ from evals.harness import case
 AGENTS = ["builder", "build_reviewer", "fixer", "fix_reviewer", "deck_reviewer", "architect", "data_analyst"]
 # Five train cases per agent; the architect has twenty (#313 added four, #314 four more, the
 # #314 manual-insert follow-up two, the edit-operations cases four, the sweeper's re-description
-# one).
-EXPECTED_CASE_COUNT = {"architect": 20}
+# one), and the builder and build_reviewer seven (two deck-style cases each).
+EXPECTED_CASE_COUNT = {"architect": 20, "builder": 7, "build_reviewer": 7}
 
 
 def _stat(root):

@@ -1,0 +1,7 @@
+kind: positive
+fault: ''
+expect:
+  deck_style_classes:
+  - dk-table
+  - dk-note
+design_system_active: true

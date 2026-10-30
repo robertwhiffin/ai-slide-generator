@@ -1,0 +1,16 @@
+{
+  "slide_index": 2,
+  "verdict": "surfaced",
+  "findings": [
+    {
+      "id": "rogue_colour:2:0",
+      "slide_index": 2,
+      "category": "design",
+      "criterion": "rogue_colour",
+      "message": "The code block is painted inline, #1E293B behind #F8FAFC text with #7DD3FC, #FCD34D, #94A3B8 on its tokens, instead of using the deck style's dk-code class. None of these is a Meridian palette token; the block should use dk-code, whose colours are var(--brand-*) tokens.",
+      "objective": true,
+      "status": "open",
+      "seen": false
+    }
+  ]
+}

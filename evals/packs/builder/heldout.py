@@ -91,6 +91,101 @@ STAT_NO_DATA_HTML = """<section class="slide">
 """
 
 
+# ---- deck-style cases: the slide is built from the technical deck style's pieces ----------------
+
+CODE_POSITION = 2
+CODE_BRIEF = (
+    "Bullet slide covering the four key patterns — system-prompt framing, few-shot examples, "
+    "chain-of-thought reasoning, and structured output formatting — with a short listing of a "
+    "structured-output instruction and a callout on when to combine them"
+)
+CODE_LOOK = (
+    "Two columns: the four patterns as bullets on the left; on the right a dk-code listing of a "
+    "structured-output instruction, its instruction verb marked kw and its JSON keys and values str, "
+    "under a cm comment. The when-to-combine callout runs full width beneath."
+)
+CODE_EXPECT = {"deck_style_classes": ["dk-code"]}
+_CODE_LINES = [
+    [("cm", "# structured output: the reply is data")],
+    [("kw", "Answer"), ("", " in JSON only:")],
+    [("", "{"), ("str", '"label"'), ("", ": "), ("str", '"refund"'), ("", " | "),
+     ("str", '"other"'), ("", ",")],
+    [("", " "), ("str", '"reason"'), ("", ": "), ("str", '"one sentence"'), ("", "}")],
+]
+
+
+def _code_slide(listing):
+    return f"""<section class="slide">
+  <p class="eyebrow">Prompt Design Patterns</p>
+  <h2 class="slide-title">Four composable patterns cover the vast majority of prompt optimisation needs</h2>
+  <div class="content">
+    <div class="grid-2">
+      <ul class="bullets">
+        <li><strong>System-prompt framing</strong> — set the model's role, constraints, and tone up front</li>
+        <li><strong>Few-shot examples</strong> — show input/output pairs so the model learns your format</li>
+        <li><strong>Chain-of-thought reasoning</strong> — ask the model to think step by step</li>
+        <li><strong>Structured output formatting</strong> — request JSON so replies parse without clean-up</li>
+      </ul>
+      {listing}
+    </div>
+    <div class="callout"><strong>When to combine:</strong> pair few-shot examples with chain-of-thought for up to 40% better output consistency, then layer patterns as needed.</div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>2</span></div>
+</section>
+"""
+
+
+TABLE_POSITION = 3
+TABLE_BRIEF = (
+    "Table of the three gains from structured prompting — token cost reduction (30-50%), output "
+    "consistency improvement (up to 40%), and typical iteration cycles to production quality "
+    "(3-5 rounds) — each with what it is measured against"
+)
+TABLE_LOOK = (
+    "A dk-table of the three gains (dimension, figure, measured against) fills the slide under the "
+    "title; the hand-off callout runs beneath it."
+)
+TABLE_EXPECT = {"deck_style_classes": ["dk-table"]}
+_TABLE_ROWS = [
+    ("Token cost", "30–50% fewer tokens per request", "naive prompts"),
+    ("Output consistency", "up to 40% gain", "few-shot + chain-of-thought vs. none"),
+    ("Iteration", "3–5 revision rounds", "reaching production-grade quality"),
+]
+
+
+def _gains_table(*, painted=False):
+    """The gains table: the deck style's ``dk-table``, or (``painted``) the same text painted
+    inline with off-palette colours."""
+    if painted:
+        table = '<table style="width:100%;border-collapse:collapse;font-size:18px;">'
+        th = '<th style="padding:12px 24px;text-align:left;background:#7C2D12;color:#FFF7ED;font-size:13px;">'
+        td = '<td style="padding:12px 24px;border-bottom:1px solid #FED7AA;color:#431407;">'
+    else:
+        table, th, td = '<table class="dk-table">', "<th>", "<td>"
+    head = "".join(f"{th}{h}</th>" for h in ("Dimension", "Gain", "Measured against"))
+    rows = "\n".join(
+        "        <tr>" + "".join(f"{td}{v}</td>" for v in row) + "</tr>" for row in _TABLE_ROWS)
+    return f"""{table}
+      <thead><tr>{head}</tr></thead>
+      <tbody>
+{rows}
+      </tbody>
+    </table>"""
+
+
+def _table_slide(table):
+    return f"""<section class="slide">
+  <p class="eyebrow">Impact</p>
+  <h2 class="slide-title">Structured prompts cut costs, boost consistency, and converge fast</h2>
+  <div class="content">
+    {table}
+    <div class="callout">The gains from structured prompting are large and well-documented.</div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>3</span></div>
+</section>
+"""
+
+
 def _gold_rd():
     return copy.deepcopy(case.gold_deck_spec(DECK)["resolved_data"])
 
@@ -126,6 +221,23 @@ def generate(out_dir: pathlib.Path | None = None):
         {"position": 3, "html": STAT_NO_DATA_HTML, "scripts": ""},
         {"position": 3, "html": case.gold_slide(3, DECK), "scripts": case.gold_scripts(3, DECK)},
     )
+
+    # Deck-style cases (the train generator's shape, on deck 2): the payload carries the technical
+    # deck style and the slide spec a look; the should_fail paints the same slide inline instead.
+    style = m.deck_style_fixture()
+    for cid, pos, brief, look, expect, good, bad in (
+        ("deck_style_code", CODE_POSITION, CODE_BRIEF, CODE_LOOK, CODE_EXPECT,
+         _code_slide(m._listing(_CODE_LINES)), _code_slide(m._listing(_CODE_LINES, painted=True))),
+        ("deck_style_table", TABLE_POSITION, TABLE_BRIEF, TABLE_LOOK, TABLE_EXPECT,
+         _table_slide(_gains_table()), _table_slide(_gains_table(painted=True))),
+    ):
+        m._write(
+            out, cid, "positive", "",
+            m._payload(m._styled_slide(slides[pos], brief, look), rd, deck_style=style),
+            {"position": pos, "html": good, "scripts": ""},
+            {"position": pos, "html": bad, "scripts": ""},
+            expect=expect,
+        )
 
 
 if __name__ == "__main__":

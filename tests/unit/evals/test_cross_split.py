@@ -13,8 +13,14 @@ import src.core.database  # noqa: F401  (break import cycle before src.services.
 from evals.harness import case
 
 HELDOUT_CASE_IDS = {
-    "builder": {"cover_slide", "bullets_problem", "stat_cards", "too_much_content", "stat_no_data"},
-    "build_reviewer": {"clean", "broken_handoff", "rogue_colour", "overflow", "source_contradiction"},
+    "builder": {
+        "cover_slide", "bullets_problem", "stat_cards", "too_much_content", "stat_no_data",
+        "deck_style_code", "deck_style_table",
+    },
+    "build_reviewer": {
+        "clean", "broken_handoff", "rogue_colour", "overflow", "source_contradiction",
+        "deck_style_inline_paint", "deck_style_clean",
+    },
     "fixer": {"rogue_colour", "overflow", "contrast_failure", "brief_not_delivered", "source_contradiction"},
     "fix_reviewer": {
         "good_fix_accept", "good_contrast_fix_accept", "restyle_reject",
@@ -69,8 +75,8 @@ def _tree(root):
 def test_total_heldout_case_count():
     # Five per agent, twenty for the architect (#313 added four, #314 four more, the #314
     # manual-insert follow-up two, the edit-operations cases four, the sweeper's re-description
-    # one): 6 x 5 + 20.
-    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 50
+    # one), seven for the builder and build_reviewer (two deck-style cases each): 4 x 5 + 2 x 7 + 20.
+    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 54
     assert len(HELDOUT_CASE_IDS["architect"]) == 20
 
 

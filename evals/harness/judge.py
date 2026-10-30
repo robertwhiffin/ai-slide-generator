@@ -31,7 +31,11 @@ def _brief_or_finding(case: Case):
     role = case.agent_key
     if role in ("builder", "build_reviewer"):
         # The judge needs the sourced data to tell real figures from invented / contradicted ones.
-        return {"slide_spec": p.get("slide_spec"), "resolved_data": p.get("resolved_data")}
+        brief = {"slide_spec": p.get("slide_spec"), "resolved_data": p.get("resolved_data")}
+        # A slide built on a deck style is judged against the pieces the role was given (C21).
+        if p.get("deck_style") is not None:
+            brief["deck_style"] = p["deck_style"]
+        return brief
     if role in ("fixer", "fix_reviewer"):
         return p.get("finding")
     if role == "architect":

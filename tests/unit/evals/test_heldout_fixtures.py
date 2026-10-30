@@ -150,7 +150,7 @@ def test_default_cases_dir_and_load_cases_are_unchanged_for_train():
     assert case.cases_dir("builder") == case.PACKS_DIR / "builder" / "cases"
     assert case.cases_dir("builder", split="train") == case.cases_dir("builder")
     train = case.load_cases("builder")
-    assert len(train) == 5
+    assert len(train) == 7  # five, plus the two deck-style cases
     assert [c.case_id for c in train] == sorted(c.case_id for c in train)
     assert [c.case_id for c in case.load_cases("builder", split="train")] == [
         c.case_id for c in train

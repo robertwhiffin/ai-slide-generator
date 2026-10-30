@@ -1,18 +1,26 @@
 """Self-tests for the builder eval pack (Task 9). Behavioural; no model, no network."""
+import json
 import re
 
 import pytest
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
-from src.domain.deck_spec import ResolvedData, SlideSpec
+from src.domain.deck_spec import DeckStyle, ResolvedData, SlideSpec
+from src.domain.deck_style import css_class_names
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
 
 from evals.harness import case, render
 
 AGENT = "builder"
-CASE_IDS = ["gold_bullets", "gold_chart", "gold_stats", "too_much_content", "chart_no_data"]
+CASE_IDS = [
+    "gold_bullets", "gold_chart", "gold_stats", "too_much_content", "chart_no_data",
+    "deck_style_code", "deck_style_table",
+]
 POSITIVES = {"gold_bullets": 1, "gold_chart": 3, "gold_stats": 9}
 MUTATIONS = ["too_much_content", "chart_no_data"]
+# Positive cases whose payload carries the technical deck style; each must use (at least) its piece.
+DECK_STYLE_CASES = {"deck_style_code": "dk-code", "deck_style_table": "dk-table"}
+DECK_STYLE_FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
 FILES = ("case.yaml", "payload.json", "reference.json", "calibration.json")
 PACK_DIR = case.PACKS_DIR / AGENT
 
@@ -48,15 +56,26 @@ def _cal(cid):
     return json.loads((CASES / cid / "calibration.json").read_text())
 
 
-def _measure(out):
-    return render.render_slide(out["html"], out.get("scripts", ""), section_css=case.meridian_section_css())
+def _fixture_style():
+    """The technical deck style as a payload carries it (``DeckStyle.model_dump()``)."""
+    return DeckStyle.model_validate(json.loads(DECK_STYLE_FIXTURE.read_text())).model_dump()
+
+
+def _render_css(c=None):
+    """What the harness renders a case's slide with: Meridian, then the case's deck style (C21)."""
+    style = c.payload.get("deck_style") if c is not None else None
+    return case.meridian_section_css() + ("\n\n" + style["css"] if style else "")
+
+
+def _measure(out, c=None):
+    return render.render_slide(out["html"], out.get("scripts", ""), section_css=_render_css(c))
 
 
 def _spec_slide(pos):
     return case.gold_deck_spec()["slides"][pos]
 
 
-def test_exactly_the_five_cases():
+def test_exactly_the_cases():
     cases = case.load_cases(AGENT, root=CASES)
     assert sorted(c.case_id for c in cases) == sorted(CASE_IDS)
     dirs = sorted(d.name for d in CASES.iterdir() if d.is_dir())
@@ -77,9 +96,14 @@ def test_case_contract(cid):
     assert c.payload["section_css"] == case.meridian_section_css()
     assert c.payload["resolved_style"] == case.meridian_resolved_style()
     assert c.payload["design_system_active"] is True
-    assert c.expect == {}
+    if cid in DECK_STYLE_CASES:
+        assert set(c.expect) == {"deck_style_classes"}
+        assert "deck_style" in c.payload
+    else:
+        assert c.expect == {}
+        assert "deck_style" not in c.payload  # an old deck's payload carries no deck_style key
     assert set(c.reference) >= {"position", "html", "scripts"}
-    assert c.kind == ("positive" if cid in POSITIVES else "mutation")
+    assert c.kind == ("positive" if cid in POSITIVES or cid in DECK_STYLE_CASES else "mutation")
     assert (c.fault == "") == (c.kind == "positive")
 
 
@@ -106,7 +130,7 @@ def test_gold_chart_carries_figures():
 @pytest.mark.usefixtures("requires_chromium")
 def test_reference_renders_clean(cid):
     c = case.load_case(AGENT, cid, root=CASES)
-    m = _measure(c.reference)
+    m = _measure(c.reference, c)
     assert m.rendered
     assert m.overflow_px == 0
     assert m.off_palette == ()
@@ -210,6 +234,38 @@ def test_payload_validates_against_real_models(cid):
     c = case.load_case(AGENT, cid, root=CASES)
     ResolvedData.model_validate(c.payload["resolved_data"])
     SlideSpec.model_validate(c.payload["slide_spec"])
+    if "deck_style" in c.payload:
+        DeckStyle.model_validate(c.payload["deck_style"])
+
+
+# ---- deck-style cases ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cid", list(DECK_STYLE_CASES))
+def test_deck_style_case_carries_the_fixture_style_and_a_look(cid):
+    c = case.load_case(AGENT, cid, root=CASES)
+    assert c.payload["deck_style"] == _fixture_style()
+    spec = c.payload["slide_spec"]
+    assert isinstance(spec.get("look"), str) and spec["look"].strip()
+    assert SlideSpec.model_validate(spec).look
+    # One position throughout, on a slide of the gold deck whose place in the arc is unchanged.
+    pos = c.payload["position"]
+    assert spec["position"] == c.reference["position"] == _cal(cid)["should_fail"]["position"] == pos
+    gold = _spec_slide(pos)
+    for field in ("purpose", "assumes", "hands_off"):
+        assert spec[field] == gold[field], field
+    assert c.payload["assumes"] == gold["assumes"]
+    assert c.payload["hands_off"] == gold["hands_off"]
+    assert c.fault == ""
+    assert "<style" not in c.reference["html"].lower()
+
+
+@pytest.mark.parametrize("cid,piece", DECK_STYLE_CASES.items())
+def test_deck_style_case_expect_lists_pieces_the_style_defines(cid, piece):
+    classes = case.load_case(AGENT, cid, root=CASES).expect["deck_style_classes"]
+    assert isinstance(classes, list) and classes
+    assert len(classes) == len(set(classes))
+    assert piece in classes
+    assert set(classes) <= css_class_names(_fixture_style()["css"])
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -226,8 +282,9 @@ def test_reference_passes_render_measures_including_safe_area(cid):
     """I2: a known-good output must pass the scorer itself, safe area included."""
     from evals.harness import scorers
 
-    ref = case.load_case(AGENT, cid, root=CASES).reference
-    m = render.render_slide(ref["html"], ref.get("scripts", ""), section_css=case.meridian_section_css())
+    c = case.load_case(AGENT, cid, root=CASES)
+    ref = c.reference
+    m = render.render_slide(ref["html"], ref.get("scripts", ""), section_css=_render_css(c))
     assert m.safe_area_px == 0, m
     ok, why = scorers.render_measures_score(m, ref["html"])
     assert ok, why

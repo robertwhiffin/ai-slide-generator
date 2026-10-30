@@ -1,13 +1,23 @@
 """Deterministic scorers for the eval harness."""
 from __future__ import annotations
 
+import re
+from html.parser import HTMLParser
 from typing import NamedTuple
 
 from src.core import database  # noqa: F401 - break import cycle before src.* imports
+import tinycss2
 from pydantic import ValidationError
 
 from evals.harness.render import RenderMeasures
 from src.domain.deck_spec import DeckSpec, SlideSpec
+from src.domain.deck_style import (
+    DECK_STYLE_MAX_CHARS,
+    DECK_STYLE_MAX_COMPONENTS,
+    css_class_names,
+    html_class_names,
+    sanitise_deck_style,
+)
 from src.domain.finding import CRITERIA
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_alignment import AlignmentRefused, align_slides
@@ -401,6 +411,163 @@ def _insert_score(
     return True, rationale
 
 
+# --------------------------------------------------------------------------- deck style
+
+#: A hex colour literal, as the value of a CSS ``hash`` token (no leading ``#``).
+_HEX_COLOUR = re.compile(r"[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}")
+
+#: The inline declarations a slide built on a deck style must not carry: the deck style and the
+#: design system provide the paint, so inline styles are for layout only.
+DECK_STYLE_PAINT_PROPERTIES = (
+    "color", "background", "background-color", "font-size", "font-family", "border-color",
+)
+
+
+def _hex_literals(css: str) -> list[str]:
+    """The hex colour literals in ``css``'s declaration values, in source order, each once.
+
+    Comments, strings and selectors (``#id``) never count; a ``url(data:...)`` is one token, so
+    an SVG's ``%23fff`` does not either.
+    """
+    found: list[str] = []
+
+    def walk(tokens) -> None:
+        for tok in tokens:
+            if tok.type == "hash" and _HEX_COLOUR.fullmatch(tok.value):
+                literal = f"#{tok.value}"
+                if literal not in found:
+                    found.append(literal)
+            elif tok.type == "function":
+                walk(tok.arguments)
+            elif tok.type in ("() block", "[] block", "{} block"):
+                walk(tok.content)
+
+    for rule in tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True):
+        if rule.type != "qualified-rule":
+            continue
+        items = tinycss2.parse_blocks_contents(
+            rule.content, skip_comments=True, skip_whitespace=True)
+        for item in items:
+            if item.type == "declaration":
+                walk(item.value)
+    return found
+
+
+def _deck_style_score(
+    structured: dict, expect: dict, design_system_active: bool | None
+) -> tuple[bool, str]:
+    """Score the deck style an architect build answer authors (a case whose ``expect`` has
+    ``deck_style: true``). It reads the answer's ``deck_spec``. The row passes only when:
+
+    * ``deck_spec.deck_style`` is present;
+    * it has 1 to ``DECK_STYLE_MAX_COMPONENTS`` components;
+    * its CSS is at most ``DECK_STYLE_MAX_CHARS`` characters;
+    * ``sanitise_deck_style`` returns it unchanged: the very same object, with ``()`` notes (C24);
+    * every slide has a non-blank ``look``;
+    * with a design system active, its CSS holds no hex colour literal (the design system supplies
+      the colours as tokens). A ``:root`` rule needs no exemption here: under a design system the
+      sanitiser drops it, which already fails the row.
+
+    A failure's rationale names its cause; a sanitiser failure quotes the notes.
+    """
+    deck, why = _validate_deck((structured or {}).get("deck_spec"))
+    if deck is None:
+        return False, f"Deck style: no valid deck_spec to read deck_style from ({why})"
+    style = deck.deck_style
+    if style is None:
+        return False, (
+            "Deck style: deck_spec.deck_style is missing; this build is expected to author one")
+    count = len(style.components)
+    if not 1 <= count <= DECK_STYLE_MAX_COMPONENTS:
+        return False, (
+            f"Deck style: {count} components, expected 1 to {DECK_STYLE_MAX_COMPONENTS}")
+    if len(style.css) > DECK_STYLE_MAX_CHARS:
+        return False, (
+            f"Deck style: its CSS is {len(style.css)} characters, over the "
+            f"{DECK_STYLE_MAX_CHARS} limit")
+    cleaned, notes = sanitise_deck_style(style, design_system_active=bool(design_system_active))
+    if notes or cleaned is not style:
+        detail = "; ".join(notes) or "it returned a different style"
+        return False, f"Deck style: the sanitiser would change it ({detail})"
+    lookless = [slide.position for slide in deck.slides if slide.look is None]
+    if lookless:
+        return False, f"Deck style: slides {lookless} have no look (blank or missing)"
+    if design_system_active:
+        hexes = _hex_literals(style.css)
+        if hexes:
+            return False, (
+                f"Deck style: hex colour literal(s) {', '.join(hexes)} under an active design "
+                "system; its colours must be the design system's tokens")
+    return True, (
+        f"Deck style: clean ({count} components, {len(style.css)} characters, every slide has a "
+        "look)")
+
+
+class _InlineStyles(HTMLParser):
+    """Every ``style`` attribute value in an HTML fragment, decoded, in document order."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.values: list[str] = []
+
+    def handle_starttag(self, tag, attrs) -> None:
+        self.values.extend(value for name, value in attrs if name == "style" and value)
+
+
+def _inline_paint(html: str) -> list[str]:
+    """``name: value`` of every inline declaration of a ``DECK_STYLE_PAINT_PROPERTIES`` property,
+    in document order, each once."""
+    parser = _InlineStyles()
+    parser.feed(html)
+    parser.close()
+    found: list[str] = []
+    for text in parser.values:
+        for item in tinycss2.parse_blocks_contents(text, skip_comments=True, skip_whitespace=True):
+            if item.type == "declaration" and item.lower_name in DECK_STYLE_PAINT_PROPERTIES:
+                decl = f"{item.lower_name}: {tinycss2.serialize(item.value).strip()}"
+                if decl not in found:
+                    found.append(decl)
+    return found
+
+
+def deck_style_use_score(html: str, payload: dict, expect: dict) -> tuple[bool, str]:
+    """Score how a builder slide uses the deck style it was given (a case whose ``expect`` has
+    ``deck_style_classes``). The row passes only when:
+
+    * every class in ``expect.deck_style_classes`` is used in ``html``;
+    * no inline ``style`` declares one of ``DECK_STYLE_PAINT_PROPERTIES`` (inline styles are
+      layout only: the paint comes from the design system and the deck style);
+    * every class ``html`` uses is defined by ``payload["section_css"]`` or by
+      ``payload["deck_style"]["css"]``.
+
+    Every failing condition is named in the rationale.
+    """
+    wanted = list(expect.get("deck_style_classes") or [])
+    style = (payload or {}).get("deck_style") or {}
+    used = html_class_names(html or "")
+    defined = (css_class_names((payload or {}).get("section_css") or "")
+               | css_class_names(style.get("css") or ""))
+
+    reasons = []
+    unused = [name for name in wanted if name not in used]
+    if unused:
+        reasons.append(f"deck-style class(es) not used: {', '.join(unused)}")
+    painted = _inline_paint(html or "")
+    if painted:
+        reasons.append(
+            f"inline paint, which the design system and deck style provide: {'; '.join(painted)}")
+    undefined = sorted(used - defined)
+    if undefined:
+        reasons.append(
+            "class(es) defined by neither the template CSS nor the deck style: "
+            f"{', '.join(undefined)}")
+    if reasons:
+        return False, "Deck style use: " + "; ".join(reasons)
+    return True, (
+        f"Deck style use: uses {', '.join(wanted) or 'no listed class'}; no inline paint; every "
+        "class is defined")
+
+
 def expected_category_score(
     agent_key: str,
     structured: dict,
@@ -408,6 +575,7 @@ def expected_category_score(
     *,
     reference: dict | None = None,
     current_deck_spec: dict | None = None,
+    design_system_active: bool | None = None,
 ) -> tuple[bool, str]:
     """Role-dispatched expected category scorer.
 
@@ -415,6 +583,8 @@ def expected_category_score(
       A case whose ``expect`` has ``full_deck_spec`` (the arc-review sweeper's describe-only turn)
       is scored by ``_redescription_score`` alone, ahead of every other check, since production
       applies no operations on that turn and persists a build's deck_spec as it does an edit's.
+      A case whose ``expect`` has ``deck_style: true`` also needs ``_deck_style_score`` to pass,
+      checked right after the intent (``design_system_active`` is the case's).
       An edit answer carrying ``operations`` or ``deck_changes`` is scored by ``_operations_score``
       on every other edit case, as production's operations path takes it whatever else it carries.
       Otherwise an edit case whose ``expect`` has ``"inserted"`` is scored by ``_insert_score``.
@@ -434,6 +604,12 @@ def expected_category_score(
         # Check intent match
         if structured.get("intent") != expect.get("intent"):
             return False, f"Intent mismatch: got {structured.get('intent')!r}, expected {expect.get('intent')!r}"
+
+        # A build case that expects a deck style: ANDed after the intent check
+        if expect.get("deck_style"):
+            ok, why = _deck_style_score(structured, expect, design_system_active)
+            if not ok:
+                return False, why
 
         # An edit given as operations is scored as production composes it (spec §9)
         if _operations_given(structured):

@@ -6,17 +6,24 @@ from html.parser import HTMLParser
 import pytest
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
-from src.domain.deck_spec import ResolvedData, SlideSpec
+from src.domain.deck_spec import DeckStyle, ResolvedData, SlideSpec
+from src.domain.deck_style import css_class_names
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
 
 from evals.harness import case, render
 
 AGENT = "builder"
 DECK = "heldout"
-CASE_IDS = ["cover_slide", "bullets_problem", "stat_cards", "too_much_content", "stat_no_data"]
+CASE_IDS = [
+    "cover_slide", "bullets_problem", "stat_cards", "too_much_content", "stat_no_data",
+    "deck_style_code", "deck_style_table",
+]
 POSITIVES = {"cover_slide": 0, "bullets_problem": 1, "stat_cards": 3}
 MUTATIONS = {"too_much_content": 1, "stat_no_data": 3}
 POSITION_OF = {**POSITIVES, **MUTATIONS}
+# Positive cases whose payload carries the technical deck style; each must use (at least) its piece.
+DECK_STYLE_CASES = {"deck_style_code": "dk-code", "deck_style_table": "dk-table"}
+DECK_STYLE_FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
 FILES = ("case.yaml", "payload.json", "reference.json", "calibration.json")
 BUILDER_KEYS = {
     "position", "slide_spec", "assumes", "hands_off", "resolved_data",
@@ -56,8 +63,19 @@ def _cal(cid):
     return json.loads((CASES / cid / "calibration.json").read_text())
 
 
-def _measure(out):
-    return render.render_slide(out["html"], out.get("scripts", ""), section_css=case.meridian_section_css())
+def _fixture_style():
+    """The technical deck style as a payload carries it (``DeckStyle.model_dump()``)."""
+    return DeckStyle.model_validate(json.loads(DECK_STYLE_FIXTURE.read_text())).model_dump()
+
+
+def _render_css(c=None):
+    """What the harness renders a case's slide with: Meridian, then the case's deck style (C21)."""
+    style = c.payload.get("deck_style") if c is not None else None
+    return case.meridian_section_css() + ("\n\n" + style["css"] if style else "")
+
+
+def _measure(out, c=None):
+    return render.render_slide(out["html"], out.get("scripts", ""), section_css=_render_css(c))
 
 
 def _spec_slide(pos):
@@ -105,7 +123,12 @@ def _strings(obj):
             yield from _strings(v)
 
 
-def test_exactly_the_five_cases():
+def _position(cid):
+    """A case's pinned position; a deck-style case's is its own (checked for consistency below)."""
+    return POSITION_OF[cid] if cid in POSITION_OF else _load(cid).payload["position"]
+
+
+def test_exactly_the_cases():
     cases = case.load_cases(AGENT, root=CASES)
     assert sorted(c.case_id for c in cases) == sorted(CASE_IDS)
     assert sorted(d.name for d in CASES.iterdir() if d.is_dir()) == sorted(CASE_IDS)
@@ -120,14 +143,17 @@ def test_case_has_four_files(cid):
 def test_case_contract(cid):
     c = _load(cid)
     assert c.design_system_active is True
-    assert set(c.payload) == BUILDER_KEYS
+    assert set(c.payload) == (BUILDER_KEYS | {"deck_style"} if cid in DECK_STYLE_CASES else BUILDER_KEYS)
     assert set(c.payload) <= set(MODEL_PAYLOAD_KEYS[AGENT])
     assert c.payload["section_css"] == case.meridian_section_css()
     assert c.payload["resolved_style"] == case.meridian_resolved_style()
     assert c.payload["design_system_active"] is True
-    assert c.expect == {}
+    if cid in DECK_STYLE_CASES:
+        assert set(c.expect) == {"deck_style_classes"}
+    else:
+        assert c.expect == {}
     assert set(c.reference) >= {"position", "html", "scripts"}
-    assert c.kind == ("positive" if cid in POSITIVES else "mutation")
+    assert c.kind == ("positive" if cid in POSITIVES or cid in DECK_STYLE_CASES else "mutation")
     assert (c.fault == "") == (c.kind == "positive")
 
 
@@ -136,6 +162,32 @@ def test_payload_validates_against_real_models(cid):
     c = _load(cid)
     ResolvedData.model_validate(c.payload["resolved_data"])
     SlideSpec.model_validate(c.payload["slide_spec"])
+    if "deck_style" in c.payload:
+        DeckStyle.model_validate(c.payload["deck_style"])
+
+
+# ---- deck-style cases ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cid", list(DECK_STYLE_CASES))
+def test_deck_style_case_carries_the_fixture_style_and_a_look(cid):
+    c = _load(cid)
+    assert c.payload["deck_style"] == _fixture_style()
+    spec = c.payload["slide_spec"]
+    assert isinstance(spec.get("look"), str) and spec["look"].strip()
+    assert SlideSpec.model_validate(spec).look
+    # A slide of deck 2 whose place in the arc is unchanged (positions: see the test below).
+    gold = _spec_slide(c.payload["position"])
+    assert spec["purpose"] == gold["purpose"]
+    assert "<style" not in c.reference["html"].lower()
+
+
+@pytest.mark.parametrize("cid,piece", DECK_STYLE_CASES.items())
+def test_deck_style_case_expect_lists_pieces_the_style_defines(cid, piece):
+    classes = _load(cid).expect["deck_style_classes"]
+    assert isinstance(classes, list) and classes
+    assert len(classes) == len(set(classes))
+    assert piece in classes
+    assert set(classes) <= css_class_names(_fixture_style()["css"])
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -147,7 +199,7 @@ def test_resolved_data_comes_from_the_deck2_spec(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_positions_match_and_avoid_position_4(cid):
-    pos = POSITION_OF[cid]
+    pos = _position(cid)
     c = _load(cid)
     assert c.payload["position"] == pos
     assert c.payload["slide_spec"]["position"] == pos
@@ -178,7 +230,7 @@ def test_positive_matches_deck2_gold(cid, pos):
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_payload_assumes_and_hands_off_come_from_slide(cid):
     c = _load(cid)
-    gold = _spec_slide(POSITION_OF[cid])
+    gold = _spec_slide(_position(cid))
     assert c.payload["assumes"] == gold["assumes"]
     assert c.payload["hands_off"] == gold["hands_off"]
     assert c.payload["slide_spec"]["assumes"] == gold["assumes"]
@@ -194,7 +246,8 @@ def test_stat_cards_keeps_original_brief_and_three_figures():
 @pytest.mark.parametrize("cid", CASE_IDS)
 @pytest.mark.usefixtures("requires_chromium")
 def test_reference_renders_clean(cid):
-    m = _measure(_load(cid).reference)
+    c = _load(cid)
+    m = _measure(c.reference, c)
     assert m.rendered
     assert m.overflow_px == 0
     assert m.safe_area_px == 0, m
@@ -208,8 +261,9 @@ def test_reference_renders_clean(cid):
 def test_reference_passes_render_measures_scorer(cid):
     from evals.harness import scorers
 
-    ref = _load(cid).reference
-    m = _measure(ref)
+    c = _load(cid)
+    ref = c.reference
+    m = _measure(ref, c)
     ok, why = scorers.render_measures_score(m, ref["html"])
     assert ok, why
 

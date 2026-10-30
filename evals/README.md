@@ -9,7 +9,8 @@ Real-model runs; results are logged to MLflow.
 - **Configs** (`evals/configs/`). A config is a named variant of one agent's v1 definition.
   `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
   settings. Each config carries a `content_hash`, logged with every run.
-- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (twenty for the architect), 50 in total across the seven
+- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (seven for the builder and the
+  build_reviewer, twenty for the architect), 54 in total across the seven
   roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
   `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
   `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
@@ -74,11 +75,23 @@ Real-model runs; results are logged to MLflow.
       and `operations` and `deck_changes` are both null. The model's own `target_positions` are
       noted, not failed. The judge sees this case's answers as given, never composed
       (`judge._judged`), because production composes nothing on that turn.
-  - `render_measures`, for the builder and fixer: the slide is rendered in a browser (Meridian section
-    CSS). It must have zero overflow, contrast of at least 4.5, no off-palette colours, no console
-    errors and no `<style>` tag.
+    - *Architect deck style.* A case whose `expect` has `deck_style: true` must also pass
+      `_deck_style_score`, checked right after the intent. It reads the answer's `deck_spec` and
+      passes only if `deck_style` is present, has 1 to 12 components and at most 10,000 characters
+      of CSS, `sanitise_deck_style` returns it unchanged (the same object, no notes), every slide
+      has a non-blank `look`, and, with a design system active, its CSS holds no hex colour
+      literal. The scorer passes the case's `design_system_active` through.
+  - `render_measures`, for the builder and fixer: the slide is rendered in a browser with the
+    Meridian section CSS, followed by the case's deck style CSS when its payload carries one
+    (`mlflow_run.render_section_css`, also used by calibration). It must have zero overflow, contrast
+    of at least 4.5, no off-palette colours, no console errors and no `<style>` tag. A case whose
+    `expect` has `deck_style_classes` must also pass `deck_style_use_score`: every listed class is
+    used, no inline `color`, `background`, `background-color`, `font-size`, `font-family` or
+    `border-color` is declared, and every class used is defined by the payload's `section_css` or
+    its deck style. The scorer loads the row's own case (split included) for the payload.
   - `judge`: an LLM judge (`mlflow.genai.make_judge`) using the pack's `judge_prompt.md`. It compares
-    the candidate with the reference and the brief and returns pass or fail.
+    the candidate with the reference and the brief and returns pass or fail. For the builder and the
+    build_reviewer, the brief also carries the payload's `deck_style` when it has one.
 - **Row outcome.** A row fails if any scorer fails. It is skipped if the judge is skipped, or if
   every scorer is skipped. Skips cover infra errors (after 3 retries with backoff) and judge errors;
   both are excluded from pass rate.
@@ -139,7 +152,8 @@ data_analyst prompt mentions Genie and a vector index, but neither is available 
 
 ## Held-out set
 
-Each agent has a second, separate set of cases (five per agent, twenty for the architect; 50 in total) in `evals/packs/<agent>/cases_heldout/`,
+Each agent has a second, separate set of cases (five per agent, seven for the builder and the
+build_reviewer, twenty for the architect; 54 in total) in `evals/packs/<agent>/cases_heldout/`,
 built from a different source deck than the train cases. It has the same four files per case and
 shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
 cases generalises, rather than having been fitted to them.
@@ -802,3 +816,34 @@ USD 5 cap.
   (`3da09952e775`, previously `8f1493ef35f9`). It was promoted with
   `python -m evals.harness.promote --config architect=evals/configs/architect/edit-ops-b.yaml --run-id architect=366f7035e8b043a88bf1be1263816369`,
   and the frontend lifecycle contract was re-recorded.
+
+## Deck style: scoring, and builder and build_reviewer cases, 2026-10-30
+
+The architect can author a deck style (`DeckSpec.deck_style`: CSS on `dk-` classes plus a component
+catalogue) that adds to the brand. The harness now scores it (see Scorers), renders slides with it,
+and has cases that hand it to the builder and the build reviewer. No prompt changed and no
+real-model run was made.
+
+- **The fixture.** `evals/fixtures/deck_style_technical.json` is a `DeckStyle` dump for a technical
+  deck: `dk-code` (with the `kw`, `fn`, `str` and `cm` token spans), `dk-table`, `dk-badge` with
+  `dk-badge--measured` and `dk-badge--untested`, `dk-steps`, `dk-callout` and `dk-note`. Every colour,
+  font and size is a Meridian token (the code font is a literal monospace stack: Meridian has no
+  mono token). `sanitise_deck_style(..., design_system_active=True)` returns it as the same object
+  with no notes, and a test pins that.
+- **Builder** (both splits). `deck_style_code` and `deck_style_table` are positives whose payload
+  carries the fixture and whose slide spec carries a `look`. The slide keeps its gold `purpose`,
+  `assumes` and `hands_off`, and its brief asks for the piece. `expect.deck_style_classes` lists the
+  pieces the slide must use. The reference is built from them. The `should_fail` is the same slide
+  painted inline in off-palette colours, so `deck_style_use_score` and the render both fail it.
+- **Build reviewer** (both splits; train slide 7, held-out slide 2). `deck_style_clean` builds a
+  code listing with `dk-code`. `deck_style_inline_paint` is the same slide with that block painted
+  inline instead (a `#1E293B` ground and off-palette token colours), so today's `rogue_colour`
+  description catches it. Its expect is `rogue_colour` at that slide. The clean case's
+  `should_fail` wrongly flags the deck style's own token colours as `rogue_colour`. The build
+  reviewer prompt does not mention deck styles (ruling R10), so these cases measure that gap.
+- The builder and the build_reviewer now have seven cases per split, 54 across the harness.
+- **Not calibrated or measured yet.** Calibrate the four new cases on both splits before relying
+  on their judge verdicts:
+  `python -m evals.run_eval --agent builder --calibrate --cases deck_style_code,deck_style_table [--split heldout]`
+  and the same for `--agent build_reviewer --cases deck_style_inline_paint,deck_style_clean`. Neither
+  judge prompt describes `deck_style`; the judge sees it in the brief.
