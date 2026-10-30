@@ -1032,8 +1032,10 @@ What it showed:
   Editing its v1 composite (`INSTRUCTIONS`) would make `upgrade_definition_to_v2` refuse the
   persisted v1 build-reviewer definitions on released 0.5.x installs ("Legacy protected prompt
   content was edited"). Editing its authored v2 target moves `_V2_DIGEST`
-  (`src/services/prompt_assembler.py` raises at import). With the rates above, nothing measured here
-  argues for the change. Shipping it needs an **owner decision on a migration**: either a
+  (`src/services/prompt_assembler.py` raises at import). The two measured cases do not exercise the
+  gap the rule would close (on-palette token paint, an on-palette restyle of a provided piece, the
+  cascade order), so their rates neither support nor argue against the change. Shipping it needs an
+  **owner decision on a migration**: either a
   transition that accepts both the 0.5.x composite and the new one, or a protected conditional stage
   like `DECK_BRIEF_REVIEW`.
 - **Override of `optimise-agent-prompt`, delegated by the controller:** one candidate at ×1 on train

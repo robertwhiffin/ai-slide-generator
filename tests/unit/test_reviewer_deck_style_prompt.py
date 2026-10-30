@@ -351,6 +351,11 @@ def test_criteria_named_in_the_deck_style_block_are_valid_criterion_names():
         name for name in CRITERIA if re.search(rf"\b{name}\b", block) and name not in valid
     )
     assert unlisted == [], f"DECK STYLE block names criteria the prompt does not list: {unlisted}"
+    # A name the block tells the model to report must be a listed criterion, even one
+    # outside the registry (``Finding`` rejects an unknown criterion at runtime).
+    reported = re.findall(r"\breport\s+(?:it|them)\s+as\s+([a-z_]+)", _plain(block))
+    unknown = sorted({name for name in reported if name not in valid})
+    assert unknown == [], f"DECK STYLE block reports unlisted criterion names: {unknown}"
 
 
 def test_manifest_fix_reviewer_prompt_is_the_skill_instructions():
