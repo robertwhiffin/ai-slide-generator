@@ -68,7 +68,7 @@ from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
 from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
-from src.domain.deck_style import sanitise_deck_style
+from src.domain.deck_style import deck_style_context, sanitise_deck_style
 from src.domain.finding import (
     CRITERIA,
     Finding,
@@ -774,6 +774,8 @@ def rereview_committed_slides(
             # instructions (see AgentRuntime's protected prompt assembly).
             "deck_brief": deck_brief,
         }
+        if spec.deck_style is not None:
+            review_payload["deck_style"] = spec.deck_style.model_dump()
         try:
             out = get_agent_runtime().run(
                 "build_reviewer",
@@ -1859,7 +1861,7 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
                 position,
             )
 
-    return {
+    branch_payload = {
         "session_id": state["session_id"],
         "graph_release_id": state["graph_release_id"],
         "turn_id": state["turn_id"],
@@ -1886,6 +1888,10 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
         "resolved_style": state.get("resolved_style") or "",
         "design_system_active": bool(state.get("design_system_active")),
     }
+    # Only when the deck has one: an old deck's payload is exactly what it was.
+    if spec.deck_style is not None:
+        branch_payload["deck_style"] = spec.deck_style.model_dump()
+    return branch_payload
 
 
 # ---------------------------------------------------------------------------
@@ -3188,6 +3194,11 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # brand it cannot see: available_design_contract carries only the ids
         # already in force, so every other design system in the org is invisible.
         "design_system_library": _design_system_library(),
+        # The token names and template classes the deck style may use, without
+        # any font data (see src/domain/deck_style.py).
+        "deck_style_context": deck_style_context(
+            brand["token_css"], brand["style_block"]
+        ),
     }
 
     # ---- ask, plan, and at most once ask again (spec §5) ---------------------
@@ -4057,6 +4068,7 @@ _BUILDER_MODEL_PAYLOAD_KEYS = frozenset(
         "section_css",
         "resolved_style",
         "design_system_active",
+        "deck_style",
     }
 )
 
@@ -4249,6 +4261,8 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             "html": html,
             "scripts": scripts,
         }
+        if payload.get("deck_style") is not None:
+            review_payload["deck_style"] = payload["deck_style"]
 
         def _review():
             return get_agent_runtime().run(
@@ -4507,6 +4521,8 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         "section_css": payload.get("section_css"),
         "resolved_data": payload.get("resolved_data"),
     }
+    if payload.get("deck_style") is not None:
+        fix_payload["deck_style"] = payload["deck_style"]
     design_system_active = bool(
         payload.get("design_system_active")
         or state.get("design_system_active")
@@ -4669,6 +4685,8 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                 "resolved_style": payload.get("resolved_style"),
                 "section_css": payload.get("section_css"),
             }
+            if payload.get("deck_style") is not None:
+                review_payload["deck_style"] = payload["deck_style"]
             try:
                 out = get_agent_runtime().run(
                     "fix_reviewer",

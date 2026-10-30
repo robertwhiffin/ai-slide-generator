@@ -330,5 +330,56 @@
         }
       ]
     }
-  ]
+  ],
+  "deck_style_context": {
+    "design_tokens": {
+      "--brand-core-primary": "#0F766E",
+      "--brand-core-primary-dark": "#115E59",
+      "--brand-core-ink": "#111827",
+      "--brand-core-text": "#374151",
+      "--brand-core-muted": "#4B5563",
+      "--brand-core-background": "#FFFFFF",
+      "--brand-core-surface": "#F1F5F9",
+      "--brand-core-border": "#E2E8F0",
+      "--brand-accents-violet": "#6D28D9",
+      "--brand-accents-amber": "#B45309",
+      "--brand-accents-sky": "#0369A1",
+      "--brand-accents-positive": "#15803D",
+      "--brand-accents-negative": "#B91C1C",
+      "--font-sans": "\"Inter\", \"Helvetica Neue\", Arial, sans-serif",
+      "--fs-eyebrow": "14px",
+      "--fs-title": "40px",
+      "--fs-subtitle": "22px",
+      "--fs-body": "18px",
+      "--fs-caption": "13px",
+      "--fs-stat": "56px",
+      "--space-sm": "12px",
+      "--space-md": "24px",
+      "--space-lg": "40px",
+      "--slide-pad-x": "88px",
+      "--slide-pad-y": "72px",
+      "--radius-md": "12px",
+      "--shadow-sm": "0 1px 3px rgba(17, 24, 39, 0.08)"
+    },
+    "template_classes": [
+      "bullets",
+      "callout",
+      "card",
+      "chart-container",
+      "content",
+      "cover",
+      "eyebrow",
+      "grid-2",
+      "grid-3",
+      "negative",
+      "positive",
+      "slide",
+      "slide-footer",
+      "slide-subtitle",
+      "slide-title",
+      "stat-delta",
+      "stat-label",
+      "stat-value"
+    ]
+  }
 }

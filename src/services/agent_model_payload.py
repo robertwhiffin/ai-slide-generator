@@ -67,6 +67,7 @@ MODEL_PAYLOAD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "template_sections",
                 "resolved_style",
                 "design_system_library",
+                "deck_style_context",
                 "rejected_edit",
             }
         ),
@@ -83,12 +84,14 @@ MODEL_PAYLOAD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "resolved_style",
                 "design_system_active",
                 "corrective_instruction",
+                "deck_style",
             }
         ),
-        "build_reviewer": _SLIDE_REVIEW_KEYS | {"deck_brief"},
-        "fixer": _FIXER_KEYS | {"corrective_instruction", "resolved_data"},
+        "build_reviewer": _SLIDE_REVIEW_KEYS | {"deck_brief", "deck_style"},
+        "fixer": _FIXER_KEYS
+        | {"corrective_instruction", "resolved_data", "deck_style"},
         "fix_reviewer": _FIXER_KEYS
-        | {"change_summary", "original_html", "original_scripts"},
+        | {"change_summary", "original_html", "original_scripts", "deck_style"},
         "deck_reviewer": frozenset(
             {"narrative_arc", "call_to_action", "slide_count", "slides"}
         ),

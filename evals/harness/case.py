@@ -125,6 +125,26 @@ def meridian_section_css() -> str:
         return f.read()
 
 
+def meridian_deck_style_context() -> dict:
+    """The architect's ``deck_style_context`` for the Meridian bundle.
+
+    Production computes it as ``deck_style_context(token_css, style_block)``
+    (``architect_node``).  For Meridian, ``token_css`` is the bundle's
+    ``colors_and_type.css`` and ``style_block`` is the ``<style>`` element of the
+    standard template layout, the two inputs ``section_css.txt`` is the
+    concatenation of.
+    """
+    import re
+
+    from src.domain.deck_style import deck_style_context
+
+    bundle = MERIDIAN_DIR / "bundle"
+    token_css = (bundle / "colors_and_type.css").read_text()
+    layout = (bundle / "templates" / "standard" / "index.html").read_text()
+    style_block = re.search(r"<style[^>]*>(.*?)</style>", layout, re.S).group(1)
+    return deck_style_context(token_css, style_block)
+
+
 def meridian_resolved_style() -> str:
     """Load the Meridian resolved style."""
     with open(MERIDIAN_DIR / "resolved_style.txt") as f:

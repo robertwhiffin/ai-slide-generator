@@ -132,6 +132,7 @@ def _payload(cid):
         "template_sections": section_inventory(m.LAYOUT.read_text()),
         "resolved_style": case.meridian_resolved_style(),
         "design_system_library": m.LIBRARY,
+        "deck_style_context": case.meridian_deck_style_context(),
     })
 
 

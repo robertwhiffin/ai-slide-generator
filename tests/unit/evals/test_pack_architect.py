@@ -193,10 +193,11 @@ PAYLOAD_KEYS = [
     "conversation", "message", "current_deck_spec", "committed_slide_count",
     "slide_numbering", "slide_references",
     "previous_deck_review", "available_design_contract", "template_sections",
-    "resolved_style", "design_system_library",
+    "resolved_style", "design_system_library", "deck_style_context",
 ]
 # #313 (plan Task 7): the two keys src/domain/slide_numbering.architect_slide_payload builds.
 SLIDE_KEYS = ("slide_numbering", "slide_references")
+DECK_STYLE_CONTEXT_KEY = "deck_style_context"
 DECK_SLIDES = 10
 # #313 (plan Task 7): every slide reference resolved in each case's message, pinned literally.
 SLIDE_REFERENCES = {
@@ -464,7 +465,7 @@ def test_payload_keys_are_every_production_key():
     builder's ``corrective_instruction`` is), so no case carries it."""
     assert "rejected_edit" in MODEL_PAYLOAD_KEYS[AGENT]
     assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT]) - {"rejected_edit"}
-    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 11
+    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 12
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -707,7 +708,20 @@ def _without_slide_keys(data: bytes) -> bytes:
     """
     obj = json.loads(data)
     assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
-    return _serialised({k: v for k, v in obj.items() if k not in SLIDE_KEYS})
+    return _serialised(
+        {k: v for k, v in obj.items() if k not in (*SLIDE_KEYS, DECK_STYLE_CONTEXT_KEY)}
+    )
+
+
+def _without_deck_style_context(data: bytes) -> bytes:
+    """A payload.json's bytes with only ``deck_style_context`` removed (deck-style Task 5).
+
+    The key was added to every architect payload on purpose; a payload.json digest is checked on
+    the payload without it, so no case is re-pinned.
+    """
+    obj = json.loads(data)
+    assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
+    return _serialised({k: v for k, v in obj.items() if k != DECK_STYLE_CONTEXT_KEY})
 
 
 def test_existing_cases_are_byte_identical(generated):
@@ -728,7 +742,9 @@ def test_existing_cases_are_byte_identical(generated):
 def test_the_313_cases_are_byte_identical(generated):
     """#314 (Task 9): adding the insert cases rewrites none of the four #313 case files."""
     got = {
-        path: hashlib.sha256(data).hexdigest()
+        path: hashlib.sha256(
+            _without_deck_style_context(data) if path.endswith("/payload.json") else data
+        ).hexdigest()
         for path, data in generated.items()
         if path.split("/")[0] in CASES_313
     }
@@ -738,7 +754,9 @@ def test_the_313_cases_are_byte_identical(generated):
 def test_the_insert_cases_are_byte_identical(generated):
     """#314 follow-up (Task 11): adding the blank cases rewrites none of the four insert case files."""
     got = {
-        path: hashlib.sha256(data).hexdigest()
+        path: hashlib.sha256(
+            _without_deck_style_context(data) if path.endswith("/payload.json") else data
+        ).hexdigest()
         for path, data in generated.items()
         if path.split("/")[0] in INSERT_CASES
     }

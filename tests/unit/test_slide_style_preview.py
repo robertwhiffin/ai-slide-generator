@@ -728,7 +728,7 @@ class TestBuilderGeneration:
 
         for spec in fixture.PREVIEW_SLIDE_SPECS:
             payload = fixture.builder_payload(spec, "s")
-            assert set(payload) == _BUILDER_MODEL_PAYLOAD_KEYS
+            assert set(payload) == _BUILDER_MODEL_PAYLOAD_KEYS - {"deck_style"}
             assert payload["design_system_active"] is False
             assert payload["resolved_style"] == "s"
 
