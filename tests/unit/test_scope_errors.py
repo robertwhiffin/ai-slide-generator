@@ -18,7 +18,10 @@ from databricks.sdk.errors.platform import NotFound, PermissionDenied
 from src.core.scope_errors import (
     consent_message,
     is_missing_scope_error,
+    mentions_missing_scope,
     oauth_client_id_from_token,
+    oauth_scopes_from_token,
+    scopes_grant,
 )
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "genie_one" / "error_missing_scope_sdk.json"
@@ -230,6 +233,115 @@ class TestOAuthClientIdFromToken:
     )
     def test_non_jwt_inputs_give_none_without_raising(self, token):
         assert oauth_client_id_from_token(token) is None
+
+
+# ---------------------------------------------------------------------------
+# oauth_scopes_from_token, scopes_grant, mentions_missing_scope (final fix I1)
+# ---------------------------------------------------------------------------
+
+
+class TestOAuthScopesFromToken:
+    def test_space_separated_scope_claim(self):
+        # The shape a Databricks OAuth token carries (decoded from real CLI tokens).
+        token = _jwt({"scope": "ai-gateway catalog.connections offline_access", "x": _URLSAFE_FILLER})
+        assert oauth_scopes_from_token(token) == frozenset(
+            {"ai-gateway", "catalog.connections", "offline_access"}
+        )
+
+    def test_list_scope_claim(self):
+        token = _jwt({"scope": ["sql", "ai-gateway"]})
+        assert oauth_scopes_from_token(token) == frozenset({"sql", "ai-gateway"})
+
+    def test_scp_claim_when_no_scope(self):
+        assert oauth_scopes_from_token(_jwt({"scp": "sql dashboards.genie"})) == frozenset(
+            {"sql", "dashboards.genie"}
+        )
+        assert oauth_scopes_from_token(_jwt({"scp": ["all-apis"]})) == frozenset({"all-apis"})
+
+    def test_scope_preferred_over_scp(self):
+        assert oauth_scopes_from_token(_jwt({"scope": "sql", "scp": "ai-gateway"})) == frozenset(
+            {"sql"}
+        )
+
+    def test_extra_whitespace_and_non_string_list_items_are_ignored(self):
+        assert oauth_scopes_from_token(_jwt({"scope": "  sql   ai-gateway "})) == frozenset(
+            {"sql", "ai-gateway"}
+        )
+        assert oauth_scopes_from_token(_jwt({"scope": ["sql", 7, None]})) == frozenset({"sql"})
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"sub": "user@example.com"},
+            {"scope": ""},
+            {"scope": "   "},
+            {"scope": []},
+            {"scope": 42},
+            {"scope": None, "scp": {"a": 1}},
+        ],
+        ids=["absent", "empty", "blank", "empty_list", "number", "neither_usable"],
+    )
+    def test_a_claim_naming_no_scope_is_unknown(self, payload):
+        # Unknown, not "no scopes": callers act only on a known set.
+        assert oauth_scopes_from_token(_jwt(payload)) is None
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "dapi123",
+            None,
+            "",
+            "not.a.jwt",
+            "a.b",
+            "header.!!!not-base64!!!.sig",
+            f"{_b64url(b'{}')}.{_b64url(b'this is not json')}.sig",
+            _jwt(["scope", "sql"]),
+            _jwt("scope sql"),
+        ],
+        ids=[
+            "pat",
+            "none",
+            "empty",
+            "three_junk_segments",
+            "two_segments",
+            "bad_base64",
+            "payload_not_json",
+            "payload_is_list",
+            "payload_is_string",
+        ],
+    )
+    def test_non_jwt_inputs_give_none_without_raising(self, token):
+        assert oauth_scopes_from_token(token) is None
+
+
+class TestScopesGrant:
+    def test_the_scope_itself(self):
+        assert scopes_grant(frozenset({"sql", "ai-gateway"}), "ai-gateway")
+
+    def test_all_apis_holds_every_scope(self):
+        # A full CLI token carries "all-apis offline_access" and no ai-gateway.
+        assert scopes_grant(frozenset({"all-apis", "offline_access"}), "ai-gateway")
+
+    def test_a_set_without_it(self):
+        assert not scopes_grant(frozenset({"sql", "offline_access"}), "ai-gateway")
+        assert not scopes_grant(frozenset(), "ai-gateway")
+
+
+class TestMentionsMissingScope:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Invalid scope, required scopes: ai-gateway",
+            "403 Forbidden: INVALID SCOPE",
+            STAGING_TEXT,
+        ],
+    )
+    def test_scope_texts(self, text):
+        assert mentions_missing_scope(text)
+
+    @pytest.mark.parametrize("text", ["", "403 Forbidden", "PERMISSION_DENIED: no EXECUTE"])
+    def test_other_texts(self, text):
+        assert not mentions_missing_scope(text)
 
 
 # ---------------------------------------------------------------------------

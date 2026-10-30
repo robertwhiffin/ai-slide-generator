@@ -49,7 +49,7 @@ import logging
 import threading
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from typing import Any, Dict, Final, List, Literal, Optional, Sequence, Set, Tuple, get_type_hints
 
@@ -66,7 +66,12 @@ from src.api.services.slide_repository import (
 )
 from src.core.database import get_db_session
 from src.core.databricks_client import get_user_client
-from src.core.scope_errors import consent_message, oauth_client_id_from_token
+from src.core.scope_errors import (
+    consent_message,
+    oauth_client_id_from_token,
+    oauth_scopes_from_token,
+    scopes_grant,
+)
 from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, ResolvedFigure, SlideSpec
@@ -103,6 +108,7 @@ from src.services.agent_runtime import (
     is_transient_model_failure,
 )
 from src.services.agent_tools.genie_one import (
+    GENIE_ONE_SCOPE,
     GENIE_ONE_SOURCE,
     GenieOneAnswer,
     figures_from_answer,
@@ -165,7 +171,7 @@ from src.services.template_sections import (
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.html_utils import strip_inter_tag_escapes
 from src.utils.slide_hash import compute_slide_hash
-from src.utils.spotlight import spotlight
+from src.utils.spotlight import neutralize_delimiters, spotlight
 
 logger = logging.getLogger(__name__)
 
@@ -3696,13 +3702,14 @@ class _GenieOneRun:
     """One analyst run's Genie One toolset, and what the node needs after it.
 
     ``token`` is the signed-in user's (the consent message names the OAuth
-    client it was issued to); ``stored_conversation_id`` is the actor row's
-    value before the run, so an unchanged id is not written again.
+    client it was issued to), kept out of ``repr`` so no log line or traceback
+    prints it; ``stored_conversation_id`` is the actor row's value before the
+    run, so an unchanged id is not written again.
     """
 
     toolset: AgentToolset
     tool: GenieOneAgentTool
-    token: str
+    token: str = field(repr=False)
     stored_conversation_id: Optional[str]
 
 
@@ -3714,6 +3721,12 @@ def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
     as no config.  With a Genie One entry, the user's identity is captured HERE,
     in the node thread, where the request's ContextVars are set: no user client
     (production fails closed) means no toolset, never the service principal's.
+
+    **Scope pre-flight.**  When the user's token says which scopes it carries
+    and ``ai-gateway`` (or ``all-apis``) is not among them, every Genie One call
+    would be refused: the user is told the consent message once, here, and the
+    analyst runs without tools.  A token whose scopes cannot be read is not
+    refused; the gateway's answer decides.
     """
     try:
         config = resolve_agent_config(
@@ -3742,6 +3755,16 @@ def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
             "Genie One is configured but the user client has no host or token; the "
             "analyst runs without tools"
         )
+        return None
+    scopes = oauth_scopes_from_token(token)
+    if scopes is not None and not scopes_grant(scopes, GENIE_ONE_SCOPE):
+        logger.warning(
+            "Genie One is configured but the user's token lacks the %s scope; the "
+            "analyst runs without tools",
+            GENIE_ONE_SCOPE,
+            extra={"session_id": state.get("session_id")},
+        )
+        _say_consent(state, token)
         return None
 
     def on_question(question: str) -> None:
@@ -3849,15 +3872,20 @@ def _persist_genie_one_conversation(state: dict, run: _GenieOneRun) -> None:
         )
 
 
+def _say_consent(state: dict, token: str) -> None:
+    """Tell the user how to give this app the permission their sign-in lacks."""
+    _say(
+        state,
+        consent_message(oauth_client_id=oauth_client_id_from_token(token)),
+        message_type="info",
+    )
+
+
 def _say_genie_one_access(state: dict, run: _GenieOneRun) -> None:
     """Tell the user, once per kind, what a Genie One refusal needs them to do."""
     kinds = {error.kind for error in run.toolset.access_errors}
     if "missing_scope" in kinds:
-        _say(
-            state,
-            consent_message(oauth_client_id=oauth_client_id_from_token(run.token)),
-            message_type="info",
-        )
+        _say_consent(state, run.token)
     if "access_denied" in kinds:
         _say(state, _GENIE_ONE_GRANT_MESSAGE, message_type="info")
 
@@ -3954,8 +3982,10 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         )
 
     # The user is shown the figure block as text; the architect gets it
-    # spotlighted (its column names and cells are Genie One's output).
-    architect_message = message
+    # spotlighted (its column names and cells are Genie One's output).  The
+    # analyst's own prose can quote Genie One, so in the architect's copy its
+    # delimiters are escaped: nothing outside the wrapper can open or close one.
+    architect_message = neutralize_delimiters(message)
     figures: List[ResolvedFigure] = []
     if genie is not None:
         earlier = _turn_analyst_figures(state)

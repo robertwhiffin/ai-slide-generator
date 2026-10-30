@@ -27,6 +27,7 @@ from typing import Final
 from pydantic import BaseModel, Field
 
 from src.api.schemas.agent_config import AgentConfig, GenieOneTool
+from src.core.scope_errors import oauth_scopes_from_token
 from src.services.agent_tools.genie_one import (
     GenieOneAccessError,
     GenieOneAnswer,
@@ -154,14 +155,16 @@ def build_analyst_toolset(
 ) -> tuple[AgentToolset, GenieOneAgentTool] | None:
     """The data analyst's toolset for *agent_config*, or ``None`` without Genie One.
 
-    The client runs as the user whose ``host`` and ``token`` these are; the
-    stored ``conversation_id`` (that row's own) is continued.
+    The client runs as the user whose ``host`` and ``token`` these are, and
+    knows the scopes that token says it carries (so a gateway 403 for a token
+    without ``ai-gateway`` is a missing scope); the stored ``conversation_id``
+    (that row's own) is continued.
     """
     entry = next((t for t in agent_config.tools if isinstance(t, GenieOneTool)), None)
     if entry is None:
         return None
     tool = GenieOneAgentTool(
-        GenieOneClient(host=host, token=token),
+        GenieOneClient(host=host, token=token, token_scopes=oauth_scopes_from_token(token)),
         conversation_id=entry.conversation_id,
         on_question=on_question,
         session_id=session_id,

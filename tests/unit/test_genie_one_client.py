@@ -128,13 +128,18 @@ class FakeGenieOne:
         self._repeat = repeat
         self.now = START
         self.events: list[tuple[Any, ...]] = []
+        # (tool name, timeout_seconds, fake clock at the call), per call.
+        self.timeouts: list[tuple[str, float, float]] = []
 
     def _guard(self) -> None:
         if len(self.events) > self.MAX_EVENTS:
             raise _TestHarnessAbort("runaway loop: the client never stopped polling")
 
-    def call_tool(self, name: str, args: dict[str, Any]) -> FakeCallToolResult:
+    def call_tool(
+        self, name: str, args: dict[str, Any], *, timeout_seconds: float
+    ) -> FakeCallToolResult:
         self.events.append(("call", name, dict(args)))
+        self.timeouts.append((name, timeout_seconds, self.now))
         self._guard()
         queue = self._replies.get(name)
         if not queue:
@@ -622,7 +627,14 @@ def test_failed_answer_yields_no_figures(status: str):
 def test_is_error_result_raises_genie_one_error():
     recorded = load("error_bad_response_id")
     error_text = recorded["content"][0]["text"]
-    fake = FakeGenieOne({"genie_ask": [load("q1_ask")], "genie_poll_response": [recorded]})
+    # Final fix (M4): a failed poll now also cancels the question, so a cancel is scripted.
+    fake = FakeGenieOne(
+        {
+            "genie_ask": [load("q1_ask")],
+            "genie_poll_response": [recorded],
+            "genie_cancel_response": [load("error_bad_response_id")],
+        }
+    )
 
     with pytest.raises(GenieOneError) as info:
         make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=300)
@@ -753,10 +765,12 @@ def test_access_error_on_query_result_fetch_is_not_skipped():
 
 
 def test_digits_inside_ids_are_not_access_denied():
+    # Final fix (M4): a failed poll now also cancels the question, so a cancel is scripted.
     fake = FakeGenieOne(
         {
             "genie_ask": [load("q1_ask")],
             "genie_poll_response": [is_error_with_text("HTTP 404: no response_id 9a403bc1")],
+            "genie_cancel_response": [load("error_bad_response_id")],
         }
     )
 
@@ -780,6 +794,7 @@ def test_default_call_tool_url_identity_and_hung_call_timeout(monkeypatch: pytes
     class FakeWS:
         def __init__(self, **kwargs: Any) -> None:
             record["ws"] = kwargs
+            record["ws_thread"] = threading.current_thread()
 
     class FakeMCP:
         def __init__(self, **kwargs: Any) -> None:
@@ -806,6 +821,8 @@ def test_default_call_tool_url_identity_and_hung_call_timeout(monkeypatch: pytes
     assert elapsed < 2.0
     assert str(info.value).startswith("Genie One did not respond within")
     assert record["ws"] == {"host": HOST, "token": TOKEN, "auth_type": "pat"}
+    # Final fix (M8): built inside the call's worker thread, so the timeout covers it.
+    assert record["ws_thread"] is not threading.main_thread()
     assert record["mcp"]["server_url"] == f"{HOST}/ai-gateway/mcp-services/system.ai.genie_one_mcp"
     assert record["call"] == ("genie_ask", {"question": Q1})
 
@@ -848,3 +865,324 @@ def test_figures_never_carry_a_raw_spotlight_delimiter():
     for figure in figures:
         assert "</untrusted-data>" not in figure.key + figure.value
         assert "<untrusted-data" not in figure.key + figure.value
+
+
+# ---------------------------------------------------------------------------
+# Final whole-branch review fixes: I1 (a missing ai-gateway scope), M4, M8
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class _SeenRequest:
+    method: str
+    path: str
+    authorization: str | None
+
+
+class _LocalGateway:
+    """A local HTTP server answering EVERY request with one status and body.
+
+    It stands in for the AI Gateway so the real ``databricks_mcp`` / ``mcp`` /
+    ``httpx`` stack runs end to end through ``GenieOneClient``'s default call
+    path (the whole-branch reviewer's probe, as a test).  Nothing leaves
+    127.0.0.1.  Each request's method, path and ``Authorization`` header are
+    recorded.
+    """
+
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self.body = body
+        self.requests: list[_SeenRequest] = []
+
+    def __enter__(self) -> _LocalGateway:
+        import http.server
+        import threading
+
+        gateway = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                self.rfile.read(int(self.headers.get("content-length") or 0))
+                gateway.requests.append(
+                    _SeenRequest(self.command, self.path, self.headers.get("Authorization"))
+                )
+                self.send_response(gateway.status)
+                self.send_header("content-type", "text/plain")
+                self.end_headers()
+                self.wfile.write(gateway.body.encode())
+
+            do_GET = do_POST = do_DELETE = _answer  # noqa: N815
+
+            def log_message(self, *args: Any) -> None:
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        ).start()
+        self.host = f"http://127.0.0.1:{self._server.server_address[1]}"
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+_SCOPE_BODY = "Invalid scope, required scopes: ai-gateway"
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "token_scopes", "kind"),
+    [
+        (401, "Unauthorized", None, "missing_scope"),
+        (403, _SCOPE_BODY, None, "missing_scope"),
+        (
+            403,
+            "PERMISSION_DENIED: User does not have EXECUTE on system.ai.genie_one_mcp",
+            None,
+            "access_denied",
+        ),
+        (403, "Forbidden", frozenset({"sql", "offline_access"}), "missing_scope"),
+        (403, "Forbidden", frozenset({"ai-gateway", "offline_access"}), "access_denied"),
+        (403, "Forbidden", frozenset({"all-apis", "offline_access"}), "access_denied"),
+    ],
+    ids=[
+        "401",
+        "403_scope_body",
+        "403_grant_body_scopes_unknown",
+        "403_scopes_lack_ai_gateway",
+        "403_scopes_have_ai_gateway",
+        "403_scopes_all_apis",
+    ],
+)
+def test_gateway_http_errors_are_classified_through_the_real_mcp_stack(
+    status, body, token_scopes, kind, caplog: pytest.LogCaptureFixture
+):
+    with _LocalGateway(status, body) as gateway:
+        client = GenieOneClient(host=gateway.host, token=TOKEN, token_scopes=token_scopes)
+        with (
+            caplog.at_level(logging.WARNING, logger="src.services.agent_tools.genie_one"),
+            pytest.raises(GenieOneAccessError) as info,
+        ):
+            client.ask(Q1, conversation_id=None, timeout_seconds=30)
+
+    assert info.value.kind == kind
+    # The leaf's type and HTTP status name the failure; it is logged with its traceback.
+    assert str(info.value).startswith(f"HTTPStatusError (HTTP {status}): ")
+    logged = [r for r in caplog.records if r.getMessage().startswith("Genie One genie_ask failed")]
+    assert len(logged) == 1 and logged[0].exc_info is not None
+    # The MCP requests went to the service path with the user's bearer token.
+    to_service = [r for r in gateway.requests if r.path == GENIE_ONE_SERVICE_PATH]
+    assert to_service
+    assert {r.authorization for r in to_service} == {f"Bearer {TOKEN}"}
+
+
+def _http_error(status: int, body: str = "") -> BaseException:
+    """httpx's own error for a gateway reply, its body already read."""
+    import httpx
+
+    request = httpx.Request("POST", f"{HOST}{GENIE_ONE_SERVICE_PATH}")
+    response = httpx.Response(status, text=body, request=request)
+    return httpx.HTTPStatusError(
+        f"Client error '{status}' for url '{request.url}'", request=request, response=response
+    )
+
+
+def _permission_denied() -> BaseException:
+    from databricks.sdk.errors import PermissionDenied
+
+    return PermissionDenied("User does not have EXECUTE on 'system.ai.genie_one_mcp'.")
+
+
+@pytest.mark.parametrize(
+    ("make_exception", "token_scopes", "kind"),
+    [
+        (lambda: ExceptionGroup("tg", [_http_error(401)]), None, "missing_scope"),
+        (lambda: _http_error(401), frozenset({"ai-gateway"}), "missing_scope"),
+        (lambda: _http_error(403, _SCOPE_BODY), None, "missing_scope"),
+        (lambda: _http_error(403, "Forbidden"), None, "access_denied"),
+        (lambda: _http_error(403, "Forbidden"), frozenset({"sql"}), "missing_scope"),
+        (lambda: _http_error(403), frozenset({"ai-gateway"}), "access_denied"),
+        (lambda: _http_error(403), frozenset({"all-apis"}), "access_denied"),
+        (_permission_denied, frozenset({"sql"}), "missing_scope"),
+        (lambda: RuntimeError(_GATEWAY_403), frozenset({"sql"}), "missing_scope"),
+    ],
+    ids=[
+        "401_in_group",
+        "401_scopes_have_ai_gateway",
+        "403_scope_body",
+        "403_scopes_unknown",
+        "403_scopes_lack_ai_gateway",
+        "403_scopes_have_ai_gateway",
+        "403_scopes_all_apis",
+        "permission_denied_scopes_lack_ai_gateway",
+        "403_text_scopes_lack_ai_gateway",
+    ],
+)
+def test_http_status_and_known_scopes_decide_the_access_kind(make_exception, token_scopes, kind):
+    fake = FakeGenieOne({"genie_ask": [make_exception()]})
+
+    with pytest.raises(GenieOneAccessError) as info:
+        make_client(fake, token_scopes=token_scopes).ask(
+            Q1, conversation_id=None, timeout_seconds=300
+        )
+
+    assert info.value.kind == kind
+
+
+def test_other_http_errors_stay_generic_and_name_their_status():
+    fake = FakeGenieOne({"genie_ask": [ExceptionGroup("tg", [_http_error(500, "boom")])]})
+
+    with pytest.raises(GenieOneError) as info:
+        make_client(fake, token_scopes=frozenset({"sql"})).ask(
+            Q1, conversation_id=None, timeout_seconds=300
+        )
+
+    assert not isinstance(info.value, GenieOneAccessError)
+    assert str(info.value).startswith("HTTPStatusError (HTTP 500): Client error '500'")
+
+
+def test_a_plain_exception_message_names_its_type():
+    fake = FakeGenieOne({"genie_ask": [RuntimeError("Connection reset by peer")]})
+
+    with pytest.raises(GenieOneError) as info:
+        make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=300)
+
+    assert str(info.value) == "RuntimeError: Connection reset by peer"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Invalid scope, required scopes: ai-gateway",
+        "403 Forbidden: Invalid scope, required scopes: ai-gateway",
+        "Provided OAuth token does not have required scopes: ai-gateway",
+    ],
+    ids=["invalid_scope", "with_403_text", "staging_wording"],
+)
+def test_an_is_error_reply_naming_a_missing_scope_is_missing_scope(text: str):
+    fake = FakeGenieOne({"genie_ask": [is_error_with_text(text)]})
+
+    with pytest.raises(GenieOneAccessError) as info:
+        make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=300)
+
+    assert info.value.kind == "missing_scope"
+
+
+def test_each_call_is_bounded_by_the_questions_remaining_time():
+    """M4: a call gets min(60, what is left of the question's time + 10 s)."""
+    fake = FakeGenieOne(
+        {
+            "genie_ask": [load("q1_ask")],
+            "genie_poll_response": [load("q1_poll_in_progress")],
+            "genie_cancel_response": [load("error_bad_response_id")],
+        },
+        repeat=frozenset({"genie_poll_response"}),
+    )
+
+    answer = make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=20)
+
+    assert answer.status == "timed_out"
+    # Polls at +0, +3 ... +21 s; the deadline is +20 s, so the last poll and the
+    # cancel get only the 10 s grace.
+    assert [(name, timeout) for name, timeout, _ in fake.timeouts] == [
+        ("genie_ask", 30),
+        ("genie_poll_response", 30),
+        ("genie_poll_response", 27),
+        ("genie_poll_response", 24),
+        ("genie_poll_response", 21),
+        ("genie_poll_response", 18),
+        ("genie_poll_response", 15),
+        ("genie_poll_response", 12),
+        ("genie_poll_response", 10),
+        ("genie_cancel_response", 10),
+    ]
+
+
+def test_a_long_budget_still_caps_each_call_at_sixty_seconds():
+    _, fake = ask_q1()
+
+    assert {timeout for _, timeout, _ in fake.timeouts} == {60}
+
+
+def test_a_failed_poll_cancels_the_question():
+    """M4: a poll that raises mid-loop still cancels the running question (best effort)."""
+    fake = FakeGenieOne(
+        {
+            "genie_ask": [load("q1_ask")],
+            "genie_poll_response": [
+                load("q1_poll_in_progress"),
+                RuntimeError("Connection reset by peer"),
+            ],
+            "genie_cancel_response": [RuntimeError("cancel failed")],
+        }
+    )
+
+    with pytest.raises(GenieOneError) as info:
+        make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=300)
+
+    # The poll's error is raised, not the cancel's.
+    assert str(info.value) == "RuntimeError: Connection reset by peer"
+    assert fake.call_names == [
+        "genie_ask",
+        "genie_poll_response",
+        "genie_poll_response",
+        "genie_cancel_response",
+    ]
+    assert fake.calls[-1] == ("genie_cancel_response", {"conversation_id": CONVERSATION_ID})
+
+
+def _answer_without_polling() -> dict[str, list[Any]]:
+    """q1's ask, its final poll and its query result (no in-progress poll, so no sleep)."""
+    return {
+        "genie_ask": [load("q1_ask")],
+        "genie_poll_response": [load("q1_poll_final")],
+        "genie_get_query_result": [load("q1_query_result_0")],
+    }
+
+
+def test_default_call_tool_builds_one_workspace_client_for_all_its_calls(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """M8: one WorkspaceClient (and MCP client) per GenieOneClient, built in a worker
+    thread on the first call and reused by every later call, each in a worker thread."""
+    import threading
+
+    import databricks.sdk
+    import databricks_mcp
+
+    built: list[tuple[str, bool]] = []
+    called: list[tuple[str, bool]] = []
+    replies = {name: seq * 2 for name, seq in _answer_without_polling().items()}
+
+    def off_main() -> bool:
+        return threading.current_thread() is not threading.main_thread()
+
+    class FakeWS:
+        def __init__(self, **kwargs: Any) -> None:
+            built.append(("ws", off_main()))
+
+    class FakeMCP:
+        def __init__(self, **kwargs: Any) -> None:
+            built.append(("mcp", off_main()))
+            assert isinstance(kwargs["workspace_client"], FakeWS)
+
+        def call_tool(self, name: str, args: dict[str, Any]) -> Any:
+            called.append((name, off_main()))
+            return FakeCallToolResult(replies[name].pop(0))
+
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", FakeWS)
+    monkeypatch.setattr(databricks_mcp, "DatabricksMCPClient", FakeMCP)
+
+    client = GenieOneClient(host=HOST, token=TOKEN)
+    first = client.ask(Q1, conversation_id=None, timeout_seconds=300)
+    second = client.ask(Q1, conversation_id=CONVERSATION_ID, timeout_seconds=300)
+
+    assert first.status == second.status == "completed"
+    assert [name for name, _ in called] == [
+        "genie_ask",
+        "genie_poll_response",
+        "genie_get_query_result",
+    ] * 2
+    assert all(worker for _, worker in called)
+    assert built == [("ws", True), ("mcp", True)]
