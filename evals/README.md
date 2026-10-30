@@ -971,7 +971,8 @@ What it showed:
   and the frontend lifecycle contract was re-recorded. The builder and fixer rows in the earlier
   tables describe previous prompts.
 - **Still open.**
-  - `deck_style_code`'s inline-painted headings (above).
+  - `deck_style_code`'s inline-painted headings (above). Gone with the builder on Sonnet; see
+    "Builder on Sonnet" below.
   - The fixer drops a chart's script on a text-only fix (`source_contradiction`).
   - The builder judge prompt does not describe `deck_style`, and it fails both held-out references.
 
@@ -1275,3 +1276,90 @@ What it showed:
       confirmed design-contract change also brings a fresh deck style that the user did not
       ask for in words. EDITING's "Change deck-level fields only when the user asks" does not
       point to either exception.
+
+## Builder on Sonnet (Task 9b), 2026-10-30
+
+The owner chose to run the graph builder on Claude Sonnet instead of Haiku. The builder's model
+`endpoint_name` in the frozen manifest moved from `system.ai.claude-haiku-4-5` to
+`system.ai.claude-sonnet-5-5`. The prompt (`deck-style-ground`), temperature, max_tokens and top_p
+are unchanged, and no other role moved. The runtime never sends temperature or top_p
+(`src/services/agent_runtime.py`), so Sonnet 5.5's refusal of non-default sampling values does
+not apply. This pass measured the promoted builder prompt on Sonnet against the Haiku runs above
+and promoted the switch.
+
+- **Endpoint.** The app's own catalogue (`DatabricksModelEndpointCatalog.list_system_models()`,
+  profile `tellr-dev`) offers `claude-sonnet-5-5`, `-5`, `-4-6` and `-4-5`, and none has a rate
+  limit set, so none is zero. `system.ai.claude-sonnet-5-5` is the newest one. (The listing is in
+  the Task 9b test author's report.)
+- **Setup.** Config `evals/configs/builder/sonnet-5-5.yaml` (`0e60b438`): v1 plus
+  `endpoint_name: system.ai.claude-sonnet-5-5`. Judge `databricks-claude-sonnet-5`, profile
+  `tellr-dev`, cases digest `1b9e3b28`, the same as X1's. `prices.yaml` prices neither builder
+  endpoint, so cost is estimated at list price (Sonnet 5.5 USD 2 / 10, Haiku 4.5 USD 1 / 5 per
+  million input / output tokens). The judge is counted at USD 0.05 a call, an upper bound. No
+  calibration was re-run, because the cases, references and judge are unchanged since Task 9's.
+- **Haiku rows** are the closest recorded runs. X1 is the same prompt. F2, S1 and T1 used
+  `deck-style` (`d7b7e1ee`), whose one differing line applies only to a deck style with no design
+  system, which no builder case has.
+
+N are this pass's Sonnet runs. Latency is the model call alone, one call per slide. USD/row is the
+builder call alone at list price, which is the per-slide cost in production. ≈ USD is the run,
+judge included.
+
+| Run | Model | Split | Cases | Repeats | Rows | Pass rate | Mean (median) latency | Mean in/out tokens | USD/row | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|---|
+| X1 a3e5c876 | Haiku 4.5 | train | all 7 | 1 | 7 | 0.86 | 8.7 s (8.1 s) | 7.5k / 1.2k | 0.014 | 0.44 |
+| N1 9fca7480 | Sonnet 5.5 | train | all 7 | 2 | 14 | 1.00 | 20.9 s (13.2 s) | 9.5k / 1.8k | 0.037 | 1.21 |
+| F2 fc286840 | Haiku 4.5 | held-out | all 7 | 1 | 7 | 0.71 | 6.4 s | 7.1k / 0.7k | 0.011 | 0.42 |
+| N2 d2041a15 | Sonnet 5.5 | held-out | all 7 | 1 | 7 | 0.86 | 11.8 s | 8.9k / 1.3k | 0.031 | 0.56 |
+| S1 c0c9a056 | Haiku 4.5 | train | 2 deck-style | 3 | 6 | 0.67 | 6.9 s | 8.7k / 0.8k | 0.013 | 0.38 |
+| N3 f7bb2b7b | Sonnet 5.5 | train | 2 deck-style | 3 | 6 | 1.00 | 11.5 s | 11.0k / 1.4k | 0.036 | 0.51 |
+
+The three N runs cost **about USD 2.3**, inside the USD 8 cap. Held-out is reported as an
+aggregate only (N2).
+
+What it showed:
+
+- **Quality.** On Sonnet every train case passed every row: N1 14/14, N3 6/6. `deck_style_code`
+  passed 5/5 (2/2 in N1 and 3/3 in N3). Each answer used `dk-code` with no inline paint, and kept
+  inline styles to layout, such as a margin. On Haiku it passed 2/10 on the same prompt pooled
+  (X1 0/1, S1 1/3, T1 1/5, F1 0/1), every failure on `deck_style_use_score`: an added heading
+  painted inline with token values. That scorer is deterministic, so the gain does not rest on the
+  judge, which is itself a Sonnet model. `deck_style_table` passed 5/5 (Haiku 5/5). Held-out rose
+  from 0.71 (F2) to 0.86 (N2).
+- **Latency per slide.** Sonnet is about 1.6 to 1.8 times Haiku per call: median 13.2 s against
+  8.1 s on train, a mean of 11.8 s against 6.4 s on held-out, and 11.5 s against 6.9 s on the
+  deck-style cases. N1's mean of 20.9 s includes one 106 s row (`gold_chart`, 1.9k output tokens,
+  so mostly waiting, not writing; the cause is unknown). Without that row the mean is 14.3 s. No
+  other Sonnet row took more than 29 s, and no compared Haiku row more than 11 s. Slides build
+  concurrently, up to 15 at a time (`CAP`, `src/services/foreman_service.py`). So a deck's build
+  time grows by the slowest slide's increase in each batch, not by the sum. In these runs the
+  slowest row was 7.6 to 11.0 s on Haiku and 16.3 to 28.4 s on Sonnet, the 106 s row aside. Run
+  for run, that is about +9 to +17 s a batch. A stall like the 106 s row holds up its whole batch.
+- **Cost per slide.** Sonnet is about 2.7 to 2.9 times Haiku: about USD 0.037 against 0.014 a
+  slide on train, so about USD 0.55 against 0.21 for a 15-slide deck's builder calls (fixer rounds
+  not included). Sonnet writes about 40 to 75 % more output tokens. The same prompt and payload also
+  count as about 26 % more input tokens, since the input bytes are identical and only the
+  tokenizer differs.
+- **Acceptance bar** (plan Task 9b). **Met.**
+  1. `deck_style_code` at least 2/3 on train: 3/3 (N3), and 5/5 with N1.
+  2. No existing builder case regresses by more than one row against Haiku: every case passed
+     2/2 in N1, where X1 passed each at 1/1, or 0/1 for `deck_style_code`.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller for this change. The runs
+  were train ×2, held-out ×1 and the deck-style cases ×3, where the skill says ×5 and ×3. No
+  calibration was re-run. Per-row latency was read from the train runs' traces only. The pass
+  edited the manifest through `promote` and committed.
+- **Shipped.** The builder's v1 model is `system.ai.claude-sonnet-5-5` (`0e60b438e4be`,
+  previously `d6db84b8a570`). Promoted with
+  `python -m evals.harness.promote --config builder=evals/configs/builder/sonnet-5-5.yaml --run-id builder=9fca7480bedc4e6694a2d3d801fd60f2`.
+  The pins that `promote` does not touch were updated by hand:
+  - `HEAD_OTHER_ROLE_CONTENT_HASHES["builder"]`;
+  - the builder's `EXPECTED_ENDPOINTS` entry in `test_agent_runtime.py`,
+    `test_persisted_agent_runtime.py` and `test_agent_definition_workbench_routes.py`;
+  - the rollback preview's distinct-endpoint lists in `test_graph_release_rollback.py`;
+  - the legacy `databricks-*` endpoint map in `test_graph_configuration_draft.py`.
+  The frontend lifecycle contract was re-recorded. The builder rows in the earlier tables
+  describe Haiku.
+- **Still open.**
+  - The owner judges cost and latency on the devloop.
+  - The single 106 s call (N1). One row in 27 is too few to call it a pattern.
+  - The fix_reviewer and deck_reviewer still run on Haiku 4.5. They were out of scope.
