@@ -1,0 +1,9 @@
+# Builder v1 prompt: the promoted `deck-style` text with one DECK STYLE line extended (Ruling
+# R26). A slide with no bound section is built on the ground NO BOUND SECTION gives it; when
+# design_system_active is false that ground is the deck style's ground piece the look names
+# (such as dk-slide), on the slide's root element, since the block bans an inline background.
+# Every other line is byte-identical to `deck-style`.
+agent_key: builder
+name: builder-deck-style-ground
+base: v1
+prompt_file: deck-style-ground.md

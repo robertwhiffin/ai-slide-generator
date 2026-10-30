@@ -45,8 +45,9 @@ from src.services.graph_definition_manifest import (
 # then for the architect edit operations schema-contract re-pin, then for the
 # promoted edit-operations prompt (evals/configs/architect/edit-ops.yaml), then for
 # its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml), then for the
-# architect deck-style schema-contract re-pin (deck_style and look).
-HEAD_ARCHITECT_CONTENT_HASH = "42db22a8e622be1332f5b652375540e1ef2d8ba7857d7b7581623a01d74ffd7f"
+# architect deck-style schema-contract re-pin (deck_style and look), then for the
+# promoted deck-style prompt (evals/configs/architect/deck-style-b.yaml).
+HEAD_ARCHITECT_CONTENT_HASH = "3527e7bcafc444f397047e9018121c6a57028e3efcfe5364f854a4419db760b8"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
@@ -57,11 +58,12 @@ HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
 )
 
 # builder, fixer and fix_reviewer re-pinned for their promoted deck-style prompts
-# (evals/configs/{builder,fixer,fix_reviewer}/deck-style.yaml).  build_reviewer is
-# unchanged (Ruling R10).
+# (evals/configs/{builder,fixer,fix_reviewer}/deck-style.yaml), then the builder for its
+# no-design-system ground line (evals/configs/builder/deck-style-ground.yaml, Ruling R26).
+# build_reviewer is unchanged (Ruling R10).
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "d7b7e1ee35c9017817a5af2bae4102496718de62dd1e9125be2a6f56103224dc",
+    "builder": "d6db84b8a570e097a3bb9fb3dfccf9902ee2ccc2caf0f95a78220ca3dd9d7574",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "69eb6ea52400cc241d716da61bf9bb7f1260bf6526303045abd0e357c9ac865a",
     "fix_reviewer": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
@@ -105,11 +107,16 @@ HEAD_UNCHANGED_BLOCK_HASHES = {
     # Architect edit operations rewrote only the PAYLOAD RULES edit line and the EDITING
     # and SLIDE NUMBERS blocks; every other block is pinned at its pre-change bytes
     # (recompute from `git show 2b653079:src/core/skills/architect.py`).
-    "deckspec_construction": "93b9501662090b81d922ae546fd6fc6ba329861ee8830cc055b77ccc29bfaf02",
     "deck_scale_and_structure": "7ece01e9ffbada7e8273f132640a9c2355177135584273a35f1c56981a45dcdc",
     "vary_the_exhibits": "be654859ee8af4682e4f33380da40ccd3d57b07af10f278287b5064dc47aa0f0",
-    "slidespec_fields": "513b1ead3e1e8338b1090fc30f8e7a6145f96d6f9d2e12fdc6ae22d82fb46fcf",
-    "visual_template_binding": "15a0f8ff68e3a2cba12c68358dadc90165005b814daafb7f2340c32f7a16171e",
+    # Re-pinned by the architect deck style (deck-style-b): DECKSPEC CONSTRUCTION gains a
+    # `deck_style:` line after `slides:`, SLIDESPEC FIELDS a `look:` line, and VISUAL /
+    # TEMPLATE BINDING its bind-where-it-fits sentences; the new DECK STYLE block and the
+    # EDITING deck_changes list are pinned by test_architect_deck_style_prompt.py.  Every other
+    # byte of these three blocks is unchanged.
+    "deckspec_construction": "1beac208b08cfe80d0ca0baa9c52cd60ca43885a55e394740efa2b9af59b46c3",
+    "slidespec_fields": "96ccd2ce7e8b332243dbef4add8d762be19b8481cce1b152522831c0c3a9ac39",
+    "visual_template_binding": "ab5b09f3d23ec5bbf875b671188a1798e2ad1a80cb48fa82117e6aba60574e56",
 }
 
 # The pre-Task-5 SLIDESPEC FIELDS block.  It must no longer appear verbatim.

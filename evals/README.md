@@ -1097,3 +1097,150 @@ deck style.
 - **Not calibrated or measured yet.** The architect judge prompt does not describe `deck_style`
   or `look`. Calibrate both cases on both splits before relying on their judge verdicts:
   `python -m evals.run_eval --agent architect --calibrate --cases build_technical_deck,restyle_deck [--split heldout]`.
+  (Done in the pass below: the judge passes both references and cannot separate either
+  should_fail, so both cases are decided by their deterministic scorers.)
+
+## Architect: deck style and per-slide look, 2026-10-30
+
+The architect prompt now writes the deck style and a look for every slide (spec
+`docs/superpowers/specs/2026-10-29-architect-deck-style-design.md` §2). On a build it writes
+`deck_spec.deck_style` once, from what the planned slides need and the payload's
+`deck_style_context`, and a one-or-two-sentence `look` for each slide. It binds a template section
+where its shape fits, binds one for its frame only when the body differs, and otherwise leaves the
+slide unbound. A restyle goes through `deck_changes.deck_style`. The prompt also states the
+sanitiser's rules, so the style it writes is not stripped. This pass calibrated the judge on the
+three cases the change can move, re-ran the promoted prompt as the baseline, screened two
+candidates, ran the finalist on all train cases and on held-out, and promoted it. The builder's
+no-design-system ground line changed with it (Ruling R26) and was measured and promoted too.
+
+- **Setup.** Architect agent `system.ai.claude-opus-5-5` (manifest v1), judge
+  `databricks-claude-sonnet-5`, profile `tellr-dev`. `prices.yaml` has no entry for the agent's
+  endpoint, so the harness logged no `est_cost_usd`. Cost is estimated as in the follow-up pass
+  above: Opus 5.5 list price, USD 4 / 20 per million input / output tokens, plus USD 0.05 per
+  judge call. The judge figure is an upper bound: this pass's judge payloads, sized from the
+  logged answers and the case files, come to about USD 0.025 to 0.03 a call.
+- **Calibration** (`--calibrate --cases build_technical_deck,restyle_deck,build_request`):
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `build_request` | trusted | trusted |
+  | `build_technical_deck` | not trusted (judge passed the should_fail) | not trusted (judge passed the should_fail) |
+  | `restyle_deck` | not trusted (judge passed the should_fail) | not trusted (judge passed the should_fail) |
+
+  The judge passes both new references, so `judge_prompt.md` was not changed (Ruling R30). It
+  cannot see what the two should_fails get wrong: a deck with no deck style or looks, and a
+  restyle that renames `dk-code`. So, as for `fill_blank_slide`, these two cases are decided by
+  `contract` and `expected_category` (`_deck_style_score` for the build, the operations check
+  with `deck_style_keeps` for the restyle). Their judge verdicts are reported, not counted. In
+  this pass the judge failed only the one row that had no output, so the rule changed no outcome.
+- **Baseline** (Ruling R11, correction C31). Task 7b's cases changed the architect's
+  `cases_digest` (`ad824844`), so no recorded architect table is comparable. B0 is the
+  then-promoted prompt (`edit-ops-b`, content hash `42db22a8`) on the current train cases. Its
+  build rows are also the token baseline.
+- **Candidates** (`evals/configs/architect/`), one change each:
+  - `deck-style` (`d0a2d0ec`): `edit-ops-b` plus the rules above. DECKSPEC CONSTRUCTION gains a
+    `deck_style:` line after `slides:`, and SLIDESPEC FIELDS a `look:` line. EDITING's
+    deck_changes field list names `deck_style`. VISUAL / TEMPLATE BINDING gains the
+    bind-where-it-fits sentences. A new `DECK STYLE (deck_style and look):` block before SLIDE
+    NUMBERS holds the build, sanitiser, look and edit rules. Every other block is byte-identical.
+  - `deck-style-b` (`3527e7bc`): `deck-style` with its size sentence extended, aimed at S1's one
+    cause, the output tokens. It adds that most decks need 2,000 to 3,000 characters and four to
+    eight pieces. It also says the CSS goes straight into `deck_style`, with the pieces decided in
+    a few words of reasoning and no drafting or checking of the CSS or the looks first.
+  - No third candidate was written. The finalist runs needed the rest of the USD 22 cap.
+
+B is the baseline, S are screens, F the finalist's train run, H its held-out run, and X the
+builder's. Pass rate is the harness's, over scored rows. Run ids are from the
+`architect-styling` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|
+| B0 311f42c1 | architect v1-baseline (42db22a8) | train | all 22 | 2 | 44 | 0.91 | 0 | 17.7k / 1.5k | 6.63 |
+| S1 9d797563 | deck-style (d0a2d0ec) | train | 3 | 3 | 9 | 0.89 | 0 | 17.8k / 7.7k | 2.43 |
+| S2 9ebeed72 | deck-style-b (3527e7bc) | train | 2 builds | 3 | 6 | 1.00 | 0 | 15.8k / 8.8k | 1.74 |
+| F1 f6766e50 | deck-style-b | train | all 22 | 2 | 44 | 1.00 | 0 | 19.4k / 1.9k | 7.29 |
+| H1 084c591b | deck-style-b | held-out | all 22 | 1 | 22 | 1.00 | 0 | 17.7k / 1.5k | 3.33 |
+| X1 a3e5c876 | builder deck-style-ground (d6db84b8) | train | all 7 | 1 | 7 | 0.86 | 0 | 7.5k / 1.2k | 0.44 |
+
+S1's three cases are `build_technical_deck`, `restyle_deck` and `build_request`; S2's are the two
+builds. Calibration took 12 judge calls (about USD 0.60). That brings the architect's total to
+**about USD 22.0** with the judge at its USD 0.05 upper bound, at the USD 22 cap. With the judge
+at the USD 0.03 a call its payloads measure, the total is about USD 19.3. The builder's run
+(X1) took USD 0.44 of its remaining USD 4.66. Held-out is reported as an aggregate only (H1).
+
+What it showed:
+
+- **Baseline (B0).** All 20 existing cases passed 2/2. Both new cases failed 0/2, each on its
+  deterministic scorer. Without the new rules, the build already filled `deck_style` (the field
+  is in the schema), but with unprefixed classes (`.code-block`, `.badge`, `.cmp-table`), so
+  the sanitiser drops the whole style. The restyle used `deck_changes.deck_style`, but it also
+  rebuilt the two code slides with `update` operations, and it named raw hexes in its message.
+- **Screen of `deck-style` (S1).** `build_request` passed 3/3 and `restyle_deck` 3/3, the
+  restyle as `deck_changes.deck_style` alone: every token from the brand, no operations, no slide
+  rebuilt. `build_technical_deck` passed 2/3. Its third row was `incomplete`: the model returned a
+  `deck_spec` with no `slides` and `resolved_data.gaps` misplaced (a schema failure, not the
+  sanitiser's). The real cost was output tokens: the build rows averaged 10.2k against B0's 5.7k.
+  That is mostly reasoning: `build_request`'s answer grew from about 11k to 19k characters of
+  JSON (about 2k tokens), while its output grew by about 7k tokens.
+- **Screen of `deck-style-b` (S2).** Both builds passed 3/3, and the mean build output fell to
+  8.8k. The model still wrote about 3,300 characters of CSS, not the 2,000 to 3,000 the
+  sentence suggests.
+- **Finalist, train (F1).** All 22 cases passed 2/2, 44 of 44 on every scorer. Every existing
+  edit case was still answered with operations and passed the operations check.
+  `redescribe_deck` returned the full `deck_spec` with no operations. `restyle_deck` was
+  `deck_changes.deck_style` alone, about 2,300 characters, keeping `dk-code` and its token spans,
+  with no operations. Each build wrote about 3,000 to 4,000 characters of CSS, six or seven
+  components, and a look on all 16 or 17 slides.
+- **Finalist, held-out (H1).** 1.00 (22 of 22), with 0 judge errors and 0 infra errors. So every
+  held-out case passed 1/1 on every scorer, the three new ones included.
+- **Acceptance bar** (plan Task 8, controller overrides). **Missed on one point.**
+  1. Every existing case passed at least its B0 rate minus one row. Met: all 20 passed 2/2
+     (F1), and all 20 passed 2/2 in B0.
+  2. `build_technical_deck`, `restyle_deck` and `build_request` each passed at least 2/3 on
+     train and 1/1 on held-out. Met. On train, `deck-style-b` scored 3/3 on both builds (S2).
+     `restyle_deck` scored 3/3 in S1, whose edit rules are byte-identical to `deck-style-b`'s,
+     and 2/2 in F1. On held-out, all three passed 1/1 (H1 1.00).
+  3. Mean output tokens on the build cases rise by at most 2,500 over B0's 5,702. **Missed:**
+     8,849 in S2 (+3,147), 9,276 in F1 (+3,574), and 9,020 over all ten `deck-style-b` build rows
+     (+3,318). `deck-style` was +4,490 (S1).
+
+  The bar is a proxy for the +30 s time-to-first-slide limit. The architect's mean call time on
+  the build rows rose from 51.2 s (B0) to 76.4 s (S2) and 77.6 s (F1), about +26 s, though that
+  is the call alone, not a measured time to first slide. After two candidates the better one was
+  promoted, as the brief directs, and the gap is recorded here.
+- **Builder ground line (Ruling R26).** Without a design system, the builder's DECK STYLE block
+  sent an unbound slide to "the ground NO BOUND SECTION gives it". That ground is an inline
+  colour and background, which the same block bans when a deck style is present. So the line now
+  ends "; when design_system_active is false, that ground is the deck style's ground piece that
+  the look names (such as dk-slide): put its class on the slide's root element". The architect
+  prompt makes a no-design-system deck style define that piece and each look name it.
+  `deck-style-ground` (`d6db84b8`, `evals/configs/builder/`) is the promoted builder with that
+  one line changed, and the model is unchanged (Task 9b will switch it). X1 passed 6 of 7 against
+  F1 74fe64e6's 4 of 7, the Task 9 measurement of the then-promoted builder: `gold_chart` and
+  `too_much_content` went 0/1 → 1/1, and the rest stayed level. `deck_style_code` 0/1 is the
+  known cause, the Haiku builder painting an added heading inline with token values. No builder
+  case has no design system and a deck style, so X1 shows that the line breaks nothing. It does
+  not show that the line works.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller for this change:
+  - The screens ran ×3 on the cases the change targets, and the finalist ran on all train ×2 and
+    held-out ×1. The skill says ×5 and ×3.
+  - `deck-style-b`'s screen covered only the two builds, since its one change is to the build
+    rules.
+  - The builder ran once on train, with no held-out.
+  - This pass promoted, edited `INSTRUCTIONS` and committed.
+- **Shipped.** `deck-style-b` is the architect's v1 prompt in `src/core/skills/architect.py`
+  (`3527e7bcafc4`, previously `42db22a8e622`). `deck-style-ground` is the builder's v1 prompt in
+  `src/core/skills/builder.py` (`d6db84b8a570`, previously `d7b7e1ee35c9`). Promoted with
+  `python -m evals.harness.promote --config architect=evals/configs/architect/deck-style-b.yaml --run-id architect=f6766e5053fe4ea9a2100c489870c928 --config builder=evals/configs/builder/deck-style-ground.yaml --run-id builder=a3e5c876e519419190242bd936672e3c`.
+  The pins `promote` does not touch were updated by hand (C25), and the frontend lifecycle
+  contract was re-recorded. The architect and builder rows in the earlier tables describe
+  previous prompts.
+- **Still open.**
+  - The output-token bar, above. A build now reasons about twice as long as before. The CSS
+    itself is about 1k tokens.
+  - The architect judge prompt does not describe `deck_style` or `look`, so the judge cannot
+    separate either new case.
+  - No architect case builds without a design system, so neither the `--dk-` palette nor the
+    ground piece is measured. No builder case renders a no-design-system deck style either.
+  - S1's one `incomplete` build answer (a `deck_spec` with no `slides`) did not recur in the
+    finalist's ten build rows.

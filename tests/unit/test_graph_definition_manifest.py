@@ -704,9 +704,9 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "42db22a8e622be1332f5b652375540e1ef2d8ba7857d7b7581623a01d74ffd7f",
+    "architect": "3527e7bcafc444f397047e9018121c6a57028e3efcfe5364f854a4419db760b8",
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "d7b7e1ee35c9017817a5af2bae4102496718de62dd1e9125be2a6f56103224dc",
+    "builder": "d6db84b8a570e097a3bb9fb3dfccf9902ee2ccc2caf0f95a78220ca3dd9d7574",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "69eb6ea52400cc241d716da61bf9bb7f1260bf6526303045abd0e357c9ac865a",
     "fix_reviewer": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
@@ -1159,9 +1159,10 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
     # then for the #314 add-a-slide prompt, then for the claude-opus-5-5 seed move,
     # then for the architect edit operations schema-contract digest, then for the
     # promoted architect edit operations prompt (edit-ops), then for its follow-up
-    # tweaks (edit-ops-b), then for the architect deck-style schema-contract digest.
+    # tweaks (edit-ops-b), then for the architect deck-style schema-contract digest, then
+    # for the promoted architect deck-style prompt (deck-style-b).
     assert definition_content_hash(built({"1": "a"})) == (
-        "8b01a02b5d42f397fd49947ef57a31480c4c3066db743b1aefc135dd3a14b84e"
+        "f1a7e50420abd2760c0ce4e32d7b514710e231634fcbf61a63d7fa9c50155213"
     )
 
 
