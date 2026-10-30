@@ -165,6 +165,7 @@ from src.services.template_sections import (
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.html_utils import strip_inter_tag_escapes
 from src.utils.slide_hash import compute_slide_hash
+from src.utils.spotlight import spotlight
 
 logger = logging.getLogger(__name__)
 
@@ -2862,29 +2863,32 @@ def _code_owned_genie_figures(
 ) -> List[ResolvedFigure]:
     """The Genie One figures this turn's spec must carry verbatim.
 
-    This turn's ``analyst_figures`` when the analyst gathered any, else the
-    PERSISTED prior spec's Genie One figures (the one ``architect_node`` read
-    from the database; a contributor's checkpointed ``state["deck_spec"]`` can be
-    stale), so a later edit cannot retype or drop them.  Exact (key, value)
-    repeats across two analyst rounds of one turn are kept once.
+    The UNION, keyed by key, of the PERSISTED prior spec's Genie One figures
+    (the one ``architect_node`` read from the database; a contributor's
+    checkpointed ``state["deck_spec"]`` can be stale) and this turn's
+    ``analyst_figures``, so a later edit can neither retype nor drop a figure an
+    untouched slide still cites.  On a key both carry, this turn's value wins, in
+    the prior figure's place; this turn's new keys follow, in order.
     """
+    merged: Dict[str, ResolvedFigure] = {}
+    if prior_spec is not None:
+        for figure in prior_spec.resolved_data.figures:
+            if figure.source == GENIE_ONE_SOURCE:
+                merged[figure.key] = figure
+    for figure in _turn_analyst_figures(state):
+        merged[figure.key] = figure
+    return list(merged.values())
+
+
+def _turn_analyst_figures(state: dict) -> List[ResolvedFigure]:
+    """This turn's ``analyst_figures``, validated; an entry that does not validate is skipped."""
     figures: List[ResolvedFigure] = []
-    seen: Set[Tuple[str, str]] = set()
     for raw in scoped_vals(state, "analyst_figures"):
         try:
-            figure = ResolvedFigure.model_validate(raw)
+            figures.append(ResolvedFigure.model_validate(raw))
         except Exception:
             logger.warning("An analyst figure does not validate; skipped", exc_info=True)
-            continue
-        if (figure.key, figure.value) in seen:
-            continue
-        seen.add((figure.key, figure.value))
-        figures.append(figure)
-    if figures:
-        return figures
-    if prior_spec is None:
-        return []
-    return [f for f in prior_spec.resolved_data.figures if f.source == GENIE_ONE_SOURCE]
+    return figures
 
 
 def architect_node(state: dict) -> Dict[str, Any]:
@@ -3772,17 +3776,24 @@ def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
     return _GenieOneRun(toolset, tool, token, tool.conversation_id)
 
 
-def _merge_answer_figures(answers: Sequence[GenieOneAnswer]) -> List[ResolvedFigure]:
-    """Every answer's figures, in order, with cross-answer repeats resolved.
+def _merge_answer_figures(
+    answers: Sequence[GenieOneAnswer],
+    *,
+    earlier: Sequence[ResolvedFigure] = (),
+    earlier_answers: int = 0,
+) -> List[ResolvedFigure]:
+    """This run's NEW figures, in order, with repeats across the turn resolved.
 
-    An exact (key, value) repeat of an earlier answer's figure is dropped; a key
-    that reappears with a DIFFERENT value is kept, in place, as
-    ``"<key> (question m)"``, m the 1-based answer index.  Keys within one answer
-    are already unique (``figures_from_answer``).
+    Seeded with *earlier*, the figures an earlier analyst round of this turn
+    already wrote, and numbered turn-wide: this run's answers are questions
+    ``earlier_answers + 1`` onwards.  An exact (key, value) repeat of an earlier
+    figure is dropped; a key that reappears with a DIFFERENT value is kept, in
+    place, as ``"<key> (question m)"``, m that 1-based turn-wide answer index.
+    Keys within one answer are already unique (``figures_from_answer``).
     """
     merged: List[ResolvedFigure] = []
-    values: Dict[str, str] = {}
-    for index, answer in enumerate(answers, start=1):
+    values: Dict[str, str] = {figure.key: figure.value for figure in earlier}
+    for index, answer in enumerate(answers, start=earlier_answers + 1):
         for figure in figures_from_answer(answer):
             key = figure.key
             if key in values and values[key] != figure.value:
@@ -3796,20 +3807,29 @@ def _merge_answer_figures(answers: Sequence[GenieOneAnswer]) -> List[ResolvedFig
     return merged
 
 
-def _genie_one_lines(
+def _turn_answer_count(state: dict) -> int:
+    """How many Genie One answers this turn's earlier analyst rounds received."""
+    count = 0
+    for marker in scoped_vals(state, "analyst_rounds"):
+        if isinstance(marker, dict) and isinstance(marker.get("answers"), int):
+            count += marker["answers"]
+    return count
+
+
+def _genie_one_block(
     figures: Sequence[ResolvedFigure], answers: Sequence[GenieOneAnswer]
 ) -> str:
-    """The figure keys the architect must cite, then each distinct deep link."""
-    text = ""
+    """The figure keys the architect must cite, then each distinct deep link ("" if none)."""
+    lines: List[str] = []
     if figures:
-        text += "\nFigures from Genie One (use these keys in data_references):"
-        text += "".join(f"\n- {figure.key}: {figure.value}" for figure in figures)
+        lines.append("Figures from Genie One (use these keys in data_references):")
+        lines.extend(f"- {figure.key}: {figure.value}" for figure in figures)
     links: List[str] = []
     for answer in answers:
         if answer.deep_link and answer.deep_link not in links:
             links.append(answer.deep_link)
-    text += "".join(f"\nExplore in Databricks: {link}" for link in links)
-    return text
+    lines.extend(f"Explore in Databricks: {link}" for link in links)
+    return "\n".join(lines)
 
 
 def _persist_genie_one_conversation(state: dict, run: _GenieOneRun) -> None:
@@ -3863,8 +3883,12 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     as that user, each announced by a progress line.  The figures are then built
     by CODE from Genie One's result rows (``figures_from_answer``), never from the
     model's prose, and written on the turn-scoped ``analyst_figures``, which
-    ``architect_node`` writes verbatim into ``resolved_data.figures``; their keys
-    and the deep links are listed in the message.  A new conversation id is
+    ``architect_node`` writes verbatim into ``resolved_data.figures``.  A second
+    round in the same turn is seeded with the first round's figures and numbers
+    its answers turn-wide (:func:`_merge_answer_figures`).  Every Genie figure of
+    the turn and this run's deep links are listed after the analyst's prose: in
+    ONE ``spotlight("genie_one", ...)`` wrapper on ``architect_message`` (they are
+    Genie One's output), as plain text for the user.  A new conversation id is
     stored on the actor's row, and a refusal tells the user the consent or the
     grant they need.  Without a Genie One entry ``resolved_data.figures`` is
     whatever the architect wrote, as before: ``AnalystOutput`` still declares no
@@ -3886,7 +3910,7 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         return {
             "architect_message": _ANALYST_ROUNDS_COMPLETE,
             "analyst_figures": scoped(turn_id, []),
-            "analyst_rounds": scoped(turn_id, ["round"]),
+            "analyst_rounds": scoped(turn_id, [{"answers": 0}]),
         }
 
     request = state.get("architect_message") or ""
@@ -3929,10 +3953,26 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             f"({out.reason or 'no reason given'}). Tools tried: {tried}."
         )
 
+    # The user is shown the figure block as text; the architect gets it
+    # spotlighted (its column names and cells are Genie One's output).
+    architect_message = message
     figures: List[ResolvedFigure] = []
     if genie is not None:
-        figures = _merge_answer_figures(genie.tool.answers)
-        message += _genie_one_lines(figures, genie.tool.answers)
+        earlier = _turn_analyst_figures(state)
+        figures = _merge_answer_figures(
+            genie.tool.answers, earlier=earlier, earlier_answers=_turn_answer_count(state)
+        )
+        # Every Genie figure of the turn is listed, so the architect can cite an
+        # earlier round's keys too; only this run's new ones are written below.
+        block = _genie_one_block(earlier + figures, genie.tool.answers)
+        if block:
+            message = f"{message}\n{block}"
+            architect_message = "\n".join(
+                [
+                    architect_message,
+                    spotlight("genie_one", block, session_id=state.get("actor_session_id")),
+                ]
+            )
         _persist_genie_one_conversation(state, genie)
 
     _emit(
@@ -3956,9 +3996,12 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         _say_genie_one_access(state, genie)
 
     return {
-        "architect_message": message,
+        "architect_message": architect_message,
         "analyst_figures": scoped(turn_id, [figure.model_dump() for figure in figures]),
-        "analyst_rounds": scoped(turn_id, ["round"]),
+        # The answer count numbers a later round's questions turn-wide.
+        "analyst_rounds": scoped(
+            turn_id, [{"answers": len(genie.tool.answers) if genie is not None else 0}]
+        ),
     }
 
 

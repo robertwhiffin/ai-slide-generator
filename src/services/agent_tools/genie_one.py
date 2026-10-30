@@ -20,6 +20,7 @@ from databricks.sdk.errors import PermissionDenied
 
 from src.core.scope_errors import is_missing_scope_error
 from src.domain.deck_spec import ResolvedFigure
+from src.utils.spotlight import neutralize_delimiters
 
 logger = logging.getLogger(__name__)
 
@@ -261,10 +262,17 @@ def figures_from_answer(answer: GenieOneAnswer, *, max_figures: int = 60) -> lis
         for key, cell in pairs:
             if len(figures) >= max_figures:
                 return figures
+            # Column names and cells are Genie One's output: no figure may carry a
+            # real <untrusted-data> delimiter into a later spotlighted payload.
+            key = neutralize_delimiters(key)
             if key in taken:
                 key = f"{key} (query {n})"
             taken.add(key)
-            figures.append(ResolvedFigure(key=key, value=_cell(cell), source=GENIE_ONE_SOURCE))
+            figures.append(
+                ResolvedFigure(
+                    key=key, value=neutralize_delimiters(_cell(cell)), source=GENIE_ONE_SOURCE
+                )
+            )
     return figures
 
 
