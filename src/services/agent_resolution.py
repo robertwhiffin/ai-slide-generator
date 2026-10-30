@@ -30,6 +30,7 @@ from langchain_core.tools import StructuredTool
 
 from src.api.schemas.agent_config import (
     AgentConfig, GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
+    GenieOneTool,
 )
 from src.core.defaults import DEFAULT_SLIDE_STYLE
 from src.core.prompt_modules import build_editing_system_prompt, build_generation_system_prompt
@@ -498,5 +499,7 @@ def _build_tools(
                     "tool_name": agent_tool.name,
                 },
             )
+        elif isinstance(tool_entry, GenieOneTool):
+            logger.debug("genie_one is agent-mode only; skipped for the legacy agent")
 
     return tools

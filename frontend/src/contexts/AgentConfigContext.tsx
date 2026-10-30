@@ -972,6 +972,9 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         if (t.type === 'agent_bricks' && tool.type === 'agent_bricks') {
           return t.endpoint_name !== tool.endpoint_name;
         }
+        if (t.type === 'genie_one' && tool.type === 'genie_one') {
+          return false;
+        }
         return true;
       }),
     };

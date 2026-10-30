@@ -36,9 +36,14 @@ export interface AgentBricksTool {
   description?: string;
 }
 
-export type ToolType = 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
+export interface GenieOneTool {
+  type: 'genie_one';
+  conversation_id?: string | null;
+}
 
-export type ToolEntry = GenieTool | MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool;
+export type ToolType = 'genie_one' | 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
+
+export type ToolEntry = GenieTool | MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool | GenieOneTool;
 
 /**
  * Where a config's style source CAME FROM — persisted, never inferred.
@@ -133,6 +138,7 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
 };
 
 export const TOOL_TYPE_LABELS: Record<ToolType, string> = {
+  genie_one: 'Genie One',
   genie: 'Genie Agent',
   mcp: 'MCP Server',
   vector_index: 'Vector Index',
@@ -141,6 +147,7 @@ export const TOOL_TYPE_LABELS: Record<ToolType, string> = {
 };
 
 export const TOOL_TYPE_BADGE_LABELS: Record<ToolType, string> = {
+  genie_one: 'Genie One',
   genie: 'GENIE',
   mcp: 'MCP',
   vector_index: 'VECTOR',
@@ -149,6 +156,7 @@ export const TOOL_TYPE_BADGE_LABELS: Record<ToolType, string> = {
 };
 
 export const TOOL_TYPE_COLORS: Record<ToolType, string> = {
+  genie_one: 'bg-sky-100 text-sky-800',
   genie: 'bg-blue-100 text-blue-800',
   mcp: 'bg-green-100 text-green-800',
   vector_index: 'bg-indigo-100 text-indigo-800',

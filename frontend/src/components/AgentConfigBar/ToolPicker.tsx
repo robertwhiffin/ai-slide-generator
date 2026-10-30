@@ -19,6 +19,7 @@ import { AgentBricksDiscovery } from './tools/AgentBricksDiscovery';
 // ---------------------------------------------------------------------------
 
 const TOOL_CATEGORIES: { type: ToolType; label: string }[] = [
+  { type: 'genie_one', label: '+ Genie One' },
   { type: 'genie', label: '+ Genie Agent' },
   { type: 'agent_bricks', label: '+ Agent Bricks' },
   { type: 'vector_index', label: '+ Vector Index' },
@@ -50,6 +51,12 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
   const [activeCategory, setActiveCategory] = useState<ToolType | null>(null);
 
   const handleButtonClick = (type: ToolType) => {
+    if (type === 'genie_one') {
+      // One-click: no discovery panel.
+      setActiveCategory(null);
+      onSelect({ type: 'genie_one' });
+      return;
+    }
     setActiveCategory(prev => (prev === type ? null : type));
   };
 
@@ -59,7 +66,7 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
 
   return (
     <div className="relative flex flex-wrap items-center gap-1.5">
-      {TOOL_CATEGORIES.map(({ type, label }) => (
+      {TOOL_CATEGORIES.filter(({ type }) => type !== 'genie_one' || !existingTools.some(t => t.type === 'genie_one')).map(({ type, label }) => (
         <button
           key={type}
           onClick={() => handleButtonClick(type)}

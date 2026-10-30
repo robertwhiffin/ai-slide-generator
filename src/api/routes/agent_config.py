@@ -278,6 +278,7 @@ async def patch_tools(session_id: str, body: PatchToolRequest):
         # Match by discriminator key (e.g. genie:space_id, mcp:connection_name)
         from src.api.schemas.agent_config import (
             GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
+            GenieOneTool,
         )
 
         def _key(t):
@@ -291,6 +292,8 @@ async def patch_tools(session_id: str, body: PatchToolRequest):
                 return f"model_endpoint:{t.endpoint_name}"
             elif isinstance(t, AgentBricksTool):
                 return f"agent_bricks:{t.endpoint_name}"
+            elif isinstance(t, GenieOneTool):
+                return "genie_one"
             return None
 
         remove_key = _key(body.tool)
