@@ -1,46 +1,46 @@
 {
   "should_fail": {
     "intent": "build",
-    "message": "Here is a 6-slide deck on choosing a pgvector index: the index definitions and a sample query as code, a comparison table of HNSW, IVFFlat and exact search, and every figure badged measured or untested.",
+    "message": "Here is a 5-slide deck on rolling out HTTP/3: the rollout as a dated timeline, the canary's results in one KPI band, and what each team must do before the May step.",
     "deck_spec": {
-      "title": "Choosing a pgvector Index for Semantic Search",
-      "audience": "Backend engineers adding semantic search to a Postgres application",
-      "purpose": "Help the team choose a pgvector index by comparing HNSW, IVFFlat and exact search on speed, recall and build cost",
-      "argument": "HNSW answers fastest at the highest recall in the benchmark, IVFFlat is the cheaper fallback and exact search only suits small tables; the HNSW build time at full size is still untested",
-      "call_to_action": "Use HNSW for the search feature, and time a full-size index build before the launch",
+      "title": "Rolling Out HTTP/3 Across the Public Website",
+      "audience": "The web platform team and the teams whose services sit behind the public website",
+      "purpose": "Agree the HTTP/3 rollout dates and each team's part, on the strength of the canary's results",
+      "argument": "The canary shows HTTP/3 makes the public website faster and more reliable on mobile and on poor networks, so the rollout should widen to every static asset in May 2026 and to every page in July",
+      "call_to_action": "Approve the May 2026 step, and have each team finish its part before then",
       "narrative_arc": [
-        "Open on the choice: which pgvector index to use for semantic search",
-        "Compare HNSW, IVFFlat and exact search side by side",
-        "Show the index definitions and a sample query as code",
-        "Report what the benchmark measured and what is still untested",
-        "Close with the recommendation and the next steps"
+        "Open on the goal: a faster, more reliable public website on every network",
+        "Lay out the rollout as four dated milestones",
+        "Report what the canary measured",
+        "Show why the results justify widening the rollout in May",
+        "Close with what each team must do before the May step"
       ],
       "design_contract": {
         "design_system_id": 3,
         "template_id": 5
       },
       "resolved_data": {
-        "synthesis": "On 1 million 768-dimension embeddings HNSW answered in 4 ms at 98% recall, IVFFlat in 9 ms at 92% recall and exact search in 310 ms. The 2-hour estimate for building the HNSW index on 10 million rows is untested.",
+        "synthesis": "On the canary (5% of traffic) time to first byte at the 75th percentile fell from 420 ms to 310 ms, connection setup on mobile was 38% faster, page-load errors on poor networks fell 22%, and 61% of canary requests were served over HTTP/3. The rollout dates are the user's plan: the canary in March 2026, every static asset in May 2026, every page in July 2026, and the TCP-only edge configuration retired in October 2026.",
         "figures": [
           {
-            "key": "hnsw_query",
-            "value": "HNSW answered in 4 ms at 98% recall",
-            "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"
+            "key": "ttfb_p75",
+            "value": "time to first byte at the 75th percentile down from 420 ms to 310 ms",
+            "source": "The user's canary on 5% of traffic"
           },
           {
-            "key": "ivfflat_query",
-            "value": "IVFFlat answered in 9 ms at 92% recall",
-            "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"
+            "key": "mobile_setup",
+            "value": "connection setup on mobile 38% faster",
+            "source": "The user's canary on 5% of traffic"
           },
           {
-            "key": "exact_query",
-            "value": "exact search answered in 310 ms",
-            "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"
+            "key": "poor_network_errors",
+            "value": "page-load errors on poor networks down 22%",
+            "source": "The user's canary on 5% of traffic"
           },
           {
-            "key": "hnsw_build_estimate",
-            "value": "an estimated 2 hours to build the HNSW index on 10 million rows",
-            "source": "The user's estimate (untested)"
+            "key": "http3_share",
+            "value": "61% of canary requests served over HTTP/3",
+            "source": "The user's canary on 5% of traffic"
           }
         ],
         "gaps": []
@@ -48,71 +48,60 @@
       "slides": [
         {
           "position": 0,
-          "purpose": "Open the deck: choosing a pgvector index for semantic search",
-          "content_brief": "Cover slide with the title 'Choosing a pgvector Index for Semantic Search' and a subtitle naming the three options: HNSW, IVFFlat and exact search",
-          "assumes": "The audience knows the application stores its embeddings in Postgres",
-          "hands_off": "The index choice decides how fast and how accurate the search is",
+          "purpose": "Open the deck: rolling out HTTP/3 across the public website",
+          "content_brief": "Cover slide with the title 'Rolling Out HTTP/3 Across the Public Website' and a subtitle promising a faster site on mobile and on poor networks",
+          "assumes": "The audience runs the public website or a service behind it",
+          "hands_off": "HTTP/3 is worth rolling out to the whole site",
           "data_references": [],
           "slide_type": null,
           "template_section_index": null
         },
         {
           "position": 1,
-          "purpose": "Compare the three ways to search the embeddings",
-          "content_brief": "Comparison table of HNSW, IVFFlat and exact search, one row per option, with columns for query time, recall, build cost and memory; a one-line takeaway beneath: HNSW is the fastest at the highest recall, and costs the most to build",
-          "assumes": "The audience has heard of approximate nearest-neighbour search",
-          "hands_off": "HNSW leads on speed and recall; its build cost is the price",
-          "data_references": [
-            "hnsw_query",
-            "ivfflat_query",
-            "exact_query"
-          ],
+          "purpose": "Lay out the rollout as four dated milestones",
+          "content_brief": "The rollout as a timeline, left to right: a canary on 5% of traffic in March 2026, every static asset in May 2026, every page in July 2026, and the TCP-only edge configuration retired in October 2026; a one-line note beneath that each step waits for the previous step's results",
+          "assumes": "The audience knows HTTP/3 is running as a canary",
+          "hands_off": "The rollout has four dated steps, and May is the next one",
+          "data_references": [],
           "slide_type": null,
           "template_section_index": null
         },
         {
           "position": 2,
-          "purpose": "Show how each index is defined",
-          "content_brief": "Code listing of the index definitions: enable the vector extension, create an HNSW index with its m and ef_construction settings, and the IVFFlat alternative with its lists setting; two short bullets on what each setting trades",
-          "assumes": "The audience can read SQL",
-          "hands_off": "Each index is one statement, and its settings trade build cost for recall",
-          "data_references": [],
+          "purpose": "Report what the canary measured",
+          "content_brief": "The canary's four results in one band: time to first byte at the 75th percentile down from 420 ms to 310 ms, connection setup on mobile 38% faster, page-load errors on poor networks down 22%, and 61% of canary requests served over HTTP/3; the source beneath: the canary on 5% of traffic",
+          "assumes": "The audience has seen the rollout plan",
+          "hands_off": "On the canary, HTTP/3 was faster and failed less",
+          "data_references": [
+            "ttfb_p75",
+            "mobile_setup",
+            "poor_network_errors",
+            "http3_share"
+          ],
           "slide_type": null,
           "template_section_index": null
         },
         {
           "position": 3,
-          "purpose": "Show a nearest-neighbour query and how to tune it",
-          "content_brief": "Code listing of a sample query that orders the rows by cosine distance to a query embedding and returns the top 10, with the ef_search setting above it, and a one-line note beneath on raising ef_search for recall",
-          "assumes": "The audience has seen the index definitions",
-          "hands_off": "One query and one setting control the speed-recall trade at search time",
-          "data_references": [],
+          "purpose": "Show why the results justify widening the rollout in May",
+          "content_brief": "Three bullets, each tying a result to the decision: faster first bytes, faster connections on mobile and fewer errors on poor networks; the takeaway beneath: the canary has earned the May step",
+          "assumes": "The audience has seen what the canary measured",
+          "hands_off": "The results justify widening the rollout in May",
+          "data_references": [
+            "ttfb_p75",
+            "mobile_setup",
+            "poor_network_errors"
+          ],
           "slide_type": null,
           "template_section_index": null
         },
         {
           "position": 4,
-          "purpose": "Report what the benchmark measured",
-          "content_brief": "Three stat cards from the benchmark on 1 million 768-dimension embeddings, each badged measured: HNSW at 4 ms and 98% recall, IVFFlat at 9 ms and 92% recall, and exact search at 310 ms",
-          "assumes": "The audience has seen the options and how each is queried",
-          "hands_off": "HNSW was the fastest and the most accurate in the benchmark",
-          "data_references": [
-            "hnsw_query",
-            "ivfflat_query",
-            "exact_query"
-          ],
-          "slide_type": null,
-          "template_section_index": null
-        },
-        {
-          "position": 5,
-          "purpose": "Close with the recommendation, what is still untested and the next steps",
-          "content_brief": "Recommend HNSW for the search feature; badge the estimated 2 hours to build it on 10 million rows as untested; then the next steps in order: build the index on a full-size copy, time the build, tune ef_search, then launch; end with the call to action",
-          "assumes": "The audience has seen what the benchmark measured",
-          "hands_off": "Choose HNSW, and time a full-size build before the launch",
-          "data_references": [
-            "hnsw_build_estimate"
-          ],
+          "purpose": "Close with what each team must do before the May step",
+          "content_brief": "What each team must do before May 2026, one bullet each: the web platform team widens HTTP/3 to every static asset, the service teams check their health checks over HTTP/3, and support learns to spot a browser falling back to HTTP/2; end with the call to action",
+          "assumes": "The audience has seen the plan and the results",
+          "hands_off": "Approve the May step, and each team finishes its part before then",
+          "data_references": [],
           "slide_type": null,
           "template_section_index": null
         }

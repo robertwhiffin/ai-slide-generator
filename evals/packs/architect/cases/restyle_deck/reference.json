@@ -1,6 +1,6 @@
 {
   "intent": "edit",
-  "message": "I'll put every code block on a dark navy ground with light text, and lighten the keyword, function, string and comment colours so they stay readable on it. Nothing else changes and no slide is rebuilt.",
+  "message": "The brand has no navy, so I'll put every code block on its darkest ink token with light text, and lighten the keyword, function, string and comment colours so they stay readable on it. Nothing else changes and no slide is rebuilt.",
   "deck_spec": null,
   "data_request": null,
   "target_positions": [],

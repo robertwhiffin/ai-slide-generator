@@ -77,15 +77,17 @@ MESSAGES = {
     ),
     # The arc-review sweeper's describe-only turn: production's own message, as on train.
     "redescribe_deck": ARC_REVIEW_MESSAGE,
-    # Architect deck style: a fresh technical build on its own public topic, and a restyle of the
-    # code blocks on deck 2.
+    # Architect deck style: a fresh technical build on its own public topic that needs OTHER
+    # pieces than train's (a dated timeline and a KPI band, no code; Ruling R29), and a restyle of
+    # the code blocks on deck 2.
     "build_technical_deck": (
-        "Build a deck for backend engineers on choosing a pgvector index for semantic search in "
-        "Postgres. Show the index definitions and a sample nearest-neighbour query as code, add a "
-        "comparison table of HNSW, IVFFlat and exact search, and badge each figure as measured or "
-        "untested. Measured on 1 million 768-dimension embeddings: HNSW answered in 4 ms at 98% "
-        "recall, IVFFlat in 9 ms at 92% recall, and exact search in 310 ms. Untested: our estimate "
-        "that building the HNSW index on 10 million rows takes 2 hours."
+        "Build a deck for the web platform team on rolling out HTTP/3 across our public website. "
+        "Show the rollout as a dated timeline: a canary on 5% of traffic in March 2026, every "
+        "static asset in May 2026, every page in July 2026, and the TCP-only edge configuration "
+        "retired in October 2026. Put the canary's results in one KPI band: time to first byte at "
+        "the 75th percentile down from 420 ms to 310 ms, connection setup on mobile 38% faster, "
+        "page-load errors on poor networks down 22%, and 61% of canary requests served over "
+        "HTTP/3. Close with what each team must do before the May step."
     ),
     "restyle_deck": "Please give every code listing a dark background and light lettering",
 }
@@ -370,160 +372,239 @@ REDESCRIBED_ARC = [
 
 
 # Architect deck style on its own build topic and on deck 2 (``m._technical_deck``, ``m._restyled``
-# and ``m.RESTYLE_FAULT`` say what each case and its should_fail are).
+# and ``m.RESTYLE_FAULT`` say what each case and its should_fail are). The build asks for other
+# pieces than train's (Ruling R29): a dated timeline and a KPI band, and no code, so its deck style
+# is its own, not the technical fixture.
 TECH_BUILD_MESSAGE = (
-    "Here is a 6-slide deck on choosing a pgvector index: the index definitions and a sample query "
-    "as code, a comparison table of HNSW, IVFFlat and exact search, and every figure badged "
-    "measured or untested."
+    "Here is a 5-slide deck on rolling out HTTP/3: the rollout as a dated timeline, the canary's "
+    "results in one KPI band, and what each team must do before the May step."
 )
 TECH_DECK = {
-    "title": "Choosing a pgvector Index for Semantic Search",
-    "audience": "Backend engineers adding semantic search to a Postgres application",
+    "title": "Rolling Out HTTP/3 Across the Public Website",
+    "audience": (
+        "The web platform team and the teams whose services sit behind the public website"
+    ),
     "purpose": (
-        "Help the team choose a pgvector index by comparing HNSW, IVFFlat and exact search on "
-        "speed, recall and build cost"
+        "Agree the HTTP/3 rollout dates and each team's part, on the strength of the canary's "
+        "results"
     ),
     "argument": (
-        "HNSW answers fastest at the highest recall in the benchmark, IVFFlat is the cheaper "
-        "fallback and exact search only suits small tables; the HNSW build time at full size is "
-        "still untested"
+        "The canary shows HTTP/3 makes the public website faster and more reliable on mobile and "
+        "on poor networks, so the rollout should widen to every static asset in May 2026 and to "
+        "every page in July"
     ),
-    "call_to_action": (
-        "Use HNSW for the search feature, and time a full-size index build before the launch"
-    ),
+    "call_to_action": "Approve the May 2026 step, and have each team finish its part before then",
     "narrative_arc": [
-        "Open on the choice: which pgvector index to use for semantic search",
-        "Compare HNSW, IVFFlat and exact search side by side",
-        "Show the index definitions and a sample query as code",
-        "Report what the benchmark measured and what is still untested",
-        "Close with the recommendation and the next steps",
+        "Open on the goal: a faster, more reliable public website on every network",
+        "Lay out the rollout as four dated milestones",
+        "Report what the canary measured",
+        "Show why the results justify widening the rollout in May",
+        "Close with what each team must do before the May step",
     ],
     "resolved_data": {
         "synthesis": (
-            "On 1 million 768-dimension embeddings HNSW answered in 4 ms at 98% recall, IVFFlat in "
-            "9 ms at 92% recall and exact search in 310 ms. The 2-hour estimate for building the "
-            "HNSW index on 10 million rows is untested."
+            "On the canary (5% of traffic) time to first byte at the 75th percentile fell from "
+            "420 ms to 310 ms, connection setup on mobile was 38% faster, page-load errors on poor "
+            "networks fell 22%, and 61% of canary requests were served over HTTP/3. The rollout "
+            "dates are the user's plan: the canary in March 2026, every static asset in May 2026, "
+            "every page in July 2026, and the TCP-only edge configuration retired in October 2026."
         ),
         "figures": [
-            {"key": "hnsw_query", "value": "HNSW answered in 4 ms at 98% recall",
-             "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"},
-            {"key": "ivfflat_query", "value": "IVFFlat answered in 9 ms at 92% recall",
-             "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"},
-            {"key": "exact_query", "value": "exact search answered in 310 ms",
-             "source": "The user's benchmark on 1 million 768-dimension embeddings (measured)"},
-            {"key": "hnsw_build_estimate",
-             "value": "an estimated 2 hours to build the HNSW index on 10 million rows",
-             "source": "The user's estimate (untested)"},
+            {"key": "ttfb_p75",
+             "value": "time to first byte at the 75th percentile down from 420 ms to 310 ms",
+             "source": "The user's canary on 5% of traffic"},
+            {"key": "mobile_setup", "value": "connection setup on mobile 38% faster",
+             "source": "The user's canary on 5% of traffic"},
+            {"key": "poor_network_errors", "value": "page-load errors on poor networks down 22%",
+             "source": "The user's canary on 5% of traffic"},
+            {"key": "http3_share", "value": "61% of canary requests served over HTTP/3",
+             "source": "The user's canary on 5% of traffic"},
         ],
         "gaps": [],
     },
 }
-QUERY_FIGURES = ["hnsw_query", "ivfflat_query", "exact_query"]
+CANARY_FIGURES = ["ttfb_p75", "mobile_setup", "poor_network_errors", "http3_share"]
 TECH_SLIDES = [
     {
-        "purpose": "Open the deck: choosing a pgvector index for semantic search",
+        "purpose": "Open the deck: rolling out HTTP/3 across the public website",
         "content_brief": (
-            "Cover slide with the title 'Choosing a pgvector Index for Semantic Search' and a "
-            "subtitle naming the three options: HNSW, IVFFlat and exact search"
+            "Cover slide with the title 'Rolling Out HTTP/3 Across the Public Website' and a "
+            "subtitle promising a faster site on mobile and on poor networks"
         ),
-        "assumes": "The audience knows the application stores its embeddings in Postgres",
-        "hands_off": "The index choice decides how fast and how accurate the search is",
+        "assumes": "The audience runs the public website or a service behind it",
+        "hands_off": "HTTP/3 is worth rolling out to the whole site",
         "look": (
             "Meridian cover: the title large on the left and the subtitle beneath it; no "
             "deck-style pieces"
         ),
     },
     {
-        "purpose": "Compare the three ways to search the embeddings",
+        "purpose": "Lay out the rollout as four dated milestones",
         "content_brief": (
-            "Comparison table of HNSW, IVFFlat and exact search, one row per option, with columns "
-            "for query time, recall, build cost and memory; a one-line takeaway beneath: HNSW is "
-            "the fastest at the highest recall, and costs the most to build"
+            "The rollout as a timeline, left to right: a canary on 5% of traffic in March 2026, "
+            "every static asset in May 2026, every page in July 2026, and the TCP-only edge "
+            "configuration retired in October 2026; a one-line note beneath that each step waits "
+            "for the previous step's results"
         ),
-        "assumes": "The audience has heard of approximate nearest-neighbour search",
-        "hands_off": "HNSW leads on speed and recall; its build cost is the price",
-        "data_references": QUERY_FIGURES,
+        "assumes": "The audience knows HTTP/3 is running as a canary",
+        "hands_off": "The rollout has four dated steps, and May is the next one",
         "look": (
-            "Slide title above a full-width dk-table, one row per option; the takeaway in a "
-            "dk-callout beneath it"
+            "Slide title above a dk-timeline of the four milestones, left to right, each opening "
+            "with its date; a dk-note beneath it on each step waiting for the last"
         ),
     },
     {
-        "purpose": "Show how each index is defined",
+        "purpose": "Report what the canary measured",
         "content_brief": (
-            "Code listing of the index definitions: enable the vector extension, create an HNSW "
-            "index with its m and ef_construction settings, and the IVFFlat alternative with its "
-            "lists setting; two short bullets on what each setting trades"
+            "The canary's four results in one band: time to first byte at the 75th percentile "
+            "down from 420 ms to 310 ms, connection setup on mobile 38% faster, page-load errors "
+            "on poor networks down 22%, and 61% of canary requests served over HTTP/3; the source "
+            "beneath: the canary on 5% of traffic"
         ),
-        "assumes": "The audience can read SQL",
-        "hands_off": "Each index is one statement, and its settings trade build cost for recall",
+        "assumes": "The audience has seen the rollout plan",
+        "hands_off": "On the canary, HTTP/3 was faster and failed less",
+        "data_references": CANARY_FIGURES,
         "look": (
-            "Two short bullets on the left; a dk-code listing of the index statements on the "
-            "right, with keywords and comments marked"
+            "Slide title above a dk-kpi-band of the four results, a dk-kpi-value and a "
+            "dk-kpi-label each (four figures, one more than the template's three stat cards "
+            "hold); a dk-note beneath it naming the canary as the source"
         ),
     },
     {
-        "purpose": "Show a nearest-neighbour query and how to tune it",
+        "purpose": "Show why the results justify widening the rollout in May",
         "content_brief": (
-            "Code listing of a sample query that orders the rows by cosine distance to a query "
-            "embedding and returns the top 10, with the ef_search setting above it, and a one-line "
-            "note beneath on raising ef_search for recall"
+            "Three bullets, each tying a result to the decision: faster first bytes, faster "
+            "connections on mobile and fewer errors on poor networks; the takeaway beneath: the "
+            "canary has earned the May step"
         ),
-        "assumes": "The audience has seen the index definitions",
-        "hands_off": "One query and one setting control the speed-recall trade at search time",
+        "assumes": "The audience has seen what the canary measured",
+        "hands_off": "The results justify widening the rollout in May",
+        "data_references": ["ttfb_p75", "mobile_setup", "poor_network_errors"],
         "look": (
-            "A dk-code listing of the query across the left two-thirds; a dk-note beneath it on "
-            "ef_search"
+            "Three bullets on the left, one per result; the takeaway in the template's callout "
+            "beneath them"
         ),
     },
     {
-        "purpose": "Report what the benchmark measured",
+        "purpose": "Close with what each team must do before the May step",
         "content_brief": (
-            "Three stat cards from the benchmark on 1 million 768-dimension embeddings, each "
-            "badged measured: HNSW at 4 ms and 98% recall, IVFFlat at 9 ms and 92% recall, and "
-            "exact search at 310 ms"
+            "What each team must do before May 2026, one bullet each: the web platform team "
+            "widens HTTP/3 to every static asset, the service teams check their health checks "
+            "over HTTP/3, and support learns to spot a browser falling back to HTTP/2; end with "
+            "the call to action"
         ),
-        "assumes": "The audience has seen the options and how each is queried",
-        "hands_off": "HNSW was the fastest and the most accurate in the benchmark",
-        "data_references": QUERY_FIGURES,
+        "assumes": "The audience has seen the plan and the results",
+        "hands_off": "Approve the May step, and each team finishes its part before then",
         "look": (
-            "The template's three stat cards, one per option, each with a dk-badge "
-            "dk-badge--measured beside its number"
-        ),
-    },
-    {
-        "purpose": "Close with the recommendation, what is still untested and the next steps",
-        "content_brief": (
-            "Recommend HNSW for the search feature; badge the estimated 2 hours to build it on 10 "
-            "million rows as untested; then the next steps in order: build the index on a "
-            "full-size copy, time the build, tune ef_search, then launch; end with the call to "
-            "action"
-        ),
-        "assumes": "The audience has seen what the benchmark measured",
-        "hands_off": "Choose HNSW, and time a full-size build before the launch",
-        "data_references": ["hnsw_build_estimate"],
-        "look": (
-            "The recommendation in a dk-callout; the build estimate with a dk-badge "
-            "dk-badge--untested beside it; the next steps as dk-steps"
+            "Three short bullets, one per team; the call to action in the template's callout "
+            "beneath them"
         ),
     },
 ]
-# The technical deck style on this topic: the fixture's CSS, with its components' examples about
-# pgvector.
-TECH_EXAMPLES = {
-    "code block": (
-        '<pre class="dk-code"><span class="cm">-- the ten nearest documents</span>\n'
-        '<span class="kw">SELECT</span> id <span class="kw">FROM</span> docs '
-        '<span class="kw">ORDER BY</span> embedding &lt;=&gt; <span class="str">\'[0.12, 0.08]\''
-        '</span> <span class="kw">LIMIT</span> 10;</pre>'
+# The build's own deck style: only the pieces this deck needs that Meridian lacks (a dated
+# timeline, a KPI band for more figures than the template's three stat cards hold, and a note),
+# in Meridian tokens. The template's callout and bullets are reused, so they are not restated.
+TECH_STYLE = {
+    "css": (
+        "/* Rollout deck style on Meridian: a dated timeline, a KPI band and notes. The "
+        "template's callout and bullets are reused. */\n"
+        ".dk-timeline {\n"
+        "  display: grid;\n"
+        "  grid-auto-flow: column;\n"
+        "  grid-auto-columns: 1fr;\n"
+        "  gap: var(--space-md);\n"
+        "  margin: 0;\n"
+        "  padding: 0;\n"
+        "  list-style: none;\n"
+        "  border-top: 4px solid var(--brand-core-primary);\n"
+        "}\n"
+        ".dk-timeline li {\n"
+        "  position: relative;\n"
+        "  padding-top: var(--space-md);\n"
+        "  font-size: var(--fs-body);\n"
+        "  color: var(--brand-core-text);\n"
+        "}\n"
+        "/* A dot on the rule above each milestone. */\n"
+        ".dk-timeline li::before {\n"
+        "  content: \"\";\n"
+        "  position: absolute;\n"
+        "  top: -9px;\n"
+        "  left: 0;\n"
+        "  width: 14px;\n"
+        "  height: 14px;\n"
+        "  border-radius: 50%;\n"
+        "  background: var(--brand-core-primary);\n"
+        "}\n"
+        ".dk-timeline time {\n"
+        "  display: block;\n"
+        "  margin-bottom: 4px;\n"
+        "  font-size: var(--fs-eyebrow);\n"
+        "  font-weight: 700;\n"
+        "  letter-spacing: 0.06em;\n"
+        "  text-transform: uppercase;\n"
+        "  color: var(--brand-core-primary);\n"
+        "}\n"
+        "\n"
+        ".dk-kpi-band {\n"
+        "  display: grid;\n"
+        "  grid-auto-flow: column;\n"
+        "  grid-auto-columns: 1fr;\n"
+        "  margin: 0;\n"
+        "  padding: var(--space-md) 0;\n"
+        "  border-top: 1px solid var(--brand-core-border);\n"
+        "  border-bottom: 1px solid var(--brand-core-border);\n"
+        "}\n"
+        ".dk-kpi-band > div { padding: 0 var(--space-md); "
+        "border-left: 1px solid var(--brand-core-border); }\n"
+        ".dk-kpi-band > div:first-child { padding-left: 0; border-left: 0; }\n"
+        ".dk-kpi-value {\n"
+        "  display: block;\n"
+        "  font-size: var(--fs-title);\n"
+        "  font-weight: 700;\n"
+        "  line-height: 1.1;\n"
+        "  font-variant-numeric: tabular-nums;\n"
+        "  color: var(--brand-core-primary);\n"
+        "}\n"
+        ".dk-kpi-label { display: block; margin-top: 4px; font-size: var(--fs-body); "
+        "color: var(--brand-core-text); }\n"
+        "\n"
+        ".dk-note { margin: var(--space-sm) 0 0; font-size: var(--fs-caption); "
+        "color: var(--brand-core-muted); }\n"
     ),
-    "data table": (
-        '<table class="dk-table"><thead><tr><th>Index</th><th>Query time</th></tr></thead>'
-        '<tbody><tr><td>HNSW</td><td>4 ms</td></tr></tbody></table>'
-    ),
-    "steps": '<ol class="dk-steps"><li>Build the index</li><li>Tune ef_search</li></ol>',
-    "callout": '<div class="dk-callout">HNSW answers in 4 ms at 98% recall.</div>',
-    "note": '<p class="dk-note">Measured on 1 million 768-dimension embeddings.</p>',
+    "components": [
+        {
+            "name": "dated timeline",
+            "class_names": ["dk-timeline"],
+            "use": (
+                "A rollout or plan as three to six dated milestones, left to right; each item "
+                "opens with its date in a <time> element."
+            ),
+            "example_html": (
+                '<ol class="dk-timeline"><li><time>Mar 2026</time>Canary on 5% of traffic</li>'
+                "<li><time>May 2026</time>Every static asset</li></ol>"
+            ),
+        },
+        {
+            "name": "KPI band",
+            "class_names": ["dk-kpi-band", "dk-kpi-value", "dk-kpi-label"],
+            "use": (
+                "Four to six headline figures in one row, where the template's three stat cards "
+                "are too few; one value and its label per item."
+            ),
+            "example_html": (
+                '<div class="dk-kpi-band"><div><span class="dk-kpi-value">310 ms</span>'
+                '<span class="dk-kpi-label">Time to first byte, p75</span></div>'
+                '<div><span class="dk-kpi-value">61%</span>'
+                '<span class="dk-kpi-label">Requests over HTTP/3</span></div></div>'
+            ),
+        },
+        {
+            "name": "note",
+            "class_names": ["dk-note"],
+            "use": "A one-line caveat or source under an exhibit.",
+            "example_html": '<p class="dk-note">Measured on the canary, 5% of traffic.</p>',
+        },
+    ],
 }
 # Deck 2's looks for restyle_deck, by position: what a deck-style build would have given it.
 RESTYLE_LOOKS = {
@@ -538,22 +619,14 @@ RESTYLE_LOOKS = {
     5: "The five-item checklist as dk-steps; the call to action in a dk-callout beneath it",
 }
 RESTYLE_MESSAGE = (
-    "I'll give every code listing a dark navy background with light text, and lighten the "
-    "keyword, function, string and comment colours so they stay readable on it. Nothing else "
-    "changes and no slide is rebuilt."
+    "I'll give every code listing a dark background with light text, using the brand's darkest "
+    "ink token, and lighten the keyword, function, string and comment colours so they stay "
+    "readable on it. Nothing else changes and no slide is rebuilt."
 )
 RESTYLE_RENAMED_MESSAGE = (
-    "I'll restyle the code listings as a new dark piece, dk-code-dark: a navy background with "
+    "I'll restyle the code listings as a new dark piece, dk-code-dark: a dark background with "
     "light text. Nothing else changes and no slide is rebuilt."
 )
-
-
-def _tech_style() -> dict:
-    """The fixture with this topic's component examples."""
-    style = m.deck_style_fixture()
-    for component in style["components"]:
-        component["example_html"] = TECH_EXAMPLES.get(component["name"], component["example_html"])
-    return style
 
 
 def _checklist_brief(deck: dict, position: int) -> str:
@@ -863,9 +936,9 @@ def generate(out_dir: pathlib.Path | None = None):
         m._arc_as_deck_changes(REDESCRIBE_ARC_MESSAGE, REDESCRIBED_ARC),
     )
 
-    # Architect deck style: the technical build (its should_fail authors no deck style and no
-    # looks) and the restyle of deck 2's code blocks (its should_fail renames dk-code).
-    tech = m._technical_deck(TECH_DECK, TECH_SLIDES, _tech_style())
+    # Architect deck style: the technical build on its own pieces (its should_fail authors no deck
+    # style and no looks) and the restyle of deck 2's code blocks (its should_fail renames dk-code).
+    tech = m._technical_deck(TECH_DECK, TECH_SLIDES, TECH_STYLE)
     _write(
         out, "build_technical_deck", "positive", "", {"intent": "build", "deck_style": True},
         m._out("build", TECH_BUILD_MESSAGE, deck_spec=tech),
@@ -873,7 +946,7 @@ def generate(out_dir: pathlib.Path | None = None):
     )
     _write(
         out, "restyle_deck", "mutation", m.RESTYLE_FAULT,
-        {"intent": "edit", "positions": [], "deck_style_keeps": [m.CODE_CLASS]},
+        {"intent": "edit", "positions": [], "deck_style_keeps": list(m.RESTYLE_KEEPS)},
         m._restyled(RESTYLE_MESSAGE),
         m._restyled(RESTYLE_RENAMED_MESSAGE, renamed=True),
     )

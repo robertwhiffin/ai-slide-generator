@@ -9,6 +9,7 @@ import yaml
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
 from src.domain.deck_spec import DeckSpec, DesignContractRef
 from src.domain.deck_spec_slides import spec_json_with_blank_entry
+from src.domain.deck_style import sanitise_deck_style
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_numbering import architect_slide_payload
 from src.domain.slide_operations import (
@@ -647,12 +648,14 @@ def _arc_as_deck_changes(message: str, arc: list[str]) -> dict:
 
 # Architect deck style. build_technical_deck: a fresh build on a generic public topic whose request
 # asks for code, a comparison table and measured/untested badges, so the right answer authors a
-# deck style (here the technical fixture) and a look on every slide. Its should_fail is the very
-# same deck with no deck style and no looks, so the deck style is its only trap.
-# restyle_deck: the gold deck as a deck-style build leaves it (the fixture and RESTYLE_LOOKS); the
-# code blocks are restyled through deck_changes.deck_style alone, which rebuilds nothing. Its
-# should_fail restyles them under a new class name, so dk-code, which the code slides use, is gone.
-# Both splits share the helpers below; the decks, looks and messages are each split's own.
+# deck style (here the technical fixture without its callout: the template has one, and spec §2
+# reuses a template piece rather than restating it, Ruling R29) and a look on every slide. Its
+# should_fail is the very same deck with no deck style and no looks, so the deck style is its only
+# trap. restyle_deck: the gold deck as a deck-style build leaves it (the fixture and
+# RESTYLE_LOOKS); the code blocks are restyled through deck_changes.deck_style alone, which
+# rebuilds nothing. Its should_fail restyles them under a new class name, so dk-code, which the
+# code slides use, is gone. Both splits share the helpers below; the decks, looks and messages are
+# each split's own (held-out's build asks for other pieces, R29).
 TECH_BUILD_MESSAGE = (
     "Here is a 7-slide deck on streaming Postgres changes into the lakehouse with logical "
     "replication: the setup as code, a comparison table of the three approaches, and every figure "
@@ -733,8 +736,8 @@ TECH_SLIDES = [
         "assumes": "The audience knows at least one of the three approaches",
         "hands_off": "Logical replication is the approach worth piloting",
         "look": (
-            "Slide title above a full-width dk-table, one row per approach; the takeaway in a "
-            "dk-callout beneath it"
+            "Slide title above a full-width dk-table, one row per approach; the takeaway in the "
+            "template's callout beneath it"
         ),
     },
     {
@@ -791,7 +794,7 @@ TECH_SLIDES = [
         "data_references": ["full_snapshot_estimate"],
         "look": (
             "Two rows, each with a dk-badge dk-badge--untested beside its item; the before-rollout "
-            "warning in a dk-callout"
+            "warning in the template's callout"
         ),
     },
     {
@@ -804,7 +807,8 @@ TECH_SLIDES = [
         "assumes": "The audience has seen what was measured and what is still untested",
         "hands_off": "Pilot on one database this quarter and test failover before the rollout",
         "look": (
-            "The four pilot steps as dk-steps; the call to action in a dk-callout beneath them"
+            "The four pilot steps as dk-steps; the call to action in the template's callout "
+            "beneath them"
         ),
     },
 ]
@@ -843,23 +847,24 @@ RESTYLE_LOOKS = {
     ),
 }
 RESTYLE_FAULT = (
-    "restyle every code block through deck_changes.deck_style alone: a dark navy ground with light "
-    "text and token spans that stay readable on it, rebuilding no slide; the restyled style must "
-    "still define dk-code, which the code slides' looks and HTML use, or production refuses the "
-    "edit for stranding those slides' code blocks"
+    "restyle every code block through deck_changes.deck_style alone: a dark ground with light text "
+    "in the brand's own tokens (it has no navy, so its darkest ink token), with token spans that "
+    "stay readable on it, rebuilding no slide; the restyled style must still define dk-code and "
+    "its token spans kw, fn, str and cm, which the code slides' looks and HTML use, or production "
+    "refuses the edit for stranding those slides' code blocks"
 )
 RESTYLE_MESSAGE = (
-    "I'll put every code block on a dark navy ground with light text, and lighten the keyword, "
-    "function, string and comment colours so they stay readable on it. Nothing else changes and "
-    "no slide is rebuilt."
+    "The brand has no navy, so I'll put every code block on its darkest ink token with light "
+    "text, and lighten the keyword, function, string and comment colours so they stay readable on "
+    "it. Nothing else changes and no slide is rebuilt."
 )
 RESTYLE_RENAMED_MESSAGE = (
-    "I'll restyle the code blocks as a new dark piece, dk-code-dark: a navy ground with light "
-    "text. Nothing else changes and no slide is rebuilt."
+    "I'll restyle the code blocks as a new dark piece, dk-code-dark: the brand's darkest ink with "
+    "light text. Nothing else changes and no slide is rebuilt."
 )
 # The restyle, as edits to the fixture's CSS: the ``.dk-code`` rule's ground, border and text, and
-# each token span's colour. Every new colour is a Meridian token: ink is the one dark enough to
-# read as navy, and the light tokens keep every span at AA contrast or better on it.
+# each token span's colour. Every new colour is a Meridian token: Meridian has no navy, ink is its
+# darkest token, and the light tokens keep every span at AA contrast or better on it.
 DARK_CODE_RULE = (
     ("background: var(--brand-core-surface);", "background: var(--brand-core-ink);"),
     ("border: 1px solid var(--brand-core-border);", "border: 1px solid var(--brand-core-ink);"),
@@ -877,6 +882,32 @@ DARK_CODE_SPANS = (
 )
 # The should_fail's rename: the code-block class, wherever the restyled style names it.
 CODE_CLASS, RENAMED_CODE_CLASS = "dk-code", "dk-code-dark"
+# What the restyle must keep (expect.deck_style_keeps): the code block and the token-span classes
+# the fixture defines inside it. Production's stranding check counts both (nodes.py,
+# _stranded_style_classes): renaming ``kw`` strips the keyword colour from every kept code slide.
+RESTYLE_KEEPS = [CODE_CLASS, "kw", "fn", "str", "cm"]
+# The template's own callout (``.callout`` in the Meridian section CSS), which the fixture restates
+# as ``dk-callout``: a build reuses it instead (spec §2, Ruling R29).
+FIXTURE_CALLOUT_CLASS = "dk-callout"
+
+
+def _without_callout(style: dict) -> dict:
+    """``style`` (the fixture) without its ``dk-callout`` rule and component: a build's deck style
+    reuses the template's callout rather than restating it. Nothing else changes."""
+    style = copy.deepcopy(style)
+    css = style["css"]
+    start = css.index(f"\n.{FIXTURE_CALLOUT_CLASS} {{") + 1
+    end = css.index("}\n", start) + 2
+    css = css[:start] + css[end:]
+    old, new = "steps, callouts and notes", "steps and notes"
+    assert css.count(old) == 1, old
+    css = css.replace(old, new)
+    assert FIXTURE_CALLOUT_CLASS not in css
+    style["css"] = css
+    kept = [c for c in style["components"] if FIXTURE_CALLOUT_CLASS not in c["class_names"]]
+    assert len(kept) == len(style["components"]) - 1
+    style["components"] = kept
+    return style
 
 
 def _technical_deck(deck: dict, slides: list[dict], style: dict) -> dict:
@@ -904,7 +935,10 @@ def _technical_deck(deck: dict, slides: list[dict], style: dict) -> dict:
         ],
         "deck_style": copy.deepcopy(style),
     }
-    DeckSpec.model_validate(spec)  # fail fast
+    built = DeckSpec.model_validate(spec)  # fail fast
+    # A reference deck style is one the sanitiser returns unchanged on the Meridian contract (C24).
+    cleaned, notes = sanitise_deck_style(built.deck_style, design_system_active=True)
+    assert cleaned is built.deck_style and notes == (), notes
     return spec
 
 
@@ -920,7 +954,7 @@ def _unstyled(spec: dict) -> dict:
 
 
 def _dark_code_css(css: str) -> str:
-    """``css`` (the fixture's) with its code blocks on a dark navy ground with light text."""
+    """``css`` (the fixture's) with its code blocks on the darkest ink token with light text."""
     start = css.index("\n.dk-code {") + 1
     end = css.index("}", start) + 1
     rule = css[start:end]
@@ -1231,7 +1265,7 @@ def generate(out_dir: pathlib.Path | None = None):
 
     # Architect deck style: the technical build (its should_fail authors no deck style and no
     # looks) and the restyle of the code blocks (its should_fail renames dk-code).
-    tech = _technical_deck(TECH_DECK, TECH_SLIDES, deck_style_fixture())
+    tech = _technical_deck(TECH_DECK, TECH_SLIDES, _without_callout(deck_style_fixture()))
     _write(
         out, "build_technical_deck", "positive", "", {"intent": "build", "deck_style": True},
         _out("build", TECH_BUILD_MESSAGE, deck_spec=tech),
@@ -1239,7 +1273,7 @@ def generate(out_dir: pathlib.Path | None = None):
     )
     _write(
         out, "restyle_deck", "mutation", RESTYLE_FAULT,
-        {"intent": "edit", "positions": [], "deck_style_keeps": [CODE_CLASS]},
+        {"intent": "edit", "positions": [], "deck_style_keeps": list(RESTYLE_KEEPS)},
         _restyled(RESTYLE_MESSAGE),
         _restyled(RESTYLE_RENAMED_MESSAGE, renamed=True),
     )

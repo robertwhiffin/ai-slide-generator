@@ -8,10 +8,14 @@ Names this file fixes for the implementer (the brief, read through C19, C22-C24 
   persisted style whatever the answer's deck_spec carries (R8). So on a case with the key the row
   passes only when the answer is an operations edit (``operations`` or ``deck_changes`` given) that
   ``_operations_score`` passes AND whose ``deck_changes.deck_style`` is present with CSS
-  (``css_class_names``) that defines every listed class. Any other answer to such a case, a plain
-  edit or a full deck_spec carrying a style, fails (today it already fails on ``positions: []``;
-  that must stay so). Rationale needles, case-insensitive: ``deck_style`` when an operations answer
-  has no ``deck_changes.deck_style``; the class itself when the style does not define it.
+  (``css_class_names``) that defines every listed class once sanitised (R27). Ruling R28 adds a
+  build's hygiene: the sanitiser returns the style unchanged (a ``:root`` palette under a design
+  system is dropped), and under a design system the CSS holds no hex colour literal. Any other
+  answer to such a case, a plain edit or a full deck_spec carrying a style, fails (today it
+  already fails on ``positions: []``; that must stay so). Rationale needles, case-insensitive:
+  ``deck_style`` when an operations answer has no ``deck_changes.deck_style``; the class itself
+  when the style does not define it; the sanitiser's notes when it drops the style whole or would
+  change it; the hex literal under a design system.
 * ``scorers._operations_score(output, expect, current, reference)`` keeps its signature. Without
   ``deck_style_keeps`` in ``expect`` every architect verdict and rationale is today's (``TODAY``,
   pinned at 81f3b8ce through the real harness scorer on the real committed cases).
@@ -24,12 +28,14 @@ Names this file fixes for the implementer (the brief, read through C19, C22-C24 
   - ``build_technical_deck``: kind ``positive``, fault ``""``, expect
     ``{"intent": "build", "deck_style": True}``. A fresh one-turn build, payload otherwise
     ``build_request``'s. Train: a generic PUBLIC topic, Postgres logical replication into a
-    lakehouse, asking for code, a comparison table and measured/untested badges; held-out: another
-    public topic asking for the same exhibits. Never the owner's internal reference brief.
-  - ``restyle_deck``: kind ``mutation``, expect
-    ``{"intent": "edit", "positions": [], "deck_style_keeps": ["dk-code"]}``. The split's gold deck
-    carrying the ``deck_style_technical.json`` fixture and a look on every slide; train message
-    "make all the code blocks dark navy with light text".
+    lakehouse, asking for code, a comparison table and measured/untested badges; its reference
+    style is the fixture without ``dk-callout`` (the template has a callout, R29). Held-out: another
+    public topic (an HTTP/3 rollout) asking for OTHER pieces, a dated timeline and a KPI band and
+    no code, with its own reference style (R29). Never the owner's internal reference brief.
+  - ``restyle_deck``: kind ``mutation``, expect ``{"intent": "edit", "positions": [],
+    "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"]}`` (the code block and its token
+    spans, R29). The split's gold deck carrying the ``deck_style_technical.json`` fixture and a
+    look on every slide; train message "make all the code blocks dark navy with light text".
   ``build_request`` stays unchanged (R9 / C22).
 * Each ``calibration.json`` is ``{"should_fail": <architect output>}`` (C23); the deterministic
   scorer fails it, and its only trap is the deck style, so the judge can fail it too.
@@ -73,7 +79,9 @@ SPLITS = ("train", "heldout")
 NEW_CASE_IDS = ("build_technical_deck", "restyle_deck")
 EXPECT = {
     "build_technical_deck": {"intent": "build", "deck_style": True},
-    "restyle_deck": {"intent": "edit", "positions": [], "deck_style_keeps": ["dk-code"]},
+    "restyle_deck": {
+        "intent": "edit", "positions": [], "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"],
+    },
 }
 FILES = ("case.yaml", "payload.json", "reference.json", "calibration.json")
 FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
@@ -352,6 +360,19 @@ KEEP_CSS = _code_block(FIXTURE_CSS, {
 DROP_CSS = re.sub(r"\.dk-code\b", ".dk-listing", KEEP_CSS)
 # The table class renamed instead.
 DROP_TABLE_CSS = re.sub(r"\.dk-table\b", ".dk-grid", KEEP_CSS)
+# Ruling R28: "dark navy" from a palette with no navy, two ways. Each keeps every class, so only a
+# build's hygiene fails it: a raw hex under the design system, and a ``:root`` palette, which the
+# sanitiser drops under the design system and so leaves ``var(--dk-navy)`` undefined (light text
+# on no ground).
+NAVY = "#0B1F3A"
+HEX_NAVY_CSS = _code_block(KEEP_CSS, {
+    "background: var(--brand-core-ink);": f"background: {NAVY};",
+})
+ROOT_NAVY_CSS = f":root {{ --dk-navy: {NAVY}; }}\n" + _code_block(KEEP_CSS, {
+    "background: var(--brand-core-ink);": "background: var(--dk-navy);",
+})
+# Only an @media block: the sanitiser drops every at-rule, so no rule is left and the style goes.
+MEDIA_ONLY_CSS = "@media screen {\n" + KEEP_CSS + "}\n"
 
 
 def _restyle(css: str, *, operations=None, **changes) -> dict:
@@ -377,6 +398,17 @@ def _both(answer, expect, current, reference):
         ("expected_category_score", expected_category_score(
             AGENT, answer, expect, reference=reference, current_deck_spec=current,
             design_system_active=True)),
+    ]
+
+
+def _both_under(active: bool, answer, expect, current, reference):
+    """``_both`` with the same ``design_system_active`` on both paths."""
+    return [
+        ("_operations_score", scorers._operations_score(
+            answer, expect, current, reference, design_system_active=active)),
+        ("expected_category_score", expected_category_score(
+            AGENT, answer, expect, reference=reference, current_deck_spec=current,
+            design_system_active=active)),
     ]
 
 
@@ -487,8 +519,10 @@ def test_the_synthetic_restyles_are_what_their_tests_say():
 
 def test_restyle_that_keeps_the_class_passes():
     current, reference = _styled_deck(), _restyle(KEEP_CSS)
-    for via, (ok, why) in _both(_restyle(KEEP_CSS), KEEPS_EXPECT, current, reference):
-        assert ok, f"via {via}: {why}"
+    for active in (True, False):
+        for via, (ok, why) in _both_under(
+                active, _restyle(KEEP_CSS), KEEPS_EXPECT, current, reference):
+            assert ok, f"via {via} (design system {active}): {why}"
 
 
 def _title_only():
@@ -502,6 +536,11 @@ KEEPS_FAILURES = {
         lambda: _restyle(DROP_TABLE_CSS),
         {**KEEPS_EXPECT, "deck_style_keeps": ["dk-code", "dk-table"]}, ["dk-table"]),
     "deck_changes_without_a_deck_style": (_title_only, KEEPS_EXPECT, ["deck_style"]),
+    # Production refuses an edit whose deck_changes.deck_style the sanitiser keeps nothing of (R4):
+    # the rationale says so and quotes the notes.
+    "sanitiser_drops_the_style_whole": (
+        lambda: _restyle(MEDIA_ONLY_CSS), KEEPS_EXPECT,
+        ["drops deck_changes.deck_style whole", "no rules after cleaning"]),
 }
 
 
@@ -537,6 +576,38 @@ def test_restyle_keeps_scores_the_sanitised_style():
     for via, (ok, why) in _both(answer, KEEPS_EXPECT, current, reference):
         assert not ok, f"via {via}: {why}"
         assert "dk-code" in why, f"via {via}: {why}"
+
+
+# Ruling R28: a restyle is held to a build's hygiene. Each answer keeps every class, so only that
+# hygiene can fail it, and only with the design system active.
+HYGIENE_FAILURES = {
+    "raw_hex_navy": (HEX_NAVY_CSS, ["hex colour literal", NAVY]),
+    "root_palette_dropped_under_the_design_system": (
+        ROOT_NAVY_CSS, ["sanitiser would change it", ":root rule dropped"]),
+}
+
+
+@pytest.mark.parametrize("name", list(HYGIENE_FAILURES))
+def test_restyle_keeps_holds_the_style_to_a_builds_hygiene(name):
+    css, needles = HYGIENE_FAILURES[name]
+    assert css_class_names(css) == css_class_names(KEEP_CSS), "every class is kept"
+    current, reference = _styled_deck(), _restyle(KEEP_CSS)
+    answer = _restyle(css)
+    _composed(answer, current)  # production composes it: only the hygiene rule can fail it
+    for via, (ok, why) in _both_under(True, answer, KEEPS_EXPECT, current, reference):
+        assert not ok, f"{name} passed via {via}: {why}"
+        for needle in needles:
+            assert needle.lower() in why.lower(), f"{name} via {via}: no {needle!r} in {why}"
+
+
+@pytest.mark.parametrize("name", list(HYGIENE_FAILURES))
+def test_restyle_hygiene_follows_the_design_system_flag(name):
+    """Without a design system a raw hex is allowed and ``:root`` keeps its ``--dk-`` property,
+    so the same restyle passes: the case's flag reaches the keeps check on both paths."""
+    css, _ = HYGIENE_FAILURES[name]
+    current, reference = _styled_deck(), _restyle(KEEP_CSS)
+    for via, (ok, why) in _both_under(False, _restyle(css), KEEPS_EXPECT, current, reference):
+        assert ok, f"{name} via {via}: {why}"
 
 
 # The edits that never reach the deck style (R8: a full-spec edit keeps the persisted style, and a
@@ -724,19 +795,37 @@ def test_build_technical_deck_is_a_fresh_build(split):
     assert p["message"] != bp["message"]
 
 
+# What each split's build asks for, and the pieces its reference deck style defines for that. R29:
+# held-out asks for other pieces than train (a dated timeline and a KPI band, no code), so a prompt
+# that hard-codes train's pieces does not pass held-out for free.
+BUILD_PIECES = {
+    "train": {
+        "asks": ("code", "compar", "table", "measured", "untested"),
+        "defines": ("dk-code", "dk-table", "dk-badge", "dk-badge--measured", "dk-badge--untested"),
+        "looks": ("dk-code", "dk-table", "dk-badge"),
+    },
+    "heldout": {
+        "asks": ("dated timeline", "kpi band"),
+        "defines": ("dk-timeline", "dk-kpi-band", "dk-kpi-value", "dk-kpi-label"),
+        "looks": ("dk-timeline", "dk-kpi-band"),
+    },
+}
+
+
 def test_build_technical_deck_messages_ask_for_the_technical_exhibits():
     train = _case("build_technical_deck", "train").payload["message"]
     heldout = _case("build_technical_deck", "heldout").payload["message"]
     for marker in ("postgres", "logical replication", "lakehouse"):
         assert marker in train.lower(), marker
-    for msg in (train, heldout):
+    for split, msg in (("train", train), ("heldout", heldout)):
         lowered = msg.lower()
-        for marker in ("code", "compar", "table", "measured", "untested"):
-            assert marker in lowered, (marker, msg)
+        for marker in BUILD_PIECES[split]["asks"]:
+            assert marker in lowered, (split, marker, msg)
         # The figures come with the request, so a build (not ask_data) is the right answer.
         assert re.search(r"\d", msg), msg
-    # Held-out is its own public topic, not the train one reworded.
+    # Held-out is its own public topic, not the train one reworded, and asks for no code.
     assert heldout != train and "logical replication" not in heldout.lower()
+    assert "code" not in heldout.lower() and "table" not in heldout.lower()
 
 
 @pytest.mark.parametrize("split", SPLITS)
@@ -775,20 +864,38 @@ def test_build_technical_deck_reference_is_a_clean_thin_styled_build(split):
     for comp in style.components:
         assert set(comp.class_names) <= defined, comp.name
         assert set(comp.class_names) <= html_class_names(comp.example_html), comp.name
-    assert {"dk-code", "dk-table"} <= defined
-    assert any(name.startswith("dk-badge") for name in defined)
+    pieces = BUILD_PIECES[split]
+    assert set(pieces["defines"]) <= defined, sorted(set(pieces["defines"]) - defined)
+    # Thin (spec §2, R29): it restates no template piece. The template has a callout, so there is
+    # no dk-callout, and no dk- twin of any other template class either.
+    template = c.payload["deck_style_context"]["template_classes"]
+    assert "callout" in template
+    restated = sorted(f"dk-{name}" for name in template if f"dk-{name}" in defined)
+    assert not restated, restated
+    if split == "train":
+        # The technical fixture without its callout piece; every other piece as the fixture has it.
+        fixture = DeckStyle.model_validate(_fixture())
+        assert style.components == [
+            comp for comp in fixture.components if "dk-callout" not in comp.class_names]
+        assert defined == css_class_names(fixture.css) - {"dk-callout"}
+    else:
+        # Its own pieces: none of train's code, table or badge.
+        train_only = {"dk-code", "dk-table", "dk-badge"}
+        assert not train_only & defined, sorted(train_only & defined)
 
     # Every slide has a look; the looks name the pieces the request asks for, and only pieces the
-    # deck style defines.
+    # deck style defines; a takeaway goes in the template's own callout.
     looks = [s.look for s in spec.slides]
     assert all(looks)
     named = _looked_classes(looks)
     assert named <= defined, sorted(named - defined)
     joined = " ".join(looks)
-    for piece in ("dk-code", "dk-table", "dk-badge"):
+    for piece in pieces["looks"]:
         assert piece in joined, piece
-    briefs = " ".join(s.content_brief for s in spec.slides).lower()
-    assert "measured" in briefs and "untested" in briefs
+    assert "the template's callout" in joined
+    if split == "train":
+        briefs = " ".join(s.content_brief for s in spec.slides).lower()
+        assert "measured" in briefs and "untested" in briefs
 
 
 @pytest.mark.parametrize("split", SPLITS)
@@ -862,7 +969,15 @@ def test_restyle_deck_reference_restyles_only_the_code_blocks(split):
     assert out.deck_changes is not None and out.deck_changes.deck_style is not None
     others = out.deck_changes.model_dump(exclude={"deck_style"})
     assert all(v is None for v in others.values()), others
-    assert "code" in out.message.lower()
+    message = out.message.lower()
+    assert "code" in message
+    # R29: Meridian has no navy. Train's user asked for navy, so the answer says it uses the darkest
+    # ink token instead; held-out's asked for a dark background, and its answer says no more.
+    assert "darkest ink token" in message
+    if split == "train":
+        assert "no navy" in message
+    else:
+        assert "navy" not in message and "dark background" in message
 
     # Production composes it as a deck-style-only edit that rebuilds nothing (R12).
     spec, result = _composed(c.reference, current)

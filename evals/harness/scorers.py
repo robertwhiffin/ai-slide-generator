@@ -175,6 +175,11 @@ def _deck_style_keeps_problem(
     sanitiser drops whole refuses the edit, and a class the cleaned CSS no longer defines (one
     defined only inside an ``@media`` block, say) is stripped from every kept slide that uses it.
     So the classes are read from the SANITISED CSS (Ruling R27), never the answer's raw text.
+
+    The restyle is then held to a build's hygiene (Ruling R28): the sanitiser must return it
+    unchanged, as ``_deck_style_score`` requires (a ``:root`` palette under a design system is
+    dropped, which leaves its ``var()`` references undefined), and with a design system active its
+    CSS holds no hex colour literal (``_hex_colour_problem``).
     """
     changes = out.deck_changes
     style = changes.deck_style if changes is not None else None
@@ -192,6 +197,13 @@ def _deck_style_keeps_problem(
         return (
             f"deck_changes.deck_style, once sanitised, does not define {', '.join(missing)}; "
             "every kept slide that uses it would lose its style")
+    changed = _sanitiser_change(style, cleaned, notes)
+    if changed:
+        return f"deck_changes.deck_style: the sanitiser would change it ({changed})"
+    if design_system_active:
+        hexes = _hex_colour_problem(style.css)
+        if hexes:
+            return f"deck_changes.deck_style: {hexes}"
     return ""
 
 
@@ -222,7 +234,8 @@ def _operations_score(
       reference is itself given as operations;
     * when the case gives ``expect.deck_style_keeps`` (a restyle), ``_deck_style_keeps_problem``
       finds nothing: ``deck_changes.deck_style`` is present and still defines every listed class
-      once sanitised under ``design_system_active`` (the case's), as production cleans it.
+      once sanitised under ``design_system_active`` (the case's), as production cleans it; the
+      sanitiser returns it unchanged; and under a design system it holds no hex colour literal.
     """
     intent = output.get("intent") if isinstance(output, dict) else None
     if intent != "edit" or expect.get("intent") != "edit":
@@ -499,6 +512,28 @@ def _hex_literals(css: str) -> list[str]:
     return found
 
 
+def _hex_colour_problem(css: str) -> str:
+    """Why ``css`` breaks the design-system colour rule (its hex literals named); empty if not.
+
+    Used under an active design system, which supplies the colours as tokens, by both the build's
+    ``_deck_style_score`` and the restyle's ``_deck_style_keeps_problem``.
+    """
+    hexes = _hex_literals(css)
+    if not hexes:
+        return ""
+    return (
+        f"hex colour literal(s) {', '.join(hexes)} under an active design system; its colours "
+        "must be the design system's tokens")
+
+
+def _sanitiser_change(style, cleaned, notes: tuple[str, ...]) -> str:
+    """What ``sanitise_deck_style`` changed in ``style`` (its notes); empty when it returned the
+    very same object with ``()`` notes (C24)."""
+    if not notes and cleaned is style:
+        return ""
+    return "; ".join(notes) or "it returned a different style"
+
+
 def _deck_style_score(
     structured: dict, expect: dict, design_system_active: bool | None
 ) -> tuple[bool, str]:
@@ -532,18 +567,16 @@ def _deck_style_score(
             f"Deck style: its CSS is {len(style.css)} characters, over the "
             f"{DECK_STYLE_MAX_CHARS} limit")
     cleaned, notes = sanitise_deck_style(style, design_system_active=bool(design_system_active))
-    if notes or cleaned is not style:
-        detail = "; ".join(notes) or "it returned a different style"
-        return False, f"Deck style: the sanitiser would change it ({detail})"
+    changed = _sanitiser_change(style, cleaned, notes)
+    if changed:
+        return False, f"Deck style: the sanitiser would change it ({changed})"
     lookless = [slide.position for slide in deck.slides if slide.look is None]
     if lookless:
         return False, f"Deck style: slides {lookless} have no look (blank or missing)"
     if design_system_active:
-        hexes = _hex_literals(style.css)
+        hexes = _hex_colour_problem(style.css)
         if hexes:
-            return False, (
-                f"Deck style: hex colour literal(s) {', '.join(hexes)} under an active design "
-                "system; its colours must be the design system's tokens")
+            return False, f"Deck style: {hexes}"
     return True, (
         f"Deck style: clean ({count} components, {len(style.css)} characters, every slide has a "
         "look)")
@@ -634,7 +667,8 @@ def expected_category_score(
       An edit answer carrying ``operations`` or ``deck_changes`` is scored by ``_operations_score``
       on every other edit case, as production's operations path takes it whatever else it carries;
       on a case whose ``expect`` has ``deck_style_keeps`` (a restyle) it also checks the sanitised
-      ``deck_changes.deck_style`` (``design_system_active`` is the case's).
+      ``deck_changes.deck_style``, and holds it to a build's sanitiser and colour rules
+      (``design_system_active`` is the case's).
       Otherwise an edit case whose ``expect`` has ``"inserted"`` is scored by ``_insert_score``.
       Both need the case's ``reference`` output and the payload's ``current_deck_spec``.
     - data_analyst: checks outcome match

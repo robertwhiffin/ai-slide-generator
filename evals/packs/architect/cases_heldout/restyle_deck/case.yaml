@@ -1,11 +1,17 @@
 kind: mutation
-fault: 'restyle every code block through deck_changes.deck_style alone: a dark navy
-  ground with light text and token spans that stay readable on it, rebuilding no slide;
-  the restyled style must still define dk-code, which the code slides'' looks and
-  HTML use, or production refuses the edit for stranding those slides'' code blocks'
+fault: 'restyle every code block through deck_changes.deck_style alone: a dark ground
+  with light text in the brand''s own tokens (it has no navy, so its darkest ink token),
+  with token spans that stay readable on it, rebuilding no slide; the restyled style
+  must still define dk-code and its token spans kw, fn, str and cm, which the code
+  slides'' looks and HTML use, or production refuses the edit for stranding those
+  slides'' code blocks'
 expect:
   intent: edit
   positions: []
   deck_style_keeps:
   - dk-code
+  - kw
+  - fn
+  - str
+  - cm
 design_system_active: true

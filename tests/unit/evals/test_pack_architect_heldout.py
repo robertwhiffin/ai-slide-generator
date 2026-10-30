@@ -94,9 +94,12 @@ EXPECT = {
     # The sweeper's re-description: a full deck_spec over the current positions, no operations.
     "redescribe_deck": {"intent": "edit", "full_deck_spec": True},
     # Deck style: the build must author a clean deck style and a look on every slide; the restyle
-    # rebuilds nothing and its deck_changes.deck_style must still define dk-code.
+    # rebuilds nothing and its deck_changes.deck_style must still define dk-code and its token
+    # spans (R29).
     "build_technical_deck": {"intent": "build", "deck_style": True},
-    "restyle_deck": {"intent": "edit", "positions": [], "deck_style_keeps": ["dk-code"]},
+    "restyle_deck": {
+        "intent": "edit", "positions": [], "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"],
+    },
 }
 HAS_DECK = {"edit_request", "confirm_design", "discuss"} | (
     set(NEW_CASE_IDS) - set(DECK_STYLE_BUILD_CASES)

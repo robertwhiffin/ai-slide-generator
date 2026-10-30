@@ -1,7 +1,7 @@
 {
   "should_fail": {
     "intent": "edit",
-    "message": "I'll restyle the code blocks as a new dark piece, dk-code-dark: a navy ground with light text. Nothing else changes and no slide is rebuilt.",
+    "message": "I'll restyle the code blocks as a new dark piece, dk-code-dark: the brand's darkest ink with light text. Nothing else changes and no slide is rebuilt.",
     "deck_spec": null,
     "data_request": null,
     "target_positions": [],

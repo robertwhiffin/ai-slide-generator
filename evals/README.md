@@ -87,9 +87,13 @@ Real-model runs; results are logged to MLflow.
       every operations check above and `deck_changes.deck_style` is present and still defines each
       listed class. The classes are read from the style as `sanitise_deck_style` cleans it under the
       case's `design_system_active` (Ruling R27), because production reads only the cleaned style:
-      a class defined only inside `@media` fails, since every at-rule is dropped. Any other answer,
-      such as a plain edit or a full `deck_spec` that carries a style, fails on `positions: []`, as
-      before. Without the key every verdict and rationale is unchanged.
+      a class defined only inside `@media` fails, since every at-rule is dropped. The restyle is
+      also held to a build's hygiene (Ruling R28): the sanitiser must return it unchanged, and with
+      a design system active its CSS may hold no hex colour literal. So a raw hex fails, and so
+      does a `:root` palette, which the sanitiser drops under a design system, leaving its `var()`
+      references undefined. Any other answer, such as a plain edit or a full `deck_spec` that
+      carries a style, fails on `positions: []`, as before. Without the key every verdict and
+      rationale is unchanged.
   - `render_measures`, for the builder and fixer: the slide is rendered in a browser with the
     Meridian section CSS, followed by the case's deck style CSS when its payload carries one
     (`mlflow_run.render_section_css`, also used by calibration). It must have zero overflow, contrast
@@ -1060,23 +1064,33 @@ byte-identical. `build_request` is unchanged (Ruling R9): its reference is the g
 deck style.
 
 - **`build_technical_deck`** (positive, `expect: {intent: build, deck_style: true}`). It is a fresh
-  one-turn build, and its payload is `build_request`'s apart from the message. The message is a
-  generic public topic. Train covers streaming Postgres changes into a lakehouse with logical
-  replication. Held-out covers choosing a pgvector index. Each message asks for code, a
-  comparison table and measured/untested badges, and gives its own figures, so a build is right,
-  not `ask_data`.
-  - The reference is a deck on the Meridian contract with the technical fixture as its deck style.
-    Held-out uses the same CSS with pgvector component examples. Every slide has a `look` that
-    names only the style's pieces, and the looks use `dk-code`, `dk-table` and `dk-badge`.
+  one-turn build, and its payload is `build_request`'s apart from the message. Each message is a
+  generic public topic and gives its own figures, so a build is right, not `ask_data`. The two
+  splits ask for different pieces (Ruling R29), so a prompt that hard-codes one split's pieces
+  does not pass the other for free.
+  - Train covers streaming Postgres changes into a lakehouse with logical replication. It asks for
+    code, a comparison table and measured/untested badges. Its reference style is the technical
+    fixture without `dk-callout`: the template has its own `.callout`, and a deck style reuses a
+    template piece rather than restating it (spec §2). The looks use `dk-code`, `dk-table` and
+    `dk-badge`, and put each takeaway in "the template's callout".
+  - Held-out covers rolling out HTTP/3 across a public website. It asks for a dated timeline and
+    a KPI band, and no code. Its reference style is its own: `dk-timeline`, a `dk-kpi-band` for
+    four figures (one more than the template's three stat cards hold) and `dk-note`, in Meridian
+    tokens. It passes the sanitiser unchanged.
+  - Every slide has a `look` that names only the style's pieces, and no style defines a `dk-` twin
+    of a template class.
   - The `should_fail` is the same deck with no deck style and no looks. So the deck style is the
     only trap, and `_deck_style_score` fails it ("Deck style: deck_spec.deck_style is missing").
 - **`restyle_deck`** (mutation, `expect: {intent: edit, positions: [], deck_style_keeps:
-  [dk-code]}`). The deck is the split's gold deck as a deck-style build leaves it: the fixture
-  style and a look on every slide, some of them naming `dk-code`. The train message is "Make all
-  the code blocks dark navy with light text".
+  [dk-code, kw, fn, str, cm]}`). The keeps list is the code block and the token-span classes the
+  fixture defines in it, since production's stranding check counts both. The deck is the split's
+  gold deck as a deck-style build leaves it: the fixture style and a look on every slide, some of
+  them naming `dk-code`. The train message is "Make all the code blocks dark navy with light
+  text"; held-out's asks for a dark background.
   - The reference is `deck_changes.deck_style` alone, which rebuilds nothing. It is the fixture
     with `.dk-code` on `--brand-core-ink` and light token spans, all at AA contrast or better.
-    Every other rule is unchanged.
+    Every other rule is unchanged. Meridian has no navy, so the train answer says it uses the
+    darkest ink token instead; the held-out answer says only "dark background", as asked.
   - The `should_fail` is the same restyle with `dk-code` renamed to `dk-code-dark`. Every code
     slide would lose its style, so the keeps check fails it and names `dk-code`.
 - The architect now has twenty-two cases per split, 56 across the harness.

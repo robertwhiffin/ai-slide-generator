@@ -2,10 +2,10 @@
   "conversation": [
     {
       "role": "user",
-      "content": "Build a deck for backend engineers on choosing a pgvector index for semantic search in Postgres. Show the index definitions and a sample nearest-neighbour query as code, add a comparison table of HNSW, IVFFlat and exact search, and badge each figure as measured or untested. Measured on 1 million 768-dimension embeddings: HNSW answered in 4 ms at 98% recall, IVFFlat in 9 ms at 92% recall, and exact search in 310 ms. Untested: our estimate that building the HNSW index on 10 million rows takes 2 hours."
+      "content": "Build a deck for the web platform team on rolling out HTTP/3 across our public website. Show the rollout as a dated timeline: a canary on 5% of traffic in March 2026, every static asset in May 2026, every page in July 2026, and the TCP-only edge configuration retired in October 2026. Put the canary's results in one KPI band: time to first byte at the 75th percentile down from 420 ms to 310 ms, connection setup on mobile 38% faster, page-load errors on poor networks down 22%, and 61% of canary requests served over HTTP/3. Close with what each team must do before the May step."
     }
   ],
-  "message": "Build a deck for backend engineers on choosing a pgvector index for semantic search in Postgres. Show the index definitions and a sample nearest-neighbour query as code, add a comparison table of HNSW, IVFFlat and exact search, and badge each figure as measured or untested. Measured on 1 million 768-dimension embeddings: HNSW answered in 4 ms at 98% recall, IVFFlat in 9 ms at 92% recall, and exact search in 310 ms. Untested: our estimate that building the HNSW index on 10 million rows takes 2 hours.",
+  "message": "Build a deck for the web platform team on rolling out HTTP/3 across our public website. Show the rollout as a dated timeline: a canary on 5% of traffic in March 2026, every static asset in May 2026, every page in July 2026, and the TCP-only edge configuration retired in October 2026. Put the canary's results in one KPI band: time to first byte at the 75th percentile down from 420 ms to 310 ms, connection setup on mobile 38% faster, page-load errors on poor networks down 22%, and 61% of canary requests served over HTTP/3. Close with what each team must do before the May step.",
   "current_deck_spec": null,
   "committed_slide_count": 0,
   "slide_numbering": [],

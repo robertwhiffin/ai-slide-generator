@@ -316,7 +316,8 @@ DECK_STYLE_FAILURES = {
     "missing": (lambda: _spec(None), ["deck_style"]),
     "sanitiser_note": (lambda: _spec(_style(STYLE_CSS + UNSCOPED_RULE)), ["sanitis", ".slide"]),
     "no_components": (lambda: _spec(_style(components=[])), ["component"]),
-    "thirteen_components": (lambda: _spec(_style(components=_components(13))), ["component"]),
+    "thirteen_components": (
+        lambda: _spec(_style(components=_components(13))), ["13 components"]),
     "over_max_chars": (lambda: _spec(_style(_LONG_CSS)), [str(DECK_STYLE_MAX_CHARS)]),
     "blank_look": (lambda: _no_look("   "), ["look"]),
     "missing_look": (lambda: _no_look(None), ["look"]),
