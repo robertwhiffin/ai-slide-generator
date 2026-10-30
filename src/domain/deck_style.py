@@ -16,13 +16,23 @@ Sanitising rules (see :func:`sanitise_deck_style`):
 - A selector is kept only when some compound has a top-level ``.dk-`` class and
   every combinator right of the first such compound is descendant or ``>``.
 - Declarations with a non-``data:`` ``url()``, ``expression()`` or a remote
-  address (``http:``, ``https:``, ``//``) are dropped. The content of a
-  ``url(data:...)`` is exempt: SVG data URIs carry an ``xmlns='http://...'``.
+  address (``http:``, ``https:``, ``//``) are dropped. The address scan first
+  removes tab/LF/CR and reads ``\\`` as ``/``, as browsers' URL parsers do. The
+  content of a ``url(data:...)`` is exempt: SVG data URIs carry an
+  ``xmlns='http://...'``.
+- Declarations using an image function (``image-set()``, ``cross-fade()``,
+  ``src()``, ``element()`` and their prefixed spellings) are dropped.
 - Nested rules are dropped; the parent's declarations are kept.
-- Empty rules are dropped, and ``<style`` / ``</style`` text never survives.
+- Repeated selectors are coalesced: their declarations, in source order, move
+  to the last occurrence (``merge_css`` would otherwise keep only the last).
+- Empty rules are dropped, CSS with no rule left is blank, and ``<style`` /
+  ``</style`` text never survives.
+- A rebuilt sheet must re-sanitise with no notes, or the style is dropped.
+- Each note is capped at 200 characters.
 
 When nothing is removed the input object comes back with its CSS text
-byte-identical; new text is built only when something was dropped.
+byte-identical; new text is built only when something was dropped. A blank
+result, or one over ``DECK_STYLE_MAX_CHARS``, is ``None``.
 """
 from __future__ import annotations
 
