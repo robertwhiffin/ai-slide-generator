@@ -707,8 +707,11 @@ def test_every_readable_release_executes_with_its_own_bundles_after_it_stops_bei
             builder_v2 = db.get(AgentDefinitionRevision, v2_map["builder"][0])
             assert architect_v2.protected_assembly_digest == ARCHITECT_PROTECTED_ASSEMBLY_V2_DIGEST
             assert builder_v2.schema_contract_digest == BUILDER_SCHEMA_CONTRACT_V2_DIGEST
-        # v3 (the rollback) holds every role on the v1 bundles.
-        assert {bundles[rev][1:] for rev, _hash in v3_map.values()} == {(1, 1)}
+        # v3 (the rollback) holds every role on the v1 bundles, except the data analyst,
+        # which ships on protected assembly v2.
+        assert {
+            role: bundles[rev][1:] for role, (rev, _hash) in v3_map.items()
+        } == {role: (2 if role == "data_analyst" else 1, 1) for role in v3_map}
 
         def bound(session_id: str, role: str) -> list[type[BaseModel]]:
             return [c.schema for c in run.turns[session_id].calls if c.agent_key == role]
