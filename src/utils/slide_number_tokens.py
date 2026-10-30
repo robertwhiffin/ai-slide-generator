@@ -11,9 +11,19 @@ Every save path turns a marker span back into its token before storing, so a
 hand-edited slide (saved with the rendered numbers in it) still renumbers after
 a move.
 
-Substitution is markup-safe: a token inside a tag (an attribute value) or inside
-a ``<script>``/``<style>`` body is left literal. It is idempotent, and HTML with
-no token (or no marker) comes back as an equal string.
+Substitution is markup-safe. A token is replaced only in text content. One inside
+a tag (an attribute value, even one holding ``>``), inside a whole
+``<script>``/``<style>`` element (whatever its body holds, ``<`` or a stray
+``</style>`` included) or inside a comment is left literal. The values are
+coerced to ``int``, so nothing but digits is ever emitted. Substitution is
+idempotent, and HTML with no token (or no marker) comes back as an equal string.
+
+Retokenising accepts any plain inner text (the user may have retyped the digit)
+and normalises the kind to lower case. A marker whose content holds a tag, for
+example a number the visual editor bolded inside the span
+(``<span data-tellr-slide="number"><b>3</b></span>``), is not recognised: that
+slide keeps the number baked in. This is accepted, like an editor stripping the
+marker.
 
 ``substitute_deck_slide_numbers`` numbers ``deck["slides"]`` by list order and
 leaves everything else untouched, including the knitted ``html_content``: a
@@ -27,9 +37,17 @@ import re
 from typing import Any, Dict
 
 _TOKEN_RE = re.compile(r"\{\{slide:(number|count)\}\}")
-_TAG_SPLIT_RE = re.compile(r"(<[^>]*>)")
-_RAW_TEXT_OPEN_RE = re.compile(r"<\s*(script|style)\b", re.IGNORECASE)
-_RAW_TEXT_CLOSE_RE = re.compile(r"<\s*/\s*(script|style)\b", re.IGNORECASE)
+#: Inside a tag: anything but ``>`` or a quote, or a whole quoted value, so a
+#: ``>`` inside an attribute value does not end the tag.
+_IN_TAG = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
+#: The stretches substitution never touches: a whole script or style element
+#: (an unclosed one runs to the end, as a browser reads it), a comment, a tag.
+_SKIP_RE = re.compile(
+    r"<(script|style)\b" + _IN_TAG + r">.*?(?:</\1\s*>|\Z)"
+    r"|<!--.*?(?:-->|\Z)"
+    r"|<" + _IN_TAG + r">",
+    re.IGNORECASE | re.DOTALL,
+)
 _MARKER_RE = re.compile(
     r"""<span\b[^>]*?\bdata-tellr-slide\s*=\s*(?P<q>["'])(?P<kind>number|count)(?P=q)[^>]*>"""
     r"""[^<]*</span\s*>""",
@@ -41,27 +59,19 @@ def substitute_slide_numbers(html: str, number: int, count: int) -> str:
     """Render the page tokens in *html* as marker spans for slide *number* of *count*."""
     if not html or "{{slide:" not in html:
         return html
-    values = {"number": number, "count": count}
+    values = {"number": int(number), "count": int(count)}
 
     def _span(m: "re.Match[str]") -> str:
         kind = m.group(1)
         return f'<span data-tellr-slide="{kind}">{values[kind]}</span>'
 
     out = []
-    raw_depth = False
-    for part in _TAG_SPLIT_RE.split(html):
-        if not part:
-            continue
-        if part.startswith("<") and part.endswith(">"):
-            if _RAW_TEXT_OPEN_RE.match(part):
-                raw_depth = True
-            elif _RAW_TEXT_CLOSE_RE.match(part):
-                raw_depth = False
-            out.append(part)
-        elif raw_depth:
-            out.append(part)
-        else:
-            out.append(_TOKEN_RE.sub(_span, part))
+    pos = 0
+    for skip in _SKIP_RE.finditer(html):
+        out.append(_TOKEN_RE.sub(_span, html[pos : skip.start()]))
+        out.append(skip.group(0))
+        pos = skip.end()
+    out.append(_TOKEN_RE.sub(_span, html[pos:]))
     return "".join(out)
 
 
@@ -69,7 +79,7 @@ def retokenise_slide_numbers(html: str) -> str:
     """Turn page-number marker spans back into their tokens (the save-path inverse)."""
     if not html or "data-tellr-slide" not in html:
         return html
-    return _MARKER_RE.sub(lambda m: "{{slide:%s}}" % m.group("kind"), html)
+    return _MARKER_RE.sub(lambda m: "{{slide:%s}}" % m.group("kind").lower(), html)
 
 
 def substitute_deck_slide_numbers(deck_dict: Dict[str, Any]) -> Dict[str, Any]:

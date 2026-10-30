@@ -321,6 +321,17 @@ class TestRetokenising:
         html = _in_footer('<span data-tellr-slide="title">Intro</span>')
         assert retokenise_slide_numbers(html) == html
 
+    def test_an_upper_case_marker_value_becomes_the_canonical_token(self):
+        """Only the lower-case token is ever substituted. An upper-cased value
+        kept as ``{{slide:NUMBER}}`` would show literally on every later read."""
+        html = _in_footer(
+            '<span data-tellr-slide="NUMBER">3</span> / '
+            "<span data-tellr-slide='Count'>9</span>"
+        )
+        assert retokenise_slide_numbers(html) == _in_footer(
+            "{{slide:number}} / {{slide:count}}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Markup safety (A7)
@@ -360,6 +371,66 @@ class TestMarkupSafety:
             '<div class="slide"><script>window.page = "{{slide:number}}";</script>'
             '<p><span data-tellr-slide="number">2</span></p></div>'
         )
+
+    def test_a_token_after_a_gt_inside_an_attribute_value_is_left_alone(self):
+        """A ``>`` inside a quoted value does not end the tag. Splitting there
+        would put a span (and its ``"``) inside the attribute."""
+        html = (
+            '<div class="slide"><img alt="a > {{slide:number}}" src="x.png">'
+            "<abbr title='b > {{slide:count}}'>x</abbr>"
+            "<p>{{slide:number}}</p></div>"
+        )
+        assert substitute_slide_numbers(html, 2, 4) == (
+            '<div class="slide"><img alt="a > {{slide:number}}" src="x.png">'
+            "<abbr title='b > {{slide:count}}'>x</abbr>"
+            '<p><span data-tellr-slide="number">2</span></p></div>'
+        )
+
+    def test_a_footer_token_after_a_script_holding_a_less_than_is_substituted(self):
+        """A ``<`` in a script body must not hide the script's end, which would
+        leave every later token in the slide literal."""
+        html = (
+            '<div class="slide"><script>for (var i = 0; i<n; i++) {}</script>'
+            + FOOTER
+            + "</div>"
+        )
+        assert substitute_slide_numbers(html, 2, 4) == (
+            '<div class="slide"><script>for (var i = 0; i<n; i++) {}</script>'
+            + _rendered(FOOTER, 2, 4)
+            + "</div>"
+        )
+
+    def test_a_token_in_a_script_holding_a_closing_style_tag_is_left_alone(self):
+        """Only ``</script>`` ends a script: a ``</style>`` string inside it does not."""
+        html = (
+            '<div class="slide"><script>var a = "</style>"; var b = "{{slide:number}}";'
+            "</script><p>{{slide:number}}</p></div>"
+        )
+        assert substitute_slide_numbers(html, 2, 4) == (
+            '<div class="slide"><script>var a = "</style>"; var b = "{{slide:number}}";'
+            '</script><p><span data-tellr-slide="number">2</span></p></div>'
+        )
+
+    def test_a_quote_inside_a_comment_does_not_hide_later_tokens(self):
+        """A comment is skipped whole. Read as a tag, its apostrophe would open a
+        quoted run that swallows the footer up to the next apostrophe."""
+        html = (
+            "<div class=\"slide\"><!-- don't number this: {{slide:number}} -->"
+            + FOOTER
+            + "<p>it's</p></div>"
+        )
+        assert substitute_slide_numbers(html, 2, 4) == (
+            "<div class=\"slide\"><!-- don't number this: {{slide:number}} -->"
+            + _rendered(FOOTER, 2, 4)
+            + "<p>it's</p></div>"
+        )
+
+    def test_only_integers_are_emitted(self):
+        """The values reach slide HTML: anything that is not an integer is refused."""
+        with pytest.raises(ValueError):
+            substitute_slide_numbers(SLIDE, "<img src=x>", 4)
+        with pytest.raises(ValueError):
+            substitute_slide_numbers(SLIDE, 2, "4</span><b>")
 
 
 # ---------------------------------------------------------------------------
