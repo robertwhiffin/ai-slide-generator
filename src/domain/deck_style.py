@@ -264,8 +264,10 @@ def _serialise_declaration(decl: Any) -> str:
     return f"{serialize_identifier(decl.name)}:{tinycss2.serialize(decl.value).strip()}{important}"
 
 
-def _clean_rule(rule: Any, *, design_system_active: bool, notes: list[str]) -> str | None:
-    """Return the cleaned text of a qualified rule, or ``None`` to drop it."""
+def _clean_rule(
+    rule: Any, *, design_system_active: bool, notes: list[str]
+) -> tuple[str, list[str]] | None:
+    """Return a qualified rule's cleaned selector text and declarations, or ``None`` to drop it."""
     selectors = _split_selectors(rule.prelude)
     selector_texts = [tinycss2.serialize(s).strip() for s in selectors]
     is_root = len(selector_texts) == 1 and selector_texts[0].lower() == ":root"
@@ -316,7 +318,7 @@ def _clean_rule(rule: Any, *, design_system_active: bool, notes: list[str]) -> s
         if not seen_content:
             notes.append(f"empty rule {label!r} dropped")
         return None
-    return f"{', '.join(kept_selectors)}{{{';'.join(declarations)}}}"
+    return ", ".join(kept_selectors), declarations
 
 
 def _clean_css(css: str, *, design_system_active: bool, notes: list[str]) -> tuple[list[str], bool]:
@@ -328,12 +330,26 @@ def _clean_css(css: str, *, design_system_active: bool, notes: list[str]) -> tup
         notes.append("removed the <style> wrapper")
     parsed_from = len(notes)
 
-    rules: list[str] = []
+    # Kept rules by selector text, in source order.  ``merge_css`` keys a rule by
+    # its selector and keeps only the last of a repeated one, so the post-commit
+    # merge would silently lose the earlier rules' declarations: a repeated
+    # selector is coalesced here instead, its declarations in source order, at
+    # its LAST occurrence.  Keyed on the exact rebuilt selector text (the key
+    # ``merge_css`` reads off the rebuilt CSS), so ``.dk-a, .dk-b`` and ``.dk-a``
+    # stay two rules.
+    kept: dict[str, list[str]] = {}
     for node in tinycss2.parse_stylesheet(stripped, skip_comments=True, skip_whitespace=True):
         if node.type == "qualified-rule":
-            text = _clean_rule(node, design_system_active=design_system_active, notes=notes)
-            if text is not None:
-                rules.append(text)
+            cleaned = _clean_rule(node, design_system_active=design_system_active, notes=notes)
+            if cleaned is not None:
+                selector, declarations = cleaned
+                if selector in kept:
+                    notes.append(
+                        f"selector {_short(selector)!r} repeated: its rules were merged "
+                        "into the last one"
+                    )
+                    declarations = kept.pop(selector) + declarations
+                kept[selector] = declarations
         elif node.type == "at-rule":
             notes.append(f"@{_short(node.at_keyword)} rule dropped: at-rules are not allowed in a deck style")
         else:
@@ -343,6 +359,7 @@ def _clean_css(css: str, *, design_system_active: bool, notes: list[str]) -> tup
     # yet it must force the rebuild that leaves the comment out.
     if _STYLE_TEXT.search(stripped) and not any("<style" in n for n in notes[parsed_from:]):
         notes.append("removed text containing <style from the CSS")
+    rules = [f"{selector}{{{';'.join(declarations)}}}" for selector, declarations in kept.items()]
     return rules, len(notes) > start
 
 

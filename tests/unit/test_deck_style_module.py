@@ -706,8 +706,19 @@ def test_style_with_blank_css_is_dropped_with_a_note(active):
 
 
 _RULE = ".dk-a{color:red}"  # 16 characters
-_AT_LIMIT = _RULE * 625  # 10,000 characters
-_OVER_LIMIT = _RULE * 624 + ".dk-ab{color:red}"  # 10,001 characters
+
+
+def _distinct_rules(count: int) -> str:
+    """``count`` 20-character rules, each with its OWN selector (``.dk-a0000`` …).
+
+    The padding must not repeat a selector: a repeated one is coalesced (R18),
+    which would shrink the CSS and add a note.
+    """
+    return "".join(f".dk-a{i:04d}{{color:red}}" for i in range(count))
+
+
+_AT_LIMIT = _distinct_rules(500)  # 10,000 characters
+_OVER_LIMIT = _distinct_rules(499) + ".dk-a00499{color:red}"  # 10,001 characters
 
 
 def _assert_size_note(notes):
@@ -719,21 +730,21 @@ def _assert_size_note(notes):
 
 def test_oversized_style_is_dropped(active):
     assert len(_OVER_LIMIT) == 10001
-    out, notes = _sanitise(_style(_OVER_LIMIT, _comp("A", "dk-a")), active=active)
+    out, notes = _sanitise(_style(_OVER_LIMIT, _comp("A", "dk-a0000")), active=active)
     assert out is None
     _assert_size_note(notes)
 
 
 def test_style_exactly_at_the_size_limit_is_kept_unchanged(active):
     assert len(_AT_LIMIT) == 10000
-    style = _style(_AT_LIMIT, _comp("A", "dk-a"))
+    style = _style(_AT_LIMIT, _comp("A", "dk-a0000"))
     out, notes = _sanitise(style, active=active)
     assert notes == ()
     assert out is style
 
 
 def test_dirty_style_still_oversized_after_cleaning_is_dropped(active):
-    css = _RULE * 640 + "body{color:red}"
+    css = _distinct_rules(520) + "body{color:red}"
     out, notes = _sanitise(_style(css, _comp("A", "dk-a")), active=active)
     assert out is None
     _assert_size_note(notes)
@@ -749,6 +760,50 @@ def test_size_limit_applies_to_the_cleaned_css(active):
     assert _canon(out.css) == ".dk-a{color:red}"
     assert out.components == [comp]
     _assert_notes(notes, "@font-face", count=1)
+
+
+# --- sanitiser: repeated selectors are coalesced (R18) ------------------------
+# merge_css keys a rule by its selector and keeps only the LAST of a repeated
+# one, so the post-commit deck.css would lose the earlier rules' declarations.
+# The sanitiser merges them first: declarations in source order, at the last
+# occurrence.  Keyed on the exact selector text, so a selector LIST is its own
+# key and never coalesces with one of its members.
+
+
+def test_repeated_selector_is_coalesced_at_its_last_occurrence(active):
+    comp = _comp("Code", "dk-code")
+    style = _style(
+        ".dk-code{background:#fff}\n.dk-x{color:red}\n.dk-code{font-family:monospace}", comp
+    )
+    out, notes = _sanitise(style, active=active)
+    assert out is not None
+    assert out.css == ".dk-x{color:red}\n.dk-code{background:#fff;font-family:monospace}"
+    assert out.components == [comp]
+    _assert_notes(notes, ".dk-code", count=1)
+    assert "repeated" in notes[0], notes
+    # A fixed point: the coalesced CSS sanitises again with nothing removed.
+    again, again_notes = _sanitise(out, active=active)
+    assert again is out and again_notes == ()
+
+
+def test_every_repeat_of_a_selector_joins_one_rule_in_source_order(active):
+    css = ".dk-a{color:red}\n.dk-b{margin:0}\n.dk-a{color:blue}\n.dk-a{padding:1px}"
+    out, notes = _sanitise(_style(css, _comp("A", "dk-a")), active=active)
+    assert out.css == ".dk-b{margin:0}\n.dk-a{color:red;color:blue;padding:1px}"
+    _assert_notes(notes, ".dk-a", count=2)
+
+
+def test_a_selector_list_does_not_coalesce_with_one_of_its_members(active):
+    style = _style(".dk-a, .dk-b{color:red}\n.dk-a{font-weight:bold}", _comp("A", "dk-a"))
+    out, notes = _sanitise(style, active=active)
+    assert out is style and notes == ()
+
+
+def test_repeated_root_palette_is_coalesced_without_a_design_system():
+    style = _style(":root{--dk-a:#000}\n.dk-a{color:var(--dk-a)}\n:root{--dk-b:#fff}")
+    out, notes = _sanitise(style, active=False)
+    assert out.css == ".dk-a{color:var(--dk-a)}\n:root{--dk-a:#000;--dk-b:#fff}"
+    _assert_notes(notes, ":root", count=1)
 
 
 # --- sanitiser: byte identity (C24, R1) ---------------------------------------

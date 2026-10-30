@@ -49,7 +49,7 @@ import logging
 import threading
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, get_type_hints
 
 from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
@@ -2567,6 +2567,53 @@ def _sanitise_logged(
     return cleaned, notes
 
 
+def _resanitise_carried_deck_style(
+    plan: "_EditPlan", out: Any, session_id: str
+) -> "_EditPlan":
+    """*plan* with the deck style it carries from the persisted spec re-sanitised.
+
+    An operations edit that brings no ``deck_changes.deck_style`` keeps the
+    persisted one, which was sanitised under the contract it was committed with.
+    When this edit moves the deck onto a design system, that style may still hold
+    a ``:root`` palette, which the post-commit merge would let replace the
+    template's ``:root`` (Ruling R3, C11).  So the carried style is sanitised again
+    under the committed contract's flag (``plan.brand``).  Ruling R18: this runs on
+    every carried style, not only when the flag differs from the inbound brand's,
+    because the inbound brand is the session's contract and need not be the one
+    the style was committed under.  It is a no-op otherwise: a sanitised style
+    comes back unchanged under the same or a looser flag.  A style that cleans to
+    nothing commits as ``deck_style=None``; the edit is not refused, since it asked
+    for a contract change, not a restyle.  The plan's spec is what
+    ``_apply_edit_plan`` persists, so the cleaned spec replaces it there too.
+    """
+    carried = plan.spec.deck_style
+    changes = out.deck_changes
+    if carried is None or (changes is not None and changes.deck_style is not None):
+        return plan
+    cleaned, notes = sanitise_deck_style(
+        carried, design_system_active=plan.brand["design_system_active"]
+    )
+    if cleaned is carried:
+        return plan
+    for note in notes:
+        logger.info(
+            "deck_style_resanitised: the persisted deck style carried into contract "
+            "%s: %s",
+            _contract_ids(plan.spec.design_contract),
+            note,
+            extra={"session_id": session_id},
+        )
+    if cleaned is None:
+        logger.warning(
+            "deck_style_dropped: nothing of the persisted deck style could be kept "
+            "under contract %s (%d note(s)); committing deck_style=None",
+            _contract_ids(plan.spec.design_contract),
+            len(notes),
+            extra={"session_id": session_id},
+        )
+    return replace(plan, spec=plan.spec.model_copy(update={"deck_style": cleaned}))
+
+
 def _committed_edit_contract(
     out: Any, prior_spec: Optional[DeckSpec]
 ) -> Optional[DesignContractRef]:
@@ -2792,7 +2839,7 @@ def _plan_answer(
                 # From here on the plan's spec and brand ARE the turn's: every
                 # later step (classify_spec_change, the re-review, state, the
                 # pre-fan-out write) reads `spec` and `brand`.
-                plan = planned
+                plan = _resanitise_carried_deck_style(planned, out, session_id)
                 spec = plan.spec
                 brand = plan.brand
         elif spec is None:

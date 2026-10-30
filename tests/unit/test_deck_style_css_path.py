@@ -909,3 +909,187 @@ def test_retry_answer_deck_style_is_sanitised(graph_env, retry_intent):
     css = graph_env.deck_row().css
     assert css == committed.css
     _assert_no_hostile_text(css, "deck.css")
+
+
+# ---------------------------------------------------------------------------
+# 9. R18 (I1): a style carried onto a design system is sanitised again
+# ---------------------------------------------------------------------------
+
+#: A palette plus a rule: what the sanitiser keeps on a deck with no design system.
+CARRIED_STYLE = DeckStyle(css=":root{--dk-a:#000}\n.dk-a{color:var(--dk-a)}", components=[])
+
+
+@pytest.mark.parametrize(
+    "session_contract",
+    [None, PINNED_CONTRACT],
+    ids=["pins-a-design-system-without-a-fresh-style", "session-already-on-the-design-system"],
+)
+def test_edit_changing_the_contract_resanitises_the_carried_deck_style(
+    graph_env, monkeypatch, session_contract
+):
+    """An unpinned deck's persisted style keeps its ``:root`` palette.  An operations
+    edit pins 7/3 through ``deck_changes.design_contract`` and brings NO deck style,
+    so the persisted one is carried.  It is sanitised again under the committed
+    contract's flag: the ``:root`` goes (R3), so the template's ``:root`` and
+    ``@media`` survive the post-commit aggregate (C11).
+
+    ``session-already-on-the-design-system``: the session's contract is already
+    7/3, so the inbound brand is a design system too and the flag does not change
+    between the inbound brand and the plan's.  The carried style was still
+    committed under no design system, so it must be cleaned all the same.
+
+    Sabotage: carry the persisted style through unsanitised -> red."""
+    from src.api.services.deck_level_writer import write_deck_level_columns
+
+    _flag_follows_the_contract(graph_env, monkeypatch)
+    if session_contract is not None:
+        monkeypatch.setattr(nodes, "_session_contract", lambda _sid: session_contract)
+    graph_env.template.style_block = C11_TEMPLATE_BLOCK
+    clean, _ = sanitise_deck_style(CARRIED_STYLE, design_system_active=False)
+    assert clean is CARRIED_STYLE, "fixture: the carried style is clean without a design system"
+    prior_plain, _ = _seeded(graph_env, (0, 1, 2))
+    _persist(
+        graph_env,
+        _with_style(
+            prior_plain.model_copy(update={"design_contract": UNPINNED_CONTRACT}), CARRIED_STYLE
+        ),
+    )
+    write_deck_level_columns(graph_env.session_id, css=CARRIED_STYLE.css)
+
+    t = _turn(
+        graph_env,
+        _ops_out([], DeckChanges(design_contract=PINNED_CONTRACT), message="Pinning."),
+    )
+
+    assert t.updates["error_state"] is None
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["design_system_active"] is True
+    assert t.updates["deck_spec"].design_contract == PINNED_CONTRACT
+    committed = t.updates["deck_spec"].deck_style
+    assert committed is not None and ".dk-a" in committed.css
+    assert ":root" not in committed.css and "--dk-a:#000" not in committed.css, committed.css
+    assert _persisted_spec(graph_env).deck_style == committed
+
+    pre = graph_env.deck_row().css
+    assert C11_TEMPLATE_BLOCK in pre, pre
+    assert pre.index(C11_TEMPLATE_BLOCK) < pre.rindex(".dk-a"), pre
+    assert "--dk-a:#000" not in pre, pre
+
+    _land_rows(graph_env, 3)
+    _post_commit(graph_env, t.merged)
+    post = graph_env.deck_row().css
+    assert C11_TEMPLATE_ROOT_AFTER_MERGE in post, post
+    assert C11_TEMPLATE_MEDIA_AFTER_MERGE in post, post
+    assert "--dk-a:#000" not in post, post
+
+
+def test_carried_deck_style_that_cleans_to_nothing_commits_none_and_the_edit_lands(
+    graph_env, monkeypatch
+):
+    """A carried style that is only a ``:root`` palette has nothing left on a design
+    system.  The edit asked for a contract change, not a restyle, so it is NOT
+    refused (R18): it commits with ``deck_style=None``."""
+    _flag_follows_the_contract(graph_env, monkeypatch)
+    palette_only = DeckStyle(css=":root{--dk-a:#000}", components=[])
+    prior_plain, _ = _seeded(graph_env, (0, 1, 2))
+    _persist(
+        graph_env,
+        _with_style(
+            prior_plain.model_copy(update={"design_contract": UNPINNED_CONTRACT}), palette_only
+        ),
+    )
+
+    t = _turn(
+        graph_env,
+        _ops_out([], DeckChanges(design_contract=PINNED_CONTRACT), message="Pinning."),
+    )
+
+    assert len(graph_env.skills.calls_for("architect")) == 1, "the edit must not be retried"
+    assert t.updates["error_state"] is None
+    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["deck_spec"].design_contract == PINNED_CONTRACT
+    assert t.updates["deck_spec"].deck_style is None
+    assert _persisted_spec(graph_env).deck_style is None
+    assert "--dk-a" not in (graph_env.deck_row().css or "")
+
+
+# ---------------------------------------------------------------------------
+# 10. R18 (I2): a repeated selector keeps every declaration in deck.css
+# ---------------------------------------------------------------------------
+
+#: ``.dk-code`` twice, with a different rule between.
+REPEATED_STYLE = DeckStyle(
+    css=".dk-code{background:#fff}\n.dk-x{color:red}\n.dk-code{font-family:monospace}",
+    components=[],
+)
+
+
+@pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned"])
+def test_repeated_selector_keeps_every_declaration_in_post_commit_css(graph_env, pinned):
+    """``merge_css`` keys a rule by its selector and keeps only the last of a
+    repeated one.  The sanitiser coalesces the repeat first, so the post-commit
+    ``deck.css`` still has both of ``.dk-code``'s declarations, in order.
+
+    Sabotage: stop coalescing -> the post-commit CSS loses ``background:#fff``."""
+    if pinned:
+        _pin(graph_env)
+    base = _pinned_spec() if pinned else make_spec((0, 1))
+    graph_env.skills.set("architect", architect_build(_with_style(base, REPEATED_STYLE)))
+
+    state = graph_env.state()
+    updates = architect_node(state)
+
+    assert updates["error_state"] is None
+    committed = updates["deck_spec"].deck_style
+    assert committed.css == ".dk-x{color:red}\n.dk-code{background:#fff;font-family:monospace}"
+
+    _land_rows(graph_env, 2)
+    _post_commit(graph_env, {**state, **updates})
+    post = graph_env.deck_row().css
+    assert post.count(".dk-code") == 1, post
+    code_rule = post[post.index(".dk-code") :]
+    assert "background:#fff" in code_rule and "font-family:monospace" in code_rule, post
+    assert code_rule.index("background:#fff") < code_rule.index("font-family:monospace"), post
+
+
+# ---------------------------------------------------------------------------
+# 11. M1: the pre-fan-out write fails; the post-commit aggregate still lands the style
+# ---------------------------------------------------------------------------
+
+
+def test_failed_pre_fan_out_write_still_lands_the_deck_style_post_commit(
+    graph_env, monkeypatch
+):
+    """The architect's deck-level write raises.  The turn records
+    ``deck_level_write_failed`` and still routes on its intent, so the builders and
+    the post-commit aggregate run, and that aggregate is the only write of
+    ``deck.css`` this turn: the deck style reaches it only through
+    ``emitted_style_blocks``, after the template block.
+
+    Sabotage: leave the deck style out of ``emitted_style_blocks`` -> red."""
+    _pin(graph_env)
+    real = nodes.write_deck_level_columns
+
+    def failing_architect_write(session_id, **kwargs):
+        if "deck_spec" in kwargs:
+            raise RuntimeError("pre-fan-out write exploded")
+        return real(session_id, **kwargs)
+
+    monkeypatch.setattr(nodes, "write_deck_level_columns", failing_architect_write)
+    graph_env.skills.set("architect", architect_build(_with_style(_pinned_spec(), CODE_STYLE)))
+
+    state = graph_env.state()
+    updates = architect_node(state)
+
+    assert updates["error_state"]["code"] == "deck_level_write_failed"
+    assert updates["architect_intent"] == "build"
+    row = graph_env.deck_row()
+    assert CODE_CSS not in ((row.css if row is not None else None) or "")
+
+    _land_rows(graph_env, 2)
+    review = _post_commit(graph_env, {**state, **updates})
+
+    assert review.get("error_state") is None
+    post = graph_env.deck_row().css
+    assert ".slide" in post and ".dk-code" in post and "#fff" in post, post
+    assert post.index(".slide") < post.index(".dk-code"), post
