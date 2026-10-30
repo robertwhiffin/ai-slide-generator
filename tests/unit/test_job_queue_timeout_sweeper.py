@@ -188,3 +188,107 @@ async def test_job_entry_gets_started_at_when_worker_marks_running():
         "state, so the timeout sweeper can age it"
     )
     assert isinstance(entry["started_at"], datetime)
+
+
+# ---- Task 7: 20-minute limit for agent-mode (graph) turns ------------------
+
+
+def test_graph_timeout_constant_and_helper():
+    assert job_queue.JOB_HARD_TIMEOUT_SECONDS == 600
+    assert job_queue.GRAPH_JOB_HARD_TIMEOUT_SECONDS == 1200
+    assert job_queue.job_hard_timeout_seconds("graph") == 1200
+    assert job_queue.job_hard_timeout_seconds("monolith") == 600
+    assert job_queue.job_hard_timeout_seconds(None) == 600
+
+
+@pytest.mark.asyncio
+async def test_sweep_graph_job_survives_700s_but_not_1300s():
+    now = datetime.utcnow()
+    job_queue.jobs["req-graph"] = {
+        "status": "running",
+        "session_id": "g1",
+        "engine_mode": "graph",
+        "started_at": now - timedelta(seconds=700),
+    }
+
+    assert await job_queue.mark_timed_out_jobs_once() == 0
+    assert job_queue.jobs["req-graph"]["status"] == "running"
+
+    job_queue.jobs["req-graph"]["started_at"] = now - timedelta(seconds=1300)
+    assert await job_queue.mark_timed_out_jobs_once() == 1
+    entry = job_queue.jobs["req-graph"]
+    assert entry["status"] == "failed"
+    assert "20 minutes" in entry["error"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_monolith_job_fails_at_700s():
+    job_queue.jobs["req-mono"] = {
+        "status": "running",
+        "session_id": "m1",
+        "engine_mode": "monolith",
+        "started_at": datetime.utcnow() - timedelta(seconds=700),
+    }
+
+    assert await job_queue.mark_timed_out_jobs_once() == 1
+    assert job_queue.jobs["req-mono"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_job_records_engine_mode_from_payload():
+    try:
+        await job_queue.enqueue_job(
+            "req-eng", {"session_id": "e1", "engine_mode": "graph"}
+        )
+        assert job_queue.jobs["req-eng"]["engine_mode"] == "graph"
+    finally:
+        while not job_queue.job_queue.empty():
+            job_queue.job_queue.get_nowait()
+            job_queue.job_queue.task_done()
+
+
+@pytest.mark.asyncio
+async def test_recover_stuck_requests_uses_the_graph_limit(monkeypatch):
+    import contextlib
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from src.database.models.session import ChatRequest, UserSession
+
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    )
+    UserSession.__table__.create(engine)
+    ChatRequest.__table__.create(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    @contextlib.contextmanager
+    def fake_db():
+        db = factory()
+        try:
+            yield db
+            db.commit()
+        finally:
+            db.close()
+
+    monkeypatch.setattr("src.core.database.get_db_session", fake_db)
+    monkeypatch.setattr(
+        "src.api.services.session_manager.get_session_manager", lambda: object()
+    )
+
+    now = datetime.utcnow()
+    with fake_db() as db:
+        db.add(UserSession(session_id="us1"))
+        db.flush()
+        sid = db.query(UserSession).one().id
+        db.add(ChatRequest(request_id="young", session_id=sid, status="running",
+                           created_at=now - timedelta(minutes=15)))
+        db.add(ChatRequest(request_id="old", session_id=sid, status="running",
+                           created_at=now - timedelta(minutes=25)))
+
+    assert await job_queue.recover_stuck_requests() == 1
+
+    with fake_db() as db:
+        status = {r.request_id: r.status for r in db.query(ChatRequest).all()}
+    assert status == {"young": "running", "old": "error"}
