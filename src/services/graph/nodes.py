@@ -942,10 +942,9 @@ def _design_system_logos(design_system_id: int) -> List[dict]:
     try:
         from src.services.design_system_service import search_assets
 
+        # One unfiltered read, filtered here: a ``kind=`` filter is applied in
+        # Python by ``search_assets`` anyway, so two filtered calls read twice.
         with get_db_session() as db:
-            assets = []
-            for kind in ("logo", "lockup"):
-                assets += search_assets(db, design_system_id, kind=kind)
             rows = [
                 {
                     "handle": "{{ds-asset:%d}}" % a.id,
@@ -953,7 +952,8 @@ def _design_system_logos(design_system_id: int) -> List[dict]:
                     "kind": a.kind,
                     "mime": a.mime,
                 }
-                for a in assets
+                for a in search_assets(db, design_system_id)
+                if (a.kind or "").lower() in ("logo", "lockup")
             ]
         return rank_logos(rows)
     except Exception:

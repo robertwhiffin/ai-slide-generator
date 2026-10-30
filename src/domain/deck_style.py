@@ -645,22 +645,32 @@ def rank_logos(rows: Any) -> list[dict]:
 
     ``rows`` are mappings with ``handle``, ``filename``, ``kind`` and optionally
     ``mime``. Only kinds ``logo`` and ``lockup`` are kept. There is no ground
-    metadata, so the order is a filename heuristic: default-ground variants
-    before reverse ones (a marker in :data:`_REVERSE_MARKERS`), SVG (by mime or
-    extension) before raster, ``logo`` before ``lockup``, then filename. The cap
-    applies after the sort.
+    metadata, so the order is a filename heuristic. The rows split by ground:
+    reverse variants carry a marker in :data:`_REVERSE_MARKERS`, the rest are
+    default-ground. Each ground is ordered ``logo`` before ``lockup``, then SVG
+    (by mime or extension) before raster, then filename. The two grounds then
+    alternate, default first (best default, best reverse, next default, ...),
+    and the cap applies last. A real library holds hundreds of product lockups,
+    so without the alternation the cap would keep no mark for a dark ground.
     """
 
     def _key(row: Mapping) -> tuple:
         name = str(row.get("filename") or "")
         low = name.lower()
         is_svg = str(row.get("mime") or "").lower() == "image/svg+xml" or low.endswith(".svg")
-        reverse = any(marker in low for marker in _REVERSE_MARKERS)
-        return (reverse, not is_svg, _LOGO_KINDS[str(row.get("kind") or "").lower()], name)
+        return (_LOGO_KINDS[str(row.get("kind") or "").lower()], not is_svg, name)
+
+    def _is_reverse(row: Mapping) -> bool:
+        low = str(row.get("filename") or "").lower()
+        return any(marker in low for marker in _REVERSE_MARKERS)
 
     kept = [r for r in rows if str(r.get("kind") or "").lower() in _LOGO_KINDS]
-    kept.sort(key=_key)
-    return [{"handle": r["handle"], "filename": r["filename"]} for r in kept[:_MAX_LOGOS]]
+    default = sorted((r for r in kept if not _is_reverse(r)), key=_key)
+    reverse = sorted((r for r in kept if _is_reverse(r)), key=_key)
+    ranked: list = []
+    for i in range(max(len(default), len(reverse))):
+        ranked += default[i : i + 1] + reverse[i : i + 1]
+    return [{"handle": r["handle"], "filename": r["filename"]} for r in ranked[:_MAX_LOGOS]]
 
 
 def deck_style_context(token_css: str, style_block: str, logos: Any = ()) -> dict:

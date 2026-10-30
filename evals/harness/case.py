@@ -137,8 +137,9 @@ def meridian_deck_style_context() -> dict:
     ``_build_token_css``, ``layout_html`` asset-rewritten and root-tag normalised);
     ``resolve_template_bytes`` takes the ``<style>`` CSS out of that layout
     (``_extract_style_blocks_css``, ``""`` when there is none); and ``architect_node``
-    sends ``deck_style_context(token_css, style_block)``.  This runs those same
-    functions over the fixture bundle, with no database, so it cannot drift from them.
+    sends ``deck_style_context(token_css, style_block, logos)``, with ``logos`` ranked
+    by ``rank_logos``.  This runs those same functions over the fixture bundle and
+    ``assets.json``, with no database, so it cannot drift from them.
     """
     from types import SimpleNamespace
 

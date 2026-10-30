@@ -11,9 +11,12 @@ The contract these tests pin, per A8:
 
 * ``src.domain.deck_style.rank_logos(rows)`` is the ONE pure ranking + cap
   function.  ``rows`` are mappings with ``handle``, ``filename``, ``kind`` and
-  optionally ``mime``.  It keeps kinds ``logo`` and ``lockup`` only, sorts by
-  ``(filename has a reverse/white/negative/inverse/on-dark/knockout marker,
-  not SVG by mime or extension, logo before lockup, filename)`` and returns at
+  optionally ``mime``.  It keeps kinds ``logo`` and ``lockup`` only and splits
+  them by ground (a reverse/white/negative/inverse/on-dark/knockout filename
+  marker, or none).  Each ground is sorted ``(logo before lockup, not SVG by
+  mime or extension, filename)``; the grounds then alternate, default first
+  (Ruling RA8, after the devloop's Databricks library — 18 logos, 237 lockups —
+  left no white mark in the top 12 under A8's ground-first key).  It returns at
   most 12 ``{"handle", "filename"}`` dicts.  Production and
   ``evals/harness/case.py`` both use it.
 * ``deck_style_context(token_css, style_block, logos=...)`` stays pure: it
@@ -157,8 +160,8 @@ def test_svg_ranks_before_raster_by_mime_alone():
     assert _names(_rank(rows)) == ["meridian-mark", "meridian-logo.png"]
 
 
-def test_the_ground_outranks_the_format():
-    # A default-ground PNG beats a reverse SVG: the ground is the first key.
+def test_a_default_ground_raster_leads_a_reverse_svg():
+    # The default ground leads the alternation, whatever the format.
     rows = [_row("meridian-logo-reverse.svg"), _row("meridian-logo.png")]
     assert _names(_rank(rows)) == ["meridian-logo.png", "meridian-logo-reverse.svg"]
 
@@ -169,10 +172,34 @@ def test_a_logo_ranks_before_a_lockup_of_the_same_ground_and_format():
     assert _names(_rank(rows)) == ["meridian-logo.svg", "meridian-lockup.svg"]
 
 
-def test_the_format_outranks_the_kind():
-    # A8's key: (marker, not svg, kind rank, filename).  An SVG lockup beats a PNG logo.
-    rows = [_row("meridian-logo.png", "logo"), _row("meridian-lockup.svg", "lockup")]
-    assert _names(_rank(rows)) == ["meridian-lockup.svg", "meridian-logo.png"]
+def test_the_kind_outranks_the_format():
+    # RA8: within a ground, (kind rank, not svg, filename).  A PNG logo beats an SVG lockup.
+    rows = [_row("meridian-lockup.svg", "lockup"), _row("meridian-logo.png", "logo")]
+    assert _names(_rank(rows)) == ["meridian-logo.png", "meridian-lockup.svg"]
+
+
+def test_the_grounds_alternate_default_first():
+    rows = [
+        _row("c-logo-white.svg"),
+        _row("b-logo-white.svg"),
+        _row("a-logo-white.svg"),
+        _row("c-logo.svg"),
+        _row("b-logo.svg"),
+        _row("a-logo.svg"),
+    ]
+    assert _names(_rank(rows)) == [
+        "a-logo.svg",
+        "a-logo-white.svg",
+        "b-logo.svg",
+        "b-logo-white.svg",
+        "c-logo.svg",
+        "c-logo-white.svg",
+    ]
+
+
+def test_the_longer_ground_fills_the_rest_once_the_other_runs_out():
+    rows = [_row("a-logo-reverse.svg"), _row("c-logo.svg"), _row("b-logo.svg"), _row("a-logo.svg")]
+    assert _names(_rank(rows)) == ["a-logo.svg", "a-logo-reverse.svg", "b-logo.svg", "c-logo.svg"]
 
 
 def test_the_filename_breaks_the_remaining_ties():
@@ -189,12 +216,14 @@ def test_the_full_key_orders_a_mixed_set():
         _row("meridian-lockup.svg", "lockup"),
         _row("meridian-logo.svg", "logo"),
     ]
+    # Default: logo.svg, logo.png, lockup.svg.  Reverse: logo-reverse.svg,
+    # logo-on-dark.jpg, lockup-white.png.  Then alternated, default first.
     assert _names(_rank(rows)) == [
         "meridian-logo.svg",
-        "meridian-lockup.svg",
-        "meridian-logo.png",
         "meridian-logo-reverse.svg",
+        "meridian-logo.png",
         "meridian-logo-on-dark.jpg",
+        "meridian-lockup.svg",
         "meridian-lockup-white.png",
     ]
 
@@ -219,6 +248,137 @@ def test_a_default_ground_logo_listed_last_survives_the_cap():
     ranked = _names(_rank(rows))
     assert len(ranked) == CAP
     assert ranked[0] == "meridian-logo.png"
+
+
+def test_a_reverse_logo_survives_a_library_of_unmarked_lockups():
+    # RA8: a real library's product lockups outnumber the cap many times over.
+    rows = [_row(f"product-{i:02d}-lockup-full-color.svg", "lockup") for i in range(20)]
+    rows += [
+        _row("databricks-logo-navy.svg"),
+        _row("databricks-logo-full-color.svg"),
+        _row("databricks-logo-black.svg"),
+        _row("databricks-logo-white.svg"),
+    ]
+    ranked = _names(_rank(rows))
+    assert len(ranked) == CAP
+    assert ranked[:5] == [
+        "databricks-logo-black.svg",
+        "databricks-logo-white.svg",
+        "databricks-logo-full-color.svg",
+        "databricks-logo-navy.svg",
+        "product-00-lockup-full-color.svg",
+    ]
+
+
+#: The 18 logos and 237 lockups of the devloop's "Databricks Design System"
+#: (design system 1, listed 2026-10-30 through GET /api/settings/design-systems/1).
+_DATABRICKS_LOGOS = [
+    "databricks-logo-black.svg",
+    "databricks-logo-full-color.svg",
+    "databricks-logo-navy.svg",
+    "databricks-logo-stacked-full-color.svg",
+    "databricks-logo-stacked-navy.svg",
+    "databricks-logo-stacked-white.svg",
+    "databricks-logo-white-mono.svg",
+    "databricks-logo-white.svg",
+    "databricks-mosaic-research-primary-logo-full-color-black-rgb.svg",
+    "databricks-mosaic-research-primary-logo-full-color-white-rgb.svg",
+    "databricks-mosaic-research-primary-logo-one-color-black-rgb.svg",
+    "databricks-mosaic-research-primary-logo-one-color-white-rgb.svg",
+    "logo-color-unity-catalog-oss.svg",
+    "logo-color-unity-catalog-stacked-oss.svg",
+    "mlflow-logo-black-rgb.svg",
+    "mlflow-logo-white-rgb.svg",
+    "mlflow-tm-logo-black-rgb.svg",
+    "mlflow-tm-logo-white-rgb.svg",
+]
+_PRODUCT_LOCKUP_FAMILIES = (
+    "agent-bricks ai-bi-dashboards ai-bi apps clean-rooms data-streaming delta-sharing genie "
+    "lakebase lakebridge lakeflow-connect lakeflow-designer lakeflow-jobs lakeflow lakehouse "
+    "marketplace mosaic-ai notebooks photon unity-catalog"
+).split()
+_PRODUCT_LOCKUP_VARIANTS = (
+    "full-color-container full-color-white-container full-color-white full-color "
+    "no-db-full-color-container no-db-full-color-navy-alt no-db-full-color-white-alt "
+    "no-db-full-color-white-container no-db-full-color-white no-db-full-color"
+).split()
+_OTHER_LOCKUPS = (
+    [
+        f"databricks-sql-lockup-full-color{v}.svg"
+        for v in (
+            "-container-stacked", "-container", "-navy-alt", "-stacked", "-white-alt",
+            "-white-container-stacked", "-white-container", "-white-stacked", "-white", "",
+        )
+    ]
+    + [
+        f"genie-code-lockup-{v}.svg"
+        for v in (
+            "full-color-white", "full-color", "no-db-full-color-container",
+            "no-db-full-color-white-container", "no-db-full-color-white", "no-db-full-color",
+            "no-db-stacked-full-color-white", "no-db-stacked-full-color",
+        )
+    ]
+    + [
+        f"databricks-mosaic-research-{tier}-logo-{shape}-lockup-{tone}-{ground}-rgb.svg"
+        for tier in ("secondary", "tertiary")
+        for shape in ("horizontal", "stacked")
+        for tone in ("full-color", "one-color")
+        for ground in ("black", "white")
+    ]
+    + [f"event-lockup-{e}.png" for e in ("cio-forum", "exec-forum", "exec-roundtable")]
+)
+
+
+def _databricks_library() -> List[Dict[str, Any]]:
+    marks = [(name, "logo") for name in _DATABRICKS_LOGOS]
+    marks += [
+        (f"{family}-lockup-{variant}.svg", "lockup")
+        for family in _PRODUCT_LOCKUP_FAMILIES
+        for variant in _PRODUCT_LOCKUP_VARIANTS
+    ]
+    marks += [(name, "lockup") for name in _OTHER_LOCKUPS]
+    return [
+        _row(
+            name,
+            kind,
+            handle="{{ds-asset:%d}}" % (i + 1),
+            mime="image/png" if name.endswith(".png") else "image/svg+xml",
+        )
+        for i, (name, kind) in enumerate(marks)
+    ]
+
+
+def test_the_databricks_library_offers_a_mark_for_each_ground():
+    rows = _databricks_library()
+    assert sum(r["kind"] == "logo" for r in rows) == 18
+    assert sum(r["kind"] == "lockup" for r in rows) == 237
+
+    ranked = _names(_rank(rows))
+
+    assert len(ranked) == CAP
+    assert ranked[0] == "databricks-logo-black.svg"
+    on_light = {
+        "databricks-logo-black.svg",
+        "databricks-logo-navy.svg",
+        "databricks-logo-full-color.svg",
+    }
+    on_dark = {"databricks-logo-white.svg", "databricks-logo-stacked-white.svg"}
+    assert on_light <= set(ranked[:6]), ranked
+    assert on_dark & set(ranked[:6]), ranked
+    assert ranked == [
+        "databricks-logo-black.svg",
+        "databricks-logo-stacked-white.svg",
+        "databricks-logo-full-color.svg",
+        "databricks-logo-white-mono.svg",
+        "databricks-logo-navy.svg",
+        "databricks-logo-white.svg",
+        "databricks-logo-stacked-full-color.svg",
+        "databricks-mosaic-research-primary-logo-full-color-white-rgb.svg",
+        "databricks-logo-stacked-navy.svg",
+        "databricks-mosaic-research-primary-logo-one-color-white-rgb.svg",
+        "databricks-mosaic-research-primary-logo-full-color-black-rgb.svg",
+        "mlflow-logo-white-rgb.svg",
+    ]
 
 
 def test_fewer_rows_than_the_cap_all_come_back():
@@ -343,14 +503,15 @@ ASSETS = [
     (202, OTHER_DS_ID, "lockup", "other-brand-lockup.svg", "image/svg+xml"),
 ]
 
-#: Hand-ranked: default ground (svg: logo, lockup; raster: logo), then reverse
-#: (svg: logo; raster: logo, lockup).  Icons, other kinds and DS 8 are absent.
+#: Hand-ranked (RA8): default ground (logo svg, logo png, lockup svg) and reverse
+#: (logo svg, logo jpg, lockup png), alternated default first.  Icons, other
+#: kinds and DS 8 are absent.
 EXPECTED_LOGOS = [
     {"handle": "{{ds-asset:103}}", "filename": "meridian-logo.svg"},
-    {"handle": "{{ds-asset:104}}", "filename": "meridian-lockup.svg"},
-    {"handle": "{{ds-asset:102}}", "filename": "meridian-logo.png"},
     {"handle": "{{ds-asset:101}}", "filename": "meridian-logo-reverse.svg"},
+    {"handle": "{{ds-asset:102}}", "filename": "meridian-logo.png"},
     {"handle": "{{ds-asset:111}}", "filename": "meridian-logo-on-dark.jpg"},
+    {"handle": "{{ds-asset:104}}", "filename": "meridian-lockup.svg"},
     {"handle": "{{ds-asset:105}}", "filename": "meridian-lockup-white.png"},
 ]
 
@@ -496,13 +657,38 @@ def test_the_logo_read_never_selects_the_bytes_column(env):
 # --- no active design system: no logos ----------------------------------------
 
 
+def _asset_reads_during(env, run) -> List[str]:
+    """The SELECTs on ``design_system_asset`` the engine saw while ``run()`` ran."""
+    statements: List[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(env.engine, "before_cursor_execute", _record)
+    try:
+        run()
+    finally:
+        event.remove(env.engine, "before_cursor_execute", _record)
+    return [
+        s
+        for s in statements
+        if s.lstrip().upper().startswith("SELECT") and "design_system_asset" in s
+    ]
+
+
 def test_an_unpinned_deck_gets_no_logos(env):
     _add_assets(env)
     # Even with the style resolver reporting a design system, no id is pinned.
     env.style.design_system_active = True
+    seen: Dict[str, Any] = {}
 
-    payload = _architect_payload(env, architect_build(make_spec((0,))))
+    def _run():
+        seen["payload"] = _architect_payload(env, architect_build(make_spec((0,))))
 
+    reads = _asset_reads_during(env, _run)
+    payload = seen["payload"]
+
+    assert reads == [], "a deck without a design system read the asset table"
     assert payload["deck_style_context"]["logos"] == []
     assert payload["deck_style_context"] == {
         "design_tokens": {},
@@ -514,10 +700,15 @@ def test_an_unpinned_deck_gets_no_logos(env):
 def test_a_pinned_but_inactive_design_system_gets_no_logos(env):
     _add_assets(env)
     _pin(env, active=False)
+    seen: Dict[str, Any] = {}
 
-    payload = _architect_payload(env)
+    def _run():
+        seen["payload"] = _architect_payload(env)
 
-    assert payload["deck_style_context"]["logos"] == []
+    reads = _asset_reads_during(env, _run)
+
+    assert reads == [], "an inactive design system's assets were read"
+    assert seen["payload"]["deck_style_context"]["logos"] == []
 
 
 def test_a_design_system_with_no_logo_assets_gets_no_logos(env):

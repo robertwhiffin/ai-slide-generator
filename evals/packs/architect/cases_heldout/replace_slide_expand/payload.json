@@ -295,16 +295,16 @@
         "filename": "logos/meridian-logo.svg"
       },
       {
-        "handle": "{{ds-asset:9004}}",
-        "filename": "logos/meridian-lockup.svg"
+        "handle": "{{ds-asset:9002}}",
+        "filename": "logos/meridian-logo-reverse.svg"
       },
       {
         "handle": "{{ds-asset:9003}}",
         "filename": "logos/meridian-logo.png"
       },
       {
-        "handle": "{{ds-asset:9002}}",
-        "filename": "logos/meridian-logo-reverse.svg"
+        "handle": "{{ds-asset:9004}}",
+        "filename": "logos/meridian-lockup.svg"
       }
     ]
   }
