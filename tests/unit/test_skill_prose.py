@@ -203,6 +203,21 @@ class TestBuilderProse:
         kept the template's Unity Catalog lockup whatever its topic."""
         assert "Sample furniture is placeholder too" in load_skill("builder").instructions
 
+    def test_builder_adds_a_source_line_for_sourced_figures(self):
+        """Genie One (Task 8): a slide that shows resolved_data.figures cites each
+        figure's source field, and only that.  Both the skill body and the packaged
+        v1 builder prompt carry the rule, so neither can drift from the other."""
+        heading = "SOURCE LINE (only when the slide shows figures from resolved_data.figures):"
+        no_invention = "never invent a source"
+        instructions = load_skill("builder").instructions
+        assert heading in instructions
+        assert no_invention in instructions
+
+        manifest = load_graph_v1_manifest()
+        builder = next(d for d in manifest.definitions if d.agent_key == "builder")
+        assert heading in builder.prompt_text
+        assert no_invention in builder.prompt_text
+
 
 class TestArchitectProse:
     """The architect plans a full deck from reusable sections (deck-parity loop)."""

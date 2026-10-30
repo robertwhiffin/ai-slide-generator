@@ -23,7 +23,7 @@ from tests.fixtures.packaged_release_loader import (
 PACKAGED_V1_CONTENT_HASHES = {
     "architect": "3da09952e7751cd967c3cee11b77628c51565e37fa1b75c1c6e9f92a92d3126b",
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "181a982b59e11d30fff55c1379d8359db4890064ed59b0a16f618e9a5e034455",
+    "builder": "025f6a714ecd88ce68f7ba289f0fdc302298ab4ed66d456a7fcae45f46ca5f7d",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "8342438644d4665e929d7fdbd694d0024e401546ae06a9566161b309adb4c82a",
     "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
