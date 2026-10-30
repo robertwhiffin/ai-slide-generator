@@ -112,8 +112,10 @@ Real-model runs; results are logged to MLflow.
     `brand_asset_use_score`: the slide places at least one `{{ds-asset:N}}` from that list (a
     handle the payload itself carries does not count), every other handle is in the list or
     carried by the payload (`section_html`, a deck-style component's `example_html`), and the run's
-    `tool_calls` record holds a `search_brand_assets` call. Like the deck-style use, it is ANDed
-    into `render_measures` and so skips with `--no-render`.
+    `tool_calls` record holds a `search_brand_assets` call. When the `expect` also has `brand_icons`
+    (the index's icon-kind handles), the slide must place one of those: a logo alone is not an
+    icon (Ruling RA10). Like the deck-style use, it is ANDed into `render_measures` and so skips
+    with `--no-render`.
   - `judge`: an LLM judge (`mlflow.genai.make_judge`) using the pack's `judge_prompt.md`. It compares
     the candidate with the reference and the brief and returns pass or fail. For the builder and the
     build_reviewer, the brief also carries the payload's `deck_style` when it has one.
@@ -1394,7 +1396,8 @@ scores its use. No prompt changed and no real-model run was made.
 - **`deck_style_icons`** (builder, both splits; train slide 7, held-out slide 5). A positive whose
   look asks for brand icons and names its deck-style pieces (`dk-table` and `dk-note` on train,
   `dk-steps` on held-out). Nothing in the payload names an asset handle, so only a search can supply
-  one. `expect.brand_assets` lists every handle of the index. The reference places index icons. The
+  one. `expect.brand_assets` lists every handle of the index and `expect.brand_icons` its icons, one
+  of which the slide must place (a logo alone fails). The reference places index icons. The
   `should_fail` places invented asset ids (train) or hand-drawn glyphs (held-out).
   `brand_asset_use_score` fails both (see Scorers).
 - **The architect footer.** The `build_technical_deck` expect gains `logo_handles`, and both

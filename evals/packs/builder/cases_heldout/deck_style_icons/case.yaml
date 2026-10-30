@@ -12,4 +12,9 @@ expect:
   - '{{ds-asset:9006}}'
   - '{{ds-asset:9007}}'
   - '{{ds-asset:9008}}'
+  brand_icons:
+  - '{{ds-asset:9005}}'
+  - '{{ds-asset:9006}}'
+  - '{{ds-asset:9007}}'
+  - '{{ds-asset:9008}}'
 design_system_active: true

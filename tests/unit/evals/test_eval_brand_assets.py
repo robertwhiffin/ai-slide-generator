@@ -27,8 +27,10 @@ RA5 and RA7):
   written by the generator). It passes only when the HTML holds at least one ``{{ds-asset:N}}``
   handle from ``expect["brand_assets"]``, no handle outside that set and the handles the payload
   itself carries (``section_html``, a deck-style component's ``example_html``), and
-  ``tool_calls`` holds a ``search_brand_assets`` call. Every failing condition is named
-  (needles: ``handle``; the outside handle's number; ``search``).
+  ``tool_calls`` holds a ``search_brand_assets`` call. When ``expect`` has ``brand_icons`` (the
+  index's icon-kind handles; Ruling RA10), the HTML must also place one of those: a logo alone
+  does not answer a look that asks for icons. Every failing condition is named (needles:
+  ``handle``; the outside handle's number; ``search``; ``icon``).
 * **Where it runs (A15's choice, made here).** Folded into ``mlflow_run``'s ``render_measures``
   scorer, keyed on ``"brand_assets" in case.expect`` and ANDed like ``deck_style_use_score``; so
   it skips with the render (``--no-render``), and the builder and fixer scorer lists are unchanged.
@@ -36,7 +38,8 @@ RA5 and RA7):
   ``evals/packs/builder/mutations.py`` and ``heldout.py``: positive, its payload the deck-style
   case shape with the shared technical fixture, a look that asks for icons and names its pieces,
   no handle anywhere in the payload; ``expect == {"deck_style_classes": [...], "brand_assets":
-  [every assets.json handle, in file order]}``; its reference places index icons; its
+  [every assets.json handle, in file order], "brand_icons": [its icon-kind handles, in file
+  order]}``; its reference places index icons; its
   ``calibration.json`` is ``{"should_fail": <builder output>}`` that the scorer fails even beside
   a search.
 * **The architect footer (A17, RA5).** ``scorers._deck_style_score(structured, expect,
@@ -126,7 +129,11 @@ def _icon_slide(*handles: str) -> str:
 
 
 GOOD_HTML = _icon_slide(ICON_HANDLES[0], ICON_HANDLES[1])
-BRAND_EXPECT = {"deck_style_classes": ["dk-note"], "brand_assets": list(INDEX_HANDLES)}
+BRAND_EXPECT = {"deck_style_classes": ["dk-note"], "brand_assets": list(INDEX_HANDLES),
+                "brand_icons": list(ICON_HANDLES)}
+#: What a model draws for an icon when it never placed a brand one: a hand-made glyph.
+DRAWN_GLYPH = ('<svg width="48" height="48" viewBox="0 0 48 48" aria-hidden="true">'
+               '<circle cx="24" cy="24" r="18" fill="none" stroke="currentColor"/></svg>')
 
 
 def _payload(*, section_html: str = "", components=None) -> dict:
@@ -240,6 +247,44 @@ def test_the_index_is_the_cases_expect():
     assert ok, why
     ok, why = _score(_icon_slide(ICON_HANDLES[0]), expect=expect)
     assert not ok and ICON_HANDLES[0][len("{{ds-asset:"):-2] in why, why
+
+
+_ICON_IMGS = [f'<img src="{h}" alt="" style="width:48px;height:48px"/>' for h in ICON_HANDLES[:2]]
+_FOOTER_LOGO = (f'<span><img src="{LOGO_HANDLES[0]}" alt="Meridian" style="height:24px"/>'
+                "</span>")
+#: Ruling RA10: the searched logo in the footer, hand-drawn glyphs where the look asked for icons.
+LOGO_ONLY_HTML = (GOOD_HTML.replace(_ICON_IMGS[0], DRAWN_GLYPH).replace(_ICON_IMGS[1], DRAWN_GLYPH)
+                  .replace("<span>Meridian</span>", _FOOTER_LOGO))
+
+
+def test_brand_asset_use_fails_a_logo_only_slide_with_drawn_glyphs():
+    """Ruling RA10: an index logo is a brand asset but not an icon; a look that asks for icons is
+    not answered by a logo beside hand-drawn glyphs, a search or not."""
+    assert _handles(LOGO_ONLY_HTML) == [LOGO_HANDLES[0]]
+    assert LOGO_ONLY_HTML.count(DRAWN_GLYPH) == 2
+    ok, why = _score(LOGO_ONLY_HTML)
+    assert not ok, why
+    assert "icon" in why.lower(), why
+    assert "neither in the index" not in why, why  # the logo is the index's, so not outside it
+
+
+def test_brand_asset_use_passes_icons_beside_a_logo():
+    """The icon rule asks for an icon, not for the absence of a logo."""
+    ok, why = _score(GOOD_HTML.replace("<span>Meridian</span>", _FOOTER_LOGO))
+    assert ok, why
+
+
+def test_the_icon_rule_is_the_cases_brand_icons():
+    """Pure like the index rule: the icons a slide must place one of are ``expect["brand_icons"]``,
+    and an expect without the key asks for none."""
+    expect = {**BRAND_EXPECT, "brand_icons": [ICON_HANDLES[1]]}
+    ok, why = _score(_icon_slide(ICON_HANDLES[0]), expect=expect)
+    assert not ok and "icon" in why.lower(), why
+    ok, why = _score(_icon_slide(ICON_HANDLES[1]), expect=expect)
+    assert ok, why
+    no_key = {k: v for k, v in BRAND_EXPECT.items() if k != "brand_icons"}
+    ok, why = _score(LOGO_ONLY_HTML, expect=no_key)
+    assert ok, why
 
 
 # =========================================================================== the harness wiring
@@ -700,7 +745,7 @@ def test_new_case_references_pass_and_calibrations_fail(monkeypatch, split):
     assert cal is not None and set(cal) == {"should_fail"}
     bad = cal["should_fail"]
     assert "deck_style" in c.payload and c.design_system_active is True
-    assert set(c.expect) == {"deck_style_classes", "brand_assets"}
+    assert set(c.expect) == {"deck_style_classes", "brand_assets", "brand_icons"}
 
     ref_html, bad_html = c.reference["html"], bad["html"]
     # The reference: index handles after a search; the deck-style use rule holds too.
@@ -732,6 +777,23 @@ def test_icons_case_reference_places_index_icons_the_search_finds(split):
     used = set(_handles(c.reference["html"]))
     assert used and used <= set(INDEX_HANDLES), used
     assert used & set(ICON_HANDLES), "the look asks for icons: the reference places at least one"
+
+
+@pytest.mark.parametrize("split", SPLITS)
+def test_icons_case_fails_its_reference_with_a_logo_for_each_icon(monkeypatch, split):
+    """Ruling RA10 on the committed case: the reference with every icon swapped for the index's
+    logo places only brand assets, after a search, yet answers no icon; it fails, naming it."""
+    _patch_judge(monkeypatch)
+    c = _icons_case(split)
+    html = c.reference["html"]
+    for handle in ICON_HANDLES:
+        html = html.replace(handle, LOGO_HANDLES[0])
+    assert set(_handles(html)) == {LOGO_HANDLES[0]}
+    ok, why = scorers.brand_asset_use_score(html, c.payload, c.expect, tool_calls=SEARCH_TRACE)
+    assert not ok and "icon" in why.lower(), why
+    fb = _score_row(_scorer("builder", "render_measures"), c, {**c.reference, "html": html},
+                    split=split)
+    assert fb.value == "fail" and "icon" in fb.rationale.lower(), fb.rationale
 
 
 @pytest.mark.parametrize("split", SPLITS)

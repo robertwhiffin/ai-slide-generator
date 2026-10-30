@@ -234,6 +234,12 @@ def brand_asset_handles() -> list[str]:
     return [row["handle"] for row in json.loads(ASSET_INDEX.read_text())]
 
 
+def brand_icon_handles() -> list[str]:
+    """The fake asset index's icon-kind handles, in the file's order: a brand-asset case's
+    ``expect.brand_icons`` (Ruling RA10: the slide must place one; a logo alone is not an icon)."""
+    return [row["handle"] for row in json.loads(ASSET_INDEX.read_text()) if row["kind"] == "icon"]
+
+
 def _icon_handle(filename: str) -> str:
     """The fake index's handle for the icon ``icons/<filename>``."""
     rows = json.loads(ASSET_INDEX.read_text())
@@ -433,7 +439,8 @@ def generate(out_dir: pathlib.Path | None = None):
                  deck_style=style),
         {"position": ICONS_POSITION, "html": _icons_slide(searched), "scripts": ""},
         {"position": ICONS_POSITION, "html": _icons_slide(invented), "scripts": ""},
-        expect={"deck_style_classes": list(ICONS_CLASSES), "brand_assets": brand_asset_handles()},
+        expect={"deck_style_classes": list(ICONS_CLASSES), "brand_assets": brand_asset_handles(),
+                "brand_icons": brand_icon_handles()},
     )
 
 

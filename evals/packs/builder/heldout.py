@@ -315,7 +315,8 @@ def generate(out_dir: pathlib.Path | None = None):
          "scripts": ""},
         {"position": ICONS_POSITION, "html": _checklist_slide([_DRAWN_ICON] * len(_PRACTICES)),
          "scripts": ""},
-        expect={"deck_style_classes": list(ICONS_CLASSES), "brand_assets": m.brand_asset_handles()},
+        expect={"deck_style_classes": list(ICONS_CLASSES), "brand_assets": m.brand_asset_handles(),
+                "brand_icons": m.brand_icon_handles()},
     )
 
 

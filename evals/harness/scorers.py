@@ -735,14 +735,19 @@ def brand_asset_use_score(
     * every other handle in ``html`` is in the index or one the payload carries
       (``section_html``, a deck-style component's ``example_html``): an invented one fails;
     * ``tool_calls`` (the run's record; ``()``, ``None`` or MLflow's list) holds a
-      ``search_brand_assets`` call. Another tool's call does not count.
+      ``search_brand_assets`` call. Another tool's call does not count;
+    * when ``expect`` lists ``brand_icons`` (the index's icon-kind handles, Ruling RA10), ``html``
+      places at least one of them: a logo beside hand-drawn glyphs does not answer a look that
+      asks for icons.
 
     Every failing condition is named in the rationale.
     """
     index = list((expect or {}).get("brand_assets") or [])
+    icons = list((expect or {}).get("brand_icons") or [])
     used = _asset_handles(html or "")
     given = _payload_handles(payload)
     placed = [h for h in used if h in index]
+    placed_icons = [h for h in placed if h in icons]
     outside = [h for h in used if h not in index and h not in given]
     searched = any(
         isinstance(call, Mapping) and call.get("name") == BRAND_SEARCH_TOOL
@@ -752,6 +757,10 @@ def brand_asset_use_score(
     reasons = []
     if not placed:
         reasons.append("places no brand-asset handle from the asset index")
+    if icons and not placed_icons:
+        reasons.append(
+            f"places no brand icon from the asset index ({', '.join(icons)}); a logo alone does "
+            "not answer a look that asks for icons")
     if outside:
         reasons.append(
             f"places asset(s) neither in the index nor given in the payload: {', '.join(outside)}")
@@ -759,8 +768,9 @@ def brand_asset_use_score(
         reasons.append(f"the run made no {BRAND_SEARCH_TOOL} call")
     if reasons:
         return False, "Brand assets: " + "; ".join(reasons)
+    icon_note = f" (icons: {', '.join(placed_icons)})" if icons else ""
     return True, (
-        f"Brand assets: places {', '.join(placed)} from the asset index, after a "
+        f"Brand assets: places {', '.join(placed)} from the asset index{icon_note}, after a "
         f"{BRAND_SEARCH_TOOL} call")
 
 

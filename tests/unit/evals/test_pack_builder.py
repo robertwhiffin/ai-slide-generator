@@ -103,7 +103,7 @@ def test_case_contract(cid):
     assert c.payload["resolved_style"] == case.meridian_resolved_style()
     assert c.payload["design_system_active"] is True
     if cid in BRAND_ASSET_CASES:
-        assert set(c.expect) == {"deck_style_classes", "brand_assets"}
+        assert set(c.expect) == {"deck_style_classes", "brand_assets", "brand_icons"}
         assert "deck_style" in c.payload
     elif cid in DECK_STYLE_CASES:
         assert set(c.expect) == {"deck_style_classes"}
@@ -290,6 +290,17 @@ def test_brand_asset_case_expect_is_the_fake_asset_index(cid):
     want = [row["handle"] for row in _index()]
     assert want and len(want) == len(set(want))
     assert case.load_case(AGENT, cid, root=CASES).expect["brand_assets"] == want
+
+
+@pytest.mark.parametrize("cid", BRAND_ASSET_CASES)
+def test_brand_asset_case_expect_lists_the_index_icons(cid):
+    """Ruling RA10: ``expect.brand_icons`` is the index's icon-kind handles, in the file's order:
+    the slide must place one of those (a logo alone does not answer a look that asks for icons)."""
+    want = [row["handle"] for row in _index() if row["kind"] == "icon"]
+    assert want
+    c = case.load_case(AGENT, cid, root=CASES)
+    assert c.expect["brand_icons"] == want
+    assert set(want) <= set(c.expect["brand_assets"])
 
 
 @pytest.mark.parametrize("cid", BRAND_ASSET_CASES)
