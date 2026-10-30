@@ -776,7 +776,7 @@ The graph's architect can author a **deck style** that gives the deck a look of 
 
 **CSS order and where it is written.** Tokens, then the template block, then the deck style. It is written twice, in that order: the pre-fan-out write (`deterministic_css` plus the deck style's CSS into `deck.css`, with `emitted_style_blocks` carrying the template block then the deck style as CSS text, not `<style>` markup), and the post-commit aggregate (`aggregate_deck_css`), which re-merges the blocks. Builders' slides render with the style from the first `slide_ready`, and a restyle rewrites `deck.css` from the current style, so a removed piece does not linger.
 
-**Payload keys.** `deck_style` (the style's dump, when present) goes on the builder, build_reviewer, fixer and fix_reviewer payloads and on the re-review of committed slides. `deck_style_context` goes on the architect: the design tokens and template classes it must not restate. The `deck_style` key is optional in the model-payload fixtures, so a deck without a style sends the payload it always did.
+**Payload keys.** `deck_style` (the style's dump, when present) goes on the builder, build_reviewer, fixer and fix_reviewer payloads and on the re-review of committed slides. `deck_style_context` goes on the architect: the design tokens and template classes it must not restate. The key is added only when the deck has a style, and `model_payload_for` passes it through, so a deck without a style sends the payload it always did.
 
 **Edits.**
 - A slide edit builds the new slide with the current style.
@@ -784,7 +784,7 @@ The graph's architect can author a **deck style** that gives the deck a look of 
 - Drop check: if a restyle removes a class that a kept slide still uses, the edit is refused (`deck_style_drops_used_class`) with a sentence naming the slides and the class, unless those slides are updated in the same edit. It runs only when there is a prior and a new style and the contract is unchanged. Template-owned classes and `slide` are excluded; every other class counts.
 - A full-spec edit, and a describe-only answer with intent `build`, carry the persisted style forward when the contract is unchanged. A null `deck_changes.deck_style` means unchanged, so an edit cannot remove a style.
 - A style carried into a changed contract (an operations edit with no new style) is re-sanitised under the committed contract's flag, and committed as absent if nothing survives.
-- A design-contract change rebuilds every slide, so the architect writes a fresh style with it.
+- A design-contract change rebuilds every slide, so the architect is expected to write a fresh style with it (the prompt asks; the code carries the old one if it does not).
 
 **Old decks.** A deck with no style builds, edits and renders as before: no payload key, no extra CSS. The architect may add one when the user asks for a style change or a rebuild. Slides built earlier do not use its classes.
 

@@ -118,7 +118,7 @@ The graph already has a single deck-CSS slot: `emitted_style_blocks`, merged by 
 - **A slide that needs a piece the deck style doesn't have** (the first chart, say): the architect adds it in `deck_changes.deck_style` in the same turn, so later slides can reuse it.
 - **A design-contract change** (a new design system or template), which already invalidates every slide: the architect writes a fresh deck style along with the rebuild.
 - **An older deck with no deck style** keeps today's behaviour. The architect may introduce one when the user asks for a style change or a full rebuild, and otherwise leaves it absent. Slides built before it existed don't use its classes, which is acceptable.
-- **`classify_spec_change`:** a deck-style-only change is not a narrative change. It does not fire the deck-level re-review / rebuild path. It is a CSS rewrite.
+- **`classify_spec_change`:** a deck-style-only change is not a narrative change. It does not fire the per-slide re-review or a rebuild. It is a CSS rewrite; the deck (arc) review still runs (see "Changes during the build", R12).
 
 ### 6. Reviewers
 
@@ -215,7 +215,7 @@ Sanitiser (`src/domain/deck_style.py`):
 Edits:
 - A dropped class used by a kept slide refuses the edit with a slide-numbered sentence (`deck_style_drops_used_class`, R6). The check runs only when both a prior and a new style exist and the contract is unchanged (R7). It excludes classes the template owns and `slide`, and counts every other class (R22).
 - Full-spec edits carry the persisted style forward on the same contract, and so does a describe-only answer with intent `build` (R8, R20, R23). A null `deck_changes.deck_style` means unchanged, so an edit cannot remove a style (R13).
-- A deck-style-only edit rebuilds nothing, but the arc (deck) review still runs, one call per restyle (R12). This replaces "re-reviews nothing" in section 5 and in the Calls list.
+- A deck-style-only edit rebuilds nothing, but the arc (deck) review still runs, one call per restyle (R12). This replaces the "rebuilds and re-reviews nothing" wording in the Calls list and §5's "not a narrative change" bullet.
 - The deck style is also in the payload of `rereview_committed_slides` (R5). `build_request` is unchanged (R9).
 
 Reviewers and prompts:
@@ -231,7 +231,7 @@ Owner decisions:
 - The builder moved to Sonnet (`system.ai.claude-sonnet-5-5`). Measured against Haiku: train 1.00 vs 0.86, held-out 0.86 vs 0.71, deck-style code cases 5/5 vs 2/10, at about 1.6 to 1.8 times the latency per slide and 2.8 times the cost per slide (about USD 0.55 vs 0.21 per 15-slide deck). The production workspace must offer that endpoint with non-zero rate limits. See `evals/README.md`.
 
 Bars missed and known gaps:
-- Architect build output tokens rose by 3,147 to 3,574 against the +2,500 bar (baseline 5,702). The architect build call went from about 51 s to about 77 s, close to the +30 s time-to-first-slide bar. Mostly longer reasoning; closing it likely needs a thinking-budget setting (owner call).
+- Architect build output tokens rose by 3,147 to 3,574 against the +2,500 bar (baseline 5,702). The architect build call went from about 51 s to about 77 s, close to the +30 s time-to-first-slide bar. Mostly longer reasoning; closing it is an owner call (the README says the growth is mostly reasoning).
 - No eval case has a deck style on a deck with no design system, for the architect or the builder, so the ground-piece rule is shown non-breaking, not working.
 - The architect cases carry no labelled template sections.
 - The build-reviewer gap is unmeasured: its new cases are caught today by `rogue_colour`, so no gap was shown.
