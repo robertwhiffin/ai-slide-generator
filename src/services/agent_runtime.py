@@ -546,10 +546,14 @@ class DatabricksModelAdapter:
         * a reply in which any tool call names the schema ends the loop: that
           call's args are validated against ``schema`` and returned (a
           ``ValidationError`` is the same parse failure ``invoke`` raises);
-        * a reply with no tool calls is nudged once to call the schema; a second
-          one raises ``OutputParserException``;
+        * a reply with no tool calls (valid or malformed) is nudged once to call
+          the schema; a second one raises ``OutputParserException``;
         * otherwise the reply and one ``ToolMessage`` per call (same id) are
-          appended; see :meth:`_answer_tool_call`.
+          appended; see :meth:`_answer_tool_call`.  A malformed call (arguments
+          that are not JSON) is answered too: the provider client sends it back
+          in the assistant turn, and an unanswered call is a rejected history.
+          After the round that spends the budget, one ``HumanMessage`` tells the
+          model to call the schema now; it is never repeated.
 
         After ``max_calls + 3`` rounds without a schema call it raises
         ``OutputParserException``.  Only the model's own calls (construction,
@@ -565,6 +569,7 @@ class DatabricksModelAdapter:
             raise ValueError("a toolset needs at least one tool")
         # The name the model sees for the schema (the parser matches it the same way).
         schema_name = convert_to_openai_tool(schema)["function"]["name"]
+        budget_text = f"Tool budget exhausted. Call {schema_name} now with what you have."
         tools_by_name = {tool.name: tool for tool in toolset.tools}
         with _model_provider_errors_collapsed():
             bound_model = bind_structured_output_model(
@@ -578,14 +583,16 @@ class DatabricksModelAdapter:
         messages: list[Any] = [HumanMessage(content=prompt)]
         toolset.start()
         nudged = False
+        budget_noticed = False
         for _ in range(toolset.max_calls + 3):
             with _model_provider_errors_collapsed():
                 reply = bound_model.invoke(messages)
             tool_calls = list(reply.tool_calls)
+            malformed_calls = list(reply.invalid_tool_calls)
             for call in tool_calls:
                 if call["name"] == schema_name:
                     return schema.model_validate(call["args"])
-            if not tool_calls:
+            if not tool_calls and not malformed_calls:
                 if nudged:
                     raise OutputParserException(
                         "the model replied twice without calling the structured-output tool"
@@ -601,11 +608,22 @@ class DatabricksModelAdapter:
                 messages.append(
                     ToolMessage(
                         content=self._answer_tool_call(
-                            call, tools_by_name, toolset, schema_name=schema_name
+                            call, tools_by_name, toolset, budget_text=budget_text
                         ),
                         tool_call_id=call["id"],
                     )
                 )
+            # Answered after the valid calls: the order the client sends them in.
+            for call in malformed_calls:
+                messages.append(
+                    ToolMessage(
+                        content="Tool error: the arguments were not valid JSON.",
+                        tool_call_id=call["id"],
+                    )
+                )
+            if not budget_noticed and toolset.exhausted():
+                budget_noticed = True
+                messages.append(HumanMessage(content=budget_text))
         raise OutputParserException(
             "the model did not call the structured-output tool within the round limit"
         )
@@ -616,7 +634,7 @@ class DatabricksModelAdapter:
         tools_by_name: Mapping[str, AgentTool],
         toolset: AgentToolset,
         *,
-        schema_name: str,
+        budget_text: str,
     ) -> str:
         """The ``ToolMessage`` content for one tool call; it never raises an ``Exception``.
 
@@ -625,11 +643,16 @@ class DatabricksModelAdapter:
         ``args_schema``, the call is counted, and the tool runs with the budget's
         remaining seconds.  A ``ToolAccessError`` is recorded on the toolset;
         any other failure (bad args included) is answered as a tool error.
+
+        An error's text is untrusted (it can carry a service's or a payload's
+        words), so it reaches the model only inside ``spotlight``.  The tool's
+        own return value is the tool's to spotlight.
         """
         from src.services.agent_tools.toolset import ToolAccessError
+        from src.utils.spotlight import spotlight
 
         if toolset.exhausted():
-            return f"Tool budget exhausted. Call {schema_name} now with what you have."
+            return budget_text
         tool = tools_by_name.get(call["name"])
         if tool is None:
             return f"Unknown tool: {call['name']}"
@@ -639,9 +662,11 @@ class DatabricksModelAdapter:
             return tool.run(args, remaining_seconds=toolset.remaining_seconds())
         except ToolAccessError as error:
             toolset.access_errors.append(error)
-            return f"Access denied: {error.message}"
+            return "Access denied: " + spotlight("tool_error", error.message)
         except Exception as error:  # noqa: BLE001 - a tool failure is answered in-band
-            return f"Tool error: {type(error).__name__}: {str(error)[:300]}"
+            return f"Tool error: {type(error).__name__}: " + spotlight(
+                "tool_error", str(error)[:300]
+            )
 
 
 #: HTTP statuses a retry or a later turn can succeed on: request timeout,
