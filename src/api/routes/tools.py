@@ -255,8 +255,29 @@ def _discover_mcp_connections() -> dict:
 
         return {"items": items}
     except Exception as e:
+        from src.core.scope_errors import (
+            consent_message,
+            is_missing_scope_error,
+            oauth_client_id_from_token,
+        )
+
+        if is_missing_scope_error(e):
+            logger.warning(f"MCP discovery failed: missing OAuth scope: {e}")
+            try:
+                token = get_user_client().config.token
+            except Exception:
+                token = None
+            return {
+                "items": [],
+                "error": consent_message(oauth_client_id=oauth_client_id_from_token(token)),
+                "error_code": "missing_scope",
+            }
         logger.warning(f"Failed to discover MCP connections: {e}")
-        return {"items": []}
+        return {
+            "items": [],
+            "error": f"Could not list MCP connections: {type(e).__name__}",
+            "error_code": "discovery_failed",
+        }
 
 
 def _discover_model_endpoints() -> dict:

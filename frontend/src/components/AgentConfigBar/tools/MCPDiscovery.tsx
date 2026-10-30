@@ -31,6 +31,7 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchConnections();
@@ -51,9 +52,11 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
   const fetchConnections = async () => {
     setLoading(true);
     setError(null);
+    setDiscoveryError(null);
     try {
       const result = await api.discoverMCPConnections();
-      setConnections(result.items);
+      setConnections(result.items ?? []);
+      setDiscoveryError(result.error ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load MCP connections');
     } finally {
@@ -141,7 +144,10 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
 
         {!loading && !error && (
           <>
-            {filtered.length === 0 && (
+            {discoveryError && (
+              <p className="text-sm text-red-600 py-4 px-2 whitespace-pre-line">{discoveryError}</p>
+            )}
+            {!discoveryError && filtered.length === 0 && (
               <p className="text-sm text-gray-500 py-4 text-center">
                 {query ? 'No matching connections.' : 'No MCP connections available.'}
               </p>

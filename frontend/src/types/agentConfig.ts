@@ -95,6 +95,8 @@ export interface DiscoveryItem {
 
 export interface DiscoveryResponse {
   items: DiscoveryItem[];
+  error?: string;
+  error_code?: string;
 }
 
 export interface ColumnInfo {
