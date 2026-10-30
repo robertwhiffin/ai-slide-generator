@@ -76,6 +76,22 @@ export interface SlideSpec {
   /** The design system's own `data-label` for the bound template section. */
   slide_type?: string | null;
   template_section_index?: number | null;
+  /** One-line description of how this slide should look, in the deck style's terms. */
+  look?: string | null;
+}
+
+/** One reusable piece in the deck style's catalogue. */
+export interface DeckStyleComponent {
+  name: string;
+  class_names: string[];
+  use: string;
+  example_html: string;
+}
+
+/** The architect-authored stylesheet for the deck and its catalogue of pieces. */
+export interface DeckStyle {
+  css: string;
+  components: DeckStyleComponent[];
 }
 
 /**
@@ -96,6 +112,7 @@ export interface DeckSpec {
   design_contract: DesignContractRef;
   resolved_data: ResolvedData;
   slides: SlideSpec[];
+  deck_style?: DeckStyle | null;
 }
 
 export interface SlideDeck {

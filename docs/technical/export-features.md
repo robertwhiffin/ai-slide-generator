@@ -335,7 +335,7 @@ If the slide deck has no title, "slides" is used as the default for PDF and PPTX
 5. Call to action (`## Call to action`)
 6. Narrative arc (`## Narrative arc`, as a numbered list in the given order)
 7. Design contract (`## Design contract`, ids only: `Design system #N`, `Template #N`, `Slide style #N`; `No design system or slide style pinned` when none is set)
-8. Slide briefs (`## Slide briefs`, then `### Slide N` per slide in the given order, with Purpose, Content brief, Assumes, Hands off, Slide type when set, and Data references)
+8. Slide briefs (`## Slide briefs`, then `### Slide N` per slide in the given order, with Purpose, Content brief, Assumes, Hands off, Slide type when set, Look (when set), and Data references)
 9. Data (`## Data`, with Synthesis, Figures, and Gaps)
 
 The field `template_section_index` is omitted: it is a 0-based machine index into a pinned template, while `slide_type` carries the same binding by its human-facing label. A bare index next to a 1-based "Slide 1" heading would mislead. An empty value renders as `Not set.` and an empty list as `None.`; absent `resolved_data` or `data_references` render the same way.

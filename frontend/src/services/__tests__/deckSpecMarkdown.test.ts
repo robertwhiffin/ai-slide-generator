@@ -254,10 +254,10 @@ describe('structure of the rendered golden', () => {
     expect(disallowedTypes(root())).toEqual([]);
   });
 
-  it('bolds exactly the six slide labels', () => {
+  it('bolds exactly the seven slide labels', () => {
     // Sabotage target: drop or rename a label (e.g. omit `Data references`), or bold a value.
     expect(new Set(strongTexts(root()))).toEqual(
-      new Set(['Purpose:', 'Content brief:', 'Assumes:', 'Hands off:', 'Slide type:', 'Data references:']),
+      new Set(['Purpose:', 'Content brief:', 'Assumes:', 'Hands off:', 'Slide type:', 'Look:', 'Data references:']),
     );
   });
 
@@ -540,6 +540,19 @@ describe('empty and optional values (D2)', () => {
     expect(out).not.toContain('Slide type');
   });
 
+  it('look absent (pre-field JSON) renders exactly like look null: no Look line', () => {
+    // Sabotage target: `slide.look !== null` (absent would print `- **Look:** Not set.`).
+    // Every golden slide has a look, so the variant is built here: look removed from one, nulled on the other.
+    const absent = golden();
+    absent.slides.forEach((s) => { delete s.look; });
+    const nulled = golden();
+    nulled.slides.forEach((s) => { s.look = null; });
+    expect('look' in absent.slides[0]).toBe(false);
+    const out = render(absent);
+    expect(out).toBe(render(nulled));
+    expect(out).not.toContain('Look');
+  });
+
   it('an empty-string slide_type is non-null, so its line is kept and reads Not set.', () => {
     // Sabotage target: a truthiness test `if (slide.slide_type)` instead of `!= null`.
     const spec = golden();
@@ -664,6 +677,7 @@ describe('a blank slide entry (#314 M1): "Blank slide." in place of its two Not 
     + '- **Assumes:** The reader accepts the churn number from slide 1.\n'
     + '- **Hands off:** The reader wants to know what fixing it costs.\n'
     + '- **Slide type:** Stats\n'
+    + '- **Look:** One dk-stat across the body; its share of Q4 in a dk-note beneath it, \\*not\\* a chart.\n'
     + '- **Data references:** churn\\_rate, arr\\_at\\_risk\n\n';
 
   function withSlide2(purpose: string, contentBrief: string): DeckSpec {

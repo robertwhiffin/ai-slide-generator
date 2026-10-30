@@ -36,6 +36,7 @@ Approve two engineers for one quarter: our \#1 priority.
 - **Assumes:** Nothing. This is the first slide.
 - **Hands off:** The reader knows the number and wants to know why.
 - **Slide type:** Cover
+- **Look:** The churn rate as one dk-stat centred under the title, the quarter as its label.
 - **Data references:** churn\_rate
 
 ### Slide 2
@@ -45,6 +46,7 @@ Approve two engineers for one quarter: our \#1 priority.
 - **Assumes:** The reader accepts the churn number from slide 1.
 - **Hands off:** The reader wants to know what fixing it costs.
 - **Slide type:** Stats
+- **Look:** One dk-stat across the body; its share of Q4 in a dk-note beneath it, \*not\* a chart.
 - **Data references:** churn\_rate, arr\_at\_risk
 
 ### Slide 4
@@ -53,6 +55,7 @@ Approve two engineers for one quarter: our \#1 priority.
 - **Content brief:** Closing slide: the two-engineer ask, scoped to one quarter.
 - **Assumes:** Not set.
 - **Hands off:** The deck ends on a decision the reader can make in the room.
+- **Look:** The ask in a single dk-callout, its scope (two engineers \| one quarter) under it.
 - **Data references:** None.
 
 ## Data

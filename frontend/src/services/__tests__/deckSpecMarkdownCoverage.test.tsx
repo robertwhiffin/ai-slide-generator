@@ -72,6 +72,10 @@ const COVERAGE: Record<string, Record<string, Coverage>> = {
     design_contract: 'rendered',
     resolved_data: 'rendered',
     slides: 'rendered',
+    deck_style: {
+      excluded: 'Model-authored stylesheet and its catalogue of pieces; styling, not reader content, '
+        + 'and the CSS would swamp the export.',
+    },
   },
   SlideSpec: {
     position: 'rendered',
@@ -81,11 +85,22 @@ const COVERAGE: Record<string, Record<string, Coverage>> = {
     hands_off: 'rendered',
     data_references: 'rendered',
     slide_type: 'rendered',
+    look: 'rendered',
     template_section_index: {
       excluded: 'Machine binding index into the pinned template; slide_type names the same binding '
         + 'by its data-label and the pair is validated together (invalid_slide_bindings). A 0-based index next to a 1-based '
         + '"Slide N" heading misleads a reader.',
     },
+  },
+  DeckStyle: {
+    css: { excluded: 'Deck stylesheet text; styling rather than reader content, and it would swamp the export.' },
+    components: { excluded: 'Catalogue of styled pieces for the builder; a styling aid, not reader content.' },
+  },
+  DeckStyleComponent: {
+    name: { excluded: 'Part of the styling catalogue, which the export leaves out with the deck style.' },
+    class_names: { excluded: 'CSS class names for the builder; styling detail, not reader content.' },
+    use: { excluded: 'Guidance on when the builder should use the piece; not reader content.' },
+    example_html: { excluded: 'Example markup for the builder; styling detail, not reader content.' },
   },
   DesignContractRef: { design_system_id: 'rendered', template_id: 'rendered', slide_style_id: 'rendered' },
   ResolvedData: { synthesis: 'rendered', figures: 'rendered', gaps: 'rendered' },
@@ -96,6 +111,8 @@ const COVERAGE: Record<string, Record<string, Coverage>> = {
 const INSTANCES: Record<string, (s: DeckSpec) => object[]> = {
   DeckSpec: (s) => [s],
   SlideSpec: (s) => s.slides,
+  DeckStyle: (s) => (s.deck_style ? [s.deck_style] : []),
+  DeckStyleComponent: (s) => s.deck_style?.components ?? [],
   DesignContractRef: (s) => [s.design_contract],
   ResolvedData: (s) => [s.resolved_data],
   ResolvedFigure: (s) => s.resolved_data.figures,
