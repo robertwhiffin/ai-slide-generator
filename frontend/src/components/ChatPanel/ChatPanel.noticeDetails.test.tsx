@@ -103,10 +103,10 @@ describe('ChatPanel carries notice details onto chat messages', () => {
 
     mount();
 
-    // All four rows render (the tool row as its collapsed tool-call header).
+    // All four rows render (the tool row as its collapsed tool-activity bar).
     await screen.findByText('new notice');
     expect(screen.getByText('old notice')).toBeInTheDocument();
-    expect(screen.getByText('Tool call: q')).toBeInTheDocument();
+    expect(screen.getByTestId('tool-activity-bar').textContent).toContain('1 tool call · q');
     expect(screen.getByText('tour reply')).toBeInTheDocument();
     expect(getSession).toHaveBeenCalledWith('notice-session');
 
@@ -167,6 +167,29 @@ describe('ChatPanel carries notice details onto chat messages', () => {
     expect(within(bubbleOf('plain reply')).queryByTestId('message-details')).toBeNull();
     expect(within(bubbleOf('progress line')).queryByTestId('message-details')).toBeNull();
     expect(within(disclosures[0]).getByText('foreman')).toBeInTheDocument();
+  });
+});
+
+describe('ChatPanel history collapses tool rows into one activity bar', () => {
+  it('a tool_call history row renders a single tool-activity-bar, not a card', async () => {
+    getSession.mockResolvedValue({
+      session_id: 'notice-session',
+      messages: [
+        {
+          id: 7,
+          role: 'assistant',
+          content: 'Using tool: genie_one',
+          message_type: 'tool_call',
+          created_at: '2026-10-19T00:00:00Z',
+          metadata: { tool_name: 'genie_one', tool_input: { question: 'Q' } },
+        },
+      ],
+    });
+    mount();
+    const bar = await screen.findByTestId('tool-activity-bar');
+    expect(screen.getAllByTestId('tool-activity-bar')).toHaveLength(1);
+    expect(bar.textContent).toContain('1 tool call · Genie One');
+    expect(screen.queryByText('Tool call: genie_one')).toBeNull();
   });
 });
 
