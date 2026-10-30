@@ -882,19 +882,37 @@ def test_architect_prompt_states_addendum_a_rule(rule_id, description, needles, 
 def _page_number_bans(text: str) -> list[str]:
     """Clauses that forbid page numbers outright.
 
-    Two kinds of clause are not the retired ban: one with a page token in it or in a
-    neighbouring clause ("Never type a page number yourself. The footer holds
-    {{slide:number}} ..."), and one that exempts the cover ("the cover carries no page
-    number").
+    Two kinds of clause are not the retired ban: one with a page token in the same clause
+    ("never type a page number yourself; write {{slide:number}}"), and one that exempts the
+    cover ("the cover carries no page number").  A token in a neighbouring clause does not
+    excuse a ban: "Never add page numbers to a slide." beside the token sentence still
+    contradicts it (B5a review mutation d2).
     """
-    clauses = _clauses(text)
-    bans = []
-    for i, clause in enumerate(clauses):
-        if re.search(PAGE_NUMBER_BAN, clause):
-            near = " ".join(clauses[max(i - 1, 0) : i + 2])
-            if not (re.search(PAGE_TOKEN, near) or re.search(r"\bcover\b", clause)):
-                bans.append(clause)
-    return bans
+    return [
+        clause
+        for clause in _clauses(text)
+        if re.search(PAGE_NUMBER_BAN, clause)
+        and not (re.search(PAGE_TOKEN, clause) or re.search(r"\bcover\b", clause))
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "banned"),
+    [
+        # A ban next to the token sentence is still a ban (review mutation d2).
+        (
+            "Its example_html holds {{slide:number}} / {{slide:count}}, so they stay right when "
+            "slides move. Never add page numbers to a slide. When template_classes has a footer.",
+            True,
+        ),
+        ("No page numbers on any slide.", True),
+        ("Never type a page number yourself; write {{slide:number}} instead.", False),
+        ("The cover carries no page number.", False),
+        ("A footer piece gains one only when the user asks for page numbers.", False),
+    ],
+)
+def test_page_number_ban_detector(text, banned):
+    assert bool(_page_number_bans(text)) is banned
 
 
 def test_the_page_number_ban_is_retired():

@@ -1422,9 +1422,9 @@ rest of train and on held-out, and promoted it.
 
 - **Setup.** As in the deck-style pass above: architect `system.ai.claude-opus-5-5`, judge
   `databricks-claude-sonnet-5`, profile `tellr-dev`. The cost is estimated at USD 4 / 20 per million
-  agent input / output tokens. The judge is costed at USD 0.03 a call. That is its payload sized
-  from this pass's train answers: USD 0.029 a call on edits and 0.032 to 0.038 on builds. The
-  USD 0.05 upper bound is given beside it.
+  agent input / output tokens. The judge is costed at its USD 0.05 a call upper bound, as in
+  earlier passes. Its measured rate is given beside it: USD 0.03 a call, its payload sized from
+  this pass's train answers (USD 0.029 a call on edits and 0.032 to 0.038 on builds).
 - **Calibration** (`--calibrate --cases build_technical_deck,restyle_deck`, both splits). B4
   added the footer piece to `build_technical_deck`'s reference, and B2 added `logos` to every
   payload.
@@ -1463,18 +1463,19 @@ rest of train and on held-out, and promoted it.
 - No second candidate was written. The screen showed no prompt-caused failure, and the cap left no
   room for one.
 
-| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD (judge 0.05) |
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 (judge 0.03) |
 |---|---|---|---|---|---|---|---|---|---|
-| calibration | — | both | 2 | — | 8 judge calls | see above | 0 | — | 0.24 (0.40) |
-| S1 ec1798ba | brand-footer (47c7a388) | train | 3 | 3 | 9 | 0.89 | 0 | 18.6k / 7.0k | 2.20 (2.38) |
-| B1 e64bb2ef | v1-baseline (3527e7bc) | train | 2 builds | 2 | 4 | 0.50 | 0 | 16.0k / 8.4k | 1.05 (1.13) |
-| F1 e66eb3cb | brand-footer | train | the other 19 | 2 | 38 | 1.00 | 2 | 20.4k / 1.0k | 5.02 (5.78) |
-| H1 f84c20e5 | brand-footer | held-out | all 22 | 1 | 22 | 1.00 | 0 | 18.5k / 1.7k | 3.02 (3.46) |
+| calibration | — | both | 2 | — | 8 judge calls | see above | 0 | — | 0.40 (0.24) |
+| S1 ec1798ba | brand-footer (47c7a388) | train | 3 | 3 | 9 | 0.89 | 0 | 18.6k / 7.0k | 2.38 (2.20) |
+| B1 e64bb2ef | v1-baseline (3527e7bc) | train | 2 builds | 2 | 4 | 0.50 | 0 | 16.0k / 8.4k | 1.13 (1.05) |
+| F1 e66eb3cb | brand-footer | train | the other 19 | 2 | 38 | 1.00 | 2 | 20.4k / 1.0k | 5.78 (5.02) |
+| H1 f84c20e5 | brand-footer | held-out | all 22 | 1 | 22 | 1.00 | 0 | 18.5k / 1.7k | 3.46 (3.02) |
 
 S1's cases are `build_technical_deck`, `restyle_deck` and `build_request`. S1 and F1 together cover
-every train case at ×2 or more. **Total about USD 11.5** with the judge at USD 0.03 (agent USD 9.09,
-81 judge calls), under the USD 12 cap. It is USD 13.1 at the USD 0.05 upper bound. Held-out is
-reported as an aggregate only (H1).
+every train case at ×2 or more. **Total about USD 13.1** with the judge at its USD 0.05 upper bound,
+the figure earlier passes lead with (agent USD 9.09, 81 judge calls). That is **USD 1.1 over the
+USD 12 architect cap**, within the addendum's USD 2 slack. With the judge at the USD 0.03 a call its
+payloads measure, the real spend is about USD 11.5. Held-out is reported as an aggregate only (H1).
 
 What it showed:
 
@@ -1503,7 +1504,9 @@ What it showed:
   case passed 1/1, the two deck-style cases included.
 - **Acceptance bar** (Task B5a). **Met.**
   1. Every existing case passed at least its baseline minus one row. `build_request` was 3/3
-     against B1's 2/2. The other 19 were 2/2 each.
+     against B1's 2/2. The other 19 passed every scored row: 17 at 2/2, and `confirm_design` and
+     `discuss` at 1/1, each with one row skipped for a judge parse error (`contract` and
+     `expected_category` passed both rows).
      - Their baseline was not re-run, to stay inside the cap. The same prompt (`3527e7bc`) passed
        each 2/2 in the deck-style pass's F1 (f6766e50), on payloads that differ only by the
        `logos` key.
@@ -1522,9 +1525,13 @@ What it showed:
     2,880 to 3,200 characters.
 - **Overrides of `optimise-agent-prompt`**, delegated by the controller:
   - the screen ran ×3 on three cases, the finalist ran train ×2 and held-out ×1;
-  - B1 covered the two build cases only;
-  - the finalist's train evidence is two runs, S1 (×3) and F1 (×2);
   - this pass edited `INSTRUCTIONS`, promoted and committed.
+- **Scope cut by the implementer**, to fit the cap, and put to the reviewer rather than delegated:
+  - B1 covered the two build cases only;
+  - the finalist's train evidence is two runs, S1 (×3) and F1 (×2).
+  - The task review accepted the cut. The finalist hit the maximum on every one of the 19 cases,
+    so "baseline minus one row" holds whatever their baseline. f6766e50 ran this same baseline
+    prompt (`3527e7bc`), so it is a cross-check only.
 - **Shipped.** `brand-footer` is the architect's v1 prompt in `src/core/skills/architect.py`
   (`47c7a388cb95`, previously `3527e7bcafc4`). It was promoted with
   `python -m evals.harness.promote --config architect=evals/configs/architect/brand-footer.yaml --run-id architect=e66eb3cbb723442a8fbfa011195e3cc8`
