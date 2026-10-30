@@ -684,8 +684,21 @@ def _update_databricks(
             _upload_files(ws, staging, app_file_workspace_path)
             print("   Files updated")
 
-        # Ensure the app carries every required user API scope before deploying
-        _ensure_app_user_api_scopes(ws, app_name)
+        # Ensure the app carries every required user API scope before deploying.
+        # A failure here (a workspace that restricts scopes, a caller who may
+        # not update the app) must not abort the update: the new version still
+        # ships, and the admin is told what to add by hand.
+        try:
+            _ensure_app_user_api_scopes(ws, app_name)
+        except Exception as exc:  # noqa: BLE001 — the deploy continues without them
+            print(
+                f"   WARNING: could not add scopes "
+                f"({', '.join(REQUIRED_USER_API_SCOPES)}) to {app_name}: {exc}"
+            )
+            print(
+                "   Genie One needs ai-gateway — add it in the app settings "
+                "(the MCP picker also needs catalog.connections)."
+            )
 
         # Trigger new deployment
         print("   Deploying...")

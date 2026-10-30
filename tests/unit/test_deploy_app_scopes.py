@@ -73,6 +73,53 @@ def test_ensure_carries_description_source_path_and_resources_and_omits_compute_
     assert sent.resources == [db_resource]
 
 
+def _stub_update_steps(monkeypatch, ws):
+    """Stub every _update_databricks step but the scope update and the deploy."""
+
+    @contextmanager
+    def _staging():
+        yield "/tmp/staging"
+
+    monkeypatch.setattr(deploy, "_get_workspace_client", lambda c, p: ws)
+    monkeypatch.setattr(secret_key, "app_is_secret_mode", lambda w, n: False)
+    monkeypatch.setattr(deploy, "_read_existing_encryption_key", lambda w, p: None)
+    monkeypatch.setattr(
+        deploy, "_get_or_create_lakebase", lambda *a, **k: {"type": "provisioned"}
+    )
+    monkeypatch.setattr(deploy, "_check_breaking_migrations", lambda *a, **k: None)
+    monkeypatch.setattr(deploy, "_staging_dir", _staging)
+    monkeypatch.setattr(deploy, "_write_requirements", lambda *a, **k: None)
+    monkeypatch.setattr(deploy, "_write_app_yaml", lambda *a, **k: None)
+    monkeypatch.setattr(deploy, "_upload_files", lambda *a, **k: None)
+
+
+def test_a_failed_scope_update_warns_and_the_update_still_deploys(monkeypatch, capsys):
+    """Final fix (M6): a workspace that refuses the scope change (or a caller who
+    may not update the app) must not abort tellr.update(): the new version ships
+    and the admin is told which scope Genie One needs."""
+    ws = MagicMock()
+    ws.apps.get.return_value = App(
+        name="app", url="https://app.example", user_api_scopes=["sql"]
+    )
+    ws.apps.update.side_effect = RuntimeError("scope ai-gateway is not allowed in this workspace")
+    ws.apps.deploy_and_wait.return_value = MagicMock(deployment_id="d1")
+    _stub_update_steps(monkeypatch, ws)
+
+    deploy._update_databricks(
+        app_name="app",
+        app_file_workspace_path="/ws",
+        lakebase_name="lb",
+        schema_name="s",
+    )
+
+    ws.apps.update.assert_called_once()
+    ws.apps.deploy_and_wait.assert_called_once()
+    out = capsys.readouterr().out
+    assert "WARNING: could not add scopes" in out
+    assert "scope ai-gateway is not allowed in this workspace" in out
+    assert "Genie One needs ai-gateway — add it in the app settings" in out
+
+
 def test_update_ensures_scopes_before_deploying(monkeypatch):
     """_update_databricks must add missing scopes before deploy_and_wait."""
     order: list[str] = []
