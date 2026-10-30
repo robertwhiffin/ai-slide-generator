@@ -68,7 +68,7 @@ class MemoryStorage implements Storage {
   setItem(key: string, value: string) { this.store.set(key, String(value)); }
 }
 
-const GENIE_ONE = { type: 'genie_one' } as unknown as ToolEntry;
+const GENIE_ONE: ToolEntry = { type: 'genie_one' };
 
 function renderPicker(existingTools: ToolEntry[] = []) {
   const onSelect = vi.fn();
@@ -156,8 +156,10 @@ describe('AgentConfigBar: Genie One chip', () => {
     expect(screen.getByTitle('Genie One works in agent mode only')).toBeTruthy();
   });
 
-  it('on an agent deck there is no suffix and no title', () => {
+  it('on an agent deck there is no suffix and no title, even while the picker says legacy', () => {
+    // A locked agent deck wins over the picker: storedDeckMode ?? selectedDeckMode.
     sessionState.storedDeckMode = 'agent';
+    sessionState.selectedDeckMode = 'legacy';
     renderExpandedBar();
     expect(screen.queryByText(/agent mode only/)).toBeNull();
     expect(screen.queryByTitle('Genie One works in agent mode only')).toBeNull();

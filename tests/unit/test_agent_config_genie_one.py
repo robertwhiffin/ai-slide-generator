@@ -1,5 +1,6 @@
 """The ``genie_one`` tool type: schema, persist strip, PATCH /tools, legacy skip."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -88,7 +89,7 @@ class TestPatchTools:
 
 
 class TestLegacySkip:
-    def test_legacy_build_tools_skips_genie_one(self):
+    def test_legacy_build_tools_skips_genie_one(self, caplog):
         from src.api.schemas.agent_config import AgentConfig
         from src.services import agent_resolution
 
@@ -103,10 +104,16 @@ class TestLegacySkip:
             without = agent_resolution._build_tools(
                 AgentConfig.model_validate({"tools": [genie]}), {"session_id": "s1"}
             )
-            with_genie_one = agent_resolution._build_tools(
-                AgentConfig.model_validate({"tools": [{"type": "genie_one"}, genie]}),
-                {"session_id": "s1"},
-            )
+            with caplog.at_level(logging.DEBUG, logger="src.services.agent_resolution"):
+                with_genie_one = agent_resolution._build_tools(
+                    AgentConfig.model_validate({"tools": [{"type": "genie_one"}, genie]}),
+                    {"session_id": "s1"},
+                )
 
         assert [t.name for t in with_genie_one] == [t.name for t in without]
         assert "query_genie_space_1" in [t.name for t in without]
+        assert any(
+            r.levelno == logging.DEBUG
+            and r.getMessage() == "genie_one is agent-mode only; skipped for the legacy agent"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]

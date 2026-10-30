@@ -389,8 +389,9 @@ def _build_tools(
     Always includes search_images. Adds search_brand_assets ONLY when
     ``config.design_system_id`` is set AND that design system is ACTIVE — BOTH
     halves, see the comment on the gate itself for the tombstone defect the second
-    half fixes. Handles all 5 config tool types: GenieTool, MCPTool,
-    VectorIndexTool, ModelEndpointTool, AgentBricksTool.
+    half fixes. Handles all 6 config tool types: GenieTool, MCPTool,
+    VectorIndexTool, ModelEndpointTool, AgentBricksTool, and GenieOneTool (agent-mode
+    only, so skipped here with a DEBUG log).
 
     Args:
         config: AgentConfig with tool definitions
