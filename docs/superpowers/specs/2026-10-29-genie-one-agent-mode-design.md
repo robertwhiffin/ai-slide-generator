@@ -213,3 +213,20 @@ Both PRs are built in the same overnight run. Prompt shipping comes first, on `f
 - The consent message's wording and layout, and the chip's look.
 - How recorded Genie One answers are captured for the eval fake.
 - Test layout. Every test is sabotage-verified, per `executing-plans-tellr`.
+
+## Rulings made during planning (2026-10-29, night build)
+
+These override earlier sections of this document where they conflict. Each is recorded with its reason and what it costs if wrong. The owner reviews them in the morning.
+
+1. **`AnalystOutput` is not changed; there is no schema v3.** Code builds figures from Genie One's result rows (`figures_from_answer`) and carries them on a turn-scoped state key, and the architect node writes them into `resolved_data.figures`.
+   - *Why:* adding a field re-pins the data analyst's v1 and v2 digests in place, the #351 precedent across 15 files, or else needs a new contract tier. Building figures in code also means no model retypes a number at all, which is stronger than the anti-goal asked for.
+   - *Cost if wrong:* figure keys are mechanical (`trip_count (pickup_zip=10001)`) rather than curated by the analyst.
+2. **The data analyst prompt doesn't change.** The bound tool is named `genie`, which the existing prompt already lists ("genie — SQL and Databricks SQL warehouse queries"). Its guidance travels in the tool's description.
+   - *Why:* the data analyst prompt is promote-locked (`LegacyV1PromptTransition`, `prompt_assembler.py:231`).
+   - *Cost if wrong:* the analyst's procedure text still mentions `vector_index`, which isn't bound.
+3. **The builder is the only prompt change.** It gets a `SOURCE LINE` block, measured on the eval harness and promoted. The architect already lists metric keys in `data_references`, and the analyst's message names the figure keys.
+4. **Tools come from the actor's own agent config,** which is how legacy mode already works. Contributors' rows start with no config, so a contributor's turn runs without Genie One until they add it. The Genie One conversation id is stored on the actor row's `genie_one` entry, which makes it per user per deck automatically.
+5. **The consent message has no Reset button.** It gives both causes and a CLI command that revokes consent, using the app's OAuth client id when the user's token reveals it. Whether the app can revoke consent itself is still recorded by the live check.
+6. **At most 2 analyst rounds per turn.** A third `ask_data` in the same turn gets a code-owned "plan with what you have" message. *Why:* LangGraph's recursion limit (10007) is the only bound today, and each round can take minutes.
+7. **Genie figures stay code-owned across turns.** On a turn without new analyst figures, the prior spec's `Genie One` figures are re-applied verbatim, so an architect full-spec edit can't retype them.
+8. **Missing-scope detection matches both real texts:** `…does not have required scopes…`, seen in staging logs, and `…Invalid scope, required scopes…`, recorded from the SDK as a `PermissionDenied` parse error. The fixtures are in `tests/fixtures/genie_one/`.

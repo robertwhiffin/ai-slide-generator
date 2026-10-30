@@ -1,0 +1,24 @@
+{
+  "isError": false,
+  "content": [
+    {
+      "type": "text",
+      "text": "<!-- agent: Genie has finished. Your reply MUST include the [Explore in Databricks](url) link rendered verbatim as a markdown link \u2014 do not paraphrase it. Also include any other cited artifact links from the body, and bold the key numbers. -->\n\n**Status:** completed\n\n```sql\nSELECT `pickup_zip`, COUNT(*) AS trip_count FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IS NOT NULL GROUP BY `pickup_zip` ORDER BY trip_count DESC LIMIT 3\n```\n\nQuery returned 3 rows:\n\n<!-- begin:query_3f1cdc -->\n| pickup_zip | trip_count |\n| --- | --- |\n| 10001 | 1227 |\n| 10003 | 1181 |\n| 10011 | 1129 |\n<!-- end:query_3f1cdc -->\n\n## Top 3 pickup zip codes by trip count\n\nIn `samples.nyctaxi.trips`, these are the three pickup zip codes with the most trips: [samples.nyctaxi.trips](https://example-workspace.cloud.databricks.com/explore/data/samples/nyctaxi/trips?isDbOne=true&utm_source=one-chat&o=1234567890123456)\n\n1. **10001**: 1,227 trips\n2. **10003**: 1,181 trips\n3. **10011**: 1,129 trips\n\n| pickup_zip | trip_count |\n| --- | --- |\n| 10001 | 1227 |\n| 10003 | 1181 |\n| 10011 | 1129 |\n\nTrips without a pickup zip code were left out of the count. [Query Result](https://example-workspace.cloud.databricks.com/one/chat/threads/84cb39d7434e46c29b823d3f152d88c4?o=1234567890123456#embed-query_3f1cdc)\n\n[Explore in Databricks](https://example-workspace.cloud.databricks.com/one/chat/threads/84cb39d7434e46c29b823d3f152d88c4?o=1234567890123456&utm_source=genie_chat_mcp)\n\n<!-- agent: Tool-call IDs for your follow-up Genie tool calls; not user-facing \u2014 do not repeat them in your reply.\n- `conversation_id`: `84cb39d7434e46c29b823d3f152d88c4`\n- `response_id`: `04413f08119a48ba80a08d3383714512`\n- To fetch the full rows for a query above, call `genie_get_query_result` with the ids above plus one `item_id` from this list (never use a `query_*` embed id as `item_id`):\n  - `item_id`: `pub_toolu_bdrk_014oCWtLZYcPd9qqBS47LMAC_output` \u2014 runs: SELECT `pickup_zip`, COUNT(*) AS trip_count FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IS NOT NULL GROUP BY `pickup_zip` ORDER BY trip_count DESC LIMIT 3\n-->"
+    }
+  ],
+  "structuredContent": {
+    "response_id": "04413f08119a48ba80a08d3383714512",
+    "conversation_id": "84cb39d7434e46c29b823d3f152d88c4",
+    "status": "completed",
+    "deep_link": "https://example-workspace.cloud.databricks.com/one/chat/threads/84cb39d7434e46c29b823d3f152d88c4?o=1234567890123456&utm_source=genie_chat_mcp",
+    "final_answer": "## Top 3 pickup zip codes by trip count\n\nIn `samples.nyctaxi.trips`, these are the three pickup zip codes with the most trips: [samples.nyctaxi.trips](https://example-workspace.cloud.databricks.com/explore/data/samples/nyctaxi/trips?isDbOne=true&utm_source=one-chat&o=1234567890123456)\n\n1. **10001**: 1,227 trips\n2. **10003**: 1,181 trips\n3. **10011**: 1,129 trips\n\n| pickup_zip | trip_count |\n| --- | --- |\n| 10001 | 1227 |\n| 10003 | 1181 |\n| 10011 | 1129 |\n\nTrips without a pickup zip code were left out of the count. [Query Result](https://example-workspace.cloud.databricks.com/one/chat/threads/84cb39d7434e46c29b823d3f152d88c4?o=1234567890123456#embed-query_3f1cdc)",
+    "progress_steps": null,
+    "narration_instruction": null,
+    "query_items": [
+      {
+        "item_id": "pub_toolu_bdrk_014oCWtLZYcPd9qqBS47LMAC_output",
+        "sql": "SELECT `pickup_zip`, COUNT(*) AS trip_count FROM `samples`.`nyctaxi`.`trips` WHERE `pickup_zip` IS NOT NULL GROUP BY `pickup_zip` ORDER BY trip_count DESC LIMIT 3"
+      }
+    ]
+  }
+}

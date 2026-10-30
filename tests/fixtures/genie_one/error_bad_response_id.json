@@ -1,0 +1,10 @@
+{
+  "isError": true,
+  "content": [
+    {
+      "type": "text",
+      "text": "Your input couldn't be processed: polling Genie response failed with HTTP 404: Could not resolve response_id not-a-real-response-id to a turn. Check the conversation/response IDs and question wording, then try again."
+    }
+  ],
+  "structuredContent": null
+}

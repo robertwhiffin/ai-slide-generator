@@ -1,0 +1,14 @@
+{
+  "isError": false,
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"response_id\":\"04413f08119a48ba80a08d3383714512\",\"conversation_id\":\"84cb39d7434e46c29b823d3f152d88c4\",\"status\":\"in_progress\"}"
+    }
+  ],
+  "structuredContent": {
+    "response_id": "04413f08119a48ba80a08d3383714512",
+    "conversation_id": "84cb39d7434e46c29b823d3f152d88c4",
+    "status": "in_progress"
+  }
+}
