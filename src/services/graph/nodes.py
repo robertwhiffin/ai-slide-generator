@@ -68,7 +68,12 @@ from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
 from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
-from src.domain.deck_style import deck_style_context, sanitise_deck_style
+from src.domain.deck_style import (
+    DECK_STYLE_CLASS_PREFIX,
+    deck_style_context,
+    dropped_classes_in_use,
+    sanitise_deck_style,
+)
 from src.domain.finding import (
     CRITERIA,
     Finding,
@@ -91,6 +96,7 @@ from src.domain.slide_operations import (
     OperationProblems,
     apply_operations,
     compose_edit_spec,
+    dropped_class_problem,
     problem_sentence,
 )
 from src.services.agent import SAFETY_RETRY_NOTICE, UnsafeContentError
@@ -2190,6 +2196,50 @@ class _EditPlan:
     keeps_positions: bool
 
 
+def _stranded_style_classes(
+    prior_spec: DeckSpec,
+    composed: DeckSpec,
+    result: Any,
+    committed_rows: List[Dict[str, Any]],
+) -> Optional[OperationProblems]:
+    """Classes the composed deck style drops that a kept, non-rebuilt slide uses.
+
+    Spec §5: a slide still using a class the new style drops would silently lose
+    its styling, so every such slide needs an ``update`` in the same edit.  Kept
+    means ``result.layout`` carries the slide over and ``result.rebuild`` does not
+    list it; a moved slide is kept, as its row travels whole.  The problem's
+    positions are the PERSISTED ones, which the rows are at (the caller has
+    passed the persisted-spec guards).  Only the deck style's own ``dk-``
+    vocabulary counts: a selector may also name another class (``.slide
+    .dk-note``), and a style that stops naming it strips no piece from a slide.
+    ``None`` when nothing is stranded.
+    """
+    html_by_position = {
+        row.get("position"): row.get("html") or "" for row in committed_rows
+    }
+    rebuilt = set(result.rebuild)
+    kept_rows = {
+        position: html_by_position.get(position, "")
+        for index, position in enumerate(result.layout)
+        if position is not None and index not in rebuilt
+    }
+    stranded = {
+        name: positions
+        for name, positions in dropped_classes_in_use(
+            prior_spec.deck_style, composed.deck_style, kept_rows
+        ).items()
+        if name.startswith(DECK_STYLE_CLASS_PREFIX)
+    }
+    if not stranded:
+        return None
+    return OperationProblems(
+        tuple(
+            dropped_class_problem(name, positions)
+            for name, positions in stranded.items()
+        )
+    )
+
+
 def _deck_changes_of(
     state: dict, out: Any, prior_spec: DeckSpec
 ) -> Optional[DeckChanges]:
@@ -2265,7 +2315,9 @@ def _plan_operations_edit(
     2. ``compose_edit_spec``: the persisted spec, plus the ``deck_changes``
        fields that are set, plus the composed slides, re-validated.  The one
        field ever read out of ``deck_spec`` is a new ``design_contract`` that
-       ``deck_changes`` does not set (C19, :func:`_deck_changes_of`).
+       ``deck_changes`` does not set (C19, :func:`_deck_changes_of`).  On the
+       same contract, a new deck style may not drop a class a kept slide still
+       uses (:func:`_stranded_style_classes`).
     3. The brand of the composed contract, by the node's own re-resolve rule.
     4. The template bindings, completed and checked on the COMPOSED spec — an
        inserted slide is checked like any other.  A binding error becomes an
@@ -2286,6 +2338,22 @@ def _plan_operations_edit(
     composed = compose_edit_spec(prior_spec, result, deck_changes)
     if isinstance(composed, OperationProblems):
         return composed
+
+    # Spec §5 (R7, C17): a restyle may not strand a kept slide.  Checked only
+    # when this edit brings a deck style and there was one to drop from, and
+    # never on a contract change: that rebuilds every slide (classify_spec_change,
+    # later), so its fresh style strands nothing.  The composed spec's contract
+    # decides, wherever the answer gave it (C19).
+    if (
+        deck_changes is not None
+        and deck_changes.deck_style is not None
+        and prior_spec.deck_style is not None
+        and _contract_ids(composed.design_contract)
+        == _contract_ids(prior_spec.design_contract)
+    ):
+        stranded = _stranded_style_classes(prior_spec, composed, result, committed_rows)
+        if stranded is not None:
+            return stranded
 
     # Today's rule, applied to the composed spec: the deck binds against the
     # template it will actually use, so a restyle in deck_changes re-resolves.
@@ -2921,6 +2989,23 @@ def _plan_answer(
         and _persisted_spec_describes_these_rows(prior_spec, committed_positions)
     ):
         spec = _description_keeps_what_it_cannot_see(spec, prior_spec, committed_rows)
+
+    # R8 (C18): a full-spec edit — the sweeper's re-description or an aligned
+    # edit — keeps the persisted deck style whatever its deck_spec carries.  The
+    # sweeper does not echo the style, and a restyle goes through
+    # deck_changes.deck_style, where the dropped-class check runs; this path has
+    # none.  On a contract change every slide is rebuilt, so the answer's
+    # (sanitised) style stands.
+    if (
+        intent == "edit"
+        and plan is None
+        and edit_degrade is None
+        and spec is not None
+        and prior_spec is not None
+        and _contract_ids(spec.design_contract)
+        == _contract_ids(prior_spec.design_contract)
+    ):
+        spec = spec.model_copy(update={"deck_style": prior_spec.deck_style})
 
     # The spec's pinned template, not the inbound payload's: a turn that pins or
     # changes the contract binds against the template it will actually use.

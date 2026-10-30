@@ -59,6 +59,7 @@ PROBLEM_CODES = (
     "deck_emptied",
     "nothing_to_do",
     "invalid_deck_changes",
+    "deck_style_drops_used_class",
 )
 
 _START = -1  # the anchor "at the start of the deck"
@@ -70,6 +71,18 @@ _UPDATE_COUNT_DETAIL = (
     "the update of position {position} described {count} slides instead of one"
 )
 _UPDATE_COUNT = re.compile(r"described (\d+) slides instead of one")
+
+# Likewise the class a deck-style edit would strip from slides that still use it:
+# the graph node raises the problem (it alone holds the committed slides' HTML),
+# through dropped_class_problem, and problem_sentence reads the class back out.
+_DROPPED_CLASS_DETAIL = (
+    "the slides at positions {positions} still use the class {name}, which your "
+    "deck_changes.deck_style drops; keep {name} in the deck style, or add an "
+    "update operation for each of those slides"
+)
+_DROPPED_CLASS = re.compile(
+    r"still use the class (\S+?), which your deck_changes\.deck_style drops"
+)
 
 
 class SlideContent(BaseModel):
@@ -479,6 +492,27 @@ def compose_edit_spec(
         return OperationProblems((_problem("invalid_deck_changes", (), message),))
 
 
+def dropped_class_problem(name: str, positions: Sequence[int]) -> OperationProblem:
+    """``deck_style_drops_used_class``: kept slides at ``positions`` use ``name``,
+    a class the edit's deck style drops.  ``positions`` are persisted positions."""
+    ordered = tuple(sorted(positions))
+    return _problem(
+        "deck_style_drops_used_class",
+        ordered,
+        _DROPPED_CLASS_DETAIL.format(
+            positions=", ".join(str(p) for p in ordered), name=name
+        ),
+    )
+
+
+def _listed(numbers: Sequence[int]) -> str:
+    """``5``, ``5 and 6``, ``2, 5 and 6``."""
+    words = [str(n) for n in numbers]
+    if len(words) == 1:
+        return words[0]
+    return ", ".join(words[:-1]) + " and " + words[-1]
+
+
 def problem_sentence(
     problem: OperationProblem, slide_numbers: Mapping[int, int], slide_count: int
 ) -> str:
@@ -527,4 +561,14 @@ def problem_sentence(
         return "it did not list any change to make"
     if code == "invalid_deck_changes":
         return f"the deck-level changes were not valid ({problem.detail})"
+    if code == "deck_style_drops_used_class" and first is not None:
+        found = _DROPPED_CLASS.search(problem.detail)
+        if found:  # without the class, fall back to the detail rather than guess one
+            numbers = sorted(number(p) for p in positions)
+            verb = "uses" if len(numbers) == 1 else "use"
+            plural = "slide" if len(numbers) == 1 else "slides"
+            return (
+                f"{plural} {_listed(numbers)} still {verb} the {found.group(1)} "
+                "style the change removes"
+            )
     return problem.detail

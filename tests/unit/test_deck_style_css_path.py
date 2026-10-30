@@ -432,10 +432,18 @@ def test_build_with_hostile_deck_style_is_sanitised(graph_env, monkeypatch, pinn
 
 
 def test_full_spec_edit_with_hostile_deck_style_is_sanitised(graph_env):
-    """An edit given as a revised ``deck_spec`` (no operations) is sanitised the
-    same way: its ``deck_spec.deck_style`` loses the ``@import`` and ``body`` rules
-    before the spec is committed or written."""
-    prior, _ = _seeded(graph_env, (0, 1, 2))
+    """An edit given as a revised ``deck_spec`` (no operations) on an unchanged
+    contract commits the PERSISTED deck style, whatever its ``deck_spec`` carries
+    (Rulings R8, R20; C18).  So a hostile ``deck_spec.deck_style`` reaches neither
+    the committed spec nor ``deck.css``: not its ``@import`` or ``body`` rules,
+    and not the ``.dk-code`` rule the sanitiser would keep of it either.  (On a
+    contract change the answer's style is kept, sanitised:
+    ``test_deck_style_edits.py::test_full_spec_edit_changing_the_contract_keeps_the_answers_sanitised_style``.)
+
+    Sabotage: commit the answer's style, sanitised or not -> red."""
+    seeded, _ = _seeded(graph_env, (0, 1, 2))
+    prior = _with_style(seeded, OLD_STYLE)
+    _persist(graph_env, prior)
     revised = _with_style(_revised(prior, {1: "brief REVISED"}), HOSTILE_STYLE)
 
     t = _turn(graph_env, _edit_out(revised, [1]))
@@ -443,11 +451,12 @@ def test_full_spec_edit_with_hostile_deck_style_is_sanitised(graph_env):
     assert t.updates["error_state"] is None
     assert t.updates["architect_intent"] == "edit"
     committed = t.updates["deck_spec"].deck_style
-    assert committed is not None and ".dk-code" in committed.css
+    assert committed == OLD_STYLE, "the persisted deck style was not carried"
     _assert_no_hostile_text(committed.css, "the committed spec (state)")
+    assert _persisted_spec(graph_env).deck_style == OLD_STYLE
     _assert_no_hostile_text(graph_env.deck_row().deck_spec_json, "the persisted deck_spec")
     css = graph_env.deck_row().css
-    assert css == committed.css
+    assert css == OLD_STYLE.css
     _assert_no_hostile_text(css, "deck.css")
 
 

@@ -873,6 +873,18 @@ def test_compose_nothing_to_do():
 # ---------------------------------------------------------------------------
 
 
+def _dropped_class_problem(positions, cls: str = "dk-note") -> OperationProblem:
+    """A ``deck_style_drops_used_class`` problem as the node words it (Task 6)."""
+    listed = ", ".join(str(p) for p in positions)
+    return OperationProblem(
+        "deck_style_drops_used_class",
+        tuple(positions),
+        f"the slides at positions {listed} still use the class {cls}, which your "
+        f"deck_changes.deck_style drops; keep {cls} in the deck style, or add an "
+        "update operation for each of those slides",
+    )
+
+
 def test_problem_sentences():
     assert PROBLEM_CODES == (
         "unknown_slide",
@@ -886,6 +898,7 @@ def test_problem_sentences():
         "deck_emptied",
         "nothing_to_do",
         "invalid_deck_changes",
+        "deck_style_drops_used_class",
     )
 
     current = deck(22)
@@ -946,6 +959,25 @@ def test_problem_sentences():
         OperationProblem("invalid_deck_changes", (), "title must be non-empty")
     ) == "the deck-level changes were not valid (title must be non-empty)"
 
+    # Task 6 (R6, C16): raised by the node, numbered off the persisted positions;
+    # the class is read back out of the detail (its first `dk-` name).
+    assert say(_dropped_class_problem((4,))) == (
+        "slide 5 still uses the dk-note style the change removes"
+    )
+    assert say(_dropped_class_problem((4, 5))) == (
+        "slides 5 and 6 still use the dk-note style the change removes"
+    )
+    assert say(_dropped_class_problem((1, 4, 5), "dk-code-block")) == (
+        "slides 2, 5 and 6 still use the dk-code-block style the change removes"
+    )
+    # Without what the sentence needs (a position, a class name), the detail.
+    nameless = OperationProblem(
+        "deck_style_drops_used_class", (4,), "a class the new deck style drops is in use"
+    )
+    assert say(nameless) == nameless.detail
+    unplaced = _dropped_class_problem(())
+    assert say(unplaced) == unplaced.detail
+
     assert said == set(PROBLEM_CODES)
 
     # Slide numbers come from `slide_numbers`, not `position + 1`; a position
@@ -982,6 +1014,9 @@ def test_problem_sentences():
     )
     assert say(only_problem(apply_operations(gapped, [delete(4)]))) == (
         "there is no slide 5 — the deck has 3 slides"
+    )
+    assert say(_dropped_class_problem((3, 7))) == (
+        "slides 2 and 3 still use the dk-note style the change removes"
     )
 
     # Built from code and positions alone, whatever the detail says.
