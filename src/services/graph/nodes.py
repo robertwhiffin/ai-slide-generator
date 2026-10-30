@@ -163,6 +163,7 @@ from src.services.template_sections import (
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.html_utils import strip_inter_tag_escapes
 from src.utils.slide_hash import compute_slide_hash
+from src.utils.slide_number_tokens import substitute_slide_numbers
 
 logger = logging.getLogger(__name__)
 
@@ -434,6 +435,10 @@ def _release_slides(state: dict) -> List[int]:
         )
         return []
 
+    # Live page numbers: number = position + 1, count = the spec's slide count.
+    spec_slides = getattr(state.get("deck_spec"), "slides", None)
+    spec_count = len(spec_slides) if spec_slides else pending[-1] + 1
+
     released: List[int] = []
     for position in pending:
         row = rows.get(position)
@@ -448,7 +453,9 @@ def _release_slides(state: dict) -> List[int]:
             break
         emit_slide_ready(
             position=position,
-            html=row["html"] or "",
+            html=substitute_slide_numbers(
+                row["html"] or "", position + 1, spec_count
+            ),
             scripts=row["scripts"] or "",
             agent=row.get("modified_by") or row.get("created_by"),
         )

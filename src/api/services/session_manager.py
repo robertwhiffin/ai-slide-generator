@@ -1021,6 +1021,13 @@ class VersionConflictError(Exception):
         )
 
 
+def _deck_with_page_numbers(deck_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """A copy of *deck_dict* with page tokens rendered (never the stored dict)."""
+    from src.utils.slide_number_tokens import substitute_deck_slide_numbers
+
+    return substitute_deck_slide_numbers(dict(deck_dict))
+
+
 class SessionManager:
     """Manager for database-backed session operations.
 
@@ -3459,6 +3466,9 @@ class SessionManager:
             from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
             from src.utils.image_utils import substitute_deck_dict_images
 
+            from src.utils.slide_number_tokens import substitute_deck_slide_numbers
+
+            substitute_deck_slide_numbers(deck_dict)
             ds_id = resolve_active_design_system_id(session_id)
             substitute_deck_dict_images(deck_dict, db)
             substitute_deck_dict_ds_assets(deck_dict, db, design_system_id=ds_id)
@@ -3661,7 +3671,8 @@ class SessionManager:
             _restore_result = {
                 "version_number": version_number,
                 "description": version.description,
-                "deck": deck_dict,
+                # Outgoing copy only: the rows and snapshot keep the tokens.
+                "deck": _deck_with_page_numbers(deck_dict),
                 "verification_map": verification_map,
                 "chat_history": chat_history,
                 "deleted_versions": deleted_count,

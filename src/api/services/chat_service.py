@@ -69,6 +69,10 @@ from src.utils.ds_asset_utils import (
 )
 from src.utils.image_utils import substitute_deck_dict_images, substitute_image_placeholders
 from src.utils.slide_hash import compute_slide_hash
+from src.utils.slide_number_tokens import (
+    retokenise_slide_numbers,
+    substitute_deck_slide_numbers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +371,11 @@ class ChatService:
         cannot disclose another system's bytes.
         """
         from src.core.database import get_db_session
+
+        # Page tokens need no DB, so they sit outside the asset gate below. The
+        # knitted raw_html / html_content stay unsubstituted (see slide_number_tokens).
+        if deck_dict:
+            substitute_deck_slide_numbers(deck_dict)
 
         needs_deck = deck_dict and any(
             "{{image:" in s.get("html", "") for s in deck_dict.get("slides", [])
@@ -3670,6 +3679,8 @@ class ChatService:
         # substring match on otherwise-valid slides.
         if not has_slide_wrapper(html):
             raise ValueError("HTML must contain <div class='slide'> wrapper")
+        # Page-number markers a reader rendered go back to tokens before storing.
+        html = retokenise_slide_numbers(html)
 
         # Preserve original slide's metadata and scripts before updating
         original_slide = current_deck.slides[index]
@@ -3940,6 +3951,8 @@ class ChatService:
             if html is not None
             else blank_slide_shell([s.html for s in current_deck.slides], landed)
         )
+        if html is not None:
+            slide_html = retokenise_slide_numbers(slide_html)
         if not has_slide_wrapper(slide_html):
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
