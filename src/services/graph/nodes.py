@@ -68,6 +68,7 @@ from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
 from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
+from src.domain.deck_style import sanitise_deck_style
 from src.domain.finding import (
     CRITERIA,
     Finding,
@@ -2202,24 +2203,38 @@ def _deck_changes_of(
     Returns a copy; the answer is not mutated, so a retry plans from it afresh.
     """
     changes = out.deck_changes
-    if changes is not None and changes.design_contract is not None:
-        return changes
-    spec = out.deck_spec
-    if spec is None or _contract_ids(spec.design_contract) == _contract_ids(
-        prior_spec.design_contract
-    ):
+    adopted = _contract_from_deck_spec(out, prior_spec)
+    if adopted is None:
         return changes
     logger.info(
         "operations_contract_from_deck_spec: the architect's operations answer "
         "sets no deck_changes.design_contract but its deck_spec carries %s (the "
         "persisted spec has %s); committing that contract",
-        _contract_ids(spec.design_contract),
+        _contract_ids(adopted),
         _contract_ids(prior_spec.design_contract),
         extra={"session_id": state.get("session_id")},
     )
-    return (changes or DeckChanges()).model_copy(
-        update={"design_contract": spec.design_contract}
-    )
+    return (changes or DeckChanges()).model_copy(update={"design_contract": adopted})
+
+
+def _contract_from_deck_spec(
+    out: Any, prior_spec: DeckSpec
+) -> Optional[DesignContractRef]:
+    """The contract C19 adopts from an operations answer's ``deck_spec``, else ``None``.
+
+    :func:`_deck_changes_of`'s rule without its log, so the deck-style sanitiser
+    can find the contract an edit commits before the answer is planned without
+    saying "committing that contract" twice.
+    """
+    changes = out.deck_changes
+    if changes is not None and changes.design_contract is not None:
+        return None
+    spec = out.deck_spec
+    if spec is None or _contract_ids(spec.design_contract) == _contract_ids(
+        prior_spec.design_contract
+    ):
+        return None
+    return spec.design_contract
 
 
 def _plan_operations_edit(
@@ -2454,6 +2469,123 @@ def _say_architect_message(state: dict, message: str, intent: str) -> None:
     _say(state, message)
 
 
+# What an edit's retry is told when the sanitiser kept nothing of its
+# ``deck_changes.deck_style`` (Ruling R4); the sanitiser's notes follow it.
+_DECK_STYLE_DROPPED_PREFIX = "deck_changes.deck_style was dropped: "
+
+
+def _design_system_active_for(
+    contract: Optional[DesignContractRef], brand: Dict[str, Any]
+) -> bool:
+    """Whether *contract* resolves to a design system, as its brand would say.
+
+    *brand*'s own flag when *contract* is the one it was resolved for; otherwise
+    the style source alone is resolved, exactly as :func:`_resolve_brand` would
+    resolve it.  Never ``_resolve_brand`` itself: a contract's template bytes are
+    resolved once per turn, by the planner that commits it.
+    """
+    if _contract_ids(contract) == brand.get("resolved_for"):
+        return brand["design_system_active"]
+    from src.services.agent_resolution import resolve_style_source
+
+    style = resolve_style_source(_agent_config_for(_with_default_template(contract)))
+    return bool(style.design_system_active)
+
+
+def _sanitise_answer_deck_style(
+    out: Any,
+    session_id: str,
+    *,
+    prior_spec: Optional[DeckSpec],
+    brand: Dict[str, Any],
+) -> Tuple[Any, Optional[Tuple[str, ...]]]:
+    """*out* with ``deck_spec.deck_style`` and ``deck_changes.deck_style`` sanitised.
+
+    Applied to every answer, the retry's included, BEFORE it is planned, so no
+    check, commit or ``deck.css`` write ever reads a deck style the sanitiser has
+    not passed, and a retry's ``your_previous_answer`` echoes the cleaned answer.
+    Each style is cleaned under the design-system flag of the contract it would
+    commit with (Ruling R3: on a design system ``:root`` goes too, or it would
+    replace the template's in the post-commit merge): ``deck_spec``'s own
+    contract, and for ``deck_changes`` the composed spec's — its own contract,
+    else the one C19 adopts from ``deck_spec``, else the persisted spec's.  Each
+    note is logged.
+
+    Returns the cleaned copy (*out* itself when it carries no style, so an old
+    deck resolves and logs nothing more), and the notes when the sanitiser kept
+    nothing of ``deck_changes.deck_style`` — an edit is refused for that (R4,
+    :func:`_plan_answer`) — else ``None``.  A build whose ``deck_spec`` style is
+    dropped commits ``deck_style=None`` and builds.
+    """
+    update: Dict[str, Any] = {}
+    dropped: Optional[Tuple[str, ...]] = None
+    spec = out.deck_spec
+    if spec is not None and spec.deck_style is not None:
+        cleaned, _ = _sanitise_logged(
+            "deck_spec",
+            spec.deck_style,
+            _design_system_active_for(spec.design_contract, brand),
+            session_id,
+        )
+        update["deck_spec"] = spec.model_copy(update={"deck_style": cleaned})
+    changes = out.deck_changes
+    if changes is not None and changes.deck_style is not None:
+        cleaned, notes = _sanitise_logged(
+            "deck_changes",
+            changes.deck_style,
+            _design_system_active_for(_committed_edit_contract(out, prior_spec), brand),
+            session_id,
+        )
+        if cleaned is None:
+            dropped = notes
+        update["deck_changes"] = changes.model_copy(update={"deck_style": cleaned})
+    if not update:
+        return out, None
+    return out.model_copy(update=update), dropped
+
+
+def _sanitise_logged(
+    field: str, style: Any, design_system_active: bool, session_id: str
+) -> Tuple[Any, Tuple[str, ...]]:
+    """``sanitise_deck_style``, with each note logged against *field* and the session."""
+    cleaned, notes = sanitise_deck_style(style, design_system_active=design_system_active)
+    for note in notes:
+        logger.info(
+            "deck_style_sanitised: the architect's %s.deck_style: %s",
+            field,
+            note,
+            extra={"session_id": session_id},
+        )
+    if cleaned is None:
+        logger.warning(
+            "deck_style_dropped: nothing of the architect's %s.deck_style could be "
+            "kept (%d note(s))",
+            field,
+            len(notes),
+            extra={"session_id": session_id},
+        )
+    return cleaned, notes
+
+
+def _committed_edit_contract(
+    out: Any, prior_spec: Optional[DeckSpec]
+) -> Optional[DesignContractRef]:
+    """The contract ``compose_edit_spec`` gives an operations edit's spec.
+
+    ``deck_changes``' own contract, else the one C19 adopts from ``deck_spec``
+    (:func:`_contract_from_deck_spec`), else the persisted spec's.  With no
+    persisted spec the edit is refused before it is planned, so ``deck_spec``'s
+    contract, if any, stands in.
+    """
+    changes = out.deck_changes
+    if changes is not None and changes.design_contract is not None:
+        return changes.design_contract
+    if prior_spec is None:
+        return out.deck_spec.design_contract if out.deck_spec is not None else None
+    adopted = _contract_from_deck_spec(out, prior_spec)
+    return adopted if adopted is not None else prior_spec.design_contract
+
+
 @dataclass(frozen=True)
 class _PlannedAnswer:
     """One architect answer, checked (spec §5): what the turn does with it, or why not.
@@ -2488,6 +2620,7 @@ def _plan_answer(
     committed_positions: Set[int],
     brand: Dict[str, Any],
     slide_payload: Dict[str, Any],
+    deck_style_dropped: Optional[Tuple[str, ...]] = None,
 ) -> _PlannedAnswer:
     """Check one architect answer from the top; say and write nothing (spec §5).
 
@@ -2502,6 +2635,9 @@ def _plan_answer(
 
     *brand* is the inbound brand, the one the payload was built from; a plan or
     a re-pinned spec resolves its own, and the result's ``brand`` carries it.
+    *out* has already been through :func:`_sanitise_answer_deck_style`, and
+    *deck_style_dropped* is its notes when that kept nothing of
+    ``deck_changes.deck_style``.
     """
     session_id = state["session_id"]
     intent = out.intent
@@ -2625,6 +2761,25 @@ def _plan_answer(
                     "will describe it again from what is there now."
                 ),
             }
+        elif operations_edit and deck_style_dropped is not None:
+            # Ruling R4 (C12): the sanitiser kept nothing of the edit's deck
+            # style.  Planned without it, the edit would land without the restyle
+            # it was for, or — when the style was its only change — be refused as
+            # "nothing to do", and the retry would never learn why.  So it is
+            # refused as an operations problem carrying the notes, which takes
+            # the one retry like any other.
+            edit_degrade = _operations_rejected(
+                OperationProblems(
+                    (
+                        OperationProblem(
+                            "invalid_deck_changes",
+                            (),
+                            _DECK_STYLE_DROPPED_PREFIX + "; ".join(deck_style_dropped),
+                        ),
+                    )
+                ),
+                slide_payload["slide_numbering"],
+            )
         elif operations_edit:
             planned = _plan_operations_edit(
                 state, out, prior_spec, committed_rows, brand, slide_payload
@@ -3039,6 +3194,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 extra={"session_id": session_id},
             )
             break
+        # Every answer's deck style is sanitised before it is planned, so nothing
+        # downstream — the plan, the commit, the deck.css write, the retry's echo
+        # of this answer — sees one the sanitiser has not passed.
+        out, deck_style_dropped = _sanitise_answer_deck_style(
+            out, session_id, prior_spec=prior_spec, brand=brand
+        )
         answer = _plan_answer(
             state,
             out,
@@ -3049,6 +3210,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
             committed_positions=committed_positions,
             brand=brand,
             slide_payload=slide_payload,
+            deck_style_dropped=deck_style_dropped,
         )
         refusal = answer.refusal
         if (
@@ -3499,6 +3661,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
 
     external_scripts = [SlideDeck.CHART_JS_URL]
     head_meta = json.dumps(_DEFAULT_HEAD_META)
+    # The committed deck style's CSS, already sanitised (the answer was, before
+    # it was planned).  It follows the template block in both places it is
+    # written — the css column below and emitted_style_blocks — so the
+    # post-commit merge keeps that order and the deck style layers over the
+    # template, never under it.
+    style_css = spec.deck_style.css if spec.deck_style is not None else ""
 
     updates.update(
         {
@@ -3511,11 +3679,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
             "design_system_active": brand["design_system_active"],
             "external_scripts": external_scripts,
             "head_meta": head_meta,
-            # ONE element on a pinned deck, none on an unpinned one, and CSS
-            # TEXT rather than <style>-wrapped markup: a wrapped block is
-            # dropped SILENTLY by the aggregator (§17).
+            # The template block on a pinned deck, then the deck style's CSS,
+            # each only when non-empty, and CSS TEXT rather than <style>-wrapped
+            # markup: a wrapped block is dropped SILENTLY by the aggregator
+            # (§17).  The post-commit aggregate re-merges both, in this order.
             "emitted_style_blocks": scoped(
-                turn_id, [brand["style_block"]] if brand["style_block"] else []
+                turn_id, [block for block in (brand["style_block"], style_css) if block]
             ),
         }
     )
@@ -3525,14 +3694,17 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # external_scripts and head_meta are resolved DETERMINISTICALLY — the
     # Chart.js CDN default and the deck's <meta> set are known before any
     # builder runs, and ArchitectOutput declares neither field. The brand bytes
-    # in css come from resolve_template_bytes, never from model output.
+    # in css come from resolve_template_bytes, never from model output; the one
+    # model-written part is the committed deck style, sanitised, after them.
     #
     # css is passed only when it is non-empty. Every column parameter defaults
     # to _UNSET ("leave the stored value alone") and an explicit value
     # overwrites, so passing "" on an unpinned deck would ERASE an existing
     # deck's stylesheet, and the post-commit aggregate_deck_css would then
     # preserve the erasure. Omitting it is the writer's own documented way to
-    # say "this turn resolved no deterministic CSS".
+    # say "this turn resolved no deterministic CSS". A committed deck style
+    # makes css non-empty and replaces the stored column whole, never merged
+    # into it, so a restyle leaves none of the old style's rules behind.
     # A describe-only turn (ws4d's arc-review sweeper) is not a change the client
     # should see. It re-describes the narrative and changes no slide, but
     # deck.version is what the WYSIWYG client sends back as expected_version, and
@@ -3552,8 +3724,9 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "modified_by": initiated_by,
         "user_visible": not describe_only,
     }
-    if brand["deterministic_css"]:
-        deck_write["css"] = brand["deterministic_css"]
+    css = _concat_css(brand["deterministic_css"], style_css)
+    if css:
+        deck_write["css"] = css
     try:
         write_deck_level_columns(
             session_id,
