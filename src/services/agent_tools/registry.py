@@ -48,14 +48,22 @@ GENIE_TOOL_NAME: Final = "genie"
 GENIE_ONE_MAX_QUESTIONS: Final = 3
 GENIE_ONE_BUDGET_SECONDS: Final = 300.0
 
+#: Genie One plans its own queries, so it is asked business questions, one at a
+#: time (live, the analyst sent it a SQL-like spec of table, columns and ordering,
+#: and two questions in one reply).  The runtime's loop runs only the first tool
+#: call in a reply, to match.
 GENIE_TOOL_DESCRIPTION: Final = (
-    "Ask Genie One, the Databricks data agent, a natural-language question about "
-    "the user's data. It writes and runs SQL on the user's behalf and returns an "
-    "answer with result tables. Each question takes one to four minutes, and you "
-    f"may ask at most {GENIE_ONE_MAX_QUESTIONS} per request, so ask a few broad "
-    "questions that cover what the data request needs rather than many narrow ones. "
-    'Figures from its results are recorded automatically with source "Genie One"; '
-    'list "Genie One" in sources when you use them.'
+    "Ask Genie One, the Databricks data agent, about the user's data; it answers "
+    "with result tables. Genie One is a natural-language analyst: ask the business "
+    'question you would ask a human analyst, such as "What are the 10 most popular '
+    'routes?", "Which drop-off areas are busiest?" or "How did trip volume change '
+    'month by month?". Do not name columns or tables unless the user named them, '
+    "and do not specify SQL, rounding, sort order or output format: Genie One works "
+    "out what data to use. Ask ONE question, read the answer, then decide whether a "
+    "follow-up question is needed. Each question takes one to four minutes, and you "
+    f"may ask at most {GENIE_ONE_MAX_QUESTIONS} per request. Figures from its results "
+    'are recorded automatically with source "Genie One"; list "Genie One" in sources '
+    "when you use them."
 )
 
 _SPOTLIGHT_SOURCE: Final = "genie_one"

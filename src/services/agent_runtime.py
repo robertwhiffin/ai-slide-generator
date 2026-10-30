@@ -449,6 +449,13 @@ def _model_provider_errors_collapsed() -> Iterator[None]:
         ) from original_error
 
 
+#: The answer to every tool call after the first in one model reply.
+_NOT_RUN_TEXT = (
+    "Not run: ask one question at a time. Read the answer to your previous question "
+    "first, then ask again if you still need this."
+)
+
+
 def _tool_definition(tool: AgentTool) -> dict[str, Any]:
     """One toolset tool as the provider tool dict the model is bound to.
 
@@ -549,7 +556,9 @@ class DatabricksModelAdapter:
         * a reply with no tool calls (valid or malformed) is nudged once to call
           the schema; a second one raises ``OutputParserException``;
         * otherwise the reply and one ``ToolMessage`` per call (same id) are
-          appended; see :meth:`_answer_tool_call`.  A malformed call (arguments
+          appended.  Only the FIRST call runs (see :meth:`_answer_tool_call`):
+          each later one is answered as not run, uncounted, so the model asks
+          one question per round.  A malformed call (arguments
           that are not JSON) is answered too: the provider client sends it back
           in the assistant turn, and an unanswered call is a rejected history.
           After the round that spends the budget, one ``HumanMessage`` tells the
@@ -604,11 +613,18 @@ class DatabricksModelAdapter:
                 messages.append(HumanMessage(content=f"Respond by calling {schema_name}."))
                 continue
             messages.append(reply)
-            for call in tool_calls:
+            # One question per round: only the first call runs.  Each other call
+            # is still answered (an unanswered call is a rejected history) and is
+            # not counted, so the model reads one answer before it asks again.
+            for index, call in enumerate(tool_calls):
                 messages.append(
                     ToolMessage(
-                        content=self._answer_tool_call(
-                            call, tools_by_name, toolset, budget_text=budget_text
+                        content=(
+                            self._answer_tool_call(
+                                call, tools_by_name, toolset, budget_text=budget_text
+                            )
+                            if index == 0
+                            else _NOT_RUN_TEXT
                         ),
                         tool_call_id=call["id"],
                     )

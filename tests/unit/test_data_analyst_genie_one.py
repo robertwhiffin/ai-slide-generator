@@ -129,15 +129,20 @@ REQUEST = (
 )
 SYNTHESIS = "The busiest pickup zip codes are 10001, 10003 and 10011."
 
-#: The exact text the Genie One tool is bound with (task-6 brief).
+#: The exact text the Genie One tool is bound with (task-6 brief, then the
+#: owner's "business questions, one at a time" change).
 GENIE_TOOL_DESCRIPTION = (
-    "Ask Genie One, the Databricks data agent, a natural-language question about "
-    "the user's data. It writes and runs SQL on the user's behalf and returns an "
-    "answer with result tables. Each question takes one to four minutes, and you "
-    "may ask at most 3 per request, so ask a few broad questions that cover what "
-    "the data request needs rather than many narrow ones. Figures from its results "
-    'are recorded automatically with source "Genie One"; list "Genie One" in '
-    "sources when you use them."
+    "Ask Genie One, the Databricks data agent, about the user's data; it answers "
+    "with result tables. Genie One is a natural-language analyst: ask the business "
+    'question you would ask a human analyst, such as "What are the 10 most popular '
+    'routes?", "Which drop-off areas are busiest?" or "How did trip volume change '
+    'month by month?". Do not name columns or tables unless the user named them, '
+    "and do not specify SQL, rounding, sort order or output format: Genie One works "
+    "out what data to use. Ask ONE question, read the answer, then decide whether a "
+    "follow-up question is needed. Each question takes one to four minutes, and you "
+    "may ask at most 3 per request. Figures from its results are recorded "
+    'automatically with source "Genie One"; list "Genie One" in sources when you '
+    "use them."
 )
 
 ROUNDS_COMPLETE = (
@@ -587,6 +592,41 @@ def test_the_genie_one_tool_binds_as_genie_with_the_exact_description():
     assert (toolset.max_calls, toolset.budget_seconds) == (3, 300.0)
     assert tool.answers == [] and tool.conversation_id is None
     assert asked == [], "building the toolset must not ask anything"
+
+
+def test_the_genie_description_sent_to_the_model_asks_for_business_questions_one_at_a_time():
+    """Live, the analyst asked Genie One a SQL-like spec (table, columns, ordering,
+    output columns) and two questions in one reply.  The description the model is
+    bound with steers it to one business question at a time.  Key phrases only;
+    the exact text is pinned above."""
+    from src.services.agent_runtime import _tool_definition
+
+    built = build_analyst_toolset(
+        resolve_agent_config(GENIE_ONE_ONLY),
+        host=HOST,
+        token=TOKEN,
+        on_question=lambda question: None,
+        session_id="session-x",
+    )
+    assert built is not None
+    _, tool = built
+    sent = _tool_definition(tool)["function"]
+    assert sent["name"] == "genie"
+    description = sent["description"]
+    for phrase in (
+        "natural-language analyst",
+        "business question",
+        "Do not name columns or tables unless the user named them",
+        "do not specify SQL, rounding, sort order or output format",
+        "Genie One works out what data to use",
+        "Ask ONE question, read the answer, then decide whether a follow-up",
+        # The facts it carried before the change.
+        "one to four minutes",
+        "at most 3 per request",
+        'source "Genie One"',
+    ):
+        assert phrase in description, phrase
+    assert len(description) <= 900
 
 
 @pytest.mark.parametrize(

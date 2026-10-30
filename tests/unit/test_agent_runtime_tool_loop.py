@@ -77,6 +77,11 @@ CONFIGURATION = AgentModelConfiguration(
 BUDGET_TEXT = f"Tool budget exhausted. Call {SCHEMA_NAME} now with what you have."
 NUDGE_TEXT = f"Respond by calling {SCHEMA_NAME}."
 MALFORMED_TEXT = "Tool error: the arguments were not valid JSON."
+#: The answer to every tool call after the first in one reply (one question per round).
+NOT_RUN_TEXT = (
+    "Not run: ask one question at a time. Read the answer to your previous question "
+    "first, then ask again if you still need this."
+)
 
 
 def _untrusted(text: str) -> str:
@@ -387,7 +392,9 @@ def test_tool_call_then_schema_runs_the_tool_once_and_returns():
     assert second[2].tool_call_id == "call_1"
 
 
-def test_each_tool_call_in_one_reply_gets_its_own_tool_message():
+def test_each_tool_call_in_one_reply_gets_its_own_tool_message_but_only_the_first_runs():
+    """One question per round, whatever the tools: the first call runs; the other
+    is still answered (an unanswered call id is a rejected history), as not run."""
     lookup = RecordingTool(results=("lookup answer",))
     count = RecordingTool("count_rows", args_schema=CountArgs, results=("17",))
     toolset = _toolset(lookup, count)
@@ -404,12 +411,83 @@ def test_each_tool_call_in_one_reply_gets_its_own_tool_message():
     messages = _tool_messages(harness.chat.invocations[1])
     assert [(m.tool_call_id, m.content) for m in messages] == [
         ("call_a", "lookup answer"),
-        ("call_b", "17"),
+        ("call_b", NOT_RUN_TEXT),
     ]
-    assert lookup.runs[0].args == LookupArgs(question="top region")
-    assert count.runs[0].args == CountArgs(table="sales")
-    assert type(count.runs[0].args) is CountArgs
+    assert lookup.runs == [ToolRun(LookupArgs(question="top region"), 300.0)]
+    assert count.runs == []
+    assert toolset.calls_made == 1
+
+
+def test_two_genie_calls_in_one_reply_run_only_the_first():
+    """The live failure: the analyst asked Genie One two questions in one reply.
+
+    Only the first is asked; the second is answered, by its own id, with the
+    not-run text, and is not counted.
+    """
+    genie = RecordingTool("genie", results=("answer 1",))
+    toolset = _toolset(genie)
+    harness = _harness(
+        _reply(
+            _call("genie", {"question": "Which pickup areas are busiest?"}, "call_1"),
+            _call("genie", {"question": "What is the average fare there?"}, "call_2"),
+        ),
+        _final(),
+    )
+
+    result = _loop(harness, toolset)
+
+    assert result == SCHEMA.model_validate(OUTPUT)
+    assert [(m.tool_call_id, m.content) for m in _tool_messages(harness.chat.invocations[1])] == [
+        ("call_1", "answer 1"),
+        ("call_2", NOT_RUN_TEXT),
+    ]
+    assert genie.runs == [ToolRun(LookupArgs(question="Which pickup areas are busiest?"), 300.0)]
+    assert toolset.calls_made == 1
+
+
+def test_a_not_run_question_asked_again_next_round_runs_within_the_budget():
+    """A not-run call spends nothing: with max_calls=2, the question asked again
+    next round runs, with no budget refusal and no budget notice before it."""
+    genie = RecordingTool("genie", results=("answer 1", "answer 2"))
+    toolset = _toolset(genie, max_calls=2)
+    harness = _harness(
+        _reply(
+            _call("genie", {"question": "q1"}, "call_1"),
+            _call("genie", {"question": "q2"}, "call_2"),
+        ),
+        _ask("q2", "call_3", tool="genie"),
+        _final(),
+    )
+
+    _loop(harness, toolset)
+
+    assert _budget_notices(harness.chat.invocations[1]) == []
+    assert [(m.tool_call_id, m.content) for m in _tool_messages(harness.chat.invocations[2])] == [
+        ("call_1", "answer 1"),
+        ("call_2", NOT_RUN_TEXT),
+        ("call_3", "answer 2"),
+    ]
+    assert [run.args.question for run in genie.runs] == ["q1", "q2"]
     assert toolset.calls_made == 2
+
+
+def test_a_schema_call_beside_two_tool_calls_still_returns_without_running_either():
+    tool = RecordingTool()
+    toolset = _toolset(tool)
+    harness = _harness(
+        _reply(
+            _call("lookup", {"question": "q1"}, "call_a"),
+            _call("lookup", {"question": "q2"}, "call_b"),
+            _call(SCHEMA_NAME, OUTPUT, "call_c"),
+        )
+    )
+
+    result = _loop(harness, toolset)
+
+    assert result == SCHEMA.model_validate(OUTPUT)
+    assert tool.runs == []
+    assert toolset.calls_made == 0
+    assert len(harness.chat.invocations) == 1
 
 
 def test_fourth_call_is_refused_when_max_calls_is_3():
@@ -629,6 +707,31 @@ def test_a_malformed_tool_call_beside_a_valid_one_gets_its_own_tool_message():
         ("call_bad", MALFORMED_TEXT),
     ]
     assert len(tool.runs) == 1
+    assert toolset.calls_made == 1
+
+
+def test_a_malformed_call_beside_two_tool_calls_keeps_the_malformed_answer():
+    """One question per round answers the extra VALID call as not run; a malformed
+    call keeps its own answer (it was never runnable, so "ask again" would mislead)."""
+    tool = RecordingTool(results=("42 rows",))
+    toolset = _toolset(tool)
+    harness = _harness(
+        _with_malformed(
+            _call("lookup", {"question": "q1"}, "call_a"),
+            _call("lookup", {"question": "q2"}, "call_b"),
+        ),
+        _final(),
+    )
+
+    result = _loop(harness, toolset)
+
+    assert result == SCHEMA.model_validate(OUTPUT)
+    assert [(m.tool_call_id, m.content) for m in _tool_messages(harness.chat.invocations[1])] == [
+        ("call_a", "42 rows"),
+        ("call_b", NOT_RUN_TEXT),
+        ("call_bad", MALFORMED_TEXT),
+    ]
+    assert [run.args.question for run in tool.runs] == ["q1"]
     assert toolset.calls_made == 1
 
 
