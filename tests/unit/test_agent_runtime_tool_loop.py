@@ -476,6 +476,79 @@ def test_a_failing_search_is_an_error_tool_message_not_a_failed_slide():
     assert "db-host-17" not in str(answer.content)
 
 
+def test_a_call_naming_no_bound_tool_is_answered_and_the_run_goes_on():
+    """A hallucinated tool name costs the model a round, never the slide.
+
+    It is answered like any call (the provider rejects an unanswered one), with
+    a code-owned text, beside the real search in the same reply and in order.
+    """
+    search = _RecordingSearch()
+
+    def search_and_unknown(_schema):
+        return AIMessage(
+            content="",
+            tool_calls=[
+                _search_tool_call("call_s1", {"kind": "icon"}),
+                {"name": "search_web", "args": {"q": "logo"}, "id": "call_u1", "type": "tool_call"},
+            ],
+        )
+
+    chat = _ScriptedChatModel([search_and_unknown, _schema_call("builder")])
+    runtime = _chat_runtime("builder", chat)
+
+    result = runtime.run(
+        "builder", 7, dict(PAYLOAD), AgentAssemblyContext(True, tools=(search.tool,))
+    )
+
+    assert result.output == OUTPUT_SCHEMAS["builder"].model_validate(fake_output("builder"))
+    assert search.calls == [{"query": None, "kind": "icon"}]
+    searched, unknown = _tool_messages(chat.inputs[1])
+    assert [searched.tool_call_id, unknown.tool_call_id] == ["call_s1", "call_u1"]
+    assert unknown.content == "tool call failed: no tool of that name is available."
+
+
+def test_an_unreadable_call_is_answered_with_its_own_text():
+    """A call whose arguments the client could not parse (``invalid_tool_calls``).
+
+    ChatDatabricks sends it back to the provider inside the assistant turn, so
+    it must be answered by id or the next round is rejected.  It may have been
+    the output schema, so it is never told a search failed.
+    """
+    from langchain_core.messages.tool import invalid_tool_call
+
+    search = _RecordingSearch()
+
+    def search_and_unreadable(schema):
+        return AIMessage(
+            content="",
+            tool_calls=[_search_tool_call("call_s1", {"kind": "icon"})],
+            invalid_tool_calls=[
+                invalid_tool_call(
+                    name=schema.__name__,
+                    args='{"html": "<div class=',
+                    id="call_bad",
+                    error="Unterminated string",
+                )
+            ],
+        )
+
+    chat = _ScriptedChatModel([search_and_unreadable, _schema_call("builder")])
+    runtime = _chat_runtime("builder", chat)
+
+    result = runtime.run(
+        "builder", 7, dict(PAYLOAD), AgentAssemblyContext(True, tools=(search.tool,))
+    )
+
+    assert result.output == OUTPUT_SCHEMAS["builder"].model_validate(fake_output("builder"))
+    assert len(search.calls) == 1
+    searched, unreadable = _tool_messages(chat.inputs[1])
+    assert [searched.tool_call_id, unreadable.tool_call_id] == ["call_s1", "call_bad"]
+    assert unreadable.content == (
+        "tool call failed: its arguments were not valid JSON, so nothing was run."
+    )
+    assert "search failed" not in unreadable.content
+
+
 # ---------------------------------------------------------------------------
 # Spotlighting
 # ---------------------------------------------------------------------------

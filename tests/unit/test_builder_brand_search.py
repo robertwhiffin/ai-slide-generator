@@ -509,6 +509,40 @@ def test_a_brand_search_reaches_the_builders_model_spotlighted_once_and_capped(
     assert {row["id"] for row in rows} <= brand.asset_ids
 
 
+def test_a_search_tool_that_cannot_be_built_binds_none_and_the_slide_still_builds(
+    graph_env, monkeypatch, brand
+):
+    """Building the node's capped wrapper runs before the node's own ``try``.
+
+    Only the wrapper's construction is made to fail (``build_ds_asset_tool``'s
+    own ``from_function`` still works), so this pins that the wrapper is built
+    inside ``_brand_search_tools``'s guard: no tool, today's binding, a slide.
+    """
+    from langchain_core.tools import StructuredTool
+
+    original = StructuredTool.from_function
+
+    def _failing_for_the_node_wrapper(*args, **kwargs):
+        func = kwargs.get("func", args[0] if args else None)
+        if getattr(func, "__module__", None) == nodes.__name__:
+            raise RuntimeError("tool construction failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        StructuredTool, "from_function", staticmethod(_failing_for_the_node_wrapper)
+    )
+    runtime = _recording_runtime(monkeypatch, builder=builder_out)
+
+    updates = builder_node(_branch_payload(graph_env, design_system_id=brand.design_system_id))
+
+    assert 0 in updates["slides"]["vals"]
+    (call,) = runtime.calls
+    assert call.context.tools == ()
+    chat = _ScriptedChatModel([_answer("builder")])
+    result = _replay(call, chat)
+    _assert_todays_binding(chat, "builder", result.diagnostics.assembled_prompt)
+
+
 # ===========================================================================
 # fixer_node
 # ===========================================================================

@@ -382,6 +382,12 @@ _TOOL_RESULT_SOURCES = {"search_brand_assets": "brand_assets"}
 #: hostnames) never reaches the model.
 _TOOL_FAILED_RESULT = "search failed: the search could not be completed and returned no assets."
 _UNKNOWN_TOOL_RESULT = "tool call failed: no tool of that name is available."
+#: The answer to a call whose arguments the provider client could not read (an
+#: ``invalid_tool_calls`` entry).  It may have named any tool, the output
+#: schema included, so it is never told a search ran.
+_INVALID_TOOL_CALL_RESULT = (
+    "tool call failed: its arguments were not valid JSON, so nothing was run."
+)
 
 
 def _tool_result(tools_by_name: Mapping[str, Any], call: Mapping[str, Any]) -> str:
@@ -418,8 +424,9 @@ def _invoke_with_tool_rounds(
     calls are kept (any tool call beside them is not run) and it is parsed
     exactly as the no-tool binding parses.  A reply that calls nothing is parsed
     the same way, so it fails as today.  Otherwise every tool call in the reply
-    is run and answered by a ``ToolMessage`` — an unreadable call too, because
-    the provider rejects a conversation with an unanswered tool call.  A further
+    is run and answered by a ``ToolMessage`` — a call naming no bound tool and
+    an unreadable call too, each with its own code-owned text, because the
+    provider rejects a conversation with an unanswered tool call.  A further
     tool reply after the last round fails with the parse-error class a no-tool
     reply raises.
     """
@@ -452,7 +459,8 @@ def _invoke_with_tool_rounds(
         for call in getattr(reply, "invalid_tool_calls", None) or []:
             messages.append(
                 ToolMessage(
-                    content=_TOOL_FAILED_RESULT, tool_call_id=str(call.get("id") or "")
+                    content=_INVALID_TOOL_CALL_RESULT,
+                    tool_call_id=str(call.get("id") or ""),
                 )
             )
     raise OutputParserException(

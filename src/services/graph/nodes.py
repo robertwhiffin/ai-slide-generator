@@ -253,41 +253,45 @@ def _brand_search_tools(payload: Mapping[str, Any]) -> Tuple[Any, ...]:
     )
     if design_system_id is None:
         return ()
+    # Everything that builds the tool sits inside the guard: it runs before the
+    # node's own ``try``, so anything escaping here would fail the branch
+    # without a placeholder instead of building the slide without a search.
     try:
         from langchain_core.tools import StructuredTool
 
         from src.services.tools.ds_asset_tool import SearchBrandAssetsInput, build_ds_asset_tool
 
         search = build_ds_asset_tool(int(design_system_id))
+
+        def _search_brand_assets(
+            query: Optional[str] = None, kind: Optional[str] = None
+        ) -> str:
+            found = search.func(query=query, kind=kind)
+            rows = json.loads(found).get("assets") or []
+            if len(rows) <= _BRAND_SEARCH_ROW_CAP:
+                return found
+            return json.dumps(
+                {
+                    "message": (
+                        f"Found {len(rows)} brand asset(s); showing the first "
+                        f"{_BRAND_SEARCH_ROW_CAP}. Narrow the search with query or kind."
+                    ),
+                    "assets": rows[:_BRAND_SEARCH_ROW_CAP],
+                }
+            )
+
+        tool = StructuredTool.from_function(
+            func=_search_brand_assets,
+            name=search.name,
+            description=search.description,
+            args_schema=SearchBrandAssetsInput,
+        )
     except Exception:
         logger.warning(
             "brand-asset search unavailable; the slide is built without it", exc_info=True
         )
         return ()
-
-    def _search_brand_assets(query: Optional[str] = None, kind: Optional[str] = None) -> str:
-        found = search.func(query=query, kind=kind)
-        rows = json.loads(found).get("assets") or []
-        if len(rows) <= _BRAND_SEARCH_ROW_CAP:
-            return found
-        return json.dumps(
-            {
-                "message": (
-                    f"Found {len(rows)} brand asset(s); showing the first "
-                    f"{_BRAND_SEARCH_ROW_CAP}. Narrow the search with query or kind."
-                ),
-                "assets": rows[:_BRAND_SEARCH_ROW_CAP],
-            }
-        )
-
-    return (
-        StructuredTool.from_function(
-            func=_search_brand_assets,
-            name=search.name,
-            description=search.description,
-            args_schema=SearchBrandAssetsInput,
-        ),
-    )
+    return (tool,)
 
 
 def _raise_if_persisted_runtime_failure(exc: Exception) -> None:
