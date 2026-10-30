@@ -142,7 +142,7 @@ def meridian_deck_style_context() -> dict:
     """
     from types import SimpleNamespace
 
-    from src.domain.deck_style import deck_style_context
+    from src.domain.deck_style import deck_style_context, rank_logos
     from src.services.design_system_service import _declared_css_paths
     from src.services.design_system_templates import materialize_templates
     from src.services.template_sections import _extract_style_blocks_css
@@ -161,8 +161,13 @@ def meridian_deck_style_context() -> dict:
     template = next(
         t for t in materialize_templates(design_system) if t.entry_path == MERIDIAN_TEMPLATE_ENTRY
     )
+    # The fake asset index that stands in for the architect's logo read (production:
+    # ``nodes._design_system_logos``), ranked by the same function.
+    assets = json.loads((MERIDIAN_DIR / "assets.json").read_text())
     return deck_style_context(
-        template.token_css or "", _extract_style_blocks_css(template.layout_html or "")
+        template.token_css or "",
+        _extract_style_blocks_css(template.layout_html or ""),
+        rank_logos(assets),
     )
 
 

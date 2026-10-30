@@ -325,7 +325,8 @@ def test_architect_payload_has_context_without_font_data(graph_env, deck):
         assert "@font-face" in FONT_TOKEN_CSS and "base64" in FONT_STYLE_BLOCK
     else:
         answer = make_spec((0,))
-        expected = {"design_tokens": {}, "template_classes": []}
+        # Addendum A, B2 (A9): an unpinned deck is shown no logos.
+        expected = {"design_tokens": {}, "template_classes": [], "logos": []}
     env.skills.set("architect", architect_build(answer))
 
     architect_node(env.state())

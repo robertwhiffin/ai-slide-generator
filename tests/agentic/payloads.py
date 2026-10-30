@@ -64,7 +64,7 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
         "template_sections": [],
         "resolved_style": None,
         "design_system_library": [],
-        "deck_style_context": {"design_tokens": {}, "template_classes": []},
+        "deck_style_context": {"design_tokens": {}, "template_classes": [], "logos": []},
     }
     unknown = sorted(set(overrides) - set(payload))
     if unknown:

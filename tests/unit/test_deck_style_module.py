@@ -1050,7 +1050,9 @@ def test_context_extracts_tokens_and_classes_without_fonts():
         ".card{padding:8px}\n"
     )
     ctx = _ds().deck_style_context(_FONT_TOKEN_CSS, style_block)
-    assert set(ctx) == {"design_tokens", "template_classes"}
+    # Addendum A, B2 (A9): ``logos`` is always emitted, empty without rows.
+    assert set(ctx) == {"design_tokens", "template_classes", "logos"}
+    assert ctx["logos"] == []
     assert ctx["design_tokens"] == {"--db-navy": "#1B3139"}
     assert ctx["template_classes"] == ["card", "meta", "slide", "title"]
     _assert_no_font_content(ctx)
@@ -1090,7 +1092,11 @@ def test_context_template_classes_are_sorted_then_capped_at_300():
 
 
 def test_context_of_empty_inputs_is_empty():
-    assert _ds().deck_style_context("", "") == {"design_tokens": {}, "template_classes": []}
+    assert _ds().deck_style_context("", "") == {
+        "design_tokens": {},
+        "template_classes": [],
+        "logos": [],
+    }
 
 
 # --- review fixes: escaped declaration names ---------------------------------

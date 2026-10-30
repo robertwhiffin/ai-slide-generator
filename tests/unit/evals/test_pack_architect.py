@@ -1107,7 +1107,9 @@ def test_committed_deck_style_context_is_the_production_derivation(cid):
     """
     ctx = case.load_case(AGENT, cid, root=COMMITTED).payload[DECK_STYLE_CONTEXT_KEY]
     assert ctx == case.meridian_deck_style_context()
-    assert set(ctx) == {"design_tokens", "template_classes"}
+    # Addendum A, B2 (A9): the Meridian logos from evals/fixtures/meridian/assets.json.
+    assert set(ctx) == {"design_tokens", "template_classes", "logos"}
+    assert ctx["logos"], "the Meridian logos are missing"
     assert ctx["design_tokens"].get("--brand-core-primary") == "#0F766E"
     assert {"slide", "stat-value"} <= set(ctx["template_classes"])
 

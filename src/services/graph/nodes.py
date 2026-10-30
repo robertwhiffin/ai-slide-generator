@@ -72,6 +72,7 @@ from src.domain.deck_style import (
     css_class_names,
     deck_style_context,
     dropped_classes_in_use,
+    rank_logos,
     sanitise_deck_style,
 )
 from src.domain.finding import (
@@ -928,6 +929,39 @@ def _design_system_library() -> List[dict]:
         }
         for design_system_id, name, description, is_default in systems
     ]
+
+
+def _design_system_logos(design_system_id: int) -> List[dict]:
+    """The design system's ``logo``/``lockup`` assets as ranked ``{handle, filename}`` rows.
+
+    Handles are ``{{ds-asset:<id>}}``; no asset bytes are read (the ``data`` column
+    is deferred by ``search_assets``). Ranked and capped by ``rank_logos``. Returns
+    ``[]`` on any failure: a deck can be built without logos, so an unreadable
+    asset table logs and the turn goes on.
+    """
+    try:
+        from src.services.design_system_service import search_assets
+
+        with get_db_session() as db:
+            assets = []
+            for kind in ("logo", "lockup"):
+                assets += search_assets(db, design_system_id, kind=kind)
+            rows = [
+                {
+                    "handle": "{{ds-asset:%d}}" % a.id,
+                    "filename": a.filename,
+                    "kind": a.kind,
+                    "mime": a.mime,
+                }
+                for a in assets
+            ]
+        return rank_logos(rows)
+    except Exception:
+        logger.warning(
+            "design-system logo read failed; the architect sees no logos this turn",
+            exc_info=True,
+        )
+        return []
 
 
 def _concat_css(token_css: str, style_block: str) -> str:
@@ -3412,7 +3446,13 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # The token names and template classes the deck style may use, without
         # any font data (see src/domain/deck_style.py).
         "deck_style_context": deck_style_context(
-            brand["token_css"], brand["style_block"]
+            brand["token_css"],
+            brand["style_block"],
+            _design_system_logos(inbound_contract.design_system_id)
+            if brand["design_system_active"]
+            and inbound_contract is not None
+            and inbound_contract.design_system_id is not None
+            else [],
         ),
     }
 

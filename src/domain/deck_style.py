@@ -633,14 +633,46 @@ def _root_tokens(css: str) -> dict[str, str]:
     return tokens
 
 
-def deck_style_context(token_css: str, style_block: str) -> dict:
+_MAX_LOGOS = 12
+_LOGO_KINDS = {"logo": 0, "lockup": 1}
+# Filename markers of a reverse (dark-ground) variant. Bare "dark" is left out: it
+# often names the dark-coloured mark for a light ground.
+_REVERSE_MARKERS = ("reverse", "reversed", "inverse", "white", "negative", "knockout", "on-dark")
+
+
+def rank_logos(rows: Any) -> list[dict]:
+    """The brand marks the architect is shown: ``{handle, filename}`` rows, at most 12.
+
+    ``rows`` are mappings with ``handle``, ``filename``, ``kind`` and optionally
+    ``mime``. Only kinds ``logo`` and ``lockup`` are kept. There is no ground
+    metadata, so the order is a filename heuristic: default-ground variants
+    before reverse ones (a marker in :data:`_REVERSE_MARKERS`), SVG (by mime or
+    extension) before raster, ``logo`` before ``lockup``, then filename. The cap
+    applies after the sort.
+    """
+
+    def _key(row: Mapping) -> tuple:
+        name = str(row.get("filename") or "")
+        low = name.lower()
+        is_svg = str(row.get("mime") or "").lower() == "image/svg+xml" or low.endswith(".svg")
+        reverse = any(marker in low for marker in _REVERSE_MARKERS)
+        return (reverse, not is_svg, _LOGO_KINDS[str(row.get("kind") or "").lower()], name)
+
+    kept = [r for r in rows if str(r.get("kind") or "").lower() in _LOGO_KINDS]
+    kept.sort(key=_key)
+    return [{"handle": r["handle"], "filename": r["filename"]} for r in kept[:_MAX_LOGOS]]
+
+
+def deck_style_context(token_css: str, style_block: str, logos: Any = ()) -> dict:
     """Design tokens and template classes the architect may reference.
 
     ``design_tokens`` are the ``:root`` custom properties of both inputs.
     ``template_classes`` are the sorted unique classes of ``style_block``, capped
-    at 300. Font data never appears.
+    at 300. ``logos`` are the rows given (see :func:`rank_logos`), unchanged.
+    Font data never appears.
     """
     return {
         "design_tokens": {**_root_tokens(token_css), **_root_tokens(style_block)},
         "template_classes": sorted(css_class_names(style_block))[:_MAX_TEMPLATE_CLASSES],
+        "logos": list(logos),
     }
