@@ -99,12 +99,12 @@ describe('PackagedUpdateBadge', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('shows the title and the automatic-restart copy when nothing blocks the update', async () => {
+  it('shows the title and the retried-on-restart copy when nothing blocks the update', async () => {
     stubFetch(reply(200, status()));
     render(<PackagedUpdateBadge onAdopted={vi.fn()} />);
 
     expect(await screen.findByText(TITLE)).toBeInTheDocument();
-    expect(screen.getByText('It will be applied automatically on the next restart.')).toBeInTheDocument();
+    expect(screen.getByText('It was not applied at startup; it will be retried on the next restart.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Adopt shipped version' })).toBeEnabled();
   });
 

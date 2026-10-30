@@ -84,7 +84,9 @@ def init_database(seed_databricks_defaults: bool = False) -> None:
         elif hasattr(outcome, "reason"):
             logger.info("Packaged Graph Configuration not published: %s", outcome.reason)
         elif hasattr(outcome, "issues"):
-            logger.info(
+            # Packaged prompts that fail validation are a build defect, not an
+            # admin's choice: louder than a block.
+            logger.warning(
                 "Packaged Graph Configuration invalid: %s",
                 [getattr(i, "code", i) for i in outcome.issues],
             )

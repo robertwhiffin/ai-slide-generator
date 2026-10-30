@@ -23,7 +23,7 @@ function reasonCopy(status: PackagedUpdate): string {
     case 'invalid':
       return 'The shipped version failed validation and was not applied.';
     default:
-      return 'It will be applied automatically on the next restart.';
+      return 'It was not applied at startup; it will be retried on the next restart.';
   }
 }
 

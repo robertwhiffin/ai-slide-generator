@@ -206,6 +206,64 @@ def test_init_database_ship_failure_is_logged_and_startup_continues(
     assert len(errors) == 1
 
 
+def test_init_database_logs_an_invalid_ship_as_a_warning_and_a_block_as_info(
+    monkeypatch, caplog
+):
+    """Invalid packaged prompts are a build defect (WARNING); a block is an admin's
+    choice (INFO).  Both are non-fatal."""
+    import logging
+
+    from src.services.graph_configuration import (
+        DraftValidationIssue,
+        ShipBlocked,
+        ShipInvalid,
+    )
+
+    run = _load_run_module()
+    monkeypatch.setattr("src.core.database.init_db", lambda: None)
+    monkeypatch.setattr("src.core.database.get_session_local", lambda: "SESSION_FACTORY")
+    monkeypatch.setattr(
+        "src.services.graph_configuration.bootstrap_graph_configuration",
+        lambda sf: SimpleNamespace(release_id=1, version_number=1, created=False),
+    )
+    for target in (
+        "src.core.migrate_profiles_to_agent_config.migrate_profiles",
+        "src.core.migrate_profiles_to_agent_config.backfill_sessions",
+        "src.core.backfill_session_slides_startup.backfill_unmigrated_decks",
+        "src.core.strip_retired_prompt_keys.strip_retired_prompt_keys",
+    ):
+        monkeypatch.setattr(target, lambda sf: 0)
+    monkeypatch.setattr(
+        "src.core.init_default_profile.seed_defaults", lambda include_databricks: None
+    )
+    monkeypatch.setattr("src.core.encryption.ensure_encryption_key", lambda: None)
+
+    def _ship_records(outcome):
+        monkeypatch.setattr(
+            "src.services.graph_configuration.ship_packaged_graph_configuration",
+            lambda sf: outcome,
+        )
+        caplog.clear()
+        with caplog.at_level(logging.INFO):
+            run.init_database()  # must not raise SystemExit
+        return [
+            (r.levelno, r.getMessage())
+            for r in caplog.records
+            if r.getMessage().startswith("Packaged Graph Configuration")
+        ]
+
+    invalid = ShipInvalid(
+        issues=(DraftValidationIssue("definitions.architect.prompt_text", "blank", "x"),)
+    )
+    assert _ship_records(invalid) == [
+        (logging.WARNING, "Packaged Graph Configuration invalid: ['blank']")
+    ]
+    blocked = ShipBlocked(reason="hand_edited", hand_edited_agents=("architect",))
+    assert _ship_records(blocked) == [
+        (logging.INFO, "Packaged Graph Configuration not published: hand_edited")
+    ]
+
+
 def test_init_database_exits_1_when_profile_migration_fails(monkeypatch):
     """A profile-migration failure must abort the boot command (set -e), so a
     broken migration can never leave workers serving against a half-migrated DB."""

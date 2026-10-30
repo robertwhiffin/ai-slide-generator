@@ -4,9 +4,9 @@ Enumerates every (method, path) pair under /api/admin/agent-definitions from
 the live ``src.api.main.app.routes`` and asserts the exact 24-pair set,
 ``require_admin`` in every route's dependant tree, and single-router ownership.
 
-The non-admin 403 parametric test covers all 24 routes and asserts that
-authorization fires before any body is parsed, any manifest prompt text is
-serialised in the response, or any service is invoked.
+The non-admin 403 parametric test covers all 26 routes (24 + 2 graph-shipping)
+and asserts that authorization fires before any body is parsed, any manifest
+prompt text is serialised in the response, or any service is invoked.
 
 Fix round 1: the require_admin check now scans the full /api/admin namespace
 (not just /api/admin/agent-definitions) so an unguarded route registered

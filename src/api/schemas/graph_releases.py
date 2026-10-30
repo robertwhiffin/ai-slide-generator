@@ -1,9 +1,11 @@
 """Exact wire contract for Graph Release preview and publication (#269 Task 5).
 
 The handlers live on the one admin router in ``src/api/routes/agent_definitions.py``
-(Corrections 31/35).  Every model here forbids extra keys; codes are snake_case and
-the client owns every display label.  Task 6's strict TypeScript parsers mirror
-these models field for field.
+(Corrections 31/35), except the packaged-update models (prompt shipping), which are
+served by ``src/api/routes/graph_shipping.py`` under ``/api/admin/graph-shipping``.
+Every model here forbids extra keys; codes are snake_case and the client owns every
+display label.  Task 6's strict TypeScript parsers mirror these models field for
+field.
 """
 
 from __future__ import annotations
