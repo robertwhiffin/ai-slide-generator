@@ -186,10 +186,52 @@ The edit-operations work (`2026-10-28-architect-edit-operations-design.md` §10)
 - **The deck style may not override** design-system tokens, fonts or template classes. It adds pieces and does not restyle the brand.
 - **Bound sections are a frame.** The `look` may replace a bound section's body, relaxing the builder's "keep everything else".
 - **Inline styles are layout-only** whenever a deck style exists, for design-system and plain-style decks alike.
-- **A deck-style-only edit rebuilds and re-reviews nothing.**
+- **A deck-style-only edit rebuilds nothing.** (It still gets the deck, or arc, review; see "Changes during the build", R12.)
 - **Older decks** get a deck style only when the user asks for a style change or rebuild.
 - **The bars:** time to first slide ≤ +30 s, eval spend ≤ USD 40 (offline evals only).
 - **Dropping a used piece** forces updates to the slides that use it, enforced by a node check and refusal (§5).
 - **No page numbers.**
 - **Plain-style decks** get a small palette of their own declared in the deck style.
 - **The reference deck** stays outside git, in `~/tellr-loop/deck-style/`.
+
+## Changes during the build
+
+Where the built code differs from this spec, or a call was made at plan time. R-numbers are rulings in the build ledger (not committed).
+
+Plan-time calls:
+- The sanitiser cleans a bad deck style rather than rejecting the answer. What it cannot keep is dropped with a note; a style with nothing left becomes absent.
+- The reviewer check in section 6 is carried by the authored fix_reviewer prompt, not by a new criterion in `src/domain/finding.py`.
+
+Sanitiser (`src/domain/deck_style.py`):
+- Every at-rule is dropped, not only `@import`, `@font-face`, `@keyframes` and `@namespace` (R3). `merge_css` keys at-rules by (keyword, prelude), so a deck-style `@media` would replace the template's.
+- `:root` is dropped under a design system (same keying problem); otherwise only its `--dk-` properties survive (R3).
+- A selector is kept only if a compound has a top-level `.dk-` class and every combinator after it is descendant or `>`. `:not(.dk-a)`, `:has`, `~` and `+` are dropped (R14, R14a).
+- Declarations with a remote address (URL-normalised first; `data:` exempt) or `expression()` are dropped. Image functions (`image-set`, `cross-fade`, `src`, `element`) and nested rules are dropped too (R14, R15).
+- Repeated selectors are coalesced at the last occurrence, because `merge_css` would keep only the last. Accepted: a rare cascade inversion against an equal-specificity rule written between them (R18, R19).
+- Empty rules are dropped, `<style` text never survives, a rebuilt sheet must re-sanitise with no notes, and notes are capped at 200 characters (R14, R15).
+- On a build, a style the sanitiser empties is dropped and the deck builds without one. On an edit, a dropped `deck_changes.deck_style` refuses the edit, with the notes, through the one-retry path (R4).
+- A style carried into a new contract is re-sanitised under the committed contract's flag (R17).
+
+Edits:
+- A dropped class used by a kept slide refuses the edit with a slide-numbered sentence (`deck_style_drops_used_class`, R6). The check runs only when both a prior and a new style exist and the contract is unchanged (R7). It excludes classes the template owns and `slide`, and counts every other class (R22).
+- Full-spec edits carry the persisted style forward on the same contract, and so does a describe-only answer with intent `build` (R8, R20, R23). A null `deck_changes.deck_style` means unchanged, so an edit cannot remove a style (R13).
+- A deck-style-only edit rebuilds nothing, but the arc (deck) review still runs, one call per restyle (R12). This replaces "re-reviews nothing" in section 5 and in the Calls list.
+- The deck style is also in the payload of `rereview_committed_slides` (R5). `build_request` is unchanged (R9).
+
+Reviewers and prompts:
+- The build reviewer prompt is unchanged (R10). The promote step refuses a transition source, and editing the prompt would break the v1 to v2 upgrade on released installs. It receives `deck_style` but has no rule for it; only the fix_reviewer prompt carries the deck-style check. This is a follow-up needing a migration decision.
+- Prompts changed: architect, builder, fixer, fix_reviewer. A deck with a style but no design system gets a ground piece (R26).
+
+Eval and scoring:
+- `deck_style_keeps` is scored on the sanitised style, so a class defined only inside `@media` fails (R27, R28).
+- The architect judge prompt is unchanged; the deterministic scorers decide the new cases (R30).
+- Page numbers stay out, as specced.
+
+Owner decisions:
+- The builder moved to Sonnet (`system.ai.claude-sonnet-5-5`). Measured against Haiku: train 1.00 vs 0.86, held-out 0.86 vs 0.71, deck-style code cases 5/5 vs 2/10, at about 1.6 to 1.8 times the latency per slide and 2.8 times the cost per slide (about USD 0.55 vs 0.21 per 15-slide deck). The production workspace must offer that endpoint with non-zero rate limits. See `evals/README.md`.
+
+Bars missed and known gaps:
+- Architect build output tokens rose by 3,147 to 3,574 against the +2,500 bar (baseline 5,702). The architect build call went from about 51 s to about 77 s, close to the +30 s time-to-first-slide bar. Mostly longer reasoning; closing it likely needs a thinking-budget setting (owner call).
+- No eval case has a deck style on a deck with no design system, for the architect or the builder, so the ground-piece rule is shown non-breaking, not working.
+- The architect cases carry no labelled template sections.
+- The build-reviewer gap is unmeasured: its new cases are caught today by `rogue_colour`, so no gap was shown.

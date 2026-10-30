@@ -760,6 +760,38 @@ After the commit, `ChatService.insert_slide` invalidates the deck cache (on ever
 
 ---
 
+## Deck style (graph)
+
+The graph's architect can author a **deck style** that gives the deck a look of its own on top of the brand. Glossary: **Deck style** and **Look** in `CONTEXT.md`. Design in `docs/superpowers/specs/2026-10-29-architect-deck-style-design.md`, which ends with what changed during the build. The sanitiser is `src/domain/deck_style.py` (pure, no I/O).
+
+**What the architect writes.** `DeckSpec.deck_style` is `css` on `dk-` classes plus a `components` catalogue (name, `class_names`, when to use it, example markup). Each slide may carry a `look`, a free-text recipe naming the pieces it uses. The style is part of the persisted spec. Limits: `DECK_STYLE_TARGET_CHARS` 4000, `DECK_STYLE_MAX_CHARS` 10000 (more is dropped), `DECK_STYLE_MAX_COMPONENTS` 12.
+
+**Sanitiser.** `sanitise_deck_style(style, *, design_system_active)` returns `(style or None, notes)`. The style is model-authored CSS inlined in a `<style>` element, so it may only add its own `dk-` pieces.
+- Every at-rule is dropped. `:root` is dropped under a design system, and otherwise keeps only `--dk-` properties. The reason is `merge_css`, which keys at-rules by (keyword, prelude) and `:root` by selector, so a deck-style one would replace the template's.
+- A selector survives only with a top-level `.dk-` class and descendant or `>` combinators after it.
+- Declarations with a remote address (`http:`, `https:`, `//`; scanned after removing tab, LF and CR and reading a backslash as `/`; `data:` URLs exempt) or `expression()` are dropped, as are image functions and nested rules.
+- Repeated selectors are coalesced at the last occurrence. Empty rules go, `<style` text never survives, a rebuilt sheet must re-sanitise with no notes, and notes are capped at 200 characters.
+- Unchanged input comes back as the same object. Blank, or over the cap, gives `None`.
+- `architect_node` sanitises every answer before planning (`_sanitise_answer_deck_style`) with the flag of the contract it will commit, so build, edit, retry and full-spec paths share one gate. On a build, a style that comes back `None` is logged and the deck builds without one. On an edit, a dropped `deck_changes.deck_style` refuses the edit (`invalid_deck_changes`, naming the notes) and the one retry is told why.
+
+**CSS order and where it is written.** Tokens, then the template block, then the deck style. It is written twice, in that order: the pre-fan-out write (`deterministic_css` plus the deck style's CSS into `deck.css`, with `emitted_style_blocks` carrying the template block then the deck style as CSS text, not `<style>` markup), and the post-commit aggregate (`aggregate_deck_css`), which re-merges the blocks. Builders' slides render with the style from the first `slide_ready`, and a restyle rewrites `deck.css` from the current style, so a removed piece does not linger.
+
+**Payload keys.** `deck_style` (the style's dump, when present) goes on the builder, build_reviewer, fixer and fix_reviewer payloads and on the re-review of committed slides. `deck_style_context` goes on the architect: the design tokens and template classes it must not restate. The `deck_style` key is optional in the model-payload fixtures, so a deck without a style sends the payload it always did.
+
+**Edits.**
+- A slide edit builds the new slide with the current style.
+- A deck-style-only edit (`deck_changes.deck_style`) rebuilds no slide and rewrites `deck.css`. It is not a narrative change, but the deck (arc) review still runs, one call per restyle.
+- Drop check: if a restyle removes a class that a kept slide still uses, the edit is refused (`deck_style_drops_used_class`) with a sentence naming the slides and the class, unless those slides are updated in the same edit. It runs only when there is a prior and a new style and the contract is unchanged. Template-owned classes and `slide` are excluded; every other class counts.
+- A full-spec edit, and a describe-only answer with intent `build`, carry the persisted style forward when the contract is unchanged. A null `deck_changes.deck_style` means unchanged, so an edit cannot remove a style.
+- A style carried into a changed contract (an operations edit with no new style) is re-sanitised under the committed contract's flag, and committed as absent if nothing survives.
+- A design-contract change rebuilds every slide, so the architect writes a fresh style with it.
+
+**Old decks.** A deck with no style builds, edits and renders as before: no payload key, no extra CSS. The architect may add one when the user asks for a style change or a rebuild. Slides built earlier do not use its classes.
+
+**Prompts and model.** The architect, builder, fixer and fix_reviewer prompts changed. The build reviewer prompt did not: it is a transition source in the promote step, so editing it would break the v1 to v2 upgrade on released installs. It receives `deck_style` but has no rule for it, which is a follow-up. The builder now runs on `system.ai.claude-sonnet-5-5`: better on the deck-style cases, but about 1.6 to 1.8 times slower and 2.8 times the cost per slide (numbers in `evals/README.md`). The production workspace must offer that endpoint with non-zero rate limits.
+
+**Rollout.** Node code ships with the app: the sanitiser, payload keys, CSS writes and edit checks apply on every install at once. The new prompts and the builder model are in the Graph V1 manifest, which only seeds a fresh bootstrap, so an existing install keeps its persisted prompts and models until an admin publishes a graph release carrying them (as in "Graph Path: Slide Numbers and Positions"). Until then its architect writes no style and its decks stay as they were.
+
 ## Configuration, Secrets & Clients
 
 - **Agent configuration** (session-bound):
