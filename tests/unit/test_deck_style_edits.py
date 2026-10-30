@@ -1,6 +1,6 @@
 # ruff: noqa: F811 — the conftest_graph fixtures are imported, then requested by name.
 """Edits keep the deck style coherent (architect deck style, plan Task 6;
-spec §5; PLAN-CORRECTIONS C16, C17, C18; Rulings R6, R7, R8).
+spec §5; PLAN-CORRECTIONS C16, C17, C18; Rulings R6, R7, R8, R22, R23).
 
 * **An operations edit may not strand a slide (R7, C17).**  When the edit's
   ``deck_changes.deck_style`` drops a class that the persisted style defined and
@@ -10,12 +10,15 @@ spec §5; PLAN-CORRECTIONS C16, C17, C18; Rulings R6, R7, R8).
   ``edit_operations_rejected`` degrade (R6: ``RETRYABLE_EDIT_CODES`` is untouched).
   A moved slide is kept.  An updated, replaced or deleted slide is not.  A class
   no kept slide uses may go.  A design-contract change rebuilds every slide, so
-  its fresh style is never refused.
+  its fresh style is never refused.  Every class counts, a piece's unprefixed
+  token spans (``.dk-code .kw``) too, except those something else styles: the
+  template's own and the frame's ``slide`` (R22).
 * **The user is told in slide numbers (R6, C16).**  A doubly-refused drop says
   "slides 3 and 4 still use the dk-note style the change removes" on a gapped
   deck whose persisted positions are 5 and 7.
 * **A full-spec edit cannot lose (or change) the deck style (R8, C18).**  On the
-  describe-only re-description and on an aligned edit, the committed spec keeps
+  describe-only re-description (answered as an ``edit`` or, R23, a ``build``) and
+  on an aligned edit, the committed spec keeps
   the persisted ``deck_style`` whatever the answer's ``deck_spec`` carries, and
   ``deck.css`` keeps the style's rules on a pinned deck (Task 4 review M4).  On a
   contract change the answer's (sanitised) style is kept instead.
@@ -32,7 +35,7 @@ both surfaces, and the foreman's own dispatch (``foreman_node`` then
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import pytest
 
@@ -175,6 +178,13 @@ def _note_html(marker: str, cls: str) -> str:
 
 def _use_class(env, positions: Sequence[int], cls: str = "dk-note") -> None:
     """Rewrite the committed rows at *positions* to use *cls*."""
+    _rewrite_rows(env, positions, lambda marker: _note_html(marker, cls))
+
+
+def _rewrite_rows(env, positions: Sequence[int], make_html: Callable[[str], str]) -> None:
+    """Rewrite the committed rows at *positions* as ``make_html(marker)``."""
+    if not positions:
+        return
     db = env.factory()
     try:
         owner = (
@@ -190,7 +200,7 @@ def _use_class(env, positions: Sequence[int], cls: str = "dk-note") -> None:
         )
         assert sorted(r.position for r in rows) == sorted(positions), "fixture"
         for row in rows:
-            row.html = _note_html(_marker(row.html), cls)
+            row.html = make_html(_marker(row.html))
         db.commit()
     finally:
         db.close()
@@ -415,11 +425,12 @@ UNSCOPED_NOTE = DeckStyle(css=".dk-note{border-left:4px solid #333}", components
 
 
 def test_dropping_a_class_the_deck_style_does_not_own_applies(graph_env):
-    """Every row uses the template's ``slide`` class and row 1 ``dk-note``.  The
+    """Every row uses the frame's ``slide`` class and row 1 ``dk-note``.  The
     persisted style scopes its note as ``.slide .dk-note``; the restyle drops the
-    qualifier and keeps ``dk-note``.  ``slide`` is no piece of the deck style (its
-    vocabulary is ``dk-``), and no slide loses a piece, so the edit lands on the
-    first call with no slide rebuilt (implementer's addition to Task 6).
+    qualifier and keeps ``dk-note``.  ``slide`` is the frame's class, never a deck
+    style's (Ruling R22), and no slide loses a piece, so the edit lands on the
+    first call with no slide rebuilt.  Unpinned: no template block owns ``slide``
+    here, so the frame exclusion alone lets it through.
 
     Sabotage: count every class the new style stops naming -> refused for
     ``slide`` at every position, twice, and the turn degrades."""
@@ -434,11 +445,125 @@ def test_dropping_a_class_the_deck_style_does_not_own_applies(graph_env):
 
     t = _retry_turn(graph_env, answers)
 
-    assert _calls(graph_env) == 1, "a class outside the dk- vocabulary was refused"
+    assert _calls(graph_env) == 1, "the frame's slide class was refused"
     spec = _with_style(prior, UNSCOPED_NOTE)
     _assert_landed(t, targets=[], spec=spec, message=A_MSG)
     assert _persisted_spec(graph_env) == spec
     assert graph_env.deck_row().css == UNSCOPED_NOTE.css
+    assert _rows(graph_env) == rows_before
+
+
+#: A code block whose token spans are unprefixed classes inside the piece (the
+#: shape of the plan's Task 7 fixture, ``.dk-code .kw/.fn/.str/.cm``).
+TOKENS = DeckStyle(
+    css=".dk-code{font-family:monospace}\n.dk-code .kw{color:#c00}\n.dk-code .str{color:#070}",
+    components=[],
+)
+#: The same piece with its token spans renamed into the ``dk-`` vocabulary.
+TOKENS_RENAMED = DeckStyle(
+    css=".dk-code{font-family:monospace}\n.dk-code .dk-kw{color:#c00}\n"
+    ".dk-code .dk-str{color:#070}",
+    components=[],
+)
+
+
+def _code_html(marker: str) -> str:
+    return (
+        f'<div class="slide"><h1>{marker}</h1><pre class="dk-code">'
+        '<span class="kw">def</span> <span class="str">"x"</span></pre></div>'
+    )
+
+
+def test_renaming_token_span_classes_is_refused(graph_env):
+    """Ruling R22: a gapped deck at persisted positions ``(0, 2, 5, 7)``, rows 5 and
+    7 colouring their code with the ``kw`` and ``str`` token spans.  A restyle
+    renames them ``dk-kw`` / ``dk-str`` and updates nothing: every kept slide
+    would lose its keyword and string colours, so A is refused with one problem
+    per class, each at the PERSISTED positions ``[5, 7]`` and naming its class.
+    The retry discusses instead; nothing is written.
+
+    Sabotage: count only ``dk-`` classes (the filter R22 replaced) -> A lands and
+    slides 3 and 4 lose their colours unchecked."""
+    for style in (TOKENS, TOKENS_RENAMED):
+        assert sanitise_deck_style(style, design_system_active=False) == (style, ()), (
+            "fixture: the token styles must be clean"
+        )
+    _styled_deck(graph_env, (0, 2, 5, 7), note_on=(), style=TOKENS)
+    _rewrite_rows(graph_env, (5, 7), _code_html)
+    snapshot = _db_state(graph_env)
+    first = _ops_out([], DeckChanges(deck_style=TOKENS_RENAMED), message=A_MSG)
+    question = "Shall I update slides 3 and 4 so their code keeps its colours?"
+    answers = _Answers(first, ArchitectOutput(intent="discuss", message=question))
+
+    t = _retry_turn(graph_env, answers)
+
+    problems = _assert_retried_with(answers, graph_env, first)
+    assert [(p["code"], p["positions"]) for p in problems] == [
+        (CODE, [5, 7]),
+        (CODE, [5, 7]),
+    ], problems
+    assert "the class kw," in problems[0]["detail"], problems[0]["detail"]
+    assert "the class str," in problems[1]["detail"], problems[1]["detail"]
+    assert t.updates["architect_intent"] == "discuss"
+    assert t.assistant == [question]
+    _assert_nowhere(graph_env, t, A_MSG)
+    assert _db_state(graph_env) == snapshot
+
+
+#: The pinned template's own block: the frame and a ``title`` class it styles.
+TITLED_TEMPLATE_BLOCK = ".slide { color: #123456; }\n.title { font-size: 40px; }"
+#: A card that also tweaks the template's ``title`` inside it.
+CARD_OVER_TITLE = DeckStyle(
+    css=".dk-card{padding:8px}\n.dk-card .title{font-weight:700}", components=[]
+)
+#: The card without the tweak: ``title`` is no longer named.
+CARD_ONLY = DeckStyle(css=".dk-card{padding:12px}", components=[])
+
+
+@pytest.mark.parametrize("session", ["no-selection", "selection-unpinned"])
+def test_dropping_a_template_class_qualifier_applies(graph_env, monkeypatch, session):
+    """Ruling R22's other exclusion: on a pinned deck whose template styles
+    ``title``, the persisted style tweaks ``.dk-card .title`` and the restyle drops
+    that rule.  Row 1 still uses ``dk-card`` and ``title``, but the template keeps
+    styling ``title``, so no piece is stripped: the edit lands on the first call
+    with no slide rebuilt.
+
+    ``selection-unpinned``: the session's own selection is unpinned, so the
+    INBOUND brand has no template block; the classes left out are the composed
+    contract's, resolved before the check.
+
+    Sabotage: leave the template's classes out of the exclusion -> refused for
+    ``title`` at position 1, twice, and the turn degrades; read them off the
+    inbound brand (the check before the re-resolve) -> the unpinned-selection
+    case is refused."""
+    if session == "selection-unpinned":
+        monkeypatch.setattr(nodes, "_session_contract", lambda _sid: UNPINNED_CONTRACT)
+    graph_env.template.style_block = TITLED_TEMPLATE_BLOCK
+    prior, _ = _styled_deck(
+        graph_env,
+        range(3),
+        note_on=(),
+        style=CARD_OVER_TITLE,
+        contract=PINNED_CONTRACT,
+    )
+    _rewrite_rows(
+        graph_env,
+        (1,),
+        lambda marker: (
+            f'<div class="slide"><h1>{marker}</h1>'
+            '<div class="dk-card"><h2 class="title">A card</h2></div></div>'
+        ),
+    )
+    rows_before = _rows(graph_env)
+    out = _ops_out([], DeckChanges(deck_style=CARD_ONLY), message=A_MSG)
+    answers = _Answers(out)
+
+    t = _retry_turn(graph_env, answers)
+
+    assert _calls(graph_env) == 1, "a class the template styles was refused"
+    spec = _with_style(prior, CARD_ONLY)
+    _assert_landed(t, targets=[], spec=spec, message=A_MSG)
+    assert _persisted_spec(graph_env) == spec
     assert _rows(graph_env) == rows_before
 
 
@@ -516,37 +641,52 @@ def test_echoed_contract_still_checks_the_dropped_class(graph_env):
 _DESCRIBE_ONLY = {"describe_only": scoped(TURN, True)}
 
 
+#: The full-spec answers R8 carries the style over: the sweeper's describe-only
+#: re-description under either intent it may answer with (R23: intent is model
+#: output, and a describe-only build builds nothing), and an aligned edit.
+_FULL_SPEC_KINDS = ["describe-only-edit", "describe-only-build", "alignment"]
+
+
 def _full_spec_turn(env, prior: DeckSpec, kind: str, answer_style: Optional[DeckStyle]):
-    """A full-spec edit of *prior* revising slide 2's brief, its spec carrying
-    *answer_style*: the arc-review sweeper's describe-only re-description, or an
-    ordinary aligned edit targeting slide 2."""
+    """A full-spec answer for *prior* revising slide 2's brief, its spec carrying
+    *answer_style*: the arc-review sweeper's describe-only re-description (as an
+    ``edit`` or a ``build``), or an ordinary aligned edit targeting slide 2."""
     revised = _with_style(_revised(prior, {1: "brief RE-DESCRIBED"}), answer_style)
-    overrides = _DESCRIBE_ONLY if kind == "describe-only" else {}
-    return _turn(env, _edit_out(revised, [1], message="Re-described."), **overrides), revised
+    overrides = _DESCRIBE_ONLY if kind.startswith("describe-only") else {}
+    out = ArchitectOutput(
+        intent="build" if kind == "describe-only-build" else "edit",
+        message="Re-described.",
+        target_positions=[1],
+        deck_spec=revised,
+    )
+    return _turn(env, out, **overrides), revised
 
 
-@pytest.mark.parametrize("kind", ["describe-only", "alignment"])
+@pytest.mark.parametrize("kind", _FULL_SPEC_KINDS)
 def test_full_spec_edit_keeps_persisted_deck_style(graph_env, kind):
-    """A full-spec edit whose ``deck_spec`` has ``deck_style=None`` (the sweeper
+    """A full-spec answer whose ``deck_spec`` has ``deck_style=None`` (the sweeper
     re-describes the narrative and does not echo the style) commits the persisted
     deck style: the spec in state and the persisted spec are the answer's, with
     the persisted style.  Unpinned deck.
 
     Sabotage: commit the answer's spec as given -> ``deck_style is None`` and the
-    deck loses its style."""
+    deck loses its style; carry on an ``edit`` only (R23) -> the describe-only
+    build loses it."""
     prior, _ = _styled_deck(graph_env, (0, 1, 2), note_on=(1,))
 
     t, revised = _full_spec_turn(graph_env, prior, kind, None)
 
     expected = _with_style(revised, STYLE)
     assert t.updates["error_state"] is None, t.updates["error_state"]
-    assert t.updates["architect_intent"] == "edit"
+    assert t.updates["architect_intent"] == (
+        "build" if kind == "describe-only-build" else "edit"
+    )
     assert t.updates["deck_spec"] == expected
     assert _persisted_spec(graph_env) == expected
     assert graph_env.deck_row().css == STYLE.css
 
 
-@pytest.mark.parametrize("kind", ["describe-only", "alignment"])
+@pytest.mark.parametrize("kind", _FULL_SPEC_KINDS)
 def test_full_spec_edit_keeps_the_deck_style_in_deck_css(graph_env, monkeypatch, kind):
     """Task 4 review M4: on a PINNED deck the pre-fan-out write always passes
     ``css`` (the template's CSS), so a full-spec answer without a deck style
@@ -574,7 +714,7 @@ def test_full_spec_edit_keeps_the_deck_style_in_deck_css(graph_env, monkeypatch,
     assert _persisted_spec(graph_env).deck_style == STYLE
 
 
-@pytest.mark.parametrize("kind", ["describe-only", "alignment"])
+@pytest.mark.parametrize("kind", _FULL_SPEC_KINDS)
 def test_full_spec_edit_on_the_same_contract_does_not_restyle(graph_env, kind):
     """R8 carries the persisted style whatever the answer's ``deck_spec`` says
     while the contract is unchanged: a full-spec answer bringing ANOTHER style

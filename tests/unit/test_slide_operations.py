@@ -960,7 +960,8 @@ def test_problem_sentences():
     ) == "the deck-level changes were not valid (title must be non-empty)"
 
     # Task 6 (R6, C16): raised by the node, numbered off the persisted positions;
-    # the class is read back out of the detail (its first `dk-` name).
+    # the class is read back out of the detail (the name after "still use the
+    # class", by the same pattern the detail's format is written beside).
     assert say(_dropped_class_problem((4,))) == (
         "slide 5 still uses the dk-note style the change removes"
     )

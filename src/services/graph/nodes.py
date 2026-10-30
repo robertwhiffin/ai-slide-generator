@@ -69,7 +69,7 @@ from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
 from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
 from src.domain.deck_style import (
-    DECK_STYLE_CLASS_PREFIX,
+    css_class_names,
     deck_style_context,
     dropped_classes_in_use,
     sanitise_deck_style,
@@ -94,6 +94,7 @@ from src.domain.slide_operations import (
     DeckChanges,
     OperationProblem,
     OperationProblems,
+    OperationsResult,
     apply_operations,
     compose_edit_spec,
     dropped_class_problem,
@@ -2196,11 +2197,17 @@ class _EditPlan:
     keeps_positions: bool
 
 
+#: The class of every slide's frame (``<div class="slide">``), whatever the
+#: template: a deck style may scope a piece under it, but never owns it.
+_SLIDE_FRAME_CLASS = "slide"
+
+
 def _stranded_style_classes(
     prior_spec: DeckSpec,
     composed: DeckSpec,
-    result: Any,
+    result: OperationsResult,
     committed_rows: List[Dict[str, Any]],
+    style_block: str,
 ) -> Optional[OperationProblems]:
     """Classes the composed deck style drops that a kept, non-rebuilt slide uses.
 
@@ -2209,9 +2216,15 @@ def _stranded_style_classes(
     means ``result.layout`` carries the slide over and ``result.rebuild`` does not
     list it; a moved slide is kept, as its row travels whole.  The problem's
     positions are the PERSISTED ones, which the rows are at (the caller has
-    passed the persisted-spec guards).  Only the deck style's own ``dk-``
-    vocabulary counts: a selector may also name another class (``.slide
-    .dk-note``), and a style that stops naming it strips no piece from a slide.
+    passed the persisted-spec guards).
+
+    Every class the style stops naming counts — the ``dk-`` pieces and the
+    unprefixed classes inside them alike (a code block's ``.dk-code .kw`` token
+    spans: renaming ``kw`` strips the keyword colour from every kept slide) —
+    except the classes something else styles anyway (Ruling R22): the template's
+    own, those of *style_block* (the composed contract's template CSS), and the
+    slide frame's ``slide``.  A style that stops scoping a piece under one of
+    those (``.slide .dk-note`` to ``.dk-note``) strips nothing from a slide.
     ``None`` when nothing is stranded.
     """
     html_by_position = {
@@ -2223,12 +2236,13 @@ def _stranded_style_classes(
         for index, position in enumerate(result.layout)
         if position is not None and index not in rebuilt
     }
+    styled_elsewhere = css_class_names(style_block) | {_SLIDE_FRAME_CLASS}
     stranded = {
         name: positions
         for name, positions in dropped_classes_in_use(
             prior_spec.deck_style, composed.deck_style, kept_rows
         ).items()
-        if name.startswith(DECK_STYLE_CLASS_PREFIX)
+        if name not in styled_elsewhere
     }
     if not stranded:
         return None
@@ -2315,10 +2329,10 @@ def _plan_operations_edit(
     2. ``compose_edit_spec``: the persisted spec, plus the ``deck_changes``
        fields that are set, plus the composed slides, re-validated.  The one
        field ever read out of ``deck_spec`` is a new ``design_contract`` that
-       ``deck_changes`` does not set (C19, :func:`_deck_changes_of`).  On the
-       same contract, a new deck style may not drop a class a kept slide still
-       uses (:func:`_stranded_style_classes`).
+       ``deck_changes`` does not set (C19, :func:`_deck_changes_of`).
     3. The brand of the composed contract, by the node's own re-resolve rule.
+       Then, on the same contract, a new deck style may not drop a class a kept
+       slide still uses (:func:`_stranded_style_classes`).
     4. The template bindings, completed and checked on the COMPOSED spec — an
        inserted slide is checked like any other.  A binding error becomes an
        ``invalid_slide_type_binding`` problem, so it degrades (and can be
@@ -2339,22 +2353,6 @@ def _plan_operations_edit(
     if isinstance(composed, OperationProblems):
         return composed
 
-    # Spec §5 (R7, C17): a restyle may not strand a kept slide.  Checked only
-    # when this edit brings a deck style and there was one to drop from, and
-    # never on a contract change: that rebuilds every slide (classify_spec_change,
-    # later), so its fresh style strands nothing.  The composed spec's contract
-    # decides, wherever the answer gave it (C19).
-    if (
-        deck_changes is not None
-        and deck_changes.deck_style is not None
-        and prior_spec.deck_style is not None
-        and _contract_ids(composed.design_contract)
-        == _contract_ids(prior_spec.design_contract)
-    ):
-        stranded = _stranded_style_classes(prior_spec, composed, result, committed_rows)
-        if stranded is not None:
-            return stranded
-
     # Today's rule, applied to the composed spec: the deck binds against the
     # template it will actually use, so a restyle in deck_changes re-resolves.
     # Compared with what the inbound brand was resolved FOR, not with the
@@ -2362,6 +2360,25 @@ def _plan_operations_edit(
     # resolves the spec's on an edit, exactly as the full-spec path does.
     if _contract_ids(composed.design_contract) != brand.get("resolved_for"):
         brand = _resolve_brand(composed.design_contract)
+
+    # Spec §5 (R7, C17): a restyle may not strand a kept slide.  Checked only
+    # when this edit brings a deck style and there was one to drop from, and
+    # never on a contract change: that rebuilds every slide (classify_spec_change,
+    # later), so its fresh style strands nothing.  The composed spec's contract
+    # decides, wherever the answer gave it (C19).  After the re-resolve, so the
+    # template classes it leaves out (R22) are the composed contract's.
+    if (
+        deck_changes is not None
+        and deck_changes.deck_style is not None
+        and prior_spec.deck_style is not None
+        and _contract_ids(composed.design_contract)
+        == _contract_ids(prior_spec.design_contract)
+    ):
+        stranded = _stranded_style_classes(
+            prior_spec, composed, result, committed_rows, brand["style_block"]
+        )
+        if stranded is not None:
+            return stranded
 
     # While the composed spec is still numbered 0..m-1, so an error's "slide N"
     # is that slide's number in the deck the edit produces.  On an identity
@@ -2995,9 +3012,11 @@ def _plan_answer(
     # sweeper does not echo the style, and a restyle goes through
     # deck_changes.deck_style, where the dropped-class check runs; this path has
     # none.  On a contract change every slide is rebuilt, so the answer's
-    # (sanitised) style stands.
+    # (sanitised) style stands.  R23: the sweeper's intent is model output, and a
+    # describe-only BUILD re-describes the same deck (it builds nothing), so it
+    # keeps the style too; only a real build writes a style of its own.
     if (
-        intent == "edit"
+        (intent == "edit" or (describe_only and intent == "build"))
         and plan is None
         and edit_degrade is None
         and spec is not None
