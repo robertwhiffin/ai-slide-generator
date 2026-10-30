@@ -275,7 +275,7 @@ class TestScopedVals:
         state = {"turn_id": "t1"}
         assert scoped_vals(state, "fix_map") == {}
 
-    def test_all_ten_keys_are_registered(self):
+    def test_all_twelve_keys_are_registered(self):
         """_EMPTY_FOR covers exactly the keys read through scoped_vals.
 
         ws4d added the tenth, ``describe_only`` — the turn-scoped flag
@@ -283,12 +283,15 @@ class TestScopedVals:
         builders over a human's hand-edits.  The mapping is CLOSED, so a key read
         through ``scoped_vals`` and missing here raises ``KeyError``; this test is
         what makes adding one a deliberate act.
+
+        Genie One in agent mode added ``analyst_figures`` and ``analyst_rounds``.
         """
         expected = {
             "describe_only",
             "landed_positions", "placeheld_positions", "reviewed_positions",
             "slides", "dispatched_at", "fix_map", "fixed",
             "emitted_style_blocks", "foreman_wakes",
+            "analyst_figures", "analyst_rounds",
         }
         assert set(_EMPTY_FOR.keys()) == expected
 
@@ -374,6 +377,9 @@ class TestGraphStateAnnotations:
         "fixed": turn_scoped_merge,
         "emitted_style_blocks": turn_scoped_concat,
         "foreman_wakes": turn_scoped_concat,
+        # Genie One in agent mode: the analyst can run twice in a turn, so both accumulate.
+        "analyst_figures": turn_scoped_concat,
+        "analyst_rounds": turn_scoped_concat,
     }
 
     _SINGLE_WRITER_KEYS = {

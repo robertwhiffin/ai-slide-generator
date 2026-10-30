@@ -50,9 +50,10 @@ import threading
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, get_type_hints
+from dataclasses import replace as dataclass_replace
+from typing import Any, Dict, Final, List, Literal, Optional, Sequence, Set, Tuple, get_type_hints
 
-from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
+from src.api.schemas.agent_config import AgentConfig, GenieOneTool, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_columns
 from src.api.services.session_manager import get_session_manager
@@ -64,9 +65,11 @@ from src.api.services.slide_repository import (
     layout_mutation_operation,
 )
 from src.core.database import get_db_session
+from src.core.databricks_client import get_user_client
+from src.core.scope_errors import consent_message, oauth_client_id_from_token
 from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
-from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
+from src.domain.deck_spec import DeckSpec, DesignContractRef, ResolvedFigure, SlideSpec
 from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
 from src.domain.finding import (
     CRITERIA,
@@ -99,6 +102,13 @@ from src.services.agent_runtime import (
     is_provider_parse_error,
     is_transient_model_failure,
 )
+from src.services.agent_tools.genie_one import (
+    GENIE_ONE_SOURCE,
+    GenieOneAnswer,
+    figures_from_answer,
+)
+from src.services.agent_tools.registry import GenieOneAgentTool, build_analyst_toolset
+from src.services.agent_tools.toolset import AgentToolset
 from src.services.deck_css_aggregator import aggregate_deck_css
 from src.services.deck_review_store import (
     compute_deck_digest,
@@ -179,6 +189,8 @@ def _assembly_context(
     design_system_active: Any,
     root_session_id: Any,
     actor_session_id: Any,
+    *,
+    toolset: Optional[AgentToolset] = None,
 ) -> AgentAssemblyContext:
     """Build the FOURTH argument every ``get_agent_runtime().run(...)`` call passes.
 
@@ -200,11 +212,17 @@ def _assembly_context(
 
     **IDs never select the release.**  ``run``'s second argument does; these two
     are inert for resolution and are read by nothing but the identity sink.
+
+    ``toolset`` is keyword-only and invocation-scoped, never an id: only
+    ``data_analyst_node`` passes it (Genie One in agent mode), and every other
+    call site leaves it ``None``, so their single structured-output call is
+    unchanged.
     """
     return AgentAssemblyContext(
         bool(design_system_active),
         root_session_id or "",
         actor_session_id or "",
+        toolset=toolset,
     )
 
 
@@ -2815,6 +2833,60 @@ def _plan_answer(
     )
 
 
+def _with_genie_figures(spec: DeckSpec, figures: List[ResolvedFigure]) -> DeckSpec:
+    """*spec* with *figures* as its code-owned Genie One figures.  Pure.
+
+    Keeps the architect's own figures whose source is not Genie One and whose key
+    is not one of *figures*' keys, in its order, then appends *figures* in order.
+    So a Genie value the architect retyped, a Genie figure it dropped and a stray
+    one it invented are all put right: what reaches ``resolved_data`` is what the
+    code built from Genie One's result rows.
+    """
+    keys = {figure.key for figure in figures}
+    kept = [
+        figure
+        for figure in spec.resolved_data.figures
+        if figure.source != GENIE_ONE_SOURCE and figure.key not in keys
+    ]
+    return spec.model_copy(
+        update={
+            "resolved_data": spec.resolved_data.model_copy(
+                update={"figures": kept + list(figures)}
+            )
+        }
+    )
+
+
+def _code_owned_genie_figures(
+    state: dict, prior_spec: Optional[DeckSpec]
+) -> List[ResolvedFigure]:
+    """The Genie One figures this turn's spec must carry verbatim.
+
+    This turn's ``analyst_figures`` when the analyst gathered any, else the
+    PERSISTED prior spec's Genie One figures (the one ``architect_node`` read
+    from the database; a contributor's checkpointed ``state["deck_spec"]`` can be
+    stale), so a later edit cannot retype or drop them.  Exact (key, value)
+    repeats across two analyst rounds of one turn are kept once.
+    """
+    figures: List[ResolvedFigure] = []
+    seen: Set[Tuple[str, str]] = set()
+    for raw in scoped_vals(state, "analyst_figures"):
+        try:
+            figure = ResolvedFigure.model_validate(raw)
+        except Exception:
+            logger.warning("An analyst figure does not validate; skipped", exc_info=True)
+            continue
+        if (figure.key, figure.value) in seen:
+            continue
+        seen.add((figure.key, figure.value))
+        figures.append(figure)
+    if figures:
+        return figures
+    if prior_spec is None:
+        return []
+    return [f for f in prior_spec.resolved_data.figures if f.source == GENIE_ONE_SOURCE]
+
+
 def architect_node(state: dict) -> Dict[str, Any]:
     """Decide the turn's intent, commit the spec, resolve every brand value.
 
@@ -3112,6 +3184,20 @@ def architect_node(state: dict) -> Dict[str, Any]:
     if answer.refusal is not None:
         _degrade_edit(state, updates, answer.refusal)
         return updates
+
+    # ---- Genie One figures are code-owned (Genie One in agent mode) ----------
+    # Applied once, here, before any writer reads the spec: the operations
+    # layout writes plan.spec, the insert shift and the deck-level write `spec`.
+    # The figures are the ones the code built from Genie One's result rows, so the
+    # model's copy of them (retyped, dropped, or inherited through
+    # compose_edit_spec) never reaches resolved_data.  classify_spec_change does
+    # not compare resolved_data, so this triggers no deck-level re-review.
+    genie_figures = _code_owned_genie_figures(state, prior_spec)
+    if genie_figures:
+        if spec is not None:
+            spec = _with_genie_figures(spec, genie_figures)
+        if plan is not None:
+            plan = dataclass_replace(plan, spec=_with_genie_figures(plan.spec, genie_figures))
 
     # ---- the operations path: land the plan (spec §4 step 4) ----------------
     # The rows are laid out FIRST — before the targets are read, any builder is
@@ -3581,11 +3667,186 @@ def architect_node(state: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+#: The analyst runs at most this many times in one turn.  A further request is
+#: answered by code, without calling the model: each Genie One question takes
+#: minutes, and an architect that keeps asking would spend the job's budget.
+MAX_ANALYST_ROUNDS_PER_TURN: Final = 2
+
+_ANALYST_ROUNDS_COMPLETE: Final = (
+    "Data gathering for this turn is complete. Plan the deck with the data already gathered."
+)
+
+#: Said to the user when Genie One refuses them for want of a grant (no EXECUTE
+#: on the service).  A missing OAuth scope gets ``consent_message`` instead.
+_GENIE_ONE_GRANT_MESSAGE: Final = (
+    "Genie One refused the request. You may need EXECUTE permission on "
+    "system.ai.genie_one_mcp; ask a workspace admin to grant it."
+)
+
+#: The ``tool_name`` a Genie One progress line carries, on SSE and on its row.
+_GENIE_ONE_PROGRESS_TOOL: Final = "genie_one"
+
+
+@dataclass(frozen=True)
+class _GenieOneRun:
+    """One analyst run's Genie One toolset, and what the node needs after it.
+
+    ``token`` is the signed-in user's (the consent message names the OAuth
+    client it was issued to); ``stored_conversation_id`` is the actor row's
+    value before the run, so an unchanged id is not written again.
+    """
+
+    toolset: AgentToolset
+    tool: GenieOneAgentTool
+    token: str
+    stored_conversation_id: Optional[str]
+
+
+def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
+    """The Genie One toolset for this run, or ``None`` to run exactly as before.
+
+    Tools come from the ACTOR's own row (a contributor's row starts with no
+    tools; the deck owner's Genie One is theirs).  Any failure to read it counts
+    as no config.  With a Genie One entry, the user's identity is captured HERE,
+    in the node thread, where the request's ContextVars are set: no user client
+    (production fails closed) means no toolset, never the service principal's.
+    """
+    try:
+        config = resolve_agent_config(
+            get_session_manager().get_session(state["actor_session_id"]).get("agent_config")
+        )
+    except Exception:
+        logger.warning(
+            "Could not read the actor's agent config; the analyst runs without tools",
+            exc_info=True,
+        )
+        return None
+    if not any(isinstance(tool, GenieOneTool) for tool in config.tools):
+        return None
+    try:
+        client_config = get_user_client().config
+        host, token = client_config.host, client_config.token
+    except Exception:
+        logger.warning(
+            "Genie One is configured but no user client is bound; the analyst runs "
+            "without tools",
+            exc_info=True,
+        )
+        return None
+    if not host or not token:
+        logger.warning(
+            "Genie One is configured but the user client has no host or token; the "
+            "analyst runs without tools"
+        )
+        return None
+
+    def on_question(question: str) -> None:
+        # Said BEFORE the question is asked: an answer takes minutes.  Both
+        # surfaces (C7): the event for SSE, the row for the polling transport.
+        line = f"Asking Genie One: {question}"
+        _emit(
+            StreamEventType.TOOL_CALL,
+            content=line,
+            metadata={"node": "data_analyst", "tool_name": _GENIE_ONE_PROGRESS_TOOL},
+        )
+        _say(
+            state,
+            line,
+            message_type="tool_call",
+            metadata={
+                "tool_name": _GENIE_ONE_PROGRESS_TOOL,
+                "tool_input": {"question": question},
+            },
+        )
+
+    built = build_analyst_toolset(
+        config,
+        host=host,
+        token=token,
+        on_question=on_question,
+        session_id=state.get("session_id"),
+    )
+    if built is None:
+        return None
+    toolset, tool = built
+    return _GenieOneRun(toolset, tool, token, tool.conversation_id)
+
+
+def _merge_answer_figures(answers: Sequence[GenieOneAnswer]) -> List[ResolvedFigure]:
+    """Every answer's figures, in order, with cross-answer repeats resolved.
+
+    An exact (key, value) repeat of an earlier answer's figure is dropped; a key
+    that reappears with a DIFFERENT value is kept, in place, as
+    ``"<key> (question m)"``, m the 1-based answer index.  Keys within one answer
+    are already unique (``figures_from_answer``).
+    """
+    merged: List[ResolvedFigure] = []
+    values: Dict[str, str] = {}
+    for index, answer in enumerate(answers, start=1):
+        for figure in figures_from_answer(answer):
+            key = figure.key
+            if key in values and values[key] != figure.value:
+                key = f"{key} (question {index})"
+            if key in values:
+                continue
+            values[key] = figure.value
+            merged.append(
+                figure if key == figure.key else figure.model_copy(update={"key": key})
+            )
+    return merged
+
+
+def _genie_one_lines(
+    figures: Sequence[ResolvedFigure], answers: Sequence[GenieOneAnswer]
+) -> str:
+    """The figure keys the architect must cite, then each distinct deep link."""
+    text = ""
+    if figures:
+        text += "\nFigures from Genie One (use these keys in data_references):"
+        text += "".join(f"\n- {figure.key}: {figure.value}" for figure in figures)
+    links: List[str] = []
+    for answer in answers:
+        if answer.deep_link and answer.deep_link not in links:
+            links.append(answer.deep_link)
+    text += "".join(f"\nExplore in Databricks: {link}" for link in links)
+    return text
+
+
+def _persist_genie_one_conversation(state: dict, run: _GenieOneRun) -> None:
+    """Store a new Genie One conversation id on the ACTOR's row.  Never raises."""
+    conversation_id = run.tool.conversation_id
+    if not conversation_id or conversation_id == run.stored_conversation_id:
+        return
+    try:
+        get_session_manager().set_genie_one_conversation_id(
+            state["actor_session_id"], conversation_id
+        )
+    except Exception:
+        logger.warning(
+            "Could not store the Genie One conversation id; the next turn starts a "
+            "new conversation",
+            exc_info=True,
+        )
+
+
+def _say_genie_one_access(state: dict, run: _GenieOneRun) -> None:
+    """Tell the user, once per kind, what a Genie One refusal needs them to do."""
+    kinds = {error.kind for error in run.toolset.access_errors}
+    if "missing_scope" in kinds:
+        _say(
+            state,
+            consent_message(oauth_client_id=oauth_client_id_from_token(run.token)),
+            message_type="info",
+        )
+    if "access_denied" in kinds:
+        _say(state, _GENIE_ONE_GRANT_MESSAGE, message_type="info")
+
+
 def data_analyst_node(state: dict) -> Dict[str, Any]:
     """Fetch what the architect asked for and answer through ``architect_message``.
 
-    ``GraphState`` declares **no analyst key** and the runtime silently drops
-    undeclared keys, so both the request and the answer travel on
+    ``GraphState`` declares no channel for the analyst's ANSWER and the runtime
+    silently drops undeclared keys, so both the request and the answer travel on
     ``architect_message`` (§11, Ruling C-7); the edge back to the architect is
     static.  That key is written by two nodes and still needs no reducer,
     because the architect and the analyst never run in the same superstep.
@@ -3596,26 +3857,50 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     fields: ``outcome``, ``synthesis``, ``sources``, ``gap``, ``tried_tools``,
     ``reason``.
 
-    **``ResolvedData.figures`` stays empty, and that is recorded rather than
-    worked around (§12).**  ``AnalystOutput`` declares no field that maps to
-    ``ResolvedFigure(key, value, source)``, so a graph-built spec's
-    ``resolved_data.figures`` is always ``[]`` — which makes
-    ``source_contradiction`` ("only assertable against ``resolved_data``")
-    unreachable on the graph path.  Closing it needs a declared field on
-    ``AnalystOutput``, an escalation to ws4b, not a mapping invented here.
+    **Genie One (agent mode).**  When the ACTOR's agent config has a Genie One
+    entry and a user is signed in, the run carries a toolset
+    (:func:`_genie_one_run`): the model may ask Genie One up to three questions,
+    as that user, each announced by a progress line.  The figures are then built
+    by CODE from Genie One's result rows (``figures_from_answer``), never from the
+    model's prose, and written on the turn-scoped ``analyst_figures``, which
+    ``architect_node`` writes verbatim into ``resolved_data.figures``; their keys
+    and the deep links are listed in the message.  A new conversation id is
+    stored on the actor's row, and a refusal tells the user the consent or the
+    grant they need.  Without a Genie One entry ``resolved_data.figures`` is
+    whatever the architect wrote, as before: ``AnalystOutput`` still declares no
+    figure field.
+
+    **At most** :data:`MAX_ANALYST_ROUNDS_PER_TURN` **runs per turn**
+    (``analyst_rounds``, one marker per run): a further request is answered by
+    code, and the model is not called.
     """
     report_phase(TurnPhase.GATHERING_DATA)
+    turn_id = state["turn_id"]
+
+    if len(scoped_vals(state, "analyst_rounds")) >= MAX_ANALYST_ROUNDS_PER_TURN:
+        logger.info(
+            "data_analyst: %d rounds already ran this turn; answering without the model",
+            MAX_ANALYST_ROUNDS_PER_TURN,
+            extra={"session_id": state.get("session_id")},
+        )
+        return {
+            "architect_message": _ANALYST_ROUNDS_COMPLETE,
+            "analyst_figures": scoped(turn_id, []),
+            "analyst_rounds": scoped(turn_id, ["round"]),
+        }
+
     request = state.get("architect_message") or ""
 
     # Content only (#258): the analyst's model is handed no session identifier.
-    # The runtime binds no tools, so no retrieval reads it from the payload; the
-    # session is still read off ``state`` by ``_say`` below.
+    # A Genie One tool runs with the user's token captured below, never one read
+    # from the payload; the session is still read off ``state`` by ``_say``.
     payload = {
         "data_request": request,
         "deck_purpose": (
             state["deck_spec"].purpose if state.get("deck_spec") else None
         ),
     }
+    genie = _genie_one_run(state)
     out = get_agent_runtime().run(
         "data_analyst",
         state["graph_release_id"],
@@ -3624,6 +3909,7 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             state.get("design_system_active"),
             state.get("root_session_id"),
             state.get("actor_session_id"),
+            toolset=genie.toolset if genie is not None else None,
         ),
     ).output
 
@@ -3643,6 +3929,12 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             f"({out.reason or 'no reason given'}). Tools tried: {tried}."
         )
 
+    figures: List[ResolvedFigure] = []
+    if genie is not None:
+        figures = _merge_answer_figures(genie.tool.answers)
+        message += _genie_one_lines(figures, genie.tool.answers)
+        _persist_genie_one_conversation(state, genie)
+
     _emit(
         StreamEventType.ASSISTANT,
         content=message,
@@ -3660,8 +3952,14 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     # architect answers from.  ``info`` is the shipped type for exactly this:
     # durable and visible, deliberately outside ``_AI_TYPES``.
     _say(state, message, message_type="info")
+    if genie is not None:
+        _say_genie_one_access(state, genie)
 
-    return {"architect_message": message}
+    return {
+        "architect_message": message,
+        "analyst_figures": scoped(turn_id, [figure.model_dump() for figure in figures]),
+        "analyst_rounds": scoped(turn_id, ["round"]),
+    }
 
 
 # ---------------------------------------------------------------------------

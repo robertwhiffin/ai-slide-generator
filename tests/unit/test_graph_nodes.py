@@ -1879,7 +1879,8 @@ class TestDataAnalystNode:
 
         updates = data_analyst_node(graph_env.state(architect_message="DATA REQUEST: x"))
 
-        assert list(updates) == ["architect_message"]
+        # Genie One in agent mode: every run also writes its figures and a round marker.
+        assert list(updates) == ["architect_message", "analyst_figures", "analyst_rounds"]
         assert expected_fragment in updates["architect_message"]
 
     def test_the_request_reaches_the_skill(self, graph_env):
@@ -5055,7 +5056,8 @@ _EXPECTED_NODE_WRITES = {
         "resolved_style", "target_positions", "template_layout_html", "title",
         "token_css",
     },
-    "data_analyst_node": {"architect_message"},
+    # Genie One in agent mode: code-built figures and the per-turn round marker.
+    "data_analyst_node": {"architect_message", "analyst_figures", "analyst_rounds"},
     "foreman_node": {"dispatched_at", "error_state", "foreman_wakes"},
     "builder_node": {"placeheld_positions", "slides"},
     "build_reviewer_node": {
@@ -6546,6 +6548,7 @@ class TestNoCallSiteMayTraceBlank:
     """
 
     def test_all_ten_call_sites_build_their_context_through_the_one_helper(self):
+        """A ``toolset=`` keyword is allowed: it is invocation-scoped and never an id."""
         calls = _runtime_run_calls()
         assert len(calls) == 10
         fourth = [call.args[3] for call in calls]
@@ -6554,7 +6557,10 @@ class TestNoCallSiteMayTraceBlank:
             isinstance(arg.func, ast.Name) and arg.func.id == "_assembly_context"
             for arg in fourth
         ), [ast.unparse(arg) for arg in fourth]
-        assert all(len(arg.args) == 3 and arg.keywords == [] for arg in fourth)
+        assert all(
+            len(arg.args) == 3 and [k.arg for k in arg.keywords] in ([], ["toolset"])
+            for arg in fourth
+        ), [ast.unparse(arg) for arg in fourth]
 
     def test_every_call_site_sources_both_ids_from_its_state_or_payload(self):
         calls = _runtime_run_calls()

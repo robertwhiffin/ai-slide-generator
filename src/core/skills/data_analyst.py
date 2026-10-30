@@ -1,10 +1,11 @@
 """Skill body for the data analyst.
 
-PR-3 GAPS (recorded, not defects — closing requires a declared field on AnalystOutput):
-- ``ResolvedData.figures`` is always ``[]`` on the graph path.  ``AnalystOutput``
-  declares no field that maps to it, so ``source_contradiction`` — which is *"only
-  assertable against resolved_data"* — is unreachable via the graph path.  Closing
-  it requires a declared field on ``AnalystOutput``, which is an escalation to ws4b.
+``ResolvedData.figures`` on the graph path: ``AnalystOutput`` still declares no
+figure field, and does not need one.  When the actor's agent config has Genie One
+(agent mode), ``data_analyst_node`` builds the figures in CODE from Genie One's
+result rows and ``architect_node`` writes them verbatim into
+``resolved_data.figures``.  Without Genie One the figures are whatever the
+architect wrote, as before.
 """
 
 from src.core.prompt_modules import UNTRUSTED_DATA_NOTICE

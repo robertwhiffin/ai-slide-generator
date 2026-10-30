@@ -70,6 +70,8 @@ _EMPTY_FOR: dict[str, Any] = {
     "fixed":                {},
     "emitted_style_blocks": [],
     "foreman_wakes":        [],
+    "analyst_figures":      [],
+    "analyst_rounds":       [],
 }
 
 
@@ -219,8 +221,10 @@ class GraphState(TypedDict, total=False):
     # No reducer: the two never run in the same superstep.  The analyst returns
     # {"architect_message": out.synthesis} on a static edge back to the
     # architect; that is how the analyst's synthesis reaches the architect,
-    # because GraphState declares no analyst-specific key and the runtime
-    # silently drops undeclared ones.  (Ruling C-7, corrections §11.)
+    # because GraphState declares no key for the analyst's answer and the
+    # runtime silently drops undeclared ones.  (Ruling C-7, corrections §11.)
+    # (analyst_figures and analyst_rounds, below, carry code-built Genie One
+    # figures and the round count, not the answer.)
     architect_message: Optional[str]
 
     # Set by architect_node (target slide positions for this turn).
@@ -318,6 +322,17 @@ class GraphState(TypedDict, total=False):
     # <style>-wrapped markup (deck_css_aggregator silently drops wrapped blocks).
     emitted_style_blocks: Annotated[Any, turn_scoped_concat]
     foreman_wakes: Annotated[Any, turn_scoped_concat]
+
+    # Written by data_analyst_node, once per run (Genie One in agent mode).
+    # analyst_figures: the ResolvedFigure dicts the CODE built from Genie One's
+    # result rows this turn (never model-retyped); architect_node writes them
+    # verbatim into resolved_data.figures.  analyst_rounds: one marker per analyst
+    # run this turn, which caps the rounds (MAX_ANALYST_ROUNDS_PER_TURN).  The
+    # analyst never runs concurrently with itself, but it can run twice in a turn,
+    # so both accumulate with turn_scoped_concat; turn-scoped so turn 2 does not
+    # inherit turn 1's figures or its round count from the checkpoint.
+    analyst_figures: Annotated[Any, turn_scoped_concat]
+    analyst_rounds: Annotated[Any, turn_scoped_concat]
 
 
 # ---------------------------------------------------------------------------
