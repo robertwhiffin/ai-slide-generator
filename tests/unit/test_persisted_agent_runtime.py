@@ -70,6 +70,7 @@ from src.services.prompt_assembler import (
     ResolvedPromptStage,
 )
 from tests.fixtures.deterministic_model_adapter import FAKE_OUTPUTS
+from tests.fixtures.legacy_v1_definitions import legacy_v1_manifest
 from tests.fixtures.log_records import STANDARD_LOG_RECORD_ATTRS as _STANDARD_LOG_RECORD_ATTRS
 from tests.fixtures.log_records import rendered_record
 from tests.fixtures.packaged_release_loader import PackagedGraphV1Loader
@@ -299,8 +300,10 @@ def _legacy_endpoint_resolved() -> ResolvedDefinition:
 def test_explicit_persisted_v1_release_keeps_historical_prompt_bytes(
     agent_key: str, design_system_active: bool
 ) -> None:
+    # The Graph Version 1 definitions, with the data analyst in its v1 form (the
+    # packaged analyst now ships on protected assembly v2).
     content = next(
-        item for item in load_graph_v1_manifest().definitions if item.agent_key == agent_key
+        item for item in legacy_v1_manifest().definitions if item.agent_key == agent_key
     )
     definition = ResolvedDefinition(
         graph_version=1,

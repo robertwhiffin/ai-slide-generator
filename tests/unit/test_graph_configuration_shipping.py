@@ -20,15 +20,19 @@ Assertions read the rows back (``GraphRelease``, ``GraphReleaseAgent``,
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from importlib import metadata
 from pathlib import Path
 
 import pytest
-from sqlalchemy import event, func, select, update
+from sqlalchemy import create_engine, event, func, select, update
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 import src.services.graph_configuration_publication as publication_module
 import src.services.graph_definition_manifest as manifest_module
+from src.core.database import Base
 from src.database.models.graph_configuration import (
     AgentDefinitionRevision,
     GraphRelease,
@@ -60,11 +64,13 @@ from src.services.graph_configuration import (
 from src.services.graph_configuration_content import definition_content_from_row
 from src.services.graph_definition_manifest import (
     GRAPH_V1_AGENT_KEYS,
+    AssemblyRulesV2,
     DefinitionContent,
     GraphV1Manifest,
     definition_content_hash,
     load_graph_v1_manifest,
 )
+from tests.fixtures.legacy_v1_definitions import legacy_v1_manifest
 from tests.unit import test_graph_release_publication as publication_tests
 from tests.unit.test_graph_release_publication import (
     _artifacts,
@@ -475,6 +481,62 @@ def test_untouched_install_ships_the_packaged_manifest_as_the_next_release(
     assert all(node.changed is False for node in nodes.values())
 
     # The whole history still validates.
+    assert GraphConfiguration().bootstrap_v1(factory) == BootstrapResult(False, v2.id, 2)
+
+
+@pytest.fixture
+def legacy_install() -> Iterator[sessionmaker]:
+    """An install bootstrapped before the data analyst's v2 upgrade (#269's fixture shape)."""
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    GraphConfiguration().bootstrap_v1(session_factory, manifest_loader=legacy_v1_manifest)
+    try:
+        yield session_factory
+    finally:
+        engine.dispose()
+
+
+def test_packaged_v2_data_analyst_ships_over_an_install_holding_the_v1_analyst(
+    legacy_install, monkeypatch
+):
+    """Existing installs hold the v1 analyst; an untouched one takes the packaged v2
+    analyst at startup, across the protected-assembly change, with no admin step."""
+    factory = legacy_install
+    install_release_clock(monkeypatch, factory)
+    v1 = _active(factory)
+    packaged = load_graph_v1_manifest()
+    packaged_hashes = _hashes(packaged)
+
+    before = status(factory, packaged)
+    assert before.differing_agents == ("data_analyst",)
+    assert before.blocked_reason is None
+    assert before.validation_issues == ()
+
+    outcome = ship(factory, packaged)
+
+    assert isinstance(outcome, Shipped), outcome
+    assert outcome.published.changed_agent_keys == ("data_analyst",)
+    assert outcome.draft_effect["data_analyst"] == "reset"
+    v2 = _active(factory)
+    assert v2.previous_release_id == v1.id
+    analyst = _revision(factory, _mapping(factory, v2.id)["data_analyst"])
+    assert analyst.created_by == "system:code-ship"
+    assert analyst.content_hash == packaged_hashes["data_analyst"]
+    content = definition_content_from_row(analyst)
+    assert (content.protected_assembly.version, content.assembly_rules) == (
+        2,
+        AssemblyRulesV2(format_version=2, custom_blocks=()),
+    )
+    _snapshot, nodes = _workbench(factory)
+    assert {key: node.draft.candidate_hash for key, node in nodes.items()} == packaged_hashes
     assert GraphConfiguration().bootstrap_v1(factory) == BootstrapResult(False, v2.id, 2)
 
 

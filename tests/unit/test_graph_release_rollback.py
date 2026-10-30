@@ -79,6 +79,9 @@ from tests.unit.test_graph_release_publication import (
 factory = publication_tests.factory
 
 _OTHERS = ("data_analyst", "build_reviewer", "fixer", "fix_reviewer", "deck_reviewer")
+#: The roles on the Graph Version 1 protected bundle: every packaged role but the data
+#: analyst, which ships on protected assembly v2.  Removing the v1 bundle strands these.
+V1_BUNDLE_ROLES = [key for key in GRAPH_V1_AGENT_KEYS if key != "data_analyst"]
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +536,8 @@ def test_incompatible_historical_release_is_reported_per_role(factory, monkeypat
         identity = (revision.protected_assembly_version, revision.protected_assembly_digest)
     bundles = {k: v for k, v in _default_bundles().items() if k != identity}
     assert len(bundles) == len(_default_bundles()) - 1
-    # Every v1-lineage role shares v2 architect's bundle, so v4's goes too.
+    # Every v1-lineage role shares v2 architect's bundle, so v4's goes too (the
+    # data analyst is on the v2 bundle, which stays).
     monkeypatch.setattr(draft_module, "_PROMPT_ASSEMBLER", PromptAssembler(bundles=bundles))
     before = _artifacts(factory)
 
@@ -546,7 +550,7 @@ def test_incompatible_historical_release_is_reported_per_role(factory, monkeypat
         "protected_bundle_unavailable",
         "Protected assembly bundle is unavailable.",
     )
-    assert [i.field.split(".")[1] for i in result.issues] == list(GRAPH_V1_AGENT_KEYS)
+    assert [i.field.split(".")[1] for i in result.issues] == V1_BUNDLE_ROLES
     assert _artifacts(factory) == before
 
 
@@ -1217,9 +1221,7 @@ def test_refusals_write_nothing(factory, monkeypatch, case):
             "protected_bundle_unavailable",
             "Protected assembly bundle is unavailable.",
         )
-        assert [i.field.split(".")[1] for i in raised.value.issues] == list(
-            GRAPH_V1_AGENT_KEYS
-        )
+        assert [i.field.split(".")[1] for i in raised.value.issues] == V1_BUNDLE_ROLES
     assert rollback_artifacts(factory) == before
 
 

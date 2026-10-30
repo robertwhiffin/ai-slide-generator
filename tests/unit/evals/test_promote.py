@@ -280,7 +280,11 @@ def test_non_dry_promote_of_empty_choice_is_byte_identical(tree, capsys):
 
 def test_non_dry_promote_of_all_seven_baselines_is_byte_identical(tree, capsys):
     before = _read_all(tree)
-    chosen = {key: config.v1_baseline(key) for key in GRAPH_V1_AGENT_KEYS}
+    # The data analyst ships upgraded to protected assembly v2, so its prompt is no longer
+    # the transition's source composite and the transition lock refuses even its no-op
+    # baseline: promote cannot carry the data analyst at all until that lock is revisited.
+    promotable = [key for key in GRAPH_V1_AGENT_KEYS if key != "data_analyst"]
+    chosen = {key: config.v1_baseline(key) for key in promotable}
     result = promote.promote(chosen, repo_root=tree)
     assert _read_all(tree) == before
     assert result == _current_hashes()

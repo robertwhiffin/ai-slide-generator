@@ -64,6 +64,9 @@ ADMIN = "task5-admin@example.com"  # ``_force_admin``'s principal
 NOTE = "Emergency: back to Graph Version 2"
 OFFSET = RELEASE_ID_OFFSET
 _OTHERS = ("data_analyst", "build_reviewer", "fixer", "fix_reviewer", "deck_reviewer")
+#: The roles on the Graph Version 1 protected bundle: every packaged role but the data
+#: analyst, which ships on protected assembly v2.  Removing the v1 bundle strands these.
+V1_BUNDLE_ROLES = [key for key in GRAPH_V1_AGENT_KEYS if key != "data_analyst"]
 _TS = TypeAdapter(datetime)
 #: ``_link_v2_runs``' runs in (Graph role order, test case id, run id) order: the
 #: run ids are created in another order, so a sort by id alone is RED.
@@ -845,9 +848,9 @@ def test_an_incompatible_release_is_the_exact_422(factory, monkeypatch, built, c
         "code": "protected_bundle_unavailable",
         "message": "Protected assembly bundle is unavailable.",
     }
-    assert [e["field"].split(".")[1] for e in body["errors"]] == list(GRAPH_V1_AGENT_KEYS)
+    assert [e["field"].split(".")[1] for e in body["errors"]] == V1_BUNDLE_ROLES
     assert sorted(_release_rows(factory)) == [1, 2, 3, 4]
-    _one_log(caplog, "incompatible", sorted(GRAPH_V1_AGENT_KEYS))
+    _one_log(caplog, "incompatible", sorted(V1_BUNDLE_ROLES))
 
 
 def _invalid(*errors: tuple[str, str, str]) -> dict:

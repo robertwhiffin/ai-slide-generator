@@ -79,6 +79,7 @@ from src.services.model_endpoint_probe import (
     StructuredOutputProbeFailure,
 )
 from src.services.prompt_assembler import ROLE_UNTRUSTED_DATA_NOTICE
+from tests.fixtures.legacy_v1_definitions import legacy_v1_manifest
 
 EXPECTED_TOPOLOGY_ORDER = [
     "architect",
@@ -135,8 +136,14 @@ def _reset_admin_identity() -> Iterator[None]:
         _authz.reset_admin_cache()
 
 
+#: ``session_factory`` param: bootstrap an install from before the data analyst's v2
+#: upgrade (``legacy_v1_manifest``), so it still holds the v1 analyst.  The packaged
+#: analyst ships on protected assembly v2, so a fresh bootstrap has nothing to upgrade.
+LEGACY_V1_INSTALL = pytest.mark.parametrize("session_factory", ["legacy_v1"], indirect=True)
+
+
 @pytest.fixture
-def session_factory() -> Iterator[sessionmaker]:
+def session_factory(request) -> Iterator[sessionmaker]:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -149,7 +156,10 @@ def session_factory() -> Iterator[sessionmaker]:
 
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
-    GraphConfiguration().bootstrap_v1(factory)
+    legacy = getattr(request, "param", None) == "legacy_v1"
+    GraphConfiguration().bootstrap_v1(
+        factory, manifest_loader=legacy_v1_manifest if legacy else None
+    )
     try:
         yield factory
     finally:
@@ -259,6 +269,7 @@ def _model_node(body: dict[str, object], agent_key: str) -> dict[str, object]:
     return next(node for node in _model_nodes(body) if node["agent_key"] == agent_key)
 
 
+@LEGACY_V1_INSTALL
 def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkeypatch):
     _force_admin(monkeypatch, is_admin=True)
 
@@ -375,6 +386,31 @@ def test_admin_workbench_returns_exact_typed_v1_contract(session_factory, monkey
         assert published["assembly_rules"]["separator"] == "\n\n"
         assert set(published["protected_assembly"]) == {"version", "digest"}
         assert set(published["schema_contract"]) == {"version", "digest"}
+
+
+def test_fresh_install_serves_the_packaged_data_analyst_on_protected_assembly_v2(
+    session_factory, monkeypatch
+):
+    """The packaged analyst bootstraps already upgraded: v2 rules, the v2 protected view."""
+    _force_admin(monkeypatch, is_admin=True)
+    with _app_for(session_factory) as client:
+        node = _model_node(_workbench(client), "data_analyst")
+
+    for definition in (node["published"], node["draft"]):
+        assert definition["assembly_rules"] == {"format_version": 2, "custom_blocks": []}
+        assert definition["protected_assembly"] == {
+            "version": 2,
+            "digest": "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854",
+        }
+        assert "Genie One" in definition["prompt_text"]
+        assert _stage_ids(definition) == [
+            "untrusted_data_notice",
+            "untrusted_data_open",
+            "runtime_payload",
+            "untrusted_data_close",
+            "structured_output_binding",
+        ]
+        assert all(row["bundle_version"] == 2 for row in _stage_view(definition).values())
 
 
 def test_base_revision_is_derived_from_base_release_mapping(session_factory, monkeypatch):
@@ -1339,6 +1375,7 @@ def _environment_stage_ids(agent_key: str) -> list[str]:
     return ids
 
 
+@LEGACY_V1_INSTALL
 def test_workbench_get_exposes_the_exact_server_derived_v1_protected_stage_view(
     session_factory, monkeypatch
 ):
@@ -1990,6 +2027,7 @@ def test_put_valid_v2_custom_block_save_round_trips_through_the_route(
     assert body["definition"] == _model_node(after, "architect")["draft"]
 
 
+@LEGACY_V1_INSTALL
 def test_upgrade_route_returns_the_exact_success_contract_and_preserves_release(
     session_factory, monkeypatch
 ):
@@ -2066,6 +2104,7 @@ def test_upgrade_route_copies_already_current_and_stale_without_deriving_state(
         assert definition == _model_node(after, agent_key)["draft"]
 
 
+@LEGACY_V1_INSTALL
 @pytest.mark.parametrize("agent_key", ["data_analyst", "build_reviewer"])
 def test_upgrade_route_manual_resolution_and_stale_precedence(
     session_factory, monkeypatch, agent_key
@@ -2272,6 +2311,7 @@ def test_both_post_routes_reject_unknown_or_deterministic_agent_keys(
     }
 
 
+@LEGACY_V1_INSTALL
 @pytest.mark.parametrize("agent_key", ["data_analyst", "build_reviewer"])
 def test_legacy_prompt_source_route_returns_the_exact_read_only_dto(
     session_factory, monkeypatch, agent_key
@@ -2317,6 +2357,7 @@ def test_legacy_prompt_source_route_returns_the_exact_read_only_dto(
     assert after == before
 
 
+@LEGACY_V1_INSTALL
 @pytest.mark.parametrize(
     ("agent_key", "setup", "lock_version", "expected"),
     [

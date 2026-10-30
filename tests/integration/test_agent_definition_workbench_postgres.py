@@ -68,6 +68,7 @@ from src.services.prompt_assembler import (
     V2_PROTECTED_ASSEMBLY_IDENTITY,
     PromptAssembler,
 )
+from tests.fixtures.legacy_v1_definitions import legacy_v1_manifest
 
 pytestmark = pytest.mark.postgres
 
@@ -618,7 +619,8 @@ def test_locked_persisted_protected_assembly_transition_and_recovery(
     """Catches lossy persisted transitions, recovery writes, or published mutation."""
     factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
     service = GraphConfiguration()
-    service.bootstrap_v1(factory)
+    # An install from before the data analyst's v2 upgrade: it holds the v1 analyst.
+    service.bootstrap_v1(factory, manifest_loader=legacy_v1_manifest)
     transition = PromptAssembler().legacy_v1_prompt_source(agent_key=agent_key)
 
     bootstrap_content, bootstrap_hash = _stored_draft(factory, agent_key)
@@ -763,7 +765,8 @@ def test_two_sessions_serialize_a_same_content_v1_save_against_an_upgrade(
     """Catches an upgrade that skips the lock comparison behind a same-content save."""
     factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
     service = GraphConfiguration()
-    service.bootstrap_v1(factory)
+    # An install from before the data analyst's v2 upgrade: it holds the v1 analyst.
+    service.bootstrap_v1(factory, manifest_loader=legacy_v1_manifest)
     transition = PromptAssembler().legacy_v1_prompt_source(agent_key=agent_key)
     bootstrap_content, bootstrap_hash = _stored_draft(factory, agent_key)
     published_before = _published_revision(factory, agent_key)
@@ -916,7 +919,8 @@ def test_two_sessions_serialize_two_upgrades_and_reject_the_waiter(
     """Catches a second transition authority, a double write, or a masked stale lock."""
     factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
     service = GraphConfiguration()
-    service.bootstrap_v1(factory)
+    # An install from before the data analyst's v2 upgrade: it holds the v1 analyst.
+    service.bootstrap_v1(factory, manifest_loader=legacy_v1_manifest)
     transition = PromptAssembler().legacy_v1_prompt_source(agent_key=agent_key)
     bootstrap_content, _ = _stored_draft(factory, agent_key)
     published_before = _published_revision(factory, agent_key)
@@ -1306,9 +1310,14 @@ def _expected_v2_rows(agent_key: str, digest: str) -> list[dict[str, object]]:
 
 @pytest.fixture
 def real_route_stack(postgres_engine, monkeypatch):
-    """The shipped router over real PostgreSQL, authorized as a trusted admin."""
+    """The shipped router over real PostgreSQL, authorized as a trusted admin.
+
+    The install is bootstrapped from before the data analyst's v2 upgrade
+    (``legacy_v1_manifest``), so every role starts on the v1 assembly and both legacy
+    transitions can run; a fresh install's analyst ships already on v2.
+    """
     factory = sessionmaker(bind=postgres_engine, expire_on_commit=False)
-    GraphConfiguration().bootstrap_v1(factory)
+    GraphConfiguration().bootstrap_v1(factory, manifest_loader=legacy_v1_manifest)
 
     app = FastAPI()
     app.include_router(agent_definition_router)
