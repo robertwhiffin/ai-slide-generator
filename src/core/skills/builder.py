@@ -1,17 +1,20 @@
 """Skill body for the slide builder.
 
-PR-3 GAPS (recorded, not defects — closing any requires a declared channel):
-- Brand assets are unreachable on the graph path.  ``search_brand_assets`` gating
-  stays in ``agent_factory`` (monolith-only).
-- User-uploaded images are in the same position — no ``GraphState`` key and no
-  payload field carries an image-id list.
+Brand assets (deck style addendum A): ``builder_node`` binds a
+``search_brand_assets`` tool, scoped to the deck's design system, when a design
+system is active and the deck has a deck style.  ``TOOL_GRANTS`` records that;
+it is documentation only — nothing reads it, and the binding decision is code
+in ``builder_node``.  An old deck (no deck style) binds no tool.
 
-Both gaps degrade gracefully to "no image" rather than a fabricated handle: the
-prose keeps the embedding syntax (``{{image:ID}}``) but carries no instruction to
-call a tool, so a builder that receives no image id builds the slide without images.
+PR-3 GAP (recorded, not a defect — closing it requires a declared channel):
+user-uploaded images are unreachable on the graph path — no ``GraphState`` key and
+no payload field carries an image-id list.  It degrades gracefully to "no image"
+rather than a fabricated handle: the prose keeps the embedding syntax
+(``{{image:ID}}``) but carries no instruction to call a tool, so a builder that
+receives no image id builds the slide without images.
 """
 
-TOOL_GRANTS: list[str] = []
+TOOL_GRANTS: list[str] = ["search_brand_assets"]
 
 INSTRUCTIONS: str = (
     "You are a slide builder.  Build ONE slide as an HTML fragment.\n"

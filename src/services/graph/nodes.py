@@ -48,6 +48,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, get_type_hints
@@ -189,6 +190,7 @@ def _assembly_context(
     design_system_active: Any,
     root_session_id: Any,
     actor_session_id: Any,
+    tools: Sequence[Any] = (),
 ) -> AgentAssemblyContext:
     """Build the FOURTH argument every ``get_agent_runtime().run(...)`` call passes.
 
@@ -210,11 +212,81 @@ def _assembly_context(
 
     **IDs never select the release.**  ``run``'s second argument does; these two
     are inert for resolution and are read by nothing but the identity sink.
+
+    ``tools`` is passed by ``builder_node`` and ``fixer_node`` only (deck style
+    addendum A): :func:`_brand_search_tools`, empty for every deck that does not
+    qualify.  Every other site passes the three, so its context carries none.
     """
     return AgentAssemblyContext(
         bool(design_system_active),
         root_session_id or "",
         actor_session_id or "",
+        tools=tuple(tools),
+    )
+
+
+#: The most rows one brand-asset search hands the builder or fixer.  The search
+#: itself has no cap (a real library holds hundreds of images), and spotlight's
+#: byte cap would cut an unfiltered result mid-JSON; capped rows stay valid JSON.
+_BRAND_SEARCH_ROW_CAP = 20
+
+
+def _brand_search_tools(payload: Mapping[str, Any]) -> Tuple[Any, ...]:
+    """The ``search_brand_assets`` tool a builder or fixer may call, or ``()``.
+
+    Bound only when all three hold (deck style addendum A): a design system is
+    active, the deck has a deck style (an old deck's payload never carries one,
+    so its binding is exactly today's), and the design contract names the
+    design system the search is scoped to.  ``payload`` is the builder's branch
+    payload — for the fixer, the builder record its fix entry carries.
+
+    The tool keeps ``build_ds_asset_tool``'s name, description and arguments and
+    caps its rows at ``_BRAND_SEARCH_ROW_CAP``; it returns plain JSON, and the
+    runtime spotlights it once.  Nothing here reads the database: each search
+    opens its own session.  Any failure to build it binds no tool.
+    """
+    if not payload.get("design_system_active") or payload.get("deck_style") is None:
+        return ()
+    contract = payload.get("design_contract")
+    design_system_id = (
+        contract.get("design_system_id") if isinstance(contract, Mapping) else None
+    )
+    if design_system_id is None:
+        return ()
+    try:
+        from langchain_core.tools import StructuredTool
+
+        from src.services.tools.ds_asset_tool import SearchBrandAssetsInput, build_ds_asset_tool
+
+        search = build_ds_asset_tool(int(design_system_id))
+    except Exception:
+        logger.warning(
+            "brand-asset search unavailable; the slide is built without it", exc_info=True
+        )
+        return ()
+
+    def _search_brand_assets(query: Optional[str] = None, kind: Optional[str] = None) -> str:
+        found = search.func(query=query, kind=kind)
+        rows = json.loads(found).get("assets") or []
+        if len(rows) <= _BRAND_SEARCH_ROW_CAP:
+            return found
+        return json.dumps(
+            {
+                "message": (
+                    f"Found {len(rows)} brand asset(s); showing the first "
+                    f"{_BRAND_SEARCH_ROW_CAP}. Narrow the search with query or kind."
+                ),
+                "assets": rows[:_BRAND_SEARCH_ROW_CAP],
+            }
+        )
+
+    return (
+        StructuredTool.from_function(
+            func=_search_brand_assets,
+            name=search.name,
+            description=search.description,
+            args_schema=SearchBrandAssetsInput,
+        ),
     )
 
 
@@ -4402,6 +4474,9 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         for key, value in payload.items()
         if key in _BUILDER_MODEL_PAYLOAD_KEYS
     }
+    # Rides on the context, never in the model-facing payload; ``()`` for an
+    # old deck, so its binding is today's.
+    brand_tools = _brand_search_tools(payload)
 
     try:
         out = get_agent_runtime().run(
@@ -4412,6 +4487,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                 design_system_active,
                 payload.get("root_session_id"),
                 payload.get("actor_session_id"),
+                brand_tools,
             ),
         ).output
 
@@ -4428,6 +4504,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                     design_system_active,
                     payload.get("root_session_id"),
                     payload.get("actor_session_id"),
+                    brand_tools,
                 ),
             ).output.html
 
@@ -4808,6 +4885,8 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         payload.get("design_system_active")
         or state.get("design_system_active")
     )
+    # Decided on the builder record, as the builder's own binding was.
+    brand_tools = _brand_search_tools(payload)
 
     try:
         out = get_agent_runtime().run(
@@ -4818,6 +4897,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                 design_system_active,
                 state.get("root_session_id"),
                 state.get("actor_session_id"),
+                brand_tools,
             ),
         ).output
 
@@ -4834,6 +4914,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                     design_system_active,
                     state.get("root_session_id"),
                     state.get("actor_session_id"),
+                    brand_tools,
                 ),
             ).output.html
 

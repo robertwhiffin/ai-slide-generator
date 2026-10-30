@@ -7,9 +7,13 @@ once WYSIWYG lands, a user's manual edits.  This prose preserves that distinctio
 Note on dimensions: the fixer's prose omits the "Maintain 1280x720 dimensions" line
 present in EDITING_RULES (§L5).  Safe-area numbers are owned by
 ``_SLIDE_FRAME_CONSTRAINTS`` and must not be duplicated in skill bodies.
+
+Brand assets (deck style addendum A): ``fixer_node`` binds the same scoped
+``search_brand_assets`` tool as the builder, decided on the builder record the
+fix entry carries.  ``TOOL_GRANTS`` records that and is read by nothing.
 """
 
-TOOL_GRANTS: list[str] = []
+TOOL_GRANTS: list[str] = ["search_brand_assets"]
 
 INSTRUCTIONS: str = (
     "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\n"

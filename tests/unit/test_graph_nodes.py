@@ -6554,7 +6554,33 @@ class TestNoCallSiteMayTraceBlank:
             isinstance(arg.func, ast.Name) and arg.func.id == "_assembly_context"
             for arg in fourth
         ), [ast.unparse(arg) for arg in fourth]
-        assert all(len(arg.args) == 3 and arg.keywords == [] for arg in fourth)
+        assert all(arg.keywords == [] for arg in fourth)
+        # Deck style addendum A, B3 (Ruling RA2 / Correction A10): the builder's
+        # and the fixer's two calls each (first attempt and safety retry) may
+        # pass the scoped brand-search tools as a fourth positional argument.
+        # Every other call site builds its context from exactly the three.
+        # ``_runtime_run_calls`` parses its own tree, so calls are matched to
+        # their enclosing top-level function by source position.
+        def _at(node):
+            return tuple(
+                getattr(node, attr, None)
+                for attr in ("lineno", "col_offset", "end_lineno", "end_col_offset")
+            )
+
+        positions = {_at(call): call for call in calls}
+        owners: dict = {}
+        for top in ast.parse(inspect.getsource(nodes)).body:
+            if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for node in ast.walk(top):
+                    if isinstance(node, ast.Call) and _at(node) in positions:
+                        owners.setdefault(top.name, []).append(positions[_at(node)])
+        assert sum(len(found) for found in owners.values()) == 10
+        tool_sites = {"builder_node", "fixer_node"}
+        assert [len(owners.get(name, [])) for name in sorted(tool_sites)] == [2, 2]
+        for name, found in owners.items():
+            allowed = {3, 4} if name in tool_sites else {3}
+            for call in found:
+                assert len(call.args[3].args) in allowed, (name, ast.unparse(call.args[3]))
 
     def test_every_call_site_sources_both_ids_from_its_state_or_payload(self):
         calls = _runtime_run_calls()
