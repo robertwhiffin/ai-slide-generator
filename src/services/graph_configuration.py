@@ -186,7 +186,7 @@ def read_packaged_update_status(session: Session) -> PackagedUpdateStatus:
 def adopt_packaged_update(
     session: Session, *, actor: str, expected_lock_version: int
 ) -> AdoptOutcome:
-    """The admin's Adopt: publish the packaged manifest under ``actor``.
+    """The admin's Adopt: publish the packaged manifest as ``system:adopt:<actor>``.
 
     Loads the packaged manifest and names the installed app version in the
     release note, as the startup wrapper does.

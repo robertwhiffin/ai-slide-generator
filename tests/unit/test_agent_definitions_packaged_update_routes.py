@@ -12,8 +12,8 @@ time, so a test manifest is installed by patching that module's attribute
 ``install_release_clock`` (SQLite timestamps have one-second resolution).
 
 The client and fixture setup mirror ``test_graph_release_history_routes.py``
-(Plan correction C3).  The handlers are on the one admin router in
-``agent_definitions.py``.
+(Plan correction C3).  The handlers are on their own admin router in
+``src/api/routes/graph_shipping.py``, under ``/api/admin/graph-shipping``.
 """
 
 from __future__ import annotations
@@ -61,6 +61,7 @@ SHIPPING_BASE = "/api/admin/graph-shipping"
 STATUS_URL = f"{SHIPPING_BASE}/packaged-update"
 ADOPT_URL = f"{SHIPPING_BASE}/packaged-update/adopt"
 ADMIN = "task5-admin@example.com"  # ``_force_admin``'s principal
+ADOPTED_BY = f"system:adopt:{ADMIN}"  # an adopt's ``published_by`` and ``updated_by``
 #: The installed ``databricks-tellr-app`` version the facade reports
 #: (``_with_app_version``).  Neither ``src.__version__`` ("0.1.0") nor "unknown".
 APP_VERSION = "8.8.8"
@@ -388,7 +389,7 @@ def test_adopt_publishes_the_shipped_version_then_nothing_is_available(
     assert release["version_number"] == previous["version_number"] + 1 == 2
     assert release["previous_release_id"] == previous["release_id"]
     assert release["restored_from_release_id"] is None
-    assert release["published_by"] == ADMIN
+    assert release["published_by"] == ADOPTED_BY
     assert release["release_note"] == ADOPT_NOTE
     assert release["effective_to"] is None
     assert body["changed_agent_keys"] == ["architect"]
@@ -403,7 +404,7 @@ def test_adopt_publishes_the_shipped_version_then_nothing_is_available(
     }
     assert list(body["draft_effect"]) == list(GRAPH_V1_AGENT_KEYS)
     assert after["draft"]["lock_version"] == lock + 1
-    assert after["draft"]["updated_by"] == ADMIN
+    assert after["draft"]["updated_by"] == ADOPTED_BY
     assert _release_versions(factory) == [1, 2]
 
     assert status_after == {
@@ -433,7 +434,7 @@ def test_adopt_overrides_a_hand_edit_under_the_admin(factory, monkeypatch):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["release"]["version_number"] == 3
-    assert body["release"]["published_by"] == ADMIN
+    assert body["release"]["published_by"] == ADOPTED_BY
     assert body["release"]["release_note"] == ADOPT_NOTE
     assert body["changed_agent_keys"] == ["architect", "builder"]
     assert body["draft_effect"] == {
@@ -582,8 +583,7 @@ def test_a_bad_body_is_a_422_before_the_service(factory, monkeypatch, body, erro
     assert response.status_code == 422, response.text
     payload = response.json()
     assert list(payload) == ["code", "errors"]
-    assert isinstance(payload["code"], str)
-    assert payload["code"] != "packaged_invalid"
+    assert payload["code"] == "invalid_adopt_request"
     assert payload["errors"] == [
         {"field": field, "code": code, "message": message}
         for field, code, message in errors
@@ -615,7 +615,7 @@ def test_a_service_request_rejection_is_the_422_with_its_errors(factory, monkeyp
         }
     ]
     assert unknown_key.status_code == 422
-    assert payload["code"] == unknown_key.json()["code"] != "packaged_invalid"
+    assert payload["code"] == unknown_key.json()["code"] == "invalid_adopt_request"
     assert _artifacts(factory) == before
 
 

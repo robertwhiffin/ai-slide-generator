@@ -86,6 +86,8 @@ factory = publication_tests.factory
 # on purpose: a wrong ``CODE_SHIP_ACTOR`` must not make them pass.
 _BOOTSTRAP = "system:bootstrap"
 _ADMIN = "admin@example.com"
+#: ``published_by`` (and the draft's ``updated_by``) of ``_ADMIN``'s adopt.
+_ADOPTED_BY = "system:adopt:admin@example.com"
 _PUBLISHER = "publisher@example.com"
 _APP_VERSION = "9.9.9"
 _OTHERS = ("data_analyst", "build_reviewer", "fixer", "fix_reviewer", "deck_reviewer")
@@ -575,7 +577,9 @@ def test_rollback_blocks_reshipping(factory, monkeypatch):
 
     outcome = ship(factory, manifest)
 
-    assert outcome == ShipBlocked(reason="rollback", hand_edited_agents=())
+    # The restore is the admin's publish that brought v1's architect back, so the
+    # release chain names the architect (hand_edited outranks rollback).
+    assert outcome == ShipBlocked(reason="hand_edited", hand_edited_agents=("architect",))
     # M's revisions already exist, so nothing at all is written.
     assert _artifacts(factory) == before
     active = _active(factory)
@@ -593,7 +597,9 @@ def test_rollback_blocks_reshipping(factory, monkeypatch):
 
     # A newer packaged architect is still inserted as a system revision, unpublished.
     newer = _manifest(architect=_shipped_text("architect", "M-next"))
-    assert ship(factory, newer) == ShipBlocked(reason="rollback", hand_edited_agents=())
+    assert ship(factory, newer) == ShipBlocked(
+        reason="hand_edited", hand_edited_agents=("architect",)
+    )
     _assert_only_revisions_added(
         before,
         _artifacts(factory),
@@ -843,7 +849,7 @@ def test_ship_and_adopt_write_through_the_one_publication_core(factory, monkeypa
 
     (call,) = calls
     assert call["evidence"] == ()
-    assert call["actor"] == _ADMIN
+    assert call["actor"] == _ADOPTED_BY
     assert call["restored_from_release_id"] is None
     assert _payloads(call["contents"]) == _payloads(_contents(second))
 
@@ -890,7 +896,9 @@ def test_adopt_publishes_shipped_content_under_the_admin_with_system_revisions(
     factory, monkeypatch, shipped_first
 ):
     """``adopt-writes``: no startup ship ran, so adopt must materialise the shipped
-    revisions as ``system:code-ship`` itself, not as the admin."""
+    revisions as ``system:code-ship`` itself, not as the admin.  The release is
+    published by ``system:adopt:<admin>``: the admin stays visible, and the
+    release counts as system-published for the next ship."""
     install_release_clock(monkeypatch, factory)
     v1_mapping = _mapping(factory, _active(factory).id)
     hand = hand_publish_prompt(factory, "builder")
@@ -909,7 +917,7 @@ def test_adopt_publishes_shipped_content_under_the_admin_with_system_revisions(
     assert isinstance(outcome, Shipped), outcome
     release = outcome.published.release
     assert release.version_number == 3
-    assert release.published_by == _ADMIN
+    assert release.published_by == _ADOPTED_BY
     assert release.release_note == "Adopted shipped version (Tellr 9.9.9)"
     assert release.restored_from_release_id is None
     assert release.previous_release_id == hand.release.release_id
@@ -924,7 +932,7 @@ def test_adopt_publishes_shipped_content_under_the_admin_with_system_revisions(
     assert (active.id, active.version_number, active.published_by, active.release_note) == (
         release.release_id,
         3,
-        _ADMIN,
+        _ADOPTED_BY,
         "Adopted shipped version (Tellr 9.9.9)",
     )
     revisions = _mapped_revisions(factory, active.id)
@@ -940,14 +948,15 @@ def test_adopt_publishes_shipped_content_under_the_admin_with_system_revisions(
     assert {key: revisions[key].id for key in _OTHERS} == {key: v1_mapping[key] for key in _OTHERS}
     assert all(r.created_by.startswith("system:") for r in revisions.values())
     # Adopt authored no revision at all.
-    assert _ADMIN not in {row[3] for row in _artifacts(factory)["revisions"]}
+    creators = {row[3] for row in _artifacts(factory)["revisions"]}
+    assert _ADMIN not in creators and _ADOPTED_BY not in creators
     assert len(_revisions_with(factory, "architect", packaged_hashes["architect"])) == 1
 
     # The draft is rebased and clean at the packaged content, the architect reset.
     snapshot, nodes = _workbench(factory)
     assert snapshot.draft.base_release_id == active.id
     assert snapshot.draft.lock_version == lock + 1
-    assert snapshot.draft.updated_by == _ADMIN
+    assert snapshot.draft.updated_by == _ADOPTED_BY
     assert nodes["architect"].draft.candidate_hash == packaged_hashes["architect"]
     assert {key: node.draft.candidate_hash for key, node in nodes.items()} == packaged_hashes
     assert all(node.changed is False for node in nodes.values())
@@ -985,6 +994,16 @@ def test_adopt_makes_the_install_untouched_again(factory, monkeypatch):
     assert revisions["deck_reviewer"].created_by == "system:code-ship"
     # The builder edit was replaced by the adopt: all seven packaged definitions.
     assert revisions["builder"].id == v1_mapping["builder"]
+
+    # The adopt introduced M's architect, and its ``system:adopt:`` publisher keeps
+    # that role code's: a later version that changes the architect again ships.
+    third = _manifest(second, architect=_shipped_text("architect", "M3"))
+    later = ship(factory, third)
+    assert isinstance(later, Shipped), later
+    assert (later.published.release.version_number, later.published.changed_agent_keys) == (
+        5,
+        ("architect",),
+    )
 
 
 def test_adopt_with_a_stale_lock_is_a_conflict_and_writes_nothing(factory, monkeypatch):
@@ -1026,12 +1045,15 @@ def test_adopt_of_a_matching_manifest_is_nothing_and_writes_nothing(factory, mon
 
 
 def test_adopt_is_not_blocked_by_a_rollback(factory, monkeypatch):
+    """The restore undoes a builder edit and leaves the differing architect as v1
+    had it, so the active-restore block alone stops the ship."""
     install_release_clock(monkeypatch, factory)
+    hand_publish_prompt(factory, "builder")  # v2
+    restore_to(factory, 1)  # v3
     manifest = _manifest(architect=_shipped_text("architect", "M"))
-    shipped = ship(factory, manifest)
-    assert isinstance(shipped, Shipped), shipped
-    restore_to(factory, 1)
-    assert status(factory, manifest).blocked_reason == "rollback"
+    reported = status(factory, manifest)
+    assert (reported.blocked_reason, reported.hand_edited_agents) == ("rollback", ())
+    assert ship(factory, manifest) == ShipBlocked(reason="rollback", hand_edited_agents=())
 
     adopted = adopt(factory, manifest)
 
@@ -1039,11 +1061,12 @@ def test_adopt_is_not_blocked_by_a_rollback(factory, monkeypatch):
     release = adopted.published.release
     assert (release.version_number, release.published_by, release.restored_from_release_id) == (
         4,
-        _ADMIN,
+        _ADOPTED_BY,
         None,
     )
-    assert _mapping(factory, release.release_id) == _mapping(
-        factory, shipped.published.release.release_id
+    revisions = _mapped_revisions(factory, release.release_id)
+    assert {key: revision.content_hash for key, revision in revisions.items()} == (
+        _hashes(manifest)
     )
     # No longer a rollback, so the next packaged version ships on its own.
     second = _manifest(manifest, deck_reviewer=_shipped_text("deck_reviewer", "M2"))
@@ -1150,7 +1173,7 @@ def test_hand_applied_shipped_text_counts_as_untouched_while_it_matches(factory,
     # 4. One adopt clears it, and the next packaged version ships on its own.
     adopted = adopt(factory, third)
     assert isinstance(adopted, Shipped), adopted
-    assert adopted.published.release.published_by == _ADMIN
+    assert adopted.published.release.published_by == _ADOPTED_BY
     assert _mapped_revisions(factory, adopted.published.release.release_id)[
         "architect"
     ].created_by == "system:code-ship"
@@ -1160,6 +1183,93 @@ def test_hand_applied_shipped_text_counts_as_untouched_while_it_matches(factory,
     assert final.published.release.published_by == "system:code-ship"
     assert final.published.release.version_number == 5
     assert final.published.changed_agent_keys == ("deck_reviewer",)
+
+
+# ---------------------------------------------------------------------------
+# Hand reverts: the release chain, not ``created_by``, decides (final review C1)
+# ---------------------------------------------------------------------------
+# Revisions are deduplicated by hash, so a person who puts back earlier system
+# content publishes the old ``system:*`` revision again.  Only the release that
+# brought that revision back into the role says a person chose it.
+
+
+def test_a_hand_revert_of_a_shipped_prompt_blocks_reshipping(factory, monkeypatch):
+    install_release_clock(monkeypatch, factory)
+    v1_architect = _mapping(factory, _active(factory).id)["architect"]
+    manifest = _manifest(architect=_shipped_text("architect", "M"))
+    assert isinstance(ship(factory, manifest), Shipped)  # v2
+    # An admin puts the v1 architect prompt back by hand and publishes v3.
+    reverted = hand_publish_prompt(
+        factory, "architect", prompt_text=_v1_prompt("architect"), actor=_ADMIN
+    )
+    # The scenario: v3 maps the architect to v1's own system revision again.
+    assert reverted.release.version_number == 3
+    assert reverted.mappings["architect"].agent_definition_revision_id == v1_architect
+    assert _revision(factory, v1_architect).created_by == _BOOTSTRAP
+    reported = status(factory, manifest)
+    assert (reported.blocked_reason, reported.hand_edited_agents) == (
+        "hand_edited",
+        ("architect",),
+    )
+    before = _artifacts(factory)
+
+    outcome = ship(factory, manifest)  # a restart, same code
+
+    assert outcome == ShipBlocked(reason="hand_edited", hand_edited_agents=("architect",))
+    # M's architect revision already exists, so nothing at all is written.
+    assert _artifacts(factory) == before
+    assert _active(factory).id == reverted.release.release_id
+
+
+def test_a_hand_revert_of_a_shipped_model_endpoint_blocks_reshipping(factory, monkeypatch):
+    install_release_clock(monkeypatch, factory)
+    v1_architect = _mapping(factory, _active(factory).id)["architect"]
+    v1_endpoint = _contents(load_graph_v1_manifest())["architect"].model.endpoint_name
+    shipped_endpoint = "databricks-claude-sonnet-4"
+    assert v1_endpoint != shipped_endpoint
+    manifest = _with_architect_endpoint(load_graph_v1_manifest(), shipped_endpoint)
+    assert isinstance(ship(factory, manifest), Shipped)  # v2: code changes the endpoint
+    # An admin switches the endpoint back by hand and publishes v3.
+    reverted = hand_publish_model(factory, "architect", v1_endpoint, actor=_ADMIN)
+    assert reverted.release.version_number == 3
+    assert reverted.mappings["architect"].agent_definition_revision_id == v1_architect
+    before = _artifacts(factory)
+
+    outcome = ship(factory, manifest)
+
+    assert outcome == ShipBlocked(reason="hand_edited", hand_edited_agents=("architect",))
+    assert _artifacts(factory) == before
+    assert _active(factory).id == reverted.release.release_id
+
+
+def test_an_edit_and_revert_after_a_rollback_does_not_reship(factory, monkeypatch):
+    """Undoing an unrelated edit leaves the live release no longer a restore, but
+    the architect the restore brought back is still the admin's choice."""
+    install_release_clock(monkeypatch, factory)
+    v1 = _active(factory)
+    manifest = _manifest(architect=_shipped_text("architect", "M"))
+    assert isinstance(ship(factory, manifest), Shipped)  # v2
+    restore_to(factory, 1)  # v3: the admin rolls the shipped architect back
+    assert ship(factory, manifest) == ShipBlocked(
+        reason="hand_edited", hand_edited_agents=("architect",)
+    )
+    hand_publish_prompt(factory, "builder")  # v4: an unrelated edit
+    assert ship(factory, manifest) == ShipBlocked(
+        reason="hand_edited", hand_edited_agents=("architect", "builder")
+    )
+    # The admin undoes the builder edit by typing the v1 text back (v5).
+    hand_publish_prompt(factory, "builder", prompt_text=_v1_prompt("builder"))
+    v5 = _active(factory)
+    assert (v5.version_number, v5.restored_from_release_id) == (5, None)
+    assert _mapping(factory, v5.id) == _mapping(factory, v1.id)
+    before = _artifacts(factory)
+
+    outcome = ship(factory, manifest)
+
+    # v3, the admin's restore, introduced the v1 architect that v5 still maps.
+    assert outcome == ShipBlocked(reason="hand_edited", hand_edited_agents=("architect",))
+    assert _artifacts(factory) == before
+    assert _active(factory).id == v5.id
 
 
 # ---------------------------------------------------------------------------
@@ -1259,26 +1369,27 @@ def test_status_reports_reason_agents_and_diffs(factory, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("creator", "hand_edited"),
+    ("publisher", "hand_edited"),
     [
         pytest.param("system:migration", (), id="system-prefix"),
         pytest.param("system-bot@example.com", ("builder",), id="no-colon"),
         pytest.param(_PUBLISHER, ("builder",), id="person"),
     ],
 )
-def test_only_system_prefixed_creators_count_as_untouched(
-    factory, monkeypatch, creator, hand_edited
+def test_only_system_prefixed_publishers_count_as_untouched(
+    factory, monkeypatch, publisher, hand_edited
 ):
+    """The publisher of the release that introduced the revision decides; the
+    revision's own ``created_by`` (a person's, here) does not."""
     install_release_clock(monkeypatch, factory)
     hand = hand_publish_prompt(factory, "builder")
-    with factory.begin() as db:  # SQLite has no revision mutation guard
+    revision_id = hand.mappings["builder"].agent_definition_revision_id
+    assert _revision(factory, revision_id).created_by == _PUBLISHER  # in every case
+    with factory.begin() as db:  # SQLite has no release mutation guard
         db.execute(
-            update(AgentDefinitionRevision)
-            .where(
-                AgentDefinitionRevision.id
-                == hand.mappings["builder"].agent_definition_revision_id
-            )
-            .values(created_by=creator)
+            update(GraphRelease)
+            .where(GraphRelease.id == hand.release.release_id)
+            .values(published_by=publisher)
         )
     manifest = _manifest(architect=_shipped_text("architect", "M"))
 
@@ -1431,7 +1542,7 @@ def test_adopt_helper_publishes_the_loaded_manifest(factory, monkeypatch):
     assert isinstance(outcome, Shipped), outcome
     release = outcome.published.release
     assert (release.published_by, release.release_note) == (
-        _ADMIN,
+        _ADOPTED_BY,
         f"Adopted shipped version (Tellr {_installed_version()})",
     )
     revisions = _mapped_revisions(factory, release.release_id)

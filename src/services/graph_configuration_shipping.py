@@ -13,14 +13,20 @@ packaged manifest's seven by ``content_hash``:
   rollback publishes historical content: no approval gate, no evidence, the
   three-way draft rebase.
 
-A role is hand-edited when its active revision was not created by a ``system:``
-actor **and** its content differs from the packaged definition for that role (the
-content fallback: revisions are deduplicated by hash, so a person who typed the
-shipped text keeps authorship of a revision that no ship could override).
+A role is hand-edited when its content differs from the packaged definition for
+that role (the content fallback) **and** the release that introduced its active
+revision was not published by a ``system:`` actor.  That release is the earliest
+of the run of releases, walking back from the active one through
+``previous_release_id``, that map the role to the same revision.  Revisions are
+deduplicated by hash, so ``created_by`` says only who first wrote the content: a
+person who puts back earlier system content republishes a ``system:*`` revision,
+and only the release chain records that a person chose it.
 
-Shipped content is always materialised as ``system:code-ship`` before the core
-runs, whoever publishes it: the core would otherwise stamp ``created_by`` with the
-publisher, and an adopted install would never count as untouched again.
+A startup ship publishes as ``system:code-ship``; an admin's adopt publishes as
+``system:adopt:<admin>``, so the admin stays visible and an adopted install counts
+as untouched again.  Shipped content is always materialised as
+``system:code-ship`` before the core runs, whoever publishes it, so ``created_by``
+records that the content came from the code.
 
 Locks (global order, see ``graph_configuration_publication``):
 
@@ -47,7 +53,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from sqlalchemy import select
 
-from src.database.models.graph_configuration import AgentDefinitionRevision, GraphRelease
+from src.database.models.graph_configuration import GraphRelease, GraphReleaseAgent
 from src.services.graph_configuration_bootstrap import _GraphConfigurationBootstrap
 from src.services.graph_configuration_content import (
     GraphConfigurationIntegrityError,
@@ -84,8 +90,10 @@ if TYPE_CHECKING:
 #: ``created_by`` of every code-shipped revision, and ``published_by`` of a
 #: startup ship.
 CODE_SHIP_ACTOR: Final = "system:code-ship"
-#: A revision created by an actor with this prefix is code's, not a person's.
+#: A release published by an actor with this prefix is code's, not a person's.
 SYSTEM_ACTOR_PREFIX: Final = "system:"
+#: ``published_by`` of an adopt is this prefix plus the admin.
+_ADOPT_ACTOR_PREFIX: Final = "system:adopt:"
 
 PackagedBlockReason = Literal["hand_edited", "rollback", "invalid"]
 
@@ -100,8 +108,9 @@ class PackagedUpdateStatus:
     #: ``None`` when nothing is available.  ``None`` with ``available`` means a
     #: startup ship would publish it.
     blocked_reason: PackagedBlockReason | None
-    #: Active revisions not created by ``system:*`` that differ from the packaged
-    #: definition for their role, in ``GRAPH_V1_AGENT_KEYS`` order.
+    #: Roles that differ from the packaged definition and whose active revision
+    #: was introduced by a release not published by ``system:*``, in
+    #: ``GRAPH_V1_AGENT_KEYS`` order.
     hand_edited_agents: tuple[AgentKey, ...]
     #: The publication validators over all seven packaged definitions, with
     #: fields ``definitions.<agent_key>.<field>``.
@@ -170,10 +179,21 @@ def _hand_edited_agents(
     snapshot: GraphWorkbenchSnapshot,
     packaged_hashes: Mapping[AgentKey, str],
 ) -> tuple[AgentKey, ...]:
-    """Active roles a person chose: not ``system:*`` and not the packaged content.
+    """Active roles a person chose, in ``GRAPH_V1_AGENT_KEYS`` order.
 
     Only a role whose active hash differs from the packaged one can be
-    hand-edited (the content fallback), so only those creators are read.
+    hand-edited (the content fallback).  For each such role, walk back from the
+    active release through ``previous_release_id`` while the role keeps the same
+    revision: the earliest release of that run introduced the revision, and the
+    role is hand-edited iff that release's ``published_by`` is not ``system:*``.
+
+    ``created_by`` cannot decide this: revisions are deduplicated by hash, so a
+    person who puts back earlier system content (by typing it, or by a restore)
+    publishes the old system revision again.
+
+    Two reads, whatever the chain length: every release's link and publisher,
+    then the differing roles' mappings in every release.  Release history is
+    immutable, so neither read locks.
     """
     model_nodes = _model_nodes(snapshot)
     differing = {
@@ -182,22 +202,49 @@ def _hand_edited_agents(
     }
     if not differing:
         return ()
-    creators: dict[int, str] = dict(
-        session.execute(
-            select(AgentDefinitionRevision.id, AgentDefinitionRevision.created_by).where(
-                AgentDefinitionRevision.id.in_(differing.values())
+    releases: dict[int, tuple[int | None, str]] = {
+        release_id: (previous_id, published_by)
+        for release_id, previous_id, published_by in session.execute(
+            select(
+                GraphRelease.id, GraphRelease.previous_release_id, GraphRelease.published_by
             )
-        ).all()
-    )
-    if set(creators) != set(differing.values()):
-        raise GraphConfigurationIntegrityError(
-            "active release maps a revision that cannot be read"
         )
-    return tuple(
-        key
-        for key, revision_id in differing.items()
-        if not creators[revision_id].startswith(SYSTEM_ACTOR_PREFIX)
-    )
+    }
+    mapped: dict[tuple[int, str], int] = {
+        (release_id, agent_key): revision_id
+        for release_id, agent_key, revision_id in session.execute(
+            select(
+                GraphReleaseAgent.graph_release_id,
+                GraphReleaseAgent.agent_key,
+                GraphReleaseAgent.agent_definition_revision_id,
+            ).where(GraphReleaseAgent.agent_key.in_(tuple(differing)))
+        )
+    }
+    active_id = snapshot.active_release.release_id
+    hand_edited: list[AgentKey] = []
+    for key, revision_id in differing.items():
+        if active_id not in releases or mapped.get((active_id, key)) != revision_id:
+            raise GraphConfigurationIntegrityError(
+                "active release maps a revision that cannot be read"
+            )
+        introduced = active_id
+        # A chain longer than the release count is a cycle.
+        for _step in range(len(releases)):
+            previous = releases[introduced][0]
+            if previous is None:
+                break
+            if previous not in releases or (previous, key) not in mapped:
+                raise GraphConfigurationIntegrityError(
+                    "release history cannot be read back to the first release"
+                )
+            if mapped[(previous, key)] != revision_id:
+                break
+            introduced = previous
+        else:
+            raise GraphConfigurationIntegrityError("release history has a cycle")
+        if not releases[introduced][1].startswith(SYSTEM_ACTOR_PREFIX):
+            hand_edited.append(key)
+    return tuple(hand_edited)
 
 
 class _GraphConfigurationShipping(_GraphConfigurationRollback, _GraphConfigurationBootstrap):
@@ -327,8 +374,10 @@ class _GraphConfigurationShipping(_GraphConfigurationRollback, _GraphConfigurati
         L1, the snapshot; a stale lock is a ``PublicationConflict``; then
         ``ShipNothing`` if all seven match, ``ShipInvalid`` if the packaged
         definitions have issues; otherwise the shipped revisions are materialised
-        as ``system:code-ship`` and published with ``published_by`` = ``actor``.
-        Hand edits and rollbacks do not block an adopt.
+        as ``system:code-ship`` and published with ``published_by`` (and the
+        draft's ``updated_by``) = ``system:adopt:<actor>``.  The raw ``actor`` is
+        what the request check validates.  Hand edits and rollbacks do not block
+        an adopt.
         """
         release_note = f"Adopted shipped version (Tellr {app_version})"
         self._validate_publication_request(actor, expected_lock_version, release_note)
@@ -365,7 +414,7 @@ class _GraphConfigurationShipping(_GraphConfigurationRollback, _GraphConfigurati
                 packaged=packaged,
                 packaged_hashes=packaged_hashes,
                 release_note=release_note,
-                actor=actor,
+                actor=f"{_ADOPT_ACTOR_PREFIX}{actor}",
             )
 
     @staticmethod
