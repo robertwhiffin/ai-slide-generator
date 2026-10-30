@@ -6,11 +6,13 @@ result rows, never from model prose.
 
 from __future__ import annotations
 
+import builtins
 import logging
 import re
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -25,7 +27,8 @@ GENIE_ONE_SERVICE_PATH: Final = "/ai-gateway/mcp-services/system.ai.genie_one_mc
 GENIE_ONE_SOURCE: Final = "Genie One"
 
 _CALL_TIMEOUT_SECONDS: Final = 60
-_DENIED_MARKERS: Final = ("403", "Forbidden", "PERMISSION_DENIED")
+_DENIED_RE: Final = re.compile(r"\b403\b|Forbidden|PERMISSION_DENIED")
+_GROUP: Final = getattr(builtins, "BaseExceptionGroup", ())
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
@@ -76,12 +79,12 @@ def _walk(exc: BaseException):
         for nxt in (cur.__cause__, cur.__context__):
             if nxt is not None:
                 stack.append(nxt)
-        if isinstance(cur, BaseExceptionGroup):
+        if _GROUP and isinstance(cur, _GROUP):
             stack.extend(cur.exceptions)
 
 
 def _has_denied_marker(text: str) -> bool:
-    return any(marker in text for marker in _DENIED_MARKERS)
+    return _DENIED_RE.search(text) is not None
 
 
 def _map_exception(exc: BaseException) -> GenieOneError:
@@ -112,6 +115,10 @@ def _default_call_tool(host: str, token: str) -> CallTool:
         executor = ThreadPoolExecutor(max_workers=1)
         try:
             return executor.submit(run).result(timeout=_CALL_TIMEOUT_SECONDS)
+        except FuturesTimeoutError as exc:
+            raise GenieOneError(
+                f"Genie One did not respond within {_CALL_TIMEOUT_SECONDS:g} seconds"
+            ) from exc
         finally:
             executor.shutdown(wait=False)
 
@@ -219,6 +226,15 @@ def _cell(value: str | None) -> str:
     return "null" if value is None else str(value)
 
 
+def _label_width(result: GenieOneQueryResult) -> int:
+    """Shortest count of leading columns whose values are unique per row (0 if none)."""
+    for k in range(1, len(result.columns)):
+        labels = [tuple(row[:k]) for row in result.rows]
+        if len(set(labels)) == len(labels):
+            return k
+    return 0
+
+
 def figures_from_answer(answer: GenieOneAnswer, *, max_figures: int = 60) -> list[ResolvedFigure]:
     figures: list[ResolvedFigure] = []
     taken: set[str] = set()
@@ -231,9 +247,14 @@ def figures_from_answer(answer: GenieOneAnswer, *, max_figures: int = 60) -> lis
         if len(result.rows) == 1:
             pairs = list(zip(cols, result.rows[0], strict=False))
         elif len(cols) >= 2:
-            for row in result.rows:
-                for col, cell in list(zip(cols, row, strict=False))[1:]:
-                    pairs.append((f"{col} ({cols[0]}={row[0]})", cell))
+            k = _label_width(result)
+            for i, row in enumerate(result.rows):
+                cells = list(zip(cols, row, strict=False))
+                if k:
+                    label = ", ".join(f"{c}={_cell(v)}" for c, v in cells[:k])
+                    pairs.extend((f"{col} ({label})", cell) for col, cell in cells[k:])
+                else:
+                    pairs.extend((f"{col} [{i + 1}]", cell) for col, cell in cells[1:])
         else:
             pairs = [(f"{cols[0]} [{i + 1}]", row[0]) for i, row in enumerate(result.rows)]
 

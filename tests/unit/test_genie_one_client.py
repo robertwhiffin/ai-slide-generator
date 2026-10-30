@@ -716,3 +716,119 @@ def test_other_exception_becomes_genie_one_error():
 
     assert not isinstance(info.value, GenieOneAccessError)
     assert "Connection reset by peer" in str(info.value)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1
+# ---------------------------------------------------------------------------
+
+
+def test_sdk_permission_denied_without_403_text_becomes_access_denied():
+    from databricks.sdk.errors import PermissionDenied
+
+    exc = PermissionDenied(
+        "User does not have EXECUTE on Routine or Model 'system.ai.genie_one_mcp'."
+    )
+    fake = FakeGenieOne({"genie_ask": [exc]})
+
+    with pytest.raises(GenieOneAccessError) as info:
+        make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=300)
+
+    assert info.value.kind == "access_denied"
+
+
+def test_access_error_on_query_result_fetch_is_not_skipped():
+    fake = FakeGenieOne(
+        {
+            "genie_ask": [load("q1_ask")],
+            "genie_poll_response": [load("q1_poll_final")],
+            "genie_get_query_result": [is_error_with_text("HTTP 403: Forbidden")],
+        }
+    )
+
+    with pytest.raises(GenieOneAccessError) as info:
+        make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=300)
+
+    assert info.value.kind == "access_denied"
+
+
+def test_digits_inside_ids_are_not_access_denied():
+    fake = FakeGenieOne(
+        {
+            "genie_ask": [load("q1_ask")],
+            "genie_poll_response": [is_error_with_text("HTTP 404: no response_id 9a403bc1")],
+        }
+    )
+
+    with pytest.raises(GenieOneError) as info:
+        make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=300)
+
+    assert not isinstance(info.value, GenieOneAccessError)
+
+
+def test_default_call_tool_url_identity_and_hung_call_timeout(monkeypatch: pytest.MonkeyPatch):
+    import threading
+    import time
+
+    import databricks.sdk
+    import databricks_mcp
+    from src.services.agent_tools import genie_one
+
+    record: dict[str, Any] = {}
+    release = threading.Event()
+
+    class FakeWS:
+        def __init__(self, **kwargs: Any) -> None:
+            record["ws"] = kwargs
+
+    class FakeMCP:
+        def __init__(self, **kwargs: Any) -> None:
+            record["mcp"] = kwargs
+
+        def call_tool(self, name: str, args: dict[str, Any]) -> Any:
+            record["call"] = (name, args)
+            release.wait(timeout=5)
+            raise RuntimeError("released")
+
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", FakeWS)
+    monkeypatch.setattr(databricks_mcp, "DatabricksMCPClient", FakeMCP)
+    monkeypatch.setattr(genie_one, "_CALL_TIMEOUT_SECONDS", 0.2)
+
+    client = GenieOneClient(host=HOST, token=TOKEN)
+    start = time.monotonic()
+    try:
+        with pytest.raises(GenieOneError) as info:
+            client.ask(Q1, conversation_id=None, timeout_seconds=300)
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+
+    assert elapsed < 2.0
+    assert str(info.value).startswith("Genie One did not respond within")
+    assert record["ws"] == {"host": HOST, "token": TOKEN, "auth_type": "pat"}
+    assert record["mcp"]["server_url"] == f"{HOST}/ai-gateway/mcp-services/system.ai.genie_one_mcp"
+    assert record["call"] == ("genie_ask", {"question": Q1})
+
+
+def test_figure_keys_are_unique_when_the_first_column_repeats():
+    columns = [("region", "STRING"), ("month", "STRING"), ("revenue", "BIGINT")]
+    rows = [["East", "Jan", "10"], ["East", "Feb", "20"], ["West", "Jan", "30"]]
+    answer, _ = ask_with_result(derived_query_result(columns, rows, truncated=False))
+
+    assert triples(figures_from_answer(answer)) == [
+        ("revenue (region=East, month=Jan)", "10", "Genie One"),
+        ("revenue (region=East, month=Feb)", "20", "Genie One"),
+        ("revenue (region=West, month=Jan)", "30", "Genie One"),
+    ]
+
+
+def test_figure_keys_fall_back_to_row_ordinal_when_no_prefix_is_unique():
+    columns = [("region", "STRING"), ("revenue", "BIGINT")]
+    rows = [["East", "10"], ["East", "20"], ["West", "30"]]
+    answer, _ = ask_with_result(derived_query_result(columns, rows, truncated=False))
+
+    assert triples(figures_from_answer(answer)) == [
+        ("revenue [1]", "10", "Genie One"),
+        ("revenue [2]", "20", "Genie One"),
+        ("revenue [3]", "30", "Genie One"),
+    ]

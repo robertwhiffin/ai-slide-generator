@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import json
 import re
+
+_GROUP = getattr(builtins, "BaseExceptionGroup", ())
 
 _SCOPE_RE = re.compile(r"(required scopes|invalid scope)", re.I)
 
@@ -26,7 +29,7 @@ def is_missing_scope_error(exc: BaseException) -> bool:
             stack.append(current.__cause__)
         if current.__context__ is not None:
             stack.append(current.__context__)
-        if isinstance(current, BaseExceptionGroup):
+        if _GROUP and isinstance(current, _GROUP):
             stack.extend(current.exceptions)
     return False
 
