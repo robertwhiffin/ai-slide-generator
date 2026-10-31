@@ -1173,3 +1173,74 @@ def test_a_poll_without_a_handle_is_byte_identical_and_reads_nothing(
     assert response.status_code == 200, response.text
     assert _htmls(response.json()["slides"]) == stored
     assert _asset_reads(statements) == []
+
+
+# ===========================================================================
+# The restore response renders like the version preview (final review I2)
+# ===========================================================================
+#
+# The client renders the restore response directly (AppLayout.tsx), with no
+# refetch, so it must resolve images and brand assets as the preview of the same
+# save point does, on an outgoing copy only.
+
+PNG_BYTES = b"\x89PNG user image"
+
+
+def _seed_library_image(factory) -> str:
+    """A library (open-read) user image; returns its ``{{image:TOKEN}}`` handle."""
+    from src.database.models.image import ImageAsset
+
+    db = factory()
+    try:
+        image = ImageAsset(
+            token=f"tok{uuid.uuid4().hex[:16]}",
+            filename="u.png",
+            original_filename="u.png",
+            mime_type="image/png",
+            size_bytes=len(PNG_BYTES),
+            image_data=PNG_BYTES,
+            category="branding",
+        )
+        db.add(image)
+        db.commit()
+        return "{{image:%s}}" % image.token
+    finally:
+        db.close()
+
+
+def _with_image(html: str, src: str) -> str:
+    return html.replace("</h1>", f'</h1><img src="{src}" alt="user image"/>', 1)
+
+
+def test_the_restore_response_resolves_images_and_brand_assets_like_the_preview(
+    api, test_db_factory, mock_user
+):
+    session_id = _create_session(api)
+    logo, foreign = _seed_brand(test_db_factory, session_id)
+    image = _seed_library_image(test_db_factory)
+    stored = [
+        _with_image(_branded_slide("MK-ALPHA", logo), image),
+        _branded_slide("MK-BRAVO", logo, foreign=foreign),
+    ]
+    _seed(session_id, stored)
+    version = _create_savepoint(api, session_id)
+
+    preview = api.get(f"/api/slides/versions/{version}", params={"session_id": session_id})
+    assert preview.status_code == 200, preview.text
+    restored = api.post(
+        f"/api/slides/versions/{version}/restore", json={"session_id": session_id}
+    )
+    assert restored.status_code == 200, restored.text
+
+    png_uri = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
+    expected = [
+        _with_image(_branded_slide("MK-ALPHA", _data_uri(LOGO_SVG), _numbered(1, 2)), png_uri),
+        # A handle of another design system stays in place, as on every reader.
+        _branded_slide("MK-BRAVO", _data_uri(LOGO_SVG), _numbered(2, 2), foreign=foreign),
+    ]
+    assert _htmls(preview.json()["deck"]["slides"]) == expected, "ENTRY: the preview resolves"
+    assert _htmls(restored.json()["deck"]["slides"]) == expected
+    # Outgoing copy only: the rows and every save point keep handles and tokens.
+    assert _row_htmls(test_db_factory, session_id) == stored
+    for snapshot in _version_snapshots(test_db_factory, session_id):
+        assert "data:image/" not in snapshot and MARKER_ATTR not in snapshot
