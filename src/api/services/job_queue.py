@@ -7,10 +7,14 @@ Databricks Apps' 60-second reverse proxy timeout.
 
 import asyncio
 import contextvars
+import functools
 import logging
+import os
 import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.services.persisted_graph_release import PersistedRuntimeError
@@ -20,6 +24,68 @@ logger = logging.getLogger(__name__)
 # In-memory job tracking (request_id -> metadata)
 jobs: Dict[str, Dict[str, Any]] = {}
 job_queue: asyncio.Queue = asyncio.Queue()
+
+# Job runners per uvicorn process.  Each process (UVICORN_WORKERS, default 4) takes
+# the chat jobs POSTed to it; with one runner a second turn on the same process
+# waited "pending" until the first finished.  A session's turns are still
+# serialised by its database session lock, so runners only overlap different
+# sessions.
+CHAT_JOB_CONCURRENCY_ENV = "TELLR_CHAT_JOB_CONCURRENCY"
+DEFAULT_CHAT_JOB_CONCURRENCY = 4
+MAX_CHAT_JOB_CONCURRENCY = 16
+
+# Chat jobs block a thread for minutes, so they run on their own pool.  The API's
+# request handlers (the chat poll among them) asyncio.to_thread onto the loop's
+# default executor; long jobs parked there would starve them.
+_chat_executor: Optional[ThreadPoolExecutor] = None
+_chat_executor_lock = threading.Lock()
+
+
+def chat_job_concurrency() -> int:
+    """Job runners per process, from ``TELLR_CHAT_JOB_CONCURRENCY`` (default 4, max 16)."""
+    raw = os.getenv(CHAT_JOB_CONCURRENCY_ENV)
+    if raw is None:
+        return DEFAULT_CHAT_JOB_CONCURRENCY
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning(
+            "Ignoring %s=%r; using %d chat job runners",
+            CHAT_JOB_CONCURRENCY_ENV,
+            raw,
+            DEFAULT_CHAT_JOB_CONCURRENCY,
+        )
+        return DEFAULT_CHAT_JOB_CONCURRENCY
+    return min(value, MAX_CHAT_JOB_CONCURRENCY)
+
+
+def get_chat_executor() -> ThreadPoolExecutor:
+    """The process's chat-job thread pool, created on first use.
+
+    ``start_workers`` sizes it to its runner count; a direct
+    ``process_chat_request`` call (recovery, tests) gets one sized by
+    ``chat_job_concurrency()``.
+    """
+    return _ensure_chat_executor(chat_job_concurrency())
+
+
+def _ensure_chat_executor(size: int) -> ThreadPoolExecutor:
+    global _chat_executor
+    with _chat_executor_lock:
+        if _chat_executor is None:
+            _chat_executor = ThreadPoolExecutor(max_workers=size, thread_name_prefix="chat-job")
+        return _chat_executor
+
+
+def shutdown_chat_executor() -> None:
+    """Shut the chat-job pool down without waiting; a later call creates a new one."""
+    global _chat_executor
+    with _chat_executor_lock:
+        executor, _chat_executor = _chat_executor, None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 # Maximum duration (seconds) a chat request can stay in "running" before the
 # hard-timeout sweeper marks it failed. Belt-and-suspenders on top of the
@@ -150,22 +216,27 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         # Update status
         session_manager.update_chat_request_status(request_id, "running")
 
-        # Run blocking agent in thread pool via the generator-based streaming
-        # Use captured context if available to preserve user auth
+        # Run blocking agent in the chat-job pool via the generator-based streaming
+        # (never the default executor: see _chat_executor).  Use captured context if
+        # available to preserve user auth.
         result = None
         session_title = None
+        loop = asyncio.get_running_loop()
         if ctx:
-            for event in await asyncio.to_thread(
-                ctx.run,
-                _run_streaming_generator,
-                chat_service,
-                session_id,
-                message,
-                slide_context,
-                request_id,
-                is_first_message,
-                image_ids,
-                engine_mode,
+            for event in await loop.run_in_executor(
+                get_chat_executor(),
+                functools.partial(
+                    ctx.run,
+                    _run_streaming_generator,
+                    chat_service,
+                    session_id,
+                    message,
+                    slide_context,
+                    request_id,
+                    is_first_message,
+                    image_ids,
+                    engine_mode,
+                ),
             ):
                 if event.type == StreamEventType.COMPLETE:
                     result = {
@@ -178,17 +249,22 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                 elif event.type == StreamEventType.SESSION_TITLE:
                     session_title = event.session_title
         else:
-            # Fallback for jobs without context (e.g., recovery)
-            for event in await asyncio.to_thread(
-                _run_streaming_generator,
-                chat_service,
-                session_id,
-                message,
-                slide_context,
-                request_id,
-                is_first_message,
-                image_ids,
-                engine_mode,
+            # Fallback for jobs without context (e.g., recovery): the current
+            # context, copied, as asyncio.to_thread would have passed it.
+            for event in await loop.run_in_executor(
+                get_chat_executor(),
+                functools.partial(
+                    contextvars.copy_context().run,
+                    _run_streaming_generator,
+                    chat_service,
+                    session_id,
+                    message,
+                    slide_context,
+                    request_id,
+                    is_first_message,
+                    image_ids,
+                    engine_mode,
+                ),
             ):
                 if event.type == StreamEventType.COMPLETE:
                     result = {
@@ -307,12 +383,38 @@ async def worker() -> None:
 
 
 async def start_worker() -> asyncio.Task:
-    """Start the background worker task.
+    """Start one background worker task.
 
     Returns:
         The worker task handle
     """
     return asyncio.create_task(worker())
+
+
+async def start_workers(count: Optional[int] = None) -> List[asyncio.Task]:
+    """Start ``count`` job runners (default ``chat_job_concurrency()``) over the one queue.
+
+    The chat-job pool is sized to match, so every runner has a thread.
+    """
+    count = chat_job_concurrency() if count is None else max(1, count)
+    _ensure_chat_executor(count)
+    return [asyncio.create_task(worker()) for _ in range(count)]
+
+
+async def stop_workers(tasks: List[asyncio.Task]) -> None:
+    """Cancel every runner, wait for them to stop, then release the chat-job pool.
+
+    A job's thread runs to completion on its own; the startup recovery pass marks
+    a job interrupted by a restart.
+    """
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    shutdown_chat_executor()
 
 
 async def recover_stuck_requests() -> int:
