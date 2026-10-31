@@ -60,10 +60,13 @@ const isPollingMode = (): boolean => {
 };
 
 // Streaming event types matching backend StreamEventType
-export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready' | 'turn_progress' | 'queued';
+export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready' | 'turn_progress';
+
+/** Events the client derives itself: 'queued' comes from the poll's `pending` status. */
+export type ClientEventType = 'queued';
 
 export interface StreamEvent {
-  type: StreamEventType;
+  type: StreamEventType | ClientEventType;
   content?: string;
   tool_name?: string;
   tool_input?: Record<string, any>;
