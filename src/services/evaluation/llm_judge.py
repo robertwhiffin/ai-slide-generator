@@ -27,7 +27,11 @@ from typing import Any, Dict, List, Literal, Optional
 import pandas as pd
 
 from src.core.defaults import DEFAULT_CONFIG
-from src.core.mlflow_tracing import configure_tracing_environment, create_databricks_experiment
+from src.core.mlflow_tracing import (
+    configure_tracing_environment,
+    create_databricks_experiment,
+    mlflow_experiment_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -311,12 +315,12 @@ async def evaluate_with_judge(
         configure_tracing_environment()
         logger.info("LLM judge: set MLflow tracking URI to databricks")
 
-        # Use passed experiment_id (per-session) or compute user experiment path
+        # Use passed experiment_id (per-session) or compute user experiment path.  It is
+        # made active only under the experiment lock, together with evaluate (below).
         if experiment_id:
             logger.info(
                 f"LLM judge: using per-session experiment_id: {experiment_id}"
             )
-            mlflow.set_experiment(experiment_id=experiment_id)
         else:
             # Fallback: dynamically compute user's experiment path
             logger.warning("LLM judge: no experiment_id passed, computing user experiment path")
@@ -362,7 +366,6 @@ async def evaluate_with_judge(
             else:
                 experiment_id = experiment.experiment_id
                 logger.info(f"LLM judge: using existing experiment ID: {experiment_id}")
-            mlflow.set_experiment(experiment_id=experiment_id)
 
         # Create judge using outputs and expectations
         accuracy_judge = make_judge(
@@ -383,13 +386,21 @@ async def evaluate_with_judge(
             "expectations": {"source_data": genie_data},
         }])
 
-        # Run evaluation using mlflow.genai.evaluate() - THIS creates Evaluation Runs
-        try:
-            eval_result = mlflow.genai.evaluate(
-                data=eval_data,
-                scorers=[accuracy_judge],
-            )
-        except Exception as eval_exc:
+        # Run evaluation using mlflow.genai.evaluate() - THIS creates Evaluation Runs.
+        # evaluate reads MLflow's process-global active experiment while it runs, and
+        # several chat jobs share this process, so set_experiment + evaluate hold the
+        # experiment lock.  Nothing awaits under it: the fallback runs after release.
+        eval_exc: Optional[Exception] = None
+        with mlflow_experiment_lock():
+            mlflow.set_experiment(experiment_id=experiment_id)
+            try:
+                eval_result = mlflow.genai.evaluate(
+                    data=eval_data,
+                    scorers=[accuracy_judge],
+                )
+            except Exception as exc:
+                eval_exc = exc
+        if eval_exc is not None:
             if _mlflow_evaluate_should_use_direct_fallback(eval_exc):
                 logger.warning(
                     "MLflow genai.evaluate failed (egress or MLflow state); "
@@ -404,7 +415,7 @@ async def evaluate_with_judge(
                     start_time,
                     trace_id,
                 )
-            raise
+            raise eval_exc
 
         # Extract results from evaluation
         run_id = eval_result.run_id

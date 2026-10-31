@@ -83,8 +83,8 @@ def test_the_span_body_runs_outside_the_lock():
         patch.object(mlflow_tracing.mlflow, "start_span", fake.start_span),
     ):
         with mlflow_tracing.start_span_in_experiment("outer", "exp-a"):
-            assert mlflow_tracing._EXPERIMENT_SPAN_LOCK.acquire(timeout=1)
-            mlflow_tracing._EXPERIMENT_SPAN_LOCK.release()
+            assert mlflow_tracing.mlflow_experiment_lock().acquire(timeout=1)
+            mlflow_tracing.mlflow_experiment_lock().release()
 
 
 def test_an_error_in_the_body_still_closes_the_span():
