@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -482,14 +483,48 @@ def test_no_tool_without_a_design_system(graph_env, monkeypatch, brand):
     assert call.context.toolset is None
 
 
-def test_no_tool_when_the_contract_names_no_design_system(graph_env, monkeypatch, brand):
+def _no_search_tool_is_built(monkeypatch) -> list:
+    """Spy on both constructors the gate would reach; returns the calls they saw."""
+    built: list = []
+    for module, name in (
+        ("src.services.tools.ds_asset_tool", "build_ds_asset_tool"),
+        ("src.services.agent_tools.brand_search", "build_brand_search_toolset"),
+    ):
+        monkeypatch.setattr(
+            f"{module}.{name}",
+            lambda *args, _name=name, **kwargs: built.append((_name, args)),
+        )
+    return built
+
+
+def _assert_the_gate_said_nothing(caplog) -> None:
+    """B7 (RA24 m5): the gate's ``design_system_id is None`` check returns quietly.
+
+    Without it ``int(None)`` raises inside the guard, which still binds no tool, but
+    logs "brand-asset search unavailable" with a traceback for a deck that never had
+    a search to offer.
+    """
+    noisy = [
+        r for r in caplog.records
+        if r.name == nodes.__name__ and r.levelno >= logging.WARNING
+    ]
+    assert noisy == [], [r.getMessage() for r in noisy]
+
+
+def test_no_tool_when_the_contract_names_no_design_system(
+    graph_env, monkeypatch, brand, caplog
+):
     """A13: ``design_system_active`` with a contract whose design_system_id is None."""
+    caplog.set_level(logging.WARNING, logger=nodes.__name__)
     runtime = _recording_runtime(monkeypatch, builder=builder_out)
     payload = _branch_payload(graph_env, design_system_id=None)
     assert payload["design_contract"]["design_system_id"] is None
+    built = _no_search_tool_is_built(monkeypatch)
 
     builder_node(payload)
 
+    assert built == [], "a search tool was built for a contract naming no design system"
+    _assert_the_gate_said_nothing(caplog)
     (call,) = runtime.calls
     chat = _ScriptedChatModel([_answer("builder")])
     result = _replay(call, chat)
@@ -665,14 +700,16 @@ def test_the_fixers_safety_retry_keeps_the_tool_with_a_fresh_budget(
     ],
 )
 def test_the_fixer_gets_no_tool_unless_all_three_hold(
-    graph_env, monkeypatch, brand, branch_kwargs
+    graph_env, monkeypatch, brand, branch_kwargs, caplog
 ):
+    caplog.set_level(logging.WARNING, logger=nodes.__name__)
     runtime = _recording_runtime(monkeypatch, fixer=fixer_out)
     arguments = {"design_system_id": brand.design_system_id, **branch_kwargs}
     branch = _branch_payload(graph_env, **arguments)
 
     fixer_node(_fix_state(graph_env, branch))
 
+    _assert_the_gate_said_nothing(caplog)
     (call,) = runtime.calls
     chat = _ScriptedChatModel([_answer("fixer")])
     result = _replay(call, chat)

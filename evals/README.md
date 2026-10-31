@@ -1848,6 +1848,8 @@ parents' texts:
 The fixer and fix_reviewer equal this branch's texts. The data analyst equals main's: protected
 assembly v2 and the Genie One prompt.
 
+MLflow tags the merge runs M1 to M4 with commit `a2381b66`, but they ran the merged code.
+
 **The harness's tool path.** The brand search now runs on main's tool loop
 (`DatabricksModelAdapter.invoke_with_tools`), and `run_candidate` refuses a toolset on its
 context. So `Runner` wraps its adapter: a run that binds the search passes production's

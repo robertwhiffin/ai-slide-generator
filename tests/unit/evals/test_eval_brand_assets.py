@@ -1101,3 +1101,89 @@ def test_the_build_reference_fails_without_its_footer(split, damage, needle):
         current_deck_spec=c.payload["current_deck_spec"], design_system_active=True)
     assert not ok, f"{split}: the reference passes with its footer damaged ({damage}): {why}"
     assert needle in why.lower(), why
+
+
+# ===========================================================================
+# Task B7 (RA24): the merge review's m1 and m2 pins, on behaviour that already holds
+# ===========================================================================
+
+
+class _NoLoopAdapter:
+    """An adapter with the four-keyword ``invoke`` only: it cannot run the tool loop."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        self.calls += 1
+        return schema.model_validate({**fake_output(agent_key), "html": GOOD_HTML})
+
+
+def test_a_search_run_on_an_adapter_without_the_loop_is_refused_not_run_untooled():
+    """m1 (runner.py ``_ToolLoopAdapter``): a deck-style builder run that binds the search,
+    on an adapter with no ``invoke_with_tools``, is refused.  Falling back to the plain
+    ``invoke`` would run the case with no search and score it as a real answer."""
+    adapter = _NoLoopAdapter()
+
+    result = _run("builder", _styled(BUILDER_PAYLOAD), adapter)
+
+    assert adapter.calls == 0, "the run fell back to a call without the tool"
+    assert result.status == "model_error", result.status
+    assert result.error_detail.startswith("unexpected_error:TypeError"), result.error_detail
+    assert result.structured is None
+    assert result.tool_calls == ()
+
+
+def test_the_same_adapter_still_serves_a_run_that_binds_no_search():
+    """The refusal's guard: without the search the four-keyword call is today's."""
+    adapter = _NoLoopAdapter()
+
+    result = _run("builder", BUILDER_PAYLOAD, adapter)
+
+    assert result.status == "completed", result.error_detail
+    assert adapter.calls == 1
+
+
+class _SearchThenFailOnce:
+    """Attempt 1 searches, then fails transiently; attempt 2 searches, then answers.
+
+    Each attempt is recorded with its toolset and the calls it had made when it began.
+    The search is counted on the toolset as the runtime's loop counts it
+    (``calls_made``), so a retry handed the first attempt's toolset begins spent.
+    """
+
+    def __init__(self):
+        self.attempts: list[SimpleNamespace] = []
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        raise AssertionError("a search run must reach invoke_with_tools")
+
+    def invoke_with_tools(self, *, agent_key, configuration, schema, prompt, toolset):
+        self.attempts.append(SimpleNamespace(toolset=toolset, spent=toolset.calls_made))
+        (tool,) = toolset.tools
+        query = f"attempt-{len(self.attempts)}"
+        _run_tool(tool, {"query": query})
+        toolset.calls_made += 1
+        if len(self.attempts) == 1:
+            raise RuntimeError("transient provider failure")
+        return schema.model_validate({**fake_output(agent_key), "html": GOOD_HTML})
+
+
+def test_an_infra_retry_gets_a_fresh_toolset_and_reports_only_its_own_searches(monkeypatch):
+    """m2 (runner.py ``Runner.run``): each infra-retry attempt builds its own toolset and
+    record.  Shared, the retry would start with the first attempt's searches spent and
+    report them as its own, so ``tool_calls`` and ``brand_asset_use`` would be wrong."""
+    from evals.harness import runner as runner_mod
+
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda _s: None)
+    adapter = _SearchThenFailOnce()
+    runner = Runner(model_adapter=adapter, max_infra_retries=1)
+
+    result = runner.run(config.v1_baseline("builder"), _styled(BUILDER_PAYLOAD),
+                        design_system_active=True)
+
+    assert result.status == "completed", result.error_detail
+    first, second = adapter.attempts
+    assert second.toolset is not first.toolset, "the retry reused the first attempt's toolset"
+    assert [first.spent, second.spent] == [0, 0], "the retry began with a spent budget"
+    assert [c["args"]["query"] for c in result.tool_calls] == ["attempt-2"], result.tool_calls
