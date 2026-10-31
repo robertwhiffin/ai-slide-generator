@@ -205,3 +205,62 @@ def test_the_locked_evaluation_runs_off_the_event_loop_thread():
             p.stop()
 
     assert threads["evaluate"] is not threads["loop"]
+
+
+def test_a_burst_of_verifications_never_starves_the_default_executor():
+    """Auto-verify fires every slide at once.  Waiting verifications must wait as
+    coroutines, not each parked on a default-executor thread blocked on the lock, or
+    the request handlers (the chat poll among them) starve."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    fake = _FakeMlflow()
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+    original = fake.evaluate
+
+    def evaluate(**kwargs):
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        try:
+            return original(**kwargs)
+        finally:
+            with lock:
+                in_flight["now"] -= 1
+
+    poll_seconds: list[float] = []
+
+    async def burst():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        judges = [
+            asyncio.create_task(
+                llm_judge.evaluate_with_judge(
+                    genie_data="a,b\n1,2",
+                    slide_content=f"<div>{i}</div>",
+                    experiment_id="exp-judge",
+                    judge_backend="mlflow",
+                )
+            )
+            for i in range(5)
+        ]
+        await asyncio.sleep(0.05)
+        started = time.monotonic()
+        await asyncio.wait_for(asyncio.to_thread(lambda: "poll"), 1.0)
+        poll_seconds.append(time.monotonic() - started)
+        await asyncio.gather(*judges)
+
+    patches = _patched(fake)
+    import mlflow.genai
+
+    patches.append(patch.object(mlflow.genai, "evaluate", evaluate))
+    for p in patches:
+        p.start()
+    try:
+        asyncio.run(burst())
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert in_flight["peak"] == 1
+    assert poll_seconds and poll_seconds[0] < 0.5, poll_seconds

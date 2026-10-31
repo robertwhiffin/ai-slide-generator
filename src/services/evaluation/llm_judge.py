@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 
@@ -254,10 +255,27 @@ def _evaluate_with_judge_direct_llm(
     )
 
 
+# One locked evaluation runs at a time per process anyway (the experiment lock), so
+# the others wait here as coroutines rather than each parked on a default-executor
+# thread blocked on the lock: auto-verify fires every slide at once, and those threads
+# also serve the API's request handlers.  One semaphore per event loop.
+_EVALUATION_SLOTS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _evaluation_slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slot = _EVALUATION_SLOTS.get(loop)
+    if slot is None:
+        slot = _EVALUATION_SLOTS[loop] = asyncio.Semaphore(1)
+    return slot
+
+
 def _evaluate_in_experiment(
     experiment_id: str, eval_data: Any, scorers: list
 ) -> tuple[Any, Optional[Exception]]:
-    """``mlflow.genai.evaluate`` in ``experiment_id``; returns ``(result, None)`` or ``(None, error)``.
+    """``mlflow.genai.evaluate`` in ``experiment_id``: ``(result, None)`` or ``(None, error)``.
 
     evaluate reads MLflow's process-global active experiment while it runs, and several
     chat jobs share the process, so set_experiment + evaluate hold the experiment lock.
@@ -408,10 +426,12 @@ async def evaluate_with_judge(
 
         # Run evaluation using mlflow.genai.evaluate() - THIS creates Evaluation Runs.
         # It runs in a worker thread under the experiment lock (see
-        # _evaluate_in_experiment), never on the event loop; the fallback runs after.
-        eval_result, eval_exc = await asyncio.to_thread(
-            _evaluate_in_experiment, experiment_id, eval_data, [accuracy_judge]
-        )
+        # _evaluate_in_experiment), never on the event loop, one per process at a
+        # time (see _EVALUATION_SLOTS); the fallback runs after.
+        async with _evaluation_slot():
+            eval_result, eval_exc = await asyncio.to_thread(
+                _evaluate_in_experiment, experiment_id, eval_data, [accuracy_judge]
+            )
         if eval_exc is not None:
             if _mlflow_evaluate_should_use_direct_fallback(eval_exc):
                 logger.warning(

@@ -132,17 +132,30 @@ def test_set_experiment_is_called_only_under_the_experiment_lock():
         ("src/core/mlflow_tracing.py", "start_span_in_experiment"),
         ("src/services/evaluation/llm_judge.py", "_evaluate_in_experiment"),
     }
+    repo = Path(__file__).resolve().parents[2]
+    files = sorted((repo / "src").rglob("*.py"))
+    assert len(files) > 100, f"scanned only {len(files)} files under {repo / 'src'}"
+
+    def _calls_set_experiment(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        return (isinstance(func, ast.Attribute) and func.attr == "set_experiment") or (
+            isinstance(func, ast.Name) and func.id == "set_experiment"
+        )
+
     found = set()
-    for path in Path("src").rglob("*.py"):
+    for path in files:
+        rel = str(path.relative_to(repo))
         tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            # A bare-name import would hide the call from an attribute match.
+            if isinstance(node, ast.ImportFrom) and node.module == "mlflow":
+                if any(alias.name == "set_experiment" for alias in node.names):
+                    found.add((rel, "from mlflow import set_experiment"))
         for func in ast.walk(tree):
             if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            for node in ast.walk(func):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "set_experiment"
-                ):
-                    found.add((str(path), func.name))
+            if any(_calls_set_experiment(node) for node in ast.walk(func)):
+                found.add((rel, func.name))
     assert found <= allowed, f"set_experiment outside the lock: {sorted(found - allowed)}"

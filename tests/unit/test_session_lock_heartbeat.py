@@ -197,7 +197,7 @@ async def test_the_timeout_loop_refreshes_locks_every_sweep():
     calls: list[str] = []
 
     async def sleep(_seconds):
-        if len(calls) >= 2:
+        if calls:
             raise asyncio.CancelledError
         calls.append("tick")
 
@@ -206,6 +206,7 @@ async def test_the_timeout_loop_refreshes_locks_every_sweep():
         return 0
 
     async def mark():
+        calls.append("mark")
         return 0
 
     with (
@@ -216,7 +217,8 @@ async def test_the_timeout_loop_refreshes_locks_every_sweep():
         with pytest.raises(asyncio.CancelledError):
             await job_queue.mark_timed_out_jobs_loop()
 
-    assert calls == ["tick", "refresh"]
+    # Mark first, so a turn that just timed out is not refreshed once more.
+    assert calls == ["tick", "mark", "refresh"]
 
 
 def test_the_sweep_interval_is_well_inside_the_lock_timeout():
