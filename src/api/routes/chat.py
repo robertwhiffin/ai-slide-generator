@@ -1059,6 +1059,18 @@ async def poll_chat(
         for r in _token_rows:
             r["html"] = substitute_slide_numbers(r["html"], r["position"] + 1, count)
 
+    # Brand assets after the page tokens, as the REST readers order them: one asset
+    # read for every row this poll returns, and none when no row carries a handle.
+    _asset_rows = [r for r in _all_rows if "{{ds-asset:" in (r["html"] or "")]
+    if _asset_rows:
+        from src.api.services.session_manager import resolve_streamed_ds_assets
+
+        resolved = await asyncio.to_thread(
+            resolve_streamed_ds_assets, session_id, [r["html"] for r in _asset_rows]
+        )
+        for r, html in zip(_asset_rows, resolved):
+            r["html"] = html
+
     return {
         "status": chat_request["status"],
         "events": events,

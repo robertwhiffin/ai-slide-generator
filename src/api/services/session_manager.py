@@ -1028,6 +1028,40 @@ def _deck_with_page_numbers(deck_dict: Dict[str, Any]) -> Dict[str, Any]:
     return substitute_deck_slide_numbers(dict(deck_dict))
 
 
+def resolve_streamed_ds_assets(session_id: Optional[str], htmls: Sequence[str]) -> List[str]:
+    """``{{ds-asset:ID}}`` handles in slides shipped mid-build, resolved as REST reads resolve them.
+
+    For ``slide_ready`` (the foreman's release) and ``/chat/poll``.  The caller has
+    already rendered the page tokens: page tokens first, then assets, the REST
+    readers' order.  Assets are scoped to the session's active design system
+    (``resolve_active_design_system_id``), so a foreign or unknown handle stays in
+    place and no design system means nothing resolves.  Every slide of the batch is
+    served by ONE asset read.  The output is base64 ``data:`` URIs, so a streamed
+    slide grows by its assets' bytes exactly as a REST read of it does.
+
+    HTML with no handle (an old deck, a deck with no design system) comes back
+    unchanged and costs no read at all.  It never raises: on any failure the slides
+    ship with their handles and the COMPLETE refetch resolves them, as before,
+    because streaming is a side channel.  Nothing is kept between calls, so every
+    worker resolves from the database alike.
+    """
+    htmls = list(htmls)
+    if not any(html and "{{ds-asset:" in html for html in htmls):
+        return htmls
+    try:
+        from src.api.services.chat_service import resolve_active_design_system_id
+        from src.utils.ds_asset_utils import substitute_ds_assets_in_many
+
+        design_system_id = resolve_active_design_system_id(session_id)
+        with get_db_session() as db:
+            return substitute_ds_assets_in_many(
+                htmls, db, design_system_id=design_system_id
+            )
+    except Exception:
+        logger.warning("Could not resolve brand assets for streamed slides", exc_info=True)
+        return htmls
+
+
 class SessionManager:
     """Manager for database-backed session operations.
 

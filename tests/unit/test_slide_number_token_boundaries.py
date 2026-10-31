@@ -49,6 +49,7 @@ never by position alone.
 from __future__ import annotations
 
 import contextlib
+import base64
 import queue
 import re
 import uuid
@@ -956,3 +957,219 @@ class TestThePollNumbersTheSlides:
         assert not [s for s in statements if "deck_spec_json" in s], (
             "a poll of a deck with no token read the deck spec"
         )
+
+
+# ===========================================================================
+# Brand assets on the streaming boundaries (final review I1)
+# ===========================================================================
+#
+# Addendum A puts a {{ds-asset:ID}} logo in every non-cover footer, and searched
+# icons are handles too.  slide_ready and /chat/poll resolve them as the REST
+# readers do (page tokens first, then the session's active design system's
+# assets, a foreign handle left in place), with ONE asset read per release wake
+# or poll rather than one per handle, and no read at all for a slide without a
+# handle (an old deck, a deck with no design system).
+
+LOGO_SVG = b"<svg>meridian logo</svg>"
+FOREIGN_SVG = b"<svg>another brand</svg>"
+
+
+def _data_uri(data: bytes) -> str:
+    return "data:image/svg+xml;base64," + base64.b64encode(data).decode()
+
+
+def _seed_brand(factory, session_id: str, *, scoped: bool = True) -> tuple:
+    """The session's design system (via agent_config) with one logo, plus a second
+    system's asset.  Returns ``(logo_handle, foreign_handle)``.  With
+    ``scoped=False`` the session names no design system at all."""
+    from src.database.models.design_system import DesignSystem, DesignSystemAsset
+
+    db = factory()
+    try:
+        ours = DesignSystem(name=f"ours-{uuid.uuid4().hex[:8]}")
+        ours.assets.append(
+            DesignSystemAsset(
+                kind="logo", filename="logos/logo.svg", mime="image/svg+xml",
+                data=LOGO_SVG, size_bytes=len(LOGO_SVG),
+            )
+        )
+        theirs = DesignSystem(name=f"theirs-{uuid.uuid4().hex[:8]}")
+        theirs.assets.append(
+            DesignSystemAsset(
+                kind="logo", filename="logos/other.svg", mime="image/svg+xml",
+                data=FOREIGN_SVG, size_bytes=len(FOREIGN_SVG),
+            )
+        )
+        db.add_all([ours, theirs])
+        db.flush()
+        if scoped:
+            session = (
+                db.query(UserSession).filter(UserSession.session_id == session_id).one()
+            )
+            session.agent_config = {"design_system_id": ours.id}
+        handles = (
+            "{{ds-asset:%d}}" % ours.assets[0].id,
+            "{{ds-asset:%d}}" % theirs.assets[0].id,
+        )
+        db.commit()
+        return handles
+    finally:
+        db.close()
+
+
+def _branded_slide(
+    marker: str, logo: str, page: str = PAGE_TOKENS, foreign: Optional[str] = None
+) -> str:
+    """A graph slide as Addendum A builds it: a logo handle and the page tokens in
+    the footer (and, optionally, a handle of another design system in the body)."""
+    body = f'<img src="{foreign}" alt="foreign"/>' if foreign else ""
+    return (
+        '<div class="slide"><h1>' + marker + "</h1>" + body
+        + '<div class="slide-footer"><span><img src="' + logo + '" alt="Logo"/>Acme</span>'
+        "<span>" + page + "</span></div></div>"
+    )
+
+
+def _asset_reads(statements: list) -> list:
+    return [s for s in statements if "FROM design_system_asset" in s]
+
+
+def test_slide_ready_resolves_brand_assets_with_one_read(graph_env):
+    logo, foreign = _seed_brand(graph_env.factory, graph_env.session_id)
+    stored = {
+        p: _branded_slide(MARKERS[p], logo, foreign=foreign if p == 1 else None)
+        for p in range(3)
+    }
+    _commit(graph_env, stored)
+
+    with _recorded_sql(graph_env.engine) as statements:
+        events = _release(
+            graph_env, _release_state(graph_env, covered=range(5), landed=range(3))
+        )
+
+    assert [e.position for e in events] == [0, 1, 2], "ENTRY: three slides released"
+    assert [e.html for e in events] == [
+        _branded_slide("MK-ALPHA", _data_uri(LOGO_SVG), _numbered(1, 5)),
+        # A handle of another design system is left in place, never resolved.
+        _branded_slide("MK-BRAVO", _data_uri(LOGO_SVG), _numbered(2, 5), foreign=foreign),
+        _branded_slide("MK-CHARLIE", _data_uri(LOGO_SVG), _numbered(3, 5)),
+    ]
+    assert len(_asset_reads(statements)) == 1, "one asset read per wake, not one per handle"
+    assert [r.html for r in graph_env.rows()] == [stored[p] for p in range(3)], (
+        "the release wrote resolved assets back into the rows"
+    )
+
+
+def test_slide_ready_leaves_handles_when_the_session_names_no_design_system(graph_env):
+    """Fail-closed, as the REST readers are: with no active design system no
+    handle resolves to any system's bytes."""
+    logo, _ = _seed_brand(graph_env.factory, graph_env.session_id, scoped=False)
+    stored = {p: _branded_slide(MARKERS[p], logo) for p in range(2)}
+    _commit(graph_env, stored)
+
+    events = _release(graph_env, _release_state(graph_env, covered=range(2), landed=range(2)))
+
+    assert [e.html for e in events] == [
+        _branded_slide("MK-ALPHA", logo, _numbered(1, 2)),
+        _branded_slide("MK-BRAVO", logo, _numbered(2, 2)),
+    ]
+
+
+def _forbid_design_system_lookup(monkeypatch) -> None:
+    def _lookup(session_id):
+        raise AssertionError("a slide with no handle looked up the session's design system")
+
+    monkeypatch.setattr(
+        "src.api.services.chat_service.resolve_active_design_system_id", _lookup
+    )
+
+
+def test_slide_ready_without_a_handle_is_byte_identical_and_reads_nothing(
+    graph_env, monkeypatch
+):
+    stored = {p: _legacy_slide(MARKERS[p]) for p in range(3)}
+    _commit(graph_env, stored)
+    _forbid_design_system_lookup(monkeypatch)
+
+    with _recorded_sql(graph_env.engine) as statements:
+        events = _release(
+            graph_env, _release_state(graph_env, covered=range(3), landed=range(3))
+        )
+
+    assert [e.html for e in events] == [stored[p] for p in range(3)]
+    assert _asset_reads(statements) == []
+
+
+def _rewrite_rows(world: "PollWorld", htmls: List[str]) -> None:
+    db = world.factory()
+    try:
+        for row in db.query(SessionSlide).order_by(SessionSlide.position).all():
+            row.html = htmls[row.position]
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_poll_resolves_brand_assets_in_slides_and_revisions(monkeypatch, tmp_path):
+    world = _poll_world(
+        monkeypatch, tmp_path, [_slide(m) for m in MARKERS], _spec_json(SPEC_SLIDES)
+    )
+    try:
+        logo, foreign = _seed_brand(world.factory, POLL_SID)
+        stored = [
+            _branded_slide(m, logo, foreign=foreign if i == 2 else None)
+            for i, m in enumerate(MARKERS)
+        ]
+        _rewrite_rows(world, stored)
+
+        with _recorded_sql(world.engine) as statements:
+            first = world.poll()
+        body = first.json()
+
+        assert [s["position"] for s in body["slides"]] == [0, 1, 2], "ENTRY"
+        assert _htmls(body["slides"]) == [
+            _branded_slide("MK-ALPHA", _data_uri(LOGO_SVG), _numbered(1, SPEC_SLIDES)),
+            _branded_slide("MK-BRAVO", _data_uri(LOGO_SVG), _numbered(2, SPEC_SLIDES)),
+            _branded_slide(
+                "MK-CHARLIE", _data_uri(LOGO_SVG), _numbered(3, SPEC_SLIDES), foreign=foreign
+            ),
+        ]
+        assert len(_asset_reads(statements)) == 1, "one asset read per poll"
+        assert world.rows() == stored, "the poll wrote resolved assets back into the rows"
+
+        # A delivered draft rewritten by its reviewer comes back as a revision.
+        SlideWriter().write_slide(
+            session_id=POLL_SID,
+            position=1,
+            html=_branded_slide("MK-BRAVO-EDITED", logo),
+            scripts="",
+            modified_by="fix_reviewer",
+        )
+        second = world.poll(
+            slide_cursor=body["slide_cursor"], mark=body["revision_mark"]
+        ).json()
+
+        assert second["slides"] == [], "ENTRY: nothing new released"
+        assert [r["position"] for r in second["slide_revisions"]] == [1], "ENTRY"
+        assert second["slide_revisions"][0]["html"] == _branded_slide(
+            "MK-BRAVO-EDITED", _data_uri(LOGO_SVG), _numbered(2, SPEC_SLIDES)
+        )
+    finally:
+        world.engine.dispose()
+
+
+def test_a_poll_without_a_handle_is_byte_identical_and_reads_nothing(
+    monkeypatch, tmp_path
+):
+    stored = [_legacy_slide(m) for m in MARKERS]
+    world = _poll_world(monkeypatch, tmp_path, stored, _spec_json(SPEC_SLIDES))
+    _forbid_design_system_lookup(monkeypatch)
+    try:
+        with _recorded_sql(world.engine) as statements:
+            response = world.poll()
+    finally:
+        world.engine.dispose()
+
+    assert response.status_code == 200, response.text
+    assert _htmls(response.json()["slides"]) == stored
+    assert _asset_reads(statements) == []

@@ -481,3 +481,78 @@ class TestTombstonedDesignSystemStillResolvesStoredDeckAssets:
         html = f'<img src="{{{{ds-asset:{other.id}}}}}"/>'
         out = substitute_ds_asset_placeholders(html, session, design_system_id=ds_id)
         assert out == html  # left as a literal, no bytes disclosed
+
+
+class TestSubstituteDsAssetsInMany:
+    """The batch resolver the streaming boundaries use (final review I1): the
+    per-handle resolver's output and scope, with one asset read for the batch."""
+
+    @staticmethod
+    def _asset_selects(session, fn):
+        from sqlalchemy import event
+
+        engine = session.get_bind()
+        seen: list = []
+
+        def _record(conn, cursor, statement, params, context, executemany):
+            if "FROM design_system_asset" in statement:
+                seen.append(statement)
+
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            return fn(), seen
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+
+    def test_matches_the_per_handle_resolver_with_one_read(self, session):
+        from src.utils.ds_asset_utils import (
+            substitute_ds_asset_placeholders,
+            substitute_ds_assets_in_many,
+        )
+
+        ds_id, (logo, icon) = _make_ds_with_assets(
+            session,
+            [
+                {"data": b"<svg>logo</svg>", "mime": "image/svg+xml"},
+                {"data": b"\x89PNG-icon", "mime": "image/png", "kind": "icon"},
+            ],
+        )
+        htmls = [
+            f'<img src="{{{{ds-asset:{logo.id}}}}}"/><img src="{{{{ds-asset:{icon.id}}}}}"/>',
+            f'<img src="{{{{ds-asset:{logo.id}}}}}"/>',
+            "<p>no handle</p>",
+        ]
+
+        out, selects = self._asset_selects(
+            session,
+            lambda: substitute_ds_assets_in_many(htmls, session, design_system_id=ds_id),
+        )
+
+        assert out == [
+            substitute_ds_asset_placeholders(h, session, design_system_id=ds_id) for h in htmls
+        ]
+        assert "{{ds-asset:" not in "".join(out)
+        assert len(selects) == 1, "one read for every handle of the batch"
+
+    def test_a_foreign_handle_and_no_design_system_stay_unresolved(self, session):
+        from src.utils.ds_asset_utils import substitute_ds_assets_in_many
+
+        ours = _make_asset(session, data=b"<svg>ours</svg>", name="Ours")
+        theirs = _make_asset(session, data=b"<svg>theirs</svg>", name="Theirs")
+        html = f'<img src="{{{{ds-asset:{theirs.id}}}}}"/>'
+
+        assert substitute_ds_assets_in_many(
+            [html], session, design_system_id=ours.design_system_id
+        ) == [html]
+        mine = f'<img src="{{{{ds-asset:{ours.id}}}}}"/>'
+        assert substitute_ds_assets_in_many([mine], session, design_system_id=None) == [mine]
+
+    def test_no_handle_means_no_read(self, session):
+        from src.utils.ds_asset_utils import substitute_ds_assets_in_many
+
+        htmls = ["<p>a</p>", "", "<p>b</p>"]
+        out, selects = self._asset_selects(
+            session, lambda: substitute_ds_assets_in_many(htmls, session, design_system_id=1)
+        )
+        assert out == htmls
+        assert selects == []

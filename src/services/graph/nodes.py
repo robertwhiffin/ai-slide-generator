@@ -56,7 +56,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, get
 from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_columns
-from src.api.services.session_manager import get_session_manager
+from src.api.services.session_manager import get_session_manager, resolve_streamed_ds_assets
 from src.api.services.slide_repository import (
     SlideRowsChangedError,
     SlideWriter,
@@ -516,7 +516,7 @@ def _release_slides(state: dict) -> List[int]:
     spec_slides = getattr(state.get("deck_spec"), "slides", None)
     spec_count = len(spec_slides) if spec_slides else pending[-1] + 1
 
-    released: List[int] = []
+    to_release: List[Tuple[int, dict]] = []
     for position in pending:
         row = rows.get(position)
         if row is None:
@@ -528,11 +528,23 @@ def _release_slides(state: dict) -> List[int]:
                 position,
             )
             break
+        to_release.append((position, row))
+
+    # The REST readers' order: page tokens, then brand assets, the latter for the
+    # whole wake in one read (and no read when no slide carries a handle).
+    htmls = resolve_streamed_ds_assets(
+        session_id,
+        [
+            substitute_slide_numbers(row["html"] or "", position + 1, spec_count)
+            for position, row in to_release
+        ],
+    )
+
+    released: List[int] = []
+    for (position, row), html in zip(to_release, htmls):
         emit_slide_ready(
             position=position,
-            html=substitute_slide_numbers(
-                row["html"] or "", position + 1, spec_count
-            ),
+            html=html,
             scripts=row["scripts"] or "",
             agent=row.get("modified_by") or row.get("created_by"),
         )
