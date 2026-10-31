@@ -57,11 +57,17 @@ from src.services.prompt_assembler import (
     V2_PROTECTED_ASSEMBLY_IDENTITY,
     PromptAssembler,
 )
+from tests.fixtures.legacy_v1_definitions import legacy_v1_manifest
 
 
 def _legacy_manifest():
-    """Create a v1 manifest with legacy databricks endpoints for testing."""
-    manifest = load_graph_v1_manifest()
+    """Create a v1 manifest with legacy databricks endpoints for testing.
+
+    Every role is on the Graph Version 1 assembly, the data analyst included: the
+    packaged analyst ships upgraded to v2, and these tests drive its v1 -> v2
+    transition and legacy-source recovery from the v1 form installs still hold.
+    """
+    manifest = legacy_v1_manifest()
     definitions = []
     for d in manifest.definitions:
         # Replace gateway endpoints with legacy databricks endpoints
@@ -1817,7 +1823,7 @@ def test_persisted_upgrade_matches_independent_literal_transition_bytes(
     source_literal, target_literal = INDEPENDENT_TRANSITION_LITERALS[agent_key]
     generated = next(
         item
-        for item in load_graph_v1_manifest().definitions
+        for item in legacy_v1_manifest().definitions
         if item.agent_key == agent_key
     )
     bootstrapped, _ = _stored_content(session_factory, agent_key)

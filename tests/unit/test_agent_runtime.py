@@ -54,13 +54,17 @@ from src.services.persisted_graph_release import (
     PinnedInvocationEndpointError,
     ResolvedDefinition,
 )
-from src.services.prompt_assembler import V2_PROTECTED_ASSEMBLY_IDENTITY
+from src.services.prompt_assembler import (
+    ROLE_UNTRUSTED_DATA_NOTICE,
+    V2_PROTECTED_ASSEMBLY_IDENTITY,
+)
 from tests.fixtures.deterministic_model_adapter import (
     FAKE_OUTPUTS,
     INVALID_OPTIONAL_FIELD,
     DeterministicFakeModelAdapter,
     fake_output,
 )
+from tests.fixtures.legacy_v1_definitions import LEGACY_V1_DATA_ANALYST
 from tests.fixtures.packaged_release_loader import packaged_v1_runtime
 from tests.fixtures.tool_call_doubles import (
     no_tool_call_reply,
@@ -70,6 +74,10 @@ from tests.fixtures.tool_call_doubles import (
 
 EXPECTED_PROTECTED_PROMPT_DIGEST = (
     "e4ff3d6197ea926de2a4b7445c57a1d8b7cb906453ad76345ffd0666a0976852"
+)
+#: The packaged data analyst ships on protected assembly v2 (its Genie One prompt).
+EXPECTED_V2_PROTECTED_PROMPT_DIGEST = (
+    "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854"
 )
 EXPECTED_SCHEMA_DIGESTS = {
     "architect": "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
@@ -179,7 +187,11 @@ EXPECTED_ENDPOINTS = {
 def test_every_model_driven_role_preserves_prompt_model_schema_and_output(agent_key):
     output = _output_for(agent_key)
     model = RecordingModelAdapter(output)
-    runtime = packaged_v1_runtime(model_adapter=model)
+    # The Graph Version 1 contract: the data analyst in its v1 form (the packaged one
+    # is v2; see test_packaged_data_analyst_runs_on_the_v2_protected_assembly).
+    runtime = packaged_v1_runtime(
+        model_adapter=model, content_overrides={"data_analyst": LEGACY_V1_DATA_ANALYST}
+    )
     payload = _payload_for(agent_key)
 
     result = runtime.run(
@@ -217,6 +229,39 @@ def test_every_model_driven_role_preserves_prompt_model_schema_and_output(agent_
     assert result.diagnostics.schema_contract.version == 1
     assert result.diagnostics.schema_contract.digest == EXPECTED_SCHEMA_DIGESTS[agent_key]
     assert result.diagnostics.latency_ms >= 0
+
+
+def test_packaged_data_analyst_runs_on_the_v2_protected_assembly():
+    """The packaged analyst's prompt is its authored text, then the role notice and the
+    delimited compact payload; nothing from the v1 composite or the v1 frame stages."""
+    model = RecordingModelAdapter(_output_for("data_analyst"))
+    runtime = packaged_v1_runtime(model_adapter=model)
+    payload = _payload_for("data_analyst")
+
+    result = runtime.run(
+        "data_analyst", 1, payload, AgentAssemblyContext(design_system_active=False)
+    )
+
+    authored = next(
+        d for d in load_graph_v1_manifest().definitions if d.agent_key == "data_analyst"
+    ).prompt_text
+    serialized = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str
+    )
+    assert model.calls[0].prompt == "\n\n".join(
+        [
+            authored,
+            ROLE_UNTRUSTED_DATA_NOTICE["data_analyst"],
+            "<untrusted-data>",
+            serialized,
+            "</untrusted-data>",
+        ]
+    )
+    assert "UNTRUSTED DATA HANDLING" not in model.calls[0].prompt
+    assert result.diagnostics.protected_prompt.version == 2
+    assert result.diagnostics.protected_prompt.digest == EXPECTED_V2_PROTECTED_PROMPT_DIGEST
+    assert result.diagnostics.schema_contract.version == 1
+    assert result.diagnostics.schema_contract.digest == EXPECTED_SCHEMA_DIGESTS["data_analyst"]
 
 
 def test_design_system_prompt_preserves_precedence_and_omits_frame_constraints():
@@ -297,15 +342,24 @@ def test_manifest_v1_contract_identities_match_stable_literals():
     definitions = {defn.agent_key: defn for defn in load_graph_v1_manifest().definitions}
 
     assert set(definitions) == set(EXPECTED_SCHEMA_DIGESTS)
-    assert {defn.protected_assembly.digest for defn in definitions.values()} == {
-        EXPECTED_PROTECTED_PROMPT_DIGEST
+    # Every role is on the v1 protected assembly except the data analyst, which ships
+    # upgraded to v2 with no custom blocks.
+    assert {key: defn.protected_assembly.digest for key, defn in definitions.items()} == {
+        key: EXPECTED_V2_PROTECTED_PROMPT_DIGEST
+        if key == "data_analyst"
+        else EXPECTED_PROTECTED_PROMPT_DIGEST
+        for key in definitions
     }
     assert {
         key: defn.schema_contract.digest for key, defn in definitions.items()
     } == EXPECTED_SCHEMA_DIGESTS
     assert all(
         isinstance(defn.assembly_rules, AssemblyRulesV1)
-        for defn in definitions.values()
+        for key, defn in definitions.items()
+        if key != "data_analyst"
+    )
+    assert definitions["data_analyst"].assembly_rules == AssemblyRulesV2(
+        format_version=2, custom_blocks=()
     )
 
 

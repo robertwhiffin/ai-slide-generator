@@ -1831,3 +1831,56 @@ The new prompts change only their DECK STYLE blocks:
     stays).
   - On decks without a deck style, only the page-token fence is measured (0 of 10 rows). The
     whole-block fence's effect on `white` and on cover footers there is not.
+
+## Merge of main: one tool loop, merged prompts (Ruling RA19), 2026-10-31
+
+**Spend: about USD 2.70, with the judge at its USD 0.05 a call upper bound** and both agents
+costed at USD 4 / 20 per million tokens (USD 3 cap). That is 19 judge calls, plus 260k input
+and 35k output agent tokens.
+
+Merging main (Genie One, #353 and #354) changed two promoted prompts. Both now differ from both
+parents' texts:
+- **Builder `one-footer-source`** (`a0b6c836`): main's SOURCE LINE block (`source-line`) plus
+  this branch's `one-footer` DECK STYLE block and INPUT line. The two sit in different blocks.
+- **Architect `brand-footer-genie`** (`4d86a425`): this branch's `brand-footer` plus main's
+  `genie-questions` ask_data line. The two touch different lines.
+
+The fixer and fix_reviewer equal this branch's texts. The data analyst equals main's: protected
+assembly v2 and the Genie One prompt.
+
+**The harness's tool path.** The brand search now runs on main's tool loop
+(`DatabricksModelAdapter.invoke_with_tools`), and `run_candidate` refuses a toolset on its
+context. So `Runner` wraps its adapter: a run that binds the search passes production's
+brand-search toolset (`brand_search.build_brand_search_toolset`) straight to `invoke_with_tools`.
+Only the search backend is fake. Token usage on that path is summed across rounds.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 |
+|---|---|---|---|---|---|---|---|---|---|
+| M1 012033f6 | builder one-footer-source (a0b6c836) | train | all 8 | 1 | 8 | 1.00 | 0 | 14.6k / 1.9k | 1.17 |
+| M2 a269f495 | builder one-footer-source | held-out | all 8 | 1 | 8 | 1.00 | 0 | 11.9k / 1.2k | 0.97 |
+| M3 6b470f59 | architect brand-footer-genie (4d86a425) | train | `ask_data`, `build_request` | 1 | 2 | 1.00 | 0 | 16.4k / 5.2k | 0.44 |
+| M4 805d3e65 | architect brand-footer-genie | held-out | `ask_data` | 1 | 1 | 1.00 | 0 | 16.4k / 0.3k | 0.12 |
+
+- **Builder bar. Met.**
+  - Every case passed its row on both splits. The better of the two parents was `one-footer`'s
+    R1, which passed every train case.
+  - The deck-style cases passed, including `deck_style_icons`. Its only search on train was
+    one `kind="icon"` call, and it placed three index icons.
+  - 0 page tokens on the rows without a deck style: 0 of 5 on train, and 0 of 5 on held-out
+    (only the count was read).
+  - Neither pack has a source-line case. On train, every row that shows figures carried a
+    "Source:" line (7 of 7). `chart_no_data` had none and invented none.
+- **Architect (scoped).**
+  - Main promoted `genie-questions` with no eval run behind it ("owner-tested on devloop").
+    The architect pack ×1 on both splits projects at about USD 7, beyond the cap.
+  - So only the cases the merged line can change were run: `ask_data` on both splits, and one
+    build (`build_request`, train) to check that the PAYLOAD RULES block still plans a deck.
+    All 3 passed.
+  - The other 20 train cases, and 21 held-out cases, were last measured on `brand-footer`
+    (H1 1.00).
+- **Calibration** was not re-run: the case digests are the ones the branch's passes calibrated
+  (builder `eb3f1cde` train), and no case changed.
+- **Promoted** with
+  `python -m evals.harness.promote --config builder=evals/configs/builder/one-footer-source.yaml --run-id builder=012033f6bb2a44b58377224735afd5c1 --config architect=evals/configs/architect/brand-footer-genie.yaml --run-id architect=6b470f5931a34e79aef1e51a6dc97c42`,
+  under main's promote rule (27481337): only roles still on the legacy v1 assembly are locked,
+  and neither of these is. The frontend lifecycle contract was re-recorded.

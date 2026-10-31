@@ -153,7 +153,13 @@ def promote(
     # --- validate every choice before touching anything -------------------
     # The migration matches on the transition's source_composite_prompt, so lock against
     # that directly -- a manifest that has drifted from it must not launder a change.
-    locked = {t.agent_key: t.source_composite_prompt for t in _transition_records()}
+    # Only roles whose packaged definition is still on the transition's source (legacy v1)
+    # protected assembly are locked; once a role is upgraded its prompt is authored text.
+    locked = {
+        t.agent_key: t.source_composite_prompt
+        for t in _transition_records()
+        if current_by_key[t.agent_key].protected_assembly == t.source_protected_assembly
+    }
     for role, cfg in chosen.items():
         if role not in GRAPH_V1_AGENT_KEYS:
             raise PromoteBlocked(f"unknown role {role!r}; valid roles: {list(GRAPH_V1_AGENT_KEYS)}")

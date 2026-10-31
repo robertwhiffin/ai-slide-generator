@@ -19,6 +19,17 @@ _CLOSE = re.compile(r"<\s*/\s*untrusted-data\s*>", re.IGNORECASE)
 _OPEN = re.compile(r"<\s*untrusted-data\b", re.IGNORECASE)
 
 
+def neutralize_delimiters(text: str) -> str:
+    """Escape every ``<untrusted-data>`` opener and closer in *text*.
+
+    The substitution ``spotlight`` applies to its payload, public so untrusted
+    text that is stored and later spotlighted again (Genie One figures) cannot
+    carry a real delimiter either.
+    """
+    safe = _CLOSE.sub("&lt;/untrusted-data&gt;", text)
+    return _OPEN.sub("&lt;untrusted-data", safe)
+
+
 def spotlight(
     source: str,
     text: str,
@@ -31,8 +42,7 @@ def spotlight(
 
     # Neutralize delimiter injection: a payload must not be able to emit a
     # real <untrusted-data> opener/closer and break out of the wrapper.
-    safe = _CLOSE.sub("&lt;/untrusted-data&gt;", capped)
-    safe = _OPEN.sub("&lt;untrusted-data", safe)
+    safe = neutralize_delimiters(capped)
 
     if scan:
         hits = scan_for_injection(capped)

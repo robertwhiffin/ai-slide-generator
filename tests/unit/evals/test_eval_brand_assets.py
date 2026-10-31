@@ -5,13 +5,16 @@ to a footer piece. Offline: no model, no network, no browser.
 Names this file fixes for the implementer (the brief, read through corrections A15-A18 and Rulings
 RA5 and RA7):
 
-* **The fake search (A15).** ``Runner.run(config, payload, *, design_system_active)`` keeps its
-  signature. It puts one tool on the ``AgentAssemblyContext`` it hands ``run_candidate`` exactly
-  when ``config.agent_key`` is ``builder`` or ``fixer``, ``design_system_active`` (the keyword:
-  a fixer payload carries no ``design_system_active`` key) is true and ``"deck_style" in payload``.
-  Every other run gets no tool, so the runtime hands the adapter the four keywords alone. The
-  tool is production's to the model: name ``search_brand_assets``, args ``{query, kind}``, and
-  ``build_ds_asset_tool``'s description. It searches the Meridian fake asset index
+* **The fake search (A15, re-pinned for RA19).** ``Runner.run(config, payload, *,
+  design_system_active)`` keeps its signature. It hands the run production's brand-search toolset
+  (one ``BrandSearchAgentTool``) exactly when ``config.agent_key`` is ``builder`` or ``fixer``,
+  ``design_system_active`` (the keyword: a fixer payload carries no ``design_system_active`` key)
+  is true and ``"deck_style" in payload``. A test run's context carries no toolset, so the
+  harness hands it to the adapter's ``invoke_with_tools``, the runtime's one tool loop. Every
+  other run gets no tool, so the adapter's ``invoke`` gets the four keywords alone. The tool is
+  production's to the model: name ``search_brand_assets``, args ``{query, kind}``, and
+  ``build_ds_asset_tool``'s description. Its search backend is the fake: it searches the Meridian
+  fake asset index
   ``evals/fixtures/meridian/assets.json`` as ``design_system_service.search_assets`` searches a
   design system (``kind`` a case-insensitive exact match, ``query`` a case-insensitive filename
   substring, both ANDed; ranked logo < lockup < icon < illustration < background, then filename,
@@ -80,6 +83,7 @@ from evals.harness.scorers import expected_category_score
 from src.domain.deck_spec import DeckStyle
 from src.domain.deck_style import sanitise_deck_style
 from src.services.agent_runtime import DatabricksModelAdapter
+from src.services.agent_tools.brand_search import BrandSearchAgentTool
 from src.utils.ds_asset_utils import DS_ASSET_PLACEHOLDER_PATTERN
 from tests.fixtures.deterministic_model_adapter import fake_output
 from tests.fixtures.tool_call_doubles import replying, tool_call_reply
@@ -310,9 +314,17 @@ def _committed_payload(agent_key: str, cid: str) -> dict:
     return copy.deepcopy(case.load_case(agent_key, cid).payload)
 
 
+def _run_tool(tool, args: dict) -> str:
+    """Run one toolset tool the way the runtime's loop does: parsed args, a time budget."""
+    return tool.run(tool.args_schema.model_validate(args), remaining_seconds=300.0)
+
+
 class _CapturingAdapter:
     """The runtime's model seam: records the tools each call is handed and, when scripted, calls
-    the search the way the runtime's loop does (``tool.invoke(args)``) before answering."""
+    the search the way the runtime's loop does before answering.
+
+    A run with the search reaches ``invoke_with_tools`` (the harness hands the toolset to the tool
+    loop, RA19); a run without it reaches ``invoke`` and records ``()``."""
 
     def __init__(self, *, searches=(), html: str | None = GOOD_HTML):
         self.searches = [dict(a) for a in searches]
@@ -321,14 +333,21 @@ class _CapturingAdapter:
         self.results: list[dict] = []
         self._lock = threading.Lock()
 
-    def invoke(self, *, agent_key, configuration, schema, prompt, tools=()):
-        tools = tuple(tools)
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        with self._lock:
+            self.tools_seen.append(())
+        return self._answer(agent_key, schema)
+
+    def invoke_with_tools(self, *, agent_key, configuration, schema, prompt, toolset):
+        tools = tuple(toolset.tools)
         with self._lock:
             self.tools_seen.append(tools)
         by_name = {tool.name: tool for tool in tools}
-        if SEARCH in by_name:  # a run with no tool answers without searching
-            for args in self.searches:
-                self.results.append(json.loads(by_name[SEARCH].invoke(args)))
+        for args in self.searches:
+            self.results.append(_unwrap(_run_tool(by_name[SEARCH], args)))
+        return self._answer(agent_key, schema)
+
+    def _answer(self, agent_key, schema):
         out = fake_output(agent_key)
         if agent_key in ("builder", "fixer") and self.html is not None:
             out["html"] = self.html
@@ -391,9 +410,11 @@ def test_a_deck_style_case_binds_one_fake_search_production_shaped(agent_key, pa
     (tools,) = adapter.tools_seen
     assert [t.name for t in tools] == [SEARCH]
     (tool,) = tools
-    assert set(tool.args) == {"query", "kind"}
-    # The model is told what production tells it.
+    assert set(tool.args_schema.model_fields) == {"query", "kind"}
+    # The model is told what production tells it, by production's tool class.
     assert tool.description == build_ds_asset_tool(1).description
+    assert tool.args_schema is build_ds_asset_tool(1).args_schema
+    assert type(tool) is BrandSearchAgentTool
     assert result.tool_calls == ()  # bound, but never called
 
 
@@ -459,10 +480,10 @@ def test_each_run_records_only_its_own_searches():
 
 def test_concurrent_runs_keep_their_records_apart():
     class _QueryPerRun(_CapturingAdapter):
-        def invoke(self, *, agent_key, configuration, schema, prompt, tools=()):
+        def invoke_with_tools(self, *, agent_key, configuration, schema, prompt, toolset):
             query = re.search(r"QRUN-\d+", prompt).group(0)
-            for tool in tools:
-                tool.invoke({"query": query})
+            for tool in toolset.tools:
+                _run_tool(tool, {"query": query})
             return schema.model_validate({**fake_output(agent_key), "html": GOOD_HTML})
 
     runner = Runner(model_adapter=_QueryPerRun(), max_infra_retries=0)
@@ -499,8 +520,8 @@ def test_every_other_run_binds_no_tool(agent_key, payload, active):
 
 
 def test_a_run_without_a_tool_still_reaches_a_four_keyword_adapter():
-    """The runtime hands ``tools=`` only when there are some (B3), so an adapter written before
-    the tool loop keeps working on every case the harness binds nothing for."""
+    """The harness reaches the tool loop only with a toolset (B3, RA19), so an adapter written
+    before the tool loop keeps working on every case the harness binds nothing for."""
     class _FourKeywords:
         def invoke(self, *, agent_key, configuration, schema, prompt):
             return schema.model_validate(fake_output(agent_key))
@@ -523,7 +544,7 @@ class _ScriptedChat:
     def bind_tools(self, tools, **kwargs):
         tools = list(tools)
         self.bindings.append((tools, kwargs))
-        schema = tools[-1]
+        schema = next(t for t in tools if isinstance(t, type))
 
         def reply(model_input):
             self.raw_inputs.append(list(model_input) if isinstance(model_input, list) else model_input)
@@ -561,10 +582,11 @@ def test_a_searched_icon_reaches_the_slide_through_the_production_loop():
 
     assert result.status == "completed", result.error_detail
     assert result.structured["html"] == GOOD_HTML
-    # One binding: the fake search, then the output schema, auto choice.
+    # One binding: the output schema, then the fake search, auto choice (the runtime's loop).
     ((bound, kwargs),) = chat.bindings
     assert kwargs == {"tool_choice": "auto"}
-    assert [getattr(t, "name", None) for t in bound[:-1]] == [SEARCH]
+    assert isinstance(bound[0], type)
+    assert [t["function"]["name"] for t in bound[1:]] == [SEARCH]
     # Round 2 sees the search answered from the index, spotlighted.
     first, second = chat.raw_inputs
     assert [type(m) for m in first] == [HumanMessage]

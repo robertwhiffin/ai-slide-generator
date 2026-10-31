@@ -456,9 +456,17 @@ def test_required_cases_pass_unchanged_through_current_runtime_adapter_seam(
             AgentAssemblyContext(**case.assembly_context),
         )
         assert case.synthetic_payload == before
-        assert adapter.calls[-1]["prompt"].endswith(
-            json.dumps(before, indent=2, default=str)
+        # The packaged data analyst is on protected assembly v2, which ends the prompt
+        # with the compact payload inside the untrusted-data delimiters.
+        expected_tail = (
+            json.dumps(
+                before, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str
+            )
+            + "\n\n</untrusted-data>"
+            if case.agent_key == "data_analyst"
+            else json.dumps(before, indent=2, default=str)
         )
+        assert adapter.calls[-1]["prompt"].endswith(expected_tail)
 
     assert len(adapter.calls) == 7
 

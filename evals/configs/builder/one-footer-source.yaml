@@ -1,0 +1,9 @@
+# Builder v1 prompt after merging main into feat/architect-deck-style (Ruling RA19): main's
+# promoted `source-line` text (its SOURCE LINE block, for slides that show figures from
+# resolved_data.figures) plus this branch's promoted `one-footer` DECK STYLE block and INPUT line.
+# The two changes sit in different blocks; every other byte is identical to both parents. The
+# model is this branch's (system.ai.claude-sonnet-5-5, inherited through `base: v1`).
+agent_key: builder
+name: builder-one-footer-source
+base: v1
+prompt_file: one-footer-source.md

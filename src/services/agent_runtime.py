@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 import httpx
 import openai
@@ -84,6 +85,11 @@ from src.services.prompt_assembler import (
     ResolvedPromptStage,
 )
 
+if TYPE_CHECKING:
+    # Type-only: the tool loop imports ``ToolAccessError`` lazily, so this
+    # module never imports the tools package at load time (no cycle).
+    from src.services.agent_tools.toolset import AgentTool, AgentToolset
+
 MODEL_DRIVEN_AGENT_KEYS = (
     "architect",
     "data_analyst",
@@ -147,20 +153,21 @@ class AgentAssemblyContext:
     keywords across all ten call sites by #265's
     ``test_every_production_runtime_call_passes_all_four_pinned_arguments``.
 
-    ``tools`` rides here for the same reason (deck style addendum A): the
-    LangChain tools the model may call before it answers through its output
-    schema.  Only ``builder_node`` and ``fixer_node`` ever set it, and only for a
-    deck with a deck style on an active design system; every other caller
-    leaves the empty default and gets today's binding.  It never reaches the
-    prompt, and it is excluded from equality and hashing (a ``StructuredTool``
-    is unhashable), so a context compares exactly as it did before.
+    ``toolset`` rides here for the same reason.  When set, ``_run_resolved``
+    runs the adapter's tool-calling loop instead of its single structured-output
+    call; it never reaches the prompt.  It is ``compare=False``: a toolset is
+    mutable per-invocation state (calls made, access errors), not part of the
+    context's value, and it is unhashable.  Two node families set it: the data
+    analyst (Genie One) and, for a deck with a deck style on an active design
+    system, the builder and the fixer (the brand-asset search, deck style
+    addendum A).  Every other caller leaves ``None`` and gets the single call.
     """
 
     design_system_active: bool
     # See AgentInvocationIdentity for why these default rather than being required.
     root_session_id: str = ""
     actor_session_id: str = ""
-    tools: tuple[Any, ...] = field(default=(), compare=False, hash=False, repr=False)
+    toolset: AgentToolset | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -196,12 +203,6 @@ class AgentInvocationResult:
 
 
 class AgentModelAdapter(Protocol):
-    """The model seam ``AgentRuntime`` calls with exactly these four keywords.
-
-    A run whose context carries tools adds a fifth, ``tools=``; only
-    :class:`DatabricksModelAdapter` accepts it, and no other run passes it.
-    """
-
     def invoke(
         self,
         *,
@@ -233,7 +234,7 @@ def bind_structured_output_model(
     configuration: AgentModelConfiguration,
     schema: type[BaseModel],
     transport_options: Mapping[str, Any] | None = None,
-    tools: Sequence[Any] = (),
+    extra_tools: Sequence[Mapping[str, Any]] = (),
 ) -> Any:
     """The one structured-output binding seam; it returns the bound model.
 
@@ -265,23 +266,35 @@ def bind_structured_output_model(
     production's; production ``run`` observes nothing and gets exactly
     the plain structured-output binding of ``schema``.
 
-    ``tools`` (deck style addendum A) is empty for every caller but a builder or
-    fixer run whose context carries tools.  Empty, the return is exactly the
-    chain above.  Non-empty, the same one call binds ``[*tools, schema]`` (the
-    schema last) with ``tool_choice="auto"`` and the RAW bound model is returned
-    — the existing parser cannot see a non-schema call, it raises
-    ``Unknown tool type`` — so the caller runs the tool rounds and parses the
-    answering reply itself (:func:`_invoke_with_tool_rounds`).
+    ``extra_tools`` is the tool loop's (``DatabricksModelAdapter.invoke_with_tools``):
+    provider tool dicts bound beside ``schema`` in the same one binding, still
+    ``tool_choice="auto"``.  When any are given, the bound model is returned
+    raw, without the parser chain: a reply may call a tool rather than the
+    schema, and the loop reads the schema call itself.  A test run's context
+    never carries a toolset, but the offline eval harness drives this same loop
+    under an observation (``evals/harness/runner.py``), so an observed raw model
+    gets the token callback too; it sums every round's reported usage.
     """
+    # Imported lazily, like the chat model itself: the module stays import-light.
+    from langchain_core.output_parsers.openai_tools import PydanticToolsParser
+    from langchain_core.runnables import RunnableLambda
+
     model = model_factory(
         model=configuration.endpoint_name,
         max_tokens=configuration.max_tokens,
         workspace_client=workspace_client,
         **(transport_options or {}),
     )
-    bound_model = model.bind_tools([*tools, schema], tool_choice="auto")
+    bound_model = model.bind_tools([schema, *extra_tools], tool_choice="auto")
     structured_model = (
-        bound_model if tools else bound_model | _structured_output_parser(schema)
+        bound_model
+        if extra_tools
+        else (
+            bound_model
+            | RunnableLambda(_default_omitted_finding_objectives)
+            | PydanticToolsParser(tools=[schema], first_tool_only=True)
+            | RunnableLambda(_require_structured_output)
+        )
     )
     observation = _OBSERVED_TEST_RUN.get()
     if observation is None:
@@ -352,122 +365,6 @@ def _require_structured_output(parsed: Any) -> Any:
     return parsed
 
 
-def _structured_output_parser(schema: type[BaseModel]) -> Any:
-    """Today's parse of one provider reply into ``schema``.
-
-    Fill omitted finding objectives, parse the first ``schema`` tool call, and
-    refuse a reply that called none.  The no-tool binding is the bound model
-    piped into this; the tool rounds hand it the answering reply.
-    """
-    # Imported lazily, like the chat model itself: the module stays import-light.
-    from langchain_core.output_parsers.openai_tools import PydanticToolsParser
-    from langchain_core.runnables import RunnableLambda
-
-    return (
-        RunnableLambda(_default_omitted_finding_objectives)
-        | PydanticToolsParser(tools=[schema], first_tool_only=True)
-        | RunnableLambda(_require_structured_output)
-    )
-
-
-#: Tool rounds a tool-bound run may spend before the model must answer through
-#: its output schema (deck style addendum A).  One model reply is one round,
-#: however many tool calls it carries.
-MAX_TOOL_ROUNDS = 3
-
-#: The spotlight source each tool's result is labelled with.
-_TOOL_RESULT_SOURCES = {"search_brand_assets": "brand_assets"}
-
-#: Code-owned tool-result texts: an exception's own text (connection details,
-#: hostnames) never reaches the model.
-_TOOL_FAILED_RESULT = "search failed: the search could not be completed and returned no assets."
-_UNKNOWN_TOOL_RESULT = "tool call failed: no tool of that name is available."
-#: The answer to a call whose arguments the provider client could not read (an
-#: ``invalid_tool_calls`` entry).  It may have named any tool, the output
-#: schema included, so it is never told a search ran.
-_INVALID_TOOL_CALL_RESULT = (
-    "tool call failed: its arguments were not valid JSON, so nothing was run."
-)
-
-
-def _tool_result(tools_by_name: Mapping[str, Any], call: Mapping[str, Any]) -> str:
-    """Run one tool call; its result, spotlighted as untrusted data.
-
-    A failing tool answers with a code-owned failure text instead of raising,
-    so a database blip during a search costs the model a search, not the slide.
-    """
-    from src.utils.spotlight import spotlight
-
-    name = call.get("name")
-    tool = tools_by_name.get(name) if isinstance(name, str) else None
-    if tool is None:
-        return _UNKNOWN_TOOL_RESULT
-    try:
-        result = tool.invoke(call.get("args") or {})
-    except Exception:  # noqa: BLE001 - every tool failure is told to the model
-        logger.warning("tool %s failed during a structured-output run", name, exc_info=True)
-        return _TOOL_FAILED_RESULT
-    return spotlight(_TOOL_RESULT_SOURCES.get(name, name), result)
-
-
-def _invoke_with_tool_rounds(
-    bound_model: Any,
-    *,
-    schema: type[BaseModel],
-    tools: Sequence[Any],
-    prompt: str,
-) -> Any:
-    """Let the model call ``tools`` for up to ``MAX_TOOL_ROUNDS`` rounds, then parse.
-
-    Each round the model is handed the prompt and every earlier reply with its
-    tool results.  A reply that calls the schema ends the loop: only its schema
-    calls are kept (any tool call beside them is not run) and it is parsed
-    exactly as the no-tool binding parses.  A reply that calls nothing is parsed
-    the same way, so it fails as today.  Otherwise every tool call in the reply
-    is run and answered by a ``ToolMessage`` — a call naming no bound tool and
-    an unreadable call too, each with its own code-owned text, because the
-    provider rejects a conversation with an unanswered tool call.  A further
-    tool reply after the last round fails with the parse-error class a no-tool
-    reply raises.
-    """
-    from langchain_core.exceptions import OutputParserException
-    from langchain_core.messages import HumanMessage, ToolMessage
-
-    parser = _structured_output_parser(schema)
-    # The name PydanticToolsParser matches a call against.
-    schema_name = schema.model_config.get("title") or schema.__name__
-    tools_by_name = {tool.name: tool for tool in tools}
-    messages: list[Any] = [HumanMessage(content=prompt)]
-    for completed_rounds in range(MAX_TOOL_ROUNDS + 1):
-        reply = bound_model.invoke(list(messages))
-        calls = list(getattr(reply, "tool_calls", None) or [])
-        answers = [call for call in calls if call.get("name") == schema_name]
-        if answers or not calls:
-            if len(answers) != len(calls):
-                reply = reply.model_copy(update={"tool_calls": answers})
-            return parser.invoke(reply)
-        if completed_rounds == MAX_TOOL_ROUNDS:
-            break
-        messages.append(reply)
-        for call in calls:
-            messages.append(
-                ToolMessage(
-                    content=_tool_result(tools_by_name, call),
-                    tool_call_id=str(call.get("id") or ""),
-                )
-            )
-        for call in getattr(reply, "invalid_tool_calls", None) or []:
-            messages.append(
-                ToolMessage(
-                    content=_INVALID_TOOL_CALL_RESULT,
-                    tool_call_id=str(call.get("id") or ""),
-                )
-            )
-    raise OutputParserException(
-        "the model used every tool round without calling the structured-output tool"
-    )
-
-
 def _token_count(value: Any) -> int | None:
     """A provider-reported count, or ``None``: only a non-negative ``int`` is a count."""
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
@@ -512,9 +409,10 @@ def _token_usage_callback(observation: RunObservation) -> Any:
     """A LangChain callback that copies the provider's reported usage onto ``observation``.
 
     One callback serves one binding, so one adapter call.  It records the sum
-    over every provider call it sees: a tool-bound run makes one per round, and
-    eval cost must count them all.  A run without tools makes exactly one, which
-    is recorded as reported.
+    over every provider call it sees: the tool loop
+    (``DatabricksModelAdapter.invoke_with_tools``) makes one per round, and eval
+    cost must count them all.  A run without tools makes exactly one, which is
+    recorded as reported.
 
     ``langchain_core`` is imported lazily, like the chat model that fires it.
     """
@@ -544,13 +442,75 @@ def _token_usage_callback(observation: RunObservation) -> Any:
     return _TokenUsageCallback()
 
 
+#: A MODEL call's provider and transport failures.  Each is collapsed into
+#: ``ModelProviderUnavailableError`` (and then ``PinnedInvocationEndpointError``
+#: by the runtime).  Only the model call is wrapped: a tool's own failure, even
+#: one of these types, is answered to the model in-band and never maps here.
+_MODEL_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.APIStatusError,
+    DatabricksClientError,
+    NotFound,
+    PermissionDenied,
+    Unauthenticated,
+    ResourceDoesNotExist,
+    InternalError,
+    Aborted,
+    DeadlineExceeded,
+    OperationFailed,
+    requests.exceptions.RequestException,
+    httpx.HTTPError,
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
+
+@contextmanager
+def _model_provider_errors_collapsed() -> Iterator[None]:
+    """Collapse a model call's provider failure, keeping the original as the cause."""
+    try:
+        yield
+    except _MODEL_PROVIDER_ERRORS as original_error:
+        raise ModelProviderUnavailableError(
+            "pinned model provider unavailable"
+        ) from original_error
+
+
+#: The answer to every tool call after the first in one model reply.
+_NOT_RUN_TEXT = (
+    "Not run: ask one question at a time. Read the answer to your previous question "
+    "first, then ask again if you still need this."
+)
+
+
+def _tool_definition(tool: AgentTool) -> dict[str, Any]:
+    """One toolset tool as the provider tool dict the model is bound to.
+
+    The parameters are LangChain's conversion of the tool's ``args_schema``
+    (the same treatment the output schema gets when it is bound); the name and
+    description are the tool's own.
+    """
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    parameters = convert_to_openai_tool(tool.args_schema)["function"]["parameters"]
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": parameters,
+        },
+    }
+
+
 class DatabricksModelAdapter:
     """Invoke one structured Databricks model.
 
-    The output schema is its only tool unless the run's context carries tools
-    (deck style addendum A); ``AgentRuntime`` then hands them to ``invoke`` as
-    ``tools=`` — only then, so an adapter that takes the four keywords alone is
-    never handed one — and the model may call them for a few rounds first.
+    ``invoke`` binds the output schema as the only tool.  ``invoke_with_tools``
+    (an invocation that carries a toolset) binds the schema beside the toolset's
+    tools and runs the bounded tool-calling loop.
     """
 
     def __init__(
@@ -589,51 +549,169 @@ class DatabricksModelAdapter:
         configuration: AgentModelConfiguration,
         schema: type[BaseModel],
         prompt: str,
-        tools: Sequence[Any] = (),
     ) -> BaseModel:
         # ``agent_key`` is deliberately a separate selection seam.  In particular,
         # Build Reviewer and Fix Reviewer have the same output schema.
         del agent_key
-        tools = tuple(tools)
-        provider_errors = (
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            openai.APIStatusError,
-            DatabricksClientError,
-            NotFound,
-            PermissionDenied,
-            Unauthenticated,
-            ResourceDoesNotExist,
-            InternalError,
-            Aborted,
-            DeadlineExceeded,
-            OperationFailed,
-            requests.exceptions.RequestException,
-            httpx.HTTPError,
-            ConnectionError,
-            TimeoutError,
-            OSError,
-        )
-        try:
+        with _model_provider_errors_collapsed():
             structured_model = bind_structured_output_model(
                 model_factory=self._model_factory,
                 workspace_client=self._client_factory(),
                 configuration=configuration,
                 schema=schema,
                 transport_options=self._transport_options,
-                tools=tools,
             )
-            if not tools:
-                return structured_model.invoke(prompt)
-            # A tool's own failure is answered to the model inside the rounds,
-            # so only a provider failure reaches the handler below.
-            return _invoke_with_tool_rounds(
-                structured_model, schema=schema, tools=tools, prompt=prompt
+            return structured_model.invoke(prompt)
+
+    def invoke_with_tools(
+        self,
+        *,
+        agent_key: str,
+        configuration: AgentModelConfiguration,
+        schema: type[BaseModel],
+        prompt: str,
+        toolset: AgentToolset,
+    ) -> BaseModel:
+        """Run the bounded tool-calling loop; return the model's validated schema call.
+
+        The model is built and bound ONCE (the output schema plus every toolset
+        tool, ``tool_choice="auto"``) on the system client, exactly as
+        ``invoke`` builds it.  From ``[HumanMessage(prompt)]`` each round
+        invokes it with the whole history:
+
+        * a reply in which any tool call names the schema ends the loop: that
+          call's args are validated against ``schema`` and returned (a
+          ``ValidationError`` is the same parse failure ``invoke`` raises);
+        * a reply with no tool calls (valid or malformed) is nudged once to call
+          the schema; a second one raises ``OutputParserException``;
+        * otherwise the reply and one ``ToolMessage`` per call (same id) are
+          appended.  Only the FIRST call runs (see :meth:`_answer_tool_call`):
+          each later one is answered as not run, uncounted, so the model asks
+          one question per round.  A malformed call (arguments
+          that are not JSON) is answered too: the provider client sends it back
+          in the assistant turn, and an unanswered call is a rejected history.
+          After the round that spends the budget, one ``HumanMessage`` tells the
+          model to call the schema now; it is never repeated.
+
+        After ``max_calls + 3`` rounds without a schema call it raises
+        ``OutputParserException``.  Only the model's own calls (construction,
+        binding, each round) collapse provider failures into
+        ``ModelProviderUnavailableError``; a tool's failure never does.
+        """
+        del agent_key
+        from langchain_core.exceptions import OutputParserException
+        from langchain_core.messages import HumanMessage, ToolMessage
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        if not toolset.tools:
+            raise ValueError("a toolset needs at least one tool")
+        # The name the model sees for the schema (the parser matches it the same way).
+        schema_name = convert_to_openai_tool(schema)["function"]["name"]
+        budget_text = f"Tool budget exhausted. Call {schema_name} now with what you have."
+        tools_by_name = {tool.name: tool for tool in toolset.tools}
+        with _model_provider_errors_collapsed():
+            bound_model = bind_structured_output_model(
+                model_factory=self._model_factory,
+                workspace_client=self._client_factory(),
+                configuration=configuration,
+                schema=schema,
+                transport_options=self._transport_options,
+                extra_tools=[_tool_definition(tool) for tool in toolset.tools],
             )
-        except provider_errors as original_error:
-            raise ModelProviderUnavailableError(
-                "pinned model provider unavailable"
-            ) from original_error
+        messages: list[Any] = [HumanMessage(content=prompt)]
+        toolset.start()
+        nudged = False
+        budget_noticed = False
+        for _ in range(toolset.max_calls + 3):
+            with _model_provider_errors_collapsed():
+                reply = bound_model.invoke(messages)
+            tool_calls = list(reply.tool_calls)
+            malformed_calls = list(reply.invalid_tool_calls)
+            for call in tool_calls:
+                if call["name"] == schema_name:
+                    return schema.model_validate(call["args"])
+            if not tool_calls and not malformed_calls:
+                if nudged:
+                    raise OutputParserException(
+                        "the model replied twice without calling the structured-output tool"
+                    )
+                nudged = True
+                # An empty assistant turn is rejected by some providers; prose is kept.
+                if reply.content:
+                    messages.append(reply)
+                messages.append(HumanMessage(content=f"Respond by calling {schema_name}."))
+                continue
+            messages.append(reply)
+            # One question per round: only the first call runs.  Each other call
+            # is still answered (an unanswered call is a rejected history) and is
+            # not counted, so the model reads one answer before it asks again.
+            for index, call in enumerate(tool_calls):
+                messages.append(
+                    ToolMessage(
+                        content=(
+                            self._answer_tool_call(
+                                call, tools_by_name, toolset, budget_text=budget_text
+                            )
+                            if index == 0
+                            else _NOT_RUN_TEXT
+                        ),
+                        tool_call_id=call["id"],
+                    )
+                )
+            # Answered after the valid calls: the order the client sends them in.
+            for call in malformed_calls:
+                messages.append(
+                    ToolMessage(
+                        content="Tool error: the arguments were not valid JSON.",
+                        tool_call_id=call["id"],
+                    )
+                )
+            if not budget_noticed and toolset.exhausted():
+                budget_noticed = True
+                messages.append(HumanMessage(content=budget_text))
+        raise OutputParserException(
+            "the model did not call the structured-output tool within the round limit"
+        )
+
+    @staticmethod
+    def _answer_tool_call(
+        call: Mapping[str, Any],
+        tools_by_name: Mapping[str, AgentTool],
+        toolset: AgentToolset,
+        *,
+        budget_text: str,
+    ) -> str:
+        """The ``ToolMessage`` content for one tool call; it never raises an ``Exception``.
+
+        A spent budget (calls or clock) refuses the call; an unknown name is
+        answered as such.  Otherwise the args are parsed with the tool's
+        ``args_schema``, the call is counted, and the tool runs with the budget's
+        remaining seconds.  A ``ToolAccessError`` is recorded on the toolset;
+        any other failure (bad args included) is answered as a tool error.
+
+        An error's text is untrusted (it can carry a service's or a payload's
+        words), so it reaches the model only inside ``spotlight``.  The tool's
+        own return value is the tool's to spotlight.
+        """
+        from src.services.agent_tools.toolset import ToolAccessError
+        from src.utils.spotlight import spotlight
+
+        if toolset.exhausted():
+            return budget_text
+        tool = tools_by_name.get(call["name"])
+        if tool is None:
+            return f"Unknown tool: {call['name']}"
+        try:
+            args = tool.args_schema.model_validate(call["args"])
+            toolset.calls_made += 1
+            return tool.run(args, remaining_seconds=toolset.remaining_seconds())
+        except ToolAccessError as error:
+            toolset.access_errors.append(error)
+            return "Access denied: " + spotlight("tool_error", error.message)
+        except Exception as error:  # noqa: BLE001 - a tool failure is answered in-band
+            return f"Tool error: {type(error).__name__}: " + spotlight(
+                "tool_error", str(error)[:300]
+            )
 
 
 #: HTTP statuses a retry or a later turn can succeed on: request timeout,
@@ -1010,6 +1088,10 @@ class AgentRuntime:
         identity_sink: AgentInvocationIdentitySink | None,
     ) -> CandidateRunOutcome:
         """``_run_resolved`` with the raw output observed and failures classified."""
+        if assembly_context.toolset is not None:
+            # Test runs (candidate and baseline) get no live tools: a refused
+            # contract, raised rather than classified into the outcome.
+            raise ValueError("test runs carry no toolset")
         record = observation if observation is not None else RunObservation()
 
         def observe(raw: Mapping[str, Any]) -> None:
@@ -1111,11 +1193,6 @@ class AgentRuntime:
 
         configuration = saved_model_configuration(content.model)
         prompt = assembled.prompt
-        # Handed to the adapter only when there are some: every adapter that
-        # takes the four keywords alone keeps working, and a run without tools
-        # makes exactly the call it always made.
-        tools = tuple(getattr(assembly_context, "tools", ()))
-        tool_kwargs: dict[str, Any] = {"tools": tools} if tools else {}
         identity = AgentInvocationIdentity(
             graph_version=definition.graph_version,
             graph_release_id=definition.graph_release_id,
@@ -1128,6 +1205,12 @@ class AgentRuntime:
             root_session_id=assembly_context.root_session_id,
             actor_session_id=assembly_context.actor_session_id,
         )
+        toolset = assembly_context.toolset
+        # The tool loop is optional on an adapter; one without it must never
+        # silently drop a toolset by falling back to the single call.
+        invoke_with_tools = getattr(self._model_adapter, "invoke_with_tools", None)
+        if toolset is not None and invoke_with_tools is None:
+            raise TypeError("model adapter cannot run tools")
 
         def callback() -> ValidatedAgentOutput:
             # Private and keyword-only, like the raw observer: ``run`` passes
@@ -1141,13 +1224,21 @@ class AgentRuntime:
             )
             invoke_started = time.perf_counter()
             try:
-                provider_output = self._model_adapter.invoke(
-                    agent_key=definition.agent_key,
-                    configuration=configuration,
-                    schema=composed.model,
-                    prompt=prompt,
-                    **tool_kwargs,
-                )
+                if toolset is None:
+                    provider_output = self._model_adapter.invoke(
+                        agent_key=definition.agent_key,
+                        configuration=configuration,
+                        schema=composed.model,
+                        prompt=prompt,
+                    )
+                else:
+                    provider_output = invoke_with_tools(
+                        agent_key=definition.agent_key,
+                        configuration=configuration,
+                        schema=composed.model,
+                        prompt=prompt,
+                        toolset=toolset,
+                    )
             except ModelProviderUnavailableError as exc:
                 raise PinnedInvocationEndpointError(
                     endpoint_name=content.model.endpoint_name,

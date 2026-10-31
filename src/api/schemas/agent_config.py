@@ -65,8 +65,17 @@ class AgentBricksTool(BaseModel):
     description: Optional[str] = None
 
 
+class GenieOneTool(BaseModel):
+    """Genie One tool — agent mode only; one per config."""
+    type: Literal["genie_one"] = "genie_one"
+    conversation_id: Optional[str] = None
+
+
 ToolEntry = Annotated[
-    Union[GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool],
+    Union[
+        GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
+        GenieOneTool,
+    ],
     Field(discriminator="type"),
 ]
 
@@ -112,6 +121,8 @@ class AgentConfig(BaseModel):
                 key = f"model_endpoint:{tool.endpoint_name}"
             elif isinstance(tool, AgentBricksTool):
                 key = f"agent_bricks:{tool.endpoint_name}"
+            elif isinstance(tool, GenieOneTool):
+                key = "genie_one"
             else:
                 continue
             if key in seen:
@@ -322,6 +333,6 @@ def sanitize_agent_config_for_persist(
         return None
     config = raw if isinstance(raw, AgentConfig) else resolve_agent_config(raw)
     for tool in config.tools:
-        if isinstance(tool, GenieTool):
+        if isinstance(tool, (GenieTool, GenieOneTool)):
             tool.conversation_id = None
     return config.model_dump()

@@ -1,8 +1,9 @@
 # ruff: noqa: F811 — the conftest_graph fixtures are imported, then requested by name.
 """Builders and fixers can search the deck's brand assets (addendum A, Task B3).
 
-``builder_node`` and ``fixer_node`` hand the runtime a ``search_brand_assets``
-tool on ``AgentAssemblyContext.tools`` only when all three hold (Correction A13):
+``builder_node`` and ``fixer_node`` hand the runtime a toolset holding the
+``search_brand_assets`` tool on ``AgentAssemblyContext.toolset`` (the runtime's
+one tool loop, RA19) only when all three hold (Correction A13):
 
 * the payload's ``design_system_active`` is true,
 * the payload carries a ``deck_style`` (an old deck's never does), and
@@ -11,9 +12,11 @@ tool on ``AgentAssemblyContext.tools`` only when all three hold (Correction A13)
 The tool searches THAT design system only, keeps the name and arguments of
 ``build_ds_asset_tool``'s tool, and caps its rows so an unfiltered call stays
 valid JSON instead of being truncated mid-row by spotlight's byte cap.  What the
-model finally sees is that JSON spotlighted once, by the runtime's loop.
+model finally sees is that JSON spotlighted once, by the tool.  Each run gets a
+fresh toolset (a toolset counts its calls), the safety retry included.
 
-Workbench test runs and slide-style previews bind no tool.
+Workbench test runs and slide-style previews bind no tool.  The eval harness
+and ``builder_node`` reach the same loop function with the same tool class.
 
 How this file asserts: on the context and payload each node actually handed the
 runtime, on what the handed tool returns from a real database holding two
@@ -161,7 +164,21 @@ def brand(graph_env, monkeypatch):
 
 
 def _rows(tool_output: str) -> list[dict[str, Any]]:
+    """The rows of a search's JSON, unwrapped from the tool's spotlight when present."""
+    if tool_output.startswith(_SPOTLIGHT_OPEN):
+        assert tool_output.endswith(_SPOTLIGHT_CLOSE)
+        tool_output = tool_output[len(_SPOTLIGHT_OPEN) : -len(_SPOTLIGHT_CLOSE)]
     return json.loads(tool_output)["assets"]
+
+
+def _run_search(tool, **args) -> str:
+    """Run the handed ``AgentTool`` the way the runtime's loop does."""
+    return tool.run(tool.args_schema.model_validate(args), remaining_seconds=300.0)
+
+
+def _tools(context: AgentAssemblyContext) -> tuple:
+    """The tools a context's toolset holds; ``()`` when it carries none."""
+    return () if context.toolset is None else tuple(context.toolset.tools)
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +333,12 @@ def _chat_adapter(chat: _ScriptedChatModel) -> DatabricksModelAdapter:
     )
 
 
-def _replay(call: SimpleNamespace, chat: _ScriptedChatModel):
-    """Run a recorded node call through a real runtime over the v1 definition."""
-    content = _manifest_content(call.agent_key)
-    loader = SimpleNamespace(
-        resolve=lambda graph_release_id, key: ResolvedDefinition(
+def _v1_runtime(chat: _ScriptedChatModel) -> AgentRuntime:
+    """A real runtime over the v1 definitions whose chat model is ``chat``."""
+
+    def resolve(graph_release_id, key):
+        content = _manifest_content(key)
+        return ResolvedDefinition(
             graph_version=1,
             graph_release_id=graph_release_id,
             agent_key=key,
@@ -328,13 +346,19 @@ def _replay(call: SimpleNamespace, chat: _ScriptedChatModel):
             content_hash=definition_content_hash(content),
             content=content,
         )
-    )
-    runtime = AgentRuntime(
-        persisted_release_loader=loader,
+
+    return AgentRuntime(
+        persisted_release_loader=SimpleNamespace(resolve=resolve),
         model_adapter=_chat_adapter(chat),
         identity_sink=RecordingAgentInvocationIdentitySink(),
     )
-    return runtime.run(call.agent_key, call.graph_release_id, call.payload, call.context)
+
+
+def _replay(call: SimpleNamespace, chat: _ScriptedChatModel):
+    """Run a recorded node call through a real runtime over the v1 definition."""
+    return _v1_runtime(chat).run(
+        call.agent_key, call.graph_release_id, call.payload, call.context
+    )
 
 
 def _assert_todays_binding(chat: _ScriptedChatModel, agent_key: str, prompt: str) -> None:
@@ -362,7 +386,9 @@ def test_the_builder_gets_the_brand_search_tool_for_a_styled_design_system_deck(
 
     assert "slides" in updates
     (call,) = runtime.calls
-    assert [tool.name for tool in call.context.tools] == ["search_brand_assets"]
+    assert [tool.name for tool in _tools(call.context)] == ["search_brand_assets"]
+    # Three searches at most (the toolset's budget, enforced by the loop).
+    assert call.context.toolset.max_calls == 3
     # The rest of the context is what it always was.
     assert call.context == AgentAssemblyContext(True, graph_env.session_id, graph_env.session_id)
     assert call.context.design_system_active is True
@@ -380,15 +406,15 @@ def test_the_builders_tool_searches_only_the_decks_design_system(
 
     builder_node(_branch_payload(graph_env, design_system_id=brand.design_system_id))
 
-    (tool,) = runtime.calls[0].context.tools
-    everything = {row["id"] for row in _rows(tool.invoke({}))}
+    (tool,) = _tools(runtime.calls[0].context)
+    everything = {row["id"] for row in _rows(_run_search(tool))}
     assert everything and everything <= brand.asset_ids
     assert not everything & brand.foreign_asset_ids
     # The model's arguments reach the search: kind and query filter it.
-    logos = _rows(tool.invoke({"kind": "logo"}))
+    logos = _rows(_run_search(tool, kind="logo"))
     assert {row["id"] for row in logos} == brand.logo_ids
     assert {row["kind"] for row in logos} == {"logo"}
-    cloud = _rows(tool.invoke({"query": "cloud"}))
+    cloud = _rows(_run_search(tool, query="cloud"))
     assert [row["filename"] for row in cloud] == ["icon-cloud.svg"]
     assert {row["id"] for row in cloud} <= brand.icon_ids
     # Each row still carries the deck's own handle.
@@ -406,15 +432,18 @@ def test_the_builders_tool_caps_its_rows_and_keeps_the_tools_name_and_arguments(
 
     builder_node(_branch_payload(graph_env, design_system_id=brand.design_system_id))
 
-    (tool,) = runtime.calls[0].context.tools
-    assert tool.name == "search_brand_assets"
-    assert set(tool.args) == {"query", "kind"}
-    uncapped = _rows(build_ds_asset_tool(brand.design_system_id).invoke({"kind": "icon"}))
+    (tool,) = _tools(runtime.calls[0].context)
+    unscoped = build_ds_asset_tool(brand.design_system_id)
+    assert tool.name == unscoped.name == "search_brand_assets"
+    assert tool.description == unscoped.description
+    assert tool.args_schema is unscoped.args_schema
+    assert set(tool.args_schema.model_fields) == {"query", "kind"}
+    uncapped = _rows(unscoped.invoke({"kind": "icon"}))
     assert len(uncapped) == 30
-    capped = _rows(tool.invoke({"kind": "icon"}))
+    capped = _rows(_run_search(tool, kind="icon"))
     # The first ROW_CAP rows of the search's own ranking, as valid JSON.
     assert capped == uncapped[:ROW_CAP]
-    assert len(_rows(tool.invoke({}))) == ROW_CAP
+    assert len(_rows(_run_search(tool))) == ROW_CAP
 
 
 def test_no_tool_without_deck_style(graph_env, monkeypatch, brand):
@@ -433,7 +462,7 @@ def test_no_tool_without_deck_style(graph_env, monkeypatch, brand):
     chat = _ScriptedChatModel([_answer("builder")])
     result = _replay(call, chat)
     _assert_todays_binding(chat, "builder", result.diagnostics.assembled_prompt)
-    assert call.context.tools == ()
+    assert call.context.toolset is None
 
 
 def test_no_tool_without_a_design_system(graph_env, monkeypatch, brand):
@@ -450,7 +479,7 @@ def test_no_tool_without_a_design_system(graph_env, monkeypatch, brand):
     chat = _ScriptedChatModel([_answer("builder")])
     result = _replay(call, chat)
     _assert_todays_binding(chat, "builder", result.diagnostics.assembled_prompt)
-    assert call.context.tools == ()
+    assert call.context.toolset is None
 
 
 def test_no_tool_when_the_contract_names_no_design_system(graph_env, monkeypatch, brand):
@@ -465,21 +494,53 @@ def test_no_tool_when_the_contract_names_no_design_system(graph_env, monkeypatch
     chat = _ScriptedChatModel([_answer("builder")])
     result = _replay(call, chat)
     _assert_todays_binding(chat, "builder", result.diagnostics.assembled_prompt)
-    assert call.context.tools == ()
+    assert call.context.toolset is None
 
 
-def test_the_builders_safety_retry_keeps_the_tool(graph_env, monkeypatch, brand):
-    """Both builder calls (first attempt and gate retry) get the scoped tool."""
-    runtime = _recording_runtime(monkeypatch, builder=_unsafe_then_clean(builder_out))
+def _spending_unsafe_then_clean(runtime_box: list, spent_before: list, make_output):
+    """``_unsafe_then_clean``, and each attempt spends its toolset's whole budget.
+
+    A retry handed the same toolset would start exhausted: every search answered
+    with the budget text.  ``runtime_box`` holds the recording runtime, so the
+    handler can reach the context of the call it is answering; ``spent_before``
+    gets each toolset's call count as its run starts.
+    """
+    unsafe_then_clean = _unsafe_then_clean(make_output)
+
+    def handler(payload):
+        (runtime,) = runtime_box
+        toolset = runtime.calls[-1].context.toolset
+        spent_before.append(toolset.calls_made)
+        toolset.start()
+        toolset.calls_made = toolset.max_calls
+        return unsafe_then_clean(payload)
+
+    return handler
+
+
+def test_the_builders_safety_retry_keeps_the_tool_with_a_fresh_budget(
+    graph_env, monkeypatch, brand
+):
+    """Both builder calls (first attempt and gate retry) get the scoped tool, each in a
+    toolset of its own (RA21): the first attempt's spent budget is not the retry's."""
+    box: list = []
+    spent_before: list = []
+    runtime = _recording_runtime(
+        monkeypatch, builder=_spending_unsafe_then_clean(box, spent_before, builder_out)
+    )
+    box.append(runtime)
 
     updates = builder_node(_branch_payload(graph_env, design_system_id=brand.design_system_id))
 
     assert updates["slides"]["vals"][0]["html"] == "<div class='slide'>clean</div>"
     first, retry = runtime.calls
     assert "corrective_instruction" in retry.payload
+    assert first.context.toolset is not retry.context.toolset
+    # The first attempt spent its whole budget; the retry still started with none spent.
+    assert spent_before == [0, 0]
     for call in (first, retry):
-        (tool,) = call.context.tools
-        assert {row["id"] for row in _rows(tool.invoke({"kind": "logo"}))} == brand.logo_ids
+        (tool,) = _tools(call.context)
+        assert {row["id"] for row in _rows(_run_search(tool, kind="logo"))} == brand.logo_ids
 
 
 def test_a_brand_search_reaches_the_builders_model_spotlighted_once_and_capped(
@@ -490,6 +551,7 @@ def test_a_brand_search_reaches_the_builders_model_spotlighted_once_and_capped(
     The model searches unfiltered once, then answers.  The result it is shown
     is the deck's assets, at most ROW_CAP of them, as JSON wrapped in exactly
     one spotlight — not raw, and not double-wrapped by the tool and the loop.
+    The search ran on the node's own toolset, which counted it.
     """
     runtime = _recording_runtime(monkeypatch, builder=builder_out)
     builder_node(_branch_payload(graph_env, design_system_id=brand.design_system_id))
@@ -507,37 +569,42 @@ def test_a_brand_search_reaches_the_builders_model_spotlighted_once_and_capped(
     rows = _rows(content[len(_SPOTLIGHT_OPEN) : -len(_SPOTLIGHT_CLOSE)])
     assert len(rows) == ROW_CAP
     assert {row["id"] for row in rows} <= brand.asset_ids
+    assert call.context.toolset.calls_made == 1
 
 
+@pytest.mark.parametrize(
+    "failing",
+    [
+        pytest.param(
+            ("src.services.tools.ds_asset_tool", "build_ds_asset_tool"), id="the_search"
+        ),
+        pytest.param(
+            ("src.services.agent_tools.brand_search", "build_brand_search_toolset"),
+            id="the_toolset",
+        ),
+    ],
+)
 def test_a_search_tool_that_cannot_be_built_binds_none_and_the_slide_still_builds(
-    graph_env, monkeypatch, brand
+    graph_env, monkeypatch, brand, failing
 ):
-    """Building the node's capped wrapper runs before the node's own ``try``.
+    """Building the search and its toolset runs inside ``_brand_search_toolset``'s guard.
 
-    Only the wrapper's construction is made to fail (``build_ds_asset_tool``'s
-    own ``from_function`` still works), so this pins that the wrapper is built
-    inside ``_brand_search_tools``'s guard: no tool, today's binding, a slide.
+    Either construction failing gives no toolset, today's binding and a slide,
+    never a failed branch.
     """
-    from langchain_core.tools import StructuredTool
+    module, name = failing
 
-    original = StructuredTool.from_function
+    def _fail(*_args, **_kwargs):
+        raise RuntimeError("tool construction failed")
 
-    def _failing_for_the_node_wrapper(*args, **kwargs):
-        func = kwargs.get("func", args[0] if args else None)
-        if getattr(func, "__module__", None) == nodes.__name__:
-            raise RuntimeError("tool construction failed")
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(
-        StructuredTool, "from_function", staticmethod(_failing_for_the_node_wrapper)
-    )
+    monkeypatch.setattr(f"{module}.{name}", _fail)
     runtime = _recording_runtime(monkeypatch, builder=builder_out)
 
     updates = builder_node(_branch_payload(graph_env, design_system_id=brand.design_system_id))
 
     assert 0 in updates["slides"]["vals"]
     (call,) = runtime.calls
-    assert call.context.tools == ()
+    assert call.context.toolset is None
     chat = _ScriptedChatModel([_answer("builder")])
     result = _replay(call, chat)
     _assert_todays_binding(chat, "builder", result.diagnostics.assembled_prompt)
@@ -557,26 +624,36 @@ def test_the_fixer_gets_the_brand_search_tool(graph_env, monkeypatch, brand):
     assert updates["fix_target"] == 0
     (call,) = runtime.calls
     assert call.agent_key == "fixer"
-    (tool,) = call.context.tools
+    (tool,) = _tools(call.context)
     assert tool.name == "search_brand_assets"
+    assert call.context.toolset.max_calls == 3
     # Scoped to the design system of the builder record's design contract.
-    assert {row["id"] for row in _rows(tool.invoke({"kind": "logo"}))} == brand.logo_ids
-    assert not {row["id"] for row in _rows(tool.invoke({}))} & brand.foreign_asset_ids
+    assert {row["id"] for row in _rows(_run_search(tool, kind="logo"))} == brand.logo_ids
+    assert not {row["id"] for row in _rows(_run_search(tool))} & brand.foreign_asset_ids
     assert call.context == AgentAssemblyContext(True, graph_env.session_id, graph_env.session_id)
     assert "deck_style" in call.payload
 
 
-def test_the_fixers_safety_retry_keeps_the_tool(graph_env, monkeypatch, brand):
-    runtime = _recording_runtime(monkeypatch, fixer=_unsafe_then_clean(fixer_out))
+def test_the_fixers_safety_retry_keeps_the_tool_with_a_fresh_budget(
+    graph_env, monkeypatch, brand
+):
+    box: list = []
+    spent_before: list = []
+    runtime = _recording_runtime(
+        monkeypatch, fixer=_spending_unsafe_then_clean(box, spent_before, fixer_out)
+    )
+    box.append(runtime)
     branch = _branch_payload(graph_env, design_system_id=brand.design_system_id)
 
     fixer_node(_fix_state(graph_env, branch))
 
     first, retry = runtime.calls
     assert "corrective_instruction" in retry.payload
+    assert first.context.toolset is not retry.context.toolset
+    assert spent_before == [0, 0]
     for call in (first, retry):
-        (tool,) = call.context.tools
-        assert {row["id"] for row in _rows(tool.invoke({"kind": "logo"}))} == brand.logo_ids
+        (tool,) = _tools(call.context)
+        assert {row["id"] for row in _rows(_run_search(tool, kind="logo"))} == brand.logo_ids
 
 
 @pytest.mark.parametrize(
@@ -600,7 +677,7 @@ def test_the_fixer_gets_no_tool_unless_all_three_hold(
     chat = _ScriptedChatModel([_answer("fixer")])
     result = _replay(call, chat)
     _assert_todays_binding(chat, "fixer", result.diagnostics.assembled_prompt)
-    assert call.context.tools == ()
+    assert call.context.toolset is None
 
 
 # ===========================================================================
@@ -714,7 +791,7 @@ def test_workbench_test_runs_bind_no_tool(workbench_factory):
     assert all(isinstance(model_input, str) for model_input in chat.raw_inputs)
     assert len(runtime.contexts) == 2
     assert all(context.design_system_active is True for context in runtime.contexts)
-    assert [context.tools for context in runtime.contexts] == [(), ()]
+    assert [context.toolset for context in runtime.contexts] == [None, None]
 
 
 @pytest.fixture
@@ -767,4 +844,59 @@ def test_slide_style_previews_bind_no_tool(preview_release, monkeypatch):
     (schema,) = bound
     assert issubclass(schema, OUTPUT_SCHEMAS["builder"])
     assert all(isinstance(model_input, str) for model_input in chat.raw_inputs)
-    assert [context.tools for context in contexts] == [()]
+    assert [context.toolset for context in contexts] == [None]
+
+
+# ===========================================================================
+# One tool loop: builder_node and the eval harness (RA19, RA21)
+# ===========================================================================
+
+
+def test_builder_node_and_the_eval_harness_run_the_search_through_one_loop_function(
+    graph_env, monkeypatch, brand
+):
+    """A production builder run and an eval-harness builder run both enter
+    ``DatabricksModelAdapter.invoke_with_tools`` with a toolset holding production's
+    ``BrandSearchAgentTool``; only the search backend under it differs."""
+    from evals.harness.config import v1_baseline
+    from evals.harness.runner import Runner
+    from src.services.agent_tools.brand_search import BrandSearchAgentTool
+
+    loop = DatabricksModelAdapter.invoke_with_tools
+    entered: list[tuple[str, Any]] = []
+
+    def _entering_the_loop(self, **kwargs):
+        entered.append((kwargs["agent_key"], kwargs["toolset"]))
+        return loop(self, **kwargs)
+
+    monkeypatch.setattr(DatabricksModelAdapter, "invoke_with_tools", _entering_the_loop)
+
+    node_chat = _ScriptedChatModel([_search({"kind": "icon"}), _answer("builder")])
+    node_runtime = _v1_runtime(node_chat)
+    monkeypatch.setattr(nodes, "get_agent_runtime", lambda: node_runtime)
+    builder_node(_branch_payload(graph_env, design_system_id=brand.design_system_id))
+
+    harness_chat = _ScriptedChatModel([_search({"kind": "icon"}), _answer("builder")])
+    runner = Runner(model_adapter=_chat_adapter(harness_chat), max_infra_retries=0)
+    harness_payload = {
+        "position": 1,
+        "design_system_active": True,
+        "deck_style": CALLOUT_STYLE.model_dump(),
+    }
+    result = runner.run(v1_baseline("builder"), harness_payload, design_system_active=True)
+
+    assert result.status == "completed", result.error_detail
+    assert [agent_key for agent_key, _ in entered] == ["builder", "builder"]
+    for _, toolset in entered:
+        (tool,) = toolset.tools
+        assert type(tool) is BrandSearchAgentTool
+        assert toolset.max_calls == 3
+        assert toolset.calls_made == 1
+    # Each search reached its model as the tool's spotlighted rows.
+    for chat in (node_chat, harness_chat):
+        (answer,) = [m for m in chat.inputs[1] if isinstance(m, ToolMessage)]
+        assert str(answer.content).startswith(_SPOTLIGHT_OPEN)
+        assert _rows(str(answer.content))
+    assert result.tool_calls == (
+        {"name": "search_brand_assets", "args": {"query": None, "kind": "icon"}},
+    )

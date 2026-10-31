@@ -50,10 +50,11 @@ import threading
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple, get_type_hints
+from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
+from typing import Any, Dict, Final, List, Literal, Optional, Sequence, Set, Tuple, get_type_hints
 
-from src.api.schemas.agent_config import AgentConfig, resolve_agent_config
+from src.api.schemas.agent_config import AgentConfig, GenieOneTool, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_columns
 from src.api.services.session_manager import get_session_manager, resolve_streamed_ds_assets
@@ -65,9 +66,16 @@ from src.api.services.slide_repository import (
     layout_mutation_operation,
 )
 from src.core.database import get_db_session
+from src.core.databricks_client import get_user_client
+from src.core.scope_errors import (
+    consent_message,
+    oauth_client_id_from_token,
+    oauth_scopes_from_token,
+    scopes_grant,
+)
 from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
-from src.domain.deck_spec import DeckSpec, DesignContractRef, SlideSpec
+from src.domain.deck_spec import DeckSpec, DesignContractRef, ResolvedFigure, SlideSpec
 from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
 from src.domain.deck_style import (
     css_class_names,
@@ -109,6 +117,14 @@ from src.services.agent_runtime import (
     is_provider_parse_error,
     is_transient_model_failure,
 )
+from src.services.agent_tools.genie_one import (
+    GENIE_ONE_SCOPE,
+    GENIE_ONE_SOURCE,
+    GenieOneAnswer,
+    figures_from_answer,
+)
+from src.services.agent_tools.registry import GenieOneAgentTool, build_analyst_toolset
+from src.services.agent_tools.toolset import AgentToolset
 from src.services.deck_css_aggregator import aggregate_deck_css
 from src.services.deck_review_store import (
     compute_deck_digest,
@@ -166,6 +182,7 @@ from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.html_utils import strip_inter_tag_escapes
 from src.utils.slide_hash import compute_slide_hash
 from src.utils.slide_number_tokens import substitute_slide_numbers
+from src.utils.spotlight import neutralize_delimiters, spotlight
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +207,8 @@ def _assembly_context(
     design_system_active: Any,
     root_session_id: Any,
     actor_session_id: Any,
-    tools: Sequence[Any] = (),
+    *,
+    toolset: Optional[AgentToolset] = None,
 ) -> AgentAssemblyContext:
     """Build the FOURTH argument every ``get_agent_runtime().run(...)`` call passes.
 
@@ -213,85 +231,57 @@ def _assembly_context(
     **IDs never select the release.**  ``run``'s second argument does; these two
     are inert for resolution and are read by nothing but the identity sink.
 
-    ``tools`` is passed by ``builder_node`` and ``fixer_node`` only (deck style
-    addendum A): :func:`_brand_search_tools`, empty for every deck that does not
-    qualify.  Every other site passes the three, so its context carries none.
+    ``toolset`` is keyword-only and invocation-scoped, never an id: only
+    ``data_analyst_node`` (Genie One in agent mode) and ``builder_node`` and
+    ``fixer_node`` (the brand-asset search, :func:`_brand_search_toolset`, deck
+    style addendum A) pass it, and every other call site leaves it ``None``, so
+    their single structured-output call is unchanged.
     """
     return AgentAssemblyContext(
         bool(design_system_active),
         root_session_id or "",
         actor_session_id or "",
-        tools=tuple(tools),
+        toolset=toolset,
     )
 
 
-#: The most rows one brand-asset search hands the builder or fixer.  The search
-#: itself has no cap (a real library holds hundreds of images), and spotlight's
-#: byte cap would cut an unfiltered result mid-JSON; capped rows stay valid JSON.
-_BRAND_SEARCH_ROW_CAP = 20
-
-
-def _brand_search_tools(payload: Mapping[str, Any]) -> Tuple[Any, ...]:
-    """The ``search_brand_assets`` tool a builder or fixer may call, or ``()``.
+def _brand_search_toolset(payload: Mapping[str, Any]) -> Optional[AgentToolset]:
+    """A fresh ``search_brand_assets`` toolset for one builder or fixer run, or ``None``.
 
     Bound only when all three hold (deck style addendum A): a design system is
     active, the deck has a deck style (an old deck's payload never carries one,
-    so its binding is exactly today's), and the design contract names the
-    design system the search is scoped to.  ``payload`` is the builder's branch
-    payload — for the fixer, the builder record its fix entry carries.
+    so its call is exactly today's single structured-output call), and the
+    design contract names the design system the search is scoped to.
+    ``payload`` is the builder's branch payload — for the fixer, the builder
+    record its fix entry carries.
 
-    The tool keeps ``build_ds_asset_tool``'s name, description and arguments and
-    caps its rows at ``_BRAND_SEARCH_ROW_CAP``; it returns plain JSON, and the
-    runtime spotlights it once.  Nothing here reads the database: each search
-    opens its own session.  Any failure to build it binds no tool.
+    The tool is ``brand_search.BrandSearchAgentTool`` over ``build_ds_asset_tool``
+    for that design system: the row cap, the spotlight and the fixed failure text
+    are that module's, shared with the eval harness.  A toolset counts its calls,
+    so every run asks for its own (the safety-gate retry too).  Nothing here
+    reads the database: each search opens its own session.  Any failure to build
+    it binds no tool.
     """
     if not payload.get("design_system_active") or payload.get("deck_style") is None:
-        return ()
+        return None
     contract = payload.get("design_contract")
     design_system_id = (
         contract.get("design_system_id") if isinstance(contract, Mapping) else None
     )
     if design_system_id is None:
-        return ()
-    # Everything that builds the tool sits inside the guard: it runs before the
-    # node's own ``try``, so anything escaping here would fail the branch
-    # without a placeholder instead of building the slide without a search.
+        return None
+    # Everything that builds the toolset sits inside the guard, so a failure
+    # builds the slide without a search instead of failing it.
     try:
-        from langchain_core.tools import StructuredTool
+        from src.services.agent_tools.brand_search import build_brand_search_toolset
+        from src.services.tools.ds_asset_tool import build_ds_asset_tool
 
-        from src.services.tools.ds_asset_tool import SearchBrandAssetsInput, build_ds_asset_tool
-
-        search = build_ds_asset_tool(int(design_system_id))
-
-        def _search_brand_assets(
-            query: Optional[str] = None, kind: Optional[str] = None
-        ) -> str:
-            found = search.func(query=query, kind=kind)
-            rows = json.loads(found).get("assets") or []
-            if len(rows) <= _BRAND_SEARCH_ROW_CAP:
-                return found
-            return json.dumps(
-                {
-                    "message": (
-                        f"Found {len(rows)} brand asset(s); showing the first "
-                        f"{_BRAND_SEARCH_ROW_CAP}. Narrow the search with query or kind."
-                    ),
-                    "assets": rows[:_BRAND_SEARCH_ROW_CAP],
-                }
-            )
-
-        tool = StructuredTool.from_function(
-            func=_search_brand_assets,
-            name=search.name,
-            description=search.description,
-            args_schema=SearchBrandAssetsInput,
-        )
+        return build_brand_search_toolset(build_ds_asset_tool(int(design_system_id)))
     except Exception:
         logger.warning(
             "brand-asset search unavailable; the slide is built without it", exc_info=True
         )
-        return ()
-    return (tool,)
+        return None
 
 
 def _raise_if_persisted_runtime_failure(exc: Exception) -> None:
@@ -368,6 +358,7 @@ def _emit(
     content: Optional[str] = None,
     error: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    agent: Optional[str] = None,
 ) -> None:
     """Queue one event, or do nothing when no emitter is installed.
 
@@ -376,7 +367,8 @@ def _emit(
     """
     emit_event(
         StreamEvent(
-            type=event_type, content=content, error=error, metadata=metadata
+            type=event_type, content=content, error=error, metadata=metadata,
+            agent=agent,
         )
     )
 
@@ -2839,7 +2831,7 @@ def _resanitise_carried_deck_style(
             len(notes),
             extra={"session_id": session_id},
         )
-    return replace(plan, spec=plan.spec.model_copy(update={"deck_style": cleaned}))
+    return dataclass_replace(plan, spec=plan.spec.model_copy(update={"deck_style": cleaned}))
 
 
 def _changes_beside_deck_style(out: Any, prior_spec: DeckSpec) -> bool:
@@ -3360,6 +3352,63 @@ def _plan_answer(
     )
 
 
+def _with_genie_figures(spec: DeckSpec, figures: List[ResolvedFigure]) -> DeckSpec:
+    """*spec* with *figures* as its code-owned Genie One figures.  Pure.
+
+    Keeps the architect's own figures whose source is not Genie One and whose key
+    is not one of *figures*' keys, in its order, then appends *figures* in order.
+    So a Genie value the architect retyped, a Genie figure it dropped and a stray
+    one it invented are all put right: what reaches ``resolved_data`` is what the
+    code built from Genie One's result rows.
+    """
+    keys = {figure.key for figure in figures}
+    kept = [
+        figure
+        for figure in spec.resolved_data.figures
+        if figure.source != GENIE_ONE_SOURCE and figure.key not in keys
+    ]
+    return spec.model_copy(
+        update={
+            "resolved_data": spec.resolved_data.model_copy(
+                update={"figures": kept + list(figures)}
+            )
+        }
+    )
+
+
+def _code_owned_genie_figures(
+    state: dict, prior_spec: Optional[DeckSpec]
+) -> List[ResolvedFigure]:
+    """The Genie One figures this turn's spec must carry verbatim.
+
+    The UNION, keyed by key, of the PERSISTED prior spec's Genie One figures
+    (the one ``architect_node`` read from the database; a contributor's
+    checkpointed ``state["deck_spec"]`` can be stale) and this turn's
+    ``analyst_figures``, so a later edit can neither retype nor drop a figure an
+    untouched slide still cites.  On a key both carry, this turn's value wins, in
+    the prior figure's place; this turn's new keys follow, in order.
+    """
+    merged: Dict[str, ResolvedFigure] = {}
+    if prior_spec is not None:
+        for figure in prior_spec.resolved_data.figures:
+            if figure.source == GENIE_ONE_SOURCE:
+                merged[figure.key] = figure
+    for figure in _turn_analyst_figures(state):
+        merged[figure.key] = figure
+    return list(merged.values())
+
+
+def _turn_analyst_figures(state: dict) -> List[ResolvedFigure]:
+    """This turn's ``analyst_figures``, validated; an entry that does not validate is skipped."""
+    figures: List[ResolvedFigure] = []
+    for raw in scoped_vals(state, "analyst_figures"):
+        try:
+            figures.append(ResolvedFigure.model_validate(raw))
+        except Exception:
+            logger.warning("An analyst figure does not validate; skipped", exc_info=True)
+    return figures
+
+
 def architect_node(state: dict) -> Dict[str, Any]:
     """Decide the turn's intent, commit the spec, resolve every brand value.
 
@@ -3675,6 +3724,20 @@ def architect_node(state: dict) -> Dict[str, Any]:
     if answer.refusal is not None:
         _degrade_edit(state, updates, answer.refusal)
         return updates
+
+    # ---- Genie One figures are code-owned (Genie One in agent mode) ----------
+    # Applied once, here, before any writer reads the spec: the operations
+    # layout writes plan.spec, the insert shift and the deck-level write `spec`.
+    # The figures are the ones the code built from Genie One's result rows, so the
+    # model's copy of them (retyped, dropped, or inherited through
+    # compose_edit_spec) never reaches resolved_data.  classify_spec_change does
+    # not compare resolved_data, so this triggers no deck-level re-review.
+    genie_figures = _code_owned_genie_figures(state, prior_spec)
+    if genie_figures:
+        if spec is not None:
+            spec = _with_genie_figures(spec, genie_figures)
+        if plan is not None:
+            plan = dataclass_replace(plan, spec=_with_genie_figures(plan.spec, genie_figures))
 
     # ---- the operations path: land the plan (spec §4 step 4) ----------------
     # The rows are laid out FIRST — before the targets are read, any builder is
@@ -4181,11 +4244,224 @@ def architect_node(state: dict) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+#: The analyst runs at most this many times in one turn.  A further request is
+#: answered by code, without calling the model: each Genie One question takes
+#: minutes, and an architect that keeps asking would spend the job's budget.
+MAX_ANALYST_ROUNDS_PER_TURN: Final = 2
+
+_ANALYST_ROUNDS_COMPLETE: Final = (
+    "Data gathering for this turn is complete. Plan the deck with the data already gathered."
+)
+
+#: Said to the user when Genie One refuses them for want of a grant (no EXECUTE
+#: on the service).  A missing OAuth scope gets ``consent_message`` instead.
+_GENIE_ONE_GRANT_MESSAGE: Final = (
+    "Genie One refused the request. You may need EXECUTE permission on "
+    "system.ai.genie_one_mcp; ask a workspace admin to grant it."
+)
+
+#: The ``tool_name`` a Genie One progress line carries, on SSE and on its row.
+_GENIE_ONE_PROGRESS_TOOL: Final = "genie_one"
+
+
+@dataclass(frozen=True)
+class _GenieOneRun:
+    """One analyst run's Genie One toolset, and what the node needs after it.
+
+    ``token`` is the signed-in user's (the consent message names the OAuth
+    client it was issued to), kept out of ``repr`` so no log line or traceback
+    prints it; ``stored_conversation_id`` is the actor row's value before the
+    run, so an unchanged id is not written again.
+    """
+
+    toolset: AgentToolset
+    tool: GenieOneAgentTool
+    token: str = field(repr=False)
+    stored_conversation_id: Optional[str]
+
+
+def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
+    """The Genie One toolset for this run, or ``None`` to run exactly as before.
+
+    Tools come from the ACTOR's own row (a contributor's row starts with no
+    tools; the deck owner's Genie One is theirs).  Any failure to read it counts
+    as no config.  With a Genie One entry, the user's identity is captured HERE,
+    in the node thread, where the request's ContextVars are set: no user client
+    (production fails closed) means no toolset, never the service principal's.
+
+    **Scope pre-flight.**  When the user's token says which scopes it carries
+    and ``ai-gateway`` (or ``all-apis``) is not among them, every Genie One call
+    would be refused: the user is told the consent message once, here, and the
+    analyst runs without tools.  A token whose scopes cannot be read is not
+    refused; the gateway's answer decides.
+    """
+    try:
+        config = resolve_agent_config(
+            get_session_manager().get_session(state["actor_session_id"]).get("agent_config")
+        )
+    except Exception:
+        logger.warning(
+            "Could not read the actor's agent config; the analyst runs without tools",
+            exc_info=True,
+        )
+        return None
+    if not any(isinstance(tool, GenieOneTool) for tool in config.tools):
+        return None
+    try:
+        client_config = get_user_client().config
+        host, token = client_config.host, client_config.token
+    except Exception:
+        logger.warning(
+            "Genie One is configured but no user client is bound; the analyst runs "
+            "without tools",
+            exc_info=True,
+        )
+        return None
+    if not host or not token:
+        logger.warning(
+            "Genie One is configured but the user client has no host or token; the "
+            "analyst runs without tools"
+        )
+        return None
+    scopes = oauth_scopes_from_token(token)
+    if scopes is not None and not scopes_grant(scopes, GENIE_ONE_SCOPE):
+        logger.warning(
+            "Genie One is configured but the user's token lacks the %s scope; the "
+            "analyst runs without tools",
+            GENIE_ONE_SCOPE,
+            extra={"session_id": state.get("session_id")},
+        )
+        _say_consent(state, token)
+        return None
+
+    def on_question(question: str) -> None:
+        # Said BEFORE the question is asked: an answer takes minutes.  Both
+        # surfaces (C7): the event for SSE, the row for the polling transport.
+        line = f"Asking Genie One: {question}"
+        _emit(
+            StreamEventType.TOOL_CALL,
+            content=line,
+            metadata={"node": "data_analyst", "tool_name": _GENIE_ONE_PROGRESS_TOOL},
+        )
+        _say(
+            state,
+            line,
+            message_type="tool_call",
+            metadata={
+                "tool_name": _GENIE_ONE_PROGRESS_TOOL,
+                "tool_input": {"question": question},
+            },
+        )
+
+    built = build_analyst_toolset(
+        config,
+        host=host,
+        token=token,
+        on_question=on_question,
+        session_id=state.get("session_id"),
+    )
+    if built is None:
+        return None
+    toolset, tool = built
+    return _GenieOneRun(toolset, tool, token, tool.conversation_id)
+
+
+def _merge_answer_figures(
+    answers: Sequence[GenieOneAnswer],
+    *,
+    earlier: Sequence[ResolvedFigure] = (),
+    earlier_answers: int = 0,
+) -> List[ResolvedFigure]:
+    """This run's NEW figures, in order, with repeats across the turn resolved.
+
+    Seeded with *earlier*, the figures an earlier analyst round of this turn
+    already wrote, and numbered turn-wide: this run's answers are questions
+    ``earlier_answers + 1`` onwards.  An exact (key, value) repeat of an earlier
+    figure is dropped; a key that reappears with a DIFFERENT value is kept, in
+    place, as ``"<key> (question m)"``, m that 1-based turn-wide answer index.
+    Keys within one answer are already unique (``figures_from_answer``).
+    """
+    merged: List[ResolvedFigure] = []
+    values: Dict[str, str] = {figure.key: figure.value for figure in earlier}
+    for index, answer in enumerate(answers, start=earlier_answers + 1):
+        for figure in figures_from_answer(answer):
+            key = figure.key
+            if key in values and values[key] != figure.value:
+                key = f"{key} (question {index})"
+            if key in values:
+                continue
+            values[key] = figure.value
+            merged.append(
+                figure if key == figure.key else figure.model_copy(update={"key": key})
+            )
+    return merged
+
+
+def _turn_answer_count(state: dict) -> int:
+    """How many Genie One answers this turn's earlier analyst rounds received."""
+    count = 0
+    for marker in scoped_vals(state, "analyst_rounds"):
+        if isinstance(marker, dict) and isinstance(marker.get("answers"), int):
+            count += marker["answers"]
+    return count
+
+
+def _genie_one_block(
+    figures: Sequence[ResolvedFigure], answers: Sequence[GenieOneAnswer]
+) -> str:
+    """The figure keys the architect must cite, then each distinct deep link ("" if none)."""
+    lines: List[str] = []
+    if figures:
+        lines.append("Figures from Genie One (use these keys in data_references):")
+        lines.extend(f"- {figure.key}: {figure.value}" for figure in figures)
+    links: List[str] = []
+    for answer in answers:
+        if answer.deep_link and answer.deep_link not in links:
+            links.append(answer.deep_link)
+    lines.extend(f"Explore in Databricks: {link}" for link in links)
+    return "\n".join(lines)
+
+
+def _persist_genie_one_conversation(state: dict, run: _GenieOneRun) -> None:
+    """Store a new Genie One conversation id on the ACTOR's row.  Never raises."""
+    conversation_id = run.tool.conversation_id
+    if not conversation_id or conversation_id == run.stored_conversation_id:
+        return
+    try:
+        get_session_manager().set_genie_one_conversation_id(
+            state["actor_session_id"], conversation_id
+        )
+    except Exception:
+        logger.warning(
+            "Could not store the Genie One conversation id; the next turn starts a "
+            "new conversation",
+            exc_info=True,
+        )
+
+
+def _say_consent(state: dict, token: str) -> None:
+    """Tell the user how to give this app the permission their sign-in lacks."""
+    _say(
+        state,
+        consent_message(oauth_client_id=oauth_client_id_from_token(token)),
+        message_type="info",
+    )
+
+
+def _say_genie_one_access(state: dict, run: _GenieOneRun) -> None:
+    """Tell the user, once per kind, what a Genie One refusal needs them to do."""
+    kinds = {error.kind for error in run.toolset.access_errors}
+    if "missing_scope" in kinds:
+        _say_consent(state, run.token)
+    if "access_denied" in kinds:
+        _say(state, _GENIE_ONE_GRANT_MESSAGE, message_type="info")
+
+
 def data_analyst_node(state: dict) -> Dict[str, Any]:
     """Fetch what the architect asked for and answer through ``architect_message``.
 
-    ``GraphState`` declares **no analyst key** and the runtime silently drops
-    undeclared keys, so both the request and the answer travel on
+    ``GraphState`` declares no channel for the analyst's ANSWER and the runtime
+    silently drops undeclared keys, so both the request and the answer travel on
     ``architect_message`` (§11, Ruling C-7); the edge back to the architect is
     static.  That key is written by two nodes and still needs no reducer,
     because the architect and the analyst never run in the same superstep.
@@ -4196,26 +4472,54 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     fields: ``outcome``, ``synthesis``, ``sources``, ``gap``, ``tried_tools``,
     ``reason``.
 
-    **``ResolvedData.figures`` stays empty, and that is recorded rather than
-    worked around (§12).**  ``AnalystOutput`` declares no field that maps to
-    ``ResolvedFigure(key, value, source)``, so a graph-built spec's
-    ``resolved_data.figures`` is always ``[]`` — which makes
-    ``source_contradiction`` ("only assertable against ``resolved_data``")
-    unreachable on the graph path.  Closing it needs a declared field on
-    ``AnalystOutput``, an escalation to ws4b, not a mapping invented here.
+    **Genie One (agent mode).**  When the ACTOR's agent config has a Genie One
+    entry and a user is signed in, the run carries a toolset
+    (:func:`_genie_one_run`): the model may ask Genie One up to three questions,
+    as that user, each announced by a progress line.  The figures are then built
+    by CODE from Genie One's result rows (``figures_from_answer``), never from the
+    model's prose, and written on the turn-scoped ``analyst_figures``, which
+    ``architect_node`` writes verbatim into ``resolved_data.figures``.  A second
+    round in the same turn is seeded with the first round's figures and numbers
+    its answers turn-wide (:func:`_merge_answer_figures`).  Every Genie figure of
+    the turn and this run's deep links are listed after the analyst's prose: in
+    ONE ``spotlight("genie_one", ...)`` wrapper on ``architect_message`` (they are
+    Genie One's output), as plain text for the user.  A new conversation id is
+    stored on the actor's row, and a refusal tells the user the consent or the
+    grant they need.  Without a Genie One entry ``resolved_data.figures`` is
+    whatever the architect wrote, as before: ``AnalystOutput`` still declares no
+    figure field.
+
+    **At most** :data:`MAX_ANALYST_ROUNDS_PER_TURN` **runs per turn**
+    (``analyst_rounds``, one marker per run): a further request is answered by
+    code, and the model is not called.
     """
     report_phase(TurnPhase.GATHERING_DATA)
+    turn_id = state["turn_id"]
+
+    if len(scoped_vals(state, "analyst_rounds")) >= MAX_ANALYST_ROUNDS_PER_TURN:
+        logger.info(
+            "data_analyst: %d rounds already ran this turn; answering without the model",
+            MAX_ANALYST_ROUNDS_PER_TURN,
+            extra={"session_id": state.get("session_id")},
+        )
+        return {
+            "architect_message": _ANALYST_ROUNDS_COMPLETE,
+            "analyst_figures": scoped(turn_id, []),
+            "analyst_rounds": scoped(turn_id, [{"answers": 0}]),
+        }
+
     request = state.get("architect_message") or ""
 
     # Content only (#258): the analyst's model is handed no session identifier.
-    # The runtime binds no tools, so no retrieval reads it from the payload; the
-    # session is still read off ``state`` by ``_say`` below.
+    # A Genie One tool runs with the user's token captured below, never one read
+    # from the payload; the session is still read off ``state`` by ``_say``.
     payload = {
         "data_request": request,
         "deck_purpose": (
             state["deck_spec"].purpose if state.get("deck_spec") else None
         ),
     }
+    genie = _genie_one_run(state)
     out = get_agent_runtime().run(
         "data_analyst",
         state["graph_release_id"],
@@ -4224,6 +4528,7 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             state.get("design_system_active"),
             state.get("root_session_id"),
             state.get("actor_session_id"),
+            toolset=genie.toolset if genie is not None else None,
         ),
     ).output
 
@@ -4243,10 +4548,35 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             f"({out.reason or 'no reason given'}). Tools tried: {tried}."
         )
 
+    # The user is shown the figure block as text; the architect gets it
+    # spotlighted (its column names and cells are Genie One's output).  The
+    # analyst's own prose can quote Genie One, so in the architect's copy its
+    # delimiters are escaped: nothing outside the wrapper can open or close one.
+    architect_message = neutralize_delimiters(message)
+    figures: List[ResolvedFigure] = []
+    if genie is not None:
+        earlier = _turn_analyst_figures(state)
+        figures = _merge_answer_figures(
+            genie.tool.answers, earlier=earlier, earlier_answers=_turn_answer_count(state)
+        )
+        # Every Genie figure of the turn is listed, so the architect can cite an
+        # earlier round's keys too; only this run's new ones are written below.
+        block = _genie_one_block(earlier + figures, genie.tool.answers)
+        if block:
+            message = f"{message}\n{block}"
+            architect_message = "\n".join(
+                [
+                    architect_message,
+                    spotlight("genie_one", block, session_id=state.get("actor_session_id")),
+                ]
+            )
+        _persist_genie_one_conversation(state, genie)
+
     _emit(
         StreamEventType.ASSISTANT,
         content=message,
         metadata={"node": "data_analyst", "outcome": out.outcome},
+        agent="data_analyst",
     )
     # Persisted as ``info``, NOT ``llm_response``, and the difference is not
     # cosmetic.  This is user-facing prose from a node that speaks to the user, so
@@ -4259,9 +4589,18 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     # (GraphState declares no analyst channel, Ruling C-7), which is the field the
     # architect answers from.  ``info`` is the shipped type for exactly this:
     # durable and visible, deliberately outside ``_AI_TYPES``.
-    _say(state, message, message_type="info")
+    _say(state, message, message_type="info", metadata={"agent": "data_analyst"})
+    if genie is not None:
+        _say_genie_one_access(state, genie)
 
-    return {"architect_message": message}
+    return {
+        "architect_message": architect_message,
+        "analyst_figures": scoped(turn_id, [figure.model_dump() for figure in figures]),
+        # The answer count numbers a later round's questions turn-wide.
+        "analyst_rounds": scoped(
+            turn_id, [{"answers": len(genie.tool.answers) if genie is not None else 0}]
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4490,10 +4829,9 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         for key, value in payload.items()
         if key in _BUILDER_MODEL_PAYLOAD_KEYS
     }
-    # Rides on the context, never in the model-facing payload; ``()`` for an
-    # old deck, so its binding is today's.
-    brand_tools = _brand_search_tools(payload)
-
+    # The brand-asset search rides on the context, never in the model-facing
+    # payload; ``None`` for an old deck, so its call is today's.  Each run builds
+    # its own toolset: one counts its calls, so the retry must not inherit them.
     try:
         out = get_agent_runtime().run(
             "builder",
@@ -4503,7 +4841,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                 design_system_active,
                 payload.get("root_session_id"),
                 payload.get("actor_session_id"),
-                brand_tools,
+                toolset=_brand_search_toolset(payload),
             ),
         ).output
 
@@ -4520,7 +4858,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                     design_system_active,
                     payload.get("root_session_id"),
                     payload.get("actor_session_id"),
-                    brand_tools,
+                    toolset=_brand_search_toolset(payload),
                 ),
             ).output.html
 
@@ -4901,9 +5239,8 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         payload.get("design_system_active")
         or state.get("design_system_active")
     )
-    # Decided on the builder record, as the builder's own binding was.
-    brand_tools = _brand_search_tools(payload)
-
+    # The brand-asset search is decided on the builder record, as the builder's
+    # own binding was; each run (the retry too) builds its own toolset.
     try:
         out = get_agent_runtime().run(
             "fixer",
@@ -4913,7 +5250,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                 design_system_active,
                 state.get("root_session_id"),
                 state.get("actor_session_id"),
-                brand_tools,
+                toolset=_brand_search_toolset(payload),
             ),
         ).output
 
@@ -4930,7 +5267,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                     design_system_active,
                     state.get("root_session_id"),
                     state.get("actor_session_id"),
-                    brand_tools,
+                    toolset=_brand_search_toolset(payload),
                 ),
             ).output.html
 

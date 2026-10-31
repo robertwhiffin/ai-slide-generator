@@ -40,7 +40,6 @@ from src.services.graph_definition_manifest import (
     CustomTextBlock,
     DefinitionContent,
     assembly_rules_for,
-    load_graph_v1_manifest,
 )
 from src.services.prompt_assembler import (
     ROLE_UNTRUSTED_DATA_NOTICE,
@@ -51,6 +50,10 @@ from src.services.prompt_assembler import (
     PromptAssemblyRejected,
     ProtectedAssemblyBundleUnavailable,
     protected_assembly_v2_digest,
+)
+from tests.fixtures.legacy_v1_definitions import (
+    LEGACY_V1_DATA_ANALYST,
+    legacy_v1_definition,
 )
 from tests.fixtures.packaged_release_loader import (
     PACKAGED_RELEASE_ID,
@@ -69,9 +72,9 @@ HOSTILE = {
 
 
 def _definition(agent_key: str) -> DefinitionContent:
-    return next(
-        item for item in load_graph_v1_manifest().definitions if item.agent_key == agent_key
-    )
+    """The role's Graph Version 1 definition: the packaged one, except the data analyst,
+    which the packaged manifest now ships upgraded to v2 (see ``legacy_v1_definitions``)."""
+    return legacy_v1_definition(agent_key)
 
 
 def _custom(
@@ -426,7 +429,8 @@ def test_v1_assembly_matches_independent_historical_replay(
 ) -> None:
     """Catches any reinterpretation of frozen v1 blocks, JSON, identity, or bytes."""
     payload = {"deck_brief": "brief"} if agent_key == "build_reviewer" else {"x": 1}
-    content = PackagedGraphV1Loader().resolve(PACKAGED_RELEASE_ID, agent_key).content
+    loader = PackagedGraphV1Loader(content_overrides={"data_analyst": LEGACY_V1_DATA_ANALYST})
+    content = loader.resolve(PACKAGED_RELEASE_ID, agent_key).content
     assert content.prompt_text == load_skill(agent_key).instructions
     value = PromptAssembler().assemble(
         definition=content,

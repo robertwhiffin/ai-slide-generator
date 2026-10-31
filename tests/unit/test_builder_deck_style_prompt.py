@@ -1224,9 +1224,11 @@ def test_image_rules_line_is_left_as_written():
 
 #: sha256 of each prompt with its DECK STYLE block cut out (_without_deck_style_block),
 #: at HEAD f59d0a04.  Task B5b puts every new rule inside the block, so "without a deck
-#: style" the prompt is unchanged byte for byte (A20, RA5).
+#: style" the prompt is unchanged byte for byte (A20, RA5).  The builder's was re-pinned
+#: for one change outside the block: main's SOURCE LINE block (evals/configs/builder/
+#: source-line.yaml), merged in by Ruling RA19 (evals/configs/builder/one-footer-source.yaml).
 OUTSIDE_DECK_STYLE_DIGESTS = {
-    "builder": "3995292fc11fa047462f4bc60b9d6ae11cb8c03a1df82f35e9a5f1b44f8497a3",
+    "builder": "841a3e8995600a12d073f334eeda079b7af9d67a169ce1da69e31a8d38eb2e26",
     "fixer": "dde8a5ceff9e78f7327ad8e8eb31d12b6f3b373c430c292c2459a9afe4c224f6",
 }
 

@@ -173,6 +173,7 @@ def test_no_src_module_reads_code_owned_agent_definitions():
 
 
 def test_the_bootstrap_manifest_is_read_only_by_bootstrap():
+    """Bootstrap and code shipping read the manifest to write it to Lakebase; never the runtime."""
     readers = set()
     for path in _src_files():
         text = path.read_text(encoding="utf-8")
@@ -181,6 +182,7 @@ def test_the_bootstrap_manifest_is_read_only_by_bootstrap():
     assert readers == {
         "services/graph_definition_manifest.py",
         "services/graph_configuration_bootstrap.py",
+        "services/graph_configuration.py",
     }
 
 

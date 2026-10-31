@@ -2876,6 +2876,139 @@ async function getStrict<T>(url: string, parse: (value: unknown) => T | null): P
   throw new AgentDefinitionApiError(response.status, payload, response.statusText);
 }
 
+// --- Prompt shipping: the packaged (shipped) Graph Configuration -------------------
+
+export type PackagedBlockedReason = 'hand_edited' | 'rollback' | 'invalid';
+
+export const PACKAGED_BLOCKED_REASONS: readonly PackagedBlockedReason[] = ['hand_edited', 'rollback', 'invalid'];
+
+/** One differing role of the shipped version against the live release. */
+export interface PackagedAgentDiff {
+  agent_key: AgentKey;
+  field_diffs: ReleaseFieldDiff[];
+}
+
+/** `GET /api/admin/graph-shipping/packaged-update` (200). */
+export interface PackagedUpdate {
+  available: boolean;
+  differing_agents: AgentKey[];
+  blocked_reason: PackagedBlockedReason | null;
+  hand_edited_agents: AgentKey[];
+  validation_issues: DraftFieldError[];
+  diffs: PackagedAgentDiff[];
+  active_version_number: number;
+  lock_version: number;
+}
+
+/** `POST …/packaged-update/adopt` (200). */
+export interface PackagedAdoptResult {
+  release: ActiveRelease;
+  changed_agent_keys: AgentKey[];
+  draft_effect: Record<AgentKey, DraftEffect>;
+}
+
+export type PackagedAdoptFailure =
+  | StalePublicationResponse
+  | { code: 'nothing_to_adopt' }
+  | { code: 'packaged_invalid'; errors: DraftFieldError[] }
+  | { code: 'invalid_adopt_request'; errors: DraftFieldError[] };
+
+const GRAPH_SHIPPING_URL = `${API_BASE_URL}/api/admin/graph-shipping/packaged-update`;
+
+const PACKAGED_UPDATE_KEYS = [
+  'available', 'differing_agents', 'blocked_reason', 'hand_edited_agents', 'validation_issues',
+  'diffs', 'active_version_number', 'lock_version',
+] as const;
+
+const PACKAGED_AGENT_DIFF_KEYS = ['agent_key', 'field_diffs'] as const;
+
+const PACKAGED_ADOPT_KEYS = ['release', 'changed_agent_keys', 'draft_effect'] as const;
+
+/** Roles, each at most once, in Graph order; possibly none. */
+function isOrderedAgentKeys(value: unknown): value is AgentKey[] {
+  return Array.isArray(value) && (value.length === 0 || isAgentKeyList(value));
+}
+
+function isPackagedAgentDiff(value: unknown): value is PackagedAgentDiff {
+  return isPlainRecord(value)
+    && hasExactKeys(value, PACKAGED_AGENT_DIFF_KEYS)
+    && isAgentKey(value.agent_key)
+    && isFieldDiffList(value.field_diffs);
+}
+
+/** The strict packaged-update status parser: exact keys at every level. */
+export function parsePackagedUpdate(value: unknown): PackagedUpdate | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, PACKAGED_UPDATE_KEYS)) return null;
+  const valid = typeof value.available === 'boolean'
+    && isOrderedAgentKeys(value.differing_agents)
+    && (value.blocked_reason === null || isOneOf(value.blocked_reason, PACKAGED_BLOCKED_REASONS))
+    && isOrderedAgentKeys(value.hand_edited_agents)
+    && isDraftFieldErrorList(value.validation_issues, 0)
+    && Array.isArray(value.diffs)
+    && value.diffs.every(isPackagedAgentDiff)
+    && isPositiveInteger(value.active_version_number)
+    && isNonnegativeInteger(value.lock_version);
+  return valid ? value as unknown as PackagedUpdate : null;
+}
+
+/** The strict adopt 200 parser. */
+export function parsePackagedAdoptResult(value: unknown): PackagedAdoptResult | null {
+  if (!isPlainRecord(value) || !hasExactKeys(value, PACKAGED_ADOPT_KEYS)) return null;
+  const valid = isActiveRelease(value.release)
+    && isAgentKeyList(value.changed_agent_keys)
+    && isSevenRoleRecord(value.draft_effect, isDraftEffect);
+  return valid ? value as unknown as PackagedAdoptResult : null;
+}
+
+/** The strict adopt refusal parser: a 409 is stale or nothing-to-adopt, a 422 a typed error list. */
+export function parsePackagedAdoptFailure(status: number, value: unknown): PackagedAdoptFailure | null {
+  if (!isPlainRecord(value)) return null;
+  if (status === 422) {
+    return (value.code === 'packaged_invalid' || value.code === 'invalid_adopt_request')
+      && hasExactKeys(value, PUBLICATION_VALIDATION_KEYS)
+      && isDraftFieldErrorList(value.errors, 1)
+      ? value as unknown as PackagedAdoptFailure
+      : null;
+  }
+  if (status !== 409) return null;
+  if (value.code === 'nothing_to_adopt') {
+    return hasExactKeys(value, ['code']) ? value as unknown as PackagedAdoptFailure : null;
+  }
+  const stale = parsePublishReleaseFailure(409, value);
+  return stale !== null && stale.code === 'stale_publication' ? stale : null;
+}
+
+/** Reads whether a newer shipped Graph Configuration exists and how it differs. */
+export function getPackagedUpdate(): Promise<PackagedUpdate> {
+  return getStrict(GRAPH_SHIPPING_URL, parsePackagedUpdate);
+}
+
+/**
+ * Publishes the shipped Graph Configuration as the next Graph Version. The body is
+ * exactly `{ lock_version }`. A 409 or 422 throws `AgentDefinitionApiError` whose
+ * `payload` is the strictly parsed `PackagedAdoptFailure`; a malformed 200/409/422 is
+ * `InvalidReleaseResponseError`; any other status is a plain `AgentDefinitionApiError`.
+ */
+export async function adoptPackagedUpdate(lockVersion: number): Promise<PackagedAdoptResult> {
+  const response = await fetch(`${GRAPH_SHIPPING_URL}/adopt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lock_version: lockVersion }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (response.status === 200) {
+    const adopted = parsePackagedAdoptResult(payload);
+    if (adopted === null) throw new InvalidReleaseResponseError();
+    return adopted;
+  }
+  if (response.status === 409 || response.status === 422) {
+    const failure = parsePackagedAdoptFailure(response.status, payload);
+    if (failure === null) throw new InvalidReleaseResponseError();
+    throw new AgentDefinitionApiError(response.status, failure, response.statusText);
+  }
+  throw new AgentDefinitionApiError(response.status, payload, response.statusText);
+}
+
 /** Reads every Graph Release, newest first. */
 export function listGraphReleases(): Promise<ReleaseHistoryListResponse> {
   return getStrict(RELEASES_URL, parseReleaseHistoryListResponse);

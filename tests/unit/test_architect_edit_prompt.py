@@ -47,8 +47,10 @@ from src.services.graph_definition_manifest import (
 # its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml), then for the
 # architect deck-style schema-contract re-pin (deck_style and look), then for the
 # promoted deck-style prompt (evals/configs/architect/deck-style-b.yaml), then for the
-# promoted brand-footer prompt (evals/configs/architect/brand-footer.yaml, Addendum A).
-HEAD_ARCHITECT_CONTENT_HASH = "47c7a388cb9522c9c9446effa8f8480d565594248d140cd482bd4fe46d9fb72f"
+# promoted brand-footer prompt (evals/configs/architect/brand-footer.yaml, Addendum A),
+# then for main's Genie One ask_data line (evals/configs/architect/genie-questions.yaml)
+# merged into it (evals/configs/architect/brand-footer-genie.yaml, Ruling RA19).
+HEAD_ARCHITECT_CONTENT_HASH = "4d86a425a9f5b9d389ec39699a5a033654393b9b51c18d85afc84b81b644556d"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
@@ -66,11 +68,14 @@ HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
 # fixer for their brand-asset, footer and one-ground DECK STYLE rules
 # (evals/configs/builder/brand-assets-c.yaml and evals/configs/fixer/brand-assets-b.yaml,
 # Addendum A Task B5b), then both for the whole-block fence and one footer on every slide
-# except the cover (evals/configs/{builder,fixer}/one-footer.yaml, Ruling RA15).
+# except the cover (evals/configs/{builder,fixer}/one-footer.yaml, Ruling RA15), then the
+# builder for main's SOURCE LINE block merged beside its DECK STYLE block
+# (evals/configs/builder/one-footer-source.yaml, Ruling RA19).
 # build_reviewer is unchanged (Ruling R10).
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
-    "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "f62c5874247299e3c716f0b3a645e7db2702c9d6f86102b05fb6941cbb85f685",
+    # Re-pinned: the data analyst was upgraded to protected assembly v2 with a Genie One prompt.
+    "data_analyst": "5bc26a1779f5e9d0da693356b2c77ed2093273912d400c8f98adad7c6b872c96",
+    "builder": "a0b6c836e54acdc494e0934573b45a0d1ee8a6315c4ecc819be2f7e2c4a4df38",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "5b0186f54e576b885efad0cd33aa67870ca90db300aae9a3314fa7f713610f8f",
     "fix_reviewer": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
@@ -146,10 +151,10 @@ HEAD_SLIDESPEC_FIELD_LINES = (
     "(empty list if the slide needs no data)",
 )
 
-# PAYLOAD RULES lines for the other intents, unchanged.
+# PAYLOAD RULES lines for the other intents, unchanged.  The ask_data line left this list
+# when it gained the Genie One question rule (ASK_DATA_PAYLOAD_PHRASES pins it instead).
 HEAD_UNCHANGED_PAYLOAD_LINES = (
     "  build                  → deck_spec must be set",
-    "  ask_data               → data_request must be set",
     "  confirm_design_contract → proposed_design_contract must be set; "
     "never set deck_spec until the user confirms",
     "  discuss                → message only; no payload required",
@@ -175,6 +180,16 @@ EDIT_PAYLOAD_PHRASES = (
     "deck_changes for a deck-level change the user asks for",
     "target_positions and deck_spec are not needed",
     "re-describing the deck as it stands returns the full deck_spec",
+)
+# Genie One (agent mode) plans its own queries, so the ask_data line asks for the business
+# question in plain language in data_request.metric, and for time_bound and grouping only
+# when the user gave them (evals/configs/architect/genie-questions.md).
+ASK_DATA_PAYLOAD_PHRASES = (
+    "data_request must be set",
+    "state the business question the deck needs answered, in plain language, "
+    "in data_request.metric",
+    '"which pickup areas are busiest, and how do their fares compare?"',
+    "fill time_bound and grouping only when the user specified them",
 )
 # The retired edit-line rule: an edit had to carry targets and the whole revised spec.
 RETIRED_EDIT_PAYLOAD_PHRASES = (
@@ -309,6 +324,16 @@ def _edit_payload_line(prompt: str) -> str:
     return lines[0]
 
 
+def _ask_data_payload_line(prompt: str) -> str:
+    lines = [
+        line
+        for line in _payload_rules_block(prompt).splitlines()
+        if re.match(r"^\s*ask_data\s+→", line)
+    ]
+    assert len(lines) == 1, "expected exactly one `ask_data →` line in PAYLOAD RULES"
+    return lines[0]
+
+
 # --- The model sees the new prompt -------------------------------------------
 
 
@@ -320,6 +345,12 @@ def test_edit_payload_rule_asks_for_operations():
     line = _edit_payload_line(INSTRUCTIONS)
     for phrase in EDIT_PAYLOAD_PHRASES:
         assert phrase in _norm(line), f"edit payload line lacks {phrase!r}: {line!r}"
+
+
+def test_ask_data_payload_rule_asks_for_a_plain_language_business_question():
+    line = _ask_data_payload_line(INSTRUCTIONS)
+    for phrase in ASK_DATA_PAYLOAD_PHRASES:
+        assert phrase in _norm(line), f"ask_data payload line lacks {phrase!r}: {line!r}"
 
 
 def test_prompt_no_longer_requires_targets_and_deck_spec_on_an_edit():

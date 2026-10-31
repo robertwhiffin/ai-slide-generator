@@ -1,0 +1,9 @@
+# Architect v1 prompt after merging main into feat/architect-deck-style (Ruling RA19): this
+# branch's promoted `brand-footer` text with main's promoted `genie-questions` PAYLOAD RULES
+# ask_data line (state the business question in plain language in data_request.metric; fill
+# time_bound and grouping only when the user gave them). The two changes touch different lines;
+# every other byte is identical to `brand-footer`.
+agent_key: architect
+name: brand-footer-genie
+base: v1
+prompt_file: brand-footer-genie.md

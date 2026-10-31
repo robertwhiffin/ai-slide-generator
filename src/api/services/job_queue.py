@@ -28,6 +28,17 @@ job_queue: asyncio.Queue = asyncio.Queue()
 # a predictable upper bound on poll duration independent of deploy cadence.
 JOB_HARD_TIMEOUT_SECONDS = 600
 
+# Agent-mode ("graph") turns get a longer hard limit: a multi-step graph run
+# can legitimately exceed the monolith's 10 minutes.
+GRAPH_JOB_HARD_TIMEOUT_SECONDS = 1200
+
+
+def job_hard_timeout_seconds(engine_mode: str | None) -> int:
+    """Return the hard-timeout limit (seconds) for a job of the given engine mode."""
+    if engine_mode == "graph":
+        return GRAPH_JOB_HARD_TIMEOUT_SECONDS
+    return JOB_HARD_TIMEOUT_SECONDS
+
 # How often the timeout sweeper loop wakes up to scan for stuck jobs.
 # Shorter values catch stuck jobs faster but scan more often; 60 is
 # the sweet spot given the 10-minute stuck-job cutoff.
@@ -76,6 +87,7 @@ async def enqueue_job(request_id: str, payload: dict) -> None:
     jobs[request_id] = {
         "status": "pending",
         "session_id": payload["session_id"],
+        "engine_mode": payload.get("engine_mode"),
         "queued_at": datetime.utcnow(),
     }
     await job_queue.put((request_id, payload))
@@ -323,7 +335,8 @@ async def recover_stuck_requests() -> int:
             db.query(ChatRequest)
             .filter(
                 ChatRequest.status == "running",
-                ChatRequest.created_at < datetime.utcnow() - timedelta(minutes=10),
+                ChatRequest.created_at
+                < datetime.utcnow() - timedelta(seconds=GRAPH_JOB_HARD_TIMEOUT_SECONDS),
             )
             .all()
         )
@@ -348,10 +361,11 @@ async def recover_stuck_requests() -> int:
 
 
 async def mark_timed_out_jobs_once() -> int:
-    """Single sweep: mark running jobs older than JOB_HARD_TIMEOUT_SECONDS as failed.
+    """Single sweep: mark running jobs past their hard-timeout limit as failed.
 
-    Examines the in-memory ``jobs`` dict. For any entry whose ``status`` is
-    ``"running"`` and whose ``started_at`` is older than the timeout, flips
+    Examines the in-memory ``jobs`` dict. The limit is per job, chosen by
+    ``job_hard_timeout_seconds(engine_mode)``. For any entry whose ``status`` is
+    ``"running"`` and whose ``started_at`` is older than its limit, flips
     the status to ``"failed"`` and records an explanatory error. Jobs with
     no ``started_at`` are left untouched (we cannot determine age).
 
@@ -364,7 +378,6 @@ async def mark_timed_out_jobs_once() -> int:
         Number of jobs marked failed in this sweep (useful for logging).
     """
     now = datetime.utcnow()
-    cutoff = now - timedelta(seconds=JOB_HARD_TIMEOUT_SECONDS)
     marked = 0
 
     for request_id, entry in list(jobs.items()):
@@ -373,13 +386,14 @@ async def mark_timed_out_jobs_once() -> int:
         started_at = entry.get("started_at")
         if started_at is None:
             continue
-        if started_at > cutoff:
+        limit_seconds = job_hard_timeout_seconds(entry.get("engine_mode"))
+        if started_at > now - timedelta(seconds=limit_seconds):
             continue
 
         entry["status"] = "failed"
         entry["error"] = (
             f"Generation exceeded maximum duration "
-            f"({JOB_HARD_TIMEOUT_SECONDS // 60} minutes)"
+            f"({limit_seconds // 60} minutes)"
         )
         entry["ended_at"] = now
         marked += 1

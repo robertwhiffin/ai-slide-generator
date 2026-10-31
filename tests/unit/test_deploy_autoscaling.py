@@ -18,6 +18,7 @@ import pytest
 pytest.importorskip("databricks_tellr", reason="databricks-tellr package not installed")
 
 from databricks_tellr.deploy import (
+    REQUIRED_USER_API_SCOPES,
     DeploymentError,
     _capacity_to_autoscaling_cu,
     _create_app,
@@ -520,7 +521,10 @@ class TestUpdateDatabricks:
         mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
         ws = MagicMock()
         ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
-        ws.apps.get.return_value = Mock(url="https://app.test", resources=None)
+        ws.apps.get.return_value = Mock(
+            url="https://app.test", resources=None,
+            user_api_scopes=list(REQUIRED_USER_API_SCOPES),
+        )
 
         _update_databricks(
             app_name="app", app_file_workspace_path="/path",
@@ -543,7 +547,10 @@ class TestUpdateDatabricks:
         mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
         ws = MagicMock()
         ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
-        ws.apps.get.return_value = Mock(url="https://app.test", resources=None)
+        ws.apps.get.return_value = Mock(
+            url="https://app.test", resources=None,
+            user_api_scopes=list(REQUIRED_USER_API_SCOPES),
+        )
 
         _update_databricks(
             app_name="app", app_file_workspace_path="/path",
@@ -568,7 +575,10 @@ class TestUpdateDatabricks:
         mock_get_lakebase.return_value = self.PROVISIONED_RESULT
         ws = MagicMock()
         ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
-        ws.apps.get.return_value = Mock(url="https://app.test", resources=None)
+        ws.apps.get.return_value = Mock(
+            url="https://app.test", resources=None,
+            user_api_scopes=list(REQUIRED_USER_API_SCOPES),
+        )
 
         _update_databricks(
             app_name="app", app_file_workspace_path="/path",
@@ -593,7 +603,10 @@ class TestUpdateDatabricks:
         mock_get_lakebase.return_value = self.AUTOSCALING_RESULT
         ws = MagicMock()
         ws.apps.deploy_and_wait.return_value = Mock(deployment_id="d1")
-        ws.apps.get.return_value = Mock(url="https://app.test", resources=None)
+        ws.apps.get.return_value = Mock(
+            url="https://app.test", resources=None,
+            user_api_scopes=list(REQUIRED_USER_API_SCOPES),
+        )
 
         result = _update_databricks(
             app_name="app", app_file_workspace_path="/path",
@@ -628,7 +641,8 @@ class TestUpdateDatabricks:
         # Carry the TELLR_ENCRYPTION_KEY resource so app_is_secret_mode → True.
         secret_resource = sk.build_secret_resource("s", "k")
         ws.apps.get.return_value = Mock(
-            url="https://app.test", resources=[secret_resource]
+            url="https://app.test", resources=[secret_resource],
+            user_api_scopes=list(REQUIRED_USER_API_SCOPES),
         )
 
         _update_databricks(

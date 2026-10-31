@@ -63,5 +63,8 @@ export function toToolEntry(tool: AvailableTool): ToolEntry {
       return toModelEndpointToolEntry(tool);
     case 'agent_bricks':
       return toAgentBricksToolEntry(tool);
+    case 'genie_one':
+      // Added in one click by ToolPicker; it never goes through discovery/preview.
+      throw new Error('genie_one has no preview');
   }
 }

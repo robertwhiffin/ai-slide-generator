@@ -21,6 +21,8 @@ export interface Message {
   tool_call_id?: string;
   /** Technical detail behind a plain-language notice; never the headline. */
   details?: MessageDetails;
+  /** Which agent wrote this message; 'data_analyst' draws the collapsed analyst card. */
+  agent?: string;
 }
 
 export interface ChatMetadata {
