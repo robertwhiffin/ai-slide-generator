@@ -686,3 +686,72 @@ def deck_style_context(token_css: str, style_block: str, logos: Any = ()) -> dic
         "template_classes": sorted(css_class_names(style_block))[:_MAX_TEMPLATE_CLASSES],
         "logos": list(logos),
     }
+
+
+# ---------------------------------------------------------------------------
+# One ground on builds
+# ---------------------------------------------------------------------------
+
+#: One attribute of a tag, read left to right: a name, then an optional value.
+#: Consuming a quoted value whole keeps ``title='class="slide white"'`` safe.
+_ATTR_RE = re.compile(
+    r"""(?P<name>[^\s"'>/=]+)(?:(?P<eq>\s*=\s*)(?P<value>"[^"]*"?|'[^']*'?|[^\s>]*))?"""
+)
+_HTML_WS = re.compile(r"[ \t\n\f\r]+")
+_TAG_NAME_RE = re.compile(r"<[A-Za-z][^\s/>]*")
+
+
+def _class_value_without_white(value: str) -> str | None:
+    """The rewritten quoted class value, or ``None`` when it needs no change."""
+    if not value or value[0] not in "\"'":
+        return None  # unquoted: a single token, so never both slide and white
+    quote = value[0]
+    if len(value) < 2 or value[-1] != quote:
+        return None  # unclosed: not a class list a browser applies
+    tokens = [t for t in _HTML_WS.split(value[1:-1]) if t]
+    if "slide" not in tokens or "white" not in tokens:
+        return None
+    return quote + " ".join(t for t in tokens if t != "white") + quote
+
+
+def _drop_white_in_tag(tag: str) -> str:
+    m = _TAG_NAME_RE.match(tag)
+    if m is None:
+        return tag
+    pos = m.end()
+    out = [tag[:pos]]
+    for attr in _ATTR_RE.finditer(tag, pos):
+        if attr.group("name").lower() == "class" and attr.group("value") is not None:
+            new = _class_value_without_white(attr.group("value"))
+            if new is not None:
+                out.append(tag[pos : attr.start("value")])
+                out.append(new)
+                pos = attr.end("value")
+    out.append(tag[pos:])
+    return "".join(out)
+
+
+def drop_white_ground(html: str) -> str:
+    """Remove the ``white`` class token from every ``slide`` element.
+
+    The template convention is ``.slide.white`` for a light section. Only a real
+    opening tag whose class list holds both ``slide`` and ``white`` changes;
+    ``dark``, ``event``, other tokens, ``<script>``/``<style>`` content and
+    comments are untouched, and HTML with no match comes back unchanged.
+    """
+    if not html or "white" not in html:
+        return html
+    from src.utils.slide_number_tokens import _SKIP_RE
+
+    out: list[str] = []
+    pos = 0
+    for skip in _SKIP_RE.finditer(html):
+        out.append(html[pos : skip.start()])
+        text = skip.group(0)
+        if skip.group(1) is None and not text.startswith(("<!", "</", "<?")):
+            text = _drop_white_in_tag(text)
+        out.append(text)
+        pos = skip.end()
+    out.append(html[pos:])
+    result = "".join(out)
+    return result if result != html else html

@@ -80,6 +80,7 @@ from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
 from src.domain.deck_style import (
     css_class_names,
     deck_style_context,
+    drop_white_ground,
     dropped_classes_in_use,
     rank_logos,
     sanitise_deck_style,
@@ -2026,6 +2027,10 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
     # Only when the deck has one: an old deck's payload is exactly what it was.
     if spec.deck_style is not None:
         branch_payload["deck_style"] = spec.deck_style.model_dump()
+        # Branch-only, never a model payload key: a build turn of a styled deck
+        # has its content slides' ``white`` ground dropped in code (RA23).
+        if state.get("architect_intent") == "build":
+            branch_payload["one_ground"] = True
     return branch_payload
 
 
@@ -5758,6 +5763,8 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
         operation="write_slide",
         object_type="slide",
     )
+    if payload.get("one_ground") and position != 0:
+        record["html"] = drop_white_ground(record["html"])
     drafted = _write_draft_row(record, mutation)
     report_slide(position, SlideProgressStage.REVIEWING)
 
@@ -5802,6 +5809,11 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
         with _fix_slots():
             try:
                 fixer_update = fixer_node(fix_state)
+                if payload.get("one_ground") and position != 0:
+                    _fixed_vals = (fixer_update.get("fixed") or {}).get("vals") or {}
+                    _fixed_entry = _fixed_vals.get(position)
+                    if _fixed_entry and isinstance(_fixed_entry.get("html"), str):
+                        _fixed_entry["html"] = drop_white_ground(_fixed_entry["html"])
                 _fold(acc, fixer_update)
                 _fold(fix_state, fixer_update)
                 if fix_state.get("fix_target") is not None:
