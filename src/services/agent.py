@@ -125,14 +125,13 @@ def _run_output_safety_gate(html_output, regenerate, session_id, on_retry=None):
     if not findings:
         return html_output, False
 
+    # The warning carries the findings.  No mlflow.log_param: outside a run it starts
+    # one in whichever experiment is process-global (another user's, with several chat
+    # jobs per process) and nothing ever ends it.
     logger.warning(
         "Unsafe patterns in LLM output; retrying once",
         extra={"session_id": session_id, "findings": findings},
     )
-    try:
-        mlflow.log_param("safety_gate_retry", ",".join(findings)[:250])
-    except Exception:
-        pass
 
     if on_retry is not None:
         try:
