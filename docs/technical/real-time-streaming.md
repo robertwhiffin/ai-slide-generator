@@ -64,7 +64,7 @@ Frontend                    Backend
 
 **Key Components:**
 - **ChatRequest** – Database model tracking request status (`pending`/`running`/`completed`/`error`)
-- **Job Queue** – In-memory asyncio queue with background worker (`src/api/services/job_queue.py`)
+- **Job Queue** – In-memory asyncio queue per uvicorn worker, with `TELLR_CHAT_JOB_CONCURRENCY` job runners (default 4) on a dedicated thread pool (`src/api/services/job_queue.py`). A turn waiting for a runner polls as `pending` with no `turn_progress`; the chat shows it as queued. See [Multi-User Concurrency](multi-user-concurrency.md#chat-job-runners).
 - **request_id** – Links messages to specific chat requests for efficient polling
 - **Auto-creation** – Sessions are auto-created on first async request if they don't exist
 

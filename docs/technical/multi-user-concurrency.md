@@ -237,9 +237,21 @@ uvicorn.run("src.api.main:app", host=host, port=port, workers=workers)
 
 Set the `UVICORN_WORKERS` environment variable to override the default. Each worker has its own `ChatService` singleton and deck cache. The database-based session locking ensures correctness across workers.
 
+### Chat Job Runners
+
+A chat turn (polling mode) runs on the uvicorn worker that received its `POST /api/chat/async`, in that worker's in-memory queue (`src/api/services/job_queue.py`). Each worker runs `TELLR_CHAT_JOB_CONCURRENCY` job runners over its queue: default 4, at most 16, and an unusable value falls back to 4. With the default 4 workers, the app runs up to 16 turns at once. A turn waits only when all runners on its worker are busy.
+
+- **Sessions stay serial.** The database session lock still allows one turn per session, so runners only overlap different sessions.
+- **Own thread pool.** Chat jobs run on a dedicated `chat-job` thread pool sized to the runners, not on the loop's default executor. Request handlers (the chat poll among them) `asyncio.to_thread` onto the default executor, and jobs that hold a thread for minutes would starve them.
+- **Waiting is visible.** While a turn waits for a runner, its request is `pending` with no `turn_progress`. The poll loop forwards a `queued` event, and the chat shows "Waiting for another request to finish…" until the turn starts.
+- **Restarts.** The queue is in memory, so a turn still waiting when its worker restarts is lost and stays `pending`.
+
+Before this, each worker ran one chat job at a time, so a second turn on the same worker waited for the first to finish. On 2026-10-31 an agent turn waited 3 m 45 s behind a concurrent legacy turn. Prod history over 35 days (6,182 turns) peaked at 9 concurrent turns against 4 slots.
+
 ### Scaling Considerations
 
-- **Worker count:** Defaults to 4 (configurable via `UVICORN_WORKERS` env var). Increase for higher concurrency; each worker can handle multiple async requests.
+- **Worker count:** Defaults to 4 (configurable via `UVICORN_WORKERS` env var). Each worker holds a database pool of up to 100 connections (`pool_size=80`, `max_overflow=20`) and runs every periodic loop, so prefer raising `TELLR_CHAT_JOB_CONCURRENCY` for more concurrent turns.
+- **Concurrent turns:** `UVICORN_WORKERS × TELLR_CHAT_JOB_CONCURRENCY` (16 by default). The model endpoints' rate limits are the next ceiling: a deck builds its slides in parallel, so each turn makes many model calls at once.
 - **Lock timeout:** 5 minutes covers long LLM generations. Stale locks are automatically overridden.
 - **Cache coherence:** Each worker maintains its own cache. Decks are loaded from database on cache miss, ensuring consistency after cross-worker updates.
 
