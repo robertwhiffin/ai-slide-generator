@@ -170,3 +170,38 @@ def test_a_non_fallback_error_still_propagates():
     assert result.error is True
     assert mlflow_tracing.mlflow_experiment_lock().acquire(timeout=1)
     mlflow_tracing.mlflow_experiment_lock().release()
+
+
+def test_the_locked_evaluation_runs_off_the_event_loop_thread():
+    """The lock is never taken on the event loop, and a 10-30 s evaluation no longer
+    stalls every other request on the process's loop."""
+    fake = _FakeMlflow()
+    threads: dict[str, object] = {}
+    original = fake.evaluate
+
+    def evaluate(**kwargs):
+        threads["evaluate"] = threading.current_thread()
+        return original(**kwargs)
+
+    async def judge_on_loop():
+        threads["loop"] = threading.current_thread()
+        return await llm_judge.evaluate_with_judge(
+            genie_data="a,b\n1,2",
+            slide_content="<div>1</div>",
+            experiment_id="exp-judge",
+            judge_backend="mlflow",
+        )
+
+    patches = _patched(fake)
+    import mlflow.genai
+
+    patches.append(patch.object(mlflow.genai, "evaluate", evaluate))
+    for p in patches:
+        p.start()
+    try:
+        asyncio.run(judge_on_loop())
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert threads["evaluate"] is not threads["loop"]

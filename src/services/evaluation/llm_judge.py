@@ -254,6 +254,26 @@ def _evaluate_with_judge_direct_llm(
     )
 
 
+def _evaluate_in_experiment(
+    experiment_id: str, eval_data: Any, scorers: list
+) -> tuple[Any, Optional[Exception]]:
+    """``mlflow.genai.evaluate`` in ``experiment_id``; returns ``(result, None)`` or ``(None, error)``.
+
+    evaluate reads MLflow's process-global active experiment while it runs, and several
+    chat jobs share the process, so set_experiment + evaluate hold the experiment lock.
+    Called through ``asyncio.to_thread``: the lock is never taken on the event loop, and
+    a slow evaluation no longer stalls the loop.
+    """
+    import mlflow
+
+    with mlflow_experiment_lock():
+        mlflow.set_experiment(experiment_id=experiment_id)
+        try:
+            return mlflow.genai.evaluate(data=eval_data, scorers=scorers), None
+        except Exception as exc:
+            return None, exc
+
+
 async def evaluate_with_judge(
     genie_data: str,
     slide_content: str,
@@ -387,19 +407,11 @@ async def evaluate_with_judge(
         }])
 
         # Run evaluation using mlflow.genai.evaluate() - THIS creates Evaluation Runs.
-        # evaluate reads MLflow's process-global active experiment while it runs, and
-        # several chat jobs share this process, so set_experiment + evaluate hold the
-        # experiment lock.  Nothing awaits under it: the fallback runs after release.
-        eval_exc: Optional[Exception] = None
-        with mlflow_experiment_lock():
-            mlflow.set_experiment(experiment_id=experiment_id)
-            try:
-                eval_result = mlflow.genai.evaluate(
-                    data=eval_data,
-                    scorers=[accuracy_judge],
-                )
-            except Exception as exc:
-                eval_exc = exc
+        # It runs in a worker thread under the experiment lock (see
+        # _evaluate_in_experiment), never on the event loop; the fallback runs after.
+        eval_result, eval_exc = await asyncio.to_thread(
+            _evaluate_in_experiment, experiment_id, eval_data, [accuracy_judge]
+        )
         if eval_exc is not None:
             if _mlflow_evaluate_should_use_direct_fallback(eval_exc):
                 logger.warning(
