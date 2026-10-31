@@ -172,7 +172,11 @@ class TestBuildReviewerAuthoredPrefix:
 
 
 class TestBuilderProse:
-    """The builder embeds images via syntax, never by calling a tool."""
+    """The builder embeds images via syntax and never calls search_images.
+
+    It does name search_brand_assets, bound only for a deck with a deck style and a
+    design system (deck style addendum A); that is a different tool.
+    """
 
     def test_builder_contains_image_embedding_syntax(self):
         """{{image:ID}} syntax is present so future payload extensions can deliver ids."""
@@ -183,8 +187,9 @@ class TestBuilderProse:
         )
 
     def test_builder_contains_no_search_images_tool_call(self):
-        """The builder holds no tool grants; instructing it to call search_images
-        would cause it to either fabricate handles or silently drop images."""
+        """The builder is never told to call search_images (it has no such tool);
+        instructing it to would cause it to either fabricate handles or silently
+        drop images."""
         skill = load_skill("builder")
         assert "search_images" not in skill.instructions, (
             "builder instructions must not mention search_images; "

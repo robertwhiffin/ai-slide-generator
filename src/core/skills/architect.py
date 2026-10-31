@@ -1,14 +1,17 @@
 """Skill body for the architect.
 
 PR-3 GAPS (recorded, not defects — closing any requires a declared channel):
-- Brand assets are unreachable on the graph path.  ``search_brand_assets`` gating
-  stays in ``agent_factory`` (monolith-only); no graph skill holds the tool, so a
-  graph deck can embed no brand asset at all.
-- User-uploaded images are in the same position — no ``GraphState`` key and no
-  payload field carries an image-id list.
+- User-uploaded images are unreachable on the graph path — no ``GraphState`` key and
+  no payload field carries an image-id list.
 
-Closing either requires a declared channel (a new ``GraphState`` key or a field on
+Closing it requires a declared channel (a new ``GraphState`` key or a field on
 ``SlideSpec``), which is a scope addition, not a local edit.
+
+Brand assets are no longer a gap (deck style addendum A).  The architect has no
+tool: ``deck_style_context.logos`` hands it the design system's logo handles, and
+it puts one in the deck style's footer piece.  Builders and fixers hold
+``search_brand_assets`` (see their modules), bound only when a design system is
+active and the deck has a deck style.
 """
 
 TOOL_GRANTS: list[str] = []
