@@ -1,0 +1,10 @@
+[
+  {"handle": "{{ds-asset:9001}}", "filename": "logos/meridian-logo.svg", "kind": "logo"},
+  {"handle": "{{ds-asset:9002}}", "filename": "logos/meridian-logo-reverse.svg", "kind": "logo"},
+  {"handle": "{{ds-asset:9003}}", "filename": "logos/meridian-logo.png", "kind": "logo"},
+  {"handle": "{{ds-asset:9004}}", "filename": "logos/meridian-lockup.svg", "kind": "lockup"},
+  {"handle": "{{ds-asset:9005}}", "filename": "icons/icon-analytics.svg", "kind": "icon"},
+  {"handle": "{{ds-asset:9006}}", "filename": "icons/icon-security.svg", "kind": "icon"},
+  {"handle": "{{ds-asset:9007}}", "filename": "icons/icon-integrations.svg", "kind": "icon"},
+  {"handle": "{{ds-asset:9008}}", "filename": "icons/icon-automation.svg", "kind": "icon"}
+]

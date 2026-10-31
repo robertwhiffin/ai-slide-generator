@@ -1,0 +1,6 @@
+kind: positive
+fault: ''
+expect:
+  deck_style_classes:
+  - dk-code
+design_system_active: true

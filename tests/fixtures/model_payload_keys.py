@@ -45,9 +45,20 @@ ARCHITECT_MODEL_KEYS = frozenset(
         "template_sections",
         "resolved_style",
         "design_system_library",
+        "deck_style_context",
     }
 )
 ARCHITECT_RETRY_MODEL_KEYS = ARCHITECT_MODEL_KEYS | {"rejected_edit"}
+
+# Keys a role's payload carries ONLY when the deck has a deck style.  The per-call
+# sets in this module are the no-deck-style truth (the old-deck oracle); the
+# projection in ``agent_model_payload`` must allow these on top.
+OPTIONAL_MODEL_KEYS = {
+    "builder": frozenset({"deck_style"}),
+    "build_reviewer": frozenset({"deck_style"}),
+    "fixer": frozenset({"deck_style"}),
+    "fix_reviewer": frozenset({"deck_style"}),
+}
 
 
 # Every role's model-facing payload, stated POSITIVELY as the user decided (#258):
@@ -119,5 +130,6 @@ __all__ = [
     "BUILDER_RETRY_MODEL_KEYS",
     "EVERY_MODEL_CALL",
     "FIXER_MODEL_KEYS",
+    "OPTIONAL_MODEL_KEYS",
     "SLIDE_REVIEW_MODEL_KEYS",
 ]

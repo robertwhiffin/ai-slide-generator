@@ -106,6 +106,7 @@ export function renderDeckSpecMarkdown(spec: DeckSpec): string {
       `**Hands off:** ${escapeText(slide.hands_off)}`,
     ];
     if (slide.slide_type != null) fields.push(`**Slide type:** ${escapeText(slide.slide_type)}`);
+    if (slide.look != null) fields.push(`**Look:** ${escapeText(slide.look)}`);
     const refs = (slide.data_references ?? []).map((ref) => escapeText(ref));
     fields.push(`**Data references:** ${refs.length ? refs.join(', ') : NONE}`);
     blocks.push(bullets(fields));

@@ -661,8 +661,10 @@ def test_preview_runs_the_remote_check_after_the_locked_transaction(factory, mon
 
     result = _preview_with(factory, 2, validator, holder)
 
+    # Each distinct v1 endpoint once, first-seen in role order (builder on Sonnet, Task 9b).
     assert validator.calls == [
         ("system.ai.claude-opus-5-5", False),
+        ("system.ai.claude-sonnet-5-5", False),
         ("system.ai.claude-haiku-4-5", False),
     ]
     assert result.warnings == ()
@@ -707,8 +709,9 @@ def test_preview_checks_each_distinct_endpoint_once_and_warns_every_user(
 
     assert validator.calls == [
         ("system.ai.claude-opus-5-5", False),
-        ("system.ai.claude-haiku-4-5", False),
+        ("system.ai.claude-sonnet-5-5", False),
         ("system.ai.other-endpoint", False),
+        ("system.ai.claude-haiku-4-5", False),
     ]
     assert result.warnings == (
         DraftValidationIssue(

@@ -1,0 +1,6 @@
+# Builder v1 prompt: build to the architect's deck style (DECK STYLE block) when the payload
+# carries deck_style; today's rules unchanged without one.
+agent_key: builder
+name: builder-deck-style
+base: v1
+prompt_file: deck-style.md

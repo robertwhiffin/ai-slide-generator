@@ -734,17 +734,17 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "8be2ca68dd31598fcff738328365066b3a14cf257b1a8347ab37e0d9ec6e3274",
+    "architect": "4d86a425a9f5b9d389ec39699a5a033654393b9b51c18d85afc84b81b644556d",
     "data_analyst": "5bc26a1779f5e9d0da693356b2c77ed2093273912d400c8f98adad7c6b872c96",
-    "builder": "025f6a714ecd88ce68f7ba289f0fdc302298ab4ed66d456a7fcae45f46ca5f7d",
+    "builder": "a0b6c836e54acdc494e0934573b45a0d1ee8a6315c4ecc819be2f7e2c4a4df38",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
-    "fixer": "8342438644d4665e929d7fdbd694d0024e401546ae06a9566161b309adb4c82a",
-    "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+    "fixer": "5b0186f54e576b885efad0cd33aa67870ca90db300aae9a3314fa7f713610f8f",
+    "fix_reviewer": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
 
 V1_SCHEMA_CONTRACT_DIGESTS = {
-    "architect": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+    "architect": "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -754,7 +754,7 @@ V1_SCHEMA_CONTRACT_DIGESTS = {
 }
 
 V2_SCHEMA_CONTRACT_DIGESTS = {
-    "architect": "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
+    "architect": "0db6fdaf0cec0c6dd2d1b0442c76eb3e41ff54834dd9975e7553a33d37480725",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -965,7 +965,7 @@ def test_assembly_upgrade_leaves_the_schema_contract_untouched() -> None:
     }
     assert upgraded.schema_contract.model_dump() == {
         "version": 1,
-        "digest": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+        "digest": "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
     }
     assert upgraded.schema_overlay == original.schema_overlay
 
@@ -1009,13 +1009,13 @@ def test_stored_identity_resolves_the_exact_role_and_version_bundle(
         (
             "not_a_role",
             1,
-            "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+            "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
             "unknown role",
         ),
         (
             "architect",
             3,
-            "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+            "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
             "unknown version",
         ),
         (
@@ -1027,19 +1027,19 @@ def test_stored_identity_resolves_the_exact_role_and_version_bundle(
         (
             "builder",
             1,
-            "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+            "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
             "another role's digest",
         ),
         (
             "architect",
             2,
-            "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+            "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
             "v1 digest under v2",
         ),
         (
             "architect",
             1,
-            "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
+            "0db6fdaf0cec0c6dd2d1b0442c76eb3e41ff54834dd9975e7553a33d37480725",
             "v2 digest under v1",
         ),
         (
@@ -1190,9 +1190,12 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
     # then for the #314 add-a-slide prompt, then for the claude-opus-5-5 seed move,
     # then for the architect edit operations schema-contract digest, then for the
     # promoted architect edit operations prompt (edit-ops), then for its follow-up
-    # tweaks (edit-ops-b), then for the Genie One ask_data line (genie-questions).
+    # tweaks (edit-ops-b), then for the architect deck-style schema-contract digest, then
+    # for the promoted architect deck-style prompt (deck-style-b), then for the promoted
+    # brand-footer prompt (Addendum A), then for main's Genie One ask_data line
+    # (genie-questions) merged into it (brand-footer-genie).
     assert definition_content_hash(built({"1": "a"})) == (
-        "c965e3f6b0adfbb0589cb175e0204ee61bed4818ec64fd05ab335bb85c69022f"
+        "97b923063affe892938740e991f03f175362ec641e4986d494d23006e3777641"
     )
 
 

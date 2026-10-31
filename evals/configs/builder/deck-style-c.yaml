@@ -1,0 +1,6 @@
+# Builder candidate deck-style-c: deck-style plus a last check that every style attribute
+# holds layout properties only.
+agent_key: builder
+name: builder-deck-style-c
+base: v1
+prompt_file: deck-style-c.md

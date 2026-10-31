@@ -2,11 +2,9 @@
 
 Reuses the train generator's helpers; only deck-2 content lives here.
 """
-import copy
 import pathlib
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
-from src.services.agent_model_payload import model_payload_for
 
 from evals.harness import case
 from evals.packs.build_reviewer import mutations as m
@@ -52,17 +50,44 @@ MESSAGES = {
 }
 
 
-def _payload(position, html, scripts):
-    deck = case.gold_deck_spec(DECK)
-    return model_payload_for(AGENT, {
-        "position": position,
-        "slide_spec": copy.deepcopy(deck["slides"][position]),
-        "resolved_style": case.meridian_resolved_style(),
-        "section_css": case.meridian_section_css(),
-        "resolved_data": copy.deepcopy(deck["resolved_data"]),
-        "html": html,
-        "scripts": scripts,
-    })
+DECK_STYLE_SLIDE = 2  # structured output formatting: where a code listing belongs
+DECK_STYLE_LOOK = (
+    "Two columns: the four patterns as bullets on the left; on the right a dk-code listing of a "
+    "structured-output instruction. The when-to-combine callout runs full width beneath."
+)
+DECK_STYLE_CODE_LINES = [
+    [("cm", "# structured output formatting")],
+    [("kw", "Return"), ("", " only JSON:")],
+    [("", "{"), ("str", '"pattern"'), ("", ": "), ("str", '"few-shot"'), ("", ",")],
+    [("", " "), ("str", '"why"'), ("", ": "), ("str", '"one sentence"'), ("", "}")],
+]
+
+
+def _patterns_slide(listing):
+    return f"""<section class="slide">
+  <p class="eyebrow">Prompt Design Patterns</p>
+  <h2 class="slide-title">Four composable patterns cover the vast majority of prompt optimisation needs</h2>
+  <p class="slide-subtitle">A mental model for systematic prompt engineering</p>
+  <div class="content">
+    <div class="grid-2">
+      <ul class="bullets">
+        <li><strong>System-prompt framing</strong> — set the model's role, constraints, and tone up front</li>
+        <li><strong>Few-shot examples</strong> — input/output pairs teach the model your format</li>
+        <li><strong>Chain-of-thought reasoning</strong> — ask the model to think step by step</li>
+        <li><strong>Structured output formatting</strong> — request JSON, Markdown, or tables to cut post-processing</li>
+      </ul>
+      {listing}
+    </div>
+    <div class="callout"><strong>When to combine:</strong> pair few-shot examples with chain-of-thought for up to 40% better output consistency — start simple, then layer patterns as needed.</div>
+  </div>
+  <div class="slide-footer"><span>Meridian</span><span>2</span></div>
+</section>
+"""
+
+
+def _payload(position, html, scripts, *, look=None, deck_style=None):
+    return m._review_payload(case.gold_deck_spec(DECK), position, html, scripts,
+                             look=look, deck_style=deck_style)
 
 
 def _mutate_broken_handoff(html):
@@ -110,6 +135,14 @@ def generate(out_dir: pathlib.Path | None = None):
             m._out(pos, "surfaced", [m._finding(criterion, pos, MESSAGES[cid])]),
             m._out(pos, "clean", []),
         )
+
+    style = m.builder_pack.deck_style_fixture()
+    m._write_deck_style_cases(
+        out,
+        lambda html: _payload(DECK_STYLE_SLIDE, html, case.gold_scripts(DECK_STYLE_SLIDE, DECK),
+                              look=DECK_STYLE_LOOK, deck_style=style),
+        DECK_STYLE_SLIDE, _patterns_slide, DECK_STYLE_CODE_LINES,
+    )
 
 
 if __name__ == "__main__":

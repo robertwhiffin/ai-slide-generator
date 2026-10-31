@@ -1,13 +1,24 @@
 """Deterministic scorers for the eval harness."""
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
+from html.parser import HTMLParser
 from typing import NamedTuple
 
 from src.core import database  # noqa: F401 - break import cycle before src.* imports
+import tinycss2
 from pydantic import ValidationError
 
 from evals.harness.render import RenderMeasures
 from src.domain.deck_spec import DeckSpec, SlideSpec
+from src.domain.deck_style import (
+    DECK_STYLE_MAX_CHARS,
+    DECK_STYLE_MAX_COMPONENTS,
+    css_class_names,
+    html_class_names,
+    sanitise_deck_style,
+)
 from src.domain.finding import CRITERIA
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_alignment import AlignmentRefused, align_slides
@@ -17,6 +28,7 @@ from src.domain.slide_operations import (
     apply_operations,
     compose_edit_spec,
 )
+from src.utils.ds_asset_utils import DS_ASSET_PLACEHOLDER_PATTERN
 
 
 #: Longest error detail quoted in a contract-fail rationale; longer is cut + marked.
@@ -155,8 +167,55 @@ def _reference_deck(reference: dict | None, current_deck_spec) -> tuple[DeckSpec
     return _validate_deck((reference or {}).get("deck_spec"))
 
 
+def _deck_style_keeps_problem(
+    out: ArchitectOutput, keeps: list[str], design_system_active: bool | None
+) -> str:
+    """Why a restyle answer does not keep ``keeps`` (``expect.deck_style_keeps``); empty if it does.
+
+    Production restyles a deck only through ``deck_changes.deck_style``, and cleans it with
+    ``sanitise_deck_style`` under the design-system flag before anything reads it. A style the
+    sanitiser drops whole refuses the edit, and a class the cleaned CSS no longer defines (one
+    defined only inside an ``@media`` block, say) is stripped from every kept slide that uses it.
+    So the classes are read from the SANITISED CSS (Ruling R27), never the answer's raw text.
+
+    The restyle is then held to a build's hygiene (Ruling R28): the sanitiser must return it
+    unchanged, as ``_deck_style_score`` requires (a ``:root`` palette under a design system is
+    dropped, which leaves its ``var()`` references undefined), and with a design system active its
+    CSS holds no hex colour literal (``_hex_colour_problem``).
+    """
+    changes = out.deck_changes
+    style = changes.deck_style if changes is not None else None
+    if style is None:
+        return (
+            "deck_changes.deck_style is missing; this restyle is expected to change the deck "
+            f"style and keep {', '.join(keeps)}")
+    cleaned, notes = sanitise_deck_style(style, design_system_active=bool(design_system_active))
+    if cleaned is None:
+        return (
+            f"the sanitiser drops deck_changes.deck_style whole ({'; '.join(notes)}), so "
+            f"production refuses the edit and the deck loses {', '.join(keeps)}")
+    missing = [name for name in keeps if name not in css_class_names(cleaned.css)]
+    if missing:
+        return (
+            f"deck_changes.deck_style, once sanitised, does not define {', '.join(missing)}; "
+            "every kept slide that uses it would lose its style")
+    changed = _sanitiser_change(style, cleaned, notes)
+    if changed:
+        return f"deck_changes.deck_style: the sanitiser would change it ({changed})"
+    if design_system_active:
+        hexes = _hex_colour_problem(style.css)
+        if hexes:
+            return f"deck_changes.deck_style: {hexes}"
+    return ""
+
+
 def _operations_score(
-    output: dict, expect: dict, current: dict | None, reference: dict | None
+    output: dict,
+    expect: dict,
+    current: dict | None,
+    reference: dict | None,
+    *,
+    design_system_active: bool | None = None,
 ) -> tuple[bool, str]:
     """Score an architect edit given as operations with production's own semantics (spec §9).
 
@@ -174,7 +233,11 @@ def _operations_score(
     * every slide not rebuilt equals, field for field, the current deck's slide at the persisted
       position its row comes from;
     * ``DECK_LEVEL_FIELDS`` and the design contract equal the reference's, composed when the
-      reference is itself given as operations.
+      reference is itself given as operations;
+    * when the case gives ``expect.deck_style_keeps`` (a restyle), ``_deck_style_keeps_problem``
+      finds nothing: ``deck_changes.deck_style`` is present and still defines every listed class
+      once sanitised under ``design_system_active`` (the case's), as production cleans it; the
+      sanitiser returns it unchanged; and under a design system it holds no hex colour literal.
     """
     intent = output.get("intent") if isinstance(output, dict) else None
     if intent != "edit" or expect.get("intent") != "edit":
@@ -239,9 +302,17 @@ def _operations_score(
             "Operations: deck-level field design_contract differs from the reference's "
             "(a change rebuilds every slide)")
 
+    keeps = expect.get("deck_style_keeps")
+    if keeps is not None:
+        problem = _deck_style_keeps_problem(out, list(keeps), design_system_active)
+        if problem:
+            return False, f"Operations: {problem}"
+
     rationale = (
         f"Architect intent and operations match (rebuild {got_rebuild}, inserted {got_inserted}, "
         f"layout {got_layout})")
+    if keeps is not None:
+        rationale += f"; deck_changes.deck_style keeps {', '.join(keeps)}"
     targets = sorted(set(out.target_positions))
     if targets and targets != got_rebuild:
         rationale += (
@@ -401,6 +472,308 @@ def _insert_score(
     return True, rationale
 
 
+# --------------------------------------------------------------------------- deck style
+
+#: A hex colour literal, as the value of a CSS ``hash`` token (no leading ``#``).
+_HEX_COLOUR = re.compile(r"[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}")
+
+#: The inline declarations a slide built on a deck style must not carry: the deck style and the
+#: design system provide the paint, so inline styles are for layout only.
+DECK_STYLE_PAINT_PROPERTIES = (
+    "color", "background", "background-color", "font-size", "font-family", "border-color",
+)
+
+
+def _hex_literals(css: str) -> list[str]:
+    """The hex colour literals in ``css``'s declaration values, in source order, each once.
+
+    Comments, strings and selectors (``#id``) never count; a ``url(data:...)`` is one token, so
+    an SVG's ``%23fff`` does not either.
+    """
+    found: list[str] = []
+
+    def walk(tokens) -> None:
+        for tok in tokens:
+            if tok.type == "hash" and _HEX_COLOUR.fullmatch(tok.value):
+                literal = f"#{tok.value}"
+                if literal not in found:
+                    found.append(literal)
+            elif tok.type == "function":
+                walk(tok.arguments)
+            elif tok.type in ("() block", "[] block", "{} block"):
+                walk(tok.content)
+
+    for rule in tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True):
+        if rule.type != "qualified-rule":
+            continue
+        items = tinycss2.parse_blocks_contents(
+            rule.content, skip_comments=True, skip_whitespace=True)
+        for item in items:
+            if item.type == "declaration":
+                walk(item.value)
+    return found
+
+
+def _hex_colour_problem(css: str) -> str:
+    """Why ``css`` breaks the design-system colour rule (its hex literals named); empty if not.
+
+    Used under an active design system, which supplies the colours as tokens, by both the build's
+    ``_deck_style_score`` and the restyle's ``_deck_style_keeps_problem``.
+    """
+    hexes = _hex_literals(css)
+    if not hexes:
+        return ""
+    return (
+        f"hex colour literal(s) {', '.join(hexes)} under an active design system; its colours "
+        "must be the design system's tokens")
+
+
+def _sanitiser_change(style, cleaned, notes: tuple[str, ...]) -> str:
+    """What ``sanitise_deck_style`` changed in ``style`` (its notes); empty when it returned the
+    very same object with ``()`` notes (C24)."""
+    if not notes and cleaned is style:
+        return ""
+    return "; ".join(notes) or "it returned a different style"
+
+
+def _deck_style_score(
+    structured: dict, expect: dict, design_system_active: bool | None
+) -> tuple[bool, str]:
+    """Score the deck style an architect build answer authors (a case whose ``expect`` has
+    ``deck_style: true``). It reads the answer's ``deck_spec``. The row passes only when:
+
+    * ``deck_spec.deck_style`` is present;
+    * it has 1 to ``DECK_STYLE_MAX_COMPONENTS`` components;
+    * its CSS is at most ``DECK_STYLE_MAX_CHARS`` characters;
+    * ``sanitise_deck_style`` returns it unchanged: the very same object, with ``()`` notes (C24);
+    * every slide has a non-blank ``look``;
+    * with a design system active, its CSS holds no hex colour literal (the design system supplies
+      the colours as tokens). A ``:root`` rule needs no exemption here: under a design system the
+      sanitiser drops it, which already fails the row;
+    * when ``expect`` has ``logo_handles`` (Addendum A: the handles of the payload's
+      ``deck_style_context.logos``, written by the generator, since this scorer cannot see the
+      payload), the style has a footer piece (``_footer_problem``) holding both page tokens and,
+      when the list is not empty, one of those logos. Without the key no footer is required.
+
+    A failure's rationale names its cause; a sanitiser failure quotes the notes.
+    """
+    deck, why = _validate_deck((structured or {}).get("deck_spec"))
+    if deck is None:
+        return False, f"Deck style: no valid deck_spec to read deck_style from ({why})"
+    style = deck.deck_style
+    if style is None:
+        return False, (
+            "Deck style: deck_spec.deck_style is missing; this build is expected to author one")
+    count = len(style.components)
+    if not 1 <= count <= DECK_STYLE_MAX_COMPONENTS:
+        return False, (
+            f"Deck style: {count} components, expected 1 to {DECK_STYLE_MAX_COMPONENTS}")
+    if len(style.css) > DECK_STYLE_MAX_CHARS:
+        return False, (
+            f"Deck style: its CSS is {len(style.css)} characters, over the "
+            f"{DECK_STYLE_MAX_CHARS} limit")
+    cleaned, notes = sanitise_deck_style(style, design_system_active=bool(design_system_active))
+    changed = _sanitiser_change(style, cleaned, notes)
+    if changed:
+        return False, f"Deck style: the sanitiser would change it ({changed})"
+    lookless = [slide.position for slide in deck.slides if slide.look is None]
+    if lookless:
+        return False, f"Deck style: slides {lookless} have no look (blank or missing)"
+    if design_system_active:
+        hexes = _hex_colour_problem(style.css)
+        if hexes:
+            return False, f"Deck style: {hexes}"
+    footer = ""
+    if "logo_handles" in (expect or {}):
+        problem = _footer_problem(style.components, list(expect["logo_handles"] or []))
+        if problem:
+            return False, f"Deck style: {problem}"
+        footer = ", a footer piece with the page tokens"
+        if expect["logo_handles"]:
+            footer += " and a logo"
+    return True, (
+        f"Deck style: clean ({count} components, {len(style.css)} characters, every slide has a "
+        f"look{footer})")
+
+
+#: The page tokens a deck style's footer piece carries (production swaps them for the slide's
+#: number and the deck's count on every read).
+PAGE_TOKENS = ("{{slide:number}}", "{{slide:count}}")
+
+
+def _is_footer_piece(component) -> bool:
+    """A footer piece: a component whose name or one of whose class names contains "footer" (any
+    case). Deterministic, so the architect prompt can name the same rule."""
+    return "footer" in component.name.lower() or any(
+        "footer" in name.lower() for name in component.class_names)
+
+
+def _footer_problem(components, logo_handles: list[str]) -> str:
+    """Why no footer piece of ``components`` qualifies; empty when one does.
+
+    A footer piece qualifies when its ``example_html`` holds both ``PAGE_TOKENS`` and, when
+    ``logo_handles`` is not empty, one of them. Tokens or a logo elsewhere in the style do not
+    count. The rationale names each footer piece's missing items.
+    """
+    footers = [comp for comp in components if _is_footer_piece(comp)]
+    if not footers:
+        return (
+            'no footer piece (a component whose name or class names contain "footer") to carry '
+            "the page number and count")
+    problems = []
+    for comp in footers:
+        example = comp.example_html or ""
+        missing = [f"the page token {token}" for token in PAGE_TOKENS if token not in example]
+        if logo_handles and not any(handle in example for handle in logo_handles):
+            missing.append(
+                "a logo from deck_style_context.logos (" + ", ".join(logo_handles) + ")")
+        if not missing:
+            return ""
+        problems.append(f"the footer piece {comp.name!r} lacks {' and '.join(missing)}")
+    return "; ".join(problems)
+
+
+class _InlineStyles(HTMLParser):
+    """Every ``style`` attribute value in an HTML fragment, decoded, in document order."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.values: list[str] = []
+
+    def handle_starttag(self, tag, attrs) -> None:
+        self.values.extend(value for name, value in attrs if name == "style" and value)
+
+
+def _inline_paint(html: str) -> list[str]:
+    """``name: value`` of every inline declaration of a ``DECK_STYLE_PAINT_PROPERTIES`` property,
+    in document order, each once."""
+    parser = _InlineStyles()
+    parser.feed(html)
+    parser.close()
+    found: list[str] = []
+    for text in parser.values:
+        for item in tinycss2.parse_blocks_contents(text, skip_comments=True, skip_whitespace=True):
+            if item.type == "declaration" and item.lower_name in DECK_STYLE_PAINT_PROPERTIES:
+                decl = f"{item.lower_name}: {tinycss2.serialize(item.value).strip()}"
+                if decl not in found:
+                    found.append(decl)
+    return found
+
+
+def deck_style_use_score(html: str, payload: dict, expect: dict) -> tuple[bool, str]:
+    """Score how a builder slide uses the deck style it was given (a case whose ``expect`` has
+    ``deck_style_classes``). The row passes only when:
+
+    * every class in ``expect.deck_style_classes`` is used in ``html``;
+    * no inline ``style`` declares one of ``DECK_STYLE_PAINT_PROPERTIES`` (inline styles are
+      layout only: the paint comes from the design system and the deck style);
+    * every class ``html`` uses is defined by ``payload["section_css"]`` or by
+      ``payload["deck_style"]["css"]``.
+
+    Every failing condition is named in the rationale.
+    """
+    wanted = list(expect.get("deck_style_classes") or [])
+    style = (payload or {}).get("deck_style") or {}
+    used = html_class_names(html or "")
+    defined = (css_class_names((payload or {}).get("section_css") or "")
+               | css_class_names(style.get("css") or ""))
+
+    reasons = []
+    unused = [name for name in wanted if name not in used]
+    if unused:
+        reasons.append(f"deck-style class(es) not used: {', '.join(unused)}")
+    painted = _inline_paint(html or "")
+    if painted:
+        reasons.append(
+            f"inline paint, which the design system and deck style provide: {'; '.join(painted)}")
+    undefined = sorted(used - defined)
+    if undefined:
+        reasons.append(
+            "class(es) defined by neither the template CSS nor the deck style: "
+            f"{', '.join(undefined)}")
+    if reasons:
+        return False, "Deck style use: " + "; ".join(reasons)
+    return True, (
+        f"Deck style use: uses {', '.join(wanted) or 'no listed class'}; no inline paint; every "
+        "class is defined")
+
+
+# --------------------------------------------------------------------------- brand assets
+
+#: The production brand-asset search's tool name (``build_ds_asset_tool``), as a run records it.
+BRAND_SEARCH_TOOL = "search_brand_assets"
+
+
+def _asset_handles(text: str) -> list[str]:
+    """The ``{{ds-asset:N}}`` handles in ``text``, in order, each once."""
+    found: list[str] = []
+    for match in DS_ASSET_PLACEHOLDER_PATTERN.finditer(text or ""):
+        if match.group(0) not in found:
+            found.append(match.group(0))
+    return found
+
+
+def _payload_handles(payload: dict) -> set[str]:
+    """The handles the role was given: the template section's (``section_html``) and those in the
+    deck style's component examples."""
+    payload = payload or {}
+    given = set(_asset_handles(payload.get("section_html") or ""))
+    for component in ((payload.get("deck_style") or {}).get("components") or []):
+        given.update(_asset_handles((component or {}).get("example_html") or ""))
+    return given
+
+
+def brand_asset_use_score(
+    html: str, payload: dict, expect: dict, *, tool_calls
+) -> tuple[bool, str]:
+    """Score the brand assets a builder slide places (a case whose ``expect`` has
+    ``brand_assets``: the handles of the asset index the run's search answers from). It is pure:
+    the index is ``expect["brand_assets"]``. The row passes only when:
+
+    * ``html`` places at least one ``{{ds-asset:N}}`` from the index (a handle the payload itself
+      carries does not count: re-using the template's sample image is not a searched asset);
+    * every other handle in ``html`` is in the index or one the payload carries
+      (``section_html``, a deck-style component's ``example_html``): an invented one fails;
+    * ``tool_calls`` (the run's record; ``()``, ``None`` or MLflow's list) holds a
+      ``search_brand_assets`` call. Another tool's call does not count;
+    * when ``expect`` lists ``brand_icons`` (the index's icon-kind handles, Ruling RA10), ``html``
+      places at least one of them: a logo beside hand-drawn glyphs does not answer a look that
+      asks for icons.
+
+    Every failing condition is named in the rationale.
+    """
+    index = list((expect or {}).get("brand_assets") or [])
+    icons = list((expect or {}).get("brand_icons") or [])
+    used = _asset_handles(html or "")
+    given = _payload_handles(payload)
+    placed = [h for h in used if h in index]
+    placed_icons = [h for h in placed if h in icons]
+    outside = [h for h in used if h not in index and h not in given]
+    searched = any(
+        isinstance(call, Mapping) and call.get("name") == BRAND_SEARCH_TOOL
+        for call in (tool_calls or ())
+    )
+
+    reasons = []
+    if not placed:
+        reasons.append("places no brand-asset handle from the asset index")
+    if icons and not placed_icons:
+        reasons.append(
+            f"places no brand icon from the asset index ({', '.join(icons)}); a logo alone does "
+            "not answer a look that asks for icons")
+    if outside:
+        reasons.append(
+            f"places asset(s) neither in the index nor given in the payload: {', '.join(outside)}")
+    if not searched:
+        reasons.append(f"the run made no {BRAND_SEARCH_TOOL} call")
+    if reasons:
+        return False, "Brand assets: " + "; ".join(reasons)
+    icon_note = f" (icons: {', '.join(placed_icons)})" if icons else ""
+    return True, (
+        f"Brand assets: places {', '.join(placed)} from the asset index{icon_note}, after a "
+        f"{BRAND_SEARCH_TOOL} call")
+
+
 def expected_category_score(
     agent_key: str,
     structured: dict,
@@ -408,6 +781,7 @@ def expected_category_score(
     *,
     reference: dict | None = None,
     current_deck_spec: dict | None = None,
+    design_system_active: bool | None = None,
 ) -> tuple[bool, str]:
     """Role-dispatched expected category scorer.
 
@@ -415,8 +789,13 @@ def expected_category_score(
       A case whose ``expect`` has ``full_deck_spec`` (the arc-review sweeper's describe-only turn)
       is scored by ``_redescription_score`` alone, ahead of every other check, since production
       applies no operations on that turn and persists a build's deck_spec as it does an edit's.
+      A case whose ``expect`` has ``deck_style: true`` also needs ``_deck_style_score`` to pass,
+      checked right after the intent (``design_system_active`` is the case's).
       An edit answer carrying ``operations`` or ``deck_changes`` is scored by ``_operations_score``
-      on every other edit case, as production's operations path takes it whatever else it carries.
+      on every other edit case, as production's operations path takes it whatever else it carries;
+      on a case whose ``expect`` has ``deck_style_keeps`` (a restyle) it also checks the sanitised
+      ``deck_changes.deck_style``, and holds it to a build's sanitiser and colour rules
+      (``design_system_active`` is the case's).
       Otherwise an edit case whose ``expect`` has ``"inserted"`` is scored by ``_insert_score``.
       Both need the case's ``reference`` output and the payload's ``current_deck_spec``.
     - data_analyst: checks outcome match
@@ -435,9 +814,17 @@ def expected_category_score(
         if structured.get("intent") != expect.get("intent"):
             return False, f"Intent mismatch: got {structured.get('intent')!r}, expected {expect.get('intent')!r}"
 
+        # A build case that expects a deck style: ANDed after the intent check
+        if expect.get("deck_style"):
+            ok, why = _deck_style_score(structured, expect, design_system_active)
+            if not ok:
+                return False, why
+
         # An edit given as operations is scored as production composes it (spec §9)
         if _operations_given(structured):
-            return _operations_score(structured, expect, current_deck_spec, reference)
+            return _operations_score(
+                structured, expect, current_deck_spec, reference,
+                design_system_active=design_system_active)
 
         # An insert is scored with production's own alignment, not the model's targets
         if structured.get("intent") == "edit" and "inserted" in expect:

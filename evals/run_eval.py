@@ -9,7 +9,7 @@ import src.core.database  # noqa: F401 - break import cycle before src.* imports
 
 from evals.harness import auth, judge, mlflow_run
 from evals.harness import render as render_mod
-from evals.harness.case import meridian_section_css, split_kwargs
+from evals.harness.case import split_kwargs
 from evals.harness.config import AgentEvalConfig, load_config, prices, v1_baseline
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
 from src.services.model_endpoint_catalog import gateway_endpoint_name
@@ -59,8 +59,10 @@ def _load(agent_key: str, config_arg: str) -> AgentEvalConfig:
 
 
 def _calibration_render_fn(case, candidate):
+    """Render a calibration output as a sweep renders the candidate: Meridian, then the case's deck style."""
     return render_mod.render_slide(
-        candidate.get("html", ""), candidate.get("scripts") or "", section_css=meridian_section_css())
+        candidate.get("html", ""), candidate.get("scripts") or "",
+        section_css=mlflow_run.render_section_css(case))
 
 
 def _print_trust_table(agent_key: str, rows: list[dict]) -> None:

@@ -73,9 +73,12 @@ Each element must be **CSS text**: the *contents* of a style block, NOT
 exception, no log.  Whoever writes the producer owns keeping the wrapper off.
 
 The blocks are not builder output: ``BuilderOutput`` forbids a builder emitting
-``<style>``.  One writer produces them, once per turn, in ws4c; the list holds
-exactly one element, or is empty on a legacy/unpinned deck.  This function's job
-is aggregation plus token backstopping, not deduplication.
+``<style>``.  One writer produces them, once per turn, in ws4c
+(``architect_node``); the list holds the template's style block, then the
+committed deck style's CSS (sanitised before it is committed), in that order,
+and either may be absent: neither on a legacy/unpinned deck without a deck
+style.  This function's job is aggregation plus token backstopping, not
+deduplication.
 
 CSS travels whole and is never pruned here: the backstop covers only custom
 properties and ``@font-face`` families, so anything a pruner got wrong would
@@ -176,8 +179,9 @@ def aggregate_deck_css(
 
     Args:
         existing_css: The deck's stored CSS, or ``None``/``""`` for a new deck.
-        emitted_style_blocks: CSS texts emitted this turn — one element in
-            practice, empty on a legacy/unpinned deck. ``None`` is accepted.
+        emitted_style_blocks: CSS texts emitted this turn — the template block
+            then the deck style's CSS, either possibly absent (see the producer
+            contract above). ``None`` is accepted.
         token_css: The pinned design system's token stylesheet, or ``None`` when
             the deck is unpinned. ``None``/blank means no backstop.
 

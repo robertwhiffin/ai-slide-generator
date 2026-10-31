@@ -41,9 +41,22 @@ OPERATIONS_CASES = ["delete_slide", "move_slide", "replace_slide_expand", "mixed
 # Folded into NEW_CASE_IDS; tests/unit/evals/test_eval_redescribe_case.py checks its content
 # and scoring.
 REDESCRIBE_CASES = ["redescribe_deck"]
-NEW_CASE_IDS = CASES_313 + INSERT_CASES + BLANK_CASES + OPERATIONS_CASES + REDESCRIBE_CASES
+# Architect deck style (Task 7b): a technical build that must author a clean, thin deck style and
+# a look on every slide (a fresh build, positive, like build_request; build_request itself stays
+# unchanged, R9), and a restyle of the deck's code blocks through deck_changes.deck_style on the
+# same deck carrying the fixture style (a mutation). Folded into NEW_CASE_IDS;
+# tests/unit/evals/test_eval_architect_deck_style.py checks their content and scoring.
+DECK_STYLE_BUILD_CASES = ["build_technical_deck"]
+DECK_STYLE_EDIT_CASES = ["restyle_deck"]
+DECK_STYLE_CASES = DECK_STYLE_BUILD_CASES + DECK_STYLE_EDIT_CASES
+NEW_CASE_IDS = (
+    CASES_313 + INSERT_CASES + BLANK_CASES + OPERATIONS_CASES + REDESCRIBE_CASES
+    + DECK_STYLE_CASES
+)
 CASE_IDS = EXISTING_CASE_IDS + NEW_CASE_IDS
-MUTATIONS = ["edit_request", "ask_data", "confirm_design"] + NEW_CASE_IDS
+MUTATIONS = ["edit_request", "ask_data", "confirm_design"] + [
+    c for c in NEW_CASE_IDS if c not in DECK_STYLE_BUILD_CASES
+]
 EXPECT = {
     "build_request": {"intent": "build"},
     "edit_request": {"intent": "edit", "positions": [1]},
@@ -78,8 +91,26 @@ EXPECT = {
     },
     # The sweeper's re-description: a full deck_spec over the current positions, no operations.
     "redescribe_deck": {"intent": "edit", "full_deck_spec": True},
+    # Deck style: the build must author a clean deck style and a look on every slide; the restyle
+    # rebuilds nothing and its deck_changes.deck_style must still define dk-code and its token
+    # spans (R29). Addendum A (A17, RA5): the build's deck style also needs a footer piece holding
+    # a logo handle from the payload's deck_style_context.logos, written here by the generator.
+    "build_technical_deck": {
+        "intent": "build", "deck_style": True,
+        "logo_handles": [
+            "{{ds-asset:9001}}", "{{ds-asset:9002}}", "{{ds-asset:9003}}", "{{ds-asset:9004}}",
+        ],
+    },
+    "restyle_deck": {
+        "intent": "edit", "positions": [], "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"],
+    },
 }
-HAS_DECK = {"edit_request", "confirm_design", "discuss"} | set(NEW_CASE_IDS)
+HAS_DECK = {"edit_request", "confirm_design", "discuss"} | (
+    set(NEW_CASE_IDS) - set(DECK_STYLE_BUILD_CASES)
+)
+# The cases whose current deck carries the deck-style fixture and a look on every slide.
+STYLED_DECK_CASES = set(DECK_STYLE_EDIT_CASES)
+DECK_STYLE_FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
 EDIT_CASES = [c for c in CASE_IDS if EXPECT[c]["intent"] == "edit"]
 # #314 (D11, finding 11): this case's should_fail is right place and right targets with an
 # off-request new slide. The deterministic scorer passes it; only the judge separates it.
@@ -193,10 +224,11 @@ PAYLOAD_KEYS = [
     "conversation", "message", "current_deck_spec", "committed_slide_count",
     "slide_numbering", "slide_references",
     "previous_deck_review", "available_design_contract", "template_sections",
-    "resolved_style", "design_system_library",
+    "resolved_style", "design_system_library", "deck_style_context",
 ]
 # #313 (plan Task 7): the two keys src/domain/slide_numbering.architect_slide_payload builds.
 SLIDE_KEYS = ("slide_numbering", "slide_references")
+DECK_STYLE_CONTEXT_KEY = "deck_style_context"
 DECK_SLIDES = 10
 # #313 (plan Task 7): every slide reference resolved in each case's message, pinned literally.
 SLIDE_REFERENCES = {
@@ -261,6 +293,9 @@ SLIDE_REFERENCES = {
     ],
     # A describe-only turn resolves no references (architect_slide_payload, D4).
     "redescribe_deck": [],
+    # Deck style: the build names no slide; the restyle names every code block, not a slide.
+    "build_technical_deck": [],
+    "restyle_deck": [],
 }
 LAYOUT =case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
 
@@ -464,7 +499,7 @@ def test_payload_keys_are_every_production_key():
     builder's ``corrective_instruction`` is), so no case carries it."""
     assert "rejected_edit" in MODEL_PAYLOAD_KEYS[AGENT]
     assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT]) - {"rejected_edit"}
-    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 11
+    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 12
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -485,6 +520,13 @@ def test_payload_is_the_production_shape(cid):
             # #314 follow-up: the gold deck plus the blank (test_blank_payload_splices_the_blank).
             assert p["current_deck_spec"] == _blank_deck(gold)
             assert p["committed_slide_count"] == BLANK_DECK_SLIDES == 11
+        elif cid in STYLED_DECK_CASES:
+            # Deck style: the gold deck as a deck-style build leaves it, the fixture style and a
+            # look on every slide (test_eval_architect_deck_style pins the looks).
+            spec = p["current_deck_spec"]
+            assert spec["deck_style"] == json.loads(DECK_STYLE_FIXTURE.read_text())
+            assert DeckSpec.model_validate(_without_deck_style(spec)) == DeckSpec.model_validate(gold)
+            assert p["committed_slide_count"] == 10
         else:
             assert p["current_deck_spec"] == gold
             assert p["committed_slide_count"] == 10
@@ -565,9 +607,19 @@ def test_messages():
         "Trim slide 7 to live code demos, embedded video and interactive charts; drop the rest"
     )
     assert {cid: msg(cid) for cid in BLANK_CASES} == BLANK_MESSAGES
+    # Deck style: the restyle's message, as the brief gives it.
+    assert msg("restyle_deck").lower() == "make all the code blocks dark navy with light text"
 
 
-@pytest.mark.parametrize("cid", NEW_CASE_IDS)
+def _without_deck_style(spec):
+    """``spec`` without its deck style and without any slide's look."""
+    out = {k: v for k, v in spec.items() if k != "deck_style"}
+    out["slides"] = [{k: v for k, v in s.items() if k != "look"} for s in spec["slides"]]
+    return out
+
+
+# A fresh build has no prior exchange (it is a one-turn conversation, like build_request).
+@pytest.mark.parametrize("cid", [c for c in NEW_CASE_IDS if c not in DECK_STYLE_BUILD_CASES])
 def test_new_cases_continue_the_existing_prior_exchange(cid):
     prior = case.load_case(AGENT, "edit_request", root=CASES).payload["conversation"][:2]
     conv = case.load_case(AGENT, cid, root=CASES).payload["conversation"]
@@ -579,10 +631,12 @@ def test_reference_validates_and_passes(cid):
     c = case.load_case(AGENT, cid, root=CASES)
     out = ArchitectOutput.model_validate(c.reference)
     assert out.intent == EXPECT[cid]["intent"]
-    # #314: scored as the harness scores it, with the reference and the payload's current deck.
+    # #314: scored as the harness scores it, with the reference and the payload's current deck
+    # (and, since deck-style Task 7a, the case's design_system_active).
     ok, why = expected_category_score(
         AGENT, c.reference, c.expect,
         reference=c.reference, current_deck_spec=c.payload["current_deck_spec"],
+        design_system_active=c.design_system_active,
     )
     assert ok, why
 
@@ -638,6 +692,7 @@ def test_calibration_should_fail_is_wrong_and_valid(cid):
     ok, why = expected_category_score(
         AGENT, bad, c.expect,
         reference=c.reference, current_deck_spec=c.payload["current_deck_spec"],
+        design_system_active=c.design_system_active,
     )
     if cid in JUDGE_ONLY_CALIBRATION:
         # Right place and right targets: only the judge can see the new slide is off-request.
@@ -649,11 +704,12 @@ def test_calibration_should_fail_is_wrong_and_valid(cid):
 # #314 follow-up: a blank case's should_fail is an edit too (test_blank_calibration_is_pinned).
 # So is an edit-operations case's: a wrong plan for the same edit (test_eval_operations_scorer).
 # And the re-description's: an edit given as deck_changes (test_eval_redescribe_case).
+# And a deck-style case's: the right intent with the wrong deck style (test_eval_architect_deck_style).
 @pytest.mark.parametrize(
     "cid",
     [c for c in CASE_IDS
      if c not in ("edit_request", *SLIPPED, *INSERT_CASES, *BLANK_CASES, *OPERATIONS_CASES,
-                  *REDESCRIBE_CASES)],
+                  *REDESCRIBE_CASES, *DECK_STYLE_CASES)],
 )
 def test_calibration_has_the_wrong_intent(cid):
     bad = _cal(cid)["should_fail"]
@@ -700,20 +756,39 @@ def _serialised(obj) -> bytes:
 
 
 def _without_slide_keys(data: bytes) -> bytes:
-    """A payload.json's bytes with the two #313 keys removed, re-serialised as the generator does.
+    """A payload.json's bytes with the two #313 keys and ``deck_style_context`` removed,
+    re-serialised as the generator does.
 
     The file must already be in the generator's serialisation, so re-serialising cannot hide a
     formatting change; removing the keys then leaves every other key, value and order as written.
+    The removed keys' values are pinned elsewhere, by
+    ``test_committed_slide_keys_are_the_production_helper`` and
+    ``test_committed_deck_style_context_is_the_production_derivation``.
     """
     obj = json.loads(data)
     assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
-    return _serialised({k: v for k, v in obj.items() if k not in SLIDE_KEYS})
+    return _serialised(
+        {k: v for k, v in obj.items() if k not in (*SLIDE_KEYS, DECK_STYLE_CONTEXT_KEY)}
+    )
+
+
+def _without_deck_style_context(data: bytes) -> bytes:
+    """A payload.json's bytes with only ``deck_style_context`` removed (deck-style Task 5).
+
+    The key was added to every architect payload on purpose; a payload.json digest is checked on
+    the payload without it, so no case is re-pinned.  Its value is pinned instead by
+    ``test_committed_deck_style_context_is_the_production_derivation``.
+    """
+    obj = json.loads(data)
+    assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
+    return _serialised({k: v for k, v in obj.items() if k != DECK_STYLE_CONTEXT_KEY})
 
 
 def test_existing_cases_are_byte_identical(generated):
     """D7, D11: the five existing cases are their 679d2f21 bytes.
 
-    payload.json is compared with the two #313 keys stripped: it may differ only by those keys.
+    payload.json is compared with the two #313 keys and ``deck_style_context`` stripped: it may
+    differ only by those three keys.
     """
     got = {
         path: hashlib.sha256(
@@ -728,7 +803,9 @@ def test_existing_cases_are_byte_identical(generated):
 def test_the_313_cases_are_byte_identical(generated):
     """#314 (Task 9): adding the insert cases rewrites none of the four #313 case files."""
     got = {
-        path: hashlib.sha256(data).hexdigest()
+        path: hashlib.sha256(
+            _without_deck_style_context(data) if path.endswith("/payload.json") else data
+        ).hexdigest()
         for path, data in generated.items()
         if path.split("/")[0] in CASES_313
     }
@@ -738,7 +815,9 @@ def test_the_313_cases_are_byte_identical(generated):
 def test_the_insert_cases_are_byte_identical(generated):
     """#314 follow-up (Task 11): adding the blank cases rewrites none of the four insert case files."""
     got = {
-        path: hashlib.sha256(data).hexdigest()
+        path: hashlib.sha256(
+            _without_deck_style_context(data) if path.endswith("/payload.json") else data
+        ).hexdigest()
         for path, data in generated.items()
         if path.split("/")[0] in INSERT_CASES
     }
@@ -865,12 +944,13 @@ def _by_position(spec):
 # (test_blank_references_align_to_production). An edit-operations reference has no deck_spec; it
 # is composed by production's own semantics instead (test_eval_operations_scorer), and checked
 # against the gold by test_operations_references_change_only_what_the_message_names. The
-# re-description revises nothing and expects no positions (test_eval_redescribe_case).
+# re-description revises nothing and expects no positions (test_eval_redescribe_case). The
+# restyle answers in deck_changes alone, on a styled deck (test_eval_architect_deck_style).
 @pytest.mark.parametrize(
     "cid",
     [c for c in EDIT_CASES
      if c not in INSERT_CASES and c not in BLANK_CASES and c not in OPERATIONS_CASES
-     and c not in REDESCRIBE_CASES],
+     and c not in REDESCRIBE_CASES and c not in DECK_STYLE_CASES],
 )
 def test_edit_references_revise_only_their_targets(cid):
     ref = case.load_case(AGENT, cid, root=CASES).reference
@@ -1019,6 +1099,35 @@ def test_committed_slide_keys_are_the_production_helper(cid):
     assert {k: p[k] for k in SLIDE_KEYS} == architect_slide_payload(
         p["conversation"], p["message"], positions
     )
+
+
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_committed_deck_style_context_is_the_production_derivation(cid):
+    """Each committed payload's ``deck_style_context`` is what ``architect_node`` sends for the
+    Meridian brand (deck-style Task 5).
+
+    The byte-identity digests strip this key, so its value is pinned here.
+    ``case.meridian_deck_style_context`` runs production's own import, materialise and
+    extraction functions over the bundle; the guard keeps it from passing on an empty context:
+    the tokens come from the bundle's CSS and the classes from the template's ``<style>``.
+    """
+    ctx = case.load_case(AGENT, cid, root=COMMITTED).payload[DECK_STYLE_CONTEXT_KEY]
+    assert ctx == case.meridian_deck_style_context()
+    # Addendum A, B2 (A9): the Meridian logos from evals/fixtures/meridian/assets.json.
+    assert set(ctx) == {"design_tokens", "template_classes", "logos"}
+    assert ctx["logos"], "the Meridian logos are missing"
+    assert ctx["design_tokens"].get("--brand-core-primary") == "#0F766E"
+    assert {"slide", "stat-value"} <= set(ctx["template_classes"])
+
+
+@pytest.mark.parametrize("cid", DECK_STYLE_BUILD_CASES)
+def test_deck_style_build_expect_names_the_payload_logos(cid):
+    """A17: ``_deck_style_score`` cannot see the payload, so the generator writes the logo handles
+    the architect was shown into the case's expect, in the payload's order."""
+    c = case.load_case(AGENT, cid, root=CASES)
+    logos = c.payload[DECK_STYLE_CONTEXT_KEY]["logos"]
+    assert logos
+    assert c.expect["logo_handles"] == [row["handle"] for row in logos]
 
 
 def test_edit_calibration_still_fails_on_the_off_by_one():

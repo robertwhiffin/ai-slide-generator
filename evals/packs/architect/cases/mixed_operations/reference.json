@@ -24,7 +24,8 @@
           "hands_off": "PowerPoint's legacy architecture imposes real limits on presentation quality",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         }
       ]
     },
@@ -40,7 +41,8 @@
           "hands_off": "HTML slides let a team work on one deck the way it works on code",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         },
         {
           "purpose": "Evidence beat 5, continued — Version control",
@@ -49,7 +51,8 @@
           "hands_off": "Every version of the deck is recorded and can be brought back",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         },
         {
           "purpose": "Evidence beat 5, continued — Distribution",
@@ -61,7 +64,8 @@
             "html_deck_file_size"
           ],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         }
       ]
     }

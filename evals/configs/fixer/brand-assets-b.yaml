@@ -1,0 +1,13 @@
+# Fixer v1 prompt (deck style addendum A, Task B5b): the promoted `deck-style` text with the
+# DECK STYLE block extended. New bullets: keep the brand assets the catalogue's pieces name (the
+# logo comes from the footer piece alone and is never searched); when the search_brand_assets tool
+# is available, search only when the finding requires an asset (MINIMAL CHANGE), by kind "icon"
+# or one file-name word, and place what it returns; never invent a handle; the footer rules the
+# builder follows, when the finding concerns a footer (no footer on the cover, never two, a bound
+# slide fills its template's own footer and never adds the footer piece, dark slides use the
+# light-on-dark logo); never drop white or another treatment class from the outer root (Ruling
+# RA5: the one-ground rule is the builder's). Every byte outside the block is identical.
+agent_key: fixer
+name: fixer-brand-assets-b
+base: v1
+prompt_file: brand-assets-b.md

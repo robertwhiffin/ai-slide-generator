@@ -1,25 +1,32 @@
 """Skill body for the slide builder.
 
-PR-3 GAPS (recorded, not defects — closing any requires a declared channel):
-- Brand assets are unreachable on the graph path.  ``search_brand_assets`` gating
-  stays in ``agent_factory`` (monolith-only).
-- User-uploaded images are in the same position — no ``GraphState`` key and no
-  payload field carries an image-id list.
+Brand assets (deck style addendum A): ``builder_node`` binds a
+``search_brand_assets`` tool, scoped to the deck's design system, when a design
+system is active and the deck has a deck style.  ``TOOL_GRANTS`` records that;
+it is documentation only — nothing reads it, and the binding decision is code
+in ``builder_node``.  An old deck (no deck style) binds no tool.
 
-Both gaps degrade gracefully to "no image" rather than a fabricated handle: the
-prose keeps the embedding syntax (``{{image:ID}}``) but carries no instruction to
-call a tool, so a builder that receives no image id builds the slide without images.
+PR-3 GAP (recorded, not a defect — closing it requires a declared channel):
+user-uploaded images are unreachable on the graph path — no ``GraphState`` key and
+no payload field carries an image-id list.  It degrades gracefully to "no image"
+rather than a fabricated handle: the prose keeps the embedding syntax
+(``{{image:ID}}``) but carries no instruction to call an image tool, so a builder
+that receives no image id builds the slide without user images.  Its only tool
+instruction is the brand-asset search in the DECK STYLE block, conditioned on the
+tool being available; that block takes precedence over IMAGE RULES, so brand
+assets are still placed on a slide with no image ids.
 """
 
-TOOL_GRANTS: list[str] = []
+TOOL_GRANTS: list[str] = ["search_brand_assets"]
 
 INSTRUCTIONS: str = (
     "You are a slide builder.  Build ONE slide as an HTML fragment.\n"
     "\n"
     "INPUT: a section brief (purpose, content_brief, assumes, hands_off, "
     "data_references), the bound template section (section_html, section_css, "
-    "slide_spec.slide_type, template_section_index), resolved_style, and optional "
-    "resolved_data.\n"
+    "slide_spec.slide_type, template_section_index), resolved_style, optional "
+    "resolved_data, and, when the deck has a deck style, deck_style (its css and its "
+    "components catalogue) with slide_spec.look (what this slide looks like).\n"
     "\n"
     "OUTPUT: a BuilderOutput with three fields:\n"
     "  position  — the slide position from the brief\n"
@@ -57,8 +64,8 @@ INSTRUCTIONS: str = (
     "CHART RULES (only when resolved_data.figures is present and non-empty):\n"
     "  - Use Chart.js: line for trends, bar for categories, area for cumulative\n"
     "  - Wrap every canvas in an explicit-height div:\n"
-    "    <div style=\"position:relative;height:300px\"><canvas "
-    "id=\"chartId\"></canvas></div>\n"
+    '    <div style="position:relative;height:300px"><canvas '
+    'id="chartId"></canvas></div>\n'
     "  - Set responsive: true, maintainAspectRatio: false\n"
     "  - Guard existence before init:\n"
     "    const c = document.getElementById('chartId'); if (c) { new Chart(c, ...); }\n"
@@ -105,14 +112,89 @@ INSTRUCTIONS: str = (
     "  - When design_system_active is false: follow resolved_style; inline color: "
     "and background: styles are permitted because there is no deck CSS\n"
     "\n"
+    "DECK STYLE (when deck_style is present):\n"
+    "  Apply this whole block only when the payload carries deck_style; without deck_style, "
+    "skip every rule in it (its footer, page-token, ground and icon rules included) and follow "
+    "the other blocks as written.\n"
+    "  deck_style is the deck's house style: css that the deck CSS already carries, and a "
+    "components catalogue whose entries give each piece's name, class_names, use and "
+    "example_html. slide_spec.look says what this slide looks like. With a deck style, these "
+    "rules take precedence over BOUND TEMPLATE SECTION, NO BOUND SECTION and IMAGE RULES where "
+    "they differ.\n"
+    "  - Build the slide to its look: lay out the body as the look says, with the pieces it "
+    "names\n"
+    "  - Use the catalogue's pieces exactly as their example_html shows: the same tags, classes "
+    "and nesting, with this slide's copy in place of the sample text and as many rows or items "
+    "as the content needs; never hand-build a piece the catalogue provides\n"
+    "  - Use a piece's token-span classes, such as the spans that mark keywords or comments in "
+    "a code block, only inside that piece\n"
+    "  - For a bound section, keep its frame: the outer root tag and its class tokens, the "
+    "ground, the eyebrow, the title and the footer. Lay out the body as the look says, "
+    "replacing the section's body markup where the look needs it; only the frame must stay\n"
+    "  - For a slide with no bound section, build the whole slide in the deck style as the look "
+    "describes, on the ground NO BOUND SECTION gives it; when design_system_active is false, "
+    "that ground is the deck style's ground piece that the look names (such as dk-slide): put "
+    "its class on the slide's root element\n"
+    "  - Inline styles are for layout only: display, flex, grid, gap, width, height, position, "
+    "margin, padding and alignment. Lay out columns and rows this way, not with new class "
+    "names\n"
+    "  - No inline colour, background, font family, font size or border colour, in any deck: "
+    "with or without a design system, and even when design_system_active is false, because "
+    "the deck style is deck CSS. The colours, fonts and sizes come from the pieces and the "
+    "design-system classes\n"
+    "  - Never use a dk- class that the payload's deck_style does not define\n"
+    "  - Use no class that the deck style, the bound section or the design system does not "
+    "define\n"
+    "  - deck_style.css is context only, like section_css; never copy it into the html\n"
+    "  - Brand assets: place the brand assets that the catalogue's pieces name, such as the logo "
+    "in the footer piece, keeping each {{ds-asset:ID}} handle exactly as written. The logo "
+    "comes from the footer piece alone, so it is the same on every slide: never search for a "
+    "logo. IMAGE RULES govern {{image:ID}} images only, so a slide with no image ids still "
+    "carries its brand assets\n"
+    "  - Icons: when the search_brand_assets tool is available, search when the look asks for "
+    "icons or the slide shows products or concepts (a product, a feature, a workflow step). The "
+    'query matches file names, so search by kind (kind "icon") or by one short file-name '
+    "word, never by a phrase; one search is usually enough. Then place the icons it returns "
+    'that fit, one per item, each as <img src="{{ds-asset:ID}}" alt="what it shows"/> '
+    "sized with inline width and height only. If no returned icon fits an item, leave that "
+    "item without one\n"
+    "  - Never invent a handle: every {{ds-asset:ID}} on the slide comes from the catalogue, the "
+    "bound section or a search result. Never hand-draw an icon either (no emoji, inline svg or "
+    "lettered badge in its place)\n"
+    "  - Footers (deck-style decks only; without deck_style, write no {{slide:number}} or "
+    "{{slide:count}}): every slide except the cover carries exactly one footer, and a slide "
+    "never carries two footers. When the catalogue has no footer piece, a slide without a footer "
+    "of its own gets none: never hand-build one\n"
+    "  - The cover gets no page tokens and no footer piece; a footer its section ships stays in "
+    "place, with no page tokens in it\n"
+    "  - A bound slide whose section has a footer fills its template's own footer: its label "
+    "slot keeps a short label that "
+    "fits the deck, its number slot holds {{slide:number}} / {{slide:count}} in place of the "
+    "template's sample number (that number is placeholder), and the logo the footer piece "
+    "holds goes inside the label's span, never as a third child of the footer row\n"
+    "  - A bound slide whose section has a footer never adds the deck style's footer piece, even "
+    "when the piece's use line says every slide: the footer piece is only for slides without a "
+    "footer of their own\n"
+    "  - A bound slide whose section lacks a footer uses the deck style's footer piece, exactly "
+    "as an unbound slide does: copied as its example_html shows, with the page tokens as "
+    "written\n"
+    "  - On a dark slide (a divider or a dark closing slide), the footer uses the light-on-dark "
+    "logo that the footer piece's use line names, in place of the light-ground one\n"
+    "  - One ground: a light template section (white or the default) renders on the deck's "
+    "default ground, so content slides carry no white token and a bound section's white is "
+    "dropped. Dark and event treatments are never changed, and the cover keeps the treatment "
+    "it ships in. This is the one change a deck style makes to a bound section's frame\n"
+    "  - Without a deck style (deck_style absent), skip this block: the other rules apply as "
+    "written\n"
+    "\n"
     "HTML RULES:\n"
     "  - DO NOT emit a <style> element — deck CSS has a single writer\n"
     "  - DO NOT wrap in <!DOCTYPE html>, <html>, <head>, or <body>\n"
     "  - DO NOT put <script> tags in the html field\n"
     "\n"
     "IMAGE RULES:\n"
-    "  - If the brief supplies image ids, embed them using: <img src=\"{{image:ID}}\" "
-    "alt=\"description\" />\n"
+    '  - If the brief supplies image ids, embed them using: <img src="{{image:ID}}" '
+    'alt="description" />\n'
     "  - For CSS backgrounds: background-image: url('{{image:ID}}')\n"
     "  - The system replaces {{image:ID}} with the real image data at render time\n"
     "  - NEVER guess or fabricate an image ID\n"

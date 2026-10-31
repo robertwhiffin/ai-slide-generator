@@ -44,29 +44,46 @@ from src.services.graph_definition_manifest import (
 # then for #314 add a slide, then for the claude-opus-5 -> claude-opus-5-5 seed move,
 # then for the architect edit operations schema-contract re-pin, then for the
 # promoted edit-operations prompt (evals/configs/architect/edit-ops.yaml), then for
-# its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml), then for the Genie One
-# ask_data line (evals/configs/architect/genie-questions.yaml).
-HEAD_ARCHITECT_CONTENT_HASH = "8be2ca68dd31598fcff738328365066b3a14cf257b1a8347ab37e0d9ec6e3274"
+# its follow-up tweaks (evals/configs/architect/edit-ops-b.yaml), then for the
+# architect deck-style schema-contract re-pin (deck_style and look), then for the
+# promoted deck-style prompt (evals/configs/architect/deck-style-b.yaml), then for the
+# promoted brand-footer prompt (evals/configs/architect/brand-footer.yaml, Addendum A),
+# then for main's Genie One ask_data line (evals/configs/architect/genie-questions.yaml)
+# merged into it (evals/configs/architect/brand-footer-genie.yaml, Ruling RA19).
+HEAD_ARCHITECT_CONTENT_HASH = "4d86a425a9f5b9d389ec39699a5a033654393b9b51c18d85afc84b81b644556d"
 
 # Architect definition hash with prompt_text blanked: pins every non-prompt field
 # (model, overlay, assembly rules, protected assembly, schema contract).
-# Re-pinned for the architect edit operations schema-contract digest.
+# Re-pinned for the architect edit operations schema-contract digest, then for the
+# architect deck-style schema-contract digest.
 HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
-    "ec17918b9c66a86133c060c15c37b88a2139831bc910e8787ce3ef9a069d52d9"
+    "de59d43a7ff03e4a6e303de0505f35733548af8eafec1d2a6f6b8cd1c0dc9d13"
 )
 
+# builder, fixer and fix_reviewer re-pinned for their promoted deck-style prompts
+# (evals/configs/{builder,fixer,fix_reviewer}/deck-style.yaml), then the builder for its
+# no-design-system ground line (evals/configs/builder/deck-style-ground.yaml, Ruling R26),
+# then the builder for its model switch to system.ai.claude-sonnet-5-5
+# (evals/configs/builder/sonnet-5-5.yaml, Task 9b; prompt unchanged), then the builder and
+# fixer for their brand-asset, footer and one-ground DECK STYLE rules
+# (evals/configs/builder/brand-assets-c.yaml and evals/configs/fixer/brand-assets-b.yaml,
+# Addendum A Task B5b), then both for the whole-block fence and one footer on every slide
+# except the cover (evals/configs/{builder,fixer}/one-footer.yaml, Ruling RA15), then the
+# builder for main's SOURCE LINE block merged beside its DECK STYLE block
+# (evals/configs/builder/one-footer-source.yaml, Ruling RA19).
+# build_reviewer is unchanged (Ruling R10).
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
     # Re-pinned: the data analyst was upgraded to protected assembly v2 with a Genie One prompt.
     "data_analyst": "5bc26a1779f5e9d0da693356b2c77ed2093273912d400c8f98adad7c6b872c96",
-    "builder": "025f6a714ecd88ce68f7ba289f0fdc302298ab4ed66d456a7fcae45f46ca5f7d",
+    "builder": "a0b6c836e54acdc494e0934573b45a0d1ee8a6315c4ecc819be2f7e2c4a4df38",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
-    "fixer": "8342438644d4665e929d7fdbd694d0024e401546ae06a9566161b309adb4c82a",
-    "fix_reviewer": "ff14c8e8b1622482f675f726eaeb10db2618b28afdce9598f1a6198ce36f04c0",
+    "fixer": "5b0186f54e576b885efad0cd33aa67870ca90db300aae9a3314fa7f713610f8f",
+    "fix_reviewer": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
 
 HEAD_V1_SCHEMA_DIGESTS = {
-    "architect": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+    "architect": "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -76,7 +93,7 @@ HEAD_V1_SCHEMA_DIGESTS = {
 }
 
 HEAD_V2_SCHEMA_DIGESTS = {
-    "architect": "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
+    "architect": "0db6fdaf0cec0c6dd2d1b0442c76eb3e41ff54834dd9975e7553a33d37480725",
     "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
     "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
     "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -102,11 +119,20 @@ HEAD_UNCHANGED_BLOCK_HASHES = {
     # Architect edit operations rewrote only the PAYLOAD RULES edit line and the EDITING
     # and SLIDE NUMBERS blocks; every other block is pinned at its pre-change bytes
     # (recompute from `git show 2b653079:src/core/skills/architect.py`).
-    "deckspec_construction": "93b9501662090b81d922ae546fd6fc6ba329861ee8830cc055b77ccc29bfaf02",
     "deck_scale_and_structure": "7ece01e9ffbada7e8273f132640a9c2355177135584273a35f1c56981a45dcdc",
     "vary_the_exhibits": "be654859ee8af4682e4f33380da40ccd3d57b07af10f278287b5064dc47aa0f0",
-    "slidespec_fields": "513b1ead3e1e8338b1090fc30f8e7a6145f96d6f9d2e12fdc6ae22d82fb46fcf",
-    "visual_template_binding": "15a0f8ff68e3a2cba12c68358dadc90165005b814daafb7f2340c32f7a16171e",
+    # Re-pinned by the architect deck style (deck-style-b): DECKSPEC CONSTRUCTION gains a
+    # `deck_style:` line after `slides:`, SLIDESPEC FIELDS a `look:` line, and VISUAL /
+    # TEMPLATE BINDING its bind-where-it-fits sentences; the new DECK STYLE block and the
+    # EDITING deck_changes list are pinned by test_architect_deck_style_prompt.py.  Every other
+    # byte of these three blocks is unchanged.
+    "deckspec_construction": "1beac208b08cfe80d0ca0baa9c52cd60ca43885a55e394740efa2b9af59b46c3",
+    "slidespec_fields": "96ccd2ce7e8b332243dbef4add8d762be19b8481cce1b152522831c0c3a9ac39",
+    # Re-pinned by the brand-footer prompt (Addendum A, Ruling RA11): the brand-furniture
+    # sentence now sends the footer logo to deck_style_context.logos and icons to the
+    # builders' search, while furniture in the selected section's markup stays as it ships
+    # (BINDING_RULES still holds).  Every other byte of the block is unchanged.
+    "visual_template_binding": "7d27ec3cebd400f1ee6cfb79be97881df8d03c3fe8d0e61628ba1abbc6e556ed",
 }
 
 # The pre-Task-5 SLIDESPEC FIELDS block.  It must no longer appear verbatim.

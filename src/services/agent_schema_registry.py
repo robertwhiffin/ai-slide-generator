@@ -48,7 +48,7 @@ MODEL_DRIVEN_AGENT_KEYS = (
 
 _V1_DIGESTS = MappingProxyType(
     {
-        "architect": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+        "architect": "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
         "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
         "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
         "build_reviewer": "50963d37738f8c97b12caa7688d282d3174a1e0c5e3606c8ec7a73c5ae50c70d",
@@ -60,7 +60,7 @@ _V1_DIGESTS = MappingProxyType(
 
 _V2_DIGESTS = MappingProxyType(
     {
-        "architect": "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132",
+        "architect": "0db6fdaf0cec0c6dd2d1b0442c76eb3e41ff54834dd9975e7553a33d37480725",
         "data_analyst": "0543006dd98d1d84dc72c1f9b918a97daa93a3020d31e3557b2af8a91715b6c5",
         "builder": "65f29cb9774f96f131dba7dfe48ff04b8775dc0960f95a3c6efc19f326ba6aad",
         "build_reviewer": "20f69d5e65e0b94d4401b0645d16f8b238acd8b4571f9ce184b9d7d9956fc6b1",
@@ -323,6 +323,8 @@ _HISTORICAL_DIGESTS = (
     ("architect", 2, "a03aefb1735275226fe58c2edd04605e7f4126710c7023caf0e676126fbf4122"),
     ("architect", 1, "9704af4e9213f942104f449f09b66e41461cc774c7bfdd47e8c86a25b53b6285"),
     ("architect", 2, "39ed9e91b3640ded4f2859c074db3d6a8f24c14dff49f7011e590b7473956da9"),
+    ("architect", 1, "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e"),
+    ("architect", 2, "9d83be8d41cae5550012e7a32c83f126ce38fb70965c46f749f53c8032102132"),
 )
 HISTORICAL_SCHEMA_CONTRACT_BUNDLES = MappingProxyType(
     {

@@ -254,10 +254,10 @@ describe('structure of the rendered golden', () => {
     expect(disallowedTypes(root())).toEqual([]);
   });
 
-  it('bolds exactly the six slide labels', () => {
+  it('bolds exactly the seven slide labels', () => {
     // Sabotage target: drop or rename a label (e.g. omit `Data references`), or bold a value.
     expect(new Set(strongTexts(root()))).toEqual(
-      new Set(['Purpose:', 'Content brief:', 'Assumes:', 'Hands off:', 'Slide type:', 'Data references:']),
+      new Set(['Purpose:', 'Content brief:', 'Assumes:', 'Hands off:', 'Slide type:', 'Look:', 'Data references:']),
     );
   });
 
@@ -308,6 +308,7 @@ const SLOTS: Slot[] = [
   { name: 'narrative_arc[0] (ordered item start)', set: (s, v) => { s.narrative_arc[0] = v; } },
   { name: 'slides[0].purpose (after a bold label)', set: (s, v) => { s.slides[0].purpose = v; } },
   { name: 'slides[0].slide_type (after a bold label)', set: (s, v) => { s.slides[0].slide_type = v; } },
+  { name: 'slides[0].look (after a bold label)', set: (s, v) => { s.slides[0].look = v; } },
   { name: 'slides[0].data_references[0] (after a bold label)', set: (s, v) => { s.slides[0].data_references[0] = v; } },
   { name: 'figures[0].key (bullet start)', set: (s, v) => { s.resolved_data.figures[0].key = v; } },
   { name: 'figures[0].value (after "key: ")', set: (s, v) => { s.resolved_data.figures[0].value = v; } },
@@ -540,11 +541,31 @@ describe('empty and optional values (D2)', () => {
     expect(out).not.toContain('Slide type');
   });
 
+  it('look absent (pre-field JSON) renders exactly like look null: no Look line', () => {
+    // Sabotage target: `slide.look !== null` (absent would print `- **Look:** Not set.`).
+    // Every golden slide has a look, so the variant is built here: look removed from one, nulled on the other.
+    const absent = golden();
+    absent.slides.forEach((s) => { delete s.look; });
+    const nulled = golden();
+    nulled.slides.forEach((s) => { s.look = null; });
+    expect('look' in absent.slides[0]).toBe(false);
+    const out = render(absent);
+    expect(out).toBe(render(nulled));
+    expect(out).not.toContain('Look');
+  });
+
   it('an empty-string slide_type is non-null, so its line is kept and reads Not set.', () => {
     // Sabotage target: a truthiness test `if (slide.slide_type)` instead of `!= null`.
     const spec = golden();
     spec.slides[0].slide_type = '';
     expect(slideBlock(render(spec), 'Slide 1')).toContain('\n- **Slide type:** Not set.\n');
+  });
+
+  it('an empty-string look is non-null, so its line is kept and reads Not set.', () => {
+    // Sabotage target: a truthiness test `if (slide.look)` instead of `!= null`.
+    const spec = golden();
+    spec.slides[0].look = '';
+    expect(slideBlock(render(spec), 'Slide 1')).toContain('\n- **Look:** Not set.\n');
   });
 
   const DATA_DEFAULTS = '## Data\n\n### Synthesis\n\nNot set.\n\n### Figures\n\nNone.\n\n### Gaps\n\nNone.\n';
@@ -664,6 +685,7 @@ describe('a blank slide entry (#314 M1): "Blank slide." in place of its two Not 
     + '- **Assumes:** The reader accepts the churn number from slide 1.\n'
     + '- **Hands off:** The reader wants to know what fixing it costs.\n'
     + '- **Slide type:** Stats\n'
+    + '- **Look:** One dk-stat across the body; its share of Q4 in a dk-note beneath it, \\*not\\* a chart.\n'
     + '- **Data references:** churn\\_rate, arr\\_at\\_risk\n\n';
 
   function withSlide2(purpose: string, contentBrief: string): DeckSpec {

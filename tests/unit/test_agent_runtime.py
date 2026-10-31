@@ -80,7 +80,7 @@ EXPECTED_V2_PROTECTED_PROMPT_DIGEST = (
     "cb940ea3b990e12483eb660aca60f624e45711f4bcde6679ea928ae3391d3854"
 )
 EXPECTED_SCHEMA_DIGESTS = {
-    "architect": "9f090efe370a30b17779dcae11125b3645cb16153f2ef5c2dd234bf7c5f6970e",
+    "architect": "ba70181315fea46e5eed33f7afefbce3d60ea6ce2e98c7cf655a7c5a4a2ad7ab",
     "data_analyst": "610545fe1d094f2544a5c602c2ebb45f542b813bf47e347e96ba7e22a6bfc281",
     "builder": "fc4bd6a9020b228a79cc0d933066478225947605916e05bd6f44ba7eccc82387",
     "fixer": "7a4e984c602d16ea73c2f5f3f26ac385c440527001fa14b1cfb5c1245de12297",
@@ -175,7 +175,7 @@ def _expected_prompt(
 EXPECTED_ENDPOINTS = {
     "architect": "system.ai.claude-opus-5-5",
     "data_analyst": "system.ai.claude-opus-5-5",
-    "builder": "system.ai.claude-haiku-4-5",
+    "builder": "system.ai.claude-sonnet-5-5",
     "build_reviewer": "system.ai.claude-opus-5-5",
     "fixer": "system.ai.claude-opus-5-5",
     "fix_reviewer": "system.ai.claude-haiku-4-5",

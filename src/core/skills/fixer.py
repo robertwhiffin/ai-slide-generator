@@ -7,9 +7,13 @@ once WYSIWYG lands, a user's manual edits.  This prose preserves that distinctio
 Note on dimensions: the fixer's prose omits the "Maintain 1280x720 dimensions" line
 present in EDITING_RULES (§L5).  Safe-area numbers are owned by
 ``_SLIDE_FRAME_CONSTRAINTS`` and must not be duplicated in skill bodies.
+
+Brand assets (deck style addendum A): ``fixer_node`` binds the same scoped
+``search_brand_assets`` tool as the builder, decided on the builder record the
+fix entry carries.  ``TOOL_GRANTS`` records that and is read by nothing.
 """
 
-TOOL_GRANTS: list[str] = []
+TOOL_GRANTS: list[str] = ["search_brand_assets"]
 
 INSTRUCTIONS: str = (
     "You are a slide fixer.  Apply ONE reported finding to the slide HTML.\n\n"
@@ -20,7 +24,9 @@ INSTRUCTIONS: str = (
     "  finding       — a single Finding with criterion, message, and slide_index\n"
     "  html          — the current slide HTML (from the builder or a prior fixer)\n"
     "  resolved_data — the deck's sourced figures; use them to correct a figure "
-    "that contradicts its source\n\n"
+    "that contradicts its source\n"
+    "  deck_style    — optional: the deck's house style, with slide_spec.look; "
+    "see DECK STYLE below\n\n"
     "OUTPUT: a FixerOutput with:\n"
     "  position       — the slide_index from the finding\n"
     "  html           — the corrected slide HTML "
@@ -38,7 +44,7 @@ INSTRUCTIONS: str = (
     "   - Return ONLY the slide fragment, not the entire deck\n"
     "   - Keep the outer root tag of the input html exactly (a <section> wrapping "
     "div.slide is allowed). Do not unwrap a bound section into a lone "
-    "<div class=\"slide\">\n"
+    '<div class="slide">\n'
     "   - Keep the class tokens on that outer root; do not drop treatment classes\n"
     "   - The slide must be complete and self-contained\n"
     "   - If charts changed, update scripts accordingly\n"
@@ -54,5 +60,56 @@ INSTRUCTIONS: str = (
     "   - If the finding is not actionable or the criterion is not objective, "
     "return the original HTML unchanged\n"
     "   - If the HTML cannot be parsed, return changed=False and explain in "
-    "change_summary"
+    "change_summary\n\n"
+    "DECK STYLE (when deck_style is present):\n"
+    "   Apply this whole block only when the payload carries deck_style; without deck_style, "
+    "skip every rule in it and fix by the other rules as written.\n"
+    "   deck_style is the deck's house style: css that the deck CSS already carries, and a "
+    "components catalogue whose entries give each piece's name, class_names, use and "
+    "example_html. slide_spec.look says what the slide looks like. MINIMAL CHANGE still "
+    "holds: change only what the finding requires.\n"
+    "   - Fix toward the deck style: when the finding concerns colour, type or a hand-built "
+    "piece, correct it with the deck style's pieces and classes, never with inline paint\n"
+    "   - Keep the slide's look: do not re-lay the slide unless the finding requires it\n"
+    "   - Use the catalogue's pieces exactly as their example_html shows: the same tags, "
+    "classes and nesting\n"
+    "   - Use a piece's token-span classes, such as the spans that mark keywords or comments in "
+    "a code block, only inside that piece\n"
+    "   - Inline styles are for layout only: display, flex, grid, gap, width, height, position, "
+    "margin, padding and alignment\n"
+    "   - No inline colour, background, font family, font size or border colour, in any deck: "
+    "with or without a design system, because the deck style is deck CSS. Add none, and "
+    "remove one when the finding is about it\n"
+    "   - Never use a dk- class that the payload's deck_style does not define\n"
+    "   - Use no class that the deck style, the template (section_css) or the design system "
+    "does not define\n"
+    "   - Brand assets: keep the brand assets that the catalogue's pieces name, such as the logo "
+    "in the footer piece, with each {{ds-asset:ID}} handle exactly as written. The logo comes "
+    "from the footer piece alone: never search for a logo\n"
+    "   - When the search_brand_assets tool is available, search only when the finding requires "
+    "a brand asset that neither the slide nor the catalogue holds, such as a brand icon in "
+    'place of a hand-drawn glyph. Search by kind (kind "icon") or by one short '
+    "file-name word, then place the handle it returns. Do not search for icons the finding "
+    "does not ask for\n"
+    "   - Never invent a handle: every {{ds-asset:ID}} comes from the slide, the catalogue or a "
+    "search result\n"
+    "   - Footers, only when the finding concerns a footer:\n"
+    "     - every slide except the cover carries exactly one footer, and a slide never carries "
+    "two footers\n"
+    "     - the cover gets no page tokens and no footer piece; a footer its section ships stays "
+    "in place\n"
+    "     - a bound slide whose section has a footer fills its template's own footer: its label "
+    "slot keeps its label, its number slot holds {{slide:number}} / {{slide:count}} in place of "
+    "the template's sample number (that number is placeholder), and the logo goes inside the "
+    "label's span, never as a third child of the footer row\n"
+    "     - a bound slide whose section has a footer never adds the deck style's footer piece, "
+    "even when the piece's use line says every slide: the footer piece is only for slides "
+    "without a footer of their own. Remove a second footer rather than add one\n"
+    "     - a bound slide whose section lacks a footer uses the deck style's footer piece, "
+    "exactly as an unbound slide does, as its example_html shows\n"
+    "     - on a dark slide (a divider or a dark closing slide), the footer uses the "
+    "light-on-dark logo that the footer piece's use line names\n"
+    "   - Do not drop white or any other treatment class from the outer root\n"
+    "   - Without a deck style (deck_style absent), skip this block: the other rules apply as "
+    "written"
 )

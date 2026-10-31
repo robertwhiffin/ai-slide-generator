@@ -1,0 +1,12 @@
+# Fixer v1 prompt (deck style addendum A, Task B5b fix round 1, Ruling RA15): the promoted
+# `brand-assets-b` text with its DECK STYLE block changed in three places.
+# (i) A lead line fences the whole block to payloads that carry deck_style.
+# (iv) Every footer rule is nested under "Footers, only when the finding concerns a footer".
+# (ii) and (iii) The builder's footer rules: one footer on every slide except the cover; a bound
+#      slide whose section has a footer never adds the piece, one whose section lacks a footer
+#      uses it; the cover gets no page tokens and no footer piece, and a shipped footer stays.
+# Every byte outside the block is identical.
+agent_key: fixer
+name: fixer-one-footer
+base: v1
+prompt_file: one-footer.md

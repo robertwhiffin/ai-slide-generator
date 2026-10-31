@@ -17,10 +17,14 @@ and the tool grants.
 
 Tool grants
 -----------
-``data_analyst`` is the ONLY skill with non-empty ``tool_grants`` (§16, Ruling
-C-11).  Spec §5.2.2's rationale: the analyst is the OBO boundary where
-user-scoped data access is concentrated; the architect's work (conversation,
-arc, section assignment) reaches no tool.  The other six declare ``[]``.
+``data_analyst`` declares the data tools (§16, Ruling C-11).  Spec §5.2.2's
+rationale: the analyst is the OBO boundary where user-scoped data access is
+concentrated; the architect's work (conversation, arc, section assignment)
+reaches no tool.  ``builder`` and ``fixer`` declare ``search_brand_assets``
+(deck style addendum A): a read-only search of the deck's own design system,
+bound by ``builder_node``/``fixer_node`` only when a design system is active and
+the deck has a deck style.  The architect and the three reviewers declare
+``[]``.  The grants are documentation only: no ``src`` module reads them.
 """
 
 from __future__ import annotations
@@ -50,9 +54,10 @@ class Skill:
             placeholder strings with the authored prose; the graph runs on
             placeholders until then.
         output_schema: The pydantic class the model must produce.
-        tool_grants: Tool names this skill is allowed to invoke.  Only
-            ``data_analyst`` carries a non-empty list; all others declare ``[]``
-            (§5.2.2 / Ruling C-11).
+        tool_grants: Tool names this skill is allowed to invoke (documentation
+            only).  ``data_analyst`` carries the data tools; ``builder`` and
+            ``fixer`` carry ``search_brand_assets`` (deck style addendum A); the
+            architect and the reviewers declare ``[]`` (§5.2.2 / Ruling C-11).
     """
 
     name: str
@@ -96,7 +101,8 @@ def _register(
 #   3. No body may contain the safe-area literals 88px, 72px, 56px or 1280x720
 #      — those numbers are owned by _SLIDE_FRAME_CONSTRAINTS and must come
 #      from exactly one source so they can never drift.
-#   4. data_analyst is the ONLY skill with non-empty tool_grants.
+#   4. Only data_analyst, builder and fixer have non-empty tool_grants; the
+#      builder's and fixer's are ["search_brand_assets"] (deck style addendum A).
 # ---------------------------------------------------------------------------
 
 from .architect import INSTRUCTIONS as _architect_instructions

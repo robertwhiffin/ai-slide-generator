@@ -84,7 +84,9 @@ def _substitute_deck_images(deck_dict: dict, session_id: str) -> None:
     from src.core.database import get_db_session
     from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
+    from src.utils.slide_number_tokens import substitute_deck_slide_numbers
 
+    substitute_deck_slide_numbers(deck_dict)
     ds_id = resolve_active_design_system_id(session_id)
     with get_db_session() as db:
         substitute_deck_dict_images(deck_dict, db)

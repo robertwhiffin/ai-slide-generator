@@ -87,3 +87,16 @@ _Avoid_: Blank slide
 **Blank Slide**:
 A slide a person inserts by hand. Its HTML is the deck's own frame: the most common root-to-`.slide` wrapper chain among the deck's slides, with only `class`, `data-label` and `style` kept and no content (the bare `<div class="slide"></div>` when no slide offers a usable frame). Its spec entry has no purpose and no brief. The architect fills it when asked; no turn builds, re-reviews or re-describes it otherwise.
 _Avoid_: Pending Slide, empty slide
+
+**Deck style**:
+The architect-authored CSS and component catalogue that gives a deck its own look on top of the brand (`DeckSpec.deck_style`). Its classes all start `dk-`. It is sanitised before it is saved, sits after the template in `deck.css`, and is handed to builders, fixers and reviewers. It adds pieces (code block, badge, callout) and never restyles the brand's tokens, fonts or template classes. An older deck has none.
+_Avoid_: Theme, house style
+
+**Page tokens**:
+The text `{{slide:number}}` and `{{slide:count}}` in a graph slide's footer. The stored HTML keeps them. Every reader (UI, exports, MCP, thumbnails) swaps each for a `data-tellr-slide` span holding the slide's Slide Number and the deck's slide count, and each save turns such spans back into tokens, so numbers stay right after inserts, deletes and moves. Only deck-style decks carry them; the cover has none.
+_Avoid_: Page number field, placeholder
+
+**Look**:
+A slide's own recipe for the deck style (`SlideSpec.look`): a sentence naming the pieces it uses and how they are composed. The builder follows it; a slide without one is built as before.
+_Avoid_: Layout, style
+

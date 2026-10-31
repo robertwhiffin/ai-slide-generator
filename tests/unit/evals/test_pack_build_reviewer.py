@@ -5,7 +5,8 @@ import re
 import pytest
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
-from src.domain.deck_spec import ResolvedData, SlideSpec
+from src.domain.deck_spec import DeckStyle, ResolvedData, SlideSpec
+from src.domain.deck_style import html_class_names
 from src.domain.finding import CRITERIA, Finding
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
 
@@ -13,18 +14,35 @@ from evals.harness import case, render
 from evals.harness.scorers import expected_category_score
 
 AGENT = "build_reviewer"
-CASE_IDS = ["clean", "broken_handoff", "rogue_colour", "overflow", "source_contradiction"]
-MUTATIONS = ["broken_handoff", "rogue_colour", "overflow", "source_contradiction"]
-POSITION = {"clean": 1, "broken_handoff": 1, "rogue_colour": 1, "overflow": 1, "source_contradiction": 3}
+CASE_IDS = [
+    "clean", "broken_handoff", "rogue_colour", "overflow", "source_contradiction",
+    "deck_style_inline_paint", "deck_style_clean",
+]
+MUTATIONS = ["broken_handoff", "rogue_colour", "overflow", "source_contradiction", "deck_style_inline_paint"]
+POSITIVES = {"clean", "deck_style_clean"}
+# The deck-style cases carry the technical deck style. Slide 7 (slide source is plain text in Git)
+# is where a code block belongs; the mutation paints that code block inline instead of using dk-code.
+DECK_STYLE_CASES = ("deck_style_inline_paint", "deck_style_clean")
+DECK_STYLE_SLIDE = 7
+DECK_STYLE_FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
+POSITION = {
+    "clean": 1, "broken_handoff": 1, "rogue_colour": 1, "overflow": 1, "source_contradiction": 3,
+    "deck_style_inline_paint": DECK_STYLE_SLIDE, "deck_style_clean": DECK_STYLE_SLIDE,
+}
 EXPECT = {
     "clean": {"criteria": [], "positions": []},
     "broken_handoff": {"criteria": ["brief_not_delivered"], "positions": [1]},
     "rogue_colour": {"criteria": ["rogue_colour"], "positions": [1]},
     "overflow": {"criteria": ["overflow"], "positions": [1]},
     "source_contradiction": {"criteria": ["source_contradiction"], "positions": [3]},
+    "deck_style_inline_paint": {"criteria": ["rogue_colour"], "positions": [DECK_STYLE_SLIDE]},
+    "deck_style_clean": {"criteria": [], "positions": []},
 }
 FILES = ("case.yaml", "payload.json", "reference.json", "calibration.json")
 PACK_DIR = case.PACKS_DIR / AGENT
+# An inline declaration of a property the deck style provides (spec: inline styles are layout only).
+PAINT_DECL = re.compile(r"(?<![\w-])(color|background|background-color|font-size|font-family|border-color)\s*:", re.I)
+HEX = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 
 
 COMMITTED = PACK_DIR / "cases"
@@ -64,8 +82,37 @@ def _scripts(cid):
     return case.load_case(AGENT, cid, root=CASES).payload.get("scripts", "")
 
 
+def _render_css(c):
+    """What the harness renders a case's slide with: Meridian, then the case's deck style (C21)."""
+    style = c.payload.get("deck_style")
+    return case.meridian_section_css() + ("\n\n" + style["css"] if style else "")
+
+
 def _measure(cid):
-    return render.render_slide(_html(cid), _scripts(cid), section_css=case.meridian_section_css())
+    c = case.load_case(AGENT, cid, root=CASES)
+    return render.render_slide(_html(cid), _scripts(cid), section_css=_render_css(c))
+
+
+def _fixture_style():
+    """The technical deck style as a payload carries it (``DeckStyle.model_dump()``)."""
+    return DeckStyle.model_validate(json.loads(DECK_STYLE_FIXTURE.read_text())).model_dump()
+
+
+def _style_attrs(html):
+    return re.findall(r"""\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')""", html, re.I)
+
+
+def _inline_paint(html):
+    """The paint properties declared inline anywhere in ``html``."""
+    return [p.lower() for dq, sq in _style_attrs(html) for p in PAINT_DECL.findall(dq or sq)]
+
+
+def _inline_hexes(html):
+    return {h.lower() for dq, sq in _style_attrs(html) for h in HEX.findall(dq or sq)}
+
+
+def _visible_text(html):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
 
 
 def _gold_measure(pos):
@@ -84,7 +131,7 @@ def _pcts(text):
     return set(re.findall(r"\d+(?:\.\d+)?%", text))
 
 
-def test_exactly_the_five_cases():
+def test_exactly_the_cases():
     cases = case.load_cases(AGENT, root=CASES)
     assert sorted(c.case_id for c in cases) == sorted(CASE_IDS)
     dirs = sorted(d.name for d in CASES.iterdir() if d.is_dir())
@@ -105,7 +152,9 @@ def test_case_contract(cid):
     assert "deck_brief" not in c.payload
     assert c.payload["section_css"] == case.meridian_section_css()
     assert c.payload["resolved_style"] == case.meridian_resolved_style()
-    assert c.kind == ("positive" if cid == "clean" else "mutation")
+    # An old deck's payload carries no deck_style key; a deck-style case carries the fixture.
+    assert ("deck_style" in c.payload) == (cid in DECK_STYLE_CASES)
+    assert c.kind == ("positive" if cid in POSITIVES else "mutation")
     assert (c.fault == "") == (c.kind == "positive")
 
 
@@ -116,6 +165,8 @@ def test_payload_validates_against_real_models(cid):
     spec = SlideSpec.model_validate(c.payload["slide_spec"])
     assert spec.position == POSITION[cid]
     assert c.payload["position"] == POSITION[cid]
+    if "deck_style" in c.payload:
+        DeckStyle.model_validate(c.payload["deck_style"])
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -126,12 +177,79 @@ def test_resolved_data_comes_from_the_gold_deck_spec(cid):
 
 @pytest.mark.parametrize("cid", CASE_IDS)
 def test_slide_spec_is_the_gold_slide_spec(cid):
+    """The gold slide spec; a deck-style case's adds a non-blank ``look`` and changes nothing else."""
     c = case.load_case(AGENT, cid, root=CASES)
-    assert c.payload["slide_spec"] == case.gold_deck_spec()["slides"][POSITION[cid]]
+    spec = dict(c.payload["slide_spec"])
+    if cid in DECK_STYLE_CASES:
+        look = spec.pop("look", None)
+        assert isinstance(look, str) and look.strip()
+    assert spec == case.gold_deck_spec()["slides"][POSITION[cid]]
 
 
 def test_clean_is_the_gold_slide():
     assert _html("clean") == case.gold_slide(1)
+
+
+# ---- the deck-style cases ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("cid", DECK_STYLE_CASES)
+def test_deck_style_case_carries_the_fixture_style(cid):
+    c = case.load_case(AGENT, cid, root=CASES)
+    assert c.payload["deck_style"] == _fixture_style()
+    assert c.payload["section_css"] == case.meridian_section_css()  # the style is not folded in
+
+
+def test_deck_style_clean_builds_the_code_block_from_the_pieces():
+    html = _html("deck_style_clean")
+    assert "dk-code" in html_class_names(html)
+    assert re.search(r"<(pre|code)\b", html, re.I)
+    assert _inline_paint(html) == [], _inline_paint(html)
+
+
+def test_deck_style_inline_paint_paints_the_code_block_off_the_tokens():
+    """R10: today's rogue_colour description catches it, so the inline paint is a colour outside
+    the design-system tokens."""
+    html = _html("deck_style_inline_paint")
+    assert re.search(r"<(pre|code)\b", html, re.I), "no code block"
+    assert "dk-code" not in html_class_names(html)
+    assert _inline_paint(html), "the code block is not painted inline"
+    hexes = _inline_hexes(html)
+    assert hexes, "the inline paint names no colour literal"
+    section_css = case.meridian_section_css().lower()
+    assert all(h not in section_css for h in hexes), hexes
+
+
+def test_deck_style_cases_say_the_same_thing():
+    """A single fault: the painted slide's text is the clean slide's, so nothing but the paint differs
+    for a reviewer to flag."""
+    assert _visible_text(_html("deck_style_inline_paint")) == _visible_text(_html("deck_style_clean"))
+    assert _html("deck_style_inline_paint") != _html("deck_style_clean")
+    assert _scripts("deck_style_inline_paint") == _scripts("deck_style_clean")
+
+
+def test_deck_style_inline_paint_reference_names_the_planted_colour():
+    msg = case.load_case(AGENT, "deck_style_inline_paint", root=CASES).reference["findings"][0]["message"].lower()
+    assert any(h in msg for h in _inline_hexes(_html("deck_style_inline_paint"))), msg
+
+
+@pytest.mark.usefixtures("requires_chromium")
+def test_deck_style_inline_paint_renders_off_palette_and_nothing_else():
+    m = _measure("deck_style_inline_paint")
+    assert m.rendered
+    assert m.off_palette, m
+    assert m.overflow_px == 0 and m.safe_area_px == 0, m
+    assert m.min_contrast >= 4.5, m
+    assert m.console_errors == (), m
+
+
+@pytest.mark.usefixtures("requires_chromium")
+def test_deck_style_clean_renders_fully_clean_with_the_deck_style():
+    m = _measure("deck_style_clean")
+    assert m.rendered
+    assert m.overflow_px == 0 and m.safe_area_px == 0, m
+    assert m.off_palette == (), m
+    assert m.min_contrast >= 4.5, m
+    assert m.console_errors == (), m
 
 
 @pytest.mark.usefixtures("requires_chromium")
@@ -216,7 +334,7 @@ def test_reference_shape_and_passes(cid):
         Finding.model_validate(f)
     ok, why = expected_category_score(AGENT, ref, c.expect)
     assert ok, why
-    if cid == "clean":
+    if cid in POSITIVES:
         assert ref["findings"] == []
     else:
         assert {f["criterion"] for f in ref["findings"]} >= set(c.expect["criteria"])
@@ -236,8 +354,9 @@ def test_calibration_should_fail_is_reviewer_shaped_and_fails(cid):
     assert not ok, f"calibration should_fail unexpectedly passes: {why}"
 
 
-def test_clean_calibration_invents_an_objective_finding():
-    bad = _cal("clean")["should_fail"]
+@pytest.mark.parametrize("cid", sorted(POSITIVES))
+def test_clean_calibration_invents_an_objective_finding(cid):
+    bad = _cal(cid)["should_fail"]
     assert any(CRITERIA[f["criterion"]].objective for f in bad["findings"])
 
 

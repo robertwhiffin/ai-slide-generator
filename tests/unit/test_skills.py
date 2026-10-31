@@ -3,14 +3,18 @@
 Covers:
 - All seven skills load and bind to their OUTPUT_SCHEMAS entry
 - Each declares a version >= 1 and a non-empty instructions body
-- data_analyst declares non-empty tool_grants; all others declare []
+- data_analyst declares non-empty tool_grants; builder and fixer declare
+  ["search_brand_assets"] (deck style addendum A, B3 — documentation only:
+  the binding decision is code in builder_node/fixer_node, Correction A12);
+  the architect and the three reviewers declare []
 - list_skills() returns all seven names
 - Unknown skill name raises KeyError
 - No skill body contains the safe-area literals owned by _SLIDE_FRAME_CONSTRAINTS
 
 Sabotage targets used during development (results in task-C3-report.md):
 - S3: hardcode 88px into architect instructions → test_no_skill_body_contains_safe_area_literals red
-- S4: give builder non-empty tool_grants → test_non_analyst_skills_declare_empty_tool_grants red
+- S4: give the architect or a reviewer non-empty tool_grants →
+  test_skills_outside_the_analyst_builder_and_fixer_declare_empty_tool_grants red
 """
 
 import pytest
@@ -79,10 +83,24 @@ class TestSkillRegistry:
         skill = load_skill("data_analyst")
         assert skill.tool_grants, "data_analyst must declare non-empty tool_grants (§5.2.2)"
 
-    def test_non_analyst_skills_declare_empty_tool_grants(self):
-        """§16 / Ruling C-11: architect and all reviewers/builders declare []."""
-        non_analyst = [n for n in SEVEN_SKILL_NAMES if n != "data_analyst"]
-        for name in non_analyst:
+    def test_builder_and_fixer_declare_the_brand_asset_search(self):
+        """Deck style addendum A, B3: builders and fixers may search brand assets.
+
+        Documentation only (Correction A12): nothing reads ``TOOL_GRANTS``; the
+        tool is bound by ``builder_node``/``fixer_node`` when a design system is
+        active and the deck has a deck style.
+        """
+        for name in ("builder", "fixer"):
+            skill = load_skill(name)
+            assert skill.tool_grants == ["search_brand_assets"], (
+                f"{name!r} must declare ['search_brand_assets'] tool_grants; "
+                f"got {skill.tool_grants!r}"
+            )
+
+    def test_skills_outside_the_analyst_builder_and_fixer_declare_empty_tool_grants(self):
+        """§16 / Ruling C-11: the architect and the three reviewers declare []."""
+        granted = {"data_analyst", "builder", "fixer"}
+        for name in [n for n in SEVEN_SKILL_NAMES if n not in granted]:
             skill = load_skill(name)
             assert skill.tool_grants == [], (
                 f"{name!r} must declare [] tool_grants (§16 / Ruling C-11); "
