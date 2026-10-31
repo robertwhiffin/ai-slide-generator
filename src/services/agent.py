@@ -31,6 +31,7 @@ from src.core.mlflow_tracing import (
     configure_tracing_environment,
     create_databricks_experiment,
     get_unity_catalog_trace_location,
+    start_span_in_experiment,
 )
 from src.core.databricks_client import (
     get_current_username,
@@ -1416,8 +1417,7 @@ class SlideGeneratorAgent:
         try:
             use_mlflow_span = mlflow_agent_generate_spans_enabled()
             if use_mlflow_span and session.get("experiment_id"):
-                mlflow.set_experiment(experiment_id=session["experiment_id"])
-                span_cm = mlflow.start_span(name="generate_slides")
+                span_cm = start_span_in_experiment("generate_slides", session["experiment_id"])
             else:
                 span_cm = nullcontext(_NoopMlflowSpan())
 
@@ -1670,8 +1670,9 @@ class SlideGeneratorAgent:
         try:
             use_mlflow_span = mlflow_agent_generate_spans_enabled()
             if use_mlflow_span and session.get("experiment_id"):
-                mlflow.set_experiment(experiment_id=session["experiment_id"])
-                span_cm = mlflow.start_span(name="generate_slides_streaming")
+                span_cm = start_span_in_experiment(
+                    "generate_slides_streaming", session["experiment_id"]
+                )
             else:
                 span_cm = nullcontext(_NoopMlflowSpan())
 

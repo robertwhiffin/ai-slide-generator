@@ -16,12 +16,37 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+import threading
+from contextlib import ExitStack, contextmanager
+from typing import Any, Iterator, Optional
+
+import mlflow
 
 logger = logging.getLogger(__name__)
 
 # Lazy cache for UnityCatalog class (mlflow >= 3.11)
 _unity_catalog_cls: Any = None
+
+# ``mlflow.set_experiment`` sets a process-global active experiment, and a trace takes
+# its experiment when its root span starts.  Several chat jobs run in one process
+# (TELLR_CHAT_JOB_CONCURRENCY), so the set-then-start pair is serialised: otherwise one
+# user's trace could start under another user's experiment.
+_EXPERIMENT_SPAN_LOCK = threading.Lock()
+
+
+@contextmanager
+def start_span_in_experiment(name: str, experiment_id: str) -> Iterator[Any]:
+    """Open an MLflow root span attributed to ``experiment_id``, even with concurrent jobs.
+
+    The lock is held from ``set_experiment`` until the span has started (MLflow
+    resolves the trace's experiment in the span processor's ``on_start``), never for
+    the span's body.
+    """
+    with ExitStack() as stack:
+        with _EXPERIMENT_SPAN_LOCK:
+            mlflow.set_experiment(experiment_id=experiment_id)
+            span = stack.enter_context(mlflow.start_span(name=name))
+        yield span
 
 
 def _get_unity_catalog_class() -> Any | None:
