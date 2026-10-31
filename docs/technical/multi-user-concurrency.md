@@ -237,10 +237,29 @@ uvicorn.run("src.api.main:app", host=host, port=port, workers=workers)
 
 Set the `UVICORN_WORKERS` environment variable to override the default. Each worker has its own `ChatService` singleton and deck cache. The database-based session locking ensures correctness across workers.
 
+### Chat Job Runners
+
+A chat turn (polling mode) runs on the uvicorn worker that received its `POST /api/chat/async`, in that worker's in-memory queue (`src/api/services/job_queue.py`). Each worker runs `TELLR_CHAT_JOB_CONCURRENCY` job runners over its queue: default 4, at most 16, and an unusable value falls back to 4. With the default 4 workers, the app runs up to 16 turns at once. A turn waits only when all runners on its worker are busy.
+
+- **Sessions stay serial.** The database session lock still allows one turn per session, so runners only overlap different sessions.
+- **Own thread pool.** Chat jobs run on a dedicated `chat-job` thread pool sized to the runners, not on the loop's default executor. Request handlers (the chat poll among them) `asyncio.to_thread` onto the default executor, and jobs that hold a thread for minutes would starve them.
+- **Waiting is visible.** While a turn waits for a runner, its request is `pending` with no `turn_progress`. The poll loop forwards a `queued` event, and the chat shows "Waiting for another request to finish…" until the turn starts.
+- **Restarts.** The queue is in memory, so a turn still waiting when its worker restarts is lost and stays `pending`.
+- **Process-global MLflow state.** Several users' turns now share a process, so anything that relies on MLflow's process-global state must hold `mlflow_experiment_lock()` (`src/core/mlflow_tracing.py`). That state is the active experiment that `mlflow.set_experiment` sets and that traces and `mlflow.genai.evaluate` read.
+  - Generate spans open through `start_span_in_experiment`.
+  - The verification judge runs `set_experiment` + `evaluate` through `_evaluate_in_experiment`, in a thread.
+  - Nothing else may call `set_experiment`, and a test pins that.
+  - Never await while holding the lock.
+  - Autologging is explicitly disabled at startup unless `TELLR_MLFLOW_LANGCHAIN_AUTOLOG=1`. Otherwise `evaluate` would enable it process-wide and trace other turns into the verifying user's experiment. With the opt-in, autolog traces are not experiment-isolated across concurrent turns.
+  - Fluent run calls such as `mlflow.log_param` outside a run would open a run in whichever experiment is global; do not add them on the chat path.
+
+Before this, each worker ran one chat job at a time, so a second turn on the same worker waited for the first to finish. On 2026-10-31 an agent turn waited 3 m 45 s behind a concurrent legacy turn. Prod history over 35 days (6,182 turns) peaked at 9 concurrent turns against 4 slots.
+
 ### Scaling Considerations
 
-- **Worker count:** Defaults to 4 (configurable via `UVICORN_WORKERS` env var). Increase for higher concurrency; each worker can handle multiple async requests.
-- **Lock timeout:** 5 minutes covers long LLM generations. Stale locks are automatically overridden.
+- **Worker count:** Defaults to 4 (configurable via `UVICORN_WORKERS` env var). Each worker holds a database pool of up to 100 connections (`pool_size=80`, `max_overflow=20`) and runs every periodic loop, so prefer raising `TELLR_CHAT_JOB_CONCURRENCY` for more concurrent turns.
+- **Concurrent turns:** `UVICORN_WORKERS × TELLR_CHAT_JOB_CONCURRENCY` (16 by default). The model endpoints' rate limits are the next ceiling: a deck builds its slides in parallel, so each turn makes many model calls at once.
+- **Lock timeout and heartbeat:** a session lock goes stale 5 minutes after `processing_started_at`. Each worker's 60 s timeout sweep refreshes the locks of its turns that are running (not yet timed out) or queued for less than their hard timeout. So a lock stays live while its turn is alive, and goes stale about 5 minutes after the holding worker stops refreshing it (crash, restart or timeout). The sync `/chat` and SSE routes (local dev) are not heartbeated.
 - **Cache coherence:** Each worker maintains its own cache. Decks are loaded from database on cache miss, ensuring consistency after cross-worker updates.
 
 ---

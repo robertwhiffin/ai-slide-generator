@@ -49,7 +49,8 @@ from src.api.services.export_job_queue import (
     start_export_cleanup_worker,
     start_export_worker,
 )
-from src.api.services.job_queue import recover_stuck_requests, start_worker
+from src.api.services.job_queue import recover_stuck_requests, start_workers, stop_workers
+from src.core.mlflow_tracing import disable_autologging_unless_opted_in
 from src.api.services.slide_style_preview_queue import start_preview_worker
 from src.core.database import (
     is_lakebase_environment,
@@ -69,7 +70,7 @@ IS_PRODUCTION = ENVIRONMENT == "production"
 IS_TESTING = ENVIRONMENT == "test"
 
 # Worker task references for cleanup
-_worker_task = None
+_worker_tasks: list[asyncio.Task] = []
 _export_worker_task = None
 _export_cleanup_task: asyncio.Task | None = None
 _preview_worker_task = None
@@ -82,7 +83,7 @@ _frontend_assets_stack: ExitStack | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
-    global _worker_task, _export_worker_task, _export_cleanup_task, _preview_worker_task
+    global _worker_tasks, _export_worker_task, _export_cleanup_task, _preview_worker_task
     global _cleanup_task, _timeout_task, _spec_sweeper_task, _frontend_assets_stack
 
     # Startup
@@ -142,9 +143,14 @@ async def lifespan(app: FastAPI):
 
     # Skip background workers and recovery in test mode
     if not IS_TESTING:
-        # Start the job queue worker for async chat processing
-        _worker_task = await start_worker()
-        logger.info("Chat job queue worker started")
+        # Before any job runs: mlflow.genai.evaluate (verification) would otherwise
+        # enable tracing autolog process-wide and trace other turns into its experiment.
+        disable_autologging_unless_opted_in()
+
+        # Start the job queue runners for async chat processing (several per
+        # process: TELLR_CHAT_JOB_CONCURRENCY, default 4)
+        _worker_tasks = await start_workers()
+        logger.info("Chat job queue started with %d runners", len(_worker_tasks))
 
         # Start the export worker for async PPTX export processing
         _export_worker_task = await start_export_worker()
@@ -207,13 +213,10 @@ async def lifespan(app: FastAPI):
     await stop_token_refresh()
 
     # Cancel the worker tasks
-    if _worker_task:
-        _worker_task.cancel()
-        try:
-            await _worker_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("Chat job queue worker stopped")
+    if _worker_tasks:
+        await stop_workers(_worker_tasks)
+        _worker_tasks = []
+        logger.info("Chat job queue runners stopped")
 
     if _export_worker_task:
         _export_worker_task.cancel()

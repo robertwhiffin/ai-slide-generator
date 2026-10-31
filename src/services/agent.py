@@ -31,6 +31,7 @@ from src.core.mlflow_tracing import (
     configure_tracing_environment,
     create_databricks_experiment,
     get_unity_catalog_trace_location,
+    start_span_in_experiment,
 )
 from src.core.databricks_client import (
     get_current_username,
@@ -124,14 +125,13 @@ def _run_output_safety_gate(html_output, regenerate, session_id, on_retry=None):
     if not findings:
         return html_output, False
 
+    # The warning carries the findings.  No mlflow.log_param: outside a run it starts
+    # one in whichever experiment is process-global (another user's, with several chat
+    # jobs per process) and nothing ever ends it.
     logger.warning(
         "Unsafe patterns in LLM output; retrying once",
         extra={"session_id": session_id, "findings": findings},
     )
-    try:
-        mlflow.log_param("safety_gate_retry", ",".join(findings)[:250])
-    except Exception:
-        pass
 
     if on_retry is not None:
         try:
@@ -795,11 +795,11 @@ class SlideGeneratorAgent:
         experiment_id = None
         experiment_url = None
         try:
+            # Not made active here: the active experiment is process-global, so the
+            # generate span sets it under the experiment lock (start_span_in_experiment).
             experiment_id, experiment_url = self._ensure_user_experiment(
                 session_id, username
             )
-            # Set as active experiment for this session
-            mlflow.set_experiment(experiment_id=experiment_id)
         except Exception as e:
             logger.warning(
                 f"Failed to ensure user experiment, continuing without MLflow: {e}",
@@ -1416,8 +1416,7 @@ class SlideGeneratorAgent:
         try:
             use_mlflow_span = mlflow_agent_generate_spans_enabled()
             if use_mlflow_span and session.get("experiment_id"):
-                mlflow.set_experiment(experiment_id=session["experiment_id"])
-                span_cm = mlflow.start_span(name="generate_slides")
+                span_cm = start_span_in_experiment("generate_slides", session["experiment_id"])
             else:
                 span_cm = nullcontext(_NoopMlflowSpan())
 
@@ -1670,8 +1669,9 @@ class SlideGeneratorAgent:
         try:
             use_mlflow_span = mlflow_agent_generate_spans_enabled()
             if use_mlflow_span and session.get("experiment_id"):
-                mlflow.set_experiment(experiment_id=session["experiment_id"])
-                span_cm = mlflow.start_span(name="generate_slides_streaming")
+                span_cm = start_span_in_experiment(
+                    "generate_slides_streaming", session["experiment_id"]
+                )
             else:
                 span_cm = nullcontext(_NoopMlflowSpan())
 

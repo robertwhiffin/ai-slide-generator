@@ -62,8 +62,11 @@ const isPollingMode = (): boolean => {
 // Streaming event types matching backend StreamEventType
 export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready' | 'turn_progress';
 
+/** Events the client derives itself: 'queued' comes from the poll's `pending` status. */
+export type ClientEventType = 'queued';
+
 export interface StreamEvent {
-  type: StreamEventType;
+  type: StreamEventType | ClientEventType;
   content?: string;
   tool_name?: string;
   tool_input?: Record<string, any>;
@@ -90,6 +93,8 @@ export interface StreamEvent {
   slide_cursor?: number;
   /** #319: the graph turn's stage summary, on a 'turn_progress' event. */
   turn_progress?: TurnProgress | null;
+  /** On a 'queued' event: the turn is waiting for a free job runner (true), or no longer is. */
+  queued?: boolean;
 }
 
 export interface SessionMessage {
@@ -1151,6 +1156,8 @@ export const api = {
         let revisionMark: number | undefined;
         // #319: the highest turn_progress seq forwarded so far.
         let lastProgressSeq = 0;
+        // Whether this turn was last reported as waiting for a free job runner.
+        let queued = false;
 
         pollInterval = setInterval(async () => {
           if (cancelled) {
@@ -1165,6 +1172,15 @@ export const api = {
               slidesCursor > 0 ? slidesCursor : undefined,
               revisionMark,
             );
+
+            // A turn waiting for a free job runner: pending, and not started (no
+            // progress yet).  Forwarded once when it starts waiting and once when it
+            // stops, so a turn that never waits forwards nothing.
+            const waiting = response.status === 'pending' && !response.turn_progress;
+            if (waiting !== queued) {
+              queued = waiting;
+              onEvent({ type: 'queued', queued });
+            }
 
             // Process new events (streaming path emits real slide_ready events here)
             for (const event of response.events) {

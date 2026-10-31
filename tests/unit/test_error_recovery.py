@@ -70,7 +70,11 @@ def mock_client():
 @pytest.fixture
 def mock_mlflow():
     """Mock MLflow for testing."""
+    # The generate spans open through src.core.mlflow_tracing.start_span_in_experiment,
+    # so that module's mlflow is the same mock.
     with patch("src.services.agent.mlflow") as mock_mlflow, patch(
+        "src.core.mlflow_tracing.mlflow", mock_mlflow
+    ), patch(
         "src.services.agent.create_databricks_experiment",
         return_value="test-exp-id",
     ):

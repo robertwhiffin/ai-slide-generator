@@ -21,13 +21,18 @@ import json
 import logging
 import re
 import time
+import weakref
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
 
 from src.core.defaults import DEFAULT_CONFIG
-from src.core.mlflow_tracing import configure_tracing_environment, create_databricks_experiment
+from src.core.mlflow_tracing import (
+    configure_tracing_environment,
+    create_databricks_experiment,
+    mlflow_experiment_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +255,43 @@ def _evaluate_with_judge_direct_llm(
     )
 
 
+# One locked evaluation runs at a time per process anyway (the experiment lock), so
+# the others wait here as coroutines rather than each parked on a default-executor
+# thread blocked on the lock: auto-verify fires every slide at once, and those threads
+# also serve the API's request handlers.  One semaphore per event loop.
+_EVALUATION_SLOTS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _evaluation_slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slot = _EVALUATION_SLOTS.get(loop)
+    if slot is None:
+        slot = _EVALUATION_SLOTS[loop] = asyncio.Semaphore(1)
+    return slot
+
+
+def _evaluate_in_experiment(
+    experiment_id: str, eval_data: Any, scorers: list
+) -> tuple[Any, Optional[Exception]]:
+    """``mlflow.genai.evaluate`` in ``experiment_id``: ``(result, None)`` or ``(None, error)``.
+
+    evaluate reads MLflow's process-global active experiment while it runs, and several
+    chat jobs share the process, so set_experiment + evaluate hold the experiment lock.
+    Called through ``asyncio.to_thread``: the lock is never taken on the event loop, and
+    a slow evaluation no longer stalls the loop.
+    """
+    import mlflow
+
+    with mlflow_experiment_lock():
+        mlflow.set_experiment(experiment_id=experiment_id)
+        try:
+            return mlflow.genai.evaluate(data=eval_data, scorers=scorers), None
+        except Exception as exc:
+            return None, exc
+
+
 async def evaluate_with_judge(
     genie_data: str,
     slide_content: str,
@@ -311,12 +353,12 @@ async def evaluate_with_judge(
         configure_tracing_environment()
         logger.info("LLM judge: set MLflow tracking URI to databricks")
 
-        # Use passed experiment_id (per-session) or compute user experiment path
+        # Use passed experiment_id (per-session) or compute user experiment path.  It is
+        # made active only under the experiment lock, together with evaluate (below).
         if experiment_id:
             logger.info(
                 f"LLM judge: using per-session experiment_id: {experiment_id}"
             )
-            mlflow.set_experiment(experiment_id=experiment_id)
         else:
             # Fallback: dynamically compute user's experiment path
             logger.warning("LLM judge: no experiment_id passed, computing user experiment path")
@@ -362,7 +404,6 @@ async def evaluate_with_judge(
             else:
                 experiment_id = experiment.experiment_id
                 logger.info(f"LLM judge: using existing experiment ID: {experiment_id}")
-            mlflow.set_experiment(experiment_id=experiment_id)
 
         # Create judge using outputs and expectations
         accuracy_judge = make_judge(
@@ -383,13 +424,15 @@ async def evaluate_with_judge(
             "expectations": {"source_data": genie_data},
         }])
 
-        # Run evaluation using mlflow.genai.evaluate() - THIS creates Evaluation Runs
-        try:
-            eval_result = mlflow.genai.evaluate(
-                data=eval_data,
-                scorers=[accuracy_judge],
+        # Run evaluation using mlflow.genai.evaluate() - THIS creates Evaluation Runs.
+        # It runs in a worker thread under the experiment lock (see
+        # _evaluate_in_experiment), never on the event loop, one per process at a
+        # time (see _EVALUATION_SLOTS); the fallback runs after.
+        async with _evaluation_slot():
+            eval_result, eval_exc = await asyncio.to_thread(
+                _evaluate_in_experiment, experiment_id, eval_data, [accuracy_judge]
             )
-        except Exception as eval_exc:
+        if eval_exc is not None:
             if _mlflow_evaluate_should_use_direct_fallback(eval_exc):
                 logger.warning(
                     "MLflow genai.evaluate failed (egress or MLflow state); "
@@ -404,7 +447,7 @@ async def evaluate_with_judge(
                     start_time,
                     trace_id,
                 )
-            raise
+            raise eval_exc
 
         # Extract results from evaluation
         run_id = eval_result.run_id

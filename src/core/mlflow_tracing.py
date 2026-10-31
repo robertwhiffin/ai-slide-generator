@@ -16,12 +16,67 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+import threading
+from contextlib import ExitStack, contextmanager
+from typing import Any, Iterator, Optional
+
+import mlflow
 
 logger = logging.getLogger(__name__)
 
 # Lazy cache for UnityCatalog class (mlflow >= 3.11)
 _unity_catalog_cls: Any = None
+
+# ``mlflow.set_experiment`` sets a process-global active experiment, which a trace reads
+# when its root span starts and ``mlflow.genai.evaluate`` reads while it runs.  Several
+# chat jobs run in one process (TELLR_CHAT_JOB_CONCURRENCY), so every set-then-use of
+# the active experiment holds this lock: otherwise one user's trace or evaluation run
+# could land in another user's experiment.  Never await while holding it.
+_MLFLOW_EXPERIMENT_LOCK = threading.Lock()
+
+
+def disable_autologging_unless_opted_in() -> bool:
+    """Explicitly disable MLflow autologging for every flavour, unless opted in.
+
+    ``mlflow.genai.evaluate`` (slide verification) temporarily enables tracing
+    autolog for every flavour not explicitly disabled, process-wide (mlflow 3.14
+    ``configure_autologging_for_evaluation``).  While it ran, other chat turns'
+    LangChain calls became root traces in the verifying user's experiment.  Called
+    once per process at startup.  ``TELLR_MLFLOW_LANGCHAIN_AUTOLOG=1`` opts in and
+    skips this (those traces are not experiment-isolated across concurrent jobs).
+
+    Returns:
+        True if autologging was disabled.
+    """
+    flag = (os.getenv("TELLR_MLFLOW_LANGCHAIN_AUTOLOG") or "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return False
+    try:
+        mlflow.autolog(disable=True)
+    except Exception:
+        logger.warning("Could not disable MLflow autologging", exc_info=True)
+        return False
+    return True
+
+
+def mlflow_experiment_lock() -> threading.Lock:
+    """The process lock around any ``set_experiment`` and the MLflow call that relies on it."""
+    return _MLFLOW_EXPERIMENT_LOCK
+
+
+@contextmanager
+def start_span_in_experiment(name: str, experiment_id: str) -> Iterator[Any]:
+    """Open an MLflow root span attributed to ``experiment_id``, even with concurrent jobs.
+
+    The lock is held from ``set_experiment`` until the span has started (MLflow
+    resolves the trace's experiment in the span processor's ``on_start``), never for
+    the span's body.
+    """
+    with ExitStack() as stack:
+        with _MLFLOW_EXPERIMENT_LOCK:
+            mlflow.set_experiment(experiment_id=experiment_id)
+            span = stack.enter_context(mlflow.start_span(name=name))
+        yield span
 
 
 def _get_unity_catalog_class() -> Any | None:
