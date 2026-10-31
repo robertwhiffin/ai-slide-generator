@@ -18,7 +18,7 @@ import pytest
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS, model_payload_for
 from src.services.agent_runtime import MODEL_DRIVEN_AGENT_KEYS, UnknownAgentKeyError
 from src.services.graph_configuration_seed import REQUIRED_SMOKE_PAYLOADS
-from tests.fixtures.model_payload_keys import EVERY_MODEL_CALL
+from tests.fixtures.model_payload_keys import EVERY_MODEL_CALL, OPTIONAL_MODEL_KEYS
 
 #: What the projection drops from each seeded smoke payload (C37's evidence).
 _SEED_DROPPED = {
@@ -37,7 +37,7 @@ def _production_union(role: str) -> frozenset[str]:
     for _label, call_role, keys in EVERY_MODEL_CALL:
         if call_role == role:
             union |= keys
-    return union
+    return union | OPTIONAL_MODEL_KEYS.get(role, frozenset())
 
 
 def test_the_projection_covers_exactly_the_seven_model_roles():

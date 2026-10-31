@@ -27,6 +27,7 @@ from src.api.schemas.agent_config import normalize_style_source_exclusivity
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
+from src.utils.slide_number_tokens import substitute_slide_numbers
 from src.api.services.chat_service import (
     get_chat_service,
     resolve_engine_mode_or_unavailable,
@@ -1035,6 +1036,40 @@ async def poll_chat(
             revisions_after,
         )
     ]
+
+    # Live page-number tokens: the count is the persisted spec's slide count (the
+    # deck's slide_count is stale mid-build).  Read it once, and only when some
+    # row carries a token, so a legacy deck's 3-second poll costs nothing extra.
+    _all_rows = [*released_slides, *slide_revisions]
+    _token_rows = [r for r in _all_rows if "{{slide:" in (r["html"] or "")]
+    if _token_rows:
+        count = None
+        try:
+            from src.api.services.deck_level_writer import read_deck_spec
+
+            spec = await asyncio.to_thread(read_deck_spec, session_id)
+            if spec and isinstance(spec.get("slides"), list):
+                count = len(spec["slides"])
+        except Exception:
+            logger.warning("Could not read deck spec for page numbers", exc_info=True)
+        if count is None:
+            # No readable spec: highest released position + 1, so no literal
+            # token ships.
+            count = max(r["position"] for r in _all_rows) + 1
+        for r in _token_rows:
+            r["html"] = substitute_slide_numbers(r["html"], r["position"] + 1, count)
+
+    # Brand assets after the page tokens, as the REST readers order them: one asset
+    # read for every row this poll returns, and none when no row carries a handle.
+    _asset_rows = [r for r in _all_rows if "{{ds-asset:" in (r["html"] or "")]
+    if _asset_rows:
+        from src.api.services.session_manager import resolve_streamed_ds_assets
+
+        resolved = await asyncio.to_thread(
+            resolve_streamed_ds_assets, session_id, [r["html"] for r in _asset_rows]
+        )
+        for r, html in zip(_asset_rows, resolved):
+            r["html"] = html
 
     return {
         "status": chat_request["status"],

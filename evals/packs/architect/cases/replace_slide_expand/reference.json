@@ -18,7 +18,8 @@
           "hands_off": "CSS gives presenters design control that PowerPoint cannot match, in three ways",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         },
         {
           "purpose": "Design fidelity 1 — Web fonts that load reliably",
@@ -29,7 +30,8 @@
             "css_font_availability"
           ],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         },
         {
           "purpose": "Design fidelity 2 — Precise spacing and kerning",
@@ -38,7 +40,8 @@
           "hands_off": "CSS places every line of text exactly where it belongs",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         },
         {
           "purpose": "Design fidelity 3 — Theming with CSS",
@@ -47,7 +50,8 @@
           "hands_off": "With CSS, the whole deck's design lives in one place and stays consistent",
           "data_references": [],
           "slide_type": null,
-          "template_section_index": null
+          "template_section_index": null,
+          "look": null
         }
       ]
     }

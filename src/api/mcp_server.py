@@ -617,7 +617,9 @@ def _render_deck_response(
     from src.api.services.chat_service import resolve_active_design_system_id
     from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
     from src.utils.image_utils import substitute_deck_dict_images
+    from src.utils.slide_number_tokens import substitute_deck_slide_numbers
 
+    substitute_deck_slide_numbers(deck_dict)
     design_system_id = resolve_active_design_system_id(session_id)
     with get_db_session() as db:
         substitute_deck_dict_images(deck_dict, db)

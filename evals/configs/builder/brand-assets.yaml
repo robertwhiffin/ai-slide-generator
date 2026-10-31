@@ -1,0 +1,15 @@
+# Builder v1 prompt (deck style addendum A, Task B5b): the promoted `deck-style-ground` text on
+# the v1 model (Sonnet 5.5, as `sonnet-5-5`), with the DECK STYLE block extended. Its precedence
+# sentence now covers IMAGE RULES too (Ruling RA5). New bullets: place the brand assets the
+# catalogue's pieces name; when the search_brand_assets tool is available, search for icons when
+# the look asks for them or the slide shows products or concepts (by kind or one file-name word),
+# and place what it returns; never invent a handle or hand-draw an icon; no footer on the cover
+# and never two footers; a bound slide fills its template's own footer (label, {{slide:number}} /
+# {{slide:count}} over the sample number, the logo inside the label's span) and never adds the
+# footer piece, which is for unbound slides only; dark slides use the light-on-dark logo; one
+# ground (a light section renders on the deck's default ground, so white is dropped on content
+# slides; dark and event never change). Every byte outside the block is identical.
+agent_key: builder
+name: builder-brand-assets
+base: v1
+prompt_file: brand-assets.md

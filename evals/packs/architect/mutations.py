@@ -2,12 +2,14 @@
 import copy
 import json
 import pathlib
+import re
 
 import yaml
 
 import src.core.database  # noqa: F401  (break import cycle before src.services.*)
 from src.domain.deck_spec import DeckSpec, DesignContractRef
 from src.domain.deck_spec_slides import spec_json_with_blank_entry
+from src.domain.deck_style import sanitise_deck_style
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_numbering import architect_slide_payload
 from src.domain.slide_operations import (
@@ -27,6 +29,7 @@ from evals.harness import case
 AGENT = "architect"
 CASES_DIR = case.PACKS_DIR / AGENT / "cases"
 LAYOUT = case.MERIDIAN_DIR / "bundle" / "templates" / "standard" / "index.html"
+DECK_STYLE_FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
 
 MERIDIAN_ID, MERIDIAN_TEMPLATE = 3, 5
 ACME_ID, ACME_TEMPLATE = 4, 7
@@ -112,6 +115,18 @@ MESSAGES = {
     ),
     # The arc-review sweeper's describe-only turn: production's own message, on both splits.
     "redescribe_deck": ARC_REVIEW_MESSAGE,
+    # Architect deck style: a fresh technical build on a generic public topic (the figures come
+    # with the request, so it is a build, not ask_data), and a restyle of the deck's code blocks.
+    "build_technical_deck": (
+        "Build a deck for data engineers on streaming Postgres changes into a lakehouse with "
+        "logical replication. Show the setup as code (the publication, the replication slot and "
+        "the subscriber settings), add a comparison table of logical replication, trigger-based "
+        "capture and nightly batch export, and badge each figure as measured or untested. "
+        "Measured in our test run: lag under 2 seconds at 5,000 writes per second, a 3-hour "
+        "initial snapshot of a 200 GB database, and 4% extra CPU on the primary. Untested: "
+        "failover to a standby, and our estimate of 30 hours to snapshot the 2 TB database."
+    ),
+    "restyle_deck": "Make all the code blocks dark navy with light text",
 }
 
 # The edit-operations cases (spec §9): their references answer in operations, not a deck_spec.
@@ -120,6 +135,9 @@ OPERATIONS_CASES = ("delete_slide", "move_slide", "replace_slide_expand", "mixed
 # no user row, so the conversation is the prior exchange alone and ARC_REVIEW_MESSAGE reaches the
 # model only as ``message``; and a describe-only turn resolves no slide references.
 DESCRIBE_ONLY_CASES = ("redescribe_deck",)
+# The cases whose deck carries the deck-style fixture and a look on every slide: the deck as a
+# deck-style build leaves it.
+STYLED_DECK_CASES = ("restyle_deck",)
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
 HAS_DECK = (
     "edit_request", "confirm_design", "discuss",
@@ -128,6 +146,7 @@ HAS_DECK = (
     "fill_blank_slide", "edit_beside_blank",
     *OPERATIONS_CASES,
     *DESCRIBE_ONLY_CASES,
+    *STYLED_DECK_CASES,
 )
 # The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
 BLANK_CASES = ("fill_blank_slide", "edit_beside_blank")
@@ -143,6 +162,25 @@ def _blank_deck(deck: dict, at: int) -> dict:
     spliced = json.loads(spec_json_with_blank_entry(json.dumps(deck), at))
     DeckSpec.model_validate(spliced)  # fail fast
     return spliced
+
+
+def deck_style_fixture() -> dict:
+    """The technical deck style fixture (``evals/fixtures/deck_style_technical.json``), fresh."""
+    return json.loads(DECK_STYLE_FIXTURE.read_text())
+
+
+def _styled_deck(deck: dict, looks: dict[int, str]) -> dict:
+    """``deck`` as a deck-style build leaves it: the fixture style and a look on every slide.
+
+    ``looks`` maps every position to its look; each names only the fixture's pieces.
+    """
+    spec = copy.deepcopy(deck)
+    assert sorted(looks) == [s["position"] for s in spec["slides"]], sorted(looks)
+    for slide in spec["slides"]:
+        slide["look"] = looks[slide["position"]]
+    spec["deck_style"] = deck_style_fixture()
+    DeckSpec.model_validate(spec)  # fail fast
+    return spec
 
 
 def _dump(path, obj):
@@ -168,6 +206,8 @@ def _payload(cid):
     deck = case.gold_deck_spec() if has_deck else None
     if cid in BLANK_CASES:
         deck = _blank_deck(deck, BLANK_AT)
+    if cid in STYLED_DECK_CASES:
+        deck = _styled_deck(deck, RESTYLE_LOOKS)
     slide_keys = architect_slide_payload(
         conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else [],
         describe_only=describe_only,
@@ -183,6 +223,7 @@ def _payload(cid):
         "template_sections": section_inventory(LAYOUT.read_text()),
         "resolved_style": case.meridian_resolved_style(),
         "design_system_library": LIBRARY,
+        "deck_style_context": case.meridian_deck_style_context(),
     })
 
 
@@ -605,6 +646,381 @@ def _arc_as_deck_changes(message: str, arc: list[str]) -> dict:
     return _out("edit", message, operations=None, deck_changes=changes)
 
 
+# Architect deck style. build_technical_deck: a fresh build on a generic public topic whose request
+# asks for code, a comparison table and measured/untested badges, so the right answer authors a
+# deck style (here the technical fixture without its callout: the template has one, and spec §2
+# reuses a template piece rather than restating it, Ruling R29) and a look on every slide. Its
+# should_fail is the very same deck with no deck style and no looks, so the deck style is its only
+# trap. restyle_deck: the gold deck as a deck-style build leaves it (the fixture and
+# RESTYLE_LOOKS); the code blocks are restyled through deck_changes.deck_style alone, which
+# rebuilds nothing. Its should_fail restyles them under a new class name, so dk-code, which the
+# code slides use, is gone. Both splits share the helpers below; the decks, looks and messages are
+# each split's own (held-out's build asks for other pieces, R29).
+TECH_BUILD_MESSAGE = (
+    "Here is a 7-slide deck on streaming Postgres changes into the lakehouse with logical "
+    "replication: the setup as code, a comparison table of the three approaches, and every figure "
+    "badged measured or untested."
+)
+TECH_DECK = {
+    "title": "Streaming Postgres into the Lakehouse with Logical Replication",
+    "audience": "Data engineers and platform teams who run Postgres and load a lakehouse from it",
+    "purpose": (
+        "Show the team how to stream Postgres changes into the lakehouse with logical replication, "
+        "what it measured in testing, and what is still untested"
+    ),
+    "argument": (
+        "Logical replication keeps the lakehouse seconds behind Postgres with little load on the "
+        "primary, which trigger-based capture and nightly batch export cannot; failover and the "
+        "full-size snapshot still need testing"
+    ),
+    "call_to_action": (
+        "Pilot logical replication on one production database this quarter, and test failover "
+        "before the rollout"
+    ),
+    "narrative_arc": [
+        "Open on the goal: a lakehouse that stays seconds behind Postgres",
+        "Compare logical replication with trigger-based capture and nightly batch export",
+        "Show the setup as code, on the Postgres side and on the subscriber side",
+        "Report what the test run measured and what is still untested",
+        "Close with the pilot plan and the call to action",
+    ],
+    "resolved_data": {
+        "synthesis": (
+            "In the user's test run logical replication kept lag under 2 seconds at 5,000 writes "
+            "per second, took 3 hours to snapshot a 200 GB database and added 4% CPU on the "
+            "primary. Failover to a standby and the 30-hour estimate for the 2 TB snapshot are "
+            "untested."
+        ),
+        "figures": [
+            {"key": "replication_lag",
+             "value": "lag under 2 seconds at 5,000 writes per second",
+             "source": "The user's test run (measured)"},
+            {"key": "initial_snapshot",
+             "value": "a 3-hour initial snapshot of a 200 GB database",
+             "source": "The user's test run (measured)"},
+            {"key": "primary_cpu",
+             "value": "4% extra CPU on the primary",
+             "source": "The user's test run (measured)"},
+            {"key": "full_snapshot_estimate",
+             "value": "an estimated 30 hours to snapshot the 2 TB database",
+             "source": "The user's estimate (untested)"},
+        ],
+        "gaps": ["Failover to a standby has not been tested"],
+    },
+}
+TECH_SLIDES = [
+    {
+        "purpose": (
+            "Open the deck: stream Postgres changes into the lakehouse with logical replication"
+        ),
+        "content_brief": (
+            "Cover slide with the title 'Streaming Postgres into the Lakehouse with Logical "
+            "Replication' and a subtitle promising seconds of lag with no change to the "
+            "application"
+        ),
+        "assumes": "The audience runs Postgres and loads a lakehouse from it today",
+        "hands_off": "Logical replication can keep the lakehouse seconds behind Postgres",
+        "look": (
+            "Meridian cover: the title large on the left and the subtitle beneath it; no "
+            "deck-style pieces"
+        ),
+    },
+    {
+        "purpose": "Compare the three ways to feed the lakehouse from Postgres",
+        "content_brief": (
+            "Comparison table of logical replication, trigger-based capture and nightly batch "
+            "export, one row per approach, with columns for lag, load on the primary, "
+            "schema-change handling and setup effort; a one-line takeaway beneath: only logical "
+            "replication gives seconds of lag with no triggers on the tables"
+        ),
+        "assumes": "The audience knows at least one of the three approaches",
+        "hands_off": "Logical replication is the approach worth piloting",
+        "look": (
+            "Slide title above a full-width dk-table, one row per approach; the takeaway in the "
+            "template's callout beneath it"
+        ),
+    },
+    {
+        "purpose": "Show the setup on the Postgres side",
+        "content_brief": (
+            "Code listing of the three setup statements: set wal_level to logical, create a "
+            "publication for the replicated tables, and create a logical replication slot; two "
+            "short bullets beside it on what the publication and the slot each do"
+        ),
+        "assumes": "The audience has chosen logical replication and can administer Postgres",
+        "hands_off": "Postgres needs three statements to publish its changes",
+        "look": (
+            "Two short bullets on the left; a dk-code listing of the three statements on the "
+            "right, with keywords and comments marked"
+        ),
+    },
+    {
+        "purpose": "Show the subscriber settings that land the changes in the lakehouse",
+        "content_brief": (
+            "Code listing of the subscriber settings: the slot to read, the publication, the "
+            "target lakehouse tables and the checkpoint interval, with a one-line note beneath "
+            "that each batch commits as one lakehouse transaction"
+        ),
+        "assumes": "The audience has seen the publication and the slot on the Postgres side",
+        "hands_off": "The subscriber turns the replication stream into lakehouse tables",
+        "look": (
+            "A dk-code listing of the subscriber settings across the left two-thirds; a dk-note "
+            "beneath it on transactional commits"
+        ),
+    },
+    {
+        "purpose": "Report what the test run measured",
+        "content_brief": (
+            "Three stat cards from the test run, each badged measured: lag under 2 seconds at "
+            "5,000 writes per second, a 3-hour initial snapshot of a 200 GB database, and 4% extra "
+            "CPU on the primary"
+        ),
+        "assumes": "The audience has seen how the pipeline is set up",
+        "hands_off": "In the test run the pipeline kept up and cost the primary little",
+        "data_references": ["replication_lag", "initial_snapshot", "primary_cpu"],
+        "look": (
+            "The template's three stat cards, one per figure, each with a dk-badge "
+            "dk-badge--measured beside its number"
+        ),
+    },
+    {
+        "purpose": "Say plainly what is still untested",
+        "content_brief": (
+            "Two items, each badged untested: failover to a standby, and the estimated 30 hours to "
+            "snapshot the 2 TB database; a callout that both must be tested before the rollout"
+        ),
+        "assumes": "The audience has seen the measured figures",
+        "hands_off": "Two risks are still open and must be tested before the rollout",
+        "data_references": ["full_snapshot_estimate"],
+        "look": (
+            "Two rows, each with a dk-badge dk-badge--untested beside its item; the before-rollout "
+            "warning in the template's callout"
+        ),
+    },
+    {
+        "purpose": "Close with the pilot plan and the call to action",
+        "content_brief": (
+            "The pilot as four ordered steps: pick one production database, set up the "
+            "publication and the slot, run the subscriber for two weeks, then test failover to a "
+            "standby; end with the call to action"
+        ),
+        "assumes": "The audience has seen what was measured and what is still untested",
+        "hands_off": "Pilot on one database this quarter and test failover before the rollout",
+        "look": (
+            "The four pilot steps as dk-steps; the call to action in the template's callout "
+            "beneath them"
+        ),
+    },
+]
+# The gold deck's looks for restyle_deck, by position: what a deck-style build would have given it.
+RESTYLE_LOOKS = {
+    0: "Meridian cover: the deck title large and the subtitle beneath it; no deck-style pieces",
+    1: "Bullets on the left; the PowerPoint pain points in a dk-callout beneath them",
+    2: "The definition and the framework names as bullets; the 98% browser figure in a dk-callout",
+    3: (
+        "The device rendering chart on the left and the commentary on the right; the chart's "
+        "source in a dk-note beneath it"
+    ),
+    4: (
+        "Bullets contrasting CSS type control with font embedding; the 1,700+ fonts figure in a "
+        "dk-callout"
+    ),
+    5: (
+        "Bullets on the left; a short dk-code listing of an interactive chart embed on the right; "
+        "the preset-transitions contrast in a dk-callout"
+    ),
+    6: (
+        "The WCAG coverage chart on the left and the commentary on the right; the chart's source "
+        "in a dk-note beneath it"
+    ),
+    7: (
+        "Bullets on the left; a dk-code listing of a one-line diff to the deck's source on the "
+        "right; the file-size contrast in a dk-callout"
+    ),
+    8: (
+        "Each objection and its counter as a row of a two-column dk-table; the takeaway in a "
+        "dk-callout"
+    ),
+    9: (
+        "The template's three stat cards for the verdicts; the call to action in a dk-callout "
+        "beneath"
+    ),
+}
+RESTYLE_FAULT = (
+    "restyle every code block through deck_changes.deck_style alone: a dark ground with light text "
+    "in the brand's own tokens (it has no navy, so its darkest ink token), with token spans that "
+    "stay readable on it, rebuilding no slide; the restyled style must still define dk-code and "
+    "its token spans kw, fn, str and cm, which the code slides' looks and HTML use, or production "
+    "refuses the edit for stranding those slides' code blocks"
+)
+RESTYLE_MESSAGE = (
+    "The brand has no navy, so I'll put every code block on its darkest ink token with light "
+    "text, and lighten the keyword, function, string and comment colours so they stay readable on "
+    "it. Nothing else changes and no slide is rebuilt."
+)
+RESTYLE_RENAMED_MESSAGE = (
+    "I'll restyle the code blocks as a new dark piece, dk-code-dark: the brand's darkest ink with "
+    "light text. Nothing else changes and no slide is rebuilt."
+)
+# The restyle, as edits to the fixture's CSS: the ``.dk-code`` rule's ground, border and text, and
+# each token span's colour. Every new colour is a Meridian token: Meridian has no navy, ink is its
+# darkest token, and the light tokens keep every span at AA contrast or better on it.
+DARK_CODE_RULE = (
+    ("background: var(--brand-core-surface);", "background: var(--brand-core-ink);"),
+    ("border: 1px solid var(--brand-core-border);", "border: 1px solid var(--brand-core-ink);"),
+    ("color: var(--brand-core-ink);", "color: var(--brand-core-surface);"),
+)
+DARK_CODE_SPANS = (
+    (".dk-code .kw { color: var(--brand-core-primary);",
+     ".dk-code .kw { color: var(--brand-core-background);"),
+    (".dk-code .fn { color: var(--brand-accents-violet); }",
+     ".dk-code .fn { color: var(--brand-core-background); }"),
+    (".dk-code .str { color: var(--brand-accents-sky); }",
+     ".dk-code .str { color: var(--brand-core-border); }"),
+    (".dk-code .cm { color: var(--brand-core-muted);",
+     ".dk-code .cm { color: var(--brand-core-border);"),
+)
+# The should_fail's rename: the code-block class, wherever the restyled style names it.
+CODE_CLASS, RENAMED_CODE_CLASS = "dk-code", "dk-code-dark"
+# What the restyle must keep (expect.deck_style_keeps): the code block and the token-span classes
+# the fixture defines inside it. Production's stranding check counts both (nodes.py,
+# _stranded_style_classes): renaming ``kw`` strips the keyword colour from every kept code slide.
+RESTYLE_KEEPS = [CODE_CLASS, "kw", "fn", "str", "cm"]
+# The template's own callout (``.callout`` in the Meridian section CSS), which the fixture restates
+# as ``dk-callout``: a build reuses it instead (spec §2, Ruling R29).
+FIXTURE_CALLOUT_CLASS = "dk-callout"
+
+
+def _without_callout(style: dict) -> dict:
+    """``style`` (the fixture) without its ``dk-callout`` rule and component: a build's deck style
+    reuses the template's callout rather than restating it. Nothing else changes."""
+    style = copy.deepcopy(style)
+    css = style["css"]
+    start = css.index(f"\n.{FIXTURE_CALLOUT_CLASS} {{") + 1
+    end = css.index("}\n", start) + 2
+    css = css[:start] + css[end:]
+    old, new = "steps, callouts and notes", "steps and notes"
+    assert css.count(old) == 1, old
+    css = css.replace(old, new)
+    assert FIXTURE_CALLOUT_CLASS not in css
+    style["css"] = css
+    kept = [c for c in style["components"] if FIXTURE_CALLOUT_CLASS not in c["class_names"]]
+    assert len(kept) == len(style["components"]) - 1
+    style["components"] = kept
+    return style
+
+
+# Addendum A (A17, Ruling RA5): a build's deck style carries a footer piece, the template's own
+# slide footer with a logo the architect was shown (``deck_style_context.logos``) and both page
+# tokens, which production swaps for the slide's number and the deck's count. It is added here,
+# to each build reference's style, and never to the shared fixture (whose other consumers, the
+# builder and build_reviewer packs, stay as they are).
+FOOTER_CSS = (
+    "\n/* The footer: the template's slide footer, the brand logo beside the page number. */\n"
+    ".dk-footer { align-items: center; }\n"
+    ".dk-footer img { height: 24px; width: auto; }\n"
+)
+FOOTER_USE = (
+    "Every slide except the cover: the template's slide footer, the brand logo on the left and "
+    "the slide's number out of the deck's count (n / N) on the right."
+)
+
+
+def logo_handles() -> list[str]:
+    """The handles of the logos a deck-style build's payload shows the architect
+    (``deck_style_context.logos``), in its order: the build case's ``expect.logo_handles``."""
+    return [row["handle"] for row in case.meridian_deck_style_context()["logos"]]
+
+
+def _with_footer(style: dict) -> dict:
+    """``style`` with the footer piece added last: its rule after the style's CSS and its
+    component after the others, holding the first (default-ground) logo and both page tokens."""
+    style = copy.deepcopy(style)
+    logo = logo_handles()[0]
+    style["css"] = style["css"] + FOOTER_CSS
+    style["components"] = [*style["components"], {
+        "name": "footer",
+        "class_names": ["dk-footer"],
+        "use": FOOTER_USE,
+        "example_html": (
+            f'<div class="slide-footer dk-footer"><img src="{logo}" alt="Meridian"/>'
+            "<span>{{slide:number}} / {{slide:count}}</span></div>"
+        ),
+    }]
+    return style
+
+
+def _technical_deck(deck: dict, slides: list[dict], style: dict) -> dict:
+    """A technical build's deck_spec on the Meridian contract: ``deck``'s deck-level fields and
+    resolved data, ``slides`` numbered 0..n-1 (no data unless given, no template binding, each
+    with its look), and ``style`` as its deck style."""
+    spec = {
+        **{name: deck[name] for name in (
+            "title", "audience", "purpose", "argument", "call_to_action", "narrative_arc")},
+        "design_contract": DesignContractRef(
+            design_system_id=MERIDIAN_ID, template_id=MERIDIAN_TEMPLATE
+        ).model_dump(mode="json", exclude_none=True),
+        "resolved_data": copy.deepcopy(deck["resolved_data"]),
+        "slides": [
+            {
+                "position": position,
+                **{name: slide[name] for name in (
+                    "purpose", "content_brief", "assumes", "hands_off")},
+                "data_references": list(slide.get("data_references", [])),
+                "slide_type": None,
+                "template_section_index": None,
+                "look": slide["look"],
+            }
+            for position, slide in enumerate(slides)
+        ],
+        "deck_style": copy.deepcopy(style),
+    }
+    built = DeckSpec.model_validate(spec)  # fail fast
+    # A reference deck style is one the sanitiser returns unchanged on the Meridian contract (C24).
+    cleaned, notes = sanitise_deck_style(built.deck_style, design_system_active=True)
+    assert cleaned is built.deck_style and notes == (), notes
+    return spec
+
+
+def _unstyled(spec: dict) -> dict:
+    """``spec`` with no deck style and no look on any slide: the deck as a build that authors no
+    deck style leaves it."""
+    bare = {name: copy.deepcopy(value) for name, value in spec.items() if name != "deck_style"}
+    bare["slides"] = [
+        {name: value for name, value in slide.items() if name != "look"} for slide in bare["slides"]
+    ]
+    DeckSpec.model_validate(bare)  # fail fast
+    return bare
+
+
+def _dark_code_css(css: str) -> str:
+    """``css`` (the fixture's) with its code blocks on the darkest ink token with light text."""
+    start = css.index("\n.dk-code {") + 1
+    end = css.index("}", start) + 1
+    rule = css[start:end]
+    for old, new in DARK_CODE_RULE:
+        assert rule.count(old) == 1, old
+        rule = rule.replace(old, new)
+    css = css[:start] + rule + css[end:]
+    for old, new in DARK_CODE_SPANS:
+        assert css.count(old) == 1, old
+        css = css.replace(old, new)
+    return css
+
+
+def _restyled(message: str, *, renamed: bool = False) -> dict:
+    """The restyle as ``deck_changes.deck_style`` alone (the runner's dump form): the fixture with
+    its code blocks dark. ``renamed``: the should_fail, with ``dk-code`` renamed throughout the
+    style (CSS, component and example), so the class the deck's code slides use is gone."""
+    style = deck_style_fixture()
+    style["css"] = _dark_code_css(style["css"])
+    if renamed:
+        style = json.loads(re.sub(
+            rf"\b{re.escape(CODE_CLASS)}\b", RENAMED_CODE_CLASS, json.dumps(style)))
+    changes = DeckChanges(deck_style=style).model_dump(mode="json")
+    return _out("edit", message, operations=None, deck_changes=changes)
+
+
 def _write(out, cid, kind, fault, expect, reference, should_fail):
     d = out / cid
     d.mkdir(parents=True, exist_ok=True)
@@ -885,6 +1301,25 @@ def generate(out_dir: pathlib.Path | None = None):
         {"intent": "edit", "full_deck_spec": True},
         _redescribed(gold, REDESCRIBE_MESSAGE),
         _arc_as_deck_changes(REDESCRIBE_ARC_MESSAGE, REDESCRIBED_ARC),
+    )
+
+    # Architect deck style: the technical build (its should_fail authors no deck style and no
+    # looks) and the restyle of the code blocks (its should_fail renames dk-code). The build's
+    # style is the fixture without its callout, plus the footer piece; its expect names the
+    # payload's logos, which the footer must hold one of.
+    tech = _technical_deck(
+        TECH_DECK, TECH_SLIDES, _with_footer(_without_callout(deck_style_fixture())))
+    _write(
+        out, "build_technical_deck", "positive", "",
+        {"intent": "build", "deck_style": True, "logo_handles": logo_handles()},
+        _out("build", TECH_BUILD_MESSAGE, deck_spec=tech),
+        _out("build", TECH_BUILD_MESSAGE, deck_spec=_unstyled(tech)),
+    )
+    _write(
+        out, "restyle_deck", "mutation", RESTYLE_FAULT,
+        {"intent": "edit", "positions": [], "deck_style_keeps": list(RESTYLE_KEEPS)},
+        _restyled(RESTYLE_MESSAGE),
+        _restyled(RESTYLE_RENAMED_MESSAGE, renamed=True),
     )
 
 

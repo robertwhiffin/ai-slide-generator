@@ -1,0 +1,5 @@
+{
+  "position": 3,
+  "html": "<section class=\"slide\">\n  <p class=\"eyebrow\">Impact</p>\n  <h2 class=\"slide-title\">Structured prompts cut costs, boost consistency, and converge fast</h2>\n  <div class=\"content\">\n    <table class=\"dk-table\">\n      <thead><tr><th>Dimension</th><th>Gain</th><th>Measured against</th></tr></thead>\n      <tbody>\n        <tr><td>Token cost</td><td>30–50% fewer tokens per request</td><td>naive prompts</td></tr>\n        <tr><td>Output consistency</td><td>up to 40% gain</td><td>few-shot + chain-of-thought vs. none</td></tr>\n        <tr><td>Iteration</td><td>3–5 revision rounds</td><td>reaching production-grade quality</td></tr>\n      </tbody>\n    </table>\n    <div class=\"callout\">The gains from structured prompting are large and well-documented.</div>\n  </div>\n  <div class=\"slide-footer\"><span>Meridian</span><span>3</span></div>\n</section>\n",
+  "scripts": ""
+}

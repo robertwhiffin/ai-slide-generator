@@ -1,0 +1,11 @@
+# Architect v1 prompt (architect deck style, plan Task 8): the promoted `edit-ops-b` text plus
+# the deck style and the per-slide look (spec docs/superpowers/specs/
+# 2026-10-29-architect-deck-style-design.md section 2). DECKSPEC CONSTRUCTION lists a
+# `deck_style:` line after `slides:`, SLIDESPEC FIELDS a `look:` line, EDITING's deck_changes
+# field list names deck_style, VISUAL / TEMPLATE BINDING binds where it fits (a whole section,
+# a section for its frame only, or unbound), and a new DECK STYLE block before SLIDE NUMBERS
+# states the build, sanitiser, look and edit rules. Every other block is byte-identical.
+agent_key: architect
+name: deck-style
+base: v1
+prompt_file: deck-style.md

@@ -29,6 +29,8 @@ import sessionManagerPy from '../../../../src/api/services/session_manager.py?ra
 import slideTs from '../../types/slide.ts?raw';
 import type {
   DeckSpec,
+  DeckStyle,
+  DeckStyleComponent,
   DesignContractRef,
   ResolvedData,
   ResolvedFigure,
@@ -50,6 +52,7 @@ const deckSpecKeys: Record<keyof DeckSpec, true> = {
   design_contract: true,
   resolved_data: true,
   slides: true,
+  deck_style: true,
 };
 
 const slideSpecKeys: Record<keyof SlideSpec, true> = {
@@ -61,6 +64,19 @@ const slideSpecKeys: Record<keyof SlideSpec, true> = {
   data_references: true,
   slide_type: true,
   template_section_index: true,
+  look: true,
+};
+
+const deckStyleKeys: Record<keyof DeckStyle, true> = {
+  css: true,
+  components: true,
+};
+
+const deckStyleComponentKeys: Record<keyof DeckStyleComponent, true> = {
+  name: true,
+  class_names: true,
+  use: true,
+  example_html: true,
 };
 
 const designContractRefKeys: Record<keyof DesignContractRef, true> = {
@@ -85,6 +101,8 @@ const resolvedFigureKeys: Record<keyof ResolvedFigure, true> = {
 const MIRRORS: Record<string, Record<string, true>> = {
   DeckSpec: deckSpecKeys,
   SlideSpec: slideSpecKeys,
+  DeckStyle: deckStyleKeys,
+  DeckStyleComponent: deckStyleComponentKeys,
   DesignContractRef: designContractRefKeys,
   ResolvedData: resolvedDataKeys,
   ResolvedFigure: resolvedFigureKeys,
@@ -198,9 +216,11 @@ describe('DeckSpec conformance — nested models', () => {
     // mirrored model, so with a broken extractor it would check NOTHING and pass.
     // These three composite fields are the ones that must always be reached.
     expect(checked.sort()).toEqual([
+      'DeckSpec.deck_style',
       'DeckSpec.design_contract',
       'DeckSpec.resolved_data',
       'DeckSpec.slides',
+      'DeckStyle.components',
       'ResolvedData.figures',
     ]);
   });

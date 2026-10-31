@@ -126,6 +126,17 @@ def build_dataset(cases: list[Case], repeats: int, split: str = "train") -> list
 
 # --------------------------------------------------------------------------- predict
 
+def render_section_css(case: Case) -> str:
+    """The CSS a case's slide is rendered with: Meridian's, then the deck style's when the case
+    payload carries one, as production writes the deck style into deck.css after the template's
+    (C21). Both render paths use it: ``predict_fn`` and ``run_eval``'s calibration render."""
+    css = meridian_section_css()
+    style = (case.payload or {}).get("deck_style")
+    if style:
+        css += "\n\n" + style["css"]
+    return css
+
+
 def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: bool) -> Callable:
     def predict_fn(agent_key: str, case_id: str, repeat: int, split: str = "train") -> dict:
         case = load_case(agent_key, case_id, **split_kwargs(split))
@@ -135,7 +146,7 @@ def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: 
                 and isinstance(result.structured, dict) and "html" in result.structured):
             m = render_slide(
                 result.structured["html"], result.structured.get("scripts") or "",
-                section_css=meridian_section_css(),
+                section_css=render_section_css(case),
             )
             render = dataclasses.asdict(m)
         return {
@@ -148,6 +159,9 @@ def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: 
             "status": result.status,
             "infra_error": result.infra_error,
             "error_detail": result.error_detail,
+            # The run's brand-asset searches (``RunResult.tool_calls``), which render_measures reads
+            # for a brand-asset case; a runner result written before the field existed has none.
+            "tool_calls": list(getattr(result, "tool_calls", ()) or ()),
         }
 
     return predict_fn
@@ -193,7 +207,8 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
         return _fb(*det.expected_category_score(
             inputs["agent_key"], outputs.get("structured"), expectations.get("expect") or {},
             reference=expectations.get("reference"),
-            current_deck_spec=expectations.get("current_deck_spec")))
+            current_deck_spec=expectations.get("current_deck_spec"),
+            design_system_active=expectations.get("design_system_active")))
 
     @scorer(name="render_measures")
     def render_measures(inputs, outputs, expectations):
@@ -203,7 +218,27 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
         if m is None:
             return _skip("no render for this row")
         html = (outputs.get("structured") or {}).get("html", "")
-        return _fb(*det.render_measures_score(m, html))
+        ok, why = det.render_measures_score(m, html)
+        # A case whose slide is built on a deck style also scores its use (C21): the payload, which
+        # holds the deck style and the template CSS, is the row's own case's. A brand-asset case
+        # (Addendum A) also scores the icons it places against the run's searches. Each is ANDed:
+        # a failing row names only what failed; a passing row names every check.
+        case = load_case(
+            inputs["agent_key"], inputs["case_id"], **split_kwargs(inputs.get("split", "train")))
+        expect = case.expect or {}
+        checks = []
+        if "deck_style_classes" in expect:
+            checks.append(det.deck_style_use_score(html, case.payload or {}, expect))
+        if "brand_assets" in expect:
+            checks.append(det.brand_asset_use_score(
+                html, case.payload or {}, expect, tool_calls=outputs.get("tool_calls")))
+        for check_ok, check_why in checks:
+            if not check_ok:
+                why = check_why if ok else f"{why}; {check_why}"
+            elif ok:
+                why = f"{why}; {check_why}"
+            ok = ok and check_ok
+        return _fb(ok, why)
 
     @scorer(name="judge")
     def judge(inputs, outputs, expectations):

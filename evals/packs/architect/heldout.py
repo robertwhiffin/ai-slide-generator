@@ -77,6 +77,19 @@ MESSAGES = {
     ),
     # The arc-review sweeper's describe-only turn: production's own message, as on train.
     "redescribe_deck": ARC_REVIEW_MESSAGE,
+    # Architect deck style: a fresh technical build on its own public topic that needs OTHER
+    # pieces than train's (a dated timeline and a KPI band, no code; Ruling R29), and a restyle of
+    # the code blocks on deck 2.
+    "build_technical_deck": (
+        "Build a deck for the web platform team on rolling out HTTP/3 across our public website. "
+        "Show the rollout as a dated timeline: a canary on 5% of traffic in March 2026, every "
+        "static asset in May 2026, every page in July 2026, and the TCP-only edge configuration "
+        "retired in October 2026. Put the canary's results in one KPI band: time to first byte at "
+        "the 75th percentile down from 420 ms to 310 ms, connection setup on mobile 38% faster, "
+        "page-load errors on poor networks down 22%, and 61% of canary requests served over "
+        "HTTP/3. Close with what each team must do before the May step."
+    ),
+    "restyle_deck": "Please give every code listing a dark background and light lettering",
 }
 
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
@@ -87,6 +100,7 @@ HAS_DECK = (
     "fill_blank_slide", "edit_beside_blank",
     *m.OPERATIONS_CASES,
     *m.DESCRIBE_ONLY_CASES,
+    *m.STYLED_DECK_CASES,
 )
 # The cases whose deck holds a manually inserted blank slide, spliced in at BLANK_AT.
 BLANK_AT = 3
@@ -117,6 +131,8 @@ def _payload(cid):
     deck = case.gold_deck_spec(DECK) if has_deck else None
     if cid in m.BLANK_CASES:
         deck = m._blank_deck(deck, BLANK_AT)
+    if cid in m.STYLED_DECK_CASES:
+        deck = m._styled_deck(deck, RESTYLE_LOOKS)
     slide_keys = architect_slide_payload(
         conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else [],
         describe_only=describe_only,
@@ -132,6 +148,7 @@ def _payload(cid):
         "template_sections": section_inventory(m.LAYOUT.read_text()),
         "resolved_style": case.meridian_resolved_style(),
         "design_system_library": m.LIBRARY,
+        "deck_style_context": case.meridian_deck_style_context(),
     })
 
 
@@ -352,6 +369,264 @@ REDESCRIBED_ARC = [
     "Walk through an evaluation and iteration workflow the team can use straight away",
     "Finish with a concrete checklist and the next steps",
 ]
+
+
+# Architect deck style on its own build topic and on deck 2 (``m._technical_deck``, ``m._restyled``
+# and ``m.RESTYLE_FAULT`` say what each case and its should_fail are). The build asks for other
+# pieces than train's (Ruling R29): a dated timeline and a KPI band, and no code, so its deck style
+# is its own, not the technical fixture.
+TECH_BUILD_MESSAGE = (
+    "Here is a 5-slide deck on rolling out HTTP/3: the rollout as a dated timeline, the canary's "
+    "results in one KPI band, and what each team must do before the May step."
+)
+TECH_DECK = {
+    "title": "Rolling Out HTTP/3 Across the Public Website",
+    "audience": (
+        "The web platform team and the teams whose services sit behind the public website"
+    ),
+    "purpose": (
+        "Agree the HTTP/3 rollout dates and each team's part, on the strength of the canary's "
+        "results"
+    ),
+    "argument": (
+        "The canary shows HTTP/3 makes the public website faster and more reliable on mobile and "
+        "on poor networks, so the rollout should widen to every static asset in May 2026 and to "
+        "every page in July"
+    ),
+    "call_to_action": "Approve the May 2026 step, and have each team finish its part before then",
+    "narrative_arc": [
+        "Open on the goal: a faster, more reliable public website on every network",
+        "Lay out the rollout as four dated milestones",
+        "Report what the canary measured",
+        "Show why the results justify widening the rollout in May",
+        "Close with what each team must do before the May step",
+    ],
+    "resolved_data": {
+        "synthesis": (
+            "On the canary (5% of traffic) time to first byte at the 75th percentile fell from "
+            "420 ms to 310 ms, connection setup on mobile was 38% faster, page-load errors on poor "
+            "networks fell 22%, and 61% of canary requests were served over HTTP/3. The rollout "
+            "dates are the user's plan: the canary in March 2026, every static asset in May 2026, "
+            "every page in July 2026, and the TCP-only edge configuration retired in October 2026."
+        ),
+        "figures": [
+            {"key": "ttfb_p75",
+             "value": "time to first byte at the 75th percentile down from 420 ms to 310 ms",
+             "source": "The user's canary on 5% of traffic"},
+            {"key": "mobile_setup", "value": "connection setup on mobile 38% faster",
+             "source": "The user's canary on 5% of traffic"},
+            {"key": "poor_network_errors", "value": "page-load errors on poor networks down 22%",
+             "source": "The user's canary on 5% of traffic"},
+            {"key": "http3_share", "value": "61% of canary requests served over HTTP/3",
+             "source": "The user's canary on 5% of traffic"},
+        ],
+        "gaps": [],
+    },
+}
+CANARY_FIGURES = ["ttfb_p75", "mobile_setup", "poor_network_errors", "http3_share"]
+TECH_SLIDES = [
+    {
+        "purpose": "Open the deck: rolling out HTTP/3 across the public website",
+        "content_brief": (
+            "Cover slide with the title 'Rolling Out HTTP/3 Across the Public Website' and a "
+            "subtitle promising a faster site on mobile and on poor networks"
+        ),
+        "assumes": "The audience runs the public website or a service behind it",
+        "hands_off": "HTTP/3 is worth rolling out to the whole site",
+        "look": (
+            "Meridian cover: the title large on the left and the subtitle beneath it; no "
+            "deck-style pieces"
+        ),
+    },
+    {
+        "purpose": "Lay out the rollout as four dated milestones",
+        "content_brief": (
+            "The rollout as a timeline, left to right: a canary on 5% of traffic in March 2026, "
+            "every static asset in May 2026, every page in July 2026, and the TCP-only edge "
+            "configuration retired in October 2026; a one-line note beneath that each step waits "
+            "for the previous step's results"
+        ),
+        "assumes": "The audience knows HTTP/3 is running as a canary",
+        "hands_off": "The rollout has four dated steps, and May is the next one",
+        "look": (
+            "Slide title above a dk-timeline of the four milestones, left to right, each opening "
+            "with its date; a dk-note beneath it on each step waiting for the last"
+        ),
+    },
+    {
+        "purpose": "Report what the canary measured",
+        "content_brief": (
+            "The canary's four results in one band: time to first byte at the 75th percentile "
+            "down from 420 ms to 310 ms, connection setup on mobile 38% faster, page-load errors "
+            "on poor networks down 22%, and 61% of canary requests served over HTTP/3; the source "
+            "beneath: the canary on 5% of traffic"
+        ),
+        "assumes": "The audience has seen the rollout plan",
+        "hands_off": "On the canary, HTTP/3 was faster and failed less",
+        "data_references": CANARY_FIGURES,
+        "look": (
+            "Slide title above a dk-kpi-band of the four results, a dk-kpi-value and a "
+            "dk-kpi-label each (four figures, one more than the template's three stat cards "
+            "hold); a dk-note beneath it naming the canary as the source"
+        ),
+    },
+    {
+        "purpose": "Show why the results justify widening the rollout in May",
+        "content_brief": (
+            "Three bullets, each tying a result to the decision: faster first bytes, faster "
+            "connections on mobile and fewer errors on poor networks; the takeaway beneath: the "
+            "canary has earned the May step"
+        ),
+        "assumes": "The audience has seen what the canary measured",
+        "hands_off": "The results justify widening the rollout in May",
+        "data_references": ["ttfb_p75", "mobile_setup", "poor_network_errors"],
+        "look": (
+            "Three bullets on the left, one per result; the takeaway in the template's callout "
+            "beneath them"
+        ),
+    },
+    {
+        "purpose": "Close with what each team must do before the May step",
+        "content_brief": (
+            "What each team must do before May 2026, one bullet each: the web platform team "
+            "widens HTTP/3 to every static asset, the service teams check their health checks "
+            "over HTTP/3, and support learns to spot a browser falling back to HTTP/2; end with "
+            "the call to action"
+        ),
+        "assumes": "The audience has seen the plan and the results",
+        "hands_off": "Approve the May step, and each team finishes its part before then",
+        "look": (
+            "Three short bullets, one per team; the call to action in the template's callout "
+            "beneath them"
+        ),
+    },
+]
+# The build's own deck style: only the pieces this deck needs that Meridian lacks (a dated
+# timeline, a KPI band for more figures than the template's three stat cards hold, and a note),
+# in Meridian tokens. The template's callout and bullets are reused, so they are not restated.
+TECH_STYLE = {
+    "css": (
+        "/* Rollout deck style on Meridian: a dated timeline, a KPI band and notes. The "
+        "template's callout and bullets are reused. */\n"
+        ".dk-timeline {\n"
+        "  display: grid;\n"
+        "  grid-auto-flow: column;\n"
+        "  grid-auto-columns: 1fr;\n"
+        "  gap: var(--space-md);\n"
+        "  margin: 0;\n"
+        "  padding: 0;\n"
+        "  list-style: none;\n"
+        "  border-top: 4px solid var(--brand-core-primary);\n"
+        "}\n"
+        ".dk-timeline li {\n"
+        "  position: relative;\n"
+        "  padding-top: var(--space-md);\n"
+        "  font-size: var(--fs-body);\n"
+        "  color: var(--brand-core-text);\n"
+        "}\n"
+        "/* A dot on the rule above each milestone. */\n"
+        ".dk-timeline li::before {\n"
+        "  content: \"\";\n"
+        "  position: absolute;\n"
+        "  top: -9px;\n"
+        "  left: 0;\n"
+        "  width: 14px;\n"
+        "  height: 14px;\n"
+        "  border-radius: 50%;\n"
+        "  background: var(--brand-core-primary);\n"
+        "}\n"
+        ".dk-timeline time {\n"
+        "  display: block;\n"
+        "  margin-bottom: 4px;\n"
+        "  font-size: var(--fs-eyebrow);\n"
+        "  font-weight: 700;\n"
+        "  letter-spacing: 0.06em;\n"
+        "  text-transform: uppercase;\n"
+        "  color: var(--brand-core-primary);\n"
+        "}\n"
+        "\n"
+        ".dk-kpi-band {\n"
+        "  display: grid;\n"
+        "  grid-auto-flow: column;\n"
+        "  grid-auto-columns: 1fr;\n"
+        "  margin: 0;\n"
+        "  padding: var(--space-md) 0;\n"
+        "  border-top: 1px solid var(--brand-core-border);\n"
+        "  border-bottom: 1px solid var(--brand-core-border);\n"
+        "}\n"
+        ".dk-kpi-band > div { padding: 0 var(--space-md); "
+        "border-left: 1px solid var(--brand-core-border); }\n"
+        ".dk-kpi-band > div:first-child { padding-left: 0; border-left: 0; }\n"
+        ".dk-kpi-value {\n"
+        "  display: block;\n"
+        "  font-size: var(--fs-title);\n"
+        "  font-weight: 700;\n"
+        "  line-height: 1.1;\n"
+        "  font-variant-numeric: tabular-nums;\n"
+        "  color: var(--brand-core-primary);\n"
+        "}\n"
+        ".dk-kpi-label { display: block; margin-top: 4px; font-size: var(--fs-body); "
+        "color: var(--brand-core-text); }\n"
+        "\n"
+        ".dk-note { margin: var(--space-sm) 0 0; font-size: var(--fs-caption); "
+        "color: var(--brand-core-muted); }\n"
+    ),
+    "components": [
+        {
+            "name": "dated timeline",
+            "class_names": ["dk-timeline"],
+            "use": (
+                "A rollout or plan as three to six dated milestones, left to right; each item "
+                "opens with its date in a <time> element."
+            ),
+            "example_html": (
+                '<ol class="dk-timeline"><li><time>Mar 2026</time>Canary on 5% of traffic</li>'
+                "<li><time>May 2026</time>Every static asset</li></ol>"
+            ),
+        },
+        {
+            "name": "KPI band",
+            "class_names": ["dk-kpi-band", "dk-kpi-value", "dk-kpi-label"],
+            "use": (
+                "Four to six headline figures in one row, where the template's three stat cards "
+                "are too few; one value and its label per item."
+            ),
+            "example_html": (
+                '<div class="dk-kpi-band"><div><span class="dk-kpi-value">310 ms</span>'
+                '<span class="dk-kpi-label">Time to first byte, p75</span></div>'
+                '<div><span class="dk-kpi-value">61%</span>'
+                '<span class="dk-kpi-label">Requests over HTTP/3</span></div></div>'
+            ),
+        },
+        {
+            "name": "note",
+            "class_names": ["dk-note"],
+            "use": "A one-line caveat or source under an exhibit.",
+            "example_html": '<p class="dk-note">Measured on the canary, 5% of traffic.</p>',
+        },
+    ],
+}
+# Deck 2's looks for restyle_deck, by position: what a deck-style build would have given it.
+RESTYLE_LOOKS = {
+    0: "Meridian cover: the deck title large and the subtitle beneath it; no deck-style pieces",
+    1: "The three pain points as bullets; the opportunity cost in a dk-callout beneath them",
+    2: (
+        "The four patterns as bullets on the left; a short dk-code listing of a system prompt "
+        "with a structured-output schema on the right; when to combine them in a dk-callout"
+    ),
+    3: "The template's three stat cards, one per figure; their source in a dk-note beneath them",
+    4: "The evaluation loop as dk-steps on the left; the commentary bullets on the right",
+    5: "The five-item checklist as dk-steps; the call to action in a dk-callout beneath it",
+}
+RESTYLE_MESSAGE = (
+    "I'll give every code listing a dark background with light text, using the brand's darkest "
+    "ink token, and lighten the keyword, function, string and comment colours so they stay "
+    "readable on it. Nothing else changes and no slide is rebuilt."
+)
+RESTYLE_RENAMED_MESSAGE = (
+    "I'll restyle the code listings as a new dark piece, dk-code-dark: a dark background with "
+    "light text. Nothing else changes and no slide is rebuilt."
+)
 
 
 def _checklist_brief(deck: dict, position: int) -> str:
@@ -659,6 +934,23 @@ def generate(out_dir: pathlib.Path | None = None):
         {"intent": "edit", "full_deck_spec": True},
         m._redescribed(gold, REDESCRIBE_MESSAGE),
         m._arc_as_deck_changes(REDESCRIBE_ARC_MESSAGE, REDESCRIBED_ARC),
+    )
+
+    # Architect deck style: the technical build on its own pieces (its should_fail authors no deck
+    # style and no looks) and the restyle of deck 2's code blocks (its should_fail renames dk-code).
+    # Its style carries the footer piece too (Addendum A), and its expect the payload's logos.
+    tech = m._technical_deck(TECH_DECK, TECH_SLIDES, m._with_footer(TECH_STYLE))
+    _write(
+        out, "build_technical_deck", "positive", "",
+        {"intent": "build", "deck_style": True, "logo_handles": m.logo_handles()},
+        m._out("build", TECH_BUILD_MESSAGE, deck_spec=tech),
+        m._out("build", TECH_BUILD_MESSAGE, deck_spec=m._unstyled(tech)),
+    )
+    _write(
+        out, "restyle_deck", "mutation", m.RESTYLE_FAULT,
+        {"intent": "edit", "positions": [], "deck_style_keeps": list(m.RESTYLE_KEEPS)},
+        m._restyled(RESTYLE_MESSAGE),
+        m._restyled(RESTYLE_RENAMED_MESSAGE, renamed=True),
     )
 
 

@@ -157,7 +157,10 @@ class AgentAssemblyContext:
     runs the adapter's tool-calling loop instead of its single structured-output
     call; it never reaches the prompt.  It is ``compare=False``: a toolset is
     mutable per-invocation state (calls made, access errors), not part of the
-    context's value, and it is unhashable.
+    context's value, and it is unhashable.  Two node families set it: the data
+    analyst (Genie One) and, for a deck with a deck style on an active design
+    system, the builder and the fixer (the brand-asset search, deck style
+    addendum A).  Every other caller leaves ``None`` and gets the single call.
     """
 
     design_system_active: bool
@@ -267,8 +270,10 @@ def bind_structured_output_model(
     provider tool dicts bound beside ``schema`` in the same one binding, still
     ``tool_choice="auto"``.  When any are given, the bound model is returned
     raw, without the parser chain: a reply may call a tool rather than the
-    schema, and the loop reads the schema call itself.  No test run carries a
-    toolset, so the raw model is never observed for token usage.
+    schema, and the loop reads the schema call itself.  A test run's context
+    never carries a toolset, but the offline eval harness drives this same loop
+    under an observation (``evals/harness/runner.py``), so an observed raw model
+    gets the token callback too; it sums every round's reported usage.
     """
     # Imported lazily, like the chat model itself: the module stays import-light.
     from langchain_core.output_parsers.openai_tools import PydanticToolsParser
@@ -281,13 +286,15 @@ def bind_structured_output_model(
         **(transport_options or {}),
     )
     bound_model = model.bind_tools([schema, *extra_tools], tool_choice="auto")
-    if extra_tools:
-        return bound_model
     structured_model = (
         bound_model
-        | RunnableLambda(_default_omitted_finding_objectives)
-        | PydanticToolsParser(tools=[schema], first_tool_only=True)
-        | RunnableLambda(_require_structured_output)
+        if extra_tools
+        else (
+            bound_model
+            | RunnableLambda(_default_omitted_finding_objectives)
+            | PydanticToolsParser(tools=[schema], first_tool_only=True)
+            | RunnableLambda(_require_structured_output)
+        )
     )
     observation = _OBSERVED_TEST_RUN.get()
     if observation is None:
@@ -391,14 +398,32 @@ def _reported_token_usage(message: Any) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _summed_count(total: int | None, count: int | None) -> int | None:
+    """``total`` plus one more reported ``count``; ``None`` only while neither reported."""
+    if count is None:
+        return total
+    return count if total is None else total + count
+
+
 def _token_usage_callback(observation: RunObservation) -> Any:
     """A LangChain callback that copies the provider's reported usage onto ``observation``.
+
+    One callback serves one binding, so one adapter call.  It records the sum
+    over every provider call it sees: the tool loop
+    (``DatabricksModelAdapter.invoke_with_tools``) makes one per round, and eval
+    cost must count them all.  A run without tools makes exactly one, which is
+    recorded as reported.
 
     ``langchain_core`` is imported lazily, like the chat model that fires it.
     """
     from langchain_core.callbacks import BaseCallbackHandler
 
     class _TokenUsageCallback(BaseCallbackHandler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input_tokens: int | None = None
+            self.output_tokens: int | None = None
+
         def on_llm_end(self, response: Any, **kwargs: Any) -> None:
             del kwargs
             for generations in response.generations:
@@ -407,7 +432,11 @@ def _token_usage_callback(observation: RunObservation) -> Any:
                         getattr(generation, "message", None)
                     )
                     if input_tokens is not None or output_tokens is not None:
-                        _record_token_usage(observation, input_tokens, output_tokens)
+                        self.input_tokens = _summed_count(self.input_tokens, input_tokens)
+                        self.output_tokens = _summed_count(self.output_tokens, output_tokens)
+                        _record_token_usage(
+                            observation, self.input_tokens, self.output_tokens
+                        )
                         return
 
     return _TokenUsageCallback()

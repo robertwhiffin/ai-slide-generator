@@ -1,0 +1,10 @@
+# Builder candidate C (deck style addendum A, Task B5b): `brand-assets-b` with its Footers bullet
+# fenced to deck-style decks: "(deck-style decks only; without deck_style, write no
+# {{slide:number}} or {{slide:count}})". Aimed at F1's one cause: on `brand-assets-b` every row of
+# the five cases without a deck style (10 of 10) put the page tokens in the footer it improvised
+# from section_css, where the baseline wrote the template's sample number. The DECK STYLE block
+# says to skip it without a deck style, so its footer rules must not reach those decks.
+agent_key: builder
+name: builder-brand-assets-c
+base: v1
+prompt_file: brand-assets-c.md

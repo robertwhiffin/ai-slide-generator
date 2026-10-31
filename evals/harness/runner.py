@@ -8,16 +8,35 @@ Thread safety: run_candidate builds a fresh ResolvedDefinition per call and uses
 a pass-through identity sink.  PromptAssembler and AgentSchemaRegistry are
 read-only after construction.  The _OBSERVED_TEST_RUN ContextVar is per-thread,
 so no shared mutable state is written across concurrent calls.
+
+The brand-asset search (deck style addendum A): a builder or fixer run on a deck
+style with a design system active gets the brand-search toolset, as
+``builder_node`` and ``fixer_node`` do.  It is production's
+(``brand_search.build_brand_search_toolset``, the same tool, row cap, spotlight
+and call budget); only its search backend is faked, answering from the Meridian
+fake asset index and recording each call on the run's own list, returned as
+``RunResult.tool_calls``.
+
+A test run's context never carries a toolset (``AgentRuntime.run_candidate``
+refuses one), so the toolset reaches the model through the Runner's adapter
+instead: :class:`_ToolLoopAdapter` hands it to the inner adapter's
+``invoke_with_tools``, the same tool loop ``builder_node``'s runs reach through
+``AgentRuntime``.  The toolset of the run in flight rides a ContextVar, per thread.
 """
 
 from __future__ import annotations
 
+import html
+import json
 import logging
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any, Mapping, Optional
 
 import src.core.database  # break import cycle before src.services imports  # noqa: F401
-
+from evals.harness.case import MERIDIAN_DIR
 from evals.harness.config import AgentEvalConfig
 from src.services.agent_runtime import (
     AgentAssemblyContext,
@@ -27,6 +46,8 @@ from src.services.agent_runtime import (
     RunObservation,
 )
 from src.services.agent_runtime_identity import LoggingAgentInvocationIdentitySink
+from src.services.agent_tools.brand_search import build_brand_search_toolset
+from src.services.agent_tools.toolset import AgentToolset
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +81,136 @@ class RunResult:
     output_tokens: int | None
     error_detail: str | None
     infra_error: bool
+    #: The run's brand-asset searches, in call order: ``{"name": "search_brand_assets",
+    #: "args": {"query": ..., "kind": ...}}`` each (JSON-serialisable). Empty when no tool was
+    #: bound or the model never called it.
+    tool_calls: tuple = ()
+
+
+#: The roles production binds the brand-asset search for (``nodes._brand_search_toolset``).
+BRAND_SEARCH_ROLES = ("builder", "fixer")
+#: The Meridian fake asset index the fake search answers from (the architect's logo read uses
+#: the same file, ``case.meridian_deck_style_context``).
+ASSET_INDEX_FILE = MERIDIAN_DIR / "assets.json"
+SEARCH_TOOL_NAME = "search_brand_assets"
+
+
+def _binds_brand_search(
+    config: AgentEvalConfig, payload: Mapping[str, Any], design_system_active: bool
+) -> bool:
+    """Whether a run gets the brand-asset search: production's gate
+    (``nodes._brand_search_toolset``) as the harness can see it.
+
+    A builder or fixer, a design system active and a deck style in the payload.  The run's
+    ``design_system_active`` stands for both production's payload flag (a fixer payload carries
+    none) and its design-contract id (an eval payload carries no contract).
+    """
+    return (
+        config.agent_key in BRAND_SEARCH_ROLES
+        and bool(design_system_active)
+        and payload.get("deck_style") is not None
+    )
+
+
+def _fake_brand_search(record: list[dict]) -> Any:
+    """The fake search backend: ``build_ds_asset_tool``'s shape, over the fake asset index.
+
+    It keeps ``build_ds_asset_tool``'s name, description and arguments, filters and ranks as
+    ``design_system_service.search_assets`` does (its own excluded kinds and sort key), and
+    answers in ``build_ds_asset_tool``'s JSON.  Production's brand-search tool wraps it
+    (:func:`_fake_brand_search_toolset`); the index holds fewer rows than that tool's row cap.
+    Each call is appended to ``record`` before it is answered.
+    """
+    from langchain_core.tools import StructuredTool
+
+    from src.services.design_system_service import (
+        _TOOL_EXCLUDED_ASSET_KINDS,
+        _asset_search_sort_key,
+    )
+    from src.services.tools.ds_asset_tool import SearchBrandAssetsInput, build_ds_asset_tool
+    from src.utils.ds_asset_utils import DS_ASSET_PLACEHOLDER_PATTERN
+
+    production = build_ds_asset_tool(0)  # for its name and description only: never invoked
+    assets = [
+        SimpleNamespace(
+            id=int(DS_ASSET_PLACEHOLDER_PATTERN.fullmatch(row["handle"]).group(1)),
+            kind=row["kind"],
+            filename=row["filename"],
+        )
+        for row in json.loads(ASSET_INDEX_FILE.read_text())
+    ]
+
+    def _search_brand_assets(query: Optional[str] = None, kind: Optional[str] = None) -> str:
+        record.append({"name": SEARCH_TOOL_NAME, "args": {"query": query, "kind": kind}})
+        found = [a for a in assets if (a.kind or "").lower() not in _TOOL_EXCLUDED_ASSET_KINDS]
+        if kind:
+            kind_l = kind.strip().lower()
+            found = [a for a in found if (a.kind or "").lower() == kind_l]
+        if query:
+            query_l = query.strip().lower()
+            found = [a for a in found if query_l in (a.filename or "").lower()]
+        found.sort(key=_asset_search_sort_key)
+        rows = [
+            {
+                "id": a.id,
+                "kind": a.kind,
+                "filename": a.filename,
+                "usage": '<img src="{{ds-asset:%d}}" alt="%s"/>'
+                % (a.id, html.escape(str(a.filename or ""))),
+            }
+            for a in found
+        ]
+        if not rows:
+            return json.dumps(
+                {"message": "No brand assets found for this design system.", "assets": []})
+        return json.dumps({"message": f"Found {len(rows)} brand asset(s).", "assets": rows})
+
+    return StructuredTool.from_function(
+        func=_search_brand_assets,
+        name=production.name,
+        description=production.description,
+        args_schema=SearchBrandAssetsInput,
+    )
+
+
+def _fake_brand_search_toolset(record: list[dict]) -> AgentToolset:
+    """Production's brand-search toolset over the fake backend: a fresh one per run."""
+    return build_brand_search_toolset(_fake_brand_search(record))
+
+
+#: The brand-search toolset of the run in flight on this thread, or ``None``.
+_RUN_TOOLSET: ContextVar[AgentToolset | None] = ContextVar("eval_run_toolset", default=None)
+
+
+class _ToolLoopAdapter:
+    """The Runner's model seam: the production tool loop for a run that binds the search.
+
+    The runtime calls ``invoke`` with its four keywords, as for every test run.  With the
+    run's toolset set (:data:`_RUN_TOOLSET`) this calls the inner adapter's
+    ``invoke_with_tools`` with it, the loop production reaches through ``AgentRuntime`` for a
+    context that carries a toolset; otherwise it is the inner adapter's own single call.  An
+    inner adapter without the loop refuses a toolset, as ``AgentRuntime`` does.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def invoke(self, *, agent_key, configuration, schema, prompt):
+        toolset = _RUN_TOOLSET.get()
+        if toolset is None:
+            return self.inner.invoke(
+                agent_key=agent_key, configuration=configuration, schema=schema, prompt=prompt
+            )
+        invoke_with_tools = getattr(self.inner, "invoke_with_tools", None)
+        if invoke_with_tools is None:
+            raise TypeError("model adapter cannot run tools")
+        return invoke_with_tools(
+            agent_key=agent_key,
+            configuration=configuration,
+            schema=schema,
+            prompt=prompt,
+            toolset=toolset,
+        )
 
 
 def _is_infra_error(outcome: CandidateRunOutcome) -> bool:
@@ -134,7 +285,7 @@ class Runner:
         )
         self._runtime = AgentRuntime(
             persisted_release_loader=_StubLoader(),
-            model_adapter=adapter,
+            model_adapter=_ToolLoopAdapter(adapter),
             identity_sink=LoggingAgentInvocationIdentitySink(logger=logger),
         )
 
@@ -152,9 +303,16 @@ class Runner:
         backoff (2^attempt seconds before each retry).  Any other failure
         (incomplete, assembly_error, contract) is returned as-is.  After
         max_infra_retries retries returns RunResult(infra_error=True).
+
+        A builder or fixer run on a deck style with a design system active is handed the
+        brand-search toolset over the fake backend (``_binds_brand_search``); every other run
+        binds no tool, exactly as before.  Each attempt gets a fresh toolset and record, so its
+        budget is its own and the result's ``tool_calls`` are the searches of the attempt it
+        reports.
         """
-        assembly_ctx = AgentAssemblyContext(design_system_active)
+        binds_search = _binds_brand_search(config, payload, design_system_active)
         obs = RunObservation()
+        record: list[dict] = []
         outcome: CandidateRunOutcome | None = None
 
         for attempt in range(self._max_infra_retries + 1):
@@ -162,15 +320,21 @@ class Runner:
                 # Exponential backoff: 1s, 2s, 4s, … before each retry.
                 time.sleep(2 ** (attempt - 1))
 
+            record = []
+            toolset = _fake_brand_search_toolset(record) if binds_search else None
             obs = RunObservation()
-            outcome = self._runtime.run_candidate(
-                config.agent_key,
-                config.content,
-                config.content_hash,
-                payload,
-                assembly_ctx,
-                observation=obs,
-            )
+            scope = _RUN_TOOLSET.set(toolset)
+            try:
+                outcome = self._runtime.run_candidate(
+                    config.agent_key,
+                    config.content,
+                    config.content_hash,
+                    payload,
+                    AgentAssemblyContext(design_system_active),
+                    observation=obs,
+                )
+            finally:
+                _RUN_TOOLSET.reset(scope)
 
             if not _is_infra_error(outcome):
                 # Completed or a real failure (incomplete, assembly_error):
@@ -196,4 +360,5 @@ class Runner:
             output_tokens=obs.output_tokens,
             error_detail=_failure_detail(outcome),
             infra_error=infra_error,
+            tool_calls=tuple(record),
         )

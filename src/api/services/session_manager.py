@@ -1023,6 +1023,81 @@ class VersionConflictError(Exception):
         )
 
 
+def _restore_response_deck(deck_dict: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+    """The restored deck as the client receives it: a copy rendered as ``get_version``
+    renders a preview of the same save point.
+
+    Page tokens, then ``{{image:ID}}``, then ``{{ds-asset:ID}}`` scoped to the
+    session's active design system.  The client renders this response directly,
+    with no refetch, so a handle left here would show as a broken image.  The
+    slides are copied first, so the stored rows and the snapshot keep their tokens
+    and handles.
+
+    Called AFTER the restore's transaction has committed, in a session of its own:
+    the reads here (the session's design system, the asset bytes) must not share
+    the restore's write transaction.  A failed read must not undo a restore that
+    has been written either: the response then carries the page numbers alone, and
+    the handles resolve on the next read.
+    """
+    from src.api.services.chat_service import resolve_active_design_system_id
+    from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
+    from src.utils.image_utils import substitute_deck_dict_images
+    from src.utils.slide_number_tokens import substitute_deck_slide_numbers
+
+    def _copy() -> Dict[str, Any]:
+        out = dict(deck_dict)
+        if isinstance(out.get("slides"), list):
+            out["slides"] = [dict(s) if isinstance(s, dict) else s for s in out["slides"]]
+        return substitute_deck_slide_numbers(out)
+
+    out = _copy()
+    try:
+        design_system_id = resolve_active_design_system_id(session_id)
+        with get_db_session() as db:
+            substitute_deck_dict_images(out, db)
+            substitute_deck_dict_ds_assets(out, db, design_system_id=design_system_id)
+    except Exception:
+        logger.warning(
+            "Could not resolve images for the restore response", exc_info=True
+        )
+        return _copy()
+    return out
+
+
+def resolve_streamed_ds_assets(session_id: Optional[str], htmls: Sequence[str]) -> List[str]:
+    """``{{ds-asset:ID}}`` handles in slides shipped mid-build, resolved as REST reads resolve them.
+
+    For ``slide_ready`` (the foreman's release) and ``/chat/poll``.  The caller has
+    already rendered the page tokens: page tokens first, then assets, the REST
+    readers' order.  Assets are scoped to the session's active design system
+    (``resolve_active_design_system_id``), so a foreign or unknown handle stays in
+    place and no design system means nothing resolves.  Every slide of the batch is
+    served by ONE asset read.  The output is base64 ``data:`` URIs, so a streamed
+    slide grows by its assets' bytes exactly as a REST read of it does.
+
+    HTML with no handle (an old deck, a deck with no design system) comes back
+    unchanged and costs no read at all.  It never raises: on any failure the slides
+    ship with their handles and the COMPLETE refetch resolves them, as before,
+    because streaming is a side channel.  Nothing is kept between calls, so every
+    worker resolves from the database alike.
+    """
+    htmls = list(htmls)
+    if not any(html and "{{ds-asset:" in html for html in htmls):
+        return htmls
+    try:
+        from src.api.services.chat_service import resolve_active_design_system_id
+        from src.utils.ds_asset_utils import substitute_ds_assets_in_many
+
+        design_system_id = resolve_active_design_system_id(session_id)
+        with get_db_session() as db:
+            return substitute_ds_assets_in_many(
+                htmls, db, design_system_id=design_system_id
+            )
+    except Exception:
+        logger.warning("Could not resolve brand assets for streamed slides", exc_info=True)
+        return htmls
+
+
 class SessionManager:
     """Manager for database-backed session operations.
 
@@ -3499,6 +3574,9 @@ class SessionManager:
             from src.utils.ds_asset_utils import substitute_deck_dict_ds_assets
             from src.utils.image_utils import substitute_deck_dict_images
 
+            from src.utils.slide_number_tokens import substitute_deck_slide_numbers
+
+            substitute_deck_slide_numbers(deck_dict)
             ds_id = resolve_active_design_system_id(session_id)
             substitute_deck_dict_images(deck_dict, db)
             substitute_deck_dict_ds_assets(deck_dict, db, design_system_id=ds_id)
@@ -3701,12 +3779,17 @@ class SessionManager:
             _restore_result = {
                 "version_number": version_number,
                 "description": version.description,
+                # Rendered once the restore has committed (below).
                 "deck": deck_dict,
                 "verification_map": verification_map,
                 "chat_history": chat_history,
                 "deleted_versions": deleted_count,
                 "deleted_messages": deleted_messages,
             }
+
+        # The client's copy, read in its own session after the commit: the rows and
+        # the snapshot keep their tokens and handles.
+        _restore_result["deck"] = _restore_response_deck(deck_dict, session_id)
 
         # D6a: discard the pending spec-review marker unconditionally, AFTER the
         # restore has committed.  The deck those pending edits described no longer

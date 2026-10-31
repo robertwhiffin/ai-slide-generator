@@ -13,8 +13,14 @@ import src.core.database  # noqa: F401  (break import cycle before src.services.
 from evals.harness import case
 
 HELDOUT_CASE_IDS = {
-    "builder": {"cover_slide", "bullets_problem", "stat_cards", "too_much_content", "stat_no_data"},
-    "build_reviewer": {"clean", "broken_handoff", "rogue_colour", "overflow", "source_contradiction"},
+    "builder": {
+        "cover_slide", "bullets_problem", "stat_cards", "too_much_content", "stat_no_data",
+        "deck_style_code", "deck_style_table", "deck_style_icons",
+    },
+    "build_reviewer": {
+        "clean", "broken_handoff", "rogue_colour", "overflow", "source_contradiction",
+        "deck_style_inline_paint", "deck_style_clean",
+    },
     "fixer": {"rogue_colour", "overflow", "contrast_failure", "brief_not_delivered", "source_contradiction"},
     "fix_reviewer": {
         "good_fix_accept", "good_contrast_fix_accept", "restyle_reject",
@@ -28,6 +34,7 @@ HELDOUT_CASE_IDS = {
         "fill_blank_slide", "edit_beside_blank",
         "delete_slide", "move_slide", "replace_slide_expand", "mixed_operations",
         "redescribe_deck",
+        "build_technical_deck", "restyle_deck",
     },
     "data_analyst": {
         "figures_inline", "conflicting_figures", "two_sources", "needs_tool", "unsourced_public_stat",
@@ -67,11 +74,14 @@ def _tree(root):
 
 
 def test_total_heldout_case_count():
-    # Five per agent, twenty for the architect (#313 added four, #314 four more, the #314
+    # Five per agent, twenty-two for the architect (#313 added four, #314 four more, the #314
     # manual-insert follow-up two, the edit-operations cases four, the sweeper's re-description
-    # one): 6 x 5 + 20.
-    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 50
-    assert len(HELDOUT_CASE_IDS["architect"]) == 20
+    # one, the deck-style build and restyle two), seven for the build_reviewer (two deck-style
+    # cases) and eight for the builder (those two plus Addendum A's deck_style_icons):
+    # 4 x 5 + 7 + 8 + 22.
+    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 57
+    assert len(HELDOUT_CASE_IDS["architect"]) == 22
+    assert len(HELDOUT_CASE_IDS["builder"]) == 8
 
 
 @pytest.mark.parametrize("agent", AGENTS)

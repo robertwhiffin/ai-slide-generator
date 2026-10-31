@@ -42,6 +42,8 @@ from pydantic import ValidationError
 
 from src.domain.deck_spec import (
     DeckSpec,
+    DeckStyle,
+    DeckStyleComponent,
     DesignContractRef,
     ResolvedData,
     ResolvedFigure,
@@ -75,6 +77,7 @@ def _old_fields(p: int) -> dict:
         "data_references": [f"s{p}_metrics", "shared_metrics"],
         "slide_type": f"type-s{p}",
         "template_section_index": 100 + p,
+        "look": f"s{p} look: three dk-card notes under the title",
     }
 
 
@@ -88,6 +91,7 @@ def _new_fields(name: str) -> dict:
         "data_references": [f"{name.lower()}_metrics"],
         "slide_type": f"type-{name}",
         "template_section_index": 7,
+        "look": f"{name} look: one dk-stat across the body",
     }
 
 
@@ -800,6 +804,17 @@ def test_compose_applies_only_set_deck_changes():
         "narrative_arc": ["problem", "plan"],
         "design_contract": DesignContractRef(slide_style_id=3),
         "resolved_data": ResolvedData(synthesis="New synthesis", figures=[], gaps=[]),
+        "deck_style": DeckStyle(
+            css=".dk-note { color: var(--brand-core-primary); }",
+            components=[
+                DeckStyleComponent(
+                    name="Note",
+                    class_names=["dk-note"],
+                    use="A one-line aside under the exhibit.",
+                    example_html='<p class="dk-note">Aside</p>',
+                )
+            ],
+        ),
     }
     assert set(every) == set(DeckChanges.model_fields)
     identity = apply_operations(prior.slides, [])
@@ -858,6 +873,18 @@ def test_compose_nothing_to_do():
 # ---------------------------------------------------------------------------
 
 
+def _dropped_class_problem(positions, cls: str = "dk-note") -> OperationProblem:
+    """A ``deck_style_drops_used_class`` problem as the node words it (Task 6)."""
+    listed = ", ".join(str(p) for p in positions)
+    return OperationProblem(
+        "deck_style_drops_used_class",
+        tuple(positions),
+        f"the slides at positions {listed} still use the class {cls}, which your "
+        f"deck_changes.deck_style drops; keep {cls} in the deck style, or add an "
+        "update operation for each of those slides",
+    )
+
+
 def test_problem_sentences():
     assert PROBLEM_CODES == (
         "unknown_slide",
@@ -871,6 +898,7 @@ def test_problem_sentences():
         "deck_emptied",
         "nothing_to_do",
         "invalid_deck_changes",
+        "deck_style_drops_used_class",
     )
 
     current = deck(22)
@@ -931,6 +959,26 @@ def test_problem_sentences():
         OperationProblem("invalid_deck_changes", (), "title must be non-empty")
     ) == "the deck-level changes were not valid (title must be non-empty)"
 
+    # Task 6 (R6, C16): raised by the node, numbered off the persisted positions;
+    # the class is read back out of the detail (the name after "still use the
+    # class", by the same pattern the detail's format is written beside).
+    assert say(_dropped_class_problem((4,))) == (
+        "slide 5 still uses the dk-note style the change removes"
+    )
+    assert say(_dropped_class_problem((4, 5))) == (
+        "slides 5 and 6 still use the dk-note style the change removes"
+    )
+    assert say(_dropped_class_problem((1, 4, 5), "dk-code-block")) == (
+        "slides 2, 5 and 6 still use the dk-code-block style the change removes"
+    )
+    # Without what the sentence needs (a position, a class name), the detail.
+    nameless = OperationProblem(
+        "deck_style_drops_used_class", (4,), "a class the new deck style drops is in use"
+    )
+    assert say(nameless) == nameless.detail
+    unplaced = _dropped_class_problem(())
+    assert say(unplaced) == unplaced.detail
+
     assert said == set(PROBLEM_CODES)
 
     # Slide numbers come from `slide_numbers`, not `position + 1`; a position
@@ -967,6 +1015,9 @@ def test_problem_sentences():
     )
     assert say(only_problem(apply_operations(gapped, [delete(4)]))) == (
         "there is no slide 5 — the deck has 3 slides"
+    )
+    assert say(_dropped_class_problem((3, 7))) == (
+        "slides 2 and 3 still use the dk-note style the change removes"
     )
 
     # Built from code and positions alone, whatever the detail says.
@@ -1026,6 +1077,47 @@ def test_slide_content_applies_slide_specs_slide_type_rule():
             SlideSpec(position=2, **fields)
         with pytest.raises(ValidationError, match="slide_type must not be whitespace-only"):
             SlideContent(**fields)
+
+
+def test_slide_content_applies_slide_specs_look_rule():
+    """Deck style (Task 1, C5): ``look`` is stripped and a blank look becomes None
+    (not an error, unlike a blank slide_type), on SlideSpec and SlideContent alike, so
+    a slide built from new content stores the look a spec would."""
+    for look, stored in (
+        (None, None),
+        ("one dk-stat across the body", "one dk-stat across the body"),
+        ("  one dk-stat across the body\t\n", "one dk-stat across the body"),
+        ("", None),
+        ("   ", None),
+        ("\n\t", None),
+    ):
+        fields = {**_new_fields("X"), "look": look}
+        built = SlideContent(**fields)
+        assert built.look == stored
+        as_spec = SlideSpec(position=2, **fields)
+        assert as_spec.look == stored
+        assert built.to_slide_spec(2) == as_spec
+
+        for operation in (
+            SlideOperation(op="update", position=2, slides=[built]),
+            SlideOperation(op="replace", position=2, slides=[built]),
+            SlideOperation(op="insert", after_position=1, slides=[built]),
+        ):
+            result = apply_operations(deck(4), [operation])
+            assert isinstance(result, OperationsResult)
+            assert result.slides[2] == as_spec, operation.op
+            assert result.slides[2].look == stored, operation.op
+            # Every slide the operation did not rebuild keeps its own look.
+            for index, persisted in enumerate(result.layout):
+                if index not in result.rebuild:
+                    assert result.slides[index].look == _old_fields(persisted)["look"]
+
+
+def test_deck_helpers_give_every_slide_field_a_value():
+    """The notation's promise: every field but position has its own value, so the
+    field-for-field comparisons above also check that each field travels with its slide."""
+    assert set(_old_fields(0)) == set(SlideSpec.model_fields) - {"position"}
+    assert set(_new_fields("X")) == set(SlideContent.model_fields)
 
 
 def test_problem_sentence_passes_other_problems_through():

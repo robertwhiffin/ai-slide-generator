@@ -1,0 +1,14 @@
+# Builder v1 prompt (deck style addendum A, Task B5b fix round 1, Ruling RA15): the promoted
+# `brand-assets-c` text with its DECK STYLE block changed in three places.
+# (i) A lead line fences the whole block to payloads that carry deck_style; the page-token
+#     fence in the Footers bullet stays.
+# (ii) Every slide except the cover carries exactly one footer: a bound slide whose section has a
+#      footer fills it and never adds the footer piece, and a bound slide whose section lacks one
+#      uses the piece as an unbound slide does; without a footer piece in the catalogue, a slide
+#      without a footer of its own gets none.
+# (iii) The cover gets no page tokens and no footer piece, and a footer its section ships stays.
+# Every byte outside the block is identical.
+agent_key: builder
+name: builder-one-footer
+base: v1
+prompt_file: one-footer.md

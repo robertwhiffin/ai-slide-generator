@@ -48,6 +48,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
@@ -56,7 +57,7 @@ from typing import Any, Dict, Final, List, Literal, Optional, Sequence, Set, Tup
 from src.api.schemas.agent_config import AgentConfig, GenieOneTool, resolve_agent_config
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_columns
-from src.api.services.session_manager import get_session_manager
+from src.api.services.session_manager import get_session_manager, resolve_streamed_ds_assets
 from src.api.services.slide_repository import (
     SlideRowsChangedError,
     SlideWriter,
@@ -76,6 +77,14 @@ from src.database.models.design_system import DesignSystem, DesignSystemTemplate
 from src.database.models.session import SessionSlideDeck, UserSession
 from src.domain.deck_spec import DeckSpec, DesignContractRef, ResolvedFigure, SlideSpec
 from src.domain.deck_spec_slides import is_blank_slide_html, is_blank_slide_spec
+from src.domain.deck_style import (
+    css_class_names,
+    deck_style_context,
+    drop_white_ground,
+    dropped_classes_in_use,
+    rank_logos,
+    sanitise_deck_style,
+)
 from src.domain.finding import (
     CRITERIA,
     Finding,
@@ -96,8 +105,10 @@ from src.domain.slide_operations import (
     DeckChanges,
     OperationProblem,
     OperationProblems,
+    OperationsResult,
     apply_operations,
     compose_edit_spec,
+    dropped_class_problem,
     problem_sentence,
 )
 from src.services.agent import SAFETY_RETRY_NOTICE, UnsafeContentError
@@ -171,6 +182,7 @@ from src.services.template_sections import (
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.html_utils import strip_inter_tag_escapes
 from src.utils.slide_hash import compute_slide_hash
+from src.utils.slide_number_tokens import substitute_slide_numbers
 from src.utils.spotlight import neutralize_delimiters, spotlight
 
 logger = logging.getLogger(__name__)
@@ -221,9 +233,10 @@ def _assembly_context(
     are inert for resolution and are read by nothing but the identity sink.
 
     ``toolset`` is keyword-only and invocation-scoped, never an id: only
-    ``data_analyst_node`` passes it (Genie One in agent mode), and every other
-    call site leaves it ``None``, so their single structured-output call is
-    unchanged.
+    ``data_analyst_node`` (Genie One in agent mode) and ``builder_node`` and
+    ``fixer_node`` (the brand-asset search, :func:`_brand_search_toolset`, deck
+    style addendum A) pass it, and every other call site leaves it ``None``, so
+    their single structured-output call is unchanged.
     """
     return AgentAssemblyContext(
         bool(design_system_active),
@@ -231,6 +244,45 @@ def _assembly_context(
         actor_session_id or "",
         toolset=toolset,
     )
+
+
+def _brand_search_toolset(payload: Mapping[str, Any]) -> Optional[AgentToolset]:
+    """A fresh ``search_brand_assets`` toolset for one builder or fixer run, or ``None``.
+
+    Bound only when all three hold (deck style addendum A): a design system is
+    active, the deck has a deck style (an old deck's payload never carries one,
+    so its call is exactly today's single structured-output call), and the
+    design contract names the design system the search is scoped to.
+    ``payload`` is the builder's branch payload — for the fixer, the builder
+    record its fix entry carries.
+
+    The tool is ``brand_search.BrandSearchAgentTool`` over ``build_ds_asset_tool``
+    for that design system: the row cap, the spotlight and the fixed failure text
+    are that module's, shared with the eval harness.  A toolset counts its calls,
+    so every run asks for its own (the safety-gate retry too).  Nothing here
+    reads the database: each search opens its own session.  Any failure to build
+    it binds no tool.
+    """
+    if not payload.get("design_system_active") or payload.get("deck_style") is None:
+        return None
+    contract = payload.get("design_contract")
+    design_system_id = (
+        contract.get("design_system_id") if isinstance(contract, Mapping) else None
+    )
+    if design_system_id is None:
+        return None
+    # Everything that builds the toolset sits inside the guard, so a failure
+    # builds the slide without a search instead of failing it.
+    try:
+        from src.services.agent_tools.brand_search import build_brand_search_toolset
+        from src.services.tools.ds_asset_tool import build_ds_asset_tool
+
+        return build_brand_search_toolset(build_ds_asset_tool(int(design_system_id)))
+    except Exception:
+        logger.warning(
+            "brand-asset search unavailable; the slide is built without it", exc_info=True
+        )
+        return None
 
 
 def _raise_if_persisted_runtime_failure(exc: Exception) -> None:
@@ -453,7 +505,11 @@ def _release_slides(state: dict) -> List[int]:
         )
         return []
 
-    released: List[int] = []
+    # Live page numbers: number = position + 1, count = the spec's slide count.
+    spec_slides = getattr(state.get("deck_spec"), "slides", None)
+    spec_count = len(spec_slides) if spec_slides else pending[-1] + 1
+
+    to_release: List[Tuple[int, dict]] = []
     for position in pending:
         row = rows.get(position)
         if row is None:
@@ -465,9 +521,23 @@ def _release_slides(state: dict) -> List[int]:
                 position,
             )
             break
+        to_release.append((position, row))
+
+    # The REST readers' order: page tokens, then brand assets, the latter for the
+    # whole wake in one read (and no read when no slide carries a handle).
+    htmls = resolve_streamed_ds_assets(
+        session_id,
+        [
+            substitute_slide_numbers(row["html"] or "", position + 1, spec_count)
+            for position, row in to_release
+        ],
+    )
+
+    released: List[int] = []
+    for (position, row), html in zip(to_release, htmls):
         emit_slide_ready(
             position=position,
-            html=row["html"] or "",
+            html=html,
             scripts=row["scripts"] or "",
             agent=row.get("modified_by") or row.get("created_by"),
         )
@@ -800,6 +870,8 @@ def rereview_committed_slides(
             # instructions (see AgentRuntime's protected prompt assembly).
             "deck_brief": deck_brief,
         }
+        if spec.deck_style is not None:
+            review_payload["deck_style"] = spec.deck_style.model_dump()
         try:
             out = get_agent_runtime().run(
                 "build_reviewer",
@@ -940,6 +1012,39 @@ def _design_system_library() -> List[dict]:
     ]
 
 
+def _design_system_logos(design_system_id: int) -> List[dict]:
+    """The design system's ``logo``/``lockup`` assets as ranked ``{handle, filename}`` rows.
+
+    Handles are ``{{ds-asset:<id>}}``; no asset bytes are read (the ``data`` column
+    is deferred by ``search_assets``). Ranked and capped by ``rank_logos``. Returns
+    ``[]`` on any failure: a deck can be built without logos, so an unreadable
+    asset table logs and the turn goes on.
+    """
+    try:
+        from src.services.design_system_service import search_assets
+
+        # One unfiltered read, filtered here: a ``kind=`` filter is applied in
+        # Python by ``search_assets`` anyway, so two filtered calls read twice.
+        with get_db_session() as db:
+            rows = [
+                {
+                    "handle": "{{ds-asset:%d}}" % a.id,
+                    "filename": a.filename,
+                    "kind": a.kind,
+                    "mime": a.mime,
+                }
+                for a in search_assets(db, design_system_id)
+                if (a.kind or "").lower() in ("logo", "lockup")
+            ]
+        return rank_logos(rows)
+    except Exception:
+        logger.warning(
+            "design-system logo read failed; the architect sees no logos this turn",
+            exc_info=True,
+        )
+        return []
+
+
 def _concat_css(token_css: str, style_block: str) -> str:
     """``token_css`` + the template's ``<style>`` block, concatenated (§17).
 
@@ -1000,6 +1105,11 @@ def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
     from the ones this brand was resolved for" — without being handed the
     inbound contract as well: the operations planner, which may run twice in a
     turn, always receives the INBOUND brand, so it must be able to tell.
+    ``template_requested`` says whether the default-filled contract names a
+    design system AND a template, so template bytes were asked for: an empty
+    ``deterministic_css`` then means the resolution failed closed (a transient
+    DB error, a deactivated design system, a deleted template), not that the
+    deck has no brand CSS.
     """
     from src.services.agent_resolution import resolve_style_source
 
@@ -1010,11 +1120,12 @@ def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
     layout_html = ""
     style_block = ""
     token_css = ""
-    if (
+    template_requested = (
         contract is not None
         and contract.design_system_id is not None
         and contract.template_id is not None
-    ):
+    )
+    if template_requested:
         layout_html, style_block, token_css = resolve_template_bytes(
             contract.design_system_id, contract.template_id
         )
@@ -1039,6 +1150,7 @@ def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
         "deterministic_css": _concat_css(token_css, style_block),
         "section_inventory": inventory,
         "resolved_for": resolved_for,
+        "template_requested": template_requested,
     }
 
 
@@ -1885,7 +1997,7 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
                 position,
             )
 
-    return {
+    branch_payload = {
         "session_id": state["session_id"],
         "graph_release_id": state["graph_release_id"],
         "turn_id": state["turn_id"],
@@ -1912,6 +2024,14 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
         "resolved_style": state.get("resolved_style") or "",
         "design_system_active": bool(state.get("design_system_active")),
     }
+    # Only when the deck has one: an old deck's payload is exactly what it was.
+    if spec.deck_style is not None:
+        branch_payload["deck_style"] = spec.deck_style.model_dump()
+        # Branch-only, never a model payload key: a build turn of a styled deck
+        # has its content slides' ``white`` ground dropped in code (RA23).
+        if state.get("architect_intent") == "build":
+            branch_payload["one_ground"] = True
+    return branch_payload
 
 
 # ---------------------------------------------------------------------------
@@ -2210,6 +2330,63 @@ class _EditPlan:
     keeps_positions: bool
 
 
+#: The class of every slide's frame (``<div class="slide">``), whatever the
+#: template: a deck style may scope a piece under it, but never owns it.
+_SLIDE_FRAME_CLASS = "slide"
+
+
+def _stranded_style_classes(
+    prior_spec: DeckSpec,
+    composed: DeckSpec,
+    result: OperationsResult,
+    committed_rows: List[Dict[str, Any]],
+    style_block: str,
+) -> Optional[OperationProblems]:
+    """Classes the composed deck style drops that a kept, non-rebuilt slide uses.
+
+    Spec §5: a slide still using a class the new style drops would silently lose
+    its styling, so every such slide needs an ``update`` in the same edit.  Kept
+    means ``result.layout`` carries the slide over and ``result.rebuild`` does not
+    list it; a moved slide is kept, as its row travels whole.  The problem's
+    positions are the PERSISTED ones, which the rows are at (the caller has
+    passed the persisted-spec guards).
+
+    Every class the style stops naming counts — the ``dk-`` pieces and the
+    unprefixed classes inside them alike (a code block's ``.dk-code .kw`` token
+    spans: renaming ``kw`` strips the keyword colour from every kept slide) —
+    except the classes something else styles anyway (Ruling R22): the template's
+    own, those of *style_block* (the composed contract's template CSS), and the
+    slide frame's ``slide``.  A style that stops scoping a piece under one of
+    those (``.slide .dk-note`` to ``.dk-note``) strips nothing from a slide.
+    ``None`` when nothing is stranded.
+    """
+    html_by_position = {
+        row.get("position"): row.get("html") or "" for row in committed_rows
+    }
+    rebuilt = set(result.rebuild)
+    kept_rows = {
+        position: html_by_position.get(position, "")
+        for index, position in enumerate(result.layout)
+        if position is not None and index not in rebuilt
+    }
+    styled_elsewhere = css_class_names(style_block) | {_SLIDE_FRAME_CLASS}
+    stranded = {
+        name: positions
+        for name, positions in dropped_classes_in_use(
+            prior_spec.deck_style, composed.deck_style, kept_rows
+        ).items()
+        if name not in styled_elsewhere
+    }
+    if not stranded:
+        return None
+    return OperationProblems(
+        tuple(
+            dropped_class_problem(name, positions)
+            for name, positions in stranded.items()
+        )
+    )
+
+
 def _deck_changes_of(
     state: dict, out: Any, prior_spec: DeckSpec
 ) -> Optional[DeckChanges]:
@@ -2229,24 +2406,38 @@ def _deck_changes_of(
     Returns a copy; the answer is not mutated, so a retry plans from it afresh.
     """
     changes = out.deck_changes
-    if changes is not None and changes.design_contract is not None:
-        return changes
-    spec = out.deck_spec
-    if spec is None or _contract_ids(spec.design_contract) == _contract_ids(
-        prior_spec.design_contract
-    ):
+    adopted = _contract_from_deck_spec(out, prior_spec)
+    if adopted is None:
         return changes
     logger.info(
         "operations_contract_from_deck_spec: the architect's operations answer "
         "sets no deck_changes.design_contract but its deck_spec carries %s (the "
         "persisted spec has %s); committing that contract",
-        _contract_ids(spec.design_contract),
+        _contract_ids(adopted),
         _contract_ids(prior_spec.design_contract),
         extra={"session_id": state.get("session_id")},
     )
-    return (changes or DeckChanges()).model_copy(
-        update={"design_contract": spec.design_contract}
-    )
+    return (changes or DeckChanges()).model_copy(update={"design_contract": adopted})
+
+
+def _contract_from_deck_spec(
+    out: Any, prior_spec: DeckSpec
+) -> Optional[DesignContractRef]:
+    """The contract C19 adopts from an operations answer's ``deck_spec``, else ``None``.
+
+    :func:`_deck_changes_of`'s rule without its log, so the deck-style sanitiser
+    can find the contract an edit commits before the answer is planned without
+    saying "committing that contract" twice.
+    """
+    changes = out.deck_changes
+    if changes is not None and changes.design_contract is not None:
+        return None
+    spec = out.deck_spec
+    if spec is None or _contract_ids(spec.design_contract) == _contract_ids(
+        prior_spec.design_contract
+    ):
+        return None
+    return spec.design_contract
 
 
 def _plan_operations_edit(
@@ -2273,6 +2464,8 @@ def _plan_operations_edit(
        field ever read out of ``deck_spec`` is a new ``design_contract`` that
        ``deck_changes`` does not set (C19, :func:`_deck_changes_of`).
     3. The brand of the composed contract, by the node's own re-resolve rule.
+       Then, on the same contract, a new deck style may not drop a class a kept
+       slide still uses (:func:`_stranded_style_classes`).
     4. The template bindings, completed and checked on the COMPOSED spec — an
        inserted slide is checked like any other.  A binding error becomes an
        ``invalid_slide_type_binding`` problem, so it degrades (and can be
@@ -2300,6 +2493,25 @@ def _plan_operations_edit(
     # resolves the spec's on an edit, exactly as the full-spec path does.
     if _contract_ids(composed.design_contract) != brand.get("resolved_for"):
         brand = _resolve_brand(composed.design_contract)
+
+    # Spec §5 (R7, C17): a restyle may not strand a kept slide.  Checked only
+    # when this edit brings a deck style and there was one to drop from, and
+    # never on a contract change: that rebuilds every slide (classify_spec_change,
+    # later), so its fresh style strands nothing.  The composed spec's contract
+    # decides, wherever the answer gave it (C19).  After the re-resolve, so the
+    # template classes it leaves out (R22) are the composed contract's.
+    if (
+        deck_changes is not None
+        and deck_changes.deck_style is not None
+        and prior_spec.deck_style is not None
+        and _contract_ids(composed.design_contract)
+        == _contract_ids(prior_spec.design_contract)
+    ):
+        stranded = _stranded_style_classes(
+            prior_spec, composed, result, committed_rows, brand["style_block"]
+        )
+        if stranded is not None:
+            return stranded
 
     # While the composed spec is still numbered 0..m-1, so an error's "slide N"
     # is that slide's number in the deck the edit produces.  On an identity
@@ -2481,6 +2693,249 @@ def _say_architect_message(state: dict, message: str, intent: str) -> None:
     _say(state, message)
 
 
+# What an edit's retry is told when the sanitiser kept nothing of its
+# ``deck_changes.deck_style`` (Ruling R4); the sanitiser's notes follow it.
+_DECK_STYLE_DROPPED_PREFIX = "deck_changes.deck_style was dropped: "
+
+
+def _design_system_active_for(
+    contract: Optional[DesignContractRef], brand: Dict[str, Any]
+) -> bool:
+    """Whether *contract* resolves to a design system, as its brand would say.
+
+    *brand*'s own flag when *contract* is the one it was resolved for; otherwise
+    the style source alone is resolved, exactly as :func:`_resolve_brand` would
+    resolve it.  Never ``_resolve_brand`` itself: a contract's template bytes are
+    resolved once per turn, by the planner that commits it.
+    """
+    if _contract_ids(contract) == brand.get("resolved_for"):
+        return brand["design_system_active"]
+    from src.services.agent_resolution import resolve_style_source
+
+    style = resolve_style_source(_agent_config_for(_with_default_template(contract)))
+    return bool(style.design_system_active)
+
+
+def _sanitise_answer_deck_style(
+    out: Any,
+    session_id: str,
+    *,
+    prior_spec: Optional[DeckSpec],
+    brand: Dict[str, Any],
+) -> Tuple[Any, Optional[Tuple[str, ...]]]:
+    """*out* with ``deck_spec.deck_style`` and ``deck_changes.deck_style`` sanitised.
+
+    Applied to every answer, the retry's included, BEFORE it is planned, so no
+    check, commit or ``deck.css`` write ever reads a deck style the sanitiser has
+    not passed, and a retry's ``your_previous_answer`` echoes the cleaned answer.
+    Each style is cleaned under the design-system flag of the contract it would
+    commit with (Ruling R3: on a design system ``:root`` goes too, or it would
+    replace the template's in the post-commit merge): ``deck_spec``'s own
+    contract, and for ``deck_changes`` the composed spec's — its own contract,
+    else the one C19 adopts from ``deck_spec``, else the persisted spec's.  Each
+    note is logged.
+
+    Returns the cleaned copy (*out* itself when it carries no style, so an old
+    deck resolves and logs nothing more), and the notes when the sanitiser kept
+    nothing of ``deck_changes.deck_style`` — an edit whose only change that was
+    is refused for it (R4), one with other changes applies them without it (R31,
+    :func:`_plan_answer`) — else ``None``.  A build whose ``deck_spec`` style is
+    dropped commits ``deck_style=None`` and builds.
+    """
+    update: Dict[str, Any] = {}
+    dropped: Optional[Tuple[str, ...]] = None
+    spec = out.deck_spec
+    if spec is not None and spec.deck_style is not None:
+        cleaned, _ = _sanitise_logged(
+            "deck_spec",
+            spec.deck_style,
+            _design_system_active_for(spec.design_contract, brand),
+            session_id,
+        )
+        update["deck_spec"] = spec.model_copy(update={"deck_style": cleaned})
+    changes = out.deck_changes
+    if changes is not None and changes.deck_style is not None:
+        cleaned, notes = _sanitise_logged(
+            "deck_changes",
+            changes.deck_style,
+            _design_system_active_for(_committed_edit_contract(out, prior_spec), brand),
+            session_id,
+        )
+        if cleaned is None:
+            dropped = notes
+        update["deck_changes"] = changes.model_copy(update={"deck_style": cleaned})
+    if not update:
+        return out, None
+    return out.model_copy(update=update), dropped
+
+
+def _sanitise_logged(
+    field: str, style: Any, design_system_active: bool, session_id: str
+) -> Tuple[Any, Tuple[str, ...]]:
+    """``sanitise_deck_style``, with each note logged against *field* and the session."""
+    cleaned, notes = sanitise_deck_style(style, design_system_active=design_system_active)
+    for note in notes:
+        logger.info(
+            "deck_style_sanitised: the architect's %s.deck_style: %s",
+            field,
+            note,
+            extra={"session_id": session_id},
+        )
+    if cleaned is None:
+        logger.warning(
+            "deck_style_dropped: nothing of the architect's %s.deck_style could be "
+            "kept (%d note(s))",
+            field,
+            len(notes),
+            extra={"session_id": session_id},
+        )
+    return cleaned, notes
+
+
+def _resanitise_carried_deck_style(
+    plan: "_EditPlan", out: Any, session_id: str
+) -> "_EditPlan":
+    """*plan* with the deck style it carries from the persisted spec re-sanitised.
+
+    An operations edit that brings no ``deck_changes.deck_style`` keeps the
+    persisted one, which was sanitised under the contract it was committed with.
+    When this edit moves the deck onto a design system, that style may still hold
+    a ``:root`` palette, which the post-commit merge would let replace the
+    template's ``:root`` (Ruling R3, C11).  So the carried style is sanitised again
+    under the committed contract's flag (``plan.brand``).  Ruling R18: this runs on
+    every carried style, not only when the flag differs from the inbound brand's,
+    because the inbound brand is the session's contract and need not be the one
+    the style was committed under.  It is a no-op otherwise: a sanitised style
+    comes back unchanged under the same or a looser flag.  A style that cleans to
+    nothing commits as ``deck_style=None``; the edit is not refused, since it asked
+    for a contract change, not a restyle.  The plan's spec is what
+    ``_apply_edit_plan`` persists, so the cleaned spec replaces it there too.
+    """
+    carried = plan.spec.deck_style
+    changes = out.deck_changes
+    if carried is None or (changes is not None and changes.deck_style is not None):
+        return plan
+    cleaned, notes = sanitise_deck_style(
+        carried, design_system_active=plan.brand["design_system_active"]
+    )
+    if cleaned is carried:
+        return plan
+    for note in notes:
+        logger.info(
+            "deck_style_resanitised: the persisted deck style carried into contract "
+            "%s: %s",
+            _contract_ids(plan.spec.design_contract),
+            note,
+            extra={"session_id": session_id},
+        )
+    if cleaned is None:
+        logger.warning(
+            "deck_style_dropped: nothing of the persisted deck style could be kept "
+            "under contract %s (%d note(s)); committing deck_style=None",
+            _contract_ids(plan.spec.design_contract),
+            len(notes),
+            extra={"session_id": session_id},
+        )
+    return dataclass_replace(plan, spec=plan.spec.model_copy(update={"deck_style": cleaned}))
+
+
+def _changes_beside_deck_style(out: Any, prior_spec: DeckSpec) -> bool:
+    """Whether an operations edit changes anything but ``deck_changes.deck_style``.
+
+    Ruling R31: an operation, any other ``deck_changes`` field that is set, or a
+    contract C19 adopts from ``deck_spec`` — whatever ``compose_edit_spec`` would
+    count as a change once the style is gone.
+    """
+    if out.operations:
+        return True
+    changes = out.deck_changes
+    if changes is not None and any(
+        getattr(changes, name) is not None
+        for name in DeckChanges.model_fields
+        if name != "deck_style"
+    ):
+        return True
+    return _contract_from_deck_spec(out, prior_spec) is not None
+
+
+def _brand_css_missing(brand: Dict[str, Any]) -> bool:
+    """Whether *brand* asked for template bytes and got none (final review MF1).
+
+    The contract, after the default-template fill, names a design system and a
+    template, yet ``resolve_template_bytes`` failed closed (a transient DB error,
+    a deactivated design system, a deleted template).  The pre-fan-out write then
+    leaves ``deck.css`` as stored.
+    """
+    return not brand["deterministic_css"] and bool(brand.get("template_requested", False))
+
+
+def _resanitise_committed_deck_style(
+    spec: DeckSpec, brand: Dict[str, Any], session_id: str
+) -> DeckSpec:
+    """*spec* with its deck style sanitised under *brand*'s final design-system flag.
+
+    The last gate before the pre-fan-out write (final review SF1): every other
+    sanitise ran under the flag of the contract a style was committed with, and
+    the R8/R23 carry brings the persisted style forward untouched, so a flag that
+    changed on the same contract ids was never applied to it.  *spec* itself when
+    it has no deck style or the style is clean under the flag (a fixed point,
+    C24); a style that cleans to nothing commits as ``deck_style=None``.
+
+    On a brand miss (:func:`_brand_css_missing`) the flag is forced on (Ruling
+    R32): ``deck.css`` keeps its stored token and template CSS, and a deck-style
+    ``:root`` would replace the token ``:root`` in the post-commit merge — which
+    happens exactly when the miss is a deactivated design system, whose style
+    source then reports none.
+    """
+    style = spec.deck_style
+    if style is None:
+        return spec
+    cleaned, notes = sanitise_deck_style(
+        style,
+        design_system_active=bool(brand["design_system_active"])
+        or _brand_css_missing(brand),
+    )
+    if cleaned is style:
+        return spec
+    for note in notes:
+        logger.info(
+            "deck_style_resanitised: the committed deck style under contract %s's "
+            "final design-system flag: %s",
+            _contract_ids(spec.design_contract),
+            note,
+            extra={"session_id": session_id},
+        )
+    if cleaned is None:
+        logger.warning(
+            "deck_style_dropped: nothing of the committed deck style could be kept "
+            "under contract %s's final design-system flag (%d note(s)); committing "
+            "deck_style=None",
+            _contract_ids(spec.design_contract),
+            len(notes),
+            extra={"session_id": session_id},
+        )
+    return spec.model_copy(update={"deck_style": cleaned})
+
+
+def _committed_edit_contract(
+    out: Any, prior_spec: Optional[DeckSpec]
+) -> Optional[DesignContractRef]:
+    """The contract ``compose_edit_spec`` gives an operations edit's spec.
+
+    ``deck_changes``' own contract, else the one C19 adopts from ``deck_spec``
+    (:func:`_contract_from_deck_spec`), else the persisted spec's.  With no
+    persisted spec the edit is refused before it is planned, so ``deck_spec``'s
+    contract, if any, stands in.
+    """
+    changes = out.deck_changes
+    if changes is not None and changes.design_contract is not None:
+        return changes.design_contract
+    if prior_spec is None:
+        return out.deck_spec.design_contract if out.deck_spec is not None else None
+    adopted = _contract_from_deck_spec(out, prior_spec)
+    return adopted if adopted is not None else prior_spec.design_contract
+
+
 @dataclass(frozen=True)
 class _PlannedAnswer:
     """One architect answer, checked (spec §5): what the turn does with it, or why not.
@@ -2515,6 +2970,7 @@ def _plan_answer(
     committed_positions: Set[int],
     brand: Dict[str, Any],
     slide_payload: Dict[str, Any],
+    deck_style_dropped: Optional[Tuple[str, ...]] = None,
 ) -> _PlannedAnswer:
     """Check one architect answer from the top; say and write nothing (spec §5).
 
@@ -2529,6 +2985,9 @@ def _plan_answer(
 
     *brand* is the inbound brand, the one the payload was built from; a plan or
     a re-pinned spec resolves its own, and the result's ``brand`` carries it.
+    *out* has already been through :func:`_sanitise_answer_deck_style`, and
+    *deck_style_dropped* is its notes when that kept nothing of
+    ``deck_changes.deck_style``.
     """
     session_id = state["session_id"]
     intent = out.intent
@@ -2652,7 +3111,44 @@ def _plan_answer(
                     "will describe it again from what is there now."
                 ),
             }
+        elif (
+            operations_edit
+            and deck_style_dropped is not None
+            and not _changes_beside_deck_style(out, prior_spec)
+        ):
+            # Ruling R4 (C12): the sanitiser kept nothing of the edit's deck
+            # style, and the style was the edit's only change.  Planned without
+            # it, the edit would be refused as "nothing to do" and the retry
+            # would never learn why.  So it is refused as an operations problem
+            # carrying the notes, which takes the one retry like any other.
+            # Beside other changes the style is ignored instead (R31, below).
+            edit_degrade = _operations_rejected(
+                OperationProblems(
+                    (
+                        OperationProblem(
+                            "invalid_deck_changes",
+                            (),
+                            _DECK_STYLE_DROPPED_PREFIX + "; ".join(deck_style_dropped),
+                        ),
+                    )
+                ),
+                slide_payload["slide_numbering"],
+            )
         elif operations_edit:
+            if deck_style_dropped is not None:
+                # Ruling R31 (final review risk 1): the dropped style rides beside
+                # operations or other deck_changes.  Refusing would cost the user
+                # those edits for a style nothing of which could be kept — what an
+                # old prompt that fills deck_style with unprefixed classes earns
+                # every time — so the style is ignored (it is already None on
+                # ``out``: the persisted style is carried) and the rest is planned.
+                logger.warning(
+                    "deck_style_ignored: nothing of the architect's "
+                    "deck_changes.deck_style could be kept (%s); applying the "
+                    "edit's other changes without it",
+                    "; ".join(deck_style_dropped),
+                    extra={"session_id": session_id},
+                )
             planned = _plan_operations_edit(
                 state, out, prior_spec, committed_rows, brand, slide_payload
             )
@@ -2664,7 +3160,7 @@ def _plan_answer(
                 # From here on the plan's spec and brand ARE the turn's: every
                 # later step (classify_spec_change, the re-review, state, the
                 # pre-fan-out write) reads `spec` and `brand`.
-                plan = planned
+                plan = _resanitise_carried_deck_style(planned, out, session_id)
                 spec = plan.spec
                 brand = plan.brand
         elif spec is None:
@@ -2740,6 +3236,25 @@ def _plan_answer(
         and _persisted_spec_describes_these_rows(prior_spec, committed_positions)
     ):
         spec = _description_keeps_what_it_cannot_see(spec, prior_spec, committed_rows)
+
+    # R8 (C18): a full-spec edit — the sweeper's re-description or an aligned
+    # edit — keeps the persisted deck style whatever its deck_spec carries.  The
+    # sweeper does not echo the style, and a restyle goes through
+    # deck_changes.deck_style, where the dropped-class check runs; this path has
+    # none.  On a contract change every slide is rebuilt, so the answer's
+    # (sanitised) style stands.  R23: the sweeper's intent is model output, and a
+    # describe-only BUILD re-describes the same deck (it builds nothing), so it
+    # keeps the style too; only a real build writes a style of its own.
+    if (
+        (intent == "edit" or (describe_only and intent == "build"))
+        and plan is None
+        and edit_degrade is None
+        and spec is not None
+        and prior_spec is not None
+        and _contract_ids(spec.design_contract)
+        == _contract_ids(prior_spec.design_contract)
+    ):
+        spec = spec.model_copy(update={"deck_style": prior_spec.deck_style})
 
     # The spec's pinned template, not the inbound payload's: a turn that pins or
     # changes the contract binds against the template it will actually use.
@@ -3070,6 +3585,17 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # brand it cannot see: available_design_contract carries only the ids
         # already in force, so every other design system in the org is invisible.
         "design_system_library": _design_system_library(),
+        # The token names and template classes the deck style may use, without
+        # any font data (see src/domain/deck_style.py).
+        "deck_style_context": deck_style_context(
+            brand["token_css"],
+            brand["style_block"],
+            _design_system_logos(inbound_contract.design_system_id)
+            if brand["design_system_active"]
+            and inbound_contract is not None
+            and inbound_contract.design_system_id is not None
+            else [],
+        ),
     }
 
     # ---- ask, plan, and at most once ask again (spec §5) ---------------------
@@ -3123,6 +3649,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 extra={"session_id": session_id},
             )
             break
+        # Every answer's deck style is sanitised before it is planned, so nothing
+        # downstream — the plan, the commit, the deck.css write, the retry's echo
+        # of this answer — sees one the sanitiser has not passed.
+        out, deck_style_dropped = _sanitise_answer_deck_style(
+            out, session_id, prior_spec=prior_spec, brand=brand
+        )
         answer = _plan_answer(
             state,
             out,
@@ -3133,6 +3665,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
             committed_positions=committed_positions,
             brand=brand,
             slide_payload=slide_payload,
+            deck_style_dropped=deck_style_dropped,
         )
         refusal = answer.refusal
         if (
@@ -3597,6 +4130,21 @@ def architect_node(state: dict) -> Dict[str, Any]:
 
     external_scripts = [SlideDeck.CHART_JS_URL]
     head_meta = json.dumps(_DEFAULT_HEAD_META)
+    # The committed deck style, sanitised once more under the FINAL brand's
+    # design-system flag (final review SF1).  The answer's style was sanitised
+    # before it was planned, but the R8/R23 carry commits the persisted style as
+    # it is, and that was sanitised under the flag of the turn that wrote it: a
+    # design system reactivated on the same contract ids (or a style source that
+    # swallowed an error and said "none") would let its :root palette replace
+    # the template's in the post-commit merge.  On a brand miss the flag is forced
+    # on (R32): the stored token :root stays in deck.css and must not be replaced.
+    # A clean style is a fixed point (C24), so this is the same object on every
+    # other turn.
+    spec = _resanitise_committed_deck_style(spec, brand, session_id)
+    # Its CSS follows the template block in both places it is written — the css
+    # column below and emitted_style_blocks — so the post-commit merge keeps that
+    # order and the deck style layers over the template, never under it.
+    style_css = spec.deck_style.css if spec.deck_style is not None else ""
 
     updates.update(
         {
@@ -3609,11 +4157,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
             "design_system_active": brand["design_system_active"],
             "external_scripts": external_scripts,
             "head_meta": head_meta,
-            # ONE element on a pinned deck, none on an unpinned one, and CSS
-            # TEXT rather than <style>-wrapped markup: a wrapped block is
-            # dropped SILENTLY by the aggregator (§17).
+            # The template block on a pinned deck, then the deck style's CSS,
+            # each only when non-empty, and CSS TEXT rather than <style>-wrapped
+            # markup: a wrapped block is dropped SILENTLY by the aggregator
+            # (§17).  The post-commit aggregate re-merges both, in this order.
             "emitted_style_blocks": scoped(
-                turn_id, [brand["style_block"]] if brand["style_block"] else []
+                turn_id, [block for block in (brand["style_block"], style_css) if block]
             ),
         }
     )
@@ -3623,14 +4172,27 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # external_scripts and head_meta are resolved DETERMINISTICALLY — the
     # Chart.js CDN default and the deck's <meta> set are known before any
     # builder runs, and ArchitectOutput declares neither field. The brand bytes
-    # in css come from resolve_template_bytes, never from model output.
+    # in css come from resolve_template_bytes, never from model output; the one
+    # model-written part is the committed deck style, sanitised, after them.
     #
     # css is passed only when it is non-empty. Every column parameter defaults
     # to _UNSET ("leave the stored value alone") and an explicit value
     # overwrites, so passing "" on an unpinned deck would ERASE an existing
     # deck's stylesheet, and the post-commit aggregate_deck_css would then
     # preserve the erasure. Omitting it is the writer's own documented way to
-    # say "this turn resolved no deterministic CSS".
+    # say "this turn resolved no deterministic CSS". A committed deck style
+    # makes css non-empty and replaces the stored column whole, never merged
+    # into it, so a restyle leaves none of the old style's rules behind.
+    # Except (final review MF1) when the brand was expected and resolved empty:
+    # the contract names a design system and a template, and
+    # resolve_template_bytes failed closed.  The style alone would then erase the
+    # stored token and template CSS, with no backstop after it (token_css is ""
+    # too), so css is omitted exactly as on an unstyled deck, and the post-commit
+    # merge applies the style from emitted_style_blocks over the stored column.
+    # A deck with no template to resolve (unpinned, a slide style, a design
+    # system without one) still has the style replace the column.
+    # spec.to_json() runs inside the try: whatever the sanitiser let through, a
+    # spec that cannot serialise fails this write, never the turn.
     # A describe-only turn (ws4d's arc-review sweeper) is not a change the client
     # should see. It re-describes the narrative and changes no slide, but
     # deck.version is what the WYSIWYG client sends back as expected_version, and
@@ -3646,13 +4208,21 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "title": spec.title,
         "external_scripts": external_scripts,
         "head_meta": head_meta,
-        "deck_spec": spec.to_json(),
         "modified_by": initiated_by,
         "user_visible": not describe_only,
     }
-    if brand["deterministic_css"]:
-        deck_write["css"] = brand["deterministic_css"]
+    css = _concat_css(brand["deterministic_css"], style_css)
+    if _brand_css_missing(brand) and style_css:
+        logger.warning(
+            "brand_css_missing: contract %s resolved no template CSS; deck.css is "
+            "left as stored and the post-commit merge applies the deck style",
+            _contract_ids(spec.design_contract),
+            extra={"session_id": session_id},
+        )
+    elif css:
+        deck_write["css"] = css
     try:
+        deck_write["deck_spec"] = spec.to_json()
         write_deck_level_columns(
             session_id,
             mutation=_deck_mutation_context(
@@ -4211,6 +4781,7 @@ _BUILDER_MODEL_PAYLOAD_KEYS = frozenset(
         "section_css",
         "resolved_style",
         "design_system_active",
+        "deck_style",
     }
 )
 
@@ -4263,9 +4834,11 @@ def builder_node(payload: dict) -> Dict[str, Any]:
         for key, value in payload.items()
         if key in _BUILDER_MODEL_PAYLOAD_KEYS
     }
-
-    try:
-        out = get_agent_runtime().run(
+    # The brand-asset search rides on the context, never in the model-facing
+    # payload; ``None`` for an old deck, so its call is today's.  Each run builds
+    # its own toolset: one counts its calls, so the retry must not inherit them.
+    def _attempt() -> Any:
+        return get_agent_runtime().run(
             "builder",
             payload["graph_release_id"],
             skill_payload,
@@ -4273,8 +4846,24 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                 design_system_active,
                 payload.get("root_session_id"),
                 payload.get("actor_session_id"),
+                toolset=_brand_search_toolset(payload),
             ),
         ).output
+
+    try:
+        try:
+            out = _attempt()
+        except Exception as exc:
+            # One retry on an unparseable answer, with a fresh toolset and the
+            # same payload; anything else (or a second failure) falls through.
+            if not is_provider_parse_error(exc):
+                raise
+            logger.warning(
+                "Builder answer did not parse at position %s; retrying once",
+                position,
+                exc_info=True,
+            )
+            out = _attempt()
 
         def _regenerate() -> str:
             retry_payload = {
@@ -4289,6 +4878,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                     design_system_active,
                     payload.get("root_session_id"),
                     payload.get("actor_session_id"),
+                    toolset=_brand_search_toolset(payload),
                 ),
             ).output.html
 
@@ -4403,6 +4993,8 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             "html": html,
             "scripts": scripts,
         }
+        if payload.get("deck_style") is not None:
+            review_payload["deck_style"] = payload["deck_style"]
 
         def _review():
             return get_agent_runtime().run(
@@ -4661,13 +5253,16 @@ def fixer_node(state: dict) -> Dict[str, Any]:
         "section_css": payload.get("section_css"),
         "resolved_data": payload.get("resolved_data"),
     }
+    if payload.get("deck_style") is not None:
+        fix_payload["deck_style"] = payload["deck_style"]
     design_system_active = bool(
         payload.get("design_system_active")
         or state.get("design_system_active")
     )
-
-    try:
-        out = get_agent_runtime().run(
+    # The brand-asset search is decided on the builder record, as the builder's
+    # own binding was; each run (the retry too) builds its own toolset.
+    def _attempt() -> Any:
+        return get_agent_runtime().run(
             "fixer",
             state["graph_release_id"],
             fix_payload,
@@ -4675,8 +5270,22 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                 design_system_active,
                 state.get("root_session_id"),
                 state.get("actor_session_id"),
+                toolset=_brand_search_toolset(payload),
             ),
         ).output
+
+    try:
+        try:
+            out = _attempt()
+        except Exception as exc:
+            if not is_provider_parse_error(exc):
+                raise
+            logger.warning(
+                "Fixer answer did not parse at position %s; retrying once",
+                position,
+                exc_info=True,
+            )
+            out = _attempt()
 
         def _regenerate() -> str:
             retry_payload = {
@@ -4691,6 +5300,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                     design_system_active,
                     state.get("root_session_id"),
                     state.get("actor_session_id"),
+                    toolset=_brand_search_toolset(payload),
                 ),
             ).output.html
 
@@ -4823,6 +5433,8 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
                 "resolved_style": payload.get("resolved_style"),
                 "section_css": payload.get("section_css"),
             }
+            if payload.get("deck_style") is not None:
+                review_payload["deck_style"] = payload["deck_style"]
             try:
                 out = get_agent_runtime().run(
                     "fix_reviewer",
@@ -5179,6 +5791,8 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
         operation="write_slide",
         object_type="slide",
     )
+    if payload.get("one_ground") and position != 0:
+        record["html"] = drop_white_ground(record["html"])
     drafted = _write_draft_row(record, mutation)
     report_slide(position, SlideProgressStage.REVIEWING)
 
@@ -5223,6 +5837,11 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
         with _fix_slots():
             try:
                 fixer_update = fixer_node(fix_state)
+                if payload.get("one_ground") and position != 0:
+                    _fixed_vals = (fixer_update.get("fixed") or {}).get("vals") or {}
+                    _fixed_entry = _fixed_vals.get(position)
+                    if _fixed_entry and isinstance(_fixed_entry.get("html"), str):
+                        _fixed_entry["html"] = drop_white_ground(_fixed_entry["html"])
                 _fold(acc, fixer_update)
                 _fold(fix_state, fixer_update)
                 if fix_state.get("fix_target") is not None:

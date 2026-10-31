@@ -11,7 +11,7 @@ tables have independent id sequences.
 """
 import logging
 import re
-from typing import Optional
+from typing import List, Optional, Sequence
 
 from sqlalchemy.orm import Session
 
@@ -52,6 +52,56 @@ def substitute_ds_asset_placeholders(
             return match.group(0)  # Leave placeholder if asset not found
 
     return DS_ASSET_PLACEHOLDER_PATTERN.sub(replace_match, html)
+
+
+def substitute_ds_assets_in_many(
+    htmls: Sequence[str], db: Session, *, design_system_id: Optional[int]
+) -> List[str]:
+    """Resolve ``{{ds-asset:ID}}`` across several HTML strings with ONE asset read.
+
+    The resolution of :func:`substitute_ds_asset_placeholders` (base64 data URIs,
+    scoped to ``design_system_id``, a foreign or unknown handle left in place), for
+    a boundary that ships many slides at once: every distinct id is fetched in one
+    query (``design_system_service.get_assets_base64``), not once per handle.  A
+    string with no handle is returned as is, and with no handle anywhere nothing is
+    read.  A failed read leaves every handle in place.
+    """
+    htmls = list(htmls)
+    ids = {
+        int(match.group(1))
+        for html in htmls
+        if html and "{{ds-asset:" in html
+        for match in DS_ASSET_PLACEHOLDER_PATTERN.finditer(html)
+    }
+    if not ids:
+        return htmls
+    try:
+        found = design_system_service.get_assets_base64(
+            db, ids, design_system_id=design_system_id
+        )
+    except Exception as e:
+        logger.warning(f"Failed to read ds-assets {sorted(ids)}: {e}")
+        return htmls
+    missing = sorted(ids - set(found))
+    if missing:
+        logger.warning(
+            f"ds-asset placeholders left unresolved (not in design system "
+            f"{design_system_id}): {missing}"
+        )
+
+    def replace_match(match: "re.Match[str]") -> str:
+        hit = found.get(int(match.group(1)))
+        if hit is None:
+            return match.group(0)
+        b64_data, mime_type = hit
+        return f"data:{mime_type};base64,{b64_data}"
+
+    return [
+        DS_ASSET_PLACEHOLDER_PATTERN.sub(replace_match, html)
+        if html and "{{ds-asset:" in html
+        else html
+        for html in htmls
+    ]
 
 
 # Deck-level string fields (siblings of per-slide ``html``) that can carry a

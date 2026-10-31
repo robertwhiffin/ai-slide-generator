@@ -61,6 +61,9 @@ NEW_CASE_IDS = ("delete_slide", "move_slide", "replace_slide_expand", "mixed_ope
 # operations answer must FAIL (tests/unit/evals/test_eval_redescribe_case.py), so it has no
 # operations equivalent here.
 REDESCRIBE_CASE_IDS = ("redescribe_deck",)
+# The deck-style restyle (Task 7b): an edit case whose reference is already an operations answer
+# (deck_changes alone) and whose scoring tests/unit/evals/test_eval_architect_deck_style.py checks.
+DECK_STYLE_EDIT_CASE_IDS = ("restyle_deck",)
 FILES =("case.yaml", "payload.json", "reference.json", "calibration.json")
 FIVE_DECK_LEVEL_FIELDS = ("audience", "purpose", "argument", "call_to_action", "narrative_arc")
 
@@ -393,7 +396,10 @@ def test_existing_insert_cases_pass_with_operations_answers(split):
     operations edit needs none), so ``edit_*`` cases without ``inserted`` must be routed to the
     operations scorer too.
     """
-    discovered = _edit_case_ids(split) - set(NEW_CASE_IDS) - set(REDESCRIBE_CASE_IDS)
+    discovered = (
+        _edit_case_ids(split) - set(NEW_CASE_IDS) - set(REDESCRIBE_CASE_IDS)
+        - set(DECK_STYLE_EDIT_CASE_IDS)
+    )
     table = EXISTING_EDIT_OPERATIONS[split]
     assert discovered == set(table), (
         f"{split}: edit cases without an operations equivalent: {sorted(discovered - set(table))}; "

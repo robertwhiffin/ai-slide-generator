@@ -1,0 +1,10 @@
+# Architect v1 prompt (architect deck style, plan Task 8), candidate B: `deck-style` with one
+# change aimed at its screen's one cause, the build cases' output tokens (mostly reasoning).
+# The DECK STYLE size sentence adds that most decks need 2,000 to 3,000 characters and four to
+# eight pieces, and that the CSS goes straight into deck_style, the pieces decided in a few
+# words of reasoning, with no drafting or checking of the CSS or the looks in reasoning first.
+# Every other byte is identical to `deck-style`.
+agent_key: architect
+name: deck-style-b
+base: v1
+prompt_file: deck-style-b.md

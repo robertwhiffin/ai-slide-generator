@@ -9,7 +9,8 @@ Real-model runs; results are logged to MLflow.
 - **Configs** (`evals/configs/`). A config is a named variant of one agent's v1 definition.
   `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
   settings. Each config carries a `content_hash`, logged with every run.
-- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (twenty for the architect), 50 in total across the seven
+- **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (eight for the builder, seven
+  for the build_reviewer, twenty-two for the architect), 57 in total across the seven
   roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
   `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
   `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
@@ -74,11 +75,50 @@ Real-model runs; results are logged to MLflow.
       and `operations` and `deck_changes` are both null. The model's own `target_positions` are
       noted, not failed. The judge sees this case's answers as given, never composed
       (`judge._judged`), because production composes nothing on that turn.
-  - `render_measures`, for the builder and fixer: the slide is rendered in a browser (Meridian section
-    CSS). It must have zero overflow, contrast of at least 4.5, no off-palette colours, no console
-    errors and no `<style>` tag.
+    - *Architect deck style.* A case whose `expect` has `deck_style: true` must also pass
+      `_deck_style_score`, checked right after the intent. It reads the answer's `deck_spec` and
+      passes only if `deck_style` is present, has 1 to 12 components and at most 10,000 characters
+      of CSS, `sanitise_deck_style` returns it unchanged (the same object, no notes), every slide
+      has a non-blank `look`, and, with a design system active, its CSS holds no hex colour
+      literal. The scorer passes the case's `design_system_active` through. When the `expect` also
+      has `logo_handles` (the handles of the payload's `deck_style_context.logos`, written by the
+      generator, since the scorer cannot see the payload), the style must have a footer piece (a
+      component whose `name` or one of whose `class_names` contains `footer`, any case) whose
+      `example_html` holds both page tokens, `{{slide:number}}` and `{{slide:count}}`, and, when
+      the list is not empty, one of those logo handles. Tokens or a logo elsewhere in the style do
+      not count. Without the key no footer is required.
+    - *Architect restyle.* A case whose `expect` has `deck_style_keeps` (a list of classes) is a
+      restyle given in `deck_changes.deck_style`, the only way production restyles a deck (a
+      full-spec edit keeps the persisted style). An operations answer passes only if it passes
+      every operations check above and `deck_changes.deck_style` is present and still defines each
+      listed class. The classes are read from the style as `sanitise_deck_style` cleans it under the
+      case's `design_system_active` (Ruling R27), because production reads only the cleaned style:
+      a class defined only inside `@media` fails, since every at-rule is dropped. The restyle is
+      also held to a build's hygiene (Ruling R28): the sanitiser must return it unchanged, and with
+      a design system active its CSS may hold no hex colour literal. So a raw hex fails, and so
+      does a `:root` palette, which the sanitiser drops under a design system, leaving its `var()`
+      references undefined. Any other answer, such as a plain edit or a full `deck_spec` that
+      carries a style, fails on `positions: []`, as before. Without the key every verdict and
+      rationale is unchanged.
+  - `render_measures`, for the builder and fixer: the slide is rendered in a browser with the
+    Meridian section CSS, followed by the case's deck style CSS when its payload carries one
+    (`mlflow_run.render_section_css`, also used by calibration). It must have zero overflow, contrast
+    of at least 4.5, no off-palette colours, no console errors and no `<style>` tag. A case whose
+    `expect` has `deck_style_classes` must also pass `deck_style_use_score`: every listed class is
+    used, no inline `color`, `background`, `background-color`, `font-size`, `font-family` or
+    `border-color` is declared, and every class used is defined by the payload's `section_css` or
+    its deck style. The scorer loads the row's own case (split included) for the payload. A case
+    whose `expect` has `brand_assets` (the fake asset index's handles) must also pass
+    `brand_asset_use_score`: the slide places at least one `{{ds-asset:N}}` from that list (a
+    handle the payload itself carries does not count), every other handle is in the list or
+    carried by the payload (`section_html`, a deck-style component's `example_html`), and the run's
+    `tool_calls` record holds a `search_brand_assets` call. When the `expect` also has `brand_icons`
+    (the index's icon-kind handles), the slide must place one of those: a logo alone is not an
+    icon (Ruling RA10). Like the deck-style use, it is ANDed into `render_measures` and so skips
+    with `--no-render`.
   - `judge`: an LLM judge (`mlflow.genai.make_judge`) using the pack's `judge_prompt.md`. It compares
-    the candidate with the reference and the brief and returns pass or fail.
+    the candidate with the reference and the brief and returns pass or fail. For the builder and the
+    build_reviewer, the brief also carries the payload's `deck_style` when it has one.
 - **Row outcome.** A row fails if any scorer fails. It is skipped if the judge is skipped, or if
   every scorer is skipped. Skips cover infra errors (after 3 retries with backoff) and judge errors;
   both are excluded from pass rate.
@@ -139,7 +179,8 @@ data_analyst prompt mentions Genie and a vector index, but neither is available 
 
 ## Held-out set
 
-Each agent has a second, separate set of cases (five per agent, twenty for the architect; 50 in total) in `evals/packs/<agent>/cases_heldout/`,
+Each agent has a second, separate set of cases (five per agent, eight for the builder, seven for
+the build_reviewer, twenty-two for the architect; 57 in total) in `evals/packs/<agent>/cases_heldout/`,
 built from a different source deck than the train cases. It has the same four files per case and
 shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
 cases generalises, rather than having been fitted to them.
@@ -802,3 +843,1066 @@ USD 5 cap.
   (`3da09952e775`, previously `8f1493ef35f9`). It was promoted with
   `python -m evals.harness.promote --config architect=evals/configs/architect/edit-ops-b.yaml --run-id architect=366f7035e8b043a88bf1be1263816369`,
   and the frontend lifecycle contract was re-recorded.
+
+## Deck style: scoring, and builder and build_reviewer cases, 2026-10-30
+
+The architect can author a deck style (`DeckSpec.deck_style`: CSS on `dk-` classes plus a component
+catalogue) that adds to the brand. The harness now scores it (see Scorers), renders slides with it,
+and has cases that hand it to the builder and the build reviewer. No prompt changed and no
+real-model run was made.
+
+- **The fixture.** `evals/fixtures/deck_style_technical.json` is a `DeckStyle` dump for a technical
+  deck: `dk-code` (with the `kw`, `fn`, `str` and `cm` token spans), `dk-table`, `dk-badge` with
+  `dk-badge--measured` and `dk-badge--untested`, `dk-steps`, `dk-callout` and `dk-note`. Every colour,
+  font and size is a Meridian token (the code font is a literal monospace stack: Meridian has no
+  mono token). `sanitise_deck_style(..., design_system_active=True)` returns it as the same object
+  with no notes, and a test pins that.
+- **Builder** (both splits). `deck_style_code` and `deck_style_table` are positives whose payload
+  carries the fixture and whose slide spec carries a `look`. The slide keeps its gold `purpose`,
+  `assumes` and `hands_off`, and its brief asks for the piece. `expect.deck_style_classes` lists the
+  pieces the slide must use. The reference is built from them. The `should_fail` is the same slide
+  painted inline in off-palette colours, so `deck_style_use_score` and the render both fail it.
+- **Build reviewer** (both splits; train slide 7, held-out slide 2). `deck_style_clean` builds a
+  code listing with `dk-code`. `deck_style_inline_paint` is the same slide with that block painted
+  inline instead (a `#1E293B` ground and off-palette token colours), so today's `rogue_colour`
+  description catches it. Its expect is `rogue_colour` at that slide. The clean case's
+  `should_fail` wrongly flags the deck style's own token colours as `rogue_colour`. The build
+  reviewer prompt does not mention deck styles (ruling R10), so these cases measure that gap.
+- The builder and the build_reviewer now have seven cases per split, 54 across the harness.
+- **Not calibrated or measured yet.** Calibrate the four new cases on both splits before relying
+  on their judge verdicts:
+  `python -m evals.run_eval --agent builder --calibrate --cases deck_style_code,deck_style_table [--split heldout]`
+  and the same for `--agent build_reviewer --cases deck_style_inline_paint,deck_style_clean`. Neither
+  judge prompt describes `deck_style`; the judge sees it in the brief. (The builder's two cases are
+  calibrated in the pass below, and the build reviewer's in "Fix reviewer: judge fixes against the
+  deck style".)
+
+## Builder and fixer: build to the deck style, 2026-10-30
+
+The builder and fixer prompts gain a `DECK STYLE (when deck_style is present)` block (spec
+`docs/superpowers/specs/2026-10-29-architect-deck-style-design.md` §3). With a deck style, the
+builder builds the slide to its `look`, uses the catalogue's pieces exactly as their
+`example_html` shows, keeps a bound section's frame and lays out its body as the look says, uses
+token-span classes only inside their piece, and uses no class (and no `dk-` class) that the deck
+style, the bound section or the design system does not define. Inline styles are for layout only,
+in any deck. The fixer gets the same block, aimed at fixing toward the deck style and keeping the
+look. Without a deck style the block is skipped, and every other block is byte-identical, except
+that INPUT names the two optional inputs. This pass measured three builder candidates and one fixer
+candidate on train, ran the builder finalist on held-out once, and promoted both.
+
+- **Setup.** Builder agent `system.ai.claude-haiku-4-5`, fixer agent `system.ai.claude-opus-5-5`
+  (manifest v1), judge `databricks-claude-sonnet-5`, profile `tellr-dev`. `prices.yaml` prices
+  neither agent endpoint, so the harness logged no `est_cost_usd`. Cost is estimated from the
+  logged mean tokens at list price (Haiku 4.5 USD 1 / 5, Opus 5.5 USD 4 / 20 per million input /
+  output) plus USD 0.05 per judge call (an upper bound).
+- **Calibration** (`--calibrate --cases deck_style_code,deck_style_table`):
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `deck_style_code` | trusted | not trusted (judge failed the reference) |
+  | `deck_style_table` | trusted | not trusted (judge failed the reference) |
+
+  Both held-out references pass the deterministic scorers (`render_measures`, with
+  `deck_style_use_score`; pinned by `test_pack_builder_heldout.py` and
+  `test_eval_deck_style_scorer.py`). So on held-out these two cases are decided by `contract` and
+  `render_measures`, as `fill_blank_slide` is; the judge verdict is reported, not counted. The
+  judge prompt still does not describe `deck_style`.
+- **Baseline.** Task 7a added two cases, so the builder's `cases_digest` (`1b9e3b28`) differs from
+  every recorded builder table. B0 is the then-promoted v1 prompt (`181a982b`) on the current train
+  cases, the comparable baseline.
+- **Candidates** (`evals/configs/builder/`), one change each:
+  - `deck-style` (`d7b7e1ee`): the block above.
+  - `deck-style-b` (`615ba622`): `deck-style`, plus "token values count too" and "an extra heading
+    or label takes a design-system class that fits, or none". Aimed at S1's one cause.
+  - `deck-style-c` (`42c6fccb`): `deck-style`, plus a last check: before returning, keep only
+    layout properties in every style attribute, even a `var(--…)` value. Aimed at the same cause.
+  - Fixer `deck-style` (`69eb6ea5`, `evals/configs/fixer/deck-style.yaml`): the fixer block.
+
+S are screens, T tie-breaks, F finalist runs, D cause checks. Pass rate is the harness's, over
+scored rows. Run ids are from the `architect-styling` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|
+| B0 fac70627 | builder v1-baseline (181a982b) | train | all 7 | 1 | 7 | 0.71 | 0 | 6.9k / 1.2k | 0.44 |
+| S1 c0c9a056 | deck-style (d7b7e1ee) | train | 2 new | 3 | 6 | 0.67 | 0 | 8.7k / 0.8k | 0.38 |
+| S2 79edfe83 | deck-style-b (615ba622) | train | 2 new | 3 | 6 | 0.50 | 0 | 8.7k / 0.9k | 0.38 |
+| S3 633c66e8 | deck-style-c (42c6fccb) | train | 2 new | 3 | 6 | 0.67 | 0 | 8.7k / 0.9k | 0.38 |
+| T1 05b01b4f | deck-style | train | `deck_style_code` | 5 | 5 | 0.20 | 0 | 8.7k / 0.8k | 0.31 |
+| T2 13d59e38 | deck-style-c | train | `deck_style_code` | 5 | 5 | 0.00 | 0 | 8.7k / 0.9k | 0.32 |
+| F1 74fe64e6 | deck-style | train | all 7 | 1 | 7 | 0.57 | 0 | 7.4k / 1.2k | 0.44 |
+| F2 fc286840 | deck-style | held-out | all 7 | 1 | 7 | 0.71 | 0 | 7.1k / 0.7k | 0.42 |
+| D3 f06f0d37 | builder v1-baseline | train | `gold_chart`, `too_much_content` | 3 | 6 | 0.50 | 0 | 6.6k / 1.6k | 0.39 |
+| D4 3de9f411 | deck-style | train | `gold_chart`, `too_much_content` | 3 | 6 | 0.83 | 0 | 7.1k / 1.2k | 0.38 |
+| X1 485948a7 | fixer deck-style (69eb6ea5) | train | all 5 | 1 | 5 | 0.80 | 0 | 8.8k / 0.7k | 0.49 |
+| D1 cc147802 | fixer v1-baseline (83424386) | train | `source_contradiction` | 3 | 3 | 0.00 | 0 | 8.9k / 0.7k | 0.30 |
+| D2 4d063603 | fixer deck-style | train | `source_contradiction` | 3 | 3 | 0.00 | 0 | 9.4k / 0.7k | 0.31 |
+
+Calibration (8 judge calls, about USD 0.40) brings the total to **about USD 5.34**, inside the
+USD 10 cap. Held-out is an aggregate only (F2), plus the deterministic verdicts of the two
+deck-style cases, which the bar needs.
+
+What it showed:
+
+- **One cause, on `deck_style_code`.** Every failing row of the three candidates (and B0's row)
+  fails `deck_style_use_score` alone: the builder adds a heading or label over each column and
+  paints it inline with token values (`font-size: var(--fs-subtitle); color:
+  var(--brand-core-ink)`). The judge passed every one of those rows. Neither targeted change moved
+  it: `deck-style` 1/3 (S1), 2/9 pooled with T1 and F1; `deck-style-b` 0/3; `deck-style-c` 1/3, 1/8
+  pooled with T2. `deck_style_table` passed every row of every candidate (3/3 in each screen, 1/1
+  in F1).
+- **Finalist: `deck-style`**, the best of three on the screen and the tie-break. Held-out (F2):
+  0.71 (5 of 7), 0 judge errors; both deck-style cases 1/1 by the deterministic scorers. The
+  recorded v1 held-out builder rate is 0.40 (2026-10-08, another digest, model and prompt), so F2
+  is not below it. No same-digest v1 held-out run was made.
+- **Existing cases** (F1 against B0, each ×1; D3 and D4 ×3): `chart_no_data` 0/1 → 1/1,
+  `gold_bullets`, `gold_stats` and `deck_style_table` 1/1 → 1/1, `gold_chart` 1/1 → 0/1 (D: v1 1/3,
+  `deck-style` 3/3), `too_much_content` 1/1 → 0/1 (D: 2/3 each). The F1 drops are known v1 causes:
+  inline paint on an added heading with a hard-coded chart hex (judge), and overflow on the
+  overloaded brief. Neither case carries a deck style, so the block does not apply to them.
+- **Fixer** (X1): `brief_not_delivered`, `contrast_failure`, `overflow` and `rogue_colour` 1/1.
+  `source_contradiction` 0/1, and 0/3 for both v1 (D1) and the candidate (D2): the fixer corrects
+  the figure and returns `scripts: ""`, which drops the chart's init (`chart-init-timeout`). The
+  fixer's OUTPUT line says "updated Chart.js init code if charts changed; otherwise empty string",
+  and production applies the empty scripts (`fixed_scripts`, `src/services/graph/nodes.py`). This is
+  a v1 defect, unchanged by this pass. The recorded 1.00 is from 2026-10-06 (another model and
+  prompt).
+- **Acceptance bar** (plan Task 9). **Missed on one point.**
+  1. `deck_style_code` at least 2/3 on train: **missed** (1/3 in S1; 2/9 pooled). 1/1 on held-out:
+     met.
+  2. `deck_style_table` at least 2/3 on train and 1/1 on held-out: met (3/3, 1/1).
+  3. Every existing builder and fixer case at least its recorded rate minus one row: met (above).
+  After three builder candidates the best one was promoted, as the brief directs, and the gap is
+  recorded here: the Haiku builder still paints an added heading inline with token values.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller for this change:
+  screened ×3 on the two new cases, with the finalist on all train ×1 and held-out ×1 (the skill
+  says ×5 and ×3); the tie-break and cause-check runs (T, D) are train only; the deterministic
+  verdicts of the two held-out deck-style cases were read to apply the bar; and the pass promoted,
+  edited `INSTRUCTIONS` and committed.
+- **Shipped.** `deck-style` is the builder's v1 prompt in `src/core/skills/builder.py`
+  (`d7b7e1ee35c9`, previously `181a982b59e1`), and the fixer's `deck-style` is the fixer's
+  (`69eb6ea52400`, previously `8342438644d4`). Promoted with
+  `python -m evals.harness.promote --config builder=evals/configs/builder/deck-style.yaml --run-id builder=74fe64e68bb247259c235d43b9c029c8 --config fixer=evals/configs/fixer/deck-style.yaml --run-id fixer=485948a7ff6940ada5fcbc8d650eb3f6`,
+  and the frontend lifecycle contract was re-recorded. The builder and fixer rows in the earlier
+  tables describe previous prompts.
+- **Still open.**
+  - `deck_style_code`'s inline-painted headings (above). Gone with the builder on Sonnet; see
+    "Builder on Sonnet" below.
+  - The fixer drops a chart's script on a text-only fix (`source_contradiction`).
+  - The builder judge prompt does not describe `deck_style`, and it fails both held-out references.
+
+## Fix reviewer: judge fixes against the deck style; build reviewer gap, 2026-10-30
+
+The fix reviewer's prompt gains a `DECK STYLE (when the payload carries deck_style)` block, placed
+after YOUR JOB. With a deck style, the colours that `deck_style.css` gives its pieces are part of the
+contract, not `rogue_colour`. A fix that paints colour, background or font-size inline, or that
+restyles a piece the deck style provides, counts against the fix and is reported as `rogue_colour`.
+The cascade is judged with `deck_style.css` applied after `section_css`. Without a deck style the
+block is skipped, and the rest of the prompt is byte-identical. No criterion was added
+(`src/domain/finding.py` is unchanged). This pass measured that one candidate on the fix_reviewer
+train pack and promoted it. It also measured the **unchanged** build reviewer on its two deck-style
+cases.
+
+- **Setup.** Fix reviewer agent `system.ai.claude-haiku-4-5`, build reviewer agent
+  `system.ai.claude-opus-5-5` (manifest v1), judge `databricks-claude-sonnet-5`, profile
+  `tellr-dev`. `prices.yaml` prices neither agent endpoint, so cost is estimated as in the builder
+  pass above: list price (Haiku 4.5 USD 1 / 5, Opus 5.5 USD 4 / 20 per million input / output
+  tokens), plus USD 0.05 per judge call (an upper bound).
+- **Calibration.** fix_reviewer train, all 5 cases: trusted. build_reviewer
+  `deck_style_inline_paint` and `deck_style_clean`: trusted on train and on held-out. The held-out
+  `deck_style_inline_paint` needed one re-run after a judge error on the reference
+  (`KeyError: 'result'`); it was not a misclassification.
+- **Baseline.** No earlier fix_reviewer run is comparable. The last recorded rate, train 1.00
+  (8f85585e, run 2404f31f), was on `databricks-claude-haiku-5-5`, and the fix_reviewer payloads have
+  changed since then (5653f3ec). R0 is the promoted v1 prompt (`ff14c8e8`) on the current train cases
+  (`cases_digest` `e320f95d`).
+- **Candidate:** `evals/configs/fix_reviewer/deck-style.{md,yaml}` (`1050287f`), the block above.
+
+R are fix_reviewer runs and G are the build-reviewer gap runs. Run ids are from the
+`architect-styling` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|
+| R0 d7941c58 | fix_reviewer v1-baseline (ff14c8e8) | train | all 5 | 1 | 5 | 0.40 | 0 | 6.8k / 0.4k | 0.29 |
+| R1 53fb2e4c | fix_reviewer deck-style (1050287f) | train | all 5 | 1 | 5 | 0.60 | 0 | 7.0k / 0.4k | 0.30 |
+| G1 a88f0049 | build_reviewer v1-baseline (0a8f6a7c) | train | 2 deck-style | 3 | 6 | 1.00 | 0 | 10.0k / 1.6k | 0.73 |
+| G2 c4be1d01 | build_reviewer v1-baseline | held-out | 2 deck-style | 1 | 2 | 1.00 (1 row scored) | 1 | 9.4k / 1.2k | 0.22 |
+| G3 108deeb2 | build_reviewer v1-baseline | held-out | 2 deck-style | 1 | 2 | 1.00 | 0 | 9.4k / 1.2k | 0.22 |
+
+G3 is G2 re-run because of G2's judge error. Calibration took 20 judge calls (about USD 1.00), which
+brings the total to **about USD 2.76**, inside the USD 6 cap. Held-out is reported as aggregates
+only.
+
+What it showed:
+
+- **Fix reviewer, per case (R0 → R1).** `good_fix_accept` 1 → 1, `good_contrast_fix_accept` 1 → 1,
+  `restyle_reject` 0 → 1, `fault_left_reject` 0 → 0, `content_broken_reject` 0 → 0. No case dropped,
+  so the bar (no existing case drops by more than one row) is met. No fix_reviewer case carries a
+  deck style, so the block does not apply to any of them. The `restyle_reject` gain is a single row
+  and is treated as noise.
+- **One cause, in v1, on both runs.** Each failing row returns verdict `fixed` with no findings for
+  a bad fix: the overflow is still there (`fault_left_reject`) or the claim was reversed
+  (`content_broken_reject`). The judge and `expected_category` both fail those rows. The Haiku 4.5
+  fix reviewer accepts bad fixes. This pass did not change that, and it is still open.
+- **Shipped.** `deck-style` is the fix reviewer's v1 prompt in `src/core/skills/fix_reviewer.py`
+  (`1050287f9dfc`, previously `ff14c8e8b162`). It was promoted with
+  `python -m evals.harness.promote --config fix_reviewer=evals/configs/fix_reviewer/deck-style.yaml --run-id fix_reviewer=53fb2e4c149c45e3b4b276f68466f7ef`,
+  and the frontend lifecycle contract was re-recorded.
+- **Build reviewer, unchanged (G1 to G3).** `deck_style_inline_paint` passed 3/3 on train and
+  `deck_style_clean` passed 3/3. Held-out was 2 of 2 rows (aggregate). Today's prompt reports the
+  inline-painted code block as `rogue_colour`, because the case paints it in off-palette hexes
+  (`#1E293B`, `#F8FAFC`, ...) and today's `rogue_colour` description catches those. It also does not
+  flag the deck style's token colours on the clean slide. **So these two cases show no gap.** They do
+  not exercise what the rule would add: inline paint in on-palette token values, an on-palette
+  restyle of a provided piece, and the order of `deck_style.css` after `section_css`. A case built
+  for any of those is needed to measure the gap. The cases were not changed.
+- **The build-reviewer deck-style rule is not shipped** (Ruling R10, correction C27 option c). The
+  build reviewer is a `LegacyV1PromptTransition` source, so `promote` refuses to change its prompt.
+  Editing its v1 composite (`INSTRUCTIONS`) would make `upgrade_definition_to_v2` refuse the
+  persisted v1 build-reviewer definitions on released 0.5.x installs ("Legacy protected prompt
+  content was edited"). Editing its authored v2 target moves `_V2_DIGEST`
+  (`src/services/prompt_assembler.py` raises at import). The two measured cases do not exercise the
+  gap the rule would close (on-palette token paint, an on-palette restyle of a provided piece, the
+  cascade order), so their rates neither support nor argue against the change. Shipping it needs an
+  **owner decision on a migration**: either a
+  transition that accepts both the 0.5.x composite and the new one, or a protected conditional stage
+  like `DECK_BRIEF_REVIEW`.
+- **Override of `optimise-agent-prompt`, delegated by the controller:** one candidate at ×1 on train
+  (the skill says ×5), no held-out fix_reviewer run, and the pass promoted, edited `INSTRUCTIONS` and
+  committed.
+
+## Architect: deck-style cases, 2026-10-30
+
+Two architect cases were added on each split. One is a technical build that must author a deck
+style. The other is a restyle of the deck's code blocks. No prompt changed and no real-model run
+was made. Both are generated by `mutations.py` and `heldout.py`, and every existing case regenerates
+byte-identical. `build_request` is unchanged (Ruling R9): its reference is the gold deck, with no
+deck style.
+
+- **`build_technical_deck`** (positive, `expect: {intent: build, deck_style: true}`). It is a fresh
+  one-turn build, and its payload is `build_request`'s apart from the message. Each message is a
+  generic public topic and gives its own figures, so a build is right, not `ask_data`. The two
+  splits ask for different pieces (Ruling R29), so a prompt that hard-codes one split's pieces
+  does not pass the other for free.
+  - Train covers streaming Postgres changes into a lakehouse with logical replication. It asks for
+    code, a comparison table and measured/untested badges. Its reference style is the technical
+    fixture without `dk-callout`: the template has its own `.callout`, and a deck style reuses a
+    template piece rather than restating it (spec §2). The looks use `dk-code`, `dk-table` and
+    `dk-badge`, and put each takeaway in "the template's callout".
+  - Held-out covers rolling out HTTP/3 across a public website. It asks for a dated timeline and
+    a KPI band, and no code. Its reference style is its own: `dk-timeline`, a `dk-kpi-band` for
+    four figures (one more than the template's three stat cards hold) and `dk-note`, in Meridian
+    tokens. It passes the sanitiser unchanged.
+  - Every slide has a `look` that names only the style's pieces, and no style defines a `dk-` twin
+    of a template class.
+  - The `should_fail` is the same deck with no deck style and no looks. So the deck style is the
+    only trap, and `_deck_style_score` fails it ("Deck style: deck_spec.deck_style is missing").
+- **`restyle_deck`** (mutation, `expect: {intent: edit, positions: [], deck_style_keeps:
+  [dk-code, kw, fn, str, cm]}`). The keeps list is the code block and the token-span classes the
+  fixture defines in it, since production's stranding check counts both. The deck is the split's
+  gold deck as a deck-style build leaves it: the fixture style and a look on every slide, some of
+  them naming `dk-code`. The train message is "Make all the code blocks dark navy with light
+  text"; held-out's asks for a dark background.
+  - The reference is `deck_changes.deck_style` alone, which rebuilds nothing. It is the fixture
+    with `.dk-code` on `--brand-core-ink` and light token spans, all at AA contrast or better.
+    Every other rule is unchanged. Meridian has no navy, so the train answer says it uses the
+    darkest ink token instead; the held-out answer says only "dark background", as asked.
+  - The `should_fail` is the same restyle with `dk-code` renamed to `dk-code-dark`. Every code
+    slide would lose its style, so the keeps check fails it and names `dk-code`.
+- The architect now has twenty-two cases per split, 56 across the harness.
+- **Not calibrated or measured yet.** The architect judge prompt does not describe `deck_style`
+  or `look`. Calibrate both cases on both splits before relying on their judge verdicts:
+  `python -m evals.run_eval --agent architect --calibrate --cases build_technical_deck,restyle_deck [--split heldout]`.
+  (Done in the pass below: the judge passes both references and cannot separate either
+  should_fail, so both cases are decided by their deterministic scorers.)
+
+## Architect: deck style and per-slide look, 2026-10-30
+
+The architect prompt now writes the deck style and a look for every slide (spec
+`docs/superpowers/specs/2026-10-29-architect-deck-style-design.md` §2). On a build it writes
+`deck_spec.deck_style` once, from what the planned slides need and the payload's
+`deck_style_context`, and a one-or-two-sentence `look` for each slide. It binds a template section
+where its shape fits, binds one for its frame only when the body differs, and otherwise leaves the
+slide unbound. A restyle goes through `deck_changes.deck_style`. The prompt also states the
+sanitiser's rules, so the style it writes is not stripped. This pass calibrated the judge on the
+three cases the change can move, re-ran the promoted prompt as the baseline, screened two
+candidates, ran the finalist on all train cases and on held-out, and promoted it. The builder's
+no-design-system ground line changed with it (Ruling R26) and was measured and promoted too.
+
+- **Setup.** Architect agent `system.ai.claude-opus-5-5` (manifest v1), judge
+  `databricks-claude-sonnet-5`, profile `tellr-dev`. `prices.yaml` has no entry for the agent's
+  endpoint, so the harness logged no `est_cost_usd`. Cost is estimated as in the follow-up pass
+  above: Opus 5.5 list price, USD 4 / 20 per million input / output tokens, plus USD 0.05 per
+  judge call. The judge figure is an upper bound: this pass's judge payloads, sized from the
+  logged answers and the case files, come to about USD 0.025 to 0.03 a call.
+- **Calibration** (`--calibrate --cases build_technical_deck,restyle_deck,build_request`):
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `build_request` | trusted | trusted |
+  | `build_technical_deck` | not trusted (judge passed the should_fail) | not trusted (judge passed the should_fail) |
+  | `restyle_deck` | not trusted (judge passed the should_fail) | not trusted (judge passed the should_fail) |
+
+  The judge passes both new references, so `judge_prompt.md` was not changed (Ruling R30). It
+  cannot see what the two should_fails get wrong: a deck with no deck style or looks, and a
+  restyle that renames `dk-code`. So, as for `fill_blank_slide`, these two cases are decided by
+  `contract` and `expected_category` (`_deck_style_score` for the build, the operations check
+  with `deck_style_keeps` for the restyle). Their judge verdicts are reported, not counted. In
+  this pass the judge failed only the one row that had no output, so the rule changed no outcome.
+- **Baseline** (Ruling R11, correction C31). Task 7b's cases changed the architect's
+  `cases_digest` (`ad824844`), so no recorded architect table is comparable. B0 is the
+  then-promoted prompt (`edit-ops-b`, content hash `42db22a8`) on the current train cases. Its
+  build rows are also the token baseline.
+- **Candidates** (`evals/configs/architect/`), one change each:
+  - `deck-style` (`d0a2d0ec`): `edit-ops-b` plus the rules above. DECKSPEC CONSTRUCTION gains a
+    `deck_style:` line after `slides:`, and SLIDESPEC FIELDS a `look:` line. EDITING's
+    deck_changes field list names `deck_style`. VISUAL / TEMPLATE BINDING gains the
+    bind-where-it-fits sentences. A new `DECK STYLE (deck_style and look):` block before SLIDE
+    NUMBERS holds the build, sanitiser, look and edit rules. Every other block is byte-identical.
+  - `deck-style-b` (`3527e7bc`): `deck-style` with its size sentence extended, aimed at S1's one
+    cause, the output tokens. It adds that most decks need 2,000 to 3,000 characters and four to
+    eight pieces. It also says the CSS goes straight into `deck_style`, with the pieces decided in
+    a few words of reasoning and no drafting or checking of the CSS or the looks first.
+  - No third candidate was written. The finalist runs needed the rest of the USD 22 cap.
+
+B is the baseline, S are screens, F the finalist's train run, H its held-out run, and X the
+builder's. Pass rate is the harness's, over scored rows. Run ids are from the
+`architect-styling` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|
+| B0 311f42c1 | architect v1-baseline (42db22a8) | train | all 22 | 2 | 44 | 0.91 | 0 | 17.7k / 1.5k | 6.63 |
+| S1 9d797563 | deck-style (d0a2d0ec) | train | 3 | 3 | 9 | 0.89 | 0 | 17.8k / 7.7k | 2.43 |
+| S2 9ebeed72 | deck-style-b (3527e7bc) | train | 2 builds | 3 | 6 | 1.00 | 0 | 15.8k / 8.8k | 1.74 |
+| F1 f6766e50 | deck-style-b | train | all 22 | 2 | 44 | 1.00 | 0 | 19.4k / 1.9k | 7.29 |
+| H1 084c591b | deck-style-b | held-out | all 22 | 1 | 22 | 1.00 | 0 | 17.7k / 1.5k | 3.33 |
+| X1 a3e5c876 | builder deck-style-ground (d6db84b8) | train | all 7 | 1 | 7 | 0.86 | 0 | 7.5k / 1.2k | 0.44 |
+
+S1's three cases are `build_technical_deck`, `restyle_deck` and `build_request`; S2's are the two
+builds. Calibration took 12 judge calls (about USD 0.60). That brings the architect's total to
+**about USD 22.0** with the judge at its USD 0.05 upper bound, at the USD 22 cap. With the judge
+at the USD 0.03 a call its payloads measure, the total is about USD 19.3. The builder's run
+(X1) took USD 0.44 of its remaining USD 4.66. Held-out is reported as an aggregate only (H1).
+
+What it showed:
+
+- **Baseline (B0).** All 20 existing cases passed 2/2. Both new cases failed 0/2, each on its
+  deterministic scorer. Without the new rules, the build already filled `deck_style` (the field
+  is in the schema), but with unprefixed classes (`.code-block`, `.badge`, `.cmp-table`), so
+  the sanitiser drops the whole style. The restyle used `deck_changes.deck_style`, but it also
+  rebuilt the two code slides with `update` operations, and it named raw hexes in its message.
+- **Screen of `deck-style` (S1).** `build_request` passed 3/3 and `restyle_deck` 3/3, the
+  restyle as `deck_changes.deck_style` alone: every token from the brand, no operations, no slide
+  rebuilt. `build_technical_deck` passed 2/3. Its third row was `incomplete`: the model returned a
+  `deck_spec` with no `slides` and `resolved_data.gaps` misplaced (a schema failure, not the
+  sanitiser's). The real cost was output tokens: the build rows averaged 10.2k against B0's 5.7k.
+  That is mostly reasoning: `build_request`'s answer grew from about 11k to 19k characters of
+  JSON (about 2k tokens), while its output grew by about 7k tokens.
+- **Screen of `deck-style-b` (S2).** Both builds passed 3/3, and the mean build output fell to
+  8.8k. The model still wrote about 3,300 characters of CSS, not the 2,000 to 3,000 the
+  sentence suggests.
+- **Finalist, train (F1).** All 22 cases passed 2/2, 44 of 44 on every scorer. Every existing
+  edit case was still answered with operations and passed the operations check.
+  `redescribe_deck` returned the full `deck_spec` with no operations. `restyle_deck` was
+  `deck_changes.deck_style` alone, about 2,300 characters, keeping `dk-code` and its token spans,
+  with no operations. Each build wrote about 3,000 to 4,000 characters of CSS, six or seven
+  components, and a look on all 16 or 17 slides.
+- **Finalist, held-out (H1).** 1.00 (22 of 22), with 0 judge errors and 0 infra errors. So every
+  held-out case passed 1/1 on every scorer, the three new ones included.
+- **Acceptance bar** (plan Task 8, controller overrides). **Missed on one point.**
+  1. Every existing case passed at least its B0 rate minus one row. Met: all 20 passed 2/2
+     (F1), and all 20 passed 2/2 in B0.
+  2. `build_technical_deck`, `restyle_deck` and `build_request` each passed at least 2/3 on
+     train and 1/1 on held-out. Met. On train, `deck-style-b` scored 3/3 on both builds (S2).
+     `restyle_deck` scored 3/3 in S1, whose edit rules are byte-identical to `deck-style-b`'s,
+     and 2/2 in F1. On held-out, all three passed 1/1 (H1 1.00).
+  3. Mean output tokens on the build cases rise by at most 2,500 over B0's 5,702. **Missed:**
+     8,849 in S2 (+3,147), 9,276 in F1 (+3,574), and 9,020 over all ten `deck-style-b` build rows
+     (+3,318). `deck-style` was +4,490 (S1).
+
+  The bar is a proxy for the +30 s time-to-first-slide limit. The architect's mean call time on
+  the build rows rose from 51.2 s (B0) to 76.4 s (S2) and 77.6 s (F1), about +26 s, though that
+  is the call alone, not a measured time to first slide. After two candidates the better one was
+  promoted, as the brief directs, and the gap is recorded here.
+- **Builder ground line (Ruling R26).** Without a design system, the builder's DECK STYLE block
+  sent an unbound slide to "the ground NO BOUND SECTION gives it". That ground is an inline
+  colour and background, which the same block bans when a deck style is present. So the line now
+  ends "; when design_system_active is false, that ground is the deck style's ground piece that
+  the look names (such as dk-slide): put its class on the slide's root element". The architect
+  prompt makes a no-design-system deck style define that piece and each look name it.
+  `deck-style-ground` (`d6db84b8`, `evals/configs/builder/`) is the promoted builder with that
+  one line changed, and the model is unchanged (Task 9b will switch it). X1 passed 6 of 7 against
+  F1 74fe64e6's 4 of 7, the Task 9 measurement of the then-promoted builder: `gold_chart` and
+  `too_much_content` went 0/1 → 1/1, and the rest stayed level. `deck_style_code` 0/1 is the
+  known cause, the Haiku builder painting an added heading inline with token values. No builder
+  case has no design system and a deck style, so X1 shows that the line breaks nothing. It does
+  not show that the line works.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller for this change:
+  - The screens ran ×3 on the cases the change targets, and the finalist ran on all train ×2 and
+    held-out ×1. The skill says ×5 and ×3.
+  - `deck-style-b`'s screen covered only the two builds, since its one change is to the build
+    rules.
+  - The builder ran once on train, with no held-out.
+  - This pass promoted, edited `INSTRUCTIONS` and committed.
+- **Shipped.** `deck-style-b` is the architect's v1 prompt in `src/core/skills/architect.py`
+  (`3527e7bcafc4`, previously `42db22a8e622`). `deck-style-ground` is the builder's v1 prompt in
+  `src/core/skills/builder.py` (`d6db84b8a570`, previously `d7b7e1ee35c9`). Promoted with
+  `python -m evals.harness.promote --config architect=evals/configs/architect/deck-style-b.yaml --run-id architect=f6766e5053fe4ea9a2100c489870c928 --config builder=evals/configs/builder/deck-style-ground.yaml --run-id builder=a3e5c876e519419190242bd936672e3c`.
+  The pins `promote` does not touch were updated by hand (C25), and the frontend lifecycle
+  contract was re-recorded. The architect and builder rows in the earlier tables describe
+  previous prompts.
+- **Still open.**
+  - The output-token bar, above. A build now reasons about twice as long as before. The CSS
+    itself is about 1k tokens. Split by case (B0 against the ten `deck-style-b` build rows):
+    - `build_technical_deck`: 7.2k → 9.1k (+1.9k), inside the bar. B0 already wrote a deck
+      style there, with unprefixed classes.
+    - `build_request`: 4.2k → 8.9k (+4.7k). B0 wrote no deck style there.
+    - On `build_request` the answer grew by about 6.9k characters (about 1.9k tokens, the
+      style and the looks), so reasoning added roughly 2.8k. On `build_technical_deck`
+      reasoning added roughly 1.3k.
+  - The architect judge prompt does not describe `deck_style` or `look`, so the judge cannot
+    separate either new case.
+  - No architect case builds without a design system, so neither the `--dk-` palette nor the
+    ground piece is measured. No builder case renders a no-design-system deck style either.
+  - No architect case has a bindable template section. In every case payload, train and
+    held-out, all four `template_sections` entries have `label: null` (so on main too). Every
+    build row binds 0 slides, so the bind-where-it-fits and frame-only sentences are not
+    measured offline.
+  - Spend: with the judge at its USD 0.05 upper bound the architect total is USD 22.02, USD 0.02
+    over the USD 22 cap. H1 was run with the running estimate at 18.69, to get the held-out
+    result the bar needs. With the judge at its measured USD 0.03 a call the total is about
+    USD 19.3.
+  - S1's one `incomplete` build answer (a `deck_spec` with no `slides`) did not recur in the
+    finalist's ten build rows.
+  - **Prompt wording to revisit in the next measured architect pass.** That pass should add a
+    case with no design system and a narrative (non-technical) build case. The Task 8 review
+    found these points, and none of them was measured:
+    - "It adds pieces and never restates the brand: no resets, type scale, slide frame or
+      token values of its own" has no condition. Without a design system, the lines after it
+      require a `--dk-` `:root` palette (token values of its own) and a ground piece (a slide
+      frame). Under a design system the finalist already writes full-slide pieces, e.g. a
+      `.dk-divider` that paints the slide's background with `height: 100%` and the slide
+      padding. Scope the ban: "With a design system, …".
+    - The size sentence gives two targets: "about 4,000 characters" (pinned) and "2,000 to
+      3,000". The model wrote 3,000 to 4,000. Its "do not draft or check the CSS or the looks
+      in your reasoning" sits beside rules that invite a check: "every component's
+      class_names are defined in its css" and "Name only pieces that exist".
+    - "The one deck-level change you make unasked" (a missing piece) is absolute. Yet a
+      confirmed design-contract change also brings a fresh deck style that the user did not
+      ask for in words. EDITING's "Change deck-level fields only when the user asks" does not
+      point to either exception.
+
+## Builder on Sonnet (Task 9b), 2026-10-30
+
+The owner chose to run the graph builder on Claude Sonnet instead of Haiku. The builder's model
+`endpoint_name` in the frozen manifest moved from `system.ai.claude-haiku-4-5` to
+`system.ai.claude-sonnet-5-5`. The prompt (`deck-style-ground`), temperature, max_tokens and top_p
+are unchanged, and no other role moved. The runtime never sends temperature or top_p
+(`src/services/agent_runtime.py`), so Sonnet 5.5's refusal of non-default sampling values does
+not apply. This pass measured the promoted builder prompt on Sonnet against the Haiku runs above
+and promoted the switch.
+
+- **Endpoint.** The app's own catalogue (`DatabricksModelEndpointCatalog.list_system_models()`,
+  profile `tellr-dev`) offers `claude-sonnet-5-5`, `-5`, `-4-6` and `-4-5`, and none has a rate
+  limit set, so none is zero. `system.ai.claude-sonnet-5-5` is the newest one. (The listing is in
+  the Task 9b test author's report.)
+- **Setup.** Config `evals/configs/builder/sonnet-5-5.yaml` (`0e60b438`): v1 plus
+  `endpoint_name: system.ai.claude-sonnet-5-5`. Judge `databricks-claude-sonnet-5`, profile
+  `tellr-dev`, cases digest `1b9e3b28`, the same as X1's. `prices.yaml` prices neither builder
+  endpoint, so cost is estimated at list price (Sonnet 5.5 USD 2 / 10, Haiku 4.5 USD 1 / 5 per
+  million input / output tokens). The judge is counted at USD 0.05 a call, an upper bound. No
+  calibration was re-run, because the cases, references and judge are unchanged since Task 9's.
+- **Haiku rows** are the closest recorded runs. X1 is the same prompt. F2, S1 and T1 used
+  `deck-style` (`d7b7e1ee`), whose one differing line applies only to a deck style with no design
+  system, which no builder case has.
+
+N are this pass's Sonnet runs. Latency is the model call alone, one call per slide. USD/row is the
+builder call alone at list price, which is the per-slide cost in production. ≈ USD is the run,
+judge included.
+
+| Run | Model | Split | Cases | Repeats | Rows | Pass rate | Mean (median) latency | Mean in/out tokens | USD/row | ≈ USD |
+|---|---|---|---|---|---|---|---|---|---|---|
+| X1 a3e5c876 | Haiku 4.5 | train | all 7 | 1 | 7 | 0.86 | 8.7 s (8.1 s) | 7.5k / 1.2k | 0.014 | 0.44 |
+| N1 9fca7480 | Sonnet 5.5 | train | all 7 | 2 | 14 | 1.00 | 20.9 s (13.2 s) | 9.5k / 1.8k | 0.037 | 1.21 |
+| F2 fc286840 | Haiku 4.5 | held-out | all 7 | 1 | 7 | 0.71 | 6.4 s | 7.1k / 0.7k | 0.011 | 0.42 |
+| N2 d2041a15 | Sonnet 5.5 | held-out | all 7 | 1 | 7 | 0.86 | 11.8 s | 8.9k / 1.3k | 0.031 | 0.56 |
+| S1 c0c9a056 | Haiku 4.5 | train | 2 deck-style | 3 | 6 | 0.67 | 6.9 s | 8.7k / 0.8k | 0.013 | 0.38 |
+| N3 f7bb2b7b | Sonnet 5.5 | train | 2 deck-style | 3 | 6 | 1.00 | 11.5 s | 11.0k / 1.4k | 0.036 | 0.51 |
+
+The three N runs cost **about USD 2.3**, inside the USD 8 cap. Held-out is reported as an
+aggregate only (N2).
+
+What it showed:
+
+- **Quality.** On Sonnet every train case passed every row: N1 14/14, N3 6/6. `deck_style_code`
+  passed 5/5 (2/2 in N1 and 3/3 in N3). Each answer used `dk-code` with no inline paint, and kept
+  inline styles to layout, such as a margin. On Haiku it passed 2/10 on the same prompt pooled
+  (X1 0/1, S1 1/3, T1 1/5, F1 0/1), every failure on `deck_style_use_score`: an added heading
+  painted inline with token values. That scorer is deterministic, so the gain does not rest on the
+  judge, which is itself a Sonnet model. `deck_style_table` passed 5/5 (Haiku 5/5). Held-out rose
+  from 0.71 (F2) to 0.86 (N2).
+- **Latency per slide.** Sonnet is about 1.6 to 1.8 times Haiku per call: median 13.2 s against
+  8.1 s on train, a mean of 11.8 s against 6.4 s on held-out, and 11.5 s against 6.9 s on the
+  deck-style cases. N1's mean of 20.9 s includes one 106 s row (`gold_chart`, 1.9k output tokens,
+  so mostly waiting, not writing; the cause is unknown). Without that row the mean is 14.3 s. No
+  other Sonnet row took more than 29 s, and no compared Haiku row more than 11 s. Slides build
+  concurrently, up to 15 at a time (`CAP`, `src/services/foreman_service.py`). So a deck's build
+  time grows by the slowest slide's increase in each batch, not by the sum. In these runs the
+  slowest row was 7.6 to 11.0 s on Haiku and 16.3 to 28.4 s on Sonnet, the 106 s row aside. Run
+  for run, that is about +9 to +17 s a batch. A stall like the 106 s row holds up its whole batch.
+- **Cost per slide.** Sonnet is about 2.7 to 2.9 times Haiku: about USD 0.037 against 0.014 a
+  slide on train, so about USD 0.55 against 0.21 for a 15-slide deck's builder calls (fixer rounds
+  not included). Sonnet writes about 40 to 75 % more output tokens. The same prompt and payload also
+  count as about 26 % more input tokens, since the input bytes are identical and only the
+  tokenizer differs.
+- **Acceptance bar** (plan Task 9b). **Met.**
+  1. `deck_style_code` at least 2/3 on train: 3/3 (N3), and 5/5 with N1.
+  2. No existing builder case regresses by more than one row against Haiku: every case passed
+     2/2 in N1, where X1 passed each at 1/1, or 0/1 for `deck_style_code`.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller for this change. The runs
+  were train ×2, held-out ×1 and the deck-style cases ×3, where the skill says ×5 and ×3. No
+  calibration was re-run. Per-row latency was read from the train runs' traces only. The pass
+  edited the manifest through `promote` and committed.
+- **Shipped.** The builder's v1 model is `system.ai.claude-sonnet-5-5` (`0e60b438e4be`,
+  previously `d6db84b8a570`). Promoted with
+  `python -m evals.harness.promote --config builder=evals/configs/builder/sonnet-5-5.yaml --run-id builder=9fca7480bedc4e6694a2d3d801fd60f2`.
+  The pins that `promote` does not touch were updated by hand:
+  - `HEAD_OTHER_ROLE_CONTENT_HASHES["builder"]`;
+  - the builder's `EXPECTED_ENDPOINTS` entry in `test_agent_runtime.py`,
+    `test_persisted_agent_runtime.py` and `test_agent_definition_workbench_routes.py`;
+  - the rollback preview's distinct-endpoint lists in `test_graph_release_rollback.py`;
+  - the legacy `databricks-*` endpoint map in `test_graph_configuration_draft.py`.
+  The frontend lifecycle contract was re-recorded. The builder rows in the earlier tables
+  describe Haiku.
+- **Still open.**
+  - The owner judges cost and latency on the devloop.
+  - The single 106 s call (N1). One row in 27 is too few to call it a pattern.
+  - The fix_reviewer and deck_reviewer still run on Haiku 4.5. They were out of scope.
+
+## Deck style addendum A: the brand-asset search and the footer, 2026-10-30
+
+Production now binds a `search_brand_assets` tool for a builder or fixer whose payload has a deck
+style while a design system is active (`nodes._brand_search_tools`). The harness follows it and
+scores its use. No prompt changed and no real-model run was made.
+
+- **The fake search** (`evals/harness/runner.py`). `Runner.run` puts one tool on the run's
+  `AgentAssemblyContext` exactly when the role is `builder` or `fixer`, the run's
+  `design_system_active` is true and the payload has a `deck_style`. Every other run binds no tool,
+  as before. To the model the tool is production's: the same name, arguments (`query`, `kind`) and
+  description. It answers from `evals/fixtures/meridian/assets.json` (the fake asset index the
+  architect's logos come from), filtered and ranked as `design_system_service.search_assets` does,
+  in `build_ds_asset_tool`'s JSON. Each call is recorded per attempt; `RunResult.tool_calls` and
+  the predict output's `tool_calls` carry the record. `deck_style_code` and `deck_style_table`
+  (both splits) now run with the search bound too, as production would run them.
+- **`deck_style_icons`** (builder, both splits; train slide 7, held-out slide 5). A positive whose
+  look asks for brand icons and names its deck-style pieces (`dk-table` and `dk-note` on train,
+  `dk-steps` on held-out). Nothing in the payload names an asset handle, so only a search can supply
+  one. `expect.brand_assets` lists every handle of the index and `expect.brand_icons` its icons, one
+  of which the slide must place (a logo alone fails). The reference places index icons. The
+  `should_fail` places invented asset ids (train) or hand-drawn glyphs (held-out).
+  `brand_asset_use_score` fails both (see Scorers).
+- **The architect footer.** The `build_technical_deck` expect gains `logo_handles`, and both
+  reference styles gain a footer piece (`dk-footer` on the template's `slide-footer`, the first
+  logo and both page tokens). It is added in the architect generator only; the shared
+  `deck_style_technical.json` is unchanged. The architect `cases_digest` moves for this case alone.
+  The promoted architect prompt still says "No page numbers", so it fails `build_technical_deck`
+  by design until its prompt pass. (That pass is below: the baseline failed it 0/2 on the footer,
+  and `brand-footer` is now promoted.)
+- The builder now has eight cases per split, 57 per split across the harness.
+- **Not measured.** No fixer case carries a deck style, so the fixer's tool path is bound and
+  tested but not measured. The new case is not calibrated:
+  `python -m evals.run_eval --agent builder --calibrate --cases deck_style_icons [--split heldout]`.
+
+## Architect: brand footer, page numbers and icon intent (Addendum A), 2026-10-30
+
+The architect prompt now gives every deck-style build a footer with the brand logo and the page
+number (spec Addendum A §A2, §A5, calls Q1 and Q3). The Task 8 rule "No page numbers" is retired
+(Ruling RA4). This pass calibrated the judge on the two cases whose payload or reference moved,
+ran the promoted prompt as the baseline on the build cases, screened one candidate, ran it on the
+rest of train and on held-out, and promoted it.
+
+- **Setup.** As in the deck-style pass above: architect `system.ai.claude-opus-5-5`, judge
+  `databricks-claude-sonnet-5`, profile `tellr-dev`. The cost is estimated at USD 4 / 20 per million
+  agent input / output tokens. The judge is costed at its USD 0.05 a call upper bound, as in
+  earlier passes. Its measured rate is given beside it: USD 0.03 a call, its payload sized from
+  this pass's train answers (USD 0.029 a call on edits and 0.032 to 0.038 on builds).
+- **Calibration** (`--calibrate --cases build_technical_deck,restyle_deck`, both splits). B4
+  added the footer piece to `build_technical_deck`'s reference, and B2 added `logos` to every
+  payload.
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `build_technical_deck` | reference passed; should_fail passed (not trusted) | same |
+  | `restyle_deck` | reference passed; should_fail passed (not trusted) | trusted |
+
+  The judge passes both new references, so nothing changed. As before (Ruling R30), both cases are
+  decided by `contract` and `expected_category`. The footer check is in `_deck_style_score`. The
+  judge verdicts are reported, not counted.
+- **The candidate** `brand-footer` (`47c7a388`, `evals/configs/architect/`) is `deck-style-b` with
+  these changes:
+  - DECK STYLE: the "No page numbers" sentence is replaced by four:
+    - On a build, the deck style always includes a footer piece (named footer, class
+      `dk-footer`) styled to match the template's footer. Its `example_html` holds a logo handle
+      from `deck_style_context.logos` and `{{slide:number}} / {{slide:count}}`. It reuses a
+      template footer class and its two slots: the logo in the first, the tokens in the second,
+      never a third child. The template's sample number is placeholder (correction A21).
+    - It picks two logos, one for light grounds and a light-on-dark one for dark slides, named in
+      the piece's use line. It uses only handles from `logos`.
+    - Every slide except the cover carries one footer. A bound slide fills its template's own
+      footer, and an unbound slide uses the piece (Q1). Each look except the cover's names its
+      footer, and a dark slide's look says it uses the light-on-dark logo (Q3).
+    - Content slides share the default light ground, and dark sections stay dark.
+  - The look rule gains: a look may ask for icons but never names an icon handle, because builders
+    search for icons themselves.
+  - One edit bullet: a deck style without a footer piece gains one only when the user asks for it
+    or for a full rebuild. Without it, a restyle of an older deck-style deck could rebuild every
+    slide to add footers.
+  - VISUAL / TEMPLATE BINDING's brand-furniture sentence now says this: furniture in the selected
+    section's markup stays as it ships; the footer logo comes from `deck_style_context.logos`, and
+    icons from the builders' search (Ruling RA11).
+  - Every other byte is unchanged.
+- No second candidate was written. The screen showed no prompt-caused failure, and the cap left no
+  room for one.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 (judge 0.03) |
+|---|---|---|---|---|---|---|---|---|---|
+| calibration | — | both | 2 | — | 8 judge calls | see above | 0 | — | 0.40 (0.24) |
+| S1 ec1798ba | brand-footer (47c7a388) | train | 3 | 3 | 9 | 0.89 | 0 | 18.6k / 7.0k | 2.38 (2.20) |
+| B1 e64bb2ef | v1-baseline (3527e7bc) | train | 2 builds | 2 | 4 | 0.50 | 0 | 16.0k / 8.4k | 1.13 (1.05) |
+| F1 e66eb3cb | brand-footer | train | the other 19 | 2 | 38 | 1.00 | 2 | 20.4k / 1.0k | 5.78 (5.02) |
+| H1 f84c20e5 | brand-footer | held-out | all 22 | 1 | 22 | 1.00 | 0 | 18.5k / 1.7k | 3.46 (3.02) |
+
+S1's cases are `build_technical_deck`, `restyle_deck` and `build_request`. S1 and F1 together cover
+every train case at ×2 or more. **Total about USD 13.1** with the judge at its USD 0.05 upper bound,
+the figure earlier passes lead with (agent USD 9.09, 81 judge calls). That is **USD 1.1 over the
+USD 12 architect cap**, within the addendum's USD 2 slack. With the judge at the USD 0.03 a call its
+payloads measure, the real spend is about USD 11.5. Held-out is reported as an aggregate only (H1).
+
+What it showed:
+
+- **Baseline (B1).** `build_request` passed 2/2. `build_technical_deck` failed 0/2 on its
+  deterministic scorer: "no footer piece … to carry the page number and count".
+- **Screen (S1).** `build_request` 3/3 and `restyle_deck` 3/3. The restyle was
+  `deck_changes.deck_style` alone, with no operations and no footer added. `build_technical_deck`
+  passed `contract` and `expected_category` 3/3, and so the footer check too.
+  - One of its rows failed the judge, for a 17-slide deck against the 7-slide reference. B1 had the
+    same complaint on a baseline row, and the prompt asks for 14 to 20 slides. It is the case's
+    known judge gap, not a prompt cause.
+  - Every build row wrote the footer piece the rules ask for. It was named `footer`, on
+    `slide-footer dk-footer`, with the logo inside the first span and the tokens in the second. Its
+    use line names `{{ds-asset:9001}}` for light slides and the reverse `{{ds-asset:9002}}` for
+    dark ones.
+  - Every cover look said "no footer". Every other look named the footer, and every dark divider
+    or closing look named the light-on-dark logo.
+  - Five of the six rows asked for icons in a look ("each with an icon"), and no look named an
+    asset handle.
+  - Every slide was unbound: no case has a bindable section.
+- **The other 19 train cases (F1).** All passed 2/2 on every scored row. `confirm_design` and
+  `discuss` each had one judge parse error (the row is skipped), with `contract` and
+  `expected_category` passing on both rows. Every edit was answered with operations, and
+  `redescribe_deck` with the full spec.
+- **Held-out (H1).** 1.00 (22 of 22), with 0 judge errors and 0 infra errors. So every held-out
+  case passed 1/1, the two deck-style cases included.
+- **Acceptance bar** (Task B5a). **Met.**
+  1. Every existing case passed at least its baseline minus one row. `build_request` was 3/3
+     against B1's 2/2. The other 19 passed every scored row: 17 at 2/2, and `confirm_design` and
+     `discuss` at 1/1, each with one row skipped for a judge parse error (`contract` and
+     `expected_category` passed both rows).
+     - Their baseline was not re-run, to stay inside the cap. The same prompt (`3527e7bc`) passed
+       each 2/2 in the deck-style pass's F1 (f6766e50), on payloads that differ only by the
+       `logos` key.
+     - So the strictest bar applies: at least 1/2 each. All 19 clear it.
+  2. `build_technical_deck` and `restyle_deck` each passed at least 2/3 on train and 1/1 on
+     held-out. `build_technical_deck` scored 2/3 by the harness and 3/3 on its deterministic
+     scorers, `restyle_deck` 3/3, and both passed 1/1 on held-out (H1 1.00).
+- **Output tokens on the build cases** (no bar). The mean was 9,321 over S1's six build rows,
+  against 8,372 over B1's four: +949 (+11%). Against the ten `deck-style-b` build rows of the
+  deck-style pass (9,020), it is +301.
+  - The answers grew by about 550 characters (about 150 tokens): the footer piece and "dk-footer"
+    in each look. The rest is reasoning, whose spread is wide on both prompts: about 2.5k to 5.2k
+    per row.
+  - On the build rows, mean call time was 79.3 s against B1's 71.9 s.
+  - The size and reasoning sentences of `deck-style-b` are unchanged, and the CSS stayed at
+    2,880 to 3,200 characters.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller:
+  - the screen ran ×3 on three cases, the finalist ran train ×2 and held-out ×1;
+  - this pass edited `INSTRUCTIONS`, promoted and committed.
+- **Scope cut by the implementer**, to fit the cap, and put to the reviewer rather than delegated:
+  - B1 covered the two build cases only;
+  - the finalist's train evidence is two runs, S1 (×3) and F1 (×2).
+  - The task review accepted the cut. The finalist hit the maximum on every one of the 19 cases,
+    so "baseline minus one row" holds whatever their baseline. f6766e50 ran this same baseline
+    prompt (`3527e7bc`), so it is a cross-check only.
+- **Shipped.** `brand-footer` is the architect's v1 prompt in `src/core/skills/architect.py`
+  (`47c7a388cb95`, previously `3527e7bcafc4`). It was promoted with
+  `python -m evals.harness.promote --config architect=evals/configs/architect/brand-footer.yaml --run-id architect=e66eb3cbb723442a8fbfa011195e3cc8`
+  (screen run ec1798baa4d647ec85c19b0cfc24f84a).
+  - The content hash and the hashing literal were re-pinned by hand.
+  - The `visual_template_binding` block hash was re-pinned (RA11). `BINDING_RULES` still holds
+    unchanged.
+  - The frontend lifecycle contract was re-recorded.
+  - `deck-style{,-b}.md` keep the retired ban; they describe the previous prompts.
+- **Still open.**
+  - No architect case has a bindable section, so the bound-slide footer rule (Q1) is not measured
+    offline.
+  - The builders' use of the footer piece and its dark-slide logo was left to the builder pass
+    (B5b). It is not measured there either, because no builder case has a footer piece (see the
+    next section).
+  - The build reviewer may flag a dark divider's footer.
+  - The deck-style pass's "prompt wording to revisit" items are still open.
+  - The judge's slide-count complaint on `build_technical_deck`: the reference has 7 slides, and
+    the prompt asks for 14 to 20. It is a case and judge-prompt issue for the owner.
+
+## Builder and fixer: brand assets, one footer, one ground (Addendum A), 2026-10-30
+
+**Spend: about USD 11.07 for this pass and USD 2.53 for its fix round (RA15, below), USD 13.60 in
+all, with the judge at its USD 0.05 a call upper bound.**
+- This pass came inside the USD 11.9 left for builder plus fixer (Ruling RA13: the USD 25 cap
+  less the architect's USD 13.1).
+- The fix round came inside RA15's own USD 4 extension.
+- Both agents are costed at USD 4 / 20 per million input / output tokens. That is the fixer's
+  Opus 5.5 list price, and above the USD 2 / 10 Sonnet 5.5 rate of the builder pass above, so it is
+  an upper bound for the builder too.
+- For this pass, agent tokens come to USD 6.62 at that rate, plus 89 judge calls. With the judge
+  at the USD 0.03 a call its payloads measure, the spend is about USD 9.29. Costing the builder at
+  the Sonnet rate as well brings it to about USD 6.38.
+
+The builder and fixer prompts' DECK STYLE blocks gain the Addendum A rules (spec Addendum A §A4 and
+§A5, calls Q1 and Q3, corrections A20 and A21, Ruling RA5). Every new rule is inside the block.
+- The text **outside** the block is byte-identical to before
+  (`test_prompt_outside_the_deck_style_block_is_unchanged`).
+- The block itself is always sent, deck style or not. It adds 822 input tokens to every builder
+  call on `brand-assets-c`, and 975 on the RA15 prompt. F1 below shows the model acting on it
+  without a deck style.
+- The IMAGE RULES line "If no image ids are supplied, build the slide without images" stays as
+  written. Instead, the builder block's precedence sentence now names IMAGE RULES beside BOUND
+  TEMPLATE SECTION and NO BOUND SECTION.
+
+The prompts shipped by this pass (`brand-assets-c`, `brand-assets-b`) were replaced in its fix
+round by `one-footer`; see "Fix round 1 (Ruling RA15)" at the end of this section.
+
+- **Builder** (`brand-assets-c`, `693f0101`):
+  - **Brand assets.** Place the brand assets the catalogue's pieces name, such as the footer
+    piece's logo, with their handles as written. The logo comes from the footer piece alone, so it
+    is the same on every slide, and the builder never searches for one (spec decision 2). IMAGE
+    RULES govern `{{image:ID}}` images only.
+  - **Icons.** When the `search_brand_assets` tool is available (correction A20), search when the
+    look asks for icons or the slide shows products or concepts. Search by kind or by one short
+    file-name word, because the query matches file names. Place the icons it returns that fit, as
+    `<img>` sized with layout styles only. Never invent a handle, and never hand-draw an icon.
+  - **Footers** (deck-style decks only; without `deck_style` no page tokens):
+    - no footer on the cover, and never two footers;
+    - a bound slide fills its template's own footer: a label, `{{slide:number}} / {{slide:count}}`
+      over the template's sample number, and the logo inside the label's span, never a third
+      child (correction A21);
+    - a bound slide never adds the footer piece, even when the piece's use line says every slide,
+      because the piece is for unbound slides only (the B5a review's two-footer risk);
+    - an unbound slide uses the footer piece;
+    - a dark slide uses the light-on-dark logo the piece's use line names (Q3).
+  - **One ground** (A4). A light template section (`white` or the default) renders on the deck's
+    default ground, so content slides carry no `white`. Dark and event treatments never change.
+- **Fixer** (`brand-assets-b`, `b365679a`):
+  - keep the assets the pieces name (the logo is never searched);
+  - search only when the finding requires an asset the slide and catalogue lack, and only when the
+    tool is available (A20, MINIMAL CHANGE);
+  - never invent a handle;
+  - the same footer rules, when the finding concerns a footer;
+  - never drop `white` or another treatment class from the outer root (RA5: one ground is the
+    builder's rule).
+- **Setup.** Builder `system.ai.claude-sonnet-5-5`, fixer `system.ai.claude-opus-5-5` (manifest
+  v1, inherited through `base: v1`), judge `databricks-claude-sonnet-5`, profile `tellr-dev`.
+  Builder cases digest `eb3f1cde` (train) and `04278c99` (held-out), fixer `e9ba7698`. The three
+  deck-style builder cases ran with the fake search bound, as production would.
+- **Calibration** (`--calibrate --cases deck_style_icons`, both splits; B4 left it uncalibrated):
+
+  | Case | Train | Held-out |
+  |---|---|---|
+  | `deck_style_icons` | reference passed; should_fail passed (not trusted) | same |
+
+  The judge cannot see the asset index, so invented handles and hand-drawn glyphs look fine to it.
+  As for the other deck-style cases (Ruling R30), the case is decided by `contract` and
+  `render_measures`, whose `brand_asset_use_score` fails both should_fail outputs. The judge passed
+  every candidate row anyway.
+- **Candidates**, one change each:
+  - builder `brand-assets` (`222abc0a`): the rules above, without the logo sentence or the footer
+    fence;
+  - builder `brand-assets-b` (`e47310f3`): plus "the logo comes from the footer piece alone ...
+    never search for a logo", aimed at S1's cause;
+  - builder `brand-assets-c` (`693f0101`): plus the footer fence "(deck-style decks only; without
+    deck_style, write no {{slide:number}} or {{slide:count}})", aimed at F1's cause;
+  - fixer `brand-assets-b` (`b365679a`): the fixer rules above, logo sentence included. A first
+    draft without that sentence was never run and is not kept.
+
+S are screens, F finalist runs, H held-out, D a cause check. Run ids are from the
+`architect-styling` worktree's local `mlflow.db`.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 (judge 0.03) |
+|---|---|---|---|---|---|---|---|---|---|
+| calibration | — | both | `deck_style_icons` | — | 4 judge calls | see above | 0 | — | 0.20 (0.12) |
+| B0 05129e17 | builder v1-baseline (0e60b438) | train | all 8 | 2 | 16 | 0.88 | 0 | 11.3k / 1.8k | 2.09 (1.77) |
+| X0 4b1abcb2 | fixer v1-baseline (69eb6ea5) | train | all 5 | 1 | 5 | 0.80 | 0 | 8.8k / 0.7k | 0.49 (0.39) |
+| S1 8ab7306d | brand-assets (222abc0a) | train | 3 deck-style | 2 | 6 | 1.00 | 0 | 18.9k / 1.5k | 0.93 (0.81) |
+| S2 92643560 | brand-assets-b (e47310f3) | train | 3 deck-style | 2 | 6 | 1.00 | 0 | 16.7k / 1.4k | 0.87 (0.75) |
+| F1 3ce85acf | brand-assets-b | train | all 8 | 2 | 16 | 1.00 | 0 | 12.2k / 1.8k | 2.15 (1.83) |
+| H1 24b2aa39 | brand-assets-b | held-out | all 8 | 1 | 8 | 1.00 | 0 | 11.7k / 1.4k | 0.99 (0.83) |
+| X1 956d5f18 | fixer brand-assets-b (b365679a) | train | all 5 | 1 | 5 | 0.60 | 0 | 9.3k / 0.7k | 0.51 (0.41) |
+| D1 66dce7e7 | fixer v1-baseline | train | `brief_not_delivered` | 3 | 3 | 0.33 | 0 | 8.3k / 0.8k | 0.30 (0.24) |
+| D2 6e84a664 | fixer brand-assets-b | train | `brief_not_delivered` | 3 | 3 | 0.67 | 0 | 8.8k / 0.8k | 0.30 (0.24) |
+| F2 b81e7bbe | brand-assets-c (693f0101) | train | all 8 | 1 | 8 | 1.00 | 0 | 12.3k / 1.6k | 1.05 (0.89) |
+| F3 469de7fd | brand-assets-c | train | `deck_style_icons` | 1 | 1 | 1.00 | 0 | 25.9k / 1.6k | 0.19 (0.17) |
+| H2 aba3b83e | brand-assets-c | held-out | all 8 | 1 | 8 | 1.00 | 0 | 11.7k / 1.3k | 0.99 (0.83) |
+
+The "3 deck-style" cases are `deck_style_icons`, `deck_style_code` and `deck_style_table`. Held-out
+is reported as an aggregate (H1, H2), plus the one `deck_style_icons` row the bar needs. No other
+held-out case was read.
+
+What it showed:
+
+- **The baseline already searches.** On today's prompt, Sonnet passed `deck_style_icons` 2/2 (B0).
+  Each row made one `search_brand_assets(kind="icon")` call, prompted by the tool's own
+  description, and placed three index icons. Every finalist row did the same, with exactly one
+  icon search.
+- **S1's cause: logo searches.** `brand-assets` passed 6/6, but 3 of its 6 rows also searched
+  `kind="logo"`, including a `deck_style_code` slide that asks for no asset. These deck styles have
+  no footer piece, so the logo was never placed: a round trip for nothing (27k against 12k input
+  tokens). B0 made no logo search. `brand-assets-b` made none in S2 or F1.
+- **F1's cause: the footer rules leaked out of the block.** `brand-assets-b` passed 16/16 on train
+  and 8/8 on held-out. But on all 10 rows of the five cases without a deck style, it wrote
+  `{{slide:number}} / {{slide:count}}` into the footer it improvises from `section_css`'s
+  `.slide-footer`. B0 wrote the template's sample `1` there, and no tokens. The block says to skip
+  it without a deck style, so this is a behaviour change for old decks, and the judge passed it.
+  `brand-assets-c` fences the footer rules: 0 of its 5 no-deck-style rows carry a token (F2), and
+  its deck-style rows are unchanged. The sample `1` in those improvised footers is today's
+  behaviour, and it is out of scope here.
+- **Fixer** (X1 against X0, ×1). `contrast_failure`, `overflow` and `rogue_colour` passed 1/1 on
+  both. `source_contradiction` failed 0/1 on both, the known v1 defect: the fixer returns
+  `scripts: ""` and the chart's init is dropped. `brief_not_delivered` went 1/1 → 0/1.
+  - In that row the fixer left the slide unchanged and cited the finding's `objective: false`,
+    which the v1 rule 4 outside the block ("the criterion is not objective, return the original
+    HTML unchanged") tells it to do.
+  - The cause check (D1, D2, ×3 each) gave v1 1/3 and the candidate 2/3, so the drop is that rule's
+    variance, not the block, which this payload skips.
+  - In production `build_reviewer_node` sends only objective findings to the fixer, and
+    `brief_not_delivered` is the one subjective criterion. The case and v1 rule 4 disagree; that is
+    for the owner.
+  - No fixer row wrote a page token or searched (no fixer case has a deck style).
+- **Cost and latency.** On `brand-assets-c` the block adds exactly 822 input tokens to every
+  single-round builder call, with or without a deck style (`gold_bullets` 8,936 → 9,758), because
+  it is always in the prompt. That is about USD 0.0016 a slide at Sonnet's rate. Mean latency is unchanged: 14.6 s (B0), 14.2 s (F1),
+  14.3 s (F2). The icon case's one search costs a second round, 25.9k against 12.1k input tokens
+  for a deck-style slide without one.
+- **Acceptance bar** (Task B5b), for builder `brand-assets-c` and fixer `brand-assets-b`.
+  **Met.**
+  1. `deck_style_icons` at least 2 of its 3 rows: 3/3 (F2 1/1, F3 1/1, H2 1/1), deterministic
+     scorers and judge alike.
+  2. No existing case regresses by more than one row against the baseline. On the builder, every
+     case passed its row in F2, against B0's 2/2 (`chart_no_data` 0/2). On the fixer,
+     `brief_not_delivered` dropped one row (1/1 → 0/1; D: 1/3 → 2/3), and every other case held.
+- **Scope cuts, by the implementer**, to fit the cap after F1 found the leak:
+  - `brand-assets-c` ran train ×1 on all 8 cases, plus one more `deck_style_icons` row, where the
+    other finalists ran ×2. The bar was made stricter to match: every existing case had to pass
+    its only row, where ×2 would have allowed 1/2. F1 ran `brand-assets-b`, which differs from C
+    only in the fence, and it passed 16/16 at ×2 as supporting evidence.
+  - The fixer was not re-run for C, because C changes the builder only; X1 and D2 are the promoted
+    fixer config.
+  - The screens ran only the three deck-style cases, the only ones the block applies to, at ×2.
+  - No baseline was cut: B0 covered every train case ×2 and X0 every fixer case.
+- **Overrides of `optimise-agent-prompt`**, delegated by the controller:
+  - finalists ran train ×2 (×1 for C, above) and held-out ×1, where the skill says ×5 and ×3;
+  - two finalists, B and C, each scored held-out once;
+  - the bar's held-out `deck_style_icons` verdict was read;
+  - the pass edited `INSTRUCTIONS`, promoted and committed.
+- **Shipped, then replaced by the fix round below.**
+  - `brand-assets-c` became the builder's v1 prompt in `src/core/skills/builder.py`
+    (`693f010178f3`, previously `0e60b438e4be`), and `brand-assets-b` the fixer's (`b365679aa152`,
+    previously `69eb6ea52400`). They were promoted with
+    `python -m evals.harness.promote --config builder=evals/configs/builder/brand-assets-c.yaml --run-id builder=b81e7bbe53044baeaff2bf7f975db129 --config fixer=evals/configs/fixer/brand-assets-b.yaml --run-id fixer=956d5f18af274c9ea2057535d0870c6b`.
+  - `HEAD_OTHER_ROLE_CONTENT_HASHES` (builder, fixer) was re-pinned by hand, and the frontend
+    lifecycle contract was re-recorded.
+  - The out-of-block digests and every existing prompt pin are unchanged.
+- **Not measured** (Ruling RA7 and the cases):
+  - No fixer case carries a deck style, so the fixer's tool path and brand rules are bound and
+    tested but not measured. "The fixer pack ×1" proves non-regression only.
+  - No builder case has a footer piece, a bound section or a `white` section on either split, so
+    these are pinned by `test_builder_deck_style_prompt.py` but not measured offline:
+    - the footer rules: a bound footer's tokens and logo, the footer piece, the dark-slide logo,
+      and never two footers;
+    - the one-ground rule.
+
+    A devloop deck is the first real check. The cases did show the negative: with no footer
+    piece, no deck-style row added a footer.
+
+### Fix round 1 (Ruling RA15), 2026-10-31
+
+**Spend: about USD 2.53, with the judge at its USD 0.05 a call upper bound**, inside RA15's
+USD 4 extension. Both agents are costed at USD 4 / 20 per million tokens, plus 21 judge calls. At
+the USD 0.03 judge rate it is about USD 2.11; with the builder at the Sonnet rate as well, about
+USD 1.50.
+
+The task review found three prompt problems:
+- the block's other rules were as exposed as the page tokens in F1 to decks without a deck style;
+- a bound section with no template footer got contradictory rules ("every other slide carries
+  one" against "a bound slide never adds the footer piece"). In the prod Databricks deck that is
+  7 of 15 slides, including every `white` one;
+- "the cover carries no footer" stripped a footer the cover's section ships.
+
+The new prompts change only their DECK STYLE blocks:
+- **Builder `one-footer`** (`f62c5874`):
+  - A lead line fences the whole block: "Apply this whole block only when the payload carries
+    deck_style; without deck_style, skip every rule in it (its footer, page-token, ground and
+    icon rules included)". The Footers bullet keeps its page-token fence.
+  - Every slide except the cover carries exactly one footer, and never two.
+  - A bound slide whose section has a footer fills it and never adds the footer piece. A bound
+    slide whose section lacks a footer uses the piece, exactly as an unbound slide does. The
+    piece is only for slides without a footer of their own.
+  - When the catalogue has no footer piece, a slide without a footer of its own gets none (never
+    a hand-built one).
+  - The cover gets no page tokens and no footer piece, and a footer its section ships stays.
+- **Fixer `one-footer`** (`5b0186f5`):
+  - the same lead fence;
+  - every footer rule nested under "Footers, only when the finding concerns a footer:";
+  - the builder's footer and cover rules.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 (judge 0.03) |
+|---|---|---|---|---|---|---|---|---|---|
+| R1 82bc6dc1 | builder one-footer (f62c5874) | train | all 8 | 1 | 8 | 1.00 | 0 | 12.4k / 1.6k | 1.05 (0.89) |
+| R2 a42b6606 | builder one-footer | held-out | all 8 | 1 | 8 | 0.88 | 0 | 11.8k / 1.2k | 0.97 (0.81) |
+| R3 7a562aa9 | fixer one-footer (5b0186f5) | train | all 5 | 1 | 5 | 0.80 | 0 | 9.4k / 0.7k | 0.51 (0.41) |
+
+- **Bar** (RA15). **Met.**
+  1. The deck-style cases still pass. On train each passed its row (R1). On held-out
+     `deck_style_code`, `deck_style_table` and `deck_style_icons` each passed 1/1. Those three
+     per-case metrics were the only held-out cases read. `deck_style_icons` made one
+     `kind="icon"` search on each split and placed three index icons.
+  2. No existing case lost a row at ×1. Every train case passed in R1, against B0's 2/2
+     (`chart_no_data` 0/2).
+  3. No page token appeared on any row without a deck style: 0 of 5 on train, and 0 of 5 on
+     held-out. Only the count was read on held-out.
+  4. The fixer did not regress: R3 4/5, as X0. `brief_not_delivered` passed, and
+     `source_contradiction` failed on the v1 script defect. No fixer row wrote a page token.
+- **Held-out** was 7 of 8 (0.88). The failing row is `stat_no_data`, a case without a deck
+  style. The task reviewer opened it after promotion, to find the cause only. The cause is
+  **judge variance**, not the RA15 wording.
+  - `contract` and `render_measures` passed. The row has no page token and no footer.
+  - The judge failed it for "unsourced descriptive claims" in its stat cards, such as
+    "Tighter instructions and reusable structure cut wasted tokens on every call" and "Defined
+    formats and constraints make results repeatable from run to run". It also wanted the
+    callout to acknowledge the missing figures. The rationale says nothing about footers,
+    tokens or the deck style.
+  - The same case passed on `brand-assets-b` (H1 `24b2aa39`) and `brand-assets-c` (H2
+    `aba3b83e`) with near-identical card copy, for example "Tighter instructions and reusable
+    structure mean fewer wasted tokens per request" and "Defined formats and constraints keep
+    results predictable from run to run".
+  - The "acknowledge the gap" yardstick conflicts with the builder's unchanged rule "Do not add
+    a note, callout or caption about missing data". That is a case and judge issue for the
+    owner.
+  - 7 of 8 is below `brand-assets-b` and `brand-assets-c` (8/8 each), but not below the recorded
+    v1 held-out rates (0.86 on Sonnet, N2; 0.40 on 2026-10-08).
+  - Held-out was not in the RA15 bar. It was run to widen the leak check.
+- **Tokens and latency.** The block now adds exactly 975 input tokens to every single-round
+  builder call against v1 (`gold_bullets` 8,936 → 9,911). Mean latency was 13.3 s.
+  - Improvised footers are unscored. They fell on rows without a deck style:
+
+    | Rows without a deck style | Improvised footers |
+    |---|---|
+    | train: B0 | 7 of 10 |
+    | train: `brand-assets-c` | 2 of 5 |
+    | train: `one-footer` (R1) | 1 of 5 |
+    | train: `brand-assets-c` and `one-footer` pooled | 3 of 10 (one-sided Fisher p ≈ 0.09 against B0) |
+    | held-out: `one-footer` (R2) | 0 of 5 |
+    | held-out: `brand-assets-b` | 4 of 5 |
+    | held-out: `brand-assets-c` | 3 of 5 |
+
+    The drop is **probably the fence**, which names "its footer … rules". It is **harmless**:
+    6 of B0's 7 improvised footers held a hard-coded page number ("1", "3", "01"), which is
+    wrong in a real deck. It is still a change for decks without a deck style, so it is
+    **checked on devloop probe (iii)**.
+- **Scope.** No cut. The RA15 bar asks for train ×1 and fixer ×1. Held-out ×1 was added to the
+  leak check.
+- **Shipped.** `one-footer` is the builder's v1 prompt (`f62c58742472`, previously
+  `693f010178f3`) and the fixer's (`5b0186f54e57`, previously `b365679aa152`). They were promoted
+  with
+  `python -m evals.harness.promote --config builder=evals/configs/builder/one-footer.yaml --run-id builder=82bc6dc1983046d497d23a0eab945ea5 --config fixer=evals/configs/fixer/one-footer.yaml --run-id fixer=7a562aa998854b89bda2e622ae7e4312`.
+  `HEAD_OTHER_ROLE_CONTENT_HASHES` was re-pinned by hand, and the contract was re-recorded.
+- **Not measured.** No eval case has any of the following, so the devloop rebuild checks them:
+  - a **bound section with a template footer** (fill it, and add no piece);
+  - a **bound section without one** (take the footer piece);
+  - a **`white` section** (dropped on content slides with a deck style, kept without one);
+  - a **cover** with or without a shipped footer (no page tokens and no piece; a shipped footer
+    stays).
+  - On decks without a deck style, only the page-token fence is measured (0 of 10 rows). The
+    whole-block fence's effect on `white` and on cover footers there is not.
+
+## Merge of main: one tool loop, merged prompts (Ruling RA19), 2026-10-31
+
+**Spend: about USD 2.70, with the judge at its USD 0.05 a call upper bound** and both agents
+costed at USD 4 / 20 per million tokens (USD 3 cap). That is 19 judge calls, plus 260k input
+and 35k output agent tokens.
+
+Merging main (Genie One, #353 and #354) changed two promoted prompts. Both now differ from both
+parents' texts:
+- **Builder `one-footer-source`** (`a0b6c836`): main's SOURCE LINE block (`source-line`) plus
+  this branch's `one-footer` DECK STYLE block and INPUT line. The two sit in different blocks.
+- **Architect `brand-footer-genie`** (`4d86a425`): this branch's `brand-footer` plus main's
+  `genie-questions` ask_data line. The two touch different lines.
+
+The fixer and fix_reviewer equal this branch's texts. The data analyst equals main's: protected
+assembly v2 and the Genie One prompt.
+
+MLflow tags the merge runs M1 to M4 with commit `a2381b66`, but they ran the merged code.
+
+**The harness's tool path.** The brand search now runs on main's tool loop
+(`DatabricksModelAdapter.invoke_with_tools`), and `run_candidate` refuses a toolset on its
+context. So `Runner` wraps its adapter: a run that binds the search passes production's
+brand-search toolset (`brand_search.build_brand_search_toolset`) straight to `invoke_with_tools`.
+Only the search backend is fake. Token usage on that path is summed across rounds.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 |
+|---|---|---|---|---|---|---|---|---|---|
+| M1 012033f6 | builder one-footer-source (a0b6c836) | train | all 8 | 1 | 8 | 1.00 | 0 | 14.6k / 1.9k | 1.17 |
+| M2 a269f495 | builder one-footer-source | held-out | all 8 | 1 | 8 | 1.00 | 0 | 11.9k / 1.2k | 0.97 |
+| M3 6b470f59 | architect brand-footer-genie (4d86a425) | train | `ask_data`, `build_request` | 1 | 2 | 1.00 | 0 | 16.4k / 5.2k | 0.44 |
+| M4 805d3e65 | architect brand-footer-genie | held-out | `ask_data` | 1 | 1 | 1.00 | 0 | 16.4k / 0.3k | 0.12 |
+
+- **Builder bar. Met.**
+  - Every case passed its row on both splits. The better of the two parents was `one-footer`'s
+    R1, which passed every train case.
+  - The deck-style cases passed, including `deck_style_icons`. Its only search on train was
+    one `kind="icon"` call, and it placed three index icons.
+  - 0 page tokens on the rows without a deck style: 0 of 5 on train, and 0 of 5 on held-out
+    (only the count was read).
+  - Neither pack has a source-line case. On train, every row that shows figures carried a
+    "Source:" line (7 of 7). `chart_no_data` had none and invented none.
+- **Architect (scoped).**
+  - Main promoted `genie-questions` with no eval run behind it ("owner-tested on devloop").
+    The architect pack ×1 on both splits projects at about USD 7, beyond the cap.
+  - So only the cases the merged line can change were run: `ask_data` on both splits, and one
+    build (`build_request`, train) to check that the PAYLOAD RULES block still plans a deck.
+    All 3 passed.
+  - The other 20 train cases, and 21 held-out cases, were last measured on `brand-footer`
+    (H1 1.00).
+- **Main's business-question cases (Ruling RA22).**
+  - Main's architect change (7d46d1db) and its Genie One commit (62c61aaa) added no eval case,
+    and its README records no run for `genie-questions`. In both packs, the one case the ask_data
+    line can change is `ask_data`.
+  - With no record to compare against, main's own `genie-questions` config ran on that case,
+    ×1 on each split (M5, M6). It runs on this branch's v1 base: main's prompt text with this
+    branch's architect schema contract (deck_style, look), because a config can override only the
+    prompt and model settings.
+  - **Bar: met.** `brand-footer-genie` passed `ask_data` 1/1 on train (M3) and 1/1 on held-out
+    (M4). Main's config passed 1/1 and 1/1, so no row was lost.
+  - On train, both wrote `data_request.metric` as a plain business question, such as "How much
+    revenue did each region bring in during Q3, and how does that compare with Q2? …". Both filled
+    `time_bound` and `grouping` from the user's own words ("Q3 compared with Q2", "region").
+  - **Spend: USD 0.23** at the USD 0.05 judge upper bound (USD 3 cap). The merge's total is
+    about USD 2.93.
+
+  | Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | M5 03c2d8cc | architect genie-questions (main, 89e4872f on this base) | train | `ask_data` | 1 | 1 | 1.00 | 0 | 14.2k / 0.4k | 0.11 |
+  | M6 0584935f | architect genie-questions | held-out | `ask_data` | 1 | 1 | 1.00 | 0 | 14.2k / 0.3k | 0.11 |
+- **Calibration** was not re-run: the case digests are the ones the branch's passes calibrated
+  (builder `eb3f1cde` train), and no case changed.
+- **Promoted** with
+  `python -m evals.harness.promote --config builder=evals/configs/builder/one-footer-source.yaml --run-id builder=012033f6bb2a44b58377224735afd5c1 --config architect=evals/configs/architect/brand-footer-genie.yaml --run-id architect=6b470f5931a34e79aef1e51a6dc97c42`,
+  under main's promote rule (27481337): only roles still on the legacy v1 assembly are locked,
+  and neither of these is. The frontend lifecycle contract was re-recorded.

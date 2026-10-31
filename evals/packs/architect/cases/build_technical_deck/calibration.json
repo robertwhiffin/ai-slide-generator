@@ -1,0 +1,133 @@
+{
+  "should_fail": {
+    "intent": "build",
+    "message": "Here is a 7-slide deck on streaming Postgres changes into the lakehouse with logical replication: the setup as code, a comparison table of the three approaches, and every figure badged measured or untested.",
+    "deck_spec": {
+      "title": "Streaming Postgres into the Lakehouse with Logical Replication",
+      "audience": "Data engineers and platform teams who run Postgres and load a lakehouse from it",
+      "purpose": "Show the team how to stream Postgres changes into the lakehouse with logical replication, what it measured in testing, and what is still untested",
+      "argument": "Logical replication keeps the lakehouse seconds behind Postgres with little load on the primary, which trigger-based capture and nightly batch export cannot; failover and the full-size snapshot still need testing",
+      "call_to_action": "Pilot logical replication on one production database this quarter, and test failover before the rollout",
+      "narrative_arc": [
+        "Open on the goal: a lakehouse that stays seconds behind Postgres",
+        "Compare logical replication with trigger-based capture and nightly batch export",
+        "Show the setup as code, on the Postgres side and on the subscriber side",
+        "Report what the test run measured and what is still untested",
+        "Close with the pilot plan and the call to action"
+      ],
+      "design_contract": {
+        "design_system_id": 3,
+        "template_id": 5
+      },
+      "resolved_data": {
+        "synthesis": "In the user's test run logical replication kept lag under 2 seconds at 5,000 writes per second, took 3 hours to snapshot a 200 GB database and added 4% CPU on the primary. Failover to a standby and the 30-hour estimate for the 2 TB snapshot are untested.",
+        "figures": [
+          {
+            "key": "replication_lag",
+            "value": "lag under 2 seconds at 5,000 writes per second",
+            "source": "The user's test run (measured)"
+          },
+          {
+            "key": "initial_snapshot",
+            "value": "a 3-hour initial snapshot of a 200 GB database",
+            "source": "The user's test run (measured)"
+          },
+          {
+            "key": "primary_cpu",
+            "value": "4% extra CPU on the primary",
+            "source": "The user's test run (measured)"
+          },
+          {
+            "key": "full_snapshot_estimate",
+            "value": "an estimated 30 hours to snapshot the 2 TB database",
+            "source": "The user's estimate (untested)"
+          }
+        ],
+        "gaps": [
+          "Failover to a standby has not been tested"
+        ]
+      },
+      "slides": [
+        {
+          "position": 0,
+          "purpose": "Open the deck: stream Postgres changes into the lakehouse with logical replication",
+          "content_brief": "Cover slide with the title 'Streaming Postgres into the Lakehouse with Logical Replication' and a subtitle promising seconds of lag with no change to the application",
+          "assumes": "The audience runs Postgres and loads a lakehouse from it today",
+          "hands_off": "Logical replication can keep the lakehouse seconds behind Postgres",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "position": 1,
+          "purpose": "Compare the three ways to feed the lakehouse from Postgres",
+          "content_brief": "Comparison table of logical replication, trigger-based capture and nightly batch export, one row per approach, with columns for lag, load on the primary, schema-change handling and setup effort; a one-line takeaway beneath: only logical replication gives seconds of lag with no triggers on the tables",
+          "assumes": "The audience knows at least one of the three approaches",
+          "hands_off": "Logical replication is the approach worth piloting",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "position": 2,
+          "purpose": "Show the setup on the Postgres side",
+          "content_brief": "Code listing of the three setup statements: set wal_level to logical, create a publication for the replicated tables, and create a logical replication slot; two short bullets beside it on what the publication and the slot each do",
+          "assumes": "The audience has chosen logical replication and can administer Postgres",
+          "hands_off": "Postgres needs three statements to publish its changes",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "position": 3,
+          "purpose": "Show the subscriber settings that land the changes in the lakehouse",
+          "content_brief": "Code listing of the subscriber settings: the slot to read, the publication, the target lakehouse tables and the checkpoint interval, with a one-line note beneath that each batch commits as one lakehouse transaction",
+          "assumes": "The audience has seen the publication and the slot on the Postgres side",
+          "hands_off": "The subscriber turns the replication stream into lakehouse tables",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "position": 4,
+          "purpose": "Report what the test run measured",
+          "content_brief": "Three stat cards from the test run, each badged measured: lag under 2 seconds at 5,000 writes per second, a 3-hour initial snapshot of a 200 GB database, and 4% extra CPU on the primary",
+          "assumes": "The audience has seen how the pipeline is set up",
+          "hands_off": "In the test run the pipeline kept up and cost the primary little",
+          "data_references": [
+            "replication_lag",
+            "initial_snapshot",
+            "primary_cpu"
+          ],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "position": 5,
+          "purpose": "Say plainly what is still untested",
+          "content_brief": "Two items, each badged untested: failover to a standby, and the estimated 30 hours to snapshot the 2 TB database; a callout that both must be tested before the rollout",
+          "assumes": "The audience has seen the measured figures",
+          "hands_off": "Two risks are still open and must be tested before the rollout",
+          "data_references": [
+            "full_snapshot_estimate"
+          ],
+          "slide_type": null,
+          "template_section_index": null
+        },
+        {
+          "position": 6,
+          "purpose": "Close with the pilot plan and the call to action",
+          "content_brief": "The pilot as four ordered steps: pick one production database, set up the publication and the slot, run the subscriber for two weeks, then test failover to a standby; end with the call to action",
+          "assumes": "The audience has seen what was measured and what is still untested",
+          "hands_off": "Pilot on one database this quarter and test failover before the rollout",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null
+        }
+      ]
+    },
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null
+  }
+}

@@ -1,0 +1,8 @@
+# Task 9b (owner decision 2026-10-30): the builder's v1 definition with ONLY its model endpoint
+# switched from system.ai.claude-haiku-4-5 to system.ai.claude-sonnet-5-5. The prompt is the
+# promoted v1 text (`deck-style-ground`, d6db84b8), and temperature, max_tokens and top_p are
+# inherited unchanged from the manifest. This is the config the switch was measured and promoted with.
+agent_key: builder
+name: builder-sonnet-5-5
+base: v1
+endpoint_name: system.ai.claude-sonnet-5-5

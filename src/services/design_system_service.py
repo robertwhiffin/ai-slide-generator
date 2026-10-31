@@ -2275,6 +2275,33 @@ def get_asset_base64(
     return base64.b64encode(asset.data).decode("utf-8"), asset.mime
 
 
+def get_assets_base64(
+    db: Session, asset_ids: Any, *, design_system_id: Optional[int]
+) -> dict[int, tuple[str, str]]:
+    """``{id: (base64_data, mime)}`` for each of *asset_ids* owned by ``design_system_id``.
+
+    The batch sibling of :func:`get_asset_base64`, for a boundary that ships many
+    slides at once: ONE query for every id, with the same confused-deputy scope.
+    An id that is unknown or belongs to another design system is simply absent from
+    the result, and ``design_system_id=None`` matches no row (fail-closed).
+    """
+    ids = sorted({int(i) for i in asset_ids})
+    if not ids:
+        return {}
+    assets = (
+        db.query(DesignSystemAsset)
+        .filter(
+            DesignSystemAsset.id.in_(ids),
+            DesignSystemAsset.design_system_id == design_system_id,
+        )
+        .all()
+    )
+    return {
+        asset.id: (base64.b64encode(asset.data).decode("utf-8"), asset.mime)
+        for asset in assets
+    }
+
+
 # ---------------------------------------------------------------------------
 # Brand-asset search (backs the ``search_brand_assets`` generation tool)
 # ---------------------------------------------------------------------------

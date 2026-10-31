@@ -1,0 +1,193 @@
+{
+  "intent": "build",
+  "message": "Here is a 7-slide deck on streaming Postgres changes into the lakehouse with logical replication: the setup as code, a comparison table of the three approaches, and every figure badged measured or untested.",
+  "deck_spec": {
+    "title": "Streaming Postgres into the Lakehouse with Logical Replication",
+    "audience": "Data engineers and platform teams who run Postgres and load a lakehouse from it",
+    "purpose": "Show the team how to stream Postgres changes into the lakehouse with logical replication, what it measured in testing, and what is still untested",
+    "argument": "Logical replication keeps the lakehouse seconds behind Postgres with little load on the primary, which trigger-based capture and nightly batch export cannot; failover and the full-size snapshot still need testing",
+    "call_to_action": "Pilot logical replication on one production database this quarter, and test failover before the rollout",
+    "narrative_arc": [
+      "Open on the goal: a lakehouse that stays seconds behind Postgres",
+      "Compare logical replication with trigger-based capture and nightly batch export",
+      "Show the setup as code, on the Postgres side and on the subscriber side",
+      "Report what the test run measured and what is still untested",
+      "Close with the pilot plan and the call to action"
+    ],
+    "design_contract": {
+      "design_system_id": 3,
+      "template_id": 5
+    },
+    "resolved_data": {
+      "synthesis": "In the user's test run logical replication kept lag under 2 seconds at 5,000 writes per second, took 3 hours to snapshot a 200 GB database and added 4% CPU on the primary. Failover to a standby and the 30-hour estimate for the 2 TB snapshot are untested.",
+      "figures": [
+        {
+          "key": "replication_lag",
+          "value": "lag under 2 seconds at 5,000 writes per second",
+          "source": "The user's test run (measured)"
+        },
+        {
+          "key": "initial_snapshot",
+          "value": "a 3-hour initial snapshot of a 200 GB database",
+          "source": "The user's test run (measured)"
+        },
+        {
+          "key": "primary_cpu",
+          "value": "4% extra CPU on the primary",
+          "source": "The user's test run (measured)"
+        },
+        {
+          "key": "full_snapshot_estimate",
+          "value": "an estimated 30 hours to snapshot the 2 TB database",
+          "source": "The user's estimate (untested)"
+        }
+      ],
+      "gaps": [
+        "Failover to a standby has not been tested"
+      ]
+    },
+    "slides": [
+      {
+        "position": 0,
+        "purpose": "Open the deck: stream Postgres changes into the lakehouse with logical replication",
+        "content_brief": "Cover slide with the title 'Streaming Postgres into the Lakehouse with Logical Replication' and a subtitle promising seconds of lag with no change to the application",
+        "assumes": "The audience runs Postgres and loads a lakehouse from it today",
+        "hands_off": "Logical replication can keep the lakehouse seconds behind Postgres",
+        "data_references": [],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "Meridian cover: the title large on the left and the subtitle beneath it; no deck-style pieces"
+      },
+      {
+        "position": 1,
+        "purpose": "Compare the three ways to feed the lakehouse from Postgres",
+        "content_brief": "Comparison table of logical replication, trigger-based capture and nightly batch export, one row per approach, with columns for lag, load on the primary, schema-change handling and setup effort; a one-line takeaway beneath: only logical replication gives seconds of lag with no triggers on the tables",
+        "assumes": "The audience knows at least one of the three approaches",
+        "hands_off": "Logical replication is the approach worth piloting",
+        "data_references": [],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "Slide title above a full-width dk-table, one row per approach; the takeaway in the template's callout beneath it"
+      },
+      {
+        "position": 2,
+        "purpose": "Show the setup on the Postgres side",
+        "content_brief": "Code listing of the three setup statements: set wal_level to logical, create a publication for the replicated tables, and create a logical replication slot; two short bullets beside it on what the publication and the slot each do",
+        "assumes": "The audience has chosen logical replication and can administer Postgres",
+        "hands_off": "Postgres needs three statements to publish its changes",
+        "data_references": [],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "Two short bullets on the left; a dk-code listing of the three statements on the right, with keywords and comments marked"
+      },
+      {
+        "position": 3,
+        "purpose": "Show the subscriber settings that land the changes in the lakehouse",
+        "content_brief": "Code listing of the subscriber settings: the slot to read, the publication, the target lakehouse tables and the checkpoint interval, with a one-line note beneath that each batch commits as one lakehouse transaction",
+        "assumes": "The audience has seen the publication and the slot on the Postgres side",
+        "hands_off": "The subscriber turns the replication stream into lakehouse tables",
+        "data_references": [],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "A dk-code listing of the subscriber settings across the left two-thirds; a dk-note beneath it on transactional commits"
+      },
+      {
+        "position": 4,
+        "purpose": "Report what the test run measured",
+        "content_brief": "Three stat cards from the test run, each badged measured: lag under 2 seconds at 5,000 writes per second, a 3-hour initial snapshot of a 200 GB database, and 4% extra CPU on the primary",
+        "assumes": "The audience has seen how the pipeline is set up",
+        "hands_off": "In the test run the pipeline kept up and cost the primary little",
+        "data_references": [
+          "replication_lag",
+          "initial_snapshot",
+          "primary_cpu"
+        ],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "The template's three stat cards, one per figure, each with a dk-badge dk-badge--measured beside its number"
+      },
+      {
+        "position": 5,
+        "purpose": "Say plainly what is still untested",
+        "content_brief": "Two items, each badged untested: failover to a standby, and the estimated 30 hours to snapshot the 2 TB database; a callout that both must be tested before the rollout",
+        "assumes": "The audience has seen the measured figures",
+        "hands_off": "Two risks are still open and must be tested before the rollout",
+        "data_references": [
+          "full_snapshot_estimate"
+        ],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "Two rows, each with a dk-badge dk-badge--untested beside its item; the before-rollout warning in the template's callout"
+      },
+      {
+        "position": 6,
+        "purpose": "Close with the pilot plan and the call to action",
+        "content_brief": "The pilot as four ordered steps: pick one production database, set up the publication and the slot, run the subscriber for two weeks, then test failover to a standby; end with the call to action",
+        "assumes": "The audience has seen what was measured and what is still untested",
+        "hands_off": "Pilot on one database this quarter and test failover before the rollout",
+        "data_references": [],
+        "slide_type": null,
+        "template_section_index": null,
+        "look": "The four pilot steps as dk-steps; the call to action in the template's callout beneath them"
+      }
+    ],
+    "deck_style": {
+      "css": "/* Technical deck style on Meridian: code, tables, status badges, steps and notes. */\n.dk-code {\n  margin: 0;\n  padding: var(--space-md);\n  background: var(--brand-core-surface);\n  border: 1px solid var(--brand-core-border);\n  border-radius: var(--radius-md);\n  color: var(--brand-core-ink);\n  font-family: ui-monospace, \"SF Mono\", Menlo, Consolas, monospace;\n  font-size: calc(var(--fs-body) - 2px);\n  line-height: 1.6;\n  white-space: pre-wrap;\n  overflow-wrap: anywhere;\n}\n/* Token spans: only inside a code block. */\n.dk-code .kw { color: var(--brand-core-primary); font-weight: 600; }\n.dk-code .fn { color: var(--brand-accents-violet); }\n.dk-code .str { color: var(--brand-accents-sky); }\n.dk-code .cm { color: var(--brand-core-muted); font-style: italic; }\n\n.dk-table {\n  width: 100%;\n  border-collapse: collapse;\n  font-size: var(--fs-body);\n  font-variant-numeric: tabular-nums;\n}\n.dk-table th {\n  padding: var(--space-sm) var(--space-md);\n  background: var(--brand-core-primary);\n  color: var(--brand-core-background);\n  font-size: var(--fs-caption);\n  font-weight: 600;\n  letter-spacing: 0.06em;\n  text-align: left;\n  text-transform: uppercase;\n}\n.dk-table td {\n  padding: var(--space-sm) var(--space-md);\n  border-bottom: 1px solid var(--brand-core-border);\n  color: var(--brand-core-text);\n}\n.dk-table tbody tr:nth-child(even) td { background: var(--brand-core-surface); }\n\n.dk-badge {\n  display: inline-block;\n  padding: 2px 10px;\n  border-radius: 999px;\n  font-size: var(--fs-caption);\n  font-weight: 600;\n  letter-spacing: 0.04em;\n  line-height: 1.6;\n  text-transform: uppercase;\n}\n.dk-badge--measured { background: var(--brand-core-primary); color: var(--brand-core-background); }\n.dk-badge--untested {\n  background: var(--brand-core-surface);\n  color: var(--brand-core-muted);\n  border: 1px dashed var(--brand-core-muted);\n}\n\n.dk-steps { margin: 0; padding-left: 1.4em; }\n.dk-steps li { margin-bottom: var(--space-sm); padding-left: 0.3em; }\n.dk-steps li::marker { color: var(--brand-core-primary); font-weight: 700; }\n\n.dk-note { margin: 0; font-size: var(--fs-caption); color: var(--brand-core-muted); }\n\n/* The footer: the template's slide footer, the brand logo beside the page number. */\n.dk-footer { align-items: center; }\n.dk-footer img { height: 24px; width: auto; }\n",
+      "components": [
+        {
+          "name": "code block",
+          "class_names": [
+            "dk-code"
+          ],
+          "use": "Any SQL, shell or config listing. Mark keywords kw, function names fn, strings str and comments cm.",
+          "example_html": "<pre class=\"dk-code\"><span class=\"cm\">-- publish every table</span>\n<span class=\"kw\">CREATE PUBLICATION</span> lakehouse <span class=\"kw\">FOR ALL TABLES</span>;</pre>"
+        },
+        {
+          "name": "data table",
+          "class_names": [
+            "dk-table"
+          ],
+          "use": "A comparison or results table of up to six rows; the header row names each column.",
+          "example_html": "<table class=\"dk-table\"><thead><tr><th>Mode</th><th>Lag</th></tr></thead><tbody><tr><td>Logical</td><td>2 s</td></tr></tbody></table>"
+        },
+        {
+          "name": "status badge",
+          "class_names": [
+            "dk-badge",
+            "dk-badge--measured",
+            "dk-badge--untested"
+          ],
+          "use": "Marks a figure as measured or untested; place it beside the figure it qualifies.",
+          "example_html": "<span class=\"dk-badge dk-badge--measured\">Measured</span> <span class=\"dk-badge dk-badge--untested\">Untested</span>"
+        },
+        {
+          "name": "steps",
+          "class_names": [
+            "dk-steps"
+          ],
+          "use": "An ordered procedure of three to six steps.",
+          "example_html": "<ol class=\"dk-steps\"><li>Create the publication</li><li>Start the subscriber</li></ol>"
+        },
+        {
+          "name": "note",
+          "class_names": [
+            "dk-note"
+          ],
+          "use": "A one-line caveat or source under an exhibit.",
+          "example_html": "<p class=\"dk-note\">Measured on a four-node cluster.</p>"
+        },
+        {
+          "name": "footer",
+          "class_names": [
+            "dk-footer"
+          ],
+          "use": "Every slide except the cover: the template's slide footer, the brand logo on the left and the slide's number out of the deck's count (n / N) on the right.",
+          "example_html": "<div class=\"slide-footer dk-footer\"><img src=\"{{ds-asset:9001}}\" alt=\"Meridian\"/><span>{{slide:number}} / {{slide:count}}</span></div>"
+        }
+      ]
+    }
+  },
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

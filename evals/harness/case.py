@@ -125,6 +125,53 @@ def meridian_section_css() -> str:
         return f.read()
 
 
+MERIDIAN_TEMPLATE_ENTRY = "templates/standard/index.html"
+
+
+def meridian_deck_style_context() -> dict:
+    """The architect's ``deck_style_context`` for the Meridian bundle, as production derives it.
+
+    Production: the bundle import keeps the declared CSS sources
+    (``design_system_service._declared_css_paths``) and the template entry HTML;
+    ``materialize_templates`` builds the template row (``token_css`` joined by
+    ``_build_token_css``, ``layout_html`` asset-rewritten and root-tag normalised);
+    ``resolve_template_bytes`` takes the ``<style>`` CSS out of that layout
+    (``_extract_style_blocks_css``, ``""`` when there is none); and ``architect_node``
+    sends ``deck_style_context(token_css, style_block, logos)``, with ``logos`` ranked
+    by ``rank_logos``.  This runs those same functions over the fixture bundle and
+    ``assets.json``, with no database, so it cannot drift from them.
+    """
+    from types import SimpleNamespace
+
+    from src.domain.deck_style import deck_style_context, rank_logos
+    from src.services.design_system_service import _declared_css_paths
+    from src.services.design_system_templates import materialize_templates
+    from src.services.template_sections import _extract_style_blocks_css
+
+    bundle = MERIDIAN_DIR / "bundle"
+    manifest = json.loads((bundle / "_ds_manifest.json").read_text())
+
+    def _file(path: str, kind: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            path=path, kind=kind, data=(bundle / path).read_bytes(), asset_id=None, mime=""
+        )
+
+    files = [_file(p, "css") for p in _declared_css_paths(manifest) if (bundle / p).is_file()]
+    files += [_file(t["entryPath"], "template") for t in manifest["templates"]]
+    design_system = SimpleNamespace(id=None, manifest_json=manifest, files=files, templates=[])
+    template = next(
+        t for t in materialize_templates(design_system) if t.entry_path == MERIDIAN_TEMPLATE_ENTRY
+    )
+    # The fake asset index that stands in for the architect's logo read (production:
+    # ``nodes._design_system_logos``), ranked by the same function.
+    assets = json.loads((MERIDIAN_DIR / "assets.json").read_text())
+    return deck_style_context(
+        template.token_css or "",
+        _extract_style_blocks_css(template.layout_html or ""),
+        rank_logos(assets),
+    )
+
+
 def meridian_resolved_style() -> str:
     """Load the Meridian resolved style."""
     with open(MERIDIAN_DIR / "resolved_style.txt") as f:

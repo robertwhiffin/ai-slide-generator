@@ -1,0 +1,16 @@
+# Architect v1 prompt (deck style addendum A, Task B5a), candidate A: the promoted `deck-style-b`
+# text with the page-number ban (Ruling RA4) replaced by the brand footer. In DECK STYLE: on a
+# build the deck style always has a footer piece (named footer, class dk-footer, styled to match
+# the template's footer, reusing its two slots) whose example_html holds a logo handle from
+# deck_style_context.logos and both page tokens; two logos, one for light grounds and a
+# light-on-dark one for dark slides; every slide except the cover carries one footer (a bound
+# slide fills its template's own, an unbound one uses the piece, never two); content slides share
+# the default light ground while dark sections stay dark; a look may ask for icons but never names
+# an icon handle, since builders search for icons; an edit adds a footer piece to a deck style
+# only when asked. VISUAL / TEMPLATE BINDING's brand-furniture sentence now points the footer
+# logo at deck_style_context.logos and icons at the builders' search (Ruling RA11). Every other
+# byte is identical to `deck-style-b`.
+agent_key: architect
+name: brand-footer
+base: v1
+prompt_file: brand-footer.md
