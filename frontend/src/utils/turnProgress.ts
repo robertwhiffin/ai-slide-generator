@@ -5,6 +5,8 @@ const ELLIPSIS = '…';
 
 /** Unchanged legacy text: shown before the first stage arrives and for the legacy engine. */
 export const DEFAULT_TURN_LABEL = 'Generating slides...';
+/** While the turn waits for a free job runner (the backend's `pending`, before any progress). */
+export const QUEUED_TURN_LABEL = 'Waiting for another request to finish…';
 
 const PHASE_LABELS: Record<Exclude<TurnPhase, 'building'>, string> = {
   planning: `Planning the deck${ELLIPSIS}`,
