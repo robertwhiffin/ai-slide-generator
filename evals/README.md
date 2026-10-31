@@ -1878,6 +1878,26 @@ Only the search backend is fake. Token usage on that path is summed across round
     All 3 passed.
   - The other 20 train cases, and 21 held-out cases, were last measured on `brand-footer`
     (H1 1.00).
+- **Main's business-question cases (Ruling RA22).**
+  - Main's architect change (7d46d1db) and its Genie One commit (62c61aaa) added no eval case,
+    and its README records no run for `genie-questions`. In both packs, the one case the ask_data
+    line can change is `ask_data`.
+  - With no record to compare against, main's own `genie-questions` config ran on that case,
+    ×1 on each split (M5, M6). It runs on this branch's v1 base: main's prompt text with this
+    branch's architect schema contract (deck_style, look), because a config can override only the
+    prompt and model settings.
+  - **Bar: met.** `brand-footer-genie` passed `ask_data` 1/1 on train (M3) and 1/1 on held-out
+    (M4). Main's config passed 1/1 and 1/1, so no row was lost.
+  - On train, both wrote `data_request.metric` as a plain business question, such as "How much
+    revenue did each region bring in during Q3, and how does that compare with Q2? …". Both filled
+    `time_bound` and `grouping` from the user's own words ("Q3 compared with Q2", "region").
+  - **Spend: USD 0.23** at the USD 0.05 judge upper bound (USD 3 cap). The merge's total is
+    about USD 2.93.
+
+  | Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | M5 03c2d8cc | architect genie-questions (main, 89e4872f on this base) | train | `ask_data` | 1 | 1 | 1.00 | 0 | 14.2k / 0.4k | 0.11 |
+  | M6 0584935f | architect genie-questions | held-out | `ask_data` | 1 | 1 | 1.00 | 0 | 14.2k / 0.3k | 0.11 |
 - **Calibration** was not re-run: the case digests are the ones the branch's passes calibrated
   (builder `eb3f1cde` train), and no case changed.
 - **Promoted** with
