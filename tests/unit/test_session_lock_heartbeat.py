@@ -133,6 +133,49 @@ async def test_the_sweep_refreshes_pending_and_running_turns_only(clean_jobs):
 
 
 @pytest.mark.asyncio
+async def test_a_turn_queued_past_its_hard_timeout_is_no_longer_kept_alive(clean_jobs):
+    """If every runner on the process is held by a timed-out zombie, a queued turn
+    never starts.  Its lock must then go stale (the pre-heartbeat escape valve) rather
+    than lock the user out of the session until a restart."""
+    now = datetime.utcnow()
+    limit = job_queue.job_hard_timeout_seconds("graph")
+    clean_jobs.update(
+        {
+            "r-old": {
+                "status": "pending",
+                "session_id": "s-old",
+                "engine_mode": "graph",
+                "queued_at": now - timedelta(seconds=limit + 10),
+            },
+            "r-new": {
+                "status": "pending",
+                "session_id": "s-new",
+                "engine_mode": "graph",
+                "queued_at": now - timedelta(seconds=10),
+            },
+        }
+    )
+    sm = MagicMock()
+    with patch("src.api.services.session_manager.get_session_manager", return_value=sm):
+        await job_queue.refresh_job_session_locks_once()
+
+    called = [c.args[0] for c in sm.refresh_session_lock.call_args_list]
+    assert called == ["s-new"]
+
+
+def test_two_held_locks_refreshing_one_leaves_the_other_stale(manager):
+    """The refresh is scoped to its session: an unscoped UPDATE would keep every held
+    lock alive, including those whose process died."""
+    sm, factory = manager
+    stale = SESSION_LOCK_TIMEOUT_SECONDS + 5
+    _add(factory, "s-mine", processing=True, age_seconds=stale)
+    _add(factory, "s-dead-process", processing=True, age_seconds=stale)
+
+    assert sm.refresh_session_lock("s-mine") is True
+    assert sm.acquire_session_lock("s-dead-process") is True, "an unrelated lock was refreshed"
+
+
+@pytest.mark.asyncio
 async def test_one_failing_refresh_does_not_stop_the_others(clean_jobs):
     clean_jobs.update(
         {

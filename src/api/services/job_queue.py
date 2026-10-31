@@ -71,12 +71,24 @@ def get_chat_executor() -> ThreadPoolExecutor:
     return _ensure_chat_executor(chat_job_concurrency())
 
 
-def _ensure_chat_executor(size: int) -> ThreadPoolExecutor:
+def _ensure_chat_executor(size: int, *, resize: bool = False) -> ThreadPoolExecutor:
+    """The chat-job pool; with ``resize``, one of exactly ``size`` threads.
+
+    ``start_workers`` resizes, so a pool created lazily at another size (a direct
+    ``process_chat_request`` call) cannot leave runners without a thread.  The old
+    pool's running jobs finish on their own threads.
+    """
     global _chat_executor
+    replaced: Optional[ThreadPoolExecutor] = None
     with _chat_executor_lock:
+        if _chat_executor is not None and resize and _chat_executor._max_workers != size:
+            replaced, _chat_executor = _chat_executor, None
         if _chat_executor is None:
             _chat_executor = ThreadPoolExecutor(max_workers=size, thread_name_prefix="chat-job")
-        return _chat_executor
+        executor = _chat_executor
+    if replaced is not None:
+        replaced.shutdown(wait=False)
+    return executor
 
 
 def shutdown_chat_executor() -> None:
@@ -367,8 +379,11 @@ async def worker() -> None:
             try:
                 await process_chat_request(request_id, payload)
             except Exception as e:
-                jobs[request_id]["status"] = "error"
-                jobs[request_id]["error"] = str(e)
+                # process_chat_request's finally has already dropped the entry.
+                entry = jobs.get(request_id)
+                if entry is not None:
+                    entry["status"] = "error"
+                    entry["error"] = str(e)
                 logger.error(
                     f"Worker job failed: {e}", extra={"request_id": request_id}
                 )
@@ -397,7 +412,7 @@ async def start_workers(count: Optional[int] = None) -> List[asyncio.Task]:
     The chat-job pool is sized to match, so every runner has a thread.
     """
     count = chat_job_concurrency() if count is None else max(1, count)
-    _ensure_chat_executor(count)
+    _ensure_chat_executor(count, resize=True)
     return [asyncio.create_task(worker()) for _ in range(count)]
 
 
@@ -524,10 +539,24 @@ async def refresh_job_session_locks_once() -> int:
     """
     from src.api.services.session_manager import get_session_manager
 
+    now = datetime.utcnow()
+
+    def _alive(entry: Dict[str, Any]) -> bool:
+        if entry.get("status") == "running":
+            return True
+        if entry.get("status") != "pending":
+            return False
+        # A turn queued past its hard timeout is not kept alive: if every runner is
+        # held by a timed-out zombie it never starts, and its lock must go stale
+        # rather than lock the user out of the session until a restart.
+        queued_at = entry.get("queued_at")
+        limit = job_hard_timeout_seconds(entry.get("engine_mode"))
+        return queued_at is None or queued_at > now - timedelta(seconds=limit)
+
     session_ids = {
         entry["session_id"]
         for entry in list(jobs.values())
-        if entry.get("status") in ("pending", "running") and entry.get("session_id")
+        if entry.get("session_id") and _alive(entry)
     }
     if not session_ids:
         return 0
@@ -549,7 +578,7 @@ async def refresh_job_session_locks_once() -> int:
 async def mark_timed_out_jobs_loop() -> None:
     """Background loop: every 60 seconds, keeps held session locks live and marks timed-out jobs.
 
-    Runs ``refresh_job_session_locks_once()`` then ``mark_timed_out_jobs_once()``.
+    Runs ``mark_timed_out_jobs_once()`` then ``refresh_job_session_locks_once()``.
 
     Started in the FastAPI lifespan alongside the existing chat/export workers
     and request-log cleanup loop. Survives its own exceptions so a single
@@ -559,8 +588,9 @@ async def mark_timed_out_jobs_loop() -> None:
     while True:
         try:
             await asyncio.sleep(TIMEOUT_SWEEP_INTERVAL_SECONDS)
-            await refresh_job_session_locks_once()
+            # Mark first, so a turn that just timed out is not refreshed once more.
             marked = await mark_timed_out_jobs_once()
+            await refresh_job_session_locks_once()
             if marked:
                 logger.info(
                     "Timeout sweep marked %d job(s) as failed", marked

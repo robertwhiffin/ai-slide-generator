@@ -4025,8 +4025,9 @@ class SessionManager:
         run far longer and a queued turn waits before it starts.  The chat job queue
         calls this for every turn its process holds
         (``job_queue.refresh_job_session_locks_once``), so a lock outlives the timeout
-        only while its turn is alive.  Only a lock still held (``is_processing``) is
-        refreshed; a released lock is never revived.
+        only while its turn is running and not yet timed out, or queued for less than
+        its hard timeout.  Only a lock still held (``is_processing``) is refreshed; a
+        released lock is never revived.
 
         Returns:
             True if a held lock was refreshed.

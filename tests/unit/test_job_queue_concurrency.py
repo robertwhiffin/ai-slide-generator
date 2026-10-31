@@ -73,6 +73,8 @@ def env(monkeypatch):
     """A fresh queue, no tracked jobs, and the job's collaborators stubbed out."""
     monkeypatch.setattr(job_queue, "job_queue", asyncio.Queue())
     job_queue.jobs.clear()
+    # Another test file's direct process_chat_request call may have left a pool.
+    job_queue.shutdown_chat_executor()
     gen = _BlockingGenerator()
     manager = MagicMock()
     with (
@@ -265,6 +267,18 @@ async def test_the_chat_pool_matches_the_runner_count(env):
         await job_queue.stop_workers(tasks)
 
 
+@pytest.mark.asyncio
+async def test_start_workers_resizes_a_pool_left_by_an_earlier_direct_call(env, monkeypatch):
+    """A lazily created pool of another size must not leave runners without threads."""
+    monkeypatch.setenv(job_queue.CHAT_JOB_CONCURRENCY_ENV, "2")
+    assert job_queue.get_chat_executor()._max_workers == 2
+    tasks = await job_queue.start_workers(3)
+    try:
+        assert job_queue.get_chat_executor()._max_workers == 3
+    finally:
+        await job_queue.stop_workers(tasks)
+
+
 def test_a_direct_call_without_workers_still_has_a_pool(env, monkeypatch):
     """Recovery and the existing wiring tests call process_chat_request directly."""
     gen, manager = env
@@ -303,3 +317,13 @@ async def test_stop_workers_cancels_every_runner(env):
     assert len(tasks) == 3
     await job_queue.stop_workers(tasks)
     assert all(t.done() for t in tasks)
+
+
+@pytest.mark.asyncio
+async def test_stop_workers_releases_the_chat_pool(env):
+    tasks = await job_queue.start_workers(2)
+    pool = job_queue.get_chat_executor()
+    await job_queue.stop_workers(tasks)
+    assert job_queue._chat_executor is None
+    with pytest.raises(RuntimeError):
+        pool.submit(lambda: None)
