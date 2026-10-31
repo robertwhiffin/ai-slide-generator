@@ -1779,15 +1779,43 @@ The new prompts change only their DECK STYLE blocks:
      held-out. Only the count was read on held-out.
   4. The fixer did not regress: R3 4/5, as X0. `brief_not_delivered` passed, and
      `source_contradiction` failed on the v1 script defect. No fixer row wrote a page token.
-- **Held-out** was 7 of 8 (0.88). The failing row is one of the five cases without a deck style;
-  it was found by elimination and not opened.
-  - That is below `brand-assets-b` and `brand-assets-c` (8/8 each), but not below the recorded
+- **Held-out** was 7 of 8 (0.88). The failing row is `stat_no_data`, a case without a deck
+  style. The task reviewer opened it after promotion, to find the cause only. The cause is
+  **judge variance**, not the RA15 wording.
+  - `contract` and `render_measures` passed. The row has no page token and no footer.
+  - The judge failed it for "unsourced descriptive claims" in its stat cards, such as
+    "Tighter instructions and reusable structure cut wasted tokens on every call" and "Defined
+    formats and constraints make results repeatable from run to run". It also wanted the
+    callout to acknowledge the missing figures. The rationale says nothing about footers,
+    tokens or the deck style.
+  - The same case passed on `brand-assets-b` (H1 `24b2aa39`) and `brand-assets-c` (H2
+    `aba3b83e`) with near-identical card copy, for example "Tighter instructions and reusable
+    structure mean fewer wasted tokens per request" and "Defined formats and constraints keep
+    results predictable from run to run".
+  - The "acknowledge the gap" yardstick conflicts with the builder's unchanged rule "Do not add
+    a note, callout or caption about missing data". That is a case and judge issue for the
+    owner.
+  - 7 of 8 is below `brand-assets-b` and `brand-assets-c` (8/8 each), but not below the recorded
     v1 held-out rates (0.86 on Sonnet, N2; 0.40 on 2026-10-08).
   - Held-out was not in the RA15 bar. It was run to widen the leak check.
 - **Tokens and latency.** The block now adds exactly 975 input tokens to every single-round
   builder call against v1 (`gold_bullets` 8,936 → 9,911). Mean latency was 13.3 s.
-  - Improvised footers on rows without a deck style ran 1 of 5. B0 had 7 of 10, and
-    `brand-assets-c` 2 of 5. They are unscored, and the difference is within noise at this n.
+  - Improvised footers are unscored. They fell on rows without a deck style:
+
+    | Rows without a deck style | Improvised footers |
+    |---|---|
+    | train: B0 | 7 of 10 |
+    | train: `brand-assets-c` | 2 of 5 |
+    | train: `one-footer` (R1) | 1 of 5 |
+    | train: `brand-assets-c` and `one-footer` pooled | 3 of 10 (one-sided Fisher p ≈ 0.09 against B0) |
+    | held-out: `one-footer` (R2) | 0 of 5 |
+    | held-out: `brand-assets-b` | 4 of 5 |
+    | held-out: `brand-assets-c` | 3 of 5 |
+
+    The drop is **probably the fence**, which names "its footer … rules". It is **harmless**:
+    6 of B0's 7 improvised footers held a hard-coded page number ("1", "3", "01"), which is
+    wrong in a real deck. It is still a change for decks without a deck style, so it is
+    **checked on devloop probe (iii)**.
 - **Scope.** No cut. The RA15 bar asks for train ×1 and fixer ×1. Held-out ×1 was added to the
   leak check.
 - **Shipped.** `one-footer` is the builder's v1 prompt (`f62c58742472`, previously

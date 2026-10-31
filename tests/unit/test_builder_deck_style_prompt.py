@@ -713,6 +713,15 @@ POS_USE = (
     r"\b(use|uses|using|take|takes|get|gets|carry|carries|add|adds|copy|copies|place|places"
     r"|gain|gains|receive|receives)\b(?! line)"
 )
+#: Between the footer-less condition and its verb: no other subject ("unbound"), no "none"
+#: and no negation, inside one ;-free segment.
+_SAME_SUBJECT_GAP = r"(?:(?!\bunbound\b|\bnone\b|\bnot\b|n't\b|\bnever\b|\bno\b)[^.;]){0,60}"
+#: RA15: "a bound slide whose section lacks a footer uses the deck style's footer piece",
+#: in that order, so the bound slide is the one that takes the piece.  Not "… lacks a footer
+#: carries no footer; an unbound slide uses the footer piece" (the fix-round-1 mutation e).
+BOUND_WITHOUT_FOOTER_USES_PIECE = (
+    r"\bbound\b[^.;]{0,60}" + NO_OWN_FOOTER + _SAME_SUBJECT_GAP + POS_USE + _gap(40) + FOOTER_PIECE
+)
 #: The footer piece is only for slides without a footer of their own (either order).
 ONLY_FOR_FOOTERLESS = (
     r"("
@@ -934,7 +943,7 @@ COMMON_ADDENDUM_A_RULES: tuple[Rule, ...] = (
     ),
     (
         "RA15: a bound slide whose section has no footer uses the deck style's footer piece",
-        (r"\bbound\b", NO_OWN_FOOTER, POS_USE + _gap(40) + FOOTER_PIECE),
+        (BOUND_WITHOUT_FOOTER_USES_PIECE,),
         1,
     ),
     (
