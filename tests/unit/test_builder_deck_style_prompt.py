@@ -47,12 +47,11 @@ style:
 * one footer per slide (both roles; Q1, A21): a bound slide fills its template's own
   footer (a label, ``{{slide:number}} / {{slide:count}}`` in its number slot, the logo
   inside a slot and never a third flex child; the template's sample number is
-  placeholder), an unbound slide uses the deck style's footer piece, never two footers,
-  no footer on the cover; dark slides use the light-on-dark logo (Q3).  From the B5a
-  review (the main two-footer risk: the measured footer pieces reuse the template's
-  slide-footer class and their use line says "every slide except the cover"): a bound
-  slide never adds the footer piece, even when the piece's use line says every slide,
-  and the piece is only for unbound slides;
+  placeholder), an unbound slide uses the deck style's footer piece, never two footers;
+  dark slides use the light-on-dark logo (Q3).  From the B5a review (the main two-footer
+  risk: the measured footer pieces reuse the template's slide-footer class and their use
+  line says "every slide except the cover"): a bound slide whose section has a footer
+  never adds the footer piece, even when the piece's use line says every slide;
 * one ground (builder only; A4): a light template section (``white`` or default) renders
   on the deck's default ground, so ``white`` is dropped on content slides; dark and event
   treatments never change.  The fixer never drops ``white`` (RA5): no fixer clause says
@@ -60,6 +59,24 @@ style:
 * precedence (builder only; RA5): the block's precedence sentence extends to IMAGE RULES,
   and the IMAGE RULES line "If no image ids are supplied, build the slide without images"
   stays as written.
+
+Ruling RA15 (the B5b review's findings 1, 2, 3 and 5), in the same style:
+
+* the whole-block fence (both roles): the block's lead (its heading, the lines before its
+  first bullet, and that bullet) says the WHOLE block applies only to a payload that
+  carries deck_style.  The B5b finalist F1 showed the closing "skip this block" alone does
+  not stop the model applying the block's rules to decks without one.  The builder also
+  keeps its page-token fence ("without deck_style, write no {{slide:number}} or
+  {{slide:count}}");
+* one footer on every slide except the cover (both roles): a bound slide whose section has
+  no footer, like an unbound slide, uses the footer piece; the piece is only for slides
+  without a footer of their own; and no clause bars every bound slide from the piece
+  (that contradiction left the footer-less white sections of the Databricks template
+  unnumbered);
+* the cover (both roles): no page tokens and no footer piece, and a footer its section
+  ships stays as shipped; no clause strips the cover's own footer;
+* the fixer's footer rules (fixer only): every footer bullet carries "only when the
+  finding concerns a footer", or sits nested under a bullet that does.
 
 "Without a deck style" rules are unchanged: each prompt outside its DECK STYLE block is
 byte-identical to HEAD (digest pin), so every new rule lives inside the block.  Traps for
@@ -631,6 +648,191 @@ NEVER_ADDS_FOOTER_PIECE = (
 #: The one-ground rule said as a light section on the default ground.
 ONE_GROUND = r"\blight\b[^.;]{0,80}" + DEFAULT_GROUND
 
+# --- RA15 needles ------------------------------------------------------------------------
+
+#: "footer" that is not the start of "footer piece" / "footer component".
+_NOT_PIECE = r"(?!\s+(piece|component)s?\b)"
+#: A reference to the whole block: "this whole block", "every rule in it", "these rules".
+WHOLE_BLOCK = (
+    r"(\b(this|the) (whole |entire )?block\b|\b(whole|entire) block\b"
+    r"|\b(every|each|all|any) (of )?(its |these |the |this block's )?(rules?|bullets?|lines?)\b"
+    r"|\b(these|its|the following) rules\b|\bnone of (it|this|these|them|its rules)\b)"
+)
+#: No deck style in the payload: "without deck_style", "deck_style is absent".
+NO_DECK_STYLE = (
+    r"(\b(without|absent|lacking|lacks?|missing|no)\b (a |the |any )?"
+    + DECK_STYLE
+    + r"|"
+    + DECK_STYLE
+    + r" (is )?(absent|missing|empty|not present|not set)\b)"
+)
+#: The block applies ONLY with deck_style, or is skipped without it (either order).
+FENCED_TO_DECK_STYLE = (
+    r"(\bonly\b[^.;]{0,60}"
+    + DECK_STYLE
+    + r"|"
+    + DECK_STYLE
+    + r"[^.;]{0,30}\bonly\b|"
+    + NO_DECK_STYLE
+    + r"[^.;]{0,80}\b(skip|ignore|disregard|does not apply|do not apply|doesn't apply"
+    r"|don't apply|not apply|none of)\b"
+    r"|\b(skip|ignore|disregard)\b[^.;]{0,60}\b(without|absent|unless|missing|lacking)\b"
+    r"[^.;]{0,30}" + DECK_STYLE + r")"
+)
+#: L1: "without deck_style, write no {{slide:number}} or {{slide:count}}" (either order).
+NO_PAGE_TOKENS_WITHOUT_DECK_STYLE = (
+    NO_DECK_STYLE
+    + r"[^.;]{0,60}"
+    + NEG
+    + r"[^.;]{0,30}"
+    + PAGE_TOKEN
+    + r"|"
+    + NEG
+    + r"[^.;]{0,30}"
+    + PAGE_TOKEN
+    + r"[^.;]{0,60}"
+    + NO_DECK_STYLE
+)
+#: A section (or slide) with a footer of its own: "whose section has a footer".
+HAS_OWN_FOOTER = (
+    r"\b(has|have|ships?|carr(y|ies)|holds?|includes?|provides?|comes with|with)\s+"
+    r"(a|an|its own|their own|its|one)\s+(own\s+)?footers?\b" + _NOT_PIECE
+)
+#: A section (or slide) without one: "whose section has no footer", "without a footer of
+#: their own".  Not "without a footer piece".
+NO_OWN_FOOTER = (
+    r"(\b(without|lacking|lacks?|with no|has no|have no|having no|ships? no|carr(y|ies) no"
+    r"|holds? no)\s+(a\s+|an\s+|any\s+|its\s+|their\s+)?(own\s+)?footers?\b"
+    + _NOT_PIECE
+    + r"|\bno (own )?footers? of (its|their) own\b)"
+)
+#: An un-negated verb that puts the piece on the slide ("uses", "takes"), not "never adds"
+#: and not the noun in "the piece's use line".
+POS_USE = (
+    r"(?<!never )(?<!not )(?<!n't )(?<!\bno )"
+    r"\b(use|uses|using|take|takes|get|gets|carry|carries|add|adds|copy|copies|place|places"
+    r"|gain|gains|receive|receives)\b(?! line)"
+)
+#: The footer piece is only for slides without a footer of their own (either order).
+ONLY_FOR_FOOTERLESS = (
+    r"("
+    + FOOTER_PIECE
+    + r"[^.;:]{0,30}\bonly\b[^.;]{0,30}"
+    + NO_OWN_FOOTER
+    + r"|\bonly\b[^.;]{0,40}"
+    + NO_OWN_FOOTER
+    + r"[^.;]{0,40}"
+    + FOOTER_PIECE
+    + r")"
+)
+EXCEPT_COVER = r"\b(except|but|other than|apart from|save|besides|bar)\b[^.;]{0,15}\bcover\b"
+ONE_FOOTER = (
+    r"\b(exactly one|one and only one|a single|just one|only one|one)\b[^.;]{0,15}\bfooters?\b"
+    + _NOT_PIECE
+)
+#: "Every slide except the cover carries exactly one footer" (either order).
+EVERY_NON_COVER_SLIDE_ONE_FOOTER = (
+    r"((\b(every|each|all)\b[^.;]{0,20}\bslides?\b[^.;]{0,10}"
+    + EXCEPT_COVER
+    + r"|\b(every|each|all) non-cover slides?\b)[^.;]{0,40}"
+    + ONE_FOOTER
+    + r"|"
+    + ONE_FOOTER
+    + r"[^.;]{0,30}\b(every|each|all)\b[^.;]{0,20}\bslides?\b[^.;]{0,10}"
+    + EXCEPT_COVER
+    + r")"
+)
+#: Page numbering: the tokens, "page tokens", "page numbers", "numbered".  Not the bare
+#: word "number" ("its number slot").
+PAGE_NUM = r"(\bpage (tokens?|numbers?)\b|\bslide numbers?\b|\bnumber(ed|ing)\b|" + PAGE_TOKEN + ")"
+#: The cover gets no page tokens: tied to the cover, so the L1 fence ("write no
+#: {{slide:number}} …): every slide except the cover …") does not stand in for it.  The
+#: negation sits right before the tokens (at most 15 characters, no comma), so "no footer
+#: piece but carries page tokens" does not count.
+COVER_NO_PAGE_NUMBERS = (
+    r"(\bcover\b[^.;]{0,40}"
+    + NEG
+    + r"[^.;,]{0,15}"
+    + PAGE_NUM
+    + r"|"
+    + NEG
+    + r"[^.;,]{0,15}"
+    + PAGE_NUM
+    + r"[^.;]{0,30}\b(on|for|in|to) the cover\b|"
+    + PAGE_NUM
+    + r"[^.;:()]{0,40}\b(except|but|other than|apart from)\b[^.;]{0,15}\bcover\b)"
+)
+#: The cover gets no footer piece (the negation right before the piece, as above, so "no
+#: page tokens but uses the footer piece" does not count).
+COVER_NO_FOOTER_PIECE = (
+    r"(\bcover\b[^.;]{0,40}"
+    + NEG
+    + r"[^.;,]{0,15}"
+    + FOOTER_PIECE
+    + r"|"
+    + NEG
+    + r"[^.;,]{0,15}"
+    + FOOTER_PIECE
+    + r"[^.;]{0,30}\b(on|to|for|in) the cover\b)"
+)
+_KEEP = r"(?<!never )(?<!not )(?<!n't )\b(keeps?|kept|leaves?|retains?|preserves?)\b"
+_SHIPS = r"\b(ships?|shipped|comes with)\b"
+_STAYS = r"\b(stays?|kept|remains?|unchanged|untouched|as (it )?ships|as shipped|in place)\b"
+#: A footer the section ships stays as shipped: "keeps any footer its section ships",
+#: "a footer its section ships stays as shipped", "keeps its shipped footer".
+SHIPPED_FOOTER_KEPT = (
+    r"("
+    + _KEEP
+    + _gap(30)
+    + r"\bfooters?\b"
+    + _NOT_PIECE
+    + _gap(40)
+    + _SHIPS
+    + r"|"
+    + _KEEP
+    + _gap(20)
+    + r"\bshipped footers?\b|\bfooters?\b"
+    + _NOT_PIECE
+    + _gap(40)
+    + _SHIPS
+    + _gap(40)
+    + _STAYS
+    + r")"
+)
+#: Stripping the cover's own footer: "the cover carries no footer", "no footer on the
+#: cover", "remove the footer from the cover", "the cover …; a footer its section ships is
+#: removed".  "No footer piece" is allowed, and so is "a second footer is removed".
+COVER_DROPS_ITS_FOOTER = (
+    r"(\bcover\b[^.;]{0,30}\b(carries|carry|has|have|gets?|takes?|shows?|bears?|keeps?)\s+no\s+"
+    r"footers?\b" + _NOT_PIECE + r"|\bno\s+footers?\b" + _NOT_PIECE + r"[^.;]{0,20}\b(on|for) the "
+    r"cover\b|\b(remove|removes|drop|drops|strip|strips|delete|deletes)\b[^.;]{0,30}\bfooters?\b"
+    + _NOT_PIECE
+    + r"[^.;]{0,30}\bcover\b|\bcover\b[^.]{0,80}(?<!second )\bfooters?\b"
+    + _NOT_PIECE
+    + r"[^.;]{0,40}\b(removed|dropped|stripped|deleted)\b)"
+)
+#: The fixer's footer condition: "only when the finding concerns a footer".
+FINDING_CONCERNS = (
+    r"\bfinding\b[^.;]{0,30}\b(concerns?|is about|names?|involves?|flags?|reports?|targets?"
+    r"|touches?|asks? about|is on|mentions?)\b"
+)
+FOOTER_FINDING_CONDITION = (
+    r"(\b(only|solely)\b[^.;]{0,20}\b(when|if|where|while)\b[^.;]{0,20}"
+    + FINDING_CONCERNS
+    + r"|\bunless\b[^.;]{0,20}"
+    + FINDING_CONCERNS
+    + r")"
+)
+#: What makes a fixer bullet a footer rule (beside naming a footer): the cover, two
+#: footers, page tokens, the label, the light-on-dark logo, bound/unbound slides, the
+#: number slot, the third child.  The brand-assets bullet ("the logo in the footer
+#: piece") is not one.
+FOOTER_RULE_MARK = (
+    r"(\bcover\b|\btwo footers\b|\bsecond footer\b|\bpage tokens?\b|"
+    + PAGE_TOKEN
+    + r"|\blabel\b|light-on-dark|\bbound\b|\bunbound\b|\bnumber slot\b|\bthird child\b)"
+)
+
 COMMON_ADDENDUM_A_RULES: tuple[Rule, ...] = (
     (
         "place the brand assets the catalogue's pieces name (the footer piece's logo)",
@@ -710,10 +912,11 @@ COMMON_ADDENDUM_A_RULES: tuple[Rule, ...] = (
     # B5a review: the architect's measured footer pieces reuse the template's slide-footer
     # class and their use line says "every slide except the cover", so a bound slide
     # that obeys the piece's use line adds a second footer (the main two-footer risk).
+    # RA15: only a bound slide whose section HAS a footer; one without takes the piece.
     (
-        "B5a review: a bound slide never adds the deck style's footer piece",
-        (r"\bbound\b", NEVER_ADDS_FOOTER_PIECE),
-        2,
+        "RA15: a bound slide whose section has a footer never adds the deck style's footer piece",
+        (r"\bbound\b", HAS_OWN_FOOTER, NEVER_ADDS_FOOTER_PIECE),
+        1,
     ),
     (
         "B5a review: even when the footer piece's use line says every slide",
@@ -725,12 +928,18 @@ COMMON_ADDENDUM_A_RULES: tuple[Rule, ...] = (
         1,
     ),
     (
-        "B5a review: the footer piece is only for unbound slides",
-        (
-            FOOTER_PIECE,
-            r"\bonly\b",
-            r"\bunbound\b|\bnot bound\b|\bno bound section\b|\bwithout a (bound )?section\b",
-        ),
+        "RA15: the footer piece is only for slides without a footer of their own",
+        (ONLY_FOR_FOOTERLESS,),
+        1,
+    ),
+    (
+        "RA15: a bound slide whose section has no footer uses the deck style's footer piece",
+        (r"\bbound\b", NO_OWN_FOOTER, POS_USE + _gap(40) + FOOTER_PIECE),
+        1,
+    ),
+    (
+        "RA15: every slide except the cover carries exactly one footer",
+        (EVERY_NON_COVER_SLIDE_ONE_FOOTER,),
         1,
     ),
     (
@@ -744,16 +953,22 @@ COMMON_ADDENDUM_A_RULES: tuple[Rule, ...] = (
         ),
         1,
     ),
+    # RA15 replaces "no footer on the cover": the cover gets no page tokens and no footer
+    # piece, and a footer its section ships (the Databricks cover's) stays as shipped.
     (
-        "Q1/Q3: no footer on the cover",
-        (
-            FOOTER,
-            r"(\bcover\b[^.]{0,40}\b(no|without|never|not)\b[^.]{0,20}\bfooter"
-            r"|\b(no|never|not|without)\b[^.]{0,20}\bfooters?\b[^.]{0,30}\bcover\b"
-            r"|\b(except|but|other than|apart from|save|besides)\b[^.]{0,15}\bcover\b"
-            r"|\bnot (on )?the cover\b)",
-        ),
+        "RA15: the cover gets no page tokens",
+        (COVER_NO_PAGE_NUMBERS,),
         1,
+    ),
+    (
+        "RA15: the cover gets no footer piece",
+        (COVER_NO_FOOTER_PIECE,),
+        1,
+    ),
+    (
+        "RA15: a footer the cover's section ships stays as shipped",
+        (r"\bcover\b", SHIPPED_FOOTER_KEPT),
+        2,
     ),
     (
         "Q3: dark slides (dividers, closing) use the light-on-dark logo",
@@ -804,6 +1019,11 @@ BUILDER_ADDENDUM_A_RULES: tuple[Rule, ...] = (
         2,
     ),
     (
+        "L1: without deck_style, no {{slide:number}} or {{slide:count}} is written",
+        (NO_PAGE_TOKENS_WITHOUT_DECK_STYLE,),
+        1,
+    ),
+    (
         "A4: dark and event treatments are never changed",
         (
             r"\bdark\b",
@@ -845,6 +1065,98 @@ ROLE_ADDENDUM_A_CASES = [
 def test_deck_style_block_states_addendum_a_rule(role, rule, needles, width):
     block = _plain(_deck_style_block(_instructions(role)))
     assert _holds(block, needles, width), f"{role} DECK STYLE block lacks: {rule}"
+
+
+# --- RA15 pins (red until the RA15 wording pass) ------------------------------------------
+
+
+def _block_lead(block: str) -> str:
+    """The block's heading, any lines before its first bullet, and that first bullet."""
+    lines = block.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"[ \t]*- ", line):
+            return "\n".join(lines[: i + 1])
+    return block
+
+
+def _bullets(block: str) -> list[tuple[int, str]]:
+    """(indent, text) of each bullet item of the raw block; continuation lines joined."""
+    items: list[tuple[int, str]] = []
+    for line in block.splitlines():
+        m = re.match(r"^([ \t]*)- (.*)$", line)
+        if m:
+            items.append((len(m.group(1)), m.group(2)))
+        elif items and line.strip() and not _HEADING_RE.match(line):
+            items[-1] = (items[-1][0], items[-1][1] + " " + line.strip())
+    return items
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_deck_style_block_lead_fences_the_whole_block_to_deck_style(role):
+    """RA15 (i): the block's lead says the WHOLE block applies only to a payload carrying
+    deck_style.  F1 put page tokens in 10 of 10 no-deck-style rows with only the closing
+    "skip this block", so the closing line alone does not count: the fence must sit in the
+    heading, the lines before the first bullet, or the first bullet."""
+    lead = _plain(_block_lead(_deck_style_block(_instructions(role))))
+    assert _holds(lead, (WHOLE_BLOCK, FENCED_TO_DECK_STYLE), 1), (
+        f"{role} DECK STYLE block's lead does not fence the whole block to deck_style: {lead!r}"
+    )
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_no_clause_bars_every_bound_slide_from_the_footer_piece(role):
+    """RA15 (ii): "a bound slide never adds the footer piece" with no condition contradicts
+    "a bound slide whose section has no footer uses the piece".  Every clause that bars a
+    bound slide from the piece names the section's own footer as the reason."""
+    for clause in _clauses(_plain(_deck_style_block(_instructions(role)))):
+        if re.search(r"\bbound\b", clause) and re.search(NEVER_ADDS_FOOTER_PIECE, clause):
+            assert re.search(HAS_OWN_FOOTER, clause), (
+                f"{role} bars a bound slide from the footer piece without the "
+                f"'whose section has a footer' condition: {clause!r}"
+            )
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_no_clause_strips_the_covers_own_footer(role):
+    """RA15 (iii): the cover gets no page tokens and no footer piece, but a footer its
+    section ships stays: no clause says the cover carries no footer or removes it."""
+    for clause in _clauses(_plain(_deck_style_block(_instructions(role)))):
+        m = re.search(COVER_DROPS_ITS_FOOTER, clause)
+        assert not m, f"{role} strips the cover's own footer ({m.group(0)!r}): {clause!r}"
+
+
+def test_fixer_footer_rules_all_sit_under_the_footer_finding_condition():
+    """RA15 (iv): every fixer footer bullet applies only when the finding concerns a
+    footer.  A footer bullet either carries that condition itself or is nested (indented
+    deeper) under a bullet that does; a flat bullet after a conditioned one does not count
+    (today's "Footers, when the finding concerns one:" gated only its own bullet)."""
+    block = _deck_style_block(load_skill("fixer").instructions)
+    items = _bullets(block)
+
+    def conditioned(text: str) -> bool:
+        plain = _plain(text)
+        return bool(re.search(FOOTER, plain) and re.search(FOOTER_FINDING_CONDITION, plain))
+
+    def fence(text: str) -> bool:
+        plain = _plain(text)
+        return bool(re.search(WHOLE_BLOCK, plain) and re.search(FENCED_TO_DECK_STYLE, plain))
+
+    footer_rules = [
+        i
+        for i, (_, text) in enumerate(items)
+        if re.search(FOOTER, _plain(text))
+        and re.search(FOOTER_RULE_MARK, _plain(text))
+        and not fence(text)
+    ]
+    assert footer_rules, "fixer DECK STYLE block states no footer rule"
+    for i in footer_rules:
+        indent, text = items[i]
+        if conditioned(text):
+            continue
+        parent = next((j for j in range(i - 1, -1, -1) if items[j][0] < indent), None)
+        assert parent is not None and conditioned(items[parent][1]), (
+            f"fixer footer bullet is not under 'only when the finding concerns a footer': {text!r}"
+        )
 
 
 # --- Guards on the new text (green today; they must stay green) ----------------

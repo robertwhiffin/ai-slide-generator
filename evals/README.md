@@ -1554,20 +1554,31 @@ What it showed:
 
 ## Builder and fixer: brand assets, one footer, one ground (Addendum A), 2026-10-30
 
-**Spend: about USD 11.07, with the judge at its USD 0.05 a call upper bound.** That is inside the
-USD 11.9 left for builder plus fixer (Ruling RA13: the USD 25 cap less the architect's USD 13.1).
-Both agents are costed at USD 4 / 20 per million input / output tokens. That is the fixer's Opus 5.5
-list price, and above the USD 2 / 10 Sonnet 5.5 rate of the builder pass above, so it is an upper
-bound for the builder too. Agent tokens come to USD 6.62 at that rate, plus 89 judge calls. With the
-judge at the USD 0.03 a call its payloads measure, the spend is about USD 9.29. Costing the builder
-at the Sonnet rate as well brings it to about USD 6.38.
+**Spend: about USD 11.07 for this pass and USD 2.53 for its fix round (RA15, below), USD 13.60 in
+all, with the judge at its USD 0.05 a call upper bound.**
+- This pass came inside the USD 11.9 left for builder plus fixer (Ruling RA13: the USD 25 cap
+  less the architect's USD 13.1).
+- The fix round came inside RA15's own USD 4 extension.
+- Both agents are costed at USD 4 / 20 per million input / output tokens. That is the fixer's
+  Opus 5.5 list price, and above the USD 2 / 10 Sonnet 5.5 rate of the builder pass above, so it is
+  an upper bound for the builder too.
+- For this pass, agent tokens come to USD 6.62 at that rate, plus 89 judge calls. With the judge
+  at the USD 0.03 a call its payloads measure, the spend is about USD 9.29. Costing the builder at
+  the Sonnet rate as well brings it to about USD 6.38.
 
 The builder and fixer prompts' DECK STYLE blocks gain the Addendum A rules (spec Addendum A §A4 and
-§A5, calls Q1 and Q3, corrections A20 and A21, Ruling RA5). Every new rule is inside the block, so
-without a deck style each prompt is byte-identical to before
-(`test_prompt_outside_the_deck_style_block_is_unchanged`). The IMAGE RULES line "If no image ids are
-supplied, build the slide without images" stays as written. Instead, the builder block's precedence
-sentence now names IMAGE RULES beside BOUND TEMPLATE SECTION and NO BOUND SECTION.
+§A5, calls Q1 and Q3, corrections A20 and A21, Ruling RA5). Every new rule is inside the block.
+- The text **outside** the block is byte-identical to before
+  (`test_prompt_outside_the_deck_style_block_is_unchanged`).
+- The block itself is always sent, deck style or not. It adds 822 input tokens to every builder
+  call on `brand-assets-c`, and 975 on the RA15 prompt. F1 below shows the model acting on it
+  without a deck style.
+- The IMAGE RULES line "If no image ids are supplied, build the slide without images" stays as
+  written. Instead, the builder block's precedence sentence now names IMAGE RULES beside BOUND
+  TEMPLATE SECTION and NO BOUND SECTION.
+
+The prompts shipped by this pass (`brand-assets-c`, `brand-assets-b`) were replaced in its fix
+round by `one-footer`; see "Fix round 1 (Ruling RA15)" at the end of this section.
 
 - **Builder** (`brand-assets-c`, `693f0101`):
   - **Brand assets.** Place the brand assets the catalogue's pieces name, such as the footer
@@ -1674,9 +1685,9 @@ What it showed:
     `brief_not_delivered` is the one subjective criterion. The case and v1 rule 4 disagree; that is
     for the owner.
   - No fixer row wrote a page token or searched (no fixer case has a deck style).
-- **Cost and latency.** The block adds about 790 input tokens to every builder call, with or without
-  a deck style (`gold_bullets` 8,936 → 9,758), because it is always in the prompt. That is about
-  USD 0.0016 a slide at Sonnet's rate. Mean latency is unchanged: 14.6 s (B0), 14.2 s (F1),
+- **Cost and latency.** On `brand-assets-c` the block adds exactly 822 input tokens to every
+  single-round builder call, with or without a deck style (`gold_bullets` 8,936 → 9,758), because
+  it is always in the prompt. That is about USD 0.0016 a slide at Sonnet's rate. Mean latency is unchanged: 14.6 s (B0), 14.2 s (F1),
   14.3 s (F2). The icon case's one search costs a second round, 25.9k against 12.1k input tokens
   for a deck-style slide without one.
 - **Acceptance bar** (Task B5b), for builder `brand-assets-c` and fixer `brand-assets-b`.
@@ -1700,10 +1711,10 @@ What it showed:
   - two finalists, B and C, each scored held-out once;
   - the bar's held-out `deck_style_icons` verdict was read;
   - the pass edited `INSTRUCTIONS`, promoted and committed.
-- **Shipped.**
-  - `brand-assets-c` is the builder's v1 prompt in `src/core/skills/builder.py` (`693f010178f3`,
-    previously `0e60b438e4be`), and `brand-assets-b` is the fixer's (`b365679aa152`, previously
-    `69eb6ea52400`). They were promoted with
+- **Shipped, then replaced by the fix round below.**
+  - `brand-assets-c` became the builder's v1 prompt in `src/core/skills/builder.py`
+    (`693f010178f3`, previously `0e60b438e4be`), and `brand-assets-b` the fixer's (`b365679aa152`,
+    previously `69eb6ea52400`). They were promoted with
     `python -m evals.harness.promote --config builder=evals/configs/builder/brand-assets-c.yaml --run-id builder=b81e7bbe53044baeaff2bf7f975db129 --config fixer=evals/configs/fixer/brand-assets-b.yaml --run-id fixer=956d5f18af274c9ea2057535d0870c6b`.
   - `HEAD_OTHER_ROLE_CONTENT_HASHES` (builder, fixer) was re-pinned by hand, and the frontend
     lifecycle contract was re-recorded.
@@ -1719,3 +1730,76 @@ What it showed:
 
     A devloop deck is the first real check. The cases did show the negative: with no footer
     piece, no deck-style row added a footer.
+
+### Fix round 1 (Ruling RA15), 2026-10-31
+
+**Spend: about USD 2.53, with the judge at its USD 0.05 a call upper bound**, inside RA15's
+USD 4 extension. Both agents are costed at USD 4 / 20 per million tokens, plus 21 judge calls. At
+the USD 0.03 judge rate it is about USD 2.11; with the builder at the Sonnet rate as well, about
+USD 1.50.
+
+The task review found three prompt problems:
+- the block's other rules were as exposed as the page tokens in F1 to decks without a deck style;
+- a bound section with no template footer got contradictory rules ("every other slide carries
+  one" against "a bound slide never adds the footer piece"). In the prod Databricks deck that is
+  7 of 15 slides, including every `white` one;
+- "the cover carries no footer" stripped a footer the cover's section ships.
+
+The new prompts change only their DECK STYLE blocks:
+- **Builder `one-footer`** (`f62c5874`):
+  - A lead line fences the whole block: "Apply this whole block only when the payload carries
+    deck_style; without deck_style, skip every rule in it (its footer, page-token, ground and
+    icon rules included)". The Footers bullet keeps its page-token fence.
+  - Every slide except the cover carries exactly one footer, and never two.
+  - A bound slide whose section has a footer fills it and never adds the footer piece. A bound
+    slide whose section lacks a footer uses the piece, exactly as an unbound slide does. The
+    piece is only for slides without a footer of their own.
+  - When the catalogue has no footer piece, a slide without a footer of its own gets none (never
+    a hand-built one).
+  - The cover gets no page tokens and no footer piece, and a footer its section ships stays.
+- **Fixer `one-footer`** (`5b0186f5`):
+  - the same lead fence;
+  - every footer rule nested under "Footers, only when the finding concerns a footer:";
+  - the builder's footer and cover rules.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens | ≈ USD, judge 0.05 (judge 0.03) |
+|---|---|---|---|---|---|---|---|---|---|
+| R1 82bc6dc1 | builder one-footer (f62c5874) | train | all 8 | 1 | 8 | 1.00 | 0 | 12.4k / 1.6k | 1.05 (0.89) |
+| R2 a42b6606 | builder one-footer | held-out | all 8 | 1 | 8 | 0.88 | 0 | 11.8k / 1.2k | 0.97 (0.81) |
+| R3 7a562aa9 | fixer one-footer (5b0186f5) | train | all 5 | 1 | 5 | 0.80 | 0 | 9.4k / 0.7k | 0.51 (0.41) |
+
+- **Bar** (RA15). **Met.**
+  1. The deck-style cases still pass. On train each passed its row (R1). On held-out
+     `deck_style_code`, `deck_style_table` and `deck_style_icons` each passed 1/1. Those three
+     per-case metrics were the only held-out cases read. `deck_style_icons` made one
+     `kind="icon"` search on each split and placed three index icons.
+  2. No existing case lost a row at ×1. Every train case passed in R1, against B0's 2/2
+     (`chart_no_data` 0/2).
+  3. No page token appeared on any row without a deck style: 0 of 5 on train, and 0 of 5 on
+     held-out. Only the count was read on held-out.
+  4. The fixer did not regress: R3 4/5, as X0. `brief_not_delivered` passed, and
+     `source_contradiction` failed on the v1 script defect. No fixer row wrote a page token.
+- **Held-out** was 7 of 8 (0.88). The failing row is one of the five cases without a deck style;
+  it was found by elimination and not opened.
+  - That is below `brand-assets-b` and `brand-assets-c` (8/8 each), but not below the recorded
+    v1 held-out rates (0.86 on Sonnet, N2; 0.40 on 2026-10-08).
+  - Held-out was not in the RA15 bar. It was run to widen the leak check.
+- **Tokens and latency.** The block now adds exactly 975 input tokens to every single-round
+  builder call against v1 (`gold_bullets` 8,936 → 9,911). Mean latency was 13.3 s.
+  - Improvised footers on rows without a deck style ran 1 of 5. B0 had 7 of 10, and
+    `brand-assets-c` 2 of 5. They are unscored, and the difference is within noise at this n.
+- **Scope.** No cut. The RA15 bar asks for train ×1 and fixer ×1. Held-out ×1 was added to the
+  leak check.
+- **Shipped.** `one-footer` is the builder's v1 prompt (`f62c58742472`, previously
+  `693f010178f3`) and the fixer's (`5b0186f54e57`, previously `b365679aa152`). They were promoted
+  with
+  `python -m evals.harness.promote --config builder=evals/configs/builder/one-footer.yaml --run-id builder=82bc6dc1983046d497d23a0eab945ea5 --config fixer=evals/configs/fixer/one-footer.yaml --run-id fixer=7a562aa998854b89bda2e622ae7e4312`.
+  `HEAD_OTHER_ROLE_CONTENT_HASHES` was re-pinned by hand, and the contract was re-recorded.
+- **Not measured.** No eval case has any of the following, so the devloop rebuild checks them:
+  - a **bound section with a template footer** (fill it, and add no piece);
+  - a **bound section without one** (take the footer piece);
+  - a **`white` section** (dropped on content slides with a deck style, kept without one);
+  - a **cover** with or without a shipped footer (no page tokens and no piece; a shipped footer
+    stays).
+  - On decks without a deck style, only the page-token fence is measured (0 of 10 rows). The
+    whole-block fence's effect on `white` and on cover footers there is not.

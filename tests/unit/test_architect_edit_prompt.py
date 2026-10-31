@@ -65,13 +65,14 @@ HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
 # (evals/configs/builder/sonnet-5-5.yaml, Task 9b; prompt unchanged), then the builder and
 # fixer for their brand-asset, footer and one-ground DECK STYLE rules
 # (evals/configs/builder/brand-assets-c.yaml and evals/configs/fixer/brand-assets-b.yaml,
-# Addendum A Task B5b).
+# Addendum A Task B5b), then both for the whole-block fence and one footer on every slide
+# except the cover (evals/configs/{builder,fixer}/one-footer.yaml, Ruling RA15).
 # build_reviewer is unchanged (Ruling R10).
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
     "data_analyst": "5fd364e1936f58582a43eba1ef74a88166d698db644ff0b9562f3728f36210b2",
-    "builder": "693f010178f385140d89ebcd44a053c4066d489b96ae2388ea328526cd1a9137",
+    "builder": "f62c5874247299e3c716f0b3a645e7db2702c9d6f86102b05fb6941cbb85f685",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
-    "fixer": "b365679aa152c9a7a6ba9efb4cd8a4d74e4c75e987d7a6a676b7d671898b3f1b",
+    "fixer": "5b0186f54e576b885efad0cd33aa67870ca90db300aae9a3314fa7f713610f8f",
     "fix_reviewer": "1050287f9dfcba60e4b827d7d9c3f93f51e494108e5c0cff764f51f73e6381a2",
     "deck_reviewer": "7f015a2cb032f3d528ec9e5391e79ec21d7fe77514dcf33855734571c0bced1b",
 }
