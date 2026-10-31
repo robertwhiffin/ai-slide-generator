@@ -511,8 +511,45 @@ async def mark_timed_out_jobs_once() -> int:
     return marked
 
 
+async def refresh_job_session_locks_once() -> int:
+    """Refresh the session lock of every turn this process holds, pending or running.
+
+    A session lock goes stale after ``SESSION_LOCK_TIMEOUT_SECONDS`` (300 s), while a
+    graph turn may run for ``GRAPH_JOB_HARD_TIMEOUT_SECONDS`` and a queued turn waits
+    first.  Without this a second turn on the same session could take the stale lock
+    and run alongside the first.  A failed refresh is logged and the others go on.
+
+    Returns:
+        Number of locks refreshed.
+    """
+    from src.api.services.session_manager import get_session_manager
+
+    session_ids = {
+        entry["session_id"]
+        for entry in list(jobs.values())
+        if entry.get("status") in ("pending", "running") and entry.get("session_id")
+    }
+    if not session_ids:
+        return 0
+    manager = get_session_manager()
+    refreshed = 0
+    for session_id in session_ids:
+        try:
+            if await asyncio.to_thread(manager.refresh_session_lock, session_id):
+                refreshed += 1
+        except Exception:
+            logger.warning(
+                "Session lock refresh failed",
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+    return refreshed
+
+
 async def mark_timed_out_jobs_loop() -> None:
-    """Background loop: runs ``mark_timed_out_jobs_once()`` every 60 seconds.
+    """Background loop: every 60 seconds, keeps held session locks live and marks timed-out jobs.
+
+    Runs ``refresh_job_session_locks_once()`` then ``mark_timed_out_jobs_once()``.
 
     Started in the FastAPI lifespan alongside the existing chat/export workers
     and request-log cleanup loop. Survives its own exceptions so a single
@@ -522,6 +559,7 @@ async def mark_timed_out_jobs_loop() -> None:
     while True:
         try:
             await asyncio.sleep(TIMEOUT_SWEEP_INTERVAL_SECONDS)
+            await refresh_job_session_locks_once()
             marked = await mark_timed_out_jobs_once()
             if marked:
                 logger.info(

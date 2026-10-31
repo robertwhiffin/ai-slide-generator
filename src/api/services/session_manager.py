@@ -4018,6 +4018,33 @@ class SessionManager:
             )
             return True
 
+    def refresh_session_lock(self, session_id: str) -> bool:
+        """Keep a held processing lock live: set ``processing_started_at`` to now.
+
+        A lock goes stale after ``SESSION_LOCK_TIMEOUT_SECONDS``, but a graph turn may
+        run far longer and a queued turn waits before it starts.  The chat job queue
+        calls this for every turn its process holds
+        (``job_queue.refresh_job_session_locks_once``), so a lock outlives the timeout
+        only while its turn is alive.  Only a lock still held (``is_processing``) is
+        refreshed; a released lock is never revived.
+
+        Returns:
+            True if a held lock was refreshed.
+        """
+        with get_db_session() as db:
+            updated = (
+                db.query(UserSession)
+                .filter(
+                    UserSession.session_id == session_id,
+                    UserSession.is_processing.is_(True),
+                )
+                .update(
+                    {UserSession.processing_started_at: datetime.utcnow()},
+                    synchronize_session=False,
+                )
+            )
+            return bool(updated)
+
     def release_session_lock(self, session_id: str) -> None:
         """Release processing lock for a session.
 
