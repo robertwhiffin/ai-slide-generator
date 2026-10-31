@@ -35,6 +35,30 @@ _unity_catalog_cls: Any = None
 _MLFLOW_EXPERIMENT_LOCK = threading.Lock()
 
 
+def disable_autologging_unless_opted_in() -> bool:
+    """Explicitly disable MLflow autologging for every flavour, unless opted in.
+
+    ``mlflow.genai.evaluate`` (slide verification) temporarily enables tracing
+    autolog for every flavour not explicitly disabled, process-wide (mlflow 3.14
+    ``configure_autologging_for_evaluation``).  While it ran, other chat turns'
+    LangChain calls became root traces in the verifying user's experiment.  Called
+    once per process at startup.  ``TELLR_MLFLOW_LANGCHAIN_AUTOLOG=1`` opts in and
+    skips this (those traces are not experiment-isolated across concurrent jobs).
+
+    Returns:
+        True if autologging was disabled.
+    """
+    flag = (os.getenv("TELLR_MLFLOW_LANGCHAIN_AUTOLOG") or "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return False
+    try:
+        mlflow.autolog(disable=True)
+    except Exception:
+        logger.warning("Could not disable MLflow autologging", exc_info=True)
+        return False
+    return True
+
+
 def mlflow_experiment_lock() -> threading.Lock:
     """The process lock around any ``set_experiment`` and the MLflow call that relies on it."""
     return _MLFLOW_EXPERIMENT_LOCK

@@ -795,11 +795,11 @@ class SlideGeneratorAgent:
         experiment_id = None
         experiment_url = None
         try:
+            # Not made active here: the active experiment is process-global, so the
+            # generate span sets it under the experiment lock (start_span_in_experiment).
             experiment_id, experiment_url = self._ensure_user_experiment(
                 session_id, username
             )
-            # Set as active experiment for this session
-            mlflow.set_experiment(experiment_id=experiment_id)
         except Exception as e:
             logger.warning(
                 f"Failed to ensure user experiment, continuing without MLflow: {e}",

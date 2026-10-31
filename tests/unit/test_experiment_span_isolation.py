@@ -119,3 +119,30 @@ def test_both_agent_generate_paths_open_their_span_through_the_helper():
         assert "start_span_in_experiment(" in source, method.__name__
         assert "mlflow.start_span(" not in source, method.__name__
         assert "mlflow.set_experiment(" not in source, method.__name__
+
+
+def test_set_experiment_is_called_only_under_the_experiment_lock():
+    """One unlocked set_experiment anywhere defeats the lock everywhere: it can move the
+    global during another thread's locked span start or judge evaluation.  Only the two
+    locked helpers may call it."""
+    import ast
+    from pathlib import Path
+
+    allowed = {
+        ("src/core/mlflow_tracing.py", "start_span_in_experiment"),
+        ("src/services/evaluation/llm_judge.py", "_evaluate_in_experiment"),
+    }
+    found = set()
+    for path in Path("src").rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "set_experiment"
+                ):
+                    found.add((str(path), func.name))
+    assert found <= allowed, f"set_experiment outside the lock: {sorted(found - allowed)}"

@@ -50,6 +50,7 @@ from src.api.services.export_job_queue import (
     start_export_worker,
 )
 from src.api.services.job_queue import recover_stuck_requests, start_workers, stop_workers
+from src.core.mlflow_tracing import disable_autologging_unless_opted_in
 from src.api.services.slide_style_preview_queue import start_preview_worker
 from src.core.database import (
     is_lakebase_environment,
@@ -142,6 +143,10 @@ async def lifespan(app: FastAPI):
 
     # Skip background workers and recovery in test mode
     if not IS_TESTING:
+        # Before any job runs: mlflow.genai.evaluate (verification) would otherwise
+        # enable tracing autolog process-wide and trace other turns into its experiment.
+        disable_autologging_unless_opted_in()
+
         # Start the job queue runners for async chat processing (several per
         # process: TELLR_CHAT_JOB_CONCURRENCY, default 4)
         _worker_tasks = await start_workers()
