@@ -4837,8 +4837,8 @@ def builder_node(payload: dict) -> Dict[str, Any]:
     # The brand-asset search rides on the context, never in the model-facing
     # payload; ``None`` for an old deck, so its call is today's.  Each run builds
     # its own toolset: one counts its calls, so the retry must not inherit them.
-    try:
-        out = get_agent_runtime().run(
+    def _attempt() -> Any:
+        return get_agent_runtime().run(
             "builder",
             payload["graph_release_id"],
             skill_payload,
@@ -4849,6 +4849,20 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                 toolset=_brand_search_toolset(payload),
             ),
         ).output
+
+    try:
+        try:
+            out = _attempt()
+        except Exception as exc:
+            # One retry on an unparseable answer, with a fresh toolset and the
+            # same payload; anything else (or a second failure) falls through.
+            if not is_provider_parse_error(exc):
+                raise
+            logger.warning(
+                "Builder answer did not parse at position %s; retrying once",
+                position,
+            )
+            out = _attempt()
 
         def _regenerate() -> str:
             retry_payload = {
@@ -5246,8 +5260,8 @@ def fixer_node(state: dict) -> Dict[str, Any]:
     )
     # The brand-asset search is decided on the builder record, as the builder's
     # own binding was; each run (the retry too) builds its own toolset.
-    try:
-        out = get_agent_runtime().run(
+    def _attempt() -> Any:
+        return get_agent_runtime().run(
             "fixer",
             state["graph_release_id"],
             fix_payload,
@@ -5258,6 +5272,18 @@ def fixer_node(state: dict) -> Dict[str, Any]:
                 toolset=_brand_search_toolset(payload),
             ),
         ).output
+
+    try:
+        try:
+            out = _attempt()
+        except Exception as exc:
+            if not is_provider_parse_error(exc):
+                raise
+            logger.warning(
+                "Fixer answer did not parse at position %s; retrying once",
+                position,
+            )
+            out = _attempt()
 
         def _regenerate() -> str:
             retry_payload = {
