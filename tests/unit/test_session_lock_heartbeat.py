@@ -33,7 +33,9 @@ from src.database.models.session import UserSession
 
 @pytest.fixture
 def manager():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
 
@@ -57,7 +59,9 @@ def manager():
 def _add(factory, session_id: str, *, processing: bool, age_seconds: float | None):
     started = None if age_seconds is None else datetime.utcnow() - timedelta(seconds=age_seconds)
     with factory.begin() as db:
-        db.add(UserSession(session_id=session_id, is_processing=processing, processing_started_at=started))
+        row = UserSession(session_id=session_id, is_processing=processing)
+        row.processing_started_at = started
+        db.add(row)
 
 
 def _row(factory, session_id: str) -> UserSession:
@@ -161,9 +165,11 @@ async def test_the_timeout_loop_refreshes_locks_every_sweep():
     async def mark():
         return 0
 
-    with patch.object(job_queue.asyncio, "sleep", sleep), patch.object(
-        job_queue, "refresh_job_session_locks_once", refresh
-    ), patch.object(job_queue, "mark_timed_out_jobs_once", mark):
+    with (
+        patch.object(job_queue.asyncio, "sleep", sleep),
+        patch.object(job_queue, "refresh_job_session_locks_once", refresh),
+        patch.object(job_queue, "mark_timed_out_jobs_once", mark),
+    ):
         with pytest.raises(asyncio.CancelledError):
             await job_queue.mark_timed_out_jobs_loop()
 
