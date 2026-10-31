@@ -4861,6 +4861,7 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             logger.warning(
                 "Builder answer did not parse at position %s; retrying once",
                 position,
+                exc_info=True,
             )
             out = _attempt()
 
@@ -5282,6 +5283,7 @@ def fixer_node(state: dict) -> Dict[str, Any]:
             logger.warning(
                 "Fixer answer did not parse at position %s; retrying once",
                 position,
+                exc_info=True,
             )
             out = _attempt()
 

@@ -55,6 +55,7 @@ import tinycss2
 from tinycss2.serializer import serialize_identifier
 
 from src.domain.deck_spec import DeckStyle
+from src.utils.slide_number_tokens import _SKIP_RE
 
 DECK_STYLE_CLASS_PREFIX = "dk-"
 DECK_STYLE_VAR_PREFIX = "--dk-"
@@ -741,8 +742,6 @@ def drop_white_ground(html: str) -> str:
     """
     if not html or "white" not in html:
         return html
-    from src.utils.slide_number_tokens import _SKIP_RE
-
     out: list[str] = []
     pos = 0
     for skip in _SKIP_RE.finditer(html):

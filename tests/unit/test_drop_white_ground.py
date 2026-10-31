@@ -200,6 +200,8 @@ UNTOUCHED = [
     pytest.param('<div data-class="slide white">X</div>', id="an_attribute_named_data_class"),
     pytest.param("<div class=slide>X</div>", id="unquoted_slide"),
     pytest.param("<div class=white>X</div>", id="unquoted_white"),
+    # A class value with no closing quote runs to the end: not a class list a browser applies.
+    pytest.param('<p>A</p><div class="slide white x', id="unclosed_class_value"),
     pytest.param("plain text, no tags", id="no_tags"),
     pytest.param("", id="empty"),
     pytest.param(
