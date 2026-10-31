@@ -14,7 +14,10 @@ a move.
 Substitution is markup-safe. A token is replaced only in text content. One inside
 a tag (an attribute value, even one holding ``>``), inside a whole
 ``<script>``/``<style>`` element (whatever its body holds, ``<`` or a stray
-``</style>`` included) or inside a comment is left literal. The values are
+``</style>`` included) or inside a comment is left literal. Tags are found as a
+browser finds them: a ``<`` that starts no tag name is text (``x < 10``), and only
+an attribute value after ``=`` is quoted, so an apostrophe in text never hides
+the footer. The values are
 coerced to ``int``, so nothing but digits is ever emitted. Substitution is
 idempotent, and HTML with no token (or no marker) comes back as an equal string.
 
@@ -37,15 +40,21 @@ import re
 from typing import Any, Dict
 
 _TOKEN_RE = re.compile(r"\{\{slide:(number|count)\}\}")
-#: Inside a tag: anything but ``>`` or a quote, or a whole quoted value, so a
-#: ``>`` inside an attribute value does not end the tag.
-_IN_TAG = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
+#: Inside a tag, as the HTML tokenizer reads it: a quoted attribute value (after
+#: ``=``) is taken whole, to its closing quote or the end of the input, so a ``>``
+#: inside it does not end the tag; any other character but ``>`` is plain, a quote
+#: included (``don't`` in text a browser reads as a tag opens no quoted run).  The
+#: alternatives cannot both match at one place, so a scan never backtracks.
+_IN_TAG = r"""(?:[^>=]|=\s*"[^"]*(?:"|\Z)|=\s*'[^']*(?:'|\Z)|=(?!\s*["']))*"""
 #: The stretches substitution never touches: a whole script or style element
-#: (an unclosed one runs to the end, as a browser reads it), a comment, a tag.
+#: (an unclosed one runs to the end, as a browser reads it), a comment, a tag.  A
+#: tag starts only where a tag name, ``/``, ``!`` or ``?`` follows the ``<``; any
+#: other ``<`` is text (``x < 10``), as it is to a browser.  An unclosed tag runs
+#: to the end.
 _SKIP_RE = re.compile(
     r"<(script|style)\b" + _IN_TAG + r">.*?(?:</\1\s*>|\Z)"
     r"|<!--.*?(?:-->|\Z)"
-    r"|<" + _IN_TAG + r">",
+    r"|<(?=[A-Za-z/!?])" + _IN_TAG + r"(?:>|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 _MARKER_RE = re.compile(

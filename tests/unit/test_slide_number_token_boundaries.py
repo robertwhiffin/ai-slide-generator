@@ -575,6 +575,82 @@ def test_hand_edited_slide_keeps_live_numbers_after_a_move(
 
 
 # ===========================================================================
+# Every deck mutation keeps the tokens in storage (final review M2)
+# ===========================================================================
+#
+# A mutation that rendered the numbers before saving would store today's
+# numbers: right after one move, so a single-move test passes, and stale after
+# the next.  So storage is checked after each move, and every mutation route
+# is checked for rendered numbers in its rows.
+
+
+def _reorder(api, session_id: str, new_order: List[int]) -> None:
+    resp = api.put(
+        "/api/slides/reorder", json={"session_id": session_id, "new_order": new_order}
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_numbers_follow_the_slides_across_two_moves_and_storage_keeps_the_tokens(
+    api, test_db_factory, mock_user
+):
+    stored = [_slide(m) for m in MARKERS]
+    session_id = _seeded(api, test_db_factory, stored)
+
+    _reorder(api, session_id, [2, 0, 1])
+    assert _row_htmls(test_db_factory, session_id) == [stored[2], stored[0], stored[1]], (
+        "the first move stored rendered numbers"
+    )
+    _reorder(api, session_id, [1, 2, 0])
+    assert _row_htmls(test_db_factory, session_id) == stored, (
+        "the second move stored rendered numbers"
+    )
+    assert _read_session_slides(api, session_id) == [
+        _slide(m, _numbered(i + 1, 3)) for i, m in enumerate(MARKERS)
+    ]
+
+
+MUTATIONS = [
+    pytest.param(
+        lambda api, sid: api.put(
+            "/api/slides/reorder", json={"session_id": sid, "new_order": [2, 0, 1]}
+        ),
+        id="reorder",
+    ),
+    pytest.param(
+        lambda api, sid: api.post("/api/slides/1/duplicate", json={"session_id": sid}),
+        id="duplicate",
+    ),
+    pytest.param(
+        lambda api, sid: api.delete("/api/slides/0", params={"session_id": sid}),
+        id="delete",
+    ),
+    pytest.param(
+        lambda api, sid: api.post("/api/slides", json={"session_id": sid, "position": 1}),
+        id="insert-blank",
+    ),
+]
+
+
+@pytest.mark.parametrize("mutate", MUTATIONS)
+def test_a_deck_mutation_stores_tokens_not_numbers(
+    api, test_db_factory, mock_user, mutate
+):
+    stored = [_slide(m) for m in MARKERS]
+    session_id = _seeded(api, test_db_factory, stored)
+
+    resp = mutate(api, session_id)
+
+    assert resp.status_code == 200, resp.text
+    assert "{{slide:" not in resp.text, "ENTRY: the response the client renders is numbered"
+    rows = _row_htmls(test_db_factory, session_id)
+    assert not [h for h in rows if MARKER_ATTR in h], "a mutation stored rendered numbers"
+    assert all(h == _slide(_which(h)) for h in rows if _MARKER_RE.search(h)), (
+        "a slide's stored HTML changed"
+    )
+
+
+# ===========================================================================
 # MCP: get_deck / get_deck_status share _render_deck_response
 # ===========================================================================
 

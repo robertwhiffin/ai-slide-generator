@@ -425,6 +425,50 @@ class TestMarkupSafety:
             + "<p>it's</p></div>"
         )
 
+    def test_a_raw_less_than_in_text_does_not_hide_later_tokens(self):
+        """A ``<`` that starts no tag name is text, as a browser reads it
+        (``x < 10``).  Read as a tag, the apostrophe after it opened a quoted run
+        that swallowed the footer up to the next apostrophe (final review M1)."""
+        html = (
+            "<div class=\"slide\"><pre>WHERE x < 10 -- it's fine</pre>"
+            + FOOTER
+            + "<p>Lakebase's sync</p></div>"
+        )
+        assert substitute_slide_numbers(html, 2, 4) == (
+            "<div class=\"slide\"><pre>WHERE x < 10 -- it's fine</pre>"
+            + _rendered(FOOTER, 2, 4)
+            + "<p>Lakebase's sync</p></div>"
+        )
+
+    def test_a_raw_less_than_before_a_quoted_value_is_still_text(self):
+        """``x < 10 AND name = 'acme`` is text: read as a tag, its ``= '`` would be
+        a quoted value running past the footer to the next apostrophe."""
+        html = (
+            "<div class=\"slide\"><pre>WHERE x < 10 AND name = 'acme</pre>"
+            + FOOTER
+            + "<p>it's</p></div>"
+        )
+        assert substitute_slide_numbers(html, 2, 4) == (
+            "<div class=\"slide\"><pre>WHERE x < 10 AND name = 'acme</pre>"
+            + _rendered(FOOTER, 2, 4)
+            + "<p>it's</p></div>"
+        )
+
+    def test_an_apostrophe_outside_an_attribute_value_opens_no_quote(self):
+        """In a tag, only a value after ``=`` is quoted: a stray apostrophe (here
+        in ``i<n; // don't``, which a browser reads as a tag) does not run on to the
+        next apostrophe past the footer."""
+        html = (
+            "<div class=\"slide\"><pre>for (i=0; i<n; i++) // don't</pre>"
+            + FOOTER
+            + "<p>it's</p></div>"
+        )
+        assert substitute_slide_numbers(html, 2, 4) == (
+            "<div class=\"slide\"><pre>for (i=0; i<n; i++) // don't</pre>"
+            + _rendered(FOOTER, 2, 4)
+            + "<p>it's</p></div>"
+        )
+
     def test_only_integers_are_emitted(self):
         """The values reach slide HTML: anything that is not an integer is refused."""
         with pytest.raises(ValueError):
