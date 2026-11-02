@@ -54,7 +54,12 @@ from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from typing import Any, Dict, Final, List, Literal, Optional, Sequence, Set, Tuple, get_type_hints
 
-from src.api.schemas.agent_config import AgentConfig, GenieOneTool, resolve_agent_config
+from src.api.schemas.agent_config import (
+    AgentConfig,
+    GatewayMcpTool,
+    GenieOneTool,
+    resolve_agent_config,
+)
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_columns
 from src.api.services.session_manager import get_session_manager, resolve_streamed_ds_assets
@@ -111,6 +116,7 @@ from src.domain.slide_operations import (
     dropped_class_problem,
     problem_sentence,
 )
+from src.services import image_service
 from src.services.agent import SAFETY_RETRY_NOTICE, UnsafeContentError
 from src.services.agent_runtime import (
     AgentAssemblyContext,
@@ -118,14 +124,30 @@ from src.services.agent_runtime import (
     is_provider_parse_error,
     is_transient_model_failure,
 )
+from src.services.agent_tools.gateway_toolset import (
+    ANALYST_GATEWAY_BUDGET_SECONDS,
+    ANALYST_GATEWAY_MAX_CALLS,
+    ARCHITECT_GATEWAY_BUDGET_SECONDS,
+    ARCHITECT_GATEWAY_MAX_CALLS,
+    GATEWAY_TURN_DEADLINE_SECONDS,
+    GatewayFailure,
+    GatewayToolsetBuild,
+    build_gateway_tools,
+    failure_notice,
+    turn_budget,
+)
 from src.services.agent_tools.genie_one import (
     GENIE_ONE_SCOPE,
     GENIE_ONE_SOURCE,
     GenieOneAnswer,
     figures_from_answer,
 )
-from src.services.agent_tools.registry import GenieOneAgentTool, build_analyst_toolset
-from src.services.agent_tools.toolset import AgentToolset
+from src.services.agent_tools.registry import (
+    GENIE_TOOL_NAME,
+    GenieOneAgentTool,
+    build_analyst_toolset,
+)
+from src.services.agent_tools.toolset import AgentTool, AgentToolset
 from src.services.deck_css_aggregator import aggregate_deck_css
 from src.services.deck_review_store import (
     compute_deck_digest,
@@ -139,6 +161,7 @@ from src.services.foreman_service import (
     releasable_positions,
     stalled_positions,
 )
+from src.services.gateway_mcp_registry import enabled_by_service
 from src.services.graph.event_emitter import (
     advance_slide_cursor,
     emit_event,
@@ -181,6 +204,12 @@ from src.services.template_sections import (
 )
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.html_utils import strip_inter_tag_escapes
+from src.utils.image_refs import (
+    reconcile_html,
+    reconcile_model_strings,
+    refs_in,
+    removed_slide_numbers,
+)
 from src.utils.slide_hash import compute_slide_hash
 from src.utils.slide_number_tokens import substitute_slide_numbers
 from src.utils.spotlight import neutralize_delimiters, spotlight
@@ -233,10 +262,12 @@ def _assembly_context(
     are inert for resolution and are read by nothing but the identity sink.
 
     ``toolset`` is keyword-only and invocation-scoped, never an id: only
-    ``data_analyst_node`` (Genie One in agent mode) and ``builder_node`` and
-    ``fixer_node`` (the brand-asset search, :func:`_brand_search_toolset`, deck
-    style addendum A) pass it, and every other call site leaves it ``None``, so
-    their single structured-output call is unchanged.
+    ``data_analyst_node`` (Genie One and its AI Gateway MCP tools in agent mode),
+    ``architect_node`` (its AI Gateway MCP tools, ``None`` on a deck without
+    one) and ``builder_node`` and ``fixer_node`` (the brand-asset search,
+    :func:`_brand_search_toolset`, deck style addendum A) pass it, and every
+    other call site leaves it ``None``, so their single structured-output call
+    is unchanged.
     """
     return AgentAssemblyContext(
         bool(design_system_active),
@@ -2031,6 +2062,17 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
         # has its content slides' ``white`` ground dropped in code (RA23).
         if state.get("architect_intent") == "build":
             branch_payload["one_ground"] = True
+    # AI Gateway MCP connections, branch-only like ``one_ground`` (never a model
+    # payload key): the image references this slide's builder may place.  Only
+    # a turn that ran the Gateway path carries THIS turn's ``gateway_usage``
+    # (the architect writes one entry per pass on it), so every other turn's
+    # payload is exactly what it was.  A JSON list (Ruling C-21), never a set.
+    if scoped_vals(state, "gateway_usage"):
+        branch_payload["gateway_known_images"] = sorted(
+            refs_in(branch_payload["slide_spec"])
+            | refs_in(section_html)
+            | _turn_gateway_images(state)
+        )
     return branch_payload
 
 
@@ -3414,6 +3456,399 @@ def _turn_analyst_figures(state: dict) -> List[ResolvedFigure]:
     return figures
 
 
+# ---------------------------------------------------------------------------
+# AI Gateway MCP connections (agent mode)
+# ---------------------------------------------------------------------------
+# The architect and the data analyst may be handed the tools of the AI Gateway
+# MCP services an admin registered and the deck's owner added.  Everything here
+# is gated on the ACTOR's agent config holding a ``gateway_mcp`` entry (C2): a
+# deck without one never reaches for the user's identity, never reads the
+# registry, never writes a ``gateway_*`` state key and adds no payload key, so
+# its turn is exactly what it was.
+
+
+#: The ``tool_name`` a Gateway progress line carries, on SSE and on its row.
+_GATEWAY_PROGRESS_TOOL: Final = "gateway_mcp"
+
+#: The ``notified`` marker for the consent message, which is said at most once a
+#: turn whoever needs it (a Gateway connection or Genie One).  A service name has
+#: three dotted parts, so it can never collide with it.
+_CONSENT_NOTIFIED: Final = "consent"
+
+_IMAGE_NOT_PLACED: Final = "An image from a connected tool couldn't be placed on slide {n}."
+_IMAGE_NOT_PLACED_UNNUMBERED: Final = "An image from a connected tool couldn't be placed."
+
+
+def _image_not_placed_notice(slide: Optional[int]) -> str:
+    """The notice for an image reference removed from slide *slide* (1-based), or
+    from no slide (``None``)."""
+    if slide is None:
+        return _IMAGE_NOT_PLACED_UNNUMBERED
+    return _IMAGE_NOT_PLACED.format(n=slide)
+
+
+def _turn_gateway_images(state: dict) -> Set[str]:
+    """The image tokens this turn's Gateway tools saved, in its earlier passes."""
+    return {token for token in scoped_vals(state, "gateway_images") if isinstance(token, str)}
+
+
+def _actor_agent_config(state: dict, *, consequence: str) -> Optional[AgentConfig]:
+    """The ACTOR's own agent config, or ``None`` when it cannot be read.
+
+    Tools come from the actor's row: a contributor's row starts with no tools, and
+    the deck owner's are theirs.  Any failure to read it counts as no config, and
+    is logged with *consequence*.
+    """
+    try:
+        return resolve_agent_config(
+            get_session_manager().get_session(state["actor_session_id"]).get("agent_config")
+        )
+    except Exception:
+        logger.warning("Could not read the actor's agent config; %s", consequence, exc_info=True)
+        return None
+
+
+@dataclass(frozen=True)
+class _GatewayUser:
+    """The actor's Gateway entries and the signed-in user their tools run as.
+
+    Captured in the node thread, where the request's ContextVars are set.
+    ``token`` is kept out of ``repr`` so no log line or traceback prints it;
+    ``owner`` is who the images the tools save belong to (C4).
+    """
+
+    entries: Tuple[GatewayMcpTool, ...]
+    host: str
+    token: str = field(repr=False)
+    owner: Optional[str]
+
+
+def _gateway_user(state: dict, config: Optional[AgentConfig]) -> Optional[_GatewayUser]:
+    """The actor's Gateway entries and the user they run as, or ``None``: no tools.
+
+    ``None`` without a ``gateway_mcp`` entry (then nothing else is looked at), on
+    a describe-only turn (the arc-review sweeper: nobody is there to be told or
+    to sign in), and with no user client: a Gateway call runs only as the
+    signed-in user, never the service principal.
+    """
+    if config is None or bool(scoped_vals(state, "describe_only")):
+        return None
+    entries = tuple(tool for tool in config.tools if isinstance(tool, GatewayMcpTool))
+    if not entries:
+        return None
+    try:
+        client_config = get_user_client().config
+        host, token = client_config.host, client_config.token
+    except Exception:
+        logger.warning(
+            "AI Gateway MCP tools are configured but no user client is bound; the "
+            "turn runs without them",
+            exc_info=True,
+            extra={"session_id": state.get("session_id")},
+        )
+        return None
+    if not host or not token:
+        logger.warning(
+            "AI Gateway MCP tools are configured but the user client has no host or "
+            "token; the turn runs without them",
+            extra={"session_id": state.get("session_id")},
+        )
+        return None
+    owner = state.get("initiated_by")
+    if not owner:
+        try:
+            owner = image_service.resolve_requesting_user()
+        except Exception:
+            logger.warning("Could not resolve the image owner", exc_info=True)
+            owner = None
+    return _GatewayUser(entries, host, token, owner)
+
+
+class _GatewayNotices:
+    """What the user has been told this turn about Gateway connections and consent.
+
+    Each notice is said at most once per service per turn (T6.4), and the consent
+    message at most once per turn across Gateway connections and Genie One
+    (T6.5).  Earlier passes' ``notified`` lists are read off this turn's
+    ``gateway_usage``; this pass's are kept in :attr:`said`, for its own entry.
+    Holds the OAuth client id the consent message names, never the token.
+    """
+
+    def __init__(self, state: dict, token: str) -> None:
+        self._state = state
+        self._oauth_client_id = oauth_client_id_from_token(token)
+        self._earlier: Set[str] = {
+            name
+            for entry in scoped_vals(state, "gateway_usage")
+            if isinstance(entry, dict)
+            for name in (entry.get("notified") or [])
+            if isinstance(name, str)
+        }
+        self.said: List[str] = []
+
+    def _told(self, key: str) -> bool:
+        return key in self._earlier or key in self.said
+
+    def consent(self) -> None:
+        """Say the consent message, unless it was said this turn."""
+        if self._told(_CONSENT_NOTIFIED):
+            return
+        self.said.append(_CONSENT_NOTIFIED)
+        _say(
+            self._state,
+            consent_message(oauth_client_id=self._oauth_client_id),
+            message_type="info",
+        )
+
+    def failures(self, failures: Sequence[GatewayFailure]) -> None:
+        """Say each failure's notice, once per service per turn."""
+        for failure in failures:
+            if self._told(failure.service_name):
+                continue
+            self.said.append(failure.service_name)
+            if failure.kind == "missing_scope":
+                self.consent()
+            else:
+                _say(
+                    self._state,
+                    failure_notice(failure, oauth_client_id=self._oauth_client_id),
+                    message_type="info",
+                )
+
+
+class _GatewayPass:
+    """One node pass's Gateway tools, the budget they may spend, and what they cost.
+
+    The tools are listed at most once per pass, and only while budget is left:
+    with no call or no second left, or past the turn deadline, ``tools/list`` is
+    never called.  ``shared_budget`` makes the budget the TURN's, spent by every
+    earlier pass of the same agent this turn (the architect's: its entries on
+    ``gateway_usage`` are summed); otherwise it is this pass's own (the analyst's
+    per-run budget).  Either way the seconds are clipped to the turn deadline
+    (``turn_started_at`` + :data:`GATEWAY_TURN_DEADLINE_SECONDS`), and every tool
+    refuses a call that would start after it.
+    """
+
+    def __init__(
+        self,
+        state: dict,
+        user: _GatewayUser,
+        *,
+        agent: Literal["architect", "data_analyst"],
+        max_calls: int,
+        budget_seconds: float,
+        shared_budget: bool,
+    ) -> None:
+        self._state = state
+        self._user = user
+        self._agent = agent
+        self._max_calls = max_calls
+        self._budget_seconds = budget_seconds
+        prior = [
+            entry
+            for entry in scoped_vals(state, "gateway_usage")
+            if shared_budget and isinstance(entry, dict) and entry.get("agent") == agent
+        ]
+        self._prior_calls = sum(int(entry.get("calls") or 0) for entry in prior)
+        self._prior_seconds = sum(float(entry.get("seconds") or 0.0) for entry in prior)
+        started = state.get("turn_started_at")
+        self._turn_started_at: Optional[float] = (
+            float(started)
+            if isinstance(started, (int, float)) and not isinstance(started, bool)
+            else None
+        )
+        self.notices = _GatewayNotices(state, user.token)
+        self._build: Optional[GatewayToolsetBuild] = None
+        self._failures: List[GatewayFailure] = []
+        #: The Gateway calls this pass started, and the seconds its toolsets ran.
+        self.calls = 0
+        self.seconds = 0.0
+
+    def _budget_left(self) -> Tuple[int, float]:
+        return turn_budget(
+            used_calls=self._prior_calls + self.calls,
+            used_seconds=self._prior_seconds + self.seconds,
+            max_calls=self._max_calls,
+            budget_seconds=self._budget_seconds,
+            turn_started_at=self._turn_started_at,
+            now=time.time(),
+        )
+
+    def _on_call(self, line: str) -> None:
+        """One Gateway call is starting: ``"{connection} · {tool}"``.
+
+        Said BEFORE the call, on both surfaces (the event for SSE, the row for
+        the polling transport), naming the connection and the tool, never the
+        model's arguments.  The tool names an MCP identifier, which never holds
+        ``" · "``; a display name might, hence ``rpartition``.
+        """
+        self.calls += 1
+        connection, _, tool = line.rpartition(" · ")
+        _emit(
+            StreamEventType.TOOL_CALL,
+            content=line,
+            # The agent names its node: "architect" or "data_analyst".
+            metadata={"node": self._agent, "tool_name": _GATEWAY_PROGRESS_TOOL},
+        )
+        _say(
+            self._state,
+            line,
+            message_type="tool_call",
+            metadata={
+                "tool_name": _GATEWAY_PROGRESS_TOOL,
+                "tool_input": {"connection": connection, "tool": tool},
+            },
+        )
+
+    def tools(self) -> Tuple[AgentTool, ...]:
+        """This pass's Gateway tools: listed on the first ask with budget left."""
+        if self._build is None:
+            calls_left, seconds_left = self._budget_left()
+            if calls_left <= 0 or seconds_left <= 0:
+                return ()
+            self._build = self._list()
+            self._failures.extend(self._build.failures)
+        return tuple(self._build.tools)
+
+    def _list(self) -> GatewayToolsetBuild:
+        user = self._user
+        try:
+            with get_db_session() as db:
+                registry = enabled_by_service(db, [entry.service_name for entry in user.entries])
+        except Exception:
+            logger.warning(
+                "Could not read the AI Gateway MCP registry; the %s runs without its "
+                "Gateway tools",
+                self._agent,
+                exc_info=True,
+                extra={"session_id": self._state.get("session_id")},
+            )
+            return GatewayToolsetBuild(tools=(), failures=())
+        deadline_at = (
+            None
+            if self._turn_started_at is None
+            else self._turn_started_at + GATEWAY_TURN_DEADLINE_SECONDS
+        )
+        try:
+            return build_gateway_tools(
+                user.entries,
+                agent=self._agent,
+                registry=registry,
+                host=user.host,
+                token=user.token,
+                user=user.owner,  # type: ignore[arg-type] - None stores an unowned image
+                on_call=self._on_call,
+                session_id=self._state.get("session_id"),
+                deadline_at=deadline_at,
+            )
+        except Exception:
+            # Each connection's own failure is already a GatewayFailure; this is
+            # anything else, and the Gateway must never be what fails the turn.
+            logger.warning(
+                "Building the AI Gateway MCP tools failed; the %s runs without them",
+                self._agent,
+                exc_info=True,
+                extra={"session_id": self._state.get("session_id")},
+            )
+            return GatewayToolsetBuild(tools=(), failures=())
+
+    def toolset(self) -> Optional[AgentToolset]:
+        """A NEW toolset of this pass's tools holding what is left of the budget, or
+        ``None`` (no tools, or nothing left): the call is then today's."""
+        tools = self.tools()
+        if not tools:
+            return None
+        calls_left, seconds_left = self._budget_left()
+        if calls_left <= 0 or seconds_left <= 0:
+            return None
+        return AgentToolset(tools=tools, max_calls=calls_left, budget_seconds=seconds_left)
+
+    def spent(self, toolset: Optional[AgentToolset]) -> None:
+        """Account for one run of *toolset*: its seconds and its refusals."""
+        if toolset is None:
+            return
+        self.seconds += max(0.0, toolset.budget_seconds - toolset.remaining_seconds())
+        if self._build is not None:
+            self._failures.extend(self._build.access_failures(toolset))
+
+    def say_failures(self) -> None:
+        """Tell the user about every connection that could not be used, once each."""
+        self.notices.failures(self._failures)
+
+    def saved_tokens(self) -> List[str]:
+        return self._build.saved_tokens() if self._build is not None else []
+
+    def usage(self) -> Dict[str, Any]:
+        """This pass's ``gateway_usage`` entry (JSON-native)."""
+        return {
+            "agent": self._agent,
+            "calls": self.calls,
+            "seconds": self.seconds,
+            "notified": list(self.notices.said),
+        }
+
+
+def _gateway_pass(
+    state: dict, config: Optional[AgentConfig], *, agent: Literal["architect", "data_analyst"]
+) -> Optional[_GatewayPass]:
+    """*agent*'s Gateway pass for this turn, or ``None`` to run exactly as before."""
+    user = _gateway_user(state, config)
+    if user is None:
+        return None
+    if agent == "architect":
+        return _GatewayPass(
+            state,
+            user,
+            agent=agent,
+            max_calls=ARCHITECT_GATEWAY_MAX_CALLS,
+            budget_seconds=ARCHITECT_GATEWAY_BUDGET_SECONDS,
+            shared_budget=True,
+        )
+    return _GatewayPass(
+        state,
+        user,
+        agent=agent,
+        max_calls=ANALYST_GATEWAY_MAX_CALLS,
+        budget_seconds=ANALYST_GATEWAY_BUDGET_SECONDS,
+        shared_budget=False,
+    )
+
+
+def _reconcile_architect_output(out: Any, known: Set[str]) -> Tuple[Any, List[Optional[int]]]:
+    """*out* with its image references reconciled against *known*, and the 1-based
+    slide number of each reference it removed (``None``: not on a slide).
+
+    A known reference is kept, a mistyped tail is fixed, anything else is removed
+    (``reconcile_model_strings``), and the answer is re-validated.  An answer
+    that cannot be reconciled (one that would no longer validate) is kept as
+    the model wrote it, never failing the turn: the builders reconcile their
+    HTML too.  An answer with nothing to change is returned as it is.
+    """
+    try:
+        dumped = out.model_dump()
+        fixed, removed = reconcile_model_strings(dumped, known)
+        if fixed == dumped:
+            return out, []
+        reconciled = type(out).model_validate(fixed)
+    except Exception:
+        logger.warning(
+            "Could not reconcile the image references in the architect's answer; it "
+            "is kept as written",
+            exc_info=True,
+        )
+        return out, []
+    return reconciled, removed_slide_numbers(fixed, removed)
+
+
+def _say_images_not_placed(state: dict, slides: Sequence[Optional[int]]) -> None:
+    """One notice per slide an image reference was removed from (and one for any
+    removed from no slide)."""
+    for slide in sorted({slide for slide in slides if slide is not None}):
+        _say(state, _image_not_placed_notice(slide), message_type="info")
+    if any(slide is None for slide in slides):
+        _say(state, _image_not_placed_notice(None), message_type="info")
+
+
 def architect_node(state: dict) -> Dict[str, Any]:
     """Decide the turn's intent, commit the spec, resolve every brand value.
 
@@ -3483,6 +3918,17 @@ def architect_node(state: dict) -> Dict[str, Any]:
     is said only once its plan has landed; on any refusal only the refusal is
     said, and its row records why (:data:`REFUSAL_METADATA_KEY`) so the next
     turn's architect is told.
+
+    **AI Gateway MCP tools (agent mode).**  When the ACTOR's agent config has a
+    ``gateway_mcp`` entry and a user is signed in (:func:`_gateway_pass`), every
+    attempt is handed a NEW toolset of the architect's Gateway tools holding
+    what is left of the TURN's budget (every architect pass and attempt this turn
+    spends one :data:`ARCHITECT_GATEWAY_MAX_CALLS` / seconds budget, clipped to
+    the turn deadline); with nothing left the call is today's.  Each answer's
+    image references are reconciled before it is planned (a mistyped tail fixed,
+    an unknown one removed), each connection that could not be used is said
+    once per turn, and ``gateway_usage`` / ``gateway_images`` are written on
+    every return path.  Without a Gateway entry none of this runs.
     """
     session_id = state["session_id"]
     turn_id = state["turn_id"]
@@ -3613,7 +4059,30 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # nobody and builds nothing, so a second model call buys it nothing.
     rejected_edit: Optional[Dict[str, Any]] = None
     answer: Optional[_PlannedAnswer] = None
+    # AI Gateway MCP tools: ``None`` without a Gateway entry (or a signed-in
+    # user), and then every line below runs exactly as before.  The image
+    # references an answer may keep: the ones the turn's Gateway tools saved,
+    # and every one already in the payload (the conversation, the user's message,
+    # the persisted spec) or in the committed slides.
+    gateway = (
+        _gateway_pass(
+            state,
+            _actor_agent_config(state, consequence="the architect runs without Gateway tools"),
+            agent="architect",
+        )
+        if state.get("actor_session_id") and not describe_only
+        else None
+    )
+    known_images: Set[str] = (
+        _turn_gateway_images(state) | refs_in(payload) | refs_in(committed_htmls)
+        if gateway is not None
+        else set()
+    )
+    images_not_placed: List[Optional[int]] = []
     for attempt in range(2):
+        # A NEW toolset per attempt, holding what is left of the turn's budget
+        # (a retry never inherits the first attempt's counters).
+        toolset = gateway.toolset() if gateway is not None else None
         try:
             out = get_agent_runtime().run(
                 "architect",
@@ -3626,9 +4095,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     brand["design_system_active"],
                     state.get("root_session_id"),
                     state.get("actor_session_id"),
+                    toolset=toolset,
                 ),
             ).output
         except Exception as exc:
+            if gateway is not None:
+                gateway.spent(toolset)
             if answer is None:
                 # The first call fails the turn as it always has: there is no
                 # refusal to fall back on.
@@ -3649,6 +4121,13 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 extra={"session_id": session_id},
             )
             break
+        if gateway is not None:
+            gateway.spent(toolset)
+            # Before anything plans, says or writes this answer: an image
+            # reference it may not keep is fixed or removed (Review Focus 4).
+            out, images_not_placed = _reconcile_architect_output(
+                out, known_images | set(gateway.saved_tokens())
+            )
         # Every answer's deck style is sanitised before it is planned, so nothing
         # downstream — the plan, the commit, the deck.css write, the retry's echo
         # of this answer — sees one the sanitiser has not passed.
@@ -3690,6 +4169,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
             extra={"session_id": session_id},
         )
 
+    if gateway is not None:
+        # Each connection that could not be used (listed or called), once per
+        # service per turn, then each slide an image could not be placed on.
+        gateway.say_failures()
+        _say_images_not_placed(state, images_not_placed)
+
     intent = answer.intent
     message = answer.message
     # From here on the answer's spec and brand ARE the turn's (an operations
@@ -3708,6 +4193,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
         "fix_target": None,
         "error_state": None,
     }
+    if gateway is not None:
+        # Written here, before the first return, so every return path carries
+        # them (the ask_data one included): the turn's later passes read what
+        # this one spent, said and saved.
+        updates["gateway_usage"] = scoped(turn_id, [gateway.usage()])
+        updates["gateway_images"] = scoped(turn_id, gateway.saved_tokens())
 
     if intent not in ("build", "edit"):
         # Said straight away (spec §7): nothing is planned on these turns, so
@@ -4285,14 +4776,25 @@ class _GenieOneRun:
     stored_conversation_id: Optional[str]
 
 
-def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
+def _genie_one_run(
+    state: dict,
+    config: Optional[AgentConfig] = None,
+    *,
+    extra_tools: Sequence[AgentTool] = (),
+    notices: Optional[_GatewayNotices] = None,
+) -> Optional[_GenieOneRun]:
     """The Genie One toolset for this run, or ``None`` to run exactly as before.
 
     Tools come from the ACTOR's own row (a contributor's row starts with no
-    tools; the deck owner's Genie One is theirs).  Any failure to read it counts
-    as no config.  With a Genie One entry, the user's identity is captured HERE,
+    tools; the deck owner's Genie One is theirs), read here unless the node
+    passes the *config* it already read.  Any failure to read it counts as no
+    config.  With a Genie One entry, the user's identity is captured HERE,
     in the node thread, where the request's ContextVars are set: no user client
     (production fails closed) means no toolset, never the service principal's.
+
+    *extra_tools* are the analyst's AI Gateway MCP tools, bound beside Genie One
+    (``build_analyst_toolset``); *notices* is that run's record of what the turn
+    has been told, so the consent message is said at most once per turn.
 
     **Scope pre-flight.**  When the user's token says which scopes it carries
     and ``ai-gateway`` (or ``all-apis``) is not among them, every Genie One call
@@ -4300,16 +4802,10 @@ def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
     analyst runs without tools.  A token whose scopes cannot be read is not
     refused; the gateway's answer decides.
     """
-    try:
-        config = resolve_agent_config(
-            get_session_manager().get_session(state["actor_session_id"]).get("agent_config")
-        )
-    except Exception:
-        logger.warning(
-            "Could not read the actor's agent config; the analyst runs without tools",
-            exc_info=True,
-        )
-        return None
+    if config is None:
+        config = _actor_agent_config(state, consequence="the analyst runs without tools")
+        if config is None:
+            return None
     if not any(isinstance(tool, GenieOneTool) for tool in config.tools):
         return None
     try:
@@ -4336,7 +4832,10 @@ def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
             GENIE_ONE_SCOPE,
             extra={"session_id": state.get("session_id")},
         )
-        _say_consent(state, token)
+        if notices is None:
+            _say_consent(state, token)
+        else:
+            notices.consent()
         return None
 
     def on_question(question: str) -> None:
@@ -4364,6 +4863,7 @@ def _genie_one_run(state: dict) -> Optional[_GenieOneRun]:
         token=token,
         on_question=on_question,
         session_id=state.get("session_id"),
+        extra_tools=extra_tools,
     )
     if built is None:
         return None
@@ -4453,11 +4953,23 @@ def _say_consent(state: dict, token: str) -> None:
     )
 
 
-def _say_genie_one_access(state: dict, run: _GenieOneRun) -> None:
-    """Tell the user, once per kind, what a Genie One refusal needs them to do."""
-    kinds = {error.kind for error in run.toolset.access_errors}
+def _say_genie_one_access(
+    state: dict, run: _GenieOneRun, notices: Optional[_GatewayNotices] = None
+) -> None:
+    """Tell the user, once per kind, what a Genie One refusal needs them to do.
+
+    Only Genie One's own refusals count: an AI Gateway MCP tool sharing the
+    toolset is told through its own notice (T6.5).  With *notices* (the run has
+    Gateway entries) the consent message is said at most once per turn.
+    """
+    kinds = {
+        error.kind for error in run.toolset.access_errors if error.tool_name == GENIE_TOOL_NAME
+    }
     if "missing_scope" in kinds:
-        _say_consent(state, run.token)
+        if notices is None:
+            _say_consent(state, run.token)
+        else:
+            notices.consent()
     if "access_denied" in kinds:
         _say(state, _GENIE_ONE_GRANT_MESSAGE, message_type="info")
 
@@ -4494,6 +5006,15 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     whatever the architect wrote, as before: ``AnalystOutput`` still declares no
     figure field.
 
+    **AI Gateway MCP tools (agent mode).**  When the actor's config also has a
+    ``gateway_mcp`` entry and a user is signed in, the analyst's Gateway tools
+    ride beside Genie One in one toolset (:data:`ANALYST_GATEWAY_MAX_CALLS` calls
+    / :data:`ANALYST_GATEWAY_BUDGET_SECONDS` s, Genie One still asking at most
+    three questions), or, without Genie One, alone (clipped to the turn
+    deadline).  Figures are still built from Genie One's rows only.  A Gateway
+    refusal is never said as Genie One's, the consent message is said at most
+    once per turn, and ``gateway_usage`` / ``gateway_images`` are written.
+
     **At most** :data:`MAX_ANALYST_ROUNDS_PER_TURN` **runs per turn**
     (``analyst_rounds``, one marker per run): a further request is answered by
     code, and the model is not called.
@@ -4524,7 +5045,28 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             state["deck_spec"].purpose if state.get("deck_spec") else None
         ),
     }
-    genie = _genie_one_run(state)
+    config = _actor_agent_config(state, consequence="the analyst runs without tools")
+    # AI Gateway MCP tools: ``None`` without a Gateway entry (or a signed-in
+    # user), and the run is then exactly Genie One's, or today's.  Listed before
+    # Genie One's toolset is built, so they ride beside it; past the turn
+    # deadline nothing is listed.
+    gateway = _gateway_pass(state, config, agent="data_analyst")
+    genie = (
+        _genie_one_run(
+            state,
+            config,
+            extra_tools=gateway.tools() if gateway is not None else (),
+            notices=gateway.notices if gateway is not None else None,
+        )
+        if config is not None
+        else None
+    )
+    toolset: Optional[AgentToolset] = None
+    if genie is not None:
+        toolset = genie.toolset
+    elif gateway is not None:
+        # The Gateway tools alone: their own budget, clipped to the turn deadline.
+        toolset = gateway.toolset()
     out = get_agent_runtime().run(
         "data_analyst",
         state["graph_release_id"],
@@ -4533,9 +5075,11 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             state.get("design_system_active"),
             state.get("root_session_id"),
             state.get("actor_session_id"),
-            toolset=genie.toolset if genie is not None else None,
+            toolset=toolset,
         ),
     ).output
+    if gateway is not None:
+        gateway.spent(toolset)
 
     if out.outcome == "success":
         message = out.synthesis or ""
@@ -4596,9 +5140,11 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     # durable and visible, deliberately outside ``_AI_TYPES``.
     _say(state, message, message_type="info", metadata={"agent": "data_analyst"})
     if genie is not None:
-        _say_genie_one_access(state, genie)
+        _say_genie_one_access(state, genie, gateway.notices if gateway is not None else None)
+    if gateway is not None:
+        gateway.say_failures()
 
-    return {
+    updates: Dict[str, Any] = {
         "architect_message": architect_message,
         "analyst_figures": scoped(turn_id, [figure.model_dump() for figure in figures]),
         # The answer count numbers a later round's questions turn-wide.
@@ -4606,6 +5152,12 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
             turn_id, [{"answers": len(genie.tool.answers) if genie is not None else 0}]
         ),
     }
+    if gateway is not None:
+        # Figures stay code-built from Genie One alone; the Gateway tools' saved
+        # images and what the run said are the turn's, for its later passes.
+        updates["gateway_usage"] = scoped(turn_id, [gateway.usage()])
+        updates["gateway_images"] = scoped(turn_id, gateway.saved_tokens())
+    return updates
 
 
 # ---------------------------------------------------------------------------
@@ -4893,6 +5445,16 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
         html = strip_inter_tag_escapes(html)
+        # AI Gateway MCP connections: on a Gateway turn (only its payload carries
+        # the key) an image reference the slide may not place is fixed (a
+        # mistyped tail) or removed with its <img> or background declaration,
+        # and the user is told once for the slide.  A fanned node, so the notice
+        # is an ungated info row, never error_state.
+        known_images = payload.get("gateway_known_images")
+        if known_images is not None:
+            html, removed_images = reconcile_html(html, known_images)
+            if removed_images:
+                _surface_notice(session_id, _image_not_placed_notice(slide_number(position)))
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Builder failed at position %s", position)

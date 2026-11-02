@@ -1,8 +1,10 @@
 """The tools an agent-mode invocation is handed, built from the actor's agent config.
 
-Today there is one: Genie One, for the data analyst.  :func:`build_analyst_toolset`
-returns ``None`` when the config has no Genie One entry, and the analyst then runs
-exactly as it did before tools existed.
+Genie One, for the data analyst.  :func:`build_analyst_toolset` returns ``None``
+when the config has no Genie One entry, and the analyst then runs exactly as it
+did before tools existed.  The analyst's AI Gateway MCP tools, when it has any,
+ride beside Genie One as ``extra_tools`` (built by ``gateway_toolset``); the
+toolset then has the Gateway budget, and Genie One keeps its own question cap.
 
 **Identity.**  The ``host`` and ``token`` passed in are the signed-in user's,
 captured by the node in its own thread (``get_user_client()``).  They are fixed
@@ -21,13 +23,17 @@ This module must not import ``src.core.skills``
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Final
 
 from pydantic import BaseModel, Field
 
 from src.api.schemas.agent_config import AgentConfig, GenieOneTool
 from src.core.scope_errors import oauth_scopes_from_token
+from src.services.agent_tools.gateway_toolset import (
+    ANALYST_GATEWAY_BUDGET_SECONDS,
+    ANALYST_GATEWAY_MAX_CALLS,
+)
 from src.services.agent_tools.genie_one import (
     GenieOneAccessError,
     GenieOneAnswer,
@@ -35,7 +41,12 @@ from src.services.agent_tools.genie_one import (
     GenieOneError,
     render_answer_for_model,
 )
-from src.services.agent_tools.toolset import AgentToolset, ToolAccessError, ToolAccessKind
+from src.services.agent_tools.toolset import (
+    AgentTool,
+    AgentToolset,
+    ToolAccessError,
+    ToolAccessKind,
+)
 from src.utils.spotlight import spotlight
 
 logger = logging.getLogger(__name__)
@@ -81,6 +92,12 @@ _ACCESS_REFUSED: Final[dict[ToolAccessKind, str]] = {
     ),
 }
 
+#: What the model is told about a question past ``max_questions`` (code-owned).
+_QUESTIONS_SPENT: Final = (
+    "Not asked: Genie One has already been asked {n} questions for this request, "
+    "the most allowed. Continue with the answers you have."
+)
+
 
 class GenieQuestion(BaseModel):
     """The one argument the model passes."""
@@ -98,6 +115,11 @@ class GenieOneAgentTool:
     :attr:`answers`, in order, so the node builds figures from the result rows
     rather than from anything the model wrote.  :attr:`conversation_id` is the
     latest one, for the node to persist on the actor's row.
+
+    ``max_questions`` caps the questions this tool asks, for a toolset whose own
+    call budget is shared with other tools (the analyst's AI Gateway MCP tools):
+    a question past it is answered without asking Genie One and without a
+    progress line.  ``None`` (the default) asks every question, as before.
     """
 
     name = GENIE_TOOL_NAME
@@ -111,15 +133,21 @@ class GenieOneAgentTool:
         conversation_id: str | None,
         on_question: Callable[[str], None],
         session_id: str | None,
+        max_questions: int | None = None,
     ) -> None:
         self._client = client
         self._on_question = on_question
         self._session_id = session_id
+        self._max_questions = max_questions
+        self._asked = 0
         self.answers: list[GenieOneAnswer] = []
         self.conversation_id: str | None = conversation_id
 
     def run(self, args: BaseModel, *, remaining_seconds: float) -> str:
         question = args.question  # type: ignore[attr-defined]
+        if self._max_questions is not None and self._asked >= self._max_questions:
+            return _QUESTIONS_SPENT.format(n=self._max_questions)
+        self._asked += 1
         try:
             self._on_question(question)
         except Exception:  # noqa: BLE001 - a progress line never stops the question
@@ -160,6 +188,7 @@ def build_analyst_toolset(
     token: str,
     on_question: Callable[[str], None],
     session_id: str | None,
+    extra_tools: Sequence[AgentTool] = (),
 ) -> tuple[AgentToolset, GenieOneAgentTool] | None:
     """The data analyst's toolset for *agent_config*, or ``None`` without Genie One.
 
@@ -167,6 +196,12 @@ def build_analyst_toolset(
     knows the scopes that token says it carries (so a gateway 403 for a token
     without ``ai-gateway`` is a missing scope); the stored ``conversation_id``
     (that row's own) is continued.
+
+    Without *extra_tools* the toolset is Genie One's alone, with its own budget
+    (:data:`GENIE_ONE_MAX_QUESTIONS` / :data:`GENIE_ONE_BUDGET_SECONDS`), exactly
+    as before.  With them (the analyst's AI Gateway MCP tools) it holds both and
+    the Gateway budget, and Genie One still asks at most
+    :data:`GENIE_ONE_MAX_QUESTIONS` questions.
     """
     entry = next((t for t in agent_config.tools if isinstance(t, GenieOneTool)), None)
     if entry is None:
@@ -176,10 +211,18 @@ def build_analyst_toolset(
         conversation_id=entry.conversation_id,
         on_question=on_question,
         session_id=session_id,
+        max_questions=GENIE_ONE_MAX_QUESTIONS if extra_tools else None,
     )
-    toolset = AgentToolset(
-        tools=(tool,),
-        max_calls=GENIE_ONE_MAX_QUESTIONS,
-        budget_seconds=GENIE_ONE_BUDGET_SECONDS,
-    )
+    if extra_tools:
+        toolset = AgentToolset(
+            tools=(tool, *extra_tools),
+            max_calls=ANALYST_GATEWAY_MAX_CALLS,
+            budget_seconds=ANALYST_GATEWAY_BUDGET_SECONDS,
+        )
+    else:
+        toolset = AgentToolset(
+            tools=(tool,),
+            max_calls=GENIE_ONE_MAX_QUESTIONS,
+            budget_seconds=GENIE_ONE_BUDGET_SECONDS,
+        )
     return toolset, tool
