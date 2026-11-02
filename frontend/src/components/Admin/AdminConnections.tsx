@@ -289,7 +289,11 @@ export const AdminConnections: React.FC = () => {
               value={form.serviceName}
               disabled={!!form.editing}
               placeholder="catalog.schema.service"
-              onChange={(e) => patch({ serviceName: e.target.value })}
+              onChange={(e) => {
+                patch({ serviceName: e.target.value });
+                // A result (and its tool picks) belongs to the service it was run against.
+                setTestResult(null);
+              }}
             />
           </div>
           <div>

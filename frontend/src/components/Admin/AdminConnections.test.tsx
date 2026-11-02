@@ -264,6 +264,40 @@ describe('AdminConnections', () => {
     expect(screen.queryByRole('checkbox', { name: 'search' })).not.toBeInTheDocument();
   });
 
+  it.each(['http://example.com/consent', 'javascript:alert(1)'])(
+    'never renders a non-https sign-in URL (%s) as a link, but still shows the message',
+    async (url) => {
+      testGatewayConnection.mockResolvedValue({
+        state: 'sign_in_required',
+        message: 'Sign in to the connection to continue',
+        sign_in_url: url,
+        tools: [],
+      });
+      render(<AdminConnections />);
+      await openAddForm();
+      fillBasics();
+      runTest();
+      expect(await screen.findByText('Sign in to the connection to continue')).toBeInTheDocument();
+      expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    },
+  );
+
+  it('drops a test result when the service name changes, so its allowlist is not saved for another service', async () => {
+    render(<AdminConnections />);
+    await openAddForm();
+    fillBasics('cat.sch.first');
+    runTest();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'fetch' }));
+    fireEvent.change(screen.getByLabelText('Service name'), { target: { value: 'cat.sch.second' } });
+    expect(screen.queryByRole('checkbox', { name: 'search' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(createGatewayConnection).toHaveBeenCalledTimes(1));
+    expect(createGatewayConnection.mock.calls[0][0]).toMatchObject({
+      service_name: 'cat.sch.second',
+      tool_allowlist: null,
+    });
+  });
+
   it('shows the error message of a failing test result', async () => {
     testGatewayConnection.mockResolvedValue({
       state: 'not_found',
