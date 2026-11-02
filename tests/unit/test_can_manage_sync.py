@@ -11,10 +11,14 @@ reads the rows back in a fresh session. Only the Databricks client is faked. The
 tests patch the module's own ``asyncio`` name, so no real time passes.
 """
 
+import ast
 import asyncio
+import io
 import logging
+import tokenize
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -560,3 +564,144 @@ def test_loop_stops_when_cancelled_during_a_sync(monkeypatch):
     )
 
     assert events == [("cancelled_in_to_thread", None)]
+
+
+# ---------------------------------------------------------------------------
+# Where the loop is registered. Lifespan never runs under IS_TESTING, so no
+# behavioural test reaches this wiring; it is asserted structurally, the same way
+# as tests/unit/test_spec_sync_sweeper.py::TestWhereTheLoopIsRegistered.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _name_tokens(path: Path) -> list[str]:
+    """Every NAME token in *path*, comments and strings discarded."""
+    readline = io.BytesIO(path.read_bytes()).readline
+    return [t.string for t in tokenize.tokenize(readline) if t.type == tokenize.NAME]
+
+
+def _callee(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+class TestWhereTheLoopIsRegistered:
+    _MAIN = _REPO_ROOT / "src/api/main.py"
+    _RUN = _REPO_ROOT / "packages/databricks-tellr-app/databricks_tellr_app/run.py"
+
+    def _lifespan(self) -> ast.AsyncFunctionDef:
+        tree = ast.parse(self._MAIN.read_text())
+        return next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "lifespan"
+        )
+
+    def _create_task_calls(self, lifespan) -> list[ast.Call]:
+        return [
+            n
+            for n in ast.walk(lifespan)
+            if isinstance(n, ast.Call)
+            and _callee(n) == "create_task"
+            and n.args
+            and isinstance(n.args[0], ast.Call)
+            and _callee(n.args[0]) == "can_manage_sync_loop"
+        ]
+
+    def test_the_files_this_asserts_about_are_the_ones_that_exist(self):
+        """Entry assertion for every absence below: a missing path would make
+        them all vacuously true."""
+        assert self._MAIN.is_file(), self._MAIN
+        assert self._RUN.is_file(), self._RUN
+        assert "lifespan" in _name_tokens(self._MAIN)
+        assert "init_database" in _name_tokens(self._RUN)
+
+    def test_the_sync_task_is_created_inside_the_lifespan(self):
+        lifespan = self._lifespan()
+        created = self._create_task_calls(lifespan)
+        assert len(created) == 1, (
+            "asyncio.create_task(can_manage_sync_loop()) is not inside the "
+            "lifespan; the CAN_MANAGE sync never runs"
+        )
+        # The task is kept in the module global the shutdown half cancels; without
+        # the `global` line the assignment is a local and shutdown sees None.
+        assigned = [
+            n
+            for n in ast.walk(lifespan)
+            if isinstance(n, ast.Assign)
+            and n.value is created[0]
+            and any(
+                isinstance(t, ast.Name) and t.id == "_can_manage_sync_task"
+                for t in n.targets
+            )
+        ]
+        assert assigned, "the created task is not stored in _can_manage_sync_task"
+        declared_global = {
+            name
+            for n in ast.walk(lifespan)
+            if isinstance(n, ast.Global)
+            for name in n.names
+        }
+        assert "_can_manage_sync_task" in declared_global
+
+    def test_the_sync_task_only_starts_in_production_with_an_app_name(self):
+        lifespan = self._lifespan()
+        (created,) = self._create_task_calls(lifespan)
+        parents = {
+            child: parent
+            for parent in ast.walk(lifespan)
+            for child in ast.iter_child_nodes(parent)
+        }
+        guards = []
+        node = created
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.If):
+                names = {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+                strings = {
+                    n.value
+                    for n in ast.walk(node.test)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                }
+                guards.append((names, strings))
+        assert any(
+            "IS_PRODUCTION" in names and "DATABRICKS_APP_NAME" in strings | names
+            for names, strings in guards
+        ), (
+            "create_task(can_manage_sync_loop()) is not under an `if` that checks "
+            f"both IS_PRODUCTION and DATABRICKS_APP_NAME; enclosing if-tests: {guards}"
+        )
+
+    def test_the_sync_task_is_cancelled_on_shutdown(self):
+        lifespan = self._lifespan()
+        (yield_node,) = [n for n in ast.walk(lifespan) if isinstance(n, ast.Yield)]
+        cancels = [
+            n
+            for n in ast.walk(lifespan)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "cancel"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "_can_manage_sync_task"
+        ]
+        assert cancels, (
+            "_can_manage_sync_task is never cancelled; shutdown will hang or log a "
+            "pending-task warning on every deploy"
+        )
+        # In the shutdown half, i.e. after the lifespan's yield.
+        assert all(c.lineno > yield_node.lineno for c in cancels)
+
+    def test_the_pre_fork_init_database_does_not_start_the_loop(self):
+        """run.py::init_database runs once, before the workers fork. A periodic
+        loop started there would die with that step."""
+        tokens = _name_tokens(self._RUN)
+        assert "can_manage_sync_loop" not in tokens, (
+            "the CAN_MANAGE sync loop is referenced in run.py; a loop started in "
+            "the pre-fork step dies with it and no worker ever syncs"
+        )
+        assert "can_manage_sync" not in tokens
