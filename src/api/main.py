@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import (
     admin,
+    admin_gateway_mcp,
     admin_usage,
     agent_config,
     agent_definitions,
@@ -525,6 +526,7 @@ async def user_client_required_handler(request: Request, exc: UserClientRequired
 # Include API routers
 app.include_router(admin.router)
 app.include_router(admin_usage.router)
+app.include_router(admin_gateway_mcp.router)
 app.include_router(agent_config.router)
 app.include_router(agent_definitions.router)
 app.include_router(graph_shipping.router)
