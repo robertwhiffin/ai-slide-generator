@@ -330,3 +330,50 @@ describe('ChatPanel turn-progress placeholder (#319)', () => {
     }
   });
 });
+
+// A turn waiting for a free job runner (the backend's `pending` before any progress).
+// SABOTAGE: ignore the `queued` event -> the queued-text test goes red; reset it on
+// `complete` only, not at send -> the next-turn test goes red after a failed turn.
+describe('ChatPanel queued placeholder', () => {
+  const QUEUED = 'Waiting for another request to finish…';
+
+  it('shows the queued text while the turn waits, then the generic text', async () => {
+    await mount();
+    send();
+    expectLabel('Generating slides...');
+    emit({ type: 'queued', queued: true });
+    expectLabel(QUEUED);
+    emit({ type: 'queued', queued: false });
+    expectLabel('Generating slides...');
+    progress(tp(1, 'planning'));
+    expectLabel('Planning the deck…');
+  });
+
+  it('a stage replaces the queued text', async () => {
+    await mount();
+    send();
+    emit({ type: 'queued', queued: true });
+    progress(tp(1, 'planning'));
+    expectLabel('Planning the deck…');
+  });
+
+  it('a queued event never becomes a chat message', async () => {
+    await mount();
+    send();
+    emit({ type: 'queued', queued: true });
+    expect(screen.getAllByText(QUEUED)).toHaveLength(1);
+    emit({ type: 'complete' });
+    expect(screen.queryByText(QUEUED)).toBeNull();
+  });
+
+  it('the next turn starts unqueued, even after a turn that failed while queued', async () => {
+    await mount();
+    send();
+    emit({ type: 'queued', queued: true });
+    act(() => { onError(new Error('poll failed')); });
+    expect(screen.queryByTestId('chat-turn-progress')).toBeNull();
+
+    send();
+    expectLabel('Generating slides...');
+  });
+});

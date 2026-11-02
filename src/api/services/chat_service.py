@@ -463,11 +463,9 @@ class ChatService:
             session_id, username
         )
 
-        # Active experiment must be set before LangChain autolog emits traces (tools, etc.).
-        if experiment_id:
-            import mlflow
-
-            mlflow.set_experiment(experiment_id=experiment_id)
+        # No mlflow.set_experiment here: the active experiment is process-global and
+        # several chat jobs share the process.  The generate span sets it under the
+        # experiment lock (src/core/mlflow_tracing.start_span_in_experiment).
 
         # Persist experiment_id to database if newly created
         if experiment_id and experiment_id != db_session.get("experiment_id"):

@@ -29,7 +29,12 @@ import {
 import { withoutTurn, withPersistedUserIds } from '../../utils/conversationTurns';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
 import { readMessageDetails } from '../../utils/messageDetails';
-import { describeTurnProgress, newerTurnProgress, parseTurnProgress } from '../../utils/turnProgress';
+import {
+  QUEUED_TURN_LABEL,
+  describeTurnProgress,
+  newerTurnProgress,
+  parseTurnProgress,
+} from '../../utils/turnProgress';
 import type { TurnProgress } from '../../types/turnProgress';
 import { ReplacementFeedback } from './ReplacementFeedback';
 import { ErrorDisplay } from './ErrorDisplay';
@@ -85,6 +90,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string>('');
   const [turnProgress, setTurnProgress] = useState<TurnProgress | null>(null);
+  // The turn is waiting for a free job runner (a 'queued' event from polling).
+  const [isQueued, setIsQueued] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastReplacement, setLastReplacement] = useState<ReplacementInfo | null>(
     null,
@@ -320,6 +327,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
     setIsLoading(true);
     setTurnProgress(null);
+    setIsQueued(false);
     setIsGenerating(true);
     onGenerationStart?.();
     setError(null);
@@ -485,6 +493,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           break;
         }
 
+        // The turn is waiting for a free job runner, or no longer is.  Like
+        // turn_progress, it only feeds the placeholder.
+        case 'queued':
+          setIsQueued(event.queued === true);
+          break;
+
         // E0: ws4d D3 — one committed slide released by the graph's reorder buffer,
         // delivered before `complete`.  Forwards position + content to AppLayout so
         // the viewer can render slides as they land in ascending order.
@@ -649,7 +663,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         <MessageList
           messages={previewMessages ?? messages}
           isLoading={isLoading && !previewMessages}
-          progressLabel={describeTurnProgress(turnProgress)}
+          progressLabel={isQueued && !turnProgress ? QUEUED_TURN_LABEL : describeTurnProgress(turnProgress)}
           deleteAction={canDeleteMessages ? { disabled: deleteMessageDisabled, onDelete: setPendingDeleteId } : undefined}
         />
       </div>

@@ -113,3 +113,22 @@ class TestGraphPathGate:
         unsafe = '<img src="https://attacker.com/b.png">'
         with pytest.raises(AgentError):
             gate_emitted_html(unsafe, lambda: unsafe, session_id="s1")
+
+
+def test_a_retry_starts_no_mlflow_run():
+    """The gate runs inside concurrent chat jobs (several per process) and graph
+    builder threads.  ``mlflow.log_param`` outside a run starts a run in whichever
+    experiment is process-global at that moment (another user's, under concurrency)
+    and nothing ends it, so the gate must not touch MLflow's fluent run API."""
+    from unittest.mock import patch
+
+    def regenerate():
+        return "<div class='slide'>now clean</div>"
+
+    with patch("src.services.agent.mlflow") as mlflow_mock:
+        out, retried = _run_output_safety_gate(
+            '<script>fetch("https://x")</script>', regenerate, session_id="s1"
+        )
+    assert retried is True
+    assert mlflow_mock.log_param.call_count == 0
+    assert mlflow_mock.start_run.call_count == 0
