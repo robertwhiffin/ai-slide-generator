@@ -274,6 +274,31 @@ def test_direct_can_use_only_is_dropped():
     assert holders_from_acl(acl) == [AclHolder("USER", "manager@x.com")]
 
 
+def test_permission_with_inherited_from_object_is_treated_as_inherited():
+    # The workspace `admins` group gets CAN_MANAGE on every app from /apps. If the
+    # API ever omits the `inherited` flag, `inherited_from_object` alone must still
+    # mark it inherited, or workspace admins stay admins.
+    acl = _acl(
+        _group(
+            "admins",
+            AppPermission(
+                inherited=None,
+                inherited_from_object=["/apps"],
+                permission_level=CAN_MANAGE,
+            ),
+        ),
+        # Control, kept: no flag and no inherited-from object is a direct grant.
+        _user(
+            "direct@x.com",
+            AppPermission(
+                inherited=None, inherited_from_object=None, permission_level=CAN_MANAGE
+            ),
+        ),
+    )
+
+    assert holders_from_acl(acl) == [AclHolder("USER", "direct@x.com")]
+
+
 def test_service_principals_are_dropped():
     acl = _acl(
         _sp("434da09e-20ca-4f44-af60-32c51579bd5a", _direct()),

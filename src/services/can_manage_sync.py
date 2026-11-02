@@ -43,7 +43,9 @@ def holders_from_acl(acl: AppPermissions) -> list[AclHolder]:
         if not name or not name.strip():
             continue
         direct_manage = any(
-            p.permission_level == AppPermissionLevel.CAN_MANAGE and not p.inherited
+            p.permission_level == AppPermissionLevel.CAN_MANAGE
+            and not p.inherited
+            and not p.inherited_from_object
             for p in (entry.all_permissions or [])
         )
         if not direct_manage:

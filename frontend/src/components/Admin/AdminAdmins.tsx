@@ -8,12 +8,27 @@ import { useToast } from '../../contexts/ToastContext';
 
 const AMBER_COPY =
   "Tellr can't read this app's permissions. Run tellr.update to grant the app access.";
+// Stored by the sync when the read worked but found no direct holders.
+const EMPTY_READ_ERROR = "the app's permissions list no direct CAN_MANAGE users or groups";
+const NO_DIRECT_HOLDERS_COPY =
+  "Tellr can read this app's permissions, but no user or group holds CAN_MANAGE on the app directly. Grant someone Can Manage on the app in Databricks.";
 const LOCK_TITLE = "Change this in the app's Permissions in Databricks";
 
-const BADGES: Record<AdminSource, { label: string; className: string }> = {
+type Badge = { label: string; className: string };
+
+const BADGES: Record<AdminSource, Badge> = {
   can_manage_sync: { label: 'CAN_MANAGE on app', className: 'bg-indigo-50 text-indigo-800' },
   manual: { label: 'Added in Tellr', className: 'bg-amber-100 text-amber-800' },
 };
+
+function badgeFor(source: string): Badge {
+  return (
+    (BADGES as Record<string, Badge | undefined>)[source] ?? {
+      label: source,
+      className: 'bg-gray-100 text-gray-700',
+    }
+  );
+}
 
 function formatAge(iso: string): string {
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
@@ -42,7 +57,7 @@ const SyncStatus: React.FC<{ sync: AdminSyncStatus }> = ({ sync }) => {
         <>Synced from app permissions {formatAge(sync.last_success_at)}</>
       ) : (
         <>
-          <div>{AMBER_COPY}</div>
+          <div>{sync.last_error === EMPTY_READ_ERROR ? NO_DIRECT_HOLDERS_COPY : AMBER_COPY}</div>
           {sync.last_error && <div className="mt-1 font-mono text-[11px]">{sync.last_error}</div>}
         </>
       )}
@@ -135,7 +150,12 @@ export const AdminAdmins: React.FC = () => {
     try {
       await adminApi.removeAdmin(entry.manual_permission_id);
       await load();
-      showToast('Admin removed', 'success');
+      showToast(
+        entry.sources.includes('can_manage_sync')
+          ? 'Removed the Tellr-added entry. Still an admin through CAN_MANAGE on the app.'
+          : 'Admin removed',
+        'success',
+      );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       showToast(`Failed to remove admin: ${message}`, 'error');
@@ -147,7 +167,8 @@ export const AdminAdmins: React.FC = () => {
       <h2 className="text-lg font-semibold text-gray-900">Admins</h2>
       <p className="mb-4 mt-1 text-sm text-gray-500">
         Admins can open this page. Anyone with CAN_MANAGE on the app is an admin automatically;
-        you can also add users and groups here.
+        you can also add users and groups here. Members of a listed group are admins through
+        that group, even if they are not listed individually.
       </p>
 
       {sync && <SyncStatus sync={sync} />}
@@ -224,14 +245,17 @@ export const AdminAdmins: React.FC = () => {
                     </small>
                   )}
                 </span>
-                {entry.sources.map(s => (
-                  <span
-                    key={s}
-                    className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] ${BADGES[s].className}`}
-                  >
-                    {BADGES[s].label}
-                  </span>
-                ))}
+                {entry.sources.map(s => {
+                  const badge = badgeFor(s);
+                  return (
+                    <span
+                      key={s}
+                      className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] ${badge.className}`}
+                    >
+                      {badge.label}
+                    </span>
+                  );
+                })}
                 {manual ? (
                   <button
                     type="button"
@@ -242,7 +266,12 @@ export const AdminAdmins: React.FC = () => {
                     Remove
                   </button>
                 ) : (
-                  <span title={LOCK_TITLE} className="flex w-14 justify-end text-gray-400">
+                  <span
+                    role="img"
+                    aria-label={LOCK_TITLE}
+                    title={LOCK_TITLE}
+                    className="flex w-14 justify-end text-gray-400"
+                  >
                     <FiLock />
                   </span>
                 )}

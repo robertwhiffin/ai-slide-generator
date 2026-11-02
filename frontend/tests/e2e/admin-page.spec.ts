@@ -98,8 +98,9 @@ function adminsFixture() {
         identity_id: null,
         sources: ['can_manage_sync'],
         manual_permission_id: null,
-        added_by: 'can_manage_sync',
-        added_at: '2026-11-02T09:00:00+00:00',
+        // A sync-only entry carries no "added by": the API sends null for both.
+        added_by: null,
+        added_at: null,
       },
       {
         identity_type: 'GROUP',

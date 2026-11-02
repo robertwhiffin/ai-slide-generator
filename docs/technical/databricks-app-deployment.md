@@ -282,7 +282,7 @@ Besides re-uploading files, `update()` grants the app's service principal `CAN_M
 databricks apps update-permissions <app_name> --json '{"access_control_list":[{"service_principal_name":"<app service principal client id>","permission_level":"CAN_MANAGE"}]}'
 ```
 
-Or add the app's service principal with Can Manage in the app's Permissions tab. Without the grant, only admins added on the Admins tab exist. See [Permissions Model](permissions-model.md#app-admin).
+Or add the app's service principal with Can Manage in the app's Permissions tab. Without the grant, Tellr cannot read who holds CAN_MANAGE. On an install that has never synced, there are no admins at all until the grant works. See [Permissions Model](permissions-model.md#app-admin).
 
 ### Generated app.yaml
 

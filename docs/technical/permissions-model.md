@@ -497,7 +497,7 @@ A tier above the per-resource permissions above, used for app-wide state rather 
 - `can_manage_sync`: written by the background CAN_MANAGE sync (`src/services/can_manage_sync.py`).
 - `manual`: added or removed on the Admins tab through the admin API (`src/api/routes/admin_permissions.py`, mounted at `/api/admin/admins`). Only manual rows can be removed there.
 
-**The sync.** The app's own service principal reads the app's ACL (`apps.get_permissions`) and reconciles the `can_manage_sync` rows (`reconcile_can_manage` in `src/services/admin_permissions.py`). Only **direct** `CAN_MANAGE` users and groups count; inherited entries and service-principal entries are skipped. It runs every 30 s until the first success and every 300 s after that. A failed read, or an ACL with no direct holders, changes nothing: the existing rows stay as they were.
+**The sync.** The app's own service principal reads the app's ACL (`apps.get_permissions`) and reconciles the `can_manage_sync` rows (`reconcile_can_manage` in `src/services/admin_permissions.py`). Only **direct** `CAN_MANAGE` users and groups count; inherited entries and service-principal entries are skipped. It runs in each uvicorn worker: every 30 s until the first success and every 300 s after that. A failed read, or an ACL with no direct holders, changes nothing: the existing rows stay as they were. The outcome of each run is stored in `permission_sync_state` (key `app_can_manage`), which drives the status line on the Admins tab.
 
 **Matching the caller.** A `USER` row matches the caller's email; a `GROUP` row matches one of the caller's own groups, read with the caller's own token (`current_user.me().groups`). Matching is case-insensitive. The app SP can list ACL entries but cannot expand a group into its members, so groups are matched from the caller's side.
 
@@ -521,6 +521,7 @@ A tier above the per-resource permissions above, used for app-wide state rather 
 | System default slide style | Same reasoning |
 | Usage analytics endpoints | Workspace-wide activity data |
 | Google credentials management | App-wide OAuth configuration |
+| Admins tab (`/api/admin/admins`) | Decides who else is an admin |
 
 **On design systems the tiers compose.** Reads are open (org-shared content), mutations are creator-or-admin, and the org default is admin-only *even for the row's creator* — and that check is made on the loaded row **before** the authorship comparison, so being the creator cannot bypass it. A row whose `created_by` is NULL or blank is admin-only to mutate, because an unattributed row must never become "anyone may manage this". See [Design System Library §5.1](design-system-library.md).
 

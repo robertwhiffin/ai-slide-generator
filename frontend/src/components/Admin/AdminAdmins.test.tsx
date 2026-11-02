@@ -24,6 +24,12 @@
  *   - skip the reload after add / remove                               -> those tests
  *   - swallow the remove error, or drop the line optimistically        -> "a failed remove ..."
  *   - toast String(err.detail) / the raw JSON body for a 422 list      -> "a 422 with a list detail ..."
+ *   - "Run tellr.update" for an empty (successful) read                -> "no-direct-holders headline ..."
+ *   - the no-direct-holders headline for every error                   -> "amber ... never succeeded"
+ *   - "Admin removed" when the entry still has CAN_MANAGE              -> "... still an admin"
+ *   - the CAN_MANAGE toast for a manual-only entry                     -> "... says Admin removed"
+ *   - index BADGES[s] unguarded                                        -> "an unknown source ..."
+ *   - drop role="img" / the aria-label from the lock                   -> "the lock is an image ..."
  */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +73,14 @@ const AMBER_COPY =
   "Tellr can't read this app's permissions. Run tellr.update to grant the app access.";
 const PERMISSION_DENIED =
   'PermissionDenied: the caller does not have permission to call ruleSets/get';
+// What the sync stores when the read worked but found no direct holders.
+const EMPTY_READ_ERROR = "the app's permissions list no direct CAN_MANAGE users or groups";
+const NO_DIRECT_HOLDERS_COPY =
+  "Tellr can read this app's permissions, but no user or group holds CAN_MANAGE on the app directly. Grant someone Can Manage on the app in Databricks.";
+const STILL_ADMIN_TOAST =
+  'Removed the Tellr-added entry. Still an admin through CAN_MANAGE on the app.';
+const GROUP_MEMBERS_BLURB =
+  'Members of a listed group are admins through that group, even if they are not listed individually.';
 
 const sam: AppAdminEntry = {
   identity_type: 'USER',
@@ -292,6 +306,58 @@ describe('AdminAdmins', () => {
       expect(status).toHaveTextContent(AMBER_COPY);
       expect(status).toHaveTextContent(PERMISSION_DENIED);
     });
+
+    it('shows the no-direct-holders headline for an empty read', async () => {
+      // The read succeeded but found no direct holders: granting the app access
+      // (tellr.update) would not help, so the headline must not say to.
+      listAdmins.mockResolvedValue(
+        response([sam, team], {
+          last_attempt_at: minutesBefore(1),
+          last_success_at: null,
+          last_error: EMPTY_READ_ERROR,
+        }),
+      );
+      render(<AdminAdmins />);
+
+      const status = await screen.findByTestId('admin-sync-status');
+      await waitFor(() => expect(status).toHaveAttribute('data-state', 'warn'));
+      expect(status).toHaveTextContent(NO_DIRECT_HOLDERS_COPY);
+      expect(status).not.toHaveTextContent('Run tellr.update');
+      expect(status).not.toHaveTextContent(AMBER_COPY);
+    });
+  });
+
+  it('the blurb says members of a listed group are admins through it', async () => {
+    render(<AdminAdmins />);
+    await findRow(sam);
+
+    expect(screen.getByText(GROUP_MEMBERS_BLURB, { exact: false })).toBeInTheDocument();
+  });
+
+  it('an unknown source renders a fallback badge instead of crashing', async () => {
+    const future = {
+      ...team,
+      identity_name: 'Future',
+      sources: ['manual', 'scim_sync'] as unknown as AppAdminEntry['sources'],
+    };
+    listAdmins.mockResolvedValue(response([sam, future]));
+    render(<AdminAdmins />);
+
+    const row = await findRow(future);
+    expect(within(row).getByText('Added in Tellr')).toBeInTheDocument();
+    expect(within(row).getByText('scim_sync', { exact: true })).toBeInTheDocument();
+    // The rest of the tab still renders.
+    expect(await findRow(sam)).toBeInTheDocument();
+  });
+
+  it('the lock is an image named by its tooltip on a CAN_MANAGE-only line', async () => {
+    render(<AdminAdmins />);
+    const robertRow = await findRow(robert);
+
+    const lock = within(robertRow).getByRole('img', { name: LOCK_TITLE });
+    // The name would fall back to `title` alone, so pin the aria-label itself.
+    expect(lock).toHaveAttribute('aria-label', LOCK_TITLE);
+    expect(lock).toHaveAttribute('title', LOCK_TITLE);
   });
 
   it('search then Add admin posts the USER email, not the display name', async () => {
@@ -433,6 +499,26 @@ describe('AdminAdmins', () => {
     await waitFor(() =>
       expect(within(screen.getByTestId(rowTestId(sam))).queryByText('Added in Tellr')).toBeNull(),
     );
+  });
+
+  it('removing an entry that also has CAN_MANAGE says it is still an admin', async () => {
+    render(<AdminAdmins />);
+    const samRow = await findRow(sam);
+
+    fireEvent.click(within(samRow).getByRole('button', { name: 'Remove sam@x.com' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(STILL_ADMIN_TOAST, 'success'));
+    expect(showToast).not.toHaveBeenCalledWith('Admin removed', 'success');
+  });
+
+  it('removing a manual-only entry says Admin removed', async () => {
+    render(<AdminAdmins />);
+    const teamRow = await findRow(team);
+
+    fireEvent.click(within(teamRow).getByRole('button', { name: 'Remove Team' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Admin removed', 'success'));
+    expect(showToast).not.toHaveBeenCalledWith(STILL_ADMIN_TOAST, 'success');
   });
 
   it('a failed remove shows an error toast and keeps the line', async () => {

@@ -1801,6 +1801,11 @@ def _ensure_app_sp_can_manage(
                 "Permissions tab"
             )
         print(f"   Admin sync will not work until this is fixed: {fix}")
+        print(
+            "   Without the grant, Tellr cannot read who holds CAN_MANAGE. On an "
+            "install that has never synced, there are no admins at all until the "
+            "grant works."
+        )
         return False
     print("   App service principal granted CAN_MANAGE on the app (admin sync)")
     return True
