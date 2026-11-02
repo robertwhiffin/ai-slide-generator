@@ -60,9 +60,11 @@ import pytest
 from databricks.sdk.errors import NotFound, PermissionDenied
 from mcp.shared.exceptions import McpError
 from mcp.types import CallToolResult, ErrorData, TextContent, Tool
+
 from src.domain.gateway_service_name import (
     validate_service_name as domain_validate_service_name,
 )
+from src.services.agent_tools import genie_one
 from src.services.agent_tools.gateway_mcp import (
     CALL_TIMEOUT_SECONDS,
     LIST_TIMEOUT_SECONDS,
@@ -83,8 +85,6 @@ from src.services.agent_tools.mcp_transport import (
     run_with_timeout,
 )
 
-from src.services.agent_tools import genie_one
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "gateway_mcp"
 
@@ -96,6 +96,12 @@ GITHUB = "system.ai.github"
 LAKEDRAW = "db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw"
 SERVICES_PREFIX = "/ai-gateway/mcp-services/"
 
+#: The workspace the LakeDraw fixtures were recorded on. A link in a message is
+#: trusted only on the client's own host, so tests that expect the recorded link
+#: build their client on this host.
+LAKEDRAW_HOST = "https://fevm-db-tellr-dev-workspace.cloud.databricks.com"
+#: The recorded workspace id (the fixtures' ``x-databricks-org-id``).
+LAKEDRAW_ORG_ID = "7474645249186749"
 #: The sign-in link in the recorded LakeDraw message, without the "," after it.
 LAKEDRAW_SIGN_IN_URL = (
     "https://fevm-db-tellr-dev-workspace.cloud.databricks.com/mcp-service-login"
@@ -266,12 +272,13 @@ class FakeFactory:
 def make_client(
     fake: FakeMcpClient,
     *,
+    host: str = HOST,
     service_name: str = WEB_SEARCH,
     token_scopes: frozenset[str] | None = None,
 ) -> tuple[GatewayMcpClient, FakeFactory]:
     factory = FakeFactory(fake)
     client = GatewayMcpClient(
-        host=HOST,
+        host=host,
         token=TOKEN,
         service_name=service_name,
         token_scopes=token_scopes,
@@ -510,9 +517,10 @@ def test_sign_in_url_adds_workspace_id_when_known():
 
 
 def test_sign_in_url_prefers_the_url_in_the_message():
-    # The URL in the message wins over a built one, even when the workspace id is known.
+    # The URL in the message (on the client's host) wins over a built one, even when
+    # the workspace id is known.
     assert (
-        sign_in_url("https://h", LAKEDRAW, message=_lakedraw_message(), workspace_id="42")
+        sign_in_url(LAKEDRAW_HOST, LAKEDRAW, message=_lakedraw_message(), workspace_id="42")
         == LAKEDRAW_SIGN_IN_URL
     )
     # A message with no URL leaves the built one.
@@ -527,7 +535,129 @@ def test_sign_in_url_strips_trailing_punctuation_from_the_message_url(tail: str)
     url = "https://w.example/mcp-service-login?name=a.b.c&o=7"
     message = f"Sign in at {url}{tail} then retry your request."
 
-    assert sign_in_url("https://h", "a.b.c", message=message) == url
+    assert sign_in_url("https://w.example", "a.b.c", message=message) == url
+
+
+#: Links that are not on LAKEDRAW_HOST, each standing in for one a service could put
+#: in its own text. Only the scheme and authority decide, so look-alikes count too.
+_FOREIGN_SIGN_IN_URLS = {
+    "other_host": f"https://evil.example/mcp-service-login?name={LAKEDRAW}&o=1",
+    "workspace_host_as_prefix": (
+        f"https://fevm-db-tellr-dev-workspace.cloud.databricks.com.evil.example"
+        f"/mcp-service-login?name={LAKEDRAW}&o=1"
+    ),
+    "workspace_host_as_userinfo": (
+        f"https://fevm-db-tellr-dev-workspace.cloud.databricks.com@evil.example"
+        f"/mcp-service-login?name={LAKEDRAW}&o=1"
+    ),
+    "other_port": (
+        f"https://fevm-db-tellr-dev-workspace.cloud.databricks.com:8443"
+        f"/mcp-service-login?name={LAKEDRAW}&o=1"
+    ),
+}
+
+
+def _lakedraw_message_linking(url: str) -> str:
+    """The recorded LakeDraw message, with its sign-in link swapped for *url*."""
+    message = _lakedraw_message().replace(LAKEDRAW_SIGN_IN_URL, url)
+    # *url* is the message's one and only link.
+    assert url in message and message.count("mcp-service-login") == 1
+    return message
+
+
+def _sign_in_url_via(
+    path: str,
+    message: str,
+    *,
+    host: str = LAKEDRAW_HOST,
+    headers: dict[str, str] | None = None,
+) -> str | None:
+    """The sign-in link produced for *message* on a client of *host*, along one *path*.
+
+    *headers* are the 401's (default: content-type only, so no workspace id is known).
+    """
+    if path == "sign_in_url":
+        return sign_in_url(host, LAKEDRAW, message=message)
+    if path == "jsonrpc_32006_in_401":
+        body = load("lakedraw_initialize_not_signed_in")["body_json"]
+        body = {**body, "error": {**body["error"], "message": message}}
+        reply_headers = headers or {"content-type": "application/json"}
+        exc = _in_groups(
+            _http_error(401, json.dumps(body), headers=reply_headers, service=LAKEDRAW), 1
+        )
+        return map_gateway_error(
+            exc, host=host, service_name=LAKEDRAW, lacks_gateway_scope=False
+        ).sign_in_url
+    if path == "jsonrpc_32006_in_200":
+        exc = _in_groups(McpError(ErrorData(code=-32006, message=message)), 2)
+        return map_gateway_error(
+            exc, host=host, service_name=LAKEDRAW, lacks_gateway_scope=False
+        ).sign_in_url
+    assert path == "is_error_result"
+    client, _ = make_client(
+        FakeMcpClient(result=_error_result(message)), host=host, service_name=LAKEDRAW
+    )
+    with pytest.raises(GatewayMcpError) as info:
+        client.call_tool("create_diagram", {})
+    assert info.value.kind == "sign_in_required"
+    return info.value.sign_in_url
+
+
+_SIGN_IN_PATHS = ["sign_in_url", "jsonrpc_32006_in_401", "jsonrpc_32006_in_200", "is_error_result"]
+
+
+@pytest.mark.parametrize("path", _SIGN_IN_PATHS)
+@pytest.mark.parametrize(
+    "foreign_url", list(_FOREIGN_SIGN_IN_URLS.values()), ids=list(_FOREIGN_SIGN_IN_URLS)
+)
+def test_sign_in_url_from_foreign_host_is_replaced_by_built_link(path: str, foreign_url: str):
+    """Ruling on I1: a message can come from the service behind the Gateway, and the
+    link is shown to the user as Tellr's own sign-in link. So a link that is not on
+    the client's host is ignored, and the link is built on the client's host."""
+    assert _sign_in_url_via(path, _lakedraw_message_linking(foreign_url)) == (
+        f"{LAKEDRAW_HOST}/mcp-service-login?name={LAKEDRAW}"
+    )
+
+
+def test_a_foreign_link_never_lends_its_workspace_id_to_the_built_one():
+    """The built link's ``&o=`` is the known workspace id, never the foreign link's."""
+    message = _lakedraw_message_linking(_FOREIGN_SIGN_IN_URLS["other_host"])
+
+    assert sign_in_url(LAKEDRAW_HOST, LAKEDRAW, message=message, workspace_id="42") == (
+        f"{LAKEDRAW_HOST}/mcp-service-login?name={LAKEDRAW}&o=42"
+    )
+    # Through a 401 carrying the recorded headers: the id is the header's.
+    recorded_headers = load("lakedraw_initialize_not_signed_in")["headers"]
+    assert _sign_in_url_via("jsonrpc_32006_in_401", message, headers=recorded_headers) == (
+        f"{LAKEDRAW_HOST}/mcp-service-login?name={LAKEDRAW}&o={LAKEDRAW_ORG_ID}"
+    )
+
+
+@pytest.mark.parametrize("path", _SIGN_IN_PATHS)
+@pytest.mark.parametrize(
+    ("host", "message_url"),
+    [
+        ("https://FEVM-DB-Tellr-Dev-Workspace.cloud.databricks.com", LAKEDRAW_SIGN_IN_URL),
+        (f"{LAKEDRAW_HOST}/", LAKEDRAW_SIGN_IN_URL),
+        (
+            LAKEDRAW_HOST,
+            LAKEDRAW_SIGN_IN_URL.replace(
+                "fevm-db-tellr-dev-workspace.cloud", "FEVM-DB-TELLR-DEV-WORKSPACE.Cloud"
+            ),
+        ),
+    ],
+    ids=["host_in_other_case", "host_with_trailing_slash", "link_in_other_case"],
+)
+def test_sign_in_url_on_the_same_host_in_another_case_is_kept(
+    path: str, host: str, message_url: str
+):
+    """Hosts compare case-insensitively, ignoring a trailing "/" on the client's host.
+    The kept link is the message's own, character for character."""
+    assert message_url.startswith("https://")
+
+    assert _sign_in_url_via(path, _lakedraw_message_linking(message_url), host=host) == (
+        message_url
+    )
 
 
 def test_timeouts_are_thirty_seconds_to_list_and_ninety_to_call():
@@ -575,7 +705,7 @@ def test_not_signed_in_401_maps_to_sign_in_with_url_from_message(depth, lacks_ga
     exc = _in_groups(_lakedraw_not_signed_in_error(), depth)
 
     mapped = map_gateway_error(
-        exc, host=HOST, service_name=LAKEDRAW, lacks_gateway_scope=lacks_gateway_scope
+        exc, host=LAKEDRAW_HOST, service_name=LAKEDRAW, lacks_gateway_scope=lacks_gateway_scope
     )
 
     assert isinstance(mapped, GatewayMcpError)
@@ -597,7 +727,9 @@ def test_a_sign_in_body_longer_than_500_chars_is_read_whole():
     assert body.index('"code"') > 500 and body.index("mcp-service-login") > 500
     exc = _in_groups(_http_error(401, body, headers=recorded["headers"], service=LAKEDRAW), 1)
 
-    mapped = map_gateway_error(exc, host=HOST, service_name=LAKEDRAW, lacks_gateway_scope=False)
+    mapped = map_gateway_error(
+        exc, host=LAKEDRAW_HOST, service_name=LAKEDRAW, lacks_gateway_scope=False
+    )
 
     assert mapped.kind == "sign_in_required"
     assert mapped.sign_in_url == LAKEDRAW_SIGN_IN_URL
@@ -617,7 +749,9 @@ def test_the_sign_in_url_is_taken_from_the_parsed_message_not_the_raw_body():
     assert f'{LAKEDRAW_SIGN_IN_URL}","data":null}}}}' in body
     exc = _in_groups(_http_error(401, body, headers=recorded["headers"], service=LAKEDRAW), 1)
 
-    mapped = map_gateway_error(exc, host=HOST, service_name=LAKEDRAW, lacks_gateway_scope=False)
+    mapped = map_gateway_error(
+        exc, host=LAKEDRAW_HOST, service_name=LAKEDRAW, lacks_gateway_scope=False
+    )
 
     assert mapped.kind == "sign_in_required"
     assert mapped.sign_in_url == LAKEDRAW_SIGN_IN_URL
@@ -867,23 +1001,26 @@ def test_call_tool_returns_the_result_and_passes_name_and_arguments():
 
 
 @pytest.mark.parametrize(
-    ("text", "url"),
+    ("host", "text", "url"),
     [
-        (_lakedraw_message(), LAKEDRAW_SIGN_IN_URL),
+        (LAKEDRAW_HOST, _lakedraw_message(), LAKEDRAW_SIGN_IN_URL),
         (
+            HOST,
             "You're not signed in to the MCP service 'system.ai.web_search'.",
             f"{HOST}/mcp-service-login?name={WEB_SEARCH}",
         ),
         (
+            "https://w.example",
             "Authorize first: https://w.example/mcp-service-login?name=system.ai.web_search&o=9.",
             "https://w.example/mcp-service-login?name=system.ai.web_search&o=9",
         ),
     ],
     ids=["recorded_lakedraw_text", "not_signed_in_without_url", "login_url_only"],
 )
-def test_call_tool_is_error_sign_in_result_maps_to_sign_in_required(text: str, url: str):
-    """T1.2: an isError result that says "not signed in" or links mcp-service-login."""
-    client, _ = make_client(FakeMcpClient(result=_error_result(text)))
+def test_call_tool_is_error_sign_in_result_maps_to_sign_in_required(host: str, text: str, url: str):
+    """T1.2: an isError result that says "not signed in" or links mcp-service-login.
+    Each client is on the host of the link it should keep."""
+    client, _ = make_client(FakeMcpClient(result=_error_result(text)), host=host)
 
     with pytest.raises(GatewayMcpError) as info:
         client.call_tool("web_search", {"query": "q"})
@@ -1057,8 +1194,10 @@ def test_client_uses_user_bearer_not_oauth_provider(operation):
 
     The user's bearer token reaches the service path. The stock OAuth provider
     never runs (it would start RFC 9728 discovery). The 401's -32006 body becomes
-    sign-in required with the exact URL. One ``initialize`` is sent and no more:
-    ``_handle_mcp_errors`` would re-send one.
+    sign-in required. Its recorded link is on the recorded workspace, not on this
+    client's (local) host, so it is not trusted: the link is built on the client's
+    host, with the workspace id from the 401's ``x-databricks-org-id``. One
+    ``initialize`` is sent and no more: ``_handle_mcp_errors`` would re-send one.
     """
     with _LocalGateway(_lakedraw_not_signed_in) as gateway:
         client = GatewayMcpClient(host=gateway.host, token=TOKEN, service_name=LAKEDRAW)
@@ -1066,7 +1205,9 @@ def test_client_uses_user_bearer_not_oauth_provider(operation):
             _run(client, operation, timeout_seconds=30)
 
     assert info.value.kind == "sign_in_required"
-    assert info.value.sign_in_url == LAKEDRAW_SIGN_IN_URL
+    assert info.value.sign_in_url == (
+        f"{gateway.host}/mcp-service-login?name={LAKEDRAW}&o={LAKEDRAW_ORG_ID}"
+    )
     assert gateway_service_url(gateway.host, LAKEDRAW) == gateway.host + _service_path(LAKEDRAW)
     to_service = gateway.requests_to(_service_path(LAKEDRAW))
     assert [(r.method, r.rpc_method, r.authorization) for r in to_service] == [

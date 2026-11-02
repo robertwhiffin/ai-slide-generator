@@ -15,6 +15,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal
+from urllib.parse import urlsplit
 
 from databricks.sdk.errors import NotFound, PermissionDenied
 from mcp.shared.exceptions import McpError
@@ -106,6 +107,24 @@ def gateway_service_url(host: str, service_name: str) -> str:
     return f"{host}{_service_path(service_name)}"
 
 
+def _origin(url: str) -> tuple[str, str] | None:
+    """``(scheme, authority)`` of *url*, lower-cased (``None`` if it does not parse).
+
+    A trailing ``/`` is part of the path, so ``https://h/`` and ``https://h`` agree.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+def _on_host(url: str, host: str) -> bool:
+    """True if *url* has exactly *host*'s scheme and authority (user info and port included)."""
+    origin = _origin(url)
+    return origin is not None and origin == _origin(host)
+
+
 def sign_in_url(
     host: str,
     service_name: str,
@@ -113,11 +132,18 @@ def sign_in_url(
     message: str | None = None,
     workspace_id: str | None = None,
 ) -> str:
-    """Where the user signs in to a service: the link in *message*, else a built one."""
+    """Where the user signs in to a service: the link in *message*, else a built one.
+
+    The link in *message* is used only when it is on *host* itself.  The message
+    can come from the service behind the Gateway, and the link is shown to the
+    user as Tellr's own sign-in link, so a link anywhere else is ignored.
+    """
     if message:
         found = _SIGN_IN_URL_RE.search(message)
         if found:
-            return found.group(0).rstrip(".,;)")
+            url = found.group(0).rstrip(".,;)")
+            if _on_host(url, host):
+                return url
     url = f"{host}/mcp-service-login?name={service_name}"
     return f"{url}&o={workspace_id}" if workspace_id else url
 
