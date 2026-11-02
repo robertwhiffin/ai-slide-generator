@@ -574,11 +574,11 @@ def test_status_probes_as_the_calling_user(
     ]
 
 
-#: Sentinel: the spec gives no exact status copy for this state, so the message is
-#: whatever ``status_message`` returns for it (consent copy also allowed for scope).
-FROM_STATUS_MESSAGE = object()
-
 GATEWAY_DETAIL = "detail from the gateway"
+
+#: Controller ruling: a status surface builds no deck, so the unavailable copy drops
+#: the turn-time "The deck was built without it." and keeps the reason.
+UNAVAILABLE_COPY = f"LakeDraw is unavailable right now ({GATEWAY_DETAIL})."
 
 
 @pytest.mark.parametrize(
@@ -595,9 +595,11 @@ GATEWAY_DETAIL = "detail from the gateway"
             f"LakeDraw ({LAKEDRAW}) was not found on this workspace. "
             "Ask an admin to check the connection.",
         ),
-        ("missing_scope", "missing_scope", FROM_STATUS_MESSAGE),
-        ("unavailable", "unavailable", FROM_STATUS_MESSAGE),
-        ("timeout", "unavailable", FROM_STATUS_MESSAGE),
+        # Controller ruling: the consent copy names the app's OAuth client id, read
+        # from the CALLER's token, not the placeholder.
+        ("missing_scope", "missing_scope", consent_message(oauth_client_id=CLIENT_ID)),
+        ("unavailable", "unavailable", UNAVAILABLE_COPY),
+        ("timeout", "unavailable", UNAVAILABLE_COPY),
     ],
 )
 def test_status_maps_each_failure_to_its_state(
@@ -608,9 +610,8 @@ def test_status_maps_each_failure_to_its_state(
     state: str,
     message: Any,
 ) -> None:
-    """The exact copy where the spec gives it; elsewhere ``message`` is what
-    ``status_message`` says for the probe's state, display name, service and detail
-    (for ``missing_scope`` the existing consent message is accepted too)."""
+    """The exact copy for every failure state: the spec's copy, the consent message
+    with the caller's client id, and the ruled unavailable copy."""
     _register(db_factory, LAKEDRAW, display_name="LakeDraw", tool_allowlist=["draw"])
     _bind_user()
     gateway.result = GatewayMcpError(kind, GATEWAY_DETAIL)  # type: ignore[arg-type]
@@ -623,23 +624,7 @@ def test_status_maps_each_failure_to_its_state(
     assert body["state"] == state
     assert body["sign_in_url"] is None
     assert body["tools"] == []
-    if message is FROM_STATUS_MESSAGE:
-        from src.services.gateway_mcp_registry import status_message
-
-        expected = {
-            status_message(
-                state,
-                display_name="LakeDraw",
-                service_name=LAKEDRAW,
-                detail=GATEWAY_DETAIL,
-                sign_in_url=None,
-            )
-        }
-        if state == "missing_scope":
-            expected.add(consent_message(oauth_client_id=CLIENT_ID))
-        assert body["message"] in expected
-    else:
-        assert body["message"] == message
+    assert body["message"] == message
 
 
 @pytest.mark.parametrize("bad_name", ["a.b", "../x.y.z", "a.b/c.d", ""])

@@ -40,6 +40,7 @@ from src.api.routes._authz import require_admin
 from src.api.schemas.gateway_mcp import GatewayStatusOut
 from src.core.database import Base, get_db
 from src.core.databricks_client import reset_user_client, set_user_client
+from src.core.scope_errors import consent_message
 from src.core.user_context import set_current_user
 from src.database.models import GatewayMcpConnection
 from src.services import gateway_mcp_registry as registry
@@ -749,6 +750,26 @@ def test_connection_test_maps_each_failure_to_its_state(
     assert body["tools"] == []
 
 
+def test_connection_test_missing_scope_names_the_admins_client_id(
+    client: TestClient, gateway: _GatewayRecorder
+) -> None:
+    """Controller ruling (Task 3): the consent copy carries the OAuth client id from
+    the calling admin's token, not the placeholder."""
+    token = _jwt(
+        {"sub": ADMIN, "client_id": "tellr-app-1234", "scope": "ai-gateway iam.current-user:read"}
+    )
+    set_user_client(_user_client(HOST, token))
+    gateway.result = GatewayMcpError("missing_scope", "the token lacks ai-gateway")
+
+    response = client.post(f"{BASE}/test", json={"service_name": LAKEDRAW})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["state"] == "missing_scope"
+    assert body["message"] == consent_message(oauth_client_id="tellr-app-1234")
+    assert body["message"] != consent_message(oauth_client_id=None)
+
+
 @pytest.mark.parametrize("bad_name", ["a.b", "a.b/c.d", "../x.y.z", ""])
 def test_connection_test_rejects_a_bad_service_name_422_without_probing(
     client: TestClient, gateway: _GatewayRecorder, bad_name: str
@@ -819,6 +840,48 @@ def test_status_message_uses_the_exact_copy(
             sign_in_url=sign_in_url,
         )
         == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("HTTP 502", "LakeDraw is unavailable right now (HTTP 502)."),
+        (None, "LakeDraw is unavailable right now (no reason given)."),
+    ],
+    ids=["with_detail", "no_detail"],
+)
+def test_status_message_unavailable_copy_mentions_no_deck(
+    detail: str | None, expected: str
+) -> None:
+    """Controller ruling (Task 3): the chip and admin surfaces build no deck, so the
+    unavailable copy drops the turn-time "The deck was built without it."."""
+    assert (
+        registry.status_message(
+            "unavailable",
+            display_name="LakeDraw",
+            service_name=LAKEDRAW,
+            detail=detail,
+            sign_in_url=None,
+        )
+        == expected
+    )
+
+
+def test_status_message_missing_scope_uses_the_given_client_id() -> None:
+    """Controller ruling (Task 3): ``oauth_client_id`` reaches the consent copy;
+    omitting it keeps the placeholder."""
+    kwargs: dict[str, Any] = {
+        "display_name": "LakeDraw",
+        "service_name": LAKEDRAW,
+        "detail": None,
+        "sign_in_url": None,
+    }
+    assert registry.status_message(
+        "missing_scope", oauth_client_id="tellr-app-1234", **kwargs
+    ) == consent_message(oauth_client_id="tellr-app-1234")
+    assert registry.status_message("missing_scope", **kwargs) == consent_message(
+        oauth_client_id=None
     )
 
 
