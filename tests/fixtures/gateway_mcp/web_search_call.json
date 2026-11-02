@@ -1,0 +1,32 @@
+{
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+   "name": "web_search",
+   "arguments": {
+    "query": "Databricks AI Gateway MCP services"
+   }
+  }
+ },
+ "status": 200,
+ "headers": {
+  "content-type": "application/json",
+  "x-databricks-org-id": "7474645249186749"
+ },
+ "body_json": {
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+   "content": [
+    {
+     "type": "text",
+     "text": "## Databricks AI Gateway MCP services\n\nDatabricks **MCP Services** let AI agents securely call tools through **Unity AI Gateway**. An MCP service is registered as a Unity Catalog securable, so administrators can control access, exposed tools, policies, credentials, auditing, and usage. ([docs.databricks.com](https://docs.databricks.com/aws/en/agents/agent-framework/agent-tool?utm_source=openai))\n\n### Main service types\n\n1. **Databricks-managed MCPs**\n   - Genie One \u2014 natural-language analytics grounded in Genie Ontology\n   - Databricks SQL \u2014 execute governed SQL queries\n   - AI Search\n   - Unity Catalog functions\n   - Web search and sandbox capabilities, where enabled ([docs.databricks.com](https://docs.databricks.com/aws/en/agents/agent-framework/agent-tool?utm_source=openai))\n\n2. **Databricks-provided third-party services**\n   - Slack\n   - GitHub\n   - Google Drive\n   - Other supported SaaS integrations  \n   These generally require no MCP server hosting. ([docs.databricks.com](https://docs.databricks.com/aws/en/agents/agent-framework/mcp-services?utm_source=openai))\n\n3. **External or custom MCP servers**\n   - Register a self-hosted or third-party MCP server.\n   - Host a custom MCP server in a Databricks App.\n   - Expose Unity Catalog functions or REST APIs as agent tools. ([docs.databricks.com](https://docs.databricks.com/aws/en/agents/mcp-tools?utm_source=openai))\n\n### MCP endpoint format\n\nFor a Unity Gateway MCP service, the endpoint is:\n\n```text\nhttps://<workspace-hostname>/ai-gateway/mcp-services/<catalog>.<schema>.<service>\n```\n\nFor example:\n\n```text\nhttps://<workspace-hostname>/ai-gateway/mcp-services/system.ai.genie_one_mcp\n```\n\nThe `system.ai` services are governed through Unity Gateway, while permissions for some workspace-specific MCP endpoints may be based on the underlying Databricks resource. ([docs.databricks.com](https://docs.databricks.com/gcp/en/agents/mcp-tools/built-in-mcp-services?utm_source=openai))\n\n### How to configure one\n\nIn the Databricks workspace:\n\n1. Open **AI Gateway** or **Unity Gateway**.\n2. Select **MCPs**.\n3. Choose a Databricks-provided MCP, or select **Register MCP Server**.\n4. Configure authentication and provider sign-in if required.\n5. Grant users, groups, or service principals permission to invoke it.\n6. Optionally restrict individual tools and add service policies.\n7. Connect an agent such as Claude, Cursor, Codex, ChatGPT, or a custom Python agent. ([docs.databricks.com](https://docs.databricks.com/aws/en/agents/mcp-tools?utm_source=openai))\n\n### Governance model\n\nMCP Services support:\n\n- Unity Catalog permissions\n- Tool allowlists\n- Service policies for individual calls\n- OAuth and managed credentials\n- Audit and usage logging\n- Caller identity propagation\n- Centralized monitoring through AI Gateway ([docs.databricks.com](https://docs.databricks.com/aws/en/agents/agent-framework/agent-tool?utm_source=openai))\n\nFor most analytics applications, Databricks recommends **Genie One MCP** for business questions and **Databricks SQL MCP** for explicit SQL, development, and data-engineering workflows. ([docs.databricks.com](https://docs.databricks.com/aws/en/agents/mcp-tools?utm_source=openai))\n\n### Sources\n- [MCPs and agent tools | Databricks on AWS](https://docs.databricks.com/aws/en/agents/agent-framework/agent-tool?utm_source=openai)\n- [Connect agents to third-party tools with MCP Services | Databricks on AWS](https://docs.databricks.com/aws/en/agents/agent-framework/mcp-services?utm_source=openai)\n- [MCPs | Databricks on AWS](https://docs.databricks.com/aws/en/agents/mcp-tools?utm_source=openai)\n- [Databricks-provided MCPs | Databricks on Google Cloud](https://docs.databricks.com/gcp/en/agents/mcp-tools/built-in-mcp-services?utm_source=openai)"
+    }
+   ],
+   "isError": false
+  }
+ },
+ "body_text": null
+}

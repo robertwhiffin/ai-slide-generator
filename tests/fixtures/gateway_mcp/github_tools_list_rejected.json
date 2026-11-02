@@ -1,0 +1,23 @@
+{
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list",
+  "params": {}
+ },
+ "status": 200,
+ "headers": {
+  "content-type": "application/json",
+  "x-databricks-org-id": "7474645249186749"
+ },
+ "body_json": {
+  "jsonrpc": "2.0",
+  "id": 2,
+  "error": {
+   "code": -32006,
+   "message": "The MCP service request was rejected (HTTP 401). Check the service authentication and contact the service owner if the problem persists.",
+   "data": null
+  }
+ },
+ "body_text": null
+}

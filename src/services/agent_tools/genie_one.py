@@ -6,23 +6,28 @@ result rows, never from model prose.
 
 from __future__ import annotations
 
-import asyncio
-import builtins
 import logging
 import re
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable, Generator
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol
 
-import httpx
 from databricks.sdk.errors import PermissionDenied
 
 from src.core.scope_errors import is_missing_scope_error, mentions_missing_scope, scopes_grant
 from src.domain.deck_spec import ResolvedFigure
+from src.services.agent_tools.mcp_transport import (
+    UserBearerAuth as _UserBearerAuth,  # noqa: F401 - the name tests and callers use
+)
+from src.services.agent_tools.mcp_transport import (
+    build_user_mcp_client,
+    run_with_timeout,
+)
+from src.services.agent_tools.mcp_transport import describe as _describe
+from src.services.agent_tools.mcp_transport import http_status as _http_status
+from src.services.agent_tools.mcp_transport import walk as _walk
 from src.utils.spotlight import neutralize_delimiters
 
 logger = logging.getLogger(__name__)
@@ -40,7 +45,6 @@ _CALL_GRACE_SECONDS: Final = 10
 #: How much of an error response's body is searched for a scope message.
 _ERROR_BODY_CHARS: Final = 500
 _DENIED_RE: Final = re.compile(r"\b403\b|Forbidden|PERMISSION_DENIED")
-_GROUP: Final = getattr(builtins, "BaseExceptionGroup", ())
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
@@ -85,30 +89,8 @@ class CallTool(Protocol):
     def __call__(self, name: str, args: dict[str, Any], *, timeout_seconds: float) -> Any: ...
 
 
-def _walk(exc: BaseException):
-    seen: set[int] = set()
-    stack = [exc]
-    while stack:
-        cur = stack.pop()
-        if id(cur) in seen:
-            continue
-        seen.add(id(cur))
-        yield cur
-        for nxt in (cur.__cause__, cur.__context__):
-            if nxt is not None:
-                stack.append(nxt)
-        if _GROUP and isinstance(cur, _GROUP):
-            stack.extend(cur.exceptions)
-
-
 def _has_denied_marker(text: str) -> bool:
     return _DENIED_RE.search(text) is not None
-
-
-def _http_status(exc: BaseException) -> int | None:
-    """The HTTP status an exception carries (``httpx.HTTPStatusError``), else ``None``."""
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    return status if isinstance(status, int) else None
 
 
 def _error_body(exc: BaseException) -> str:
@@ -118,29 +100,6 @@ def _error_body(exc: BaseException) -> str:
     except Exception:  # noqa: BLE001 - no response, or a streamed body nobody read
         return ""
     return text[:_ERROR_BODY_CHARS] if isinstance(text, str) else ""
-
-
-def _leaf(exc: BaseException) -> BaseException:
-    """The exception that says what failed: the first in the walk with an HTTP
-    status, else the first that is neither a group nor a cancellation."""
-    fallback: BaseException | None = None
-    for cur in _walk(exc):
-        if _http_status(cur) is not None:
-            return cur
-        if fallback is None and not (
-            (_GROUP and isinstance(cur, _GROUP)) or isinstance(cur, asyncio.CancelledError)
-        ):
-            fallback = cur
-    return fallback or exc
-
-
-def _describe(exc: BaseException) -> str:
-    """``"<leaf type> (HTTP <status>): <leaf text>"``: what an error message says."""
-    leaf = _leaf(exc)
-    status = _http_status(leaf)
-    head = type(leaf).__name__ + (f" (HTTP {status})" if status is not None else "")
-    text = str(leaf)
-    return f"{head}: {text}" if text else head
 
 
 def _map_exception(exc: BaseException, *, lacks_gateway_scope: bool) -> GenieOneError:
@@ -173,74 +132,9 @@ def _map_exception(exc: BaseException, *, lacks_gateway_scope: bool) -> GenieOne
     return GenieOneError(message)
 
 
-class _UserBearerAuth(httpx.Auth):
-    """The signed-in user's token on every request, and nothing else.
-
-    It replaces databricks_mcp's ``DatabricksOAuthClientProvider``, which answers
-    a 401 by starting an OAuth discovery flow (from an empty server URL) that dies
-    on an unrelated ``httpx`` error, so a missing scope could not be told apart
-    from any other failure.  Here a 401 or a 403 surfaces as
-    ``httpx.HTTPStatusError`` with its status; an error body is read first,
-    because ``raise_for_status`` leaves a streamed body unread and a scope message
-    in it would be lost.  Only the header is read from the workspace client
-    (static for a ``pat`` client), so one instance is safe to share across threads.
-    """
-
-    def __init__(self, workspace_client: Any) -> None:
-        self._workspace_client = workspace_client
-
-    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
-        request.headers.update(self._workspace_client.config.authenticate())
-        yield request
-
-    async def async_auth_flow(
-        self, request: httpx.Request
-    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
-        request.headers.update(self._workspace_client.config.authenticate())
-        response = yield request
-        if response.status_code >= 400:
-            await response.aread()
-
-
 def _build_mcp_client(host: str, token: str) -> Any:
-    """A ``DatabricksMCPClient`` for Genie One, as the user whose ``host`` and ``token`` these are.
-
-    Imported here, not at module level: the MCP stack is needed only when a
-    question is actually asked.
-    """
-    from databricks.sdk import WorkspaceClient
-    from databricks_mcp import DatabricksMCPClient
-    from mcp.client.session import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
-
-    class _GenieOneMCPClient(DatabricksMCPClient):
-        """``DatabricksMCPClient`` with :class:`_UserBearerAuth` in place of its OAuth provider.
-
-        The same session as the base's ``_call_tools_async``; only the auth
-        differs.  ``call_tool`` (its ``asyncio.run`` and error handling) is the base's.
-        """
-
-        async def _call_tools_async(
-            self, tool_name: str, arguments: dict[str, Any] | None = None
-        ) -> Any:
-            async with httpx.AsyncClient(
-                auth=_UserBearerAuth(self.client),
-                timeout=httpx.Timeout(30, read=300),
-                follow_redirects=True,
-            ) as http_client:
-                async with streamable_http_client(self.server_url, http_client=http_client) as (
-                    read_stream,
-                    write_stream,
-                    _,
-                ):
-                    async with ClientSession(read_stream, write_stream) as session:
-                        await session.initialize()
-                        return await session.call_tool(tool_name, arguments)
-
-    workspace_client = WorkspaceClient(host=host, token=token, auth_type="pat")
-    return _GenieOneMCPClient(
-        server_url=f"{host}{GENIE_ONE_SERVICE_PATH}", workspace_client=workspace_client
-    )
+    """A ``DatabricksMCPClient`` for Genie One, as the user owning ``host`` and ``token``."""
+    return build_user_mcp_client(host, token, GENIE_ONE_SERVICE_PATH)
 
 
 class _McpCallTool:
@@ -274,16 +168,13 @@ class _McpCallTool:
         def run() -> Any:
             return self._mcp_client().call_tool(name, args)
 
-        # Not a `with` block: its exit would wait on a timed-out thread.
-        executor = ThreadPoolExecutor(max_workers=1)
-        try:
-            return executor.submit(run).result(timeout=timeout_seconds)
-        except FuturesTimeoutError as exc:
-            raise GenieOneError(
+        return run_with_timeout(
+            run,
+            timeout_seconds=timeout_seconds,
+            on_timeout=lambda: GenieOneError(
                 f"Genie One did not respond within {timeout_seconds:g} seconds"
-            ) from exc
-        finally:
-            executor.shutdown(wait=False)
+            ),
+        )
 
 
 def _default_call_tool(host: str, token: str) -> CallTool:

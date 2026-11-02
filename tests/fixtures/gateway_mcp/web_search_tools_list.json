@@ -1,0 +1,38 @@
+{
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list",
+  "params": {}
+ },
+ "status": 200,
+ "headers": {
+  "content-type": "application/json",
+  "x-databricks-org-id": "7474645249186749"
+ },
+ "body_json": {
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+   "tools": [
+    {
+     "name": "web_search",
+     "description": "Search the public web for up-to-date information. Default backend uses Databricks Foundation Model API and returns a synthesized answer with citations; the `ddgs` backend is research-only and returns raw result rows.",
+     "inputSchema": {
+      "type": "object",
+      "properties": {
+       "query": {
+        "type": "string",
+        "description": "Search query string"
+       }
+      },
+      "required": [
+       "query"
+      ]
+     }
+    }
+   ]
+  }
+ },
+ "body_text": null
+}
