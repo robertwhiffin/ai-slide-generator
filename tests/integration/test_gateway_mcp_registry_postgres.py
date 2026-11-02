@@ -151,6 +151,45 @@ def test_init_db_twice_is_idempotent(postgres_engine) -> None:
         assert kept.instructions == "Diagrams only."
 
 
+def test_a_none_allowlist_is_stored_as_sql_null_and_a_list_as_json(postgres_engine) -> None:
+    """``None`` means "every tool": it must be SQL NULL (so ``IS NULL`` finds it), not
+    the JSON ``'null'`` literal a plain JSON column binds; a list stays a JSON array."""
+    factory = sessionmaker(bind=postgres_engine)
+    edit = {
+        "display_name": "LakeDraw",
+        "description": None,
+        "agent": "architect",
+        "instructions": None,
+        "enabled": True,
+        "user": ADMIN,
+    }
+    with factory() as db:
+        _create(db, "main.a.none", tool_allowlist=None)
+        listed = _create(db, "main.b.list", tool_allowlist=["draw"])
+        cleared = _create(db, "main.c.cleared", tool_allowlist=["draw"])
+        registry.update_connection(db, cleared.id, tool_allowlist=None, **edit)
+
+    with postgres_engine.connect() as conn:
+        stored = conn.execute(
+            text(
+                f'SELECT service_name, tool_allowlist IS NULL, tool_allowlist::text FROM "{TABLE}" '
+                "ORDER BY service_name"
+            )
+        ).all()
+    assert stored == [
+        ("main.a.none", True, None),
+        ("main.b.list", False, '["draw"]'),
+        ("main.c.cleared", True, None),
+    ]
+    with factory() as db:
+        assert {c.service_name: c.tool_allowlist for c in registry.list_connections(db)} == {
+            "main.a.none": None,
+            "main.b.list": ("draw",),
+            "main.c.cleared": None,
+        }
+    assert listed.tool_allowlist == ("draw",)
+
+
 def test_registry_maps_a_postgres_duplicate_to_duplicate_service_error(postgres_engine) -> None:
     factory = sessionmaker(bind=postgres_engine)
     with factory() as db:

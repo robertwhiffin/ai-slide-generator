@@ -21,7 +21,9 @@ class GatewayMcpConnection(Base):
     description = Column(Text, nullable=True)
     agent = Column(String(32), nullable=False)
     instructions = Column(Text, nullable=True)
-    tool_allowlist = Column(JSON, nullable=True)
+    # ``None`` (every tool allowed) binds as SQL NULL, not the JSON ``'null'`` literal
+    # plain JSON stores, so ``IS NULL`` finds it (cf. graph_configuration.py).
+    tool_allowlist = Column(JSON(none_as_null=True), nullable=True)
     enabled = Column(Boolean, nullable=False, default=True)
     created_by = Column(String(255))
     updated_by = Column(String(255))
