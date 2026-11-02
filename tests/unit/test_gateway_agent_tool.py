@@ -760,6 +760,127 @@ def test_a_save_that_fails_unexpectedly_is_reported_and_the_rest_still_save(capl
 
 
 # ---------------------------------------------------------------------------
+# shape_result: base64 beyond ``*base64`` keys (controller ruling, fix round 2)
+# ---------------------------------------------------------------------------
+
+
+def _data_uri(data: bytes, mime: str = "image/png") -> str:
+    return "data:" + mime + ";base64," + _b64(data)
+
+
+@pytest.mark.parametrize("key", ["image_b64", "pngB64"])
+def test_b64_suffixed_keys_are_removed_and_images_saved(key):
+    """A key ending in ``b64`` (any case) is treated like one ending in ``base64``."""
+    payload = {"diagram_id": DIAGRAM_ID, key: PNG_B64}
+    saver = RecordingSaver()
+
+    text, tokens = shape_result(_text_result(json.dumps(payload)), save_image=saver)
+
+    assert saver.attempts == [(PNG, "image/png")]
+    (token,) = tokens
+    note = _note(token, "image/png", (4, 3))
+    assert text.split("\n")[-1] == note
+    assert PNG_B64_HEAD not in text and key not in text
+    assert json.loads(_without(text, note)) == {"diagram_id": DIAGRAM_ID}
+
+
+def test_data_uri_in_plain_text_is_replaced_by_its_reference():
+    """An inline image data URI in plain text is saved and replaced IN PLACE by its
+    ``{{image:TOKEN}}`` reference; the "Image saved" note is appended as for any image."""
+    saver = RecordingSaver()
+    raw = "Here is the diagram: ![arch](" + _data_uri(PNG) + ") - as requested."
+
+    text, tokens = shape_result(_text_result(raw), save_image=saver)
+
+    assert saver.attempts == [(PNG, "image/png")]
+    (token,) = tokens
+    assert text.split("\n") == [
+        "Here is the diagram: ![arch](" + _ref(token) + ") - as requested.",
+        _note(token, "image/png", (4, 3)),
+    ]
+    assert PNG_B64_HEAD not in text and "base64," not in text
+
+
+def test_data_uri_inside_a_json_string_value_is_replaced():
+    """In JSON, a data URI inside any string value (at any depth) is replaced in place;
+    the rest of the JSON is kept."""
+    payload = {
+        "diagram_id": DIAGRAM_ID,
+        "render": {"markdown": "![arch](" + _data_uri(GIF, "image/gif") + ")", "pages": 1},
+    }
+    saver = RecordingSaver()
+
+    text, tokens = shape_result(_text_result(json.dumps(payload)), save_image=saver)
+
+    assert saver.attempts == [(GIF, "image/gif")]
+    (token,) = tokens
+    note = _note(token, "image/gif", (6, 7))
+    assert text.split("\n")[-1] == note
+    assert json.loads(_without(text, note)) == {
+        "diagram_id": DIAGRAM_ID,
+        "render": {"markdown": "![arch](" + _ref(token) + ")", "pages": 1},
+    }
+    assert _b64(GIF)[:16] not in text and "base64," not in text
+
+
+@pytest.mark.parametrize("order", ["image_block_first", "data_uri_first"])
+def test_data_uri_and_image_block_of_the_same_bytes_save_once(order):
+    """De-duplication by SHA-256 covers data URIs: the same PNG as an ImageContent block
+    and as a data URI is saved once, and the URI is replaced by that one reference."""
+    blocks = [
+        _image(PNG, "image/png"),
+        TextContent(type="text", text="Preview: ![d](" + _data_uri(PNG) + ")"),
+    ]
+    if order == "data_uri_first":
+        blocks.reverse()
+    saver = RecordingSaver()
+
+    text, tokens = shape_result(CallToolResult(content=blocks, isError=False), save_image=saver)
+
+    assert saver.attempts == [(PNG, "image/png")]
+    (token,) = tokens
+    lines = text.split("\n")
+    assert "Preview: ![d](" + _ref(token) + ")" in lines
+    assert lines.count(_note(token, "image/png", (4, 3))) == 1
+    assert set(IMAGE_PLACEHOLDER_PATTERN.findall(text)) == {token}
+    assert PNG_B64_HEAD not in text and "base64," not in text
+
+
+def test_an_undecodable_data_uri_is_replaced_by_the_reason_once():
+    """A data URI that is not a readable image is replaced in place by the
+    "[image not saved: ...]" line (said once, not again as a note); no data is left."""
+    garbage = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+    saver = RecordingSaver()
+
+    text, tokens = shape_result(
+        _text_result("Preview: " + _data_uri(garbage) + " (draft)"), save_image=saver
+    )
+
+    assert saver.attempts == [] and tokens == []
+    assert re.fullmatch(r"Preview: \[image not saved: [^\n\]]+\] \(draft\)", text), text
+    assert _b64(garbage)[:16] not in text
+
+
+# ---------------------------------------------------------------------------
+# shape_result: non-ASCII text survives re-serialisation (fix round 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("where", ["json_text", "structured_content"])
+def test_non_ascii_survives_reserialisation(where):
+    title = "Café Δ 図"
+    if where == "json_text":
+        result = _text_result(json.dumps({"title": title, "data_base64": PNG_B64}))
+    else:
+        result = CallToolResult(content=[], structuredContent={"title": title}, isError=False)
+
+    text, _ = shape_result(result, save_image=RecordingSaver())
+
+    assert title in text
+    assert "\\u00e9" not in text
+
+
+# ---------------------------------------------------------------------------
 # run: the output the model sees
 # ---------------------------------------------------------------------------
 
@@ -790,6 +911,48 @@ def test_output_cap_boundary(length, body):
     client = FakeGatewayClient([_text_result("x" * length)])
 
     assert _run(_tool(client)) == spotlight(DISPLAY, body)
+
+
+def test_the_image_note_survives_the_cap():
+    """The cap cuts the content, never an image note: over 32,000 characters of text plus
+    one image still ends with the note, the trailer reports the cut, and the whole stays
+    within the cap plus the trailer."""
+    result = CallToolResult(
+        content=[TextContent(type="text", text="y" * 40_000), _image(PNG, "image/png")],
+        isError=False,
+    )
+    saver = RecordingSaver()
+
+    text, tokens = shape_result(result, save_image=saver)
+
+    (token,) = tokens
+    assert IMAGE_PLACEHOLDER_PATTERN.findall(text) == [token]
+    kept, trailer, note = text.split("\n")
+    assert note == _note(token, "image/png", (4, 3))
+    assert set(kept) == {"y"} and len(kept) > 31_000
+    assert trailer == "[truncated: " + str(40_000 - len(kept)) + " more characters]"
+    assert len(text) <= GATEWAY_OUTPUT_CAP_CHARS + len("\n" + trailer)
+
+
+def test_every_image_note_survives_the_cap_and_the_spotlight():
+    """Through ``run``: with several images after a long text, every note reaches the
+    model (spotlight's own 32,768-character cap must not cut them either)."""
+    images = [_raster("PNG", (n, n), (n * 20, 0, 0)) for n in range(1, 7)]
+    result = CallToolResult(
+        content=[TextContent(type="text", text="y" * 40_000)]
+        + [_image(data, "image/png") for data in images],
+        isError=False,
+    )
+    saver = RecordingSaver()
+
+    out = _run(_tool(FakeGatewayClient([result]), saver=saver))
+
+    assert len(saver.tokens) == 6
+    assert IMAGE_PLACEHOLDER_PATTERN.findall(out) == saver.tokens
+    for n, token in enumerate(saver.tokens, start=1):
+        assert _note(token, "image/png", (n, n)) in out.split("\n")
+    assert "…[truncated]" not in out
+    assert out.endswith("\n</untrusted-data>")
 
 
 def test_spotlight_source_is_the_display_name_and_delimiters_are_neutralised():
