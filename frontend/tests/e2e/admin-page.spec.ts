@@ -77,9 +77,101 @@ async function setupAdminIdentityMock(page: Page) {
   });
 }
 
+// The Admins tab's list: Sam holds both sources, Robert only CAN_MANAGE (so no
+// Remove), and the group Team was added in Tellr. The sync succeeded two minutes ago.
+function adminsFixture() {
+  const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
+  return {
+    admins: [
+      {
+        identity_type: 'USER',
+        identity_name: 'sam@x.com',
+        identity_id: 'u-sam',
+        sources: ['can_manage_sync', 'manual'],
+        manual_permission_id: 42,
+        added_by: 'priya',
+        added_at: '2026-11-01T10:00:00+00:00',
+      },
+      {
+        identity_type: 'USER',
+        identity_name: 'robert@x.com',
+        identity_id: null,
+        sources: ['can_manage_sync'],
+        manual_permission_id: null,
+        added_by: 'can_manage_sync',
+        added_at: '2026-11-02T09:00:00+00:00',
+      },
+      {
+        identity_type: 'GROUP',
+        identity_name: 'Team',
+        identity_id: 'g-team',
+        sources: ['manual'],
+        manual_permission_id: 43,
+        added_by: 'robert@x.com',
+        added_at: '2026-11-02T08:00:00+00:00',
+      },
+    ],
+    sync: { last_attempt_at: twoMinutesAgo, last_success_at: twoMinutesAgo, last_error: null },
+  };
+}
+
 test.describe('Admin Page', () => {
   test.beforeEach(async ({ page }) => {
     await setupAdminIdentityMock(page);
+  });
+
+  test('Admins tab lists admins with source badges', async ({ page }) => {
+    await page.route('**/api/admin/admins', (route) => {
+      if (route.request().method() !== 'GET') {
+        return route.fallback();
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(adminsFixture()),
+      });
+    });
+
+    await page.goto('/admin');
+    await page.getByRole('tab', { name: 'Admins', exact: true }).click();
+
+    const sam = page.getByTestId('admin-row-USER-sam@x.com');
+    await expect(sam.getByText('CAN_MANAGE on app', { exact: true })).toBeVisible();
+    await expect(sam.getByText('Added in Tellr', { exact: true })).toBeVisible();
+    await expect(sam.getByRole('button', { name: 'Remove sam@x.com' })).toBeVisible();
+
+    const robert = page.getByTestId('admin-row-USER-robert@x.com');
+    await expect(robert.getByText('CAN_MANAGE on app', { exact: true })).toBeVisible();
+    await expect(robert.getByRole('button', { name: /remove/i })).toHaveCount(0);
+
+    await expect(page.getByTestId('admin-sync-status')).toHaveAttribute('data-state', 'ok');
+  });
+
+  test('the Admins panel requests /api/admin/admins only once its tab is opened', async ({ page }) => {
+    // Every other spec in this file leaves /api/admin/admins unmocked; that is only
+    // safe while the panel mounts lazily.
+    let adminsRequests = 0;
+    await page.route('**/api/admin/admins', (route) => {
+      adminsRequests += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(adminsFixture()),
+      });
+    });
+
+    await page.goto('/admin');
+    await expect(page.getByRole('tab', { name: 'Admins', exact: true })).toBeVisible();
+    for (const name of ['Feedback', 'Google Slides', 'Design System', 'Slide Style', 'Judge']) {
+      await page.getByRole('tab', { name, exact: true }).click();
+    }
+    // Let any eager fetch fire before asserting there was none.
+    await page.waitForLoadState('networkidle');
+    expect(adminsRequests).toBe(0);
+
+    await page.getByRole('tab', { name: 'Admins', exact: true }).click();
+    await expect.poll(() => adminsRequests).toBeGreaterThan(0);
+    await expect(page.getByTestId('admin-row-USER-sam@x.com')).toBeVisible();
   });
 
   test('renders page with Feedback and Google Slides tabs', async ({ page }) => {
