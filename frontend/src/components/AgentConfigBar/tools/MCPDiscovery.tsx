@@ -202,6 +202,10 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
                 {query ? 'No matching connections.' : 'No MCP connections available.'}
               </p>
             )}
+            {/* Below a Gateway group, the UC items need their own heading or they read as Gateway items. */}
+            {filteredGateway.length > 0 && filtered.length > 0 && (
+              <p className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">Unity Catalog</p>
+            )}
             {filtered.map((item, idx) => {
               const added = isAlreadyAdded(item.id);
               return (

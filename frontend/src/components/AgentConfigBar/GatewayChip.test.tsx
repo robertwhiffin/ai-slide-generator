@@ -166,6 +166,20 @@ describe('GatewayChipStatus', () => {
     expect(statusMock.mock.calls[0][0]).toBe(LAKEDRAW_SVC);
   });
 
+  it.each([
+    ['javascript:alert(1)'],
+    [' javascript:alert(1)'],
+    ['http://fevm-db-tellr-dev-workspace.cloud.databricks.com/mcp-service-login?name=x'],
+    ['data:text/html,<script>alert(1)</script>'],
+  ])('sign_in_required never renders a non-https sign_in_url (%s) as a link', async (url) => {
+    statusMock.mockResolvedValue(status('sign_in_required', { sign_in_url: url }));
+    await renderStatus(LAKEDRAW_TOOL, false);
+
+    // The status settled (the button is part of the sign_in_required UI), yet no link.
+    expect(await screen.findByRole('button', { name: 'Check again' })).toBeInTheDocument();
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
   it('"Check again" re-fetches the status and shows the new state', async () => {
     statusMock.mockResolvedValueOnce(SIGN_IN_REQUIRED).mockResolvedValueOnce(READY);
     await renderStatus(LAKEDRAW_TOOL, false);

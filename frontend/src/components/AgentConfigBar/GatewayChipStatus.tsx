@@ -15,6 +15,9 @@ const SHORT_REASON: Record<string, string> = {
   unavailable: 'unavailable',
 };
 
+/** The server builds the sign-in URL on the workspace host; only an https link is ever rendered. */
+const HTTPS_URL = /^https:\/\//i;
+
 export const GatewayChipStatus: React.FC<{ tool: GatewayMcpTool; legacyDeck: boolean }> = ({
   tool,
   legacyDeck,
@@ -48,11 +51,13 @@ export const GatewayChipStatus: React.FC<{ tool: GatewayMcpTool; legacyDeck: boo
   if (!status || status.state === 'ready') return null;
 
   if (status.state === 'sign_in_required') {
+    const signInUrl =
+      status.sign_in_url && HTTPS_URL.test(status.sign_in_url) ? status.sign_in_url : null;
     return (
       <>
-        {status.sign_in_url && (
+        {signInUrl && (
           <a
-            href={status.sign_in_url}
+            href={signInUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="underline font-normal"

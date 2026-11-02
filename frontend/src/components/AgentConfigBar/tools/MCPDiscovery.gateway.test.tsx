@@ -160,12 +160,30 @@ describe('MCPDiscovery: AI Gateway group', () => {
     expect(screen.getByText('Draws system diagrams')).toBeInTheDocument();
   });
 
+  it('heads the UC items "Unity Catalog" below a Gateway group, and only then', async () => {
+    stubDiscover(reply(200, { items: [UC_ITEM], gateway_items: [LAKEDRAW_ITEM, WEB_SEARCH_ITEM] }));
+    renderDiscovery();
+
+    const ucHeading = await screen.findByText('Unity Catalog');
+    expect(precedes(screen.getByText('Web Search'), ucHeading)).toBe(true);
+    expect(precedes(ucHeading, screen.getByText('sales_http'))).toBe(true);
+
+    // Only Gateway items match: no UC heading over an empty UC group.
+    search('lake');
+    expect(screen.queryByText('Unity Catalog')).toBeNull();
+    // Only UC items match: no Gateway group, so the UC list looks as it did before.
+    search('sales');
+    expect(screen.queryByText('Unity Catalog')).toBeNull();
+    expect(screen.queryByText('AI Gateway')).toBeNull();
+  });
+
   it('shows no "AI Gateway" group when there are no Gateway items, and UC items as before', async () => {
     stubDiscover(reply(200, { items: [UC_ITEM], gateway_items: [] }));
     renderDiscovery();
 
     expect(await screen.findByText('sales_http')).toBeInTheDocument();
     expect(screen.queryByText('AI Gateway')).toBeNull();
+    expect(screen.queryByText('Unity Catalog')).toBeNull();
   });
 
   it('does not show the empty state when only Gateway items exist', async () => {

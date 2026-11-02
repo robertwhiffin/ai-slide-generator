@@ -22,11 +22,7 @@ interface ActivityItem {
 const summariseArgs = (name: string, args: Record<string, unknown> | undefined): string => {
   const a = args ?? {};
   if (name === 'genie_one' && typeof a.question === 'string') return truncate(a.question);
-  if (name === 'gateway_mcp') {
-    const conn = typeof a.connection === 'string' ? a.connection : '';
-    const tool = typeof a.tool === 'string' ? a.tool : '';
-    return truncate(conn && tool ? `${conn} · ${tool}` : conn || tool);
-  }
+  // gateway_mcp never reaches here: buildActivityItems names its row after the connection.
   const text = Object.entries(a)
     .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : String(v)}`)
     .join(', ');
