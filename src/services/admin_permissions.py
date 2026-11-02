@@ -99,6 +99,13 @@ def _existing_sync_keys(db: Session) -> set[tuple[str, str]]:
 
 
 def reconcile_can_manage(db: Session, holders: Sequence[AclHolder]) -> tuple[int, int]:
+    holders = [
+        h
+        for h in holders
+        if h.identity_type in _VALID_IDENTITY_TYPES
+        and h.identity_name
+        and h.identity_name.strip()
+    ]
     if not holders:
         raise EmptyHolderSetError(
             "the app's permissions list no direct CAN_MANAGE users or groups"

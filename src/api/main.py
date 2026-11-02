@@ -77,6 +77,7 @@ _preview_worker_task = None
 _cleanup_task = None
 _timeout_task = None
 _spec_sweeper_task = None
+_can_manage_sync_task = None
 _frontend_assets_stack: ExitStack | None = None
 
 
@@ -85,6 +86,7 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events."""
     global _worker_tasks, _export_worker_task, _export_cleanup_task, _preview_worker_task
     global _cleanup_task, _timeout_task, _spec_sweeper_task, _frontend_assets_stack
+    global _can_manage_sync_task
 
     # Startup
     logger.info(f"Starting AI Slide Generator API (environment: {ENVIRONMENT})")
@@ -194,6 +196,12 @@ async def lifespan(app: FastAPI):
         _spec_sweeper_task = asyncio.create_task(spec_review_sweeper_loop())
         logger.info("Spec-review arc sweeper started")
 
+        # Sync the app's direct CAN_MANAGE holders into the permissions table.
+        if IS_PRODUCTION and os.getenv("DATABRICKS_APP_NAME"):
+            from src.services.can_manage_sync import can_manage_sync_loop
+            _can_manage_sync_task = asyncio.create_task(can_manage_sync_loop())
+            logger.info("App CAN_MANAGE admin sync started")
+
         # Recover any stuck requests from previous crashes
         try:
             recovered = await recover_stuck_requests()
@@ -265,6 +273,14 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         logger.info("Spec-review arc sweeper stopped")
+
+    if _can_manage_sync_task:
+        _can_manage_sync_task.cancel()
+        try:
+            await _can_manage_sync_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("App CAN_MANAGE admin sync stopped")
 
     # Tear down the FastMCP session manager's task group. Safe to call
     # unconditionally — the stack was entered unconditionally at startup.

@@ -935,3 +935,58 @@ def test_store_functions_never_commit(db_session):
         assert len(commits) == 1
     finally:
         event.remove(engine, "commit", on_commit)
+
+
+# ---------------------------------------------------------------------------
+# reconcile_can_manage: blank or invalid holders (Task 2 addendum A)
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_with_only_blank_or_invalid_holders_is_refused(db_session):
+    # A blank name, or a type other than USER/GROUP (here lower-case "user"), is not
+    # a holder. A list of only such holders is an empty read: refused before any
+    # write, so it cannot delete every synced admin.
+    db = db_session
+    _sync_row(db, "USER", "a@x.com")
+    _sync_row(db, "GROUP", "Team")
+    db.commit()
+    before = _read_rows(db)
+    assert len(before) == 2
+
+    with pytest.raises(EmptyHolderSetError) as exc_info:
+        reconcile_can_manage(
+            db,
+            [
+                AclHolder(identity_type="USER", identity_name="  "),
+                AclHolder(identity_type="user", identity_name="a@x.com"),
+            ],
+        )
+
+    assert str(exc_info.value) == EMPTY_HOLDERS_MESSAGE
+    # Commit anything the call might have left pending: nothing may change.
+    db.commit()
+    assert _read_rows(db) == before
+
+
+def test_reconcile_drops_blank_or_invalid_holders_beside_valid_ones(db_session):
+    # The same kinds of holder next to a valid one: the valid one is reconciled,
+    # and the blank and invalid ones neither get a row nor count as "wanted".
+    db = db_session
+    _sync_row(db, "USER", "a@x.com")
+    db.commit()
+
+    result = reconcile_can_manage(
+        db,
+        [
+            AclHolder(identity_type="USER", identity_name="  "),
+            AclHolder(identity_type="user", identity_name="a@x.com"),
+            AclHolder(identity_type="SERVICE_PRINCIPAL", identity_name="sp-1"),
+            AclHolder(identity_type="GROUP", identity_name="Team"),
+        ],
+    )
+    db.commit()
+
+    assert result == (1, 1)
+    assert {(r["identity_type"], r["identity_key"]) for r in _read_rows(db)} == {
+        ("GROUP", "team")
+    }
