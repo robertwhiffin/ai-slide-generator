@@ -975,6 +975,9 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         if (t.type === 'genie_one' && tool.type === 'genie_one') {
           return false;
         }
+        if (t.type === 'gateway_mcp' && tool.type === 'gateway_mcp') {
+          return t.service_name !== tool.service_name;
+        }
         return true;
       }),
     };
@@ -1011,6 +1014,8 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
             return t.type === 'model_endpoint' && t.endpoint_name === tool.endpoint_name ? tool : t;
           case 'agent_bricks':
             return t.type === 'agent_bricks' && t.endpoint_name === tool.endpoint_name ? tool : t;
+          case 'gateway_mcp':
+            return t.type === 'gateway_mcp' && t.service_name === tool.service_name ? tool : t;
           default:
             return t;
         }

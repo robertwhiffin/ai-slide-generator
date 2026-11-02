@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
+import { linkifyText } from '../../utils/linkify';
 import { splitDeckAdvisory, splitFindingRequest } from '../../utils/findingText';
 
 // Human labels for the keys a failure notice's details carry; unknown keys render as-is.
@@ -202,7 +203,9 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
         }`}
       >
         <div className="whitespace-pre-wrap">
-          {split ? split.lead : message.content}
+          {message.role === 'assistant'
+            ? linkifyText(split ? split.lead : message.content)
+            : split ? split.lead : message.content}
         </div>
         {split && (
           <details className={`mt-2 text-xs ${detailsTone}`} data-testid="message-reviewer-details">

@@ -156,3 +156,24 @@ describe('Message data analyst card', () => {
     expect(screen.getByText(/\| 10001 \| 1227 \|/)).toBeInTheDocument();
   });
 });
+
+describe('Message links (Gateway MCP sign-in notice)', () => {
+  // An `info` notice (message_type="info") reaches the UI as an assistant-role message.
+  const SIGN_IN_URL =
+    'https://fevm-db-tellr-dev-workspace.cloud.databricks.com/mcp-service-login?name=db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw&o=7474645249186749';
+  const SIGN_IN =
+    'To use LakeDraw, sign in here: https://fevm-db-tellr-dev-workspace.cloud.databricks.com/mcp-service-login?name=db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw&o=7474645249186749 — then ask again.';
+
+  it('info message with a URL renders an anchor', () => {
+    const { container } = render(<Message message={message({ content: SIGN_IN })} />);
+
+    const links = screen.getAllByRole('link');
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe(SIGN_IN_URL);
+    expect(links[0].textContent).toBe(SIGN_IN_URL);
+    expect(links[0].getAttribute('target')).toBe('_blank');
+    expect(links[0].getAttribute('rel') ?? '').toContain('noopener');
+    // The whole sentence is still there, around the link.
+    expect(container.textContent).toContain(SIGN_IN);
+  });
+});

@@ -66,5 +66,8 @@ export function toToolEntry(tool: AvailableTool): ToolEntry {
     case 'genie_one':
       // Added in one click by ToolPicker; it never goes through discovery/preview.
       throw new Error('genie_one has no preview');
+    case 'gateway_mcp':
+      // Added from the MCP picker's AI Gateway group via a GatewayMcpPreview.
+      throw new Error('gateway_mcp has no AvailableTool form');
   }
 }

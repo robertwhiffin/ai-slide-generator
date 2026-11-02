@@ -2,7 +2,7 @@ import type { ChatResponse } from '../types/message';
 import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
-import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse } from '../types/agentConfig';
+import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayMcpStatus } from '../types/agentConfig';
 import type { TurnProgress } from '../types/turnProgress';
 
 // Use relative URLs in production, explicit IPv4 in development
@@ -2328,12 +2328,26 @@ export const api = {
         const body = await response.json();
         return {
           items: body?.items ?? [],
+          gateway_items: body?.gateway_items ?? [],
           error: body?.error ?? fallback,
           error_code: body?.error_code,
         };
       } catch {
         return { items: [], error: fallback };
       }
+    }
+    return response.json();
+  },
+
+  /**
+   * Per-user sign-in / access status of one AI Gateway MCP connection.
+   */
+  async getGatewayMcpStatus(serviceName: string): Promise<GatewayMcpStatus> {
+    const response = await fetch(
+      `${API_BASE_URL}/api/tools/gateway-mcp/status?service_name=${encodeURIComponent(serviceName)}`,
+    );
+    if (!response.ok) {
+      throw new Error(`Could not get Gateway MCP status (${response.status}).`);
     }
     return response.json();
   },

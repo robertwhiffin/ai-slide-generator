@@ -18,6 +18,7 @@ import type { SlideStyle, DeckPrompt, DesignSystemSummary, DesignSystemTemplate 
 import type { AvailableTool, GenieTool, ProfileSummary, ToolEntry, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool } from '../../types/agentConfig';
 import { TOOL_TYPE_BADGE_LABELS, TOOL_TYPE_COLORS } from '../../types/agentConfig';
 import { api } from '../../services/api';
+import { GatewayChipStatus } from './GatewayChipStatus';
 import { ToolPicker } from './ToolPicker';
 import GenieDetailPanel from './GenieDetailPanel';
 import ToolDetailPanel from './ToolDetailPanel';
@@ -39,6 +40,8 @@ const ToolChip: React.FC<{
   const legacyDeck = (storedDeckMode ?? selectedDeckMode) === 'legacy';
   const label = tool.type === 'genie_one'
     ? 'Genie One'
+    : tool.type === 'gateway_mcp'
+    ? tool.display_name
     : tool.type === 'genie'
     ? tool.space_name
     : tool.type === 'mcp'
@@ -53,6 +56,7 @@ const ToolChip: React.FC<{
 
   // Derive a hover background class from the chip's color class
   const hoverBgClass = tool.type === 'genie_one' ? 'hover:bg-sky-200'
+    : tool.type === 'gateway_mcp' ? 'hover:bg-violet-200'
     : tool.type === 'genie' ? 'hover:bg-blue-200'
     : tool.type === 'mcp' ? 'hover:bg-green-200'
     : tool.type === 'vector_index' ? 'hover:bg-indigo-200'
@@ -91,6 +95,9 @@ const ToolChip: React.FC<{
       )}
       {tool.type === 'genie_one' && legacyDeck && (
         <span className="text-gray-500 font-normal">{' · agent mode only'}</span>
+      )}
+      {tool.type === 'gateway_mcp' && (
+        <GatewayChipStatus tool={tool} legacyDeck={legacyDeck} />
       )}
       {conversationId && (
         <button
@@ -594,7 +601,7 @@ export const AgentConfigBar: React.FC = () => {
   }, []);
 
   const handleEditChip = useCallback((tool: ToolEntry) => {
-    if (tool.type === 'genie_one') {
+    if (tool.type === 'genie_one' || tool.type === 'gateway_mcp') {
       return;
     }
     if (tool.type === 'genie') {
@@ -713,7 +720,7 @@ export const AgentConfigBar: React.FC = () => {
                   key={`${tool.type}-${'space_id' in tool ? tool.space_id : 'connection_name' in tool ? tool.connection_name : 'endpoint_name' in tool ? tool.endpoint_name : idx}-${idx}`}
                   tool={tool}
                   onRemove={() => removeTool(tool)}
-                  onEdit={tool.type === 'genie_one' ? undefined : () => handleEditChip(tool)}
+                  onEdit={tool.type === 'genie_one' || tool.type === 'gateway_mcp' ? undefined : () => handleEditChip(tool)}
                   sessionId={sessionId}
                 />
               ))}

@@ -22,6 +22,11 @@ interface ActivityItem {
 const summariseArgs = (name: string, args: Record<string, unknown> | undefined): string => {
   const a = args ?? {};
   if (name === 'genie_one' && typeof a.question === 'string') return truncate(a.question);
+  if (name === 'gateway_mcp') {
+    const conn = typeof a.connection === 'string' ? a.connection : '';
+    const tool = typeof a.tool === 'string' ? a.tool : '';
+    return truncate(conn && tool ? `${conn} · ${tool}` : conn || tool);
+  }
   const text = Object.entries(a)
     .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : String(v)}`)
     .join(', ');
@@ -34,10 +39,22 @@ function buildActivityItems(messages: MessageType[]): ActivityItem[] {
   let last: ActivityItem | null = null;
   for (const m of messages) {
     if (m.tool_call) {
-      last = {
-        name: displayName(m.tool_call.name),
-        summary: summariseArgs(m.tool_call.name, m.tool_call.arguments),
-      };
+      const call = m.tool_call;
+      if (call.name === 'gateway_mcp') {
+        // Row reads "{connection} · {tool}", like Genie One's "Genie One · {question}".
+        const a = call.arguments ?? {};
+        const connection = typeof a.connection === 'string' && a.connection ? a.connection : '';
+        const tool = typeof a.tool === 'string' ? a.tool : '';
+        last = {
+          name: connection || displayName('gateway_mcp'),
+          summary: connection ? truncate(tool) : '',
+        };
+      } else {
+        last = {
+          name: displayName(call.name),
+          summary: summariseArgs(call.name, call.arguments),
+        };
+      }
       items.push(last);
     } else if (m.role === 'tool') {
       if (last && last.result === undefined) {
