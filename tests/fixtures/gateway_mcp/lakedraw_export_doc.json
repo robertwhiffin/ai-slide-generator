@@ -1,0 +1,23 @@
+{
+ "_source": "doc",
+ "_note": "Doc-sourced, not recorded: LakeDraw tool results need a browser sign-in, so this follows the examples in the LakeDraw integration doc (\"Tellr x LakeDraw: Using LakeDraw as Tellr's diagram engine\", 2026-10-30). lakedraw_export_diagram returns the PNG twice: an ImageContent block and data_base64 inside the JSON text block (spec Review Focus 3). The PNG is a real 4x3 image made with Pillow.",
+ "tool": "lakedraw_export_diagram",
+ "arguments": {
+  "diagram_id": "dgm_7f3c2a91e4b04d6a",
+  "format": "png"
+ },
+ "result": {
+  "content": [
+   {
+    "type": "image",
+    "data": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAG0lEQVR4nGOUNrR8wvqCAQyY4CwQB85iLA4EAH5DBPLJvVw5AAAAAElFTkSuQmCC",
+    "mimeType": "image/png"
+   },
+   {
+    "type": "text",
+    "text": "{\"diagram_id\": \"dgm_7f3c2a91e4b04d6a\", \"format\": \"png\", \"data_base64\": \"iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAG0lEQVR4nGOUNrR8wvqCAQyY4CwQB85iLA4EAH5DBPLJvVw5AAAAAElFTkSuQmCC\"}"
+   }
+  ],
+  "isError": false
+ }
+}

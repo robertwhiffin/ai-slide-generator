@@ -480,21 +480,24 @@ def _model_provider_errors_collapsed() -> Iterator[None]:
 
 #: The answer to every tool call after the first in one model reply.
 _NOT_RUN_TEXT = (
-    "Not run: ask one question at a time. Read the answer to your previous question "
-    "first, then ask again if you still need this."
+    "Not run: call one tool at a time. Read the previous result first, "
+    "then call again if you still need this."
 )
 
 
 def _tool_definition(tool: AgentTool) -> dict[str, Any]:
     """One toolset tool as the provider tool dict the model is bound to.
 
-    The parameters are LangChain's conversion of the tool's ``args_schema``
-    (the same treatment the output schema gets when it is bound); the name and
-    description are the tool's own.
+    The parameters are the tool's own raw JSON schema when it has one (a Gateway
+    MCP tool), else LangChain's conversion of its ``args_schema`` (the same
+    treatment the output schema gets when it is bound); the name and description
+    are the tool's own.
     """
     from langchain_core.utils.function_calling import convert_to_openai_tool
 
-    parameters = convert_to_openai_tool(tool.args_schema)["function"]["parameters"]
+    parameters = getattr(tool, "parameters_json_schema", None)
+    if parameters is None:
+        parameters = convert_to_openai_tool(tool.args_schema)["function"]["parameters"]
     return {
         "type": "function",
         "function": {
