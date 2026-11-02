@@ -73,6 +73,7 @@ SYNC_KEYS = {"last_attempt_at", "last_success_at", "last_error"}
 T_SYNCED = datetime(2026, 11, 2, 8, 0, 0)
 T_ADDED = datetime(2026, 11, 2, 8, 30, 0)
 T_ATTEMPT = datetime(2026, 11, 2, 9, 15, 0)
+T_SUCCESS = datetime(2026, 11, 2, 9, 10, 0)
 SYNC_ERROR = (
     "PermissionDenied: apps.ruleSets/get is not allowed for the app's "
     "service principal"
@@ -350,6 +351,50 @@ def test_list_returns_merged_entries_and_sync_status(harness: Harness) -> None:
     assert _parse_iso(sync["last_attempt_at"]) == T_ATTEMPT
 
 
+def test_list_timestamps_carry_utc_offset(harness: Harness) -> None:
+    """The DB stores naive UTC, and the browser's ``new Date()`` reads an
+    offset-less ISO string as LOCAL time. So every non-null datetime has to
+    leave the API with an explicit UTC offset and mean the stored instant."""
+    _seed_admin(
+        harness.factory,
+        identity_name="sam@x.com",
+        source="manual",
+        created_by="owner@x.com",
+        created_at=T_ADDED,
+    )
+    # A success at T_SUCCESS, then a failed attempt at T_ATTEMPT.
+    with harness.factory() as session:
+        session.add(
+            PermissionSyncState(
+                sync_key="app_can_manage",
+                last_attempt_at=T_ATTEMPT,
+                last_success_at=T_SUCCESS,
+                last_error=SYNC_ERROR,
+            )
+        )
+        session.commit()
+
+    response = harness.client.get(ADMINS_URL)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    sams = _entries_for(body["admins"], "USER", "sam@x.com")
+    assert len(sams) == 1, body
+    sent = {
+        "admins[].added_at": (sams[0]["added_at"], T_ADDED),
+        "sync.last_attempt_at": (body["sync"]["last_attempt_at"], T_ATTEMPT),
+        "sync.last_success_at": (body["sync"]["last_success_at"], T_SUCCESS),
+    }
+    for label, (value, stored) in sent.items():
+        assert isinstance(value, str), f"{label}: expected a string, got {value!r}"
+        assert value.endswith(("+00:00", "Z")), (
+            f"{label}: {value!r} carries no UTC offset"
+        )
+        assert datetime.fromisoformat(value.replace("Z", "+00:00")) == stored.replace(
+            tzinfo=timezone.utc
+        ), f"{label}: {value!r} is not the stored instant {stored} UTC"
+
+
 def test_add_then_list_shows_added_in_tellr(harness: Harness) -> None:
     response = harness.client.post(
         ADMINS_URL,
@@ -415,6 +460,61 @@ def test_add_validation_422(harness: Harness) -> None:
         "blank name": 422,
     }, {k: r.text for k, r in responses.items()}
     assert _rows(harness.factory) == []
+
+
+def test_add_rejects_overlong_identity_fields_422(harness: Harness) -> None:
+    """identity_name and identity_id are String(255). SQLite does not enforce
+    the length, but Postgres raises and the route would 500, so the API must
+    refuse an over-long value with 422 itself."""
+    name_256 = "u" * 244 + "@example.com"
+    name_255 = "v" * 243 + "@example.com"
+    other_255 = "w" * 243 + "@example.com"
+    assert (len(name_256), len(name_255), len(other_255)) == (256, 255, 255)
+
+    rejected = {
+        "256-char name": harness.client.post(
+            ADMINS_URL,
+            json={"identity_type": "USER", "identity_name": name_256, "identity_id": None},
+        ),
+        "256-char id": harness.client.post(
+            ADMINS_URL,
+            json={
+                "identity_type": "USER",
+                "identity_name": "priya@example.com",
+                "identity_id": "7" * 256,
+            },
+        ),
+    }
+
+    assert {k: r.status_code for k, r in rejected.items()} == {
+        "256-char name": 422,
+        "256-char id": 422,
+    }, {k: r.text for k, r in rejected.items()}
+    assert _rows(harness.factory) == []
+
+    accepted = {
+        "255-char name": harness.client.post(
+            ADMINS_URL,
+            json={"identity_type": "USER", "identity_name": name_255, "identity_id": None},
+        ),
+        "255-char name and id": harness.client.post(
+            ADMINS_URL,
+            json={
+                "identity_type": "USER",
+                "identity_name": other_255,
+                "identity_id": "8" * 255,
+            },
+        ),
+    }
+
+    assert {k: r.status_code for k, r in accepted.items()} == {
+        "255-char name": 201,
+        "255-char name and id": 201,
+    }, {k: r.text for k, r in accepted.items()}
+    assert sorted((r["identity_name"], r["identity_id"]) for r in _rows(harness.factory)) == [
+        (name_255, None),
+        (other_255, "8" * 255),
+    ]
 
 
 def test_delete_manual_row_204_and_cache_reset(harness: Harness) -> None:

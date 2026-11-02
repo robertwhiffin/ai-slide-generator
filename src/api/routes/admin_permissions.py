@@ -1,10 +1,10 @@
 """Admin endpoints for listing, adding and removing app admins (admin-gated)."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.api.routes._authz import require_admin, reset_admin_cache
@@ -55,8 +55,8 @@ class AdminListResponse(BaseModel):
 
 class AddAdminRequest(BaseModel):
     identity_type: str
-    identity_name: str
-    identity_id: str | None = None
+    identity_name: str = Field(max_length=255)
+    identity_id: str | None = Field(default=None, max_length=255)
 
 
 class AddAdminResponse(BaseModel):
@@ -64,7 +64,11 @@ class AddAdminResponse(BaseModel):
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
 
 @router.get("", response_model=AdminListResponse)
@@ -106,12 +110,14 @@ def add_app_admin(
         )
     except ValueError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-        )
+        raise HTTPException(status_code=422, detail=str(exc))
     permission_id = permission.id
+    created_by = get_current_user()
     db.commit()
     reset_admin_cache()
+    logger.info(
+        "App admin added: %s %s by %s", body.identity_type, body.identity_name, created_by
+    )
     return AddAdminResponse(permission_id=permission_id)
 
 
@@ -127,4 +133,7 @@ def remove_app_admin(permission_id: int, db: Session = Depends(get_db)) -> Respo
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     db.commit()
     reset_admin_cache()
+    logger.info(
+        "App admin removed: permission %s by %s", permission_id, get_current_user()
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
