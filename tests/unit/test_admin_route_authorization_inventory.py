@@ -11,7 +11,7 @@ prompt text is serialised in the response, or any service is invoked.
 Fix round 1: the require_admin check now scans the full /api/admin namespace
 (not just /api/admin/agent-definitions) so an unguarded route registered
 directly on ``app`` at any /api/admin/* path is caught.  A second test asserts
-the full /api/admin/* route set equals the known 37 pairs.
+the full /api/admin/* route set equals the known 40 pairs.
 
 Known /api/admin/* routes outside agent-definitions (all carry require_admin):
   src.api.routes.graph_shipping — packaged-update status (GET) and adopt (POST)
@@ -19,6 +19,8 @@ Known /api/admin/* routes outside agent-definitions (all carry require_admin):
                                 (POST, GET /status, DELETE)
   src.api.routes.admin_usage  — usage/summary, daily, top-users, funnel,
                                 retention, heatmap (all GET)
+  src.api.routes.admin_permissions — admins list (GET), add (POST) and
+                                remove (DELETE /{permission_id})
 """
 
 from __future__ import annotations
@@ -101,8 +103,9 @@ _SINGLE_ROUTER_MODULE = "src.api.routes.agent_definitions"
 _TEST_USER = "task9-user@example.com"
 
 # ---------------------------------------------------------------------------
-# All 37 known /api/admin/* (method, path) pairs — the agent-definitions 24,
-# the 2 graph-shipping routes, plus the 11 routes from src.api.routes.admin and src.api.routes.admin_usage.
+# All 40 known /api/admin/* (method, path) pairs — the agent-definitions 24,
+# the 2 graph-shipping routes, the 11 routes from src.api.routes.admin and
+# src.api.routes.admin_usage, and the 3 from src.api.routes.admin_permissions.
 # A route registered at /api/admin/* that is absent from this set is a gap
 # in the inventory and must be enrolled here before it ships.
 # ---------------------------------------------------------------------------
@@ -131,6 +134,10 @@ EXPECTED_ALL_ADMIN_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/admin/usage/retention"),
         ("GET", "/api/admin/usage/summary"),
         ("GET", "/api/admin/usage/top-users"),
+        # src.api.routes.admin_permissions
+        ("DELETE", "/api/admin/admins/{permission_id}"),
+        ("GET", "/api/admin/admins"),
+        ("POST", "/api/admin/admins"),
     }
 )
 
@@ -212,12 +219,12 @@ def _non_admin_app(
 # ---------------------------------------------------------------------------
 
 
-def test_the_expected_route_sets_have_exactly_24_2_and_37_pairs() -> None:
+def test_the_expected_route_sets_have_exactly_24_2_and_40_pairs() -> None:
     """The literal sets themselves: an entry dropped from both the app and the
     set would otherwise pass the equality tests below."""
     assert len(EXPECTED_ADMIN_ROUTES) == 24
     assert len(EXPECTED_SHIPPING_ROUTES) == 2
-    assert len(EXPECTED_ALL_ADMIN_ROUTES) == 37
+    assert len(EXPECTED_ALL_ADMIN_ROUTES) == 40
 
 
 def test_app_has_exactly_the_expected_24_admin_route_pairs() -> None:
