@@ -1,10 +1,13 @@
 """Tests for src/api/routes/_authz.py (SDR-4437 PR-2 serial gate)."""
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
-
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 # ---------------------------------------------------------------------------
 # Consolidation: helpers importable from _authz with preserved signatures
@@ -203,66 +206,253 @@ def test_require_admin_caches_verdict(admin_env, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _admin_acl_probe — workspace ``admins`` group membership (Direction C)
+# _admin_acl_probe — the ``permissions`` table decides admin
 #
-# Admin is decided from the caller's OWN group membership via the OBO client's
-# current_user.me().groups — NOT an app-object ACL read. apps.get_permissions
-# is the wrong primitive at runtime: the app's OBO token lacks the
-# access-management scope and the app SP is absent from its own ACL. Deciding
-# on the caller's own group list cannot fail open (a non-admin's me().groups
-# won't contain "admins" and cannot be forged).
+# Admin == a ``permissions`` row for (app, "", admin) matching the caller: a
+# USER row for the caller's email, or a GROUP row for one of the caller's OWN
+# group display names (current_user.me().groups on the caller's OBO client; the
+# app SP cannot list group members). Membership of the workspace ``admins``
+# group no longer counts by itself. Rows come from the CAN_MANAGE sync and the
+# Admins tab. Any DB or group-lookup error propagates, so require_admin fails
+# closed without caching it.
+#
+# The probe runs against a real in-memory SQLite ``permissions`` table reached
+# through a patched ``_authz.get_db_session``; rows are seeded with the store
+# service. Only the OBO client and the group-lookup seam are faked.
 # ---------------------------------------------------------------------------
 
 
-def _wire_probe(monkeypatch, *, caller_groups):
-    """Patch _admin_acl_probe's only dependency: the caller's own group names.
+def _fake_get_db_session_over(factory):
+    """A ``get_db_session`` stand-in shaped like the real one: commit on a clean
+    exit, roll back and re-raise on an exception, always close."""
 
-    The probe resolves groups via get_user_client().current_user.me().groups
-    (OBO); the seam is _caller_group_display_names, which takes the OBO token's
-    own identity. No app name, no ACL, no SP.
+    @contextmanager
+    def fake_get_db_session():
+        db = factory()
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    return fake_get_db_session
+
+
+@pytest.fixture
+def probe_db(monkeypatch):
+    """In-memory SQLite with every table, behind ``_authz.get_db_session``.
+
+    Yields the session factory so a test can seed rows before probing.
+    """
+    import src.database.models  # noqa: F401 - register every model on Base.metadata
+    from src.api.routes import _authz
+    from src.core.database import Base
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    # autoflush=False matches production (src/core/database.py get_session_local).
+    factory = sessionmaker(bind=engine, autoflush=False)
+    monkeypatch.setattr(_authz, "get_db_session", _fake_get_db_session_over(factory))
+    _authz.reset_admin_cache()
+    yield factory
+    _authz.reset_admin_cache()
+    engine.dispose()
+
+
+def _seed_manual(factory, identity_type, identity_name):
+    """Seed an Admins-tab (``manual``) row, committed."""
+    from src.services.admin_permissions import add_manual_admin
+
+    with factory() as db:
+        add_manual_admin(
+            db,
+            identity_type=identity_type,
+            identity_name=identity_name,
+            identity_id=None,
+            created_by="seeder@test.com",
+        )
+        db.commit()
+
+
+def _seed_synced(factory, *holders):
+    """Seed CAN_MANAGE-sync (``can_manage_sync``) rows, committed.
+
+    ``holders`` are ``(identity_type, identity_name)`` pairs.
+    """
+    from src.services.admin_permissions import AclHolder, reconcile_can_manage
+
+    with factory() as db:
+        reconcile_can_manage(db, [AclHolder(t, n) for t, n in holders])
+        db.commit()
+
+
+def _wire_probe(monkeypatch, *, caller_groups):
+    """Fake the caller's OBO client and record every group lookup.
+
+    ``_caller_group_display_names`` is replaced by a recorder that returns
+    ``caller_groups``. Returns ``(fake_client, group_calls)``: ``fake_client``
+    is what ``get_user_client()`` returns, and ``group_calls`` gets one
+    ``(client, user_name)`` tuple per group lookup.
     """
     from src.api.routes import _authz
 
-    fake_client = MagicMock()
+    fake_client = MagicMock(name="caller_obo_client")
     monkeypatch.setattr(
         "src.core.databricks_client.get_user_client", lambda: fake_client
     )
-    monkeypatch.setattr(
-        _authz, "_caller_group_display_names", lambda client, user: set(caller_groups)
-    )
-    return _authz
+    group_calls = []
+
+    def recording_group_lookup(client, user_name):
+        group_calls.append((client, user_name))
+        return set(caller_groups)
+
+    monkeypatch.setattr(_authz, "_caller_group_display_names", recording_group_lookup)
+    return fake_client, group_calls
 
 
-def test_probe_admins_group_member_is_admin(monkeypatch):
-    """Caller whose own groups include 'admins' -> admin."""
-    _authz = _wire_probe(monkeypatch, caller_groups=["admins", "users"])
-    assert _authz._admin_acl_probe("bob@test.com") is True
+def test_probe_user_row_is_admin_without_group_lookup(probe_db, monkeypatch):
+    """A USER row for the caller's email makes them admin (matched
+    case-insensitively) and their groups are never looked up.
 
-
-def test_probe_non_admin_group_member_denied(monkeypatch):
-    """FAIL-OPEN REGRESSION: caller not in 'admins' -> DENIED, even though
-    they are an authenticated user with their own (non-admin) groups."""
-    _authz = _wire_probe(monkeypatch, caller_groups=["users", "tellr consumers"])
-    assert _authz._admin_acl_probe("stranger@test.com") is False
-
-
-def test_probe_no_groups_denied(monkeypatch):
-    """Caller with no group memberships -> not admin."""
-    _authz = _wire_probe(monkeypatch, caller_groups=[])
-    assert _authz._admin_acl_probe("nobody@test.com") is False
-
-
-def test_probe_transient_error_raises(monkeypatch):
-    """A me() failure propagates so require_admin fails closed WITHOUT caching."""
+    A GROUP row the caller is not in is seeded as well, so the user row must be
+    checked BEFORE any group lookup, not merely when no GROUP rows exist.
+    """
     from src.api.routes import _authz
 
-    fake_client = MagicMock()
+    _seed_manual(probe_db, "USER", "bob@test.com")
+    _seed_synced(probe_db, ("GROUP", "Tellr Maintainers"))
+    _, group_calls = _wire_probe(monkeypatch, caller_groups=["users"])
+
+    assert _authz._admin_acl_probe("BOB@test.com") is True
+    assert group_calls == [], "a USER-row admin must not trigger a group lookup"
+
+
+@pytest.mark.parametrize("table", ["empty", "rows_for_others"])
+def test_probe_workspace_admins_member_without_row_is_denied(
+    probe_db, monkeypatch, table
+):
+    """REGRESSION for the semantic change: being in the workspace ``admins``
+    group no longer makes the caller a Tellr admin.
+
+    Denied on an empty table, and on a populated one with no row for this
+    caller or their groups (the state after the first CAN_MANAGE sync on an
+    upgraded install, which drops the inherited ``admins`` entry).
+    """
+    from src.api.routes import _authz
+
+    if table == "rows_for_others":
+        _seed_synced(
+            probe_db, ("USER", "owner@test.com"), ("GROUP", "Tellr Maintainers")
+        )
+        _seed_manual(probe_db, "USER", "helper@test.com")
+    _wire_probe(monkeypatch, caller_groups=["admins"])
+
+    assert _authz._admin_acl_probe("wsadmin@test.com") is False
+
+
+def test_probe_group_row_matches_callers_group(probe_db, monkeypatch):
+    """A GROUP row admits the caller when it names one of the caller's OWN
+    group display names, compared case-insensitively.
+
+    The groups are read through the caller's OBO client, never another one
+    (``me()`` on the app SP's client would return the SP's groups, not the
+    caller's).
+    """
+    from src.api.routes import _authz
+
+    _seed_synced(probe_db, ("GROUP", "Tellr Maintainers"))
+    fake_client, group_calls = _wire_probe(
+        monkeypatch, caller_groups=["tellr maintainers"]
+    )
+
+    assert _authz._admin_acl_probe("carol@test.com") is True
+    assert group_calls, "the caller's groups were never looked up"
+    assert all(client is fake_client for client, _ in group_calls)
+
+
+def test_probe_admins_group_row_counts_when_granted_directly(probe_db, monkeypatch):
+    """The other side of the regression above: ``admins`` is not blacklisted.
+
+    A GROUP row named ``admins`` (CAN_MANAGE granted directly on the app, or
+    added in the Admins tab) admits its members like any other group row
+    (spec: "A group granted CAN_MANAGE directly on the app counts, even if it
+    is the workspace ``admins`` group").
+    """
+    from src.api.routes import _authz
+
+    _seed_synced(probe_db, ("GROUP", "admins"))
+    _wire_probe(monkeypatch, caller_groups=["admins"])
+
+    assert _authz._admin_acl_probe("wsadmin@test.com") is True
+
+
+def _operational_error():
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError(
+        "SELECT permissions.id FROM permissions", {}, Exception("connection refused")
+    )
+
+
+@pytest.mark.parametrize("fails_at", ["session_open", "first_query"])
+def test_probe_db_error_raises(monkeypatch, fails_at):
+    """A database error propagates; it is never turned into a verdict.
+
+    Returning False would be cached by require_admin and lock a real admin out
+    for the TTL; falling back to group membership would fail open (the caller
+    here IS in ``admins``). ``session_open``: ``get_db_session`` itself raises.
+    ``first_query``: the session opens but the first query fails, which is
+    where a broken database actually surfaces (here: the ``permissions`` table
+    was never created).
+    """
+    from sqlalchemy.exc import OperationalError
+
+    from src.api.routes import _authz
+
+    if fails_at == "session_open":
+
+        def broken_get_db_session():
+            raise _operational_error()
+
+        monkeypatch.setattr(_authz, "get_db_session", broken_get_db_session)
+    else:
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )  # no create_all: every query raises "no such table"
+        factory = sessionmaker(bind=engine, autoflush=False)
+        monkeypatch.setattr(
+            _authz, "get_db_session", _fake_get_db_session_over(factory)
+        )
+    _wire_probe(monkeypatch, caller_groups=["admins"])
+
+    with pytest.raises(OperationalError):
+        _authz._admin_acl_probe("wsadmin@test.com")
+
+
+def test_probe_group_lookup_error_raises_when_group_rows_exist(probe_db, monkeypatch):
+    """With a GROUP row to match against, a failing ``current_user.me()``
+    propagates, so require_admin fails closed WITHOUT caching (a False here
+    would be cached and lock every group admin out for the TTL)."""
+    from src.api.routes import _authz
+
+    _seed_synced(probe_db, ("GROUP", "Tellr Maintainers"))
+    fake_client = MagicMock(name="caller_obo_client")
     fake_client.current_user.me.side_effect = RuntimeError("workspace unreachable")
     monkeypatch.setattr(
         "src.core.databricks_client.get_user_client", lambda: fake_client
     )
-    with pytest.raises(RuntimeError):
-        _authz._admin_acl_probe("alice@test.com")
+
+    with pytest.raises(RuntimeError, match="workspace unreachable"):
+        _authz._admin_acl_probe("carol@test.com")
 
 
 def test_caller_group_display_names_reads_me_group_display(monkeypatch):
