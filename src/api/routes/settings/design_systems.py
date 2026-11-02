@@ -301,7 +301,7 @@ def _is_blank_identity(value: Optional[str]) -> bool:
 
 
 def _require_creator_or_admin(ds: DesignSystem) -> None:
-    """Require the caller to be ``ds``'s author, or a workspace admin.
+    """Require the caller to be ``ds``'s author, or a Tellr admin.
 
     Design systems are org-shared, user-CONTRIBUTED content: any user may add
     one (create/import stay open) and manage the ones they uploaded, nobody may
@@ -377,7 +377,7 @@ def _require_creator_or_admin(ds: DesignSystem) -> None:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     "This design system is the organization default; only a "
-                    "workspace admin can rename or delete it. Ask an admin to "
+                    "Tellr admin can rename or delete it. Ask an admin to "
                     "make a different design system the default first."
                 ),
             ) from None

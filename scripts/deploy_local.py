@@ -57,6 +57,7 @@ from databricks_tellr.deploy import (
     _setup_database_schema,
     _reset_schema,
     _get_app_client_id,
+    _ensure_app_sp_can_manage,
     _ensure_sp_autoscaling_role,
     delete,
 )
@@ -593,6 +594,7 @@ def create_local(
             ),
         )
         print("   App registered")
+        _ensure_app_sp_can_manage(ws, app_name, _get_app_client_id(app))
         print()
 
         # Register SP role on the target branch (staging branch or production branch)
@@ -918,6 +920,9 @@ def update_local(
             print("   Files updated")
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
+
+        # The admin sync needs the app SP to hold CAN_MANAGE on its own app.
+        _ensure_app_sp_can_manage(ws, app_name)
 
         # Deploy new version
         print("   Deploying...")

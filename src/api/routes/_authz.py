@@ -294,7 +294,9 @@ def _require_export_job_access(
 # (``apps.get_permissions``) each hit a wall:
 #
 #   1. OBO-can-read-the-ACL as the verdict           -> fail-OPEN (every user
-#      could read the ACL, so every user was "admin").
+#      could read the ACL, so every user was "admin"). Those verifications
+#      used a full-scope CLI token, which carries ``access-management``;
+#      the runtime OBO token (wall 3) does not.
 #   2. SP/system client reads the ACL                -> fail-CLOSED for all:
 #      PermissionDenied ``apps.ruleSets/get`` (the app's own SP was not in its
 #      own ACL).
@@ -400,7 +402,7 @@ def require_admin() -> None:
             _ADMIN_CACHE[user] = (verdict, now)
         except Exception:
             logger.warning(
-                "require_admin: ACL membership check failed for %s; failing "
+                "require_admin: admin permissions lookup failed for %s; failing "
                 "closed (uncached)",
                 user,
                 exc_info=True,
