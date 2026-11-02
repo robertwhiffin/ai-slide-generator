@@ -92,6 +92,7 @@ def _sniff_mime(data: bytes) -> str | None:
 
 
 def _image_size(data: bytes, mime: str) -> tuple[int, int] | None:
+    """A raster image's ``(width, height)``; ``None`` for SVG or bytes Pillow cannot read."""
     if mime == "image/svg+xml":
         return None
     try:
@@ -99,7 +100,7 @@ def _image_size(data: bytes, mime: str) -> tuple[int, int] | None:
 
         with Image.open(io.BytesIO(data)) as img:
             return img.size
-    except Exception:  # noqa: BLE001 - the size is only a courtesy to the model
+    except Exception:  # noqa: BLE001 - unreadable bytes (or a decompression bomb)
         return None
 
 
@@ -130,12 +131,19 @@ class _Shaper:
             return [
                 f"[image not saved: larger than {image_service.MAX_FILE_SIZE // (1024 * 1024)} MB]"
             ]
+        size = _image_size(data, mime)
+        if size is None and mime != "image/svg+xml":
+            return ["[image not saved: could not decode the image data]"]
         try:
             token = self._save(data, mime)
         except ValueError as exc:
             return [f"[image not saved: {exc}]"]
+        except Exception:  # noqa: BLE001 - one bad image must not cost the rest of the result
+            # e.g. Pillow failing on a truncated image, or the database; the
+            # service call already ran, so the model still gets its text.
+            logger.warning("Gateway MCP image save failed", exc_info=True)
+            return ["[image not saved: it could not be stored]"]
         self.tokens.append(token)
-        size = _image_size(data, mime)
         dims = "" if size is None else f", {size[0]}×{size[1]}"
         return [f"Image saved: {{{{image:{token}}}}} ({mime}{dims}){_IMAGE_NOTE_TAIL}"]
 

@@ -702,6 +702,63 @@ def test_a_rejected_save_is_reported_and_the_rest_still_save():
     ]
 
 
+@pytest.mark.parametrize("where", ["image_block", "base64_field"])
+def test_an_undecodable_image_is_reported_and_the_rest_of_the_result_kept(where):
+    """Valid base64 under an image MIME type (or a PNG signature) that Pillow cannot read
+    is never offered to the saver (``upload_image``'s thumbnail step would raise
+    ``UnidentifiedImageError``, not a ValueError, and lose the whole result); one
+    "[image not saved: ...]" line, and the service's text still reaches the model."""
+    garbage = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+    persisted = {"diagram_id": DIAGRAM_ID, "diagram_url": DIAGRAM_URL}
+    if where == "image_block":
+        content = [
+            TextContent(type="text", text=json.dumps(persisted)),
+            _image(garbage, "image/png"),
+        ]
+    else:
+        payload = {**persisted, "data_base64": _b64(garbage)}
+        content = [TextContent(type="text", text=json.dumps(payload))]
+    saver = RecordingSaver()
+
+    text, tokens = shape_result(CallToolResult(content=content, isError=False), save_image=saver)
+
+    assert saver.attempts == [] and tokens == []
+    reports = [line for line in text.split("\n") if line.startswith("[image not saved: ")]
+    assert len(reports) == 1 and reports[0].endswith("]")
+    assert json.loads(_without(text, reports[0])) == persisted
+
+
+def test_a_save_that_fails_unexpectedly_is_reported_and_the_rest_still_save(caplog):
+    """Anything else the saver raises (Pillow on a truncated image, the database) is one
+    logged "[image not saved: ...]" line that does not echo the error, and the service's
+    text and the next image are kept: the call has already run."""
+    failure = RuntimeError("could not connect to server db-host-7: connection refused")
+    saver = RecordingSaver(reject={"image/gif": failure})  # type: ignore[dict-item]
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text="Exported."),
+            _image(GIF, "image/gif"),
+            _image(PNG, "image/png"),
+        ],
+        isError=False,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="src.services.agent_tools.gateway_tool"):
+        text, tokens = shape_result(result, save_image=saver)
+
+    assert saver.attempts == [(GIF, "image/gif"), (PNG, "image/png")]
+    assert tokens == saver.tokens and len(tokens) == 1
+    first, report, note = text.split("\n")
+    assert first == "Exported."
+    assert re.fullmatch(r"\[image not saved: [^\n]+\]", report), report
+    assert note == _note(tokens[0], "image/png", (4, 3))
+    assert "db-host-7" not in text
+    assert any(
+        record.name == "src.services.agent_tools.gateway_tool" and record.levelno >= logging.WARNING
+        for record in caplog.records
+    )
+
+
 # ---------------------------------------------------------------------------
 # run: the output the model sees
 # ---------------------------------------------------------------------------
