@@ -7,9 +7,12 @@ from typing import Annotated, Any, Final, Literal, Optional, Union
 from pydantic import (
     BaseModel,
     Field,
+    field_validator,
     model_serializer,
     model_validator,
 )
+
+from src.domain.gateway_service_name import validate_service_name
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +74,22 @@ class GenieOneTool(BaseModel):
     conversation_id: Optional[str] = None
 
 
+class GatewayMcpTool(BaseModel):
+    """AI Gateway MCP service tool — agent mode only; one per service."""
+    type: Literal["gateway_mcp"]
+    service_name: str
+    display_name: str = Field(..., min_length=1, max_length=120)
+
+    @field_validator("service_name")
+    @classmethod
+    def _service_name(cls, v: str) -> str:
+        return validate_service_name(v)
+
+
 ToolEntry = Annotated[
     Union[
         GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
-        GenieOneTool,
+        GenieOneTool, GatewayMcpTool,
     ],
     Field(discriminator="type"),
 ]
@@ -123,6 +138,8 @@ class AgentConfig(BaseModel):
                 key = f"agent_bricks:{tool.endpoint_name}"
             elif isinstance(tool, GenieOneTool):
                 key = "genie_one"
+            elif isinstance(tool, GatewayMcpTool):
+                key = f"gateway_mcp:{tool.service_name}"
             else:
                 continue
             if key in seen:

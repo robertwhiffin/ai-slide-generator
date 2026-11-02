@@ -16,7 +16,7 @@ from src.api.schemas.gateway_mcp import (
 )
 from src.core.database import get_db
 from src.core.databricks_client import get_user_client
-from src.core.scope_errors import oauth_scopes_from_token
+from src.core.scope_errors import oauth_client_id_from_token, oauth_scopes_from_token
 from src.core.user_context import get_current_user
 from src.services import gateway_mcp_registry as registry
 from src.services.agent_tools.gateway_mcp import GatewayMcpClient, probe_service
@@ -91,6 +91,7 @@ def test_gateway_connection(body: GatewayTestRequest):
         service_name=body.service_name,
         detail=probe.detail,
         sign_in_url=probe.sign_in_url,
+        oauth_client_id=oauth_client_id_from_token(token),
     )
     return GatewayStatusOut(
         state=probe.state,

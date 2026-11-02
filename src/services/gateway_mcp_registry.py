@@ -167,6 +167,7 @@ def status_message(
     service_name: str,
     detail: str | None,
     sign_in_url: str | None,
+    oauth_client_id: str | None = None,
 ) -> str | None:
     """The user-facing line for a probe state, or ``None`` when ready."""
     if state == "ready":
@@ -184,8 +185,8 @@ def status_message(
             "Ask an admin to check the connection."
         )
     if state == "missing_scope":
-        return consent_message(oauth_client_id=None)
+        return consent_message(oauth_client_id=oauth_client_id)
     if state == "not_registered":
         return f"{display_name} is no longer available."
-    reason = detail or "unknown error"
-    return f"{display_name} is unavailable right now ({reason}). The deck was built without it."
+    reason = detail or "no reason given"
+    return f"{display_name} is unavailable right now ({reason})."

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, ValidationError
@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 from src.api.routes._authz import _check_deck_permission_for_session
 from src.api.schemas.agent_config import (
     AgentConfig,
+    GatewayMcpTool,
     ToolEntry,
     normalize_style_source_exclusivity,
     resolve_agent_config,
@@ -147,6 +148,38 @@ def _validate_references(config: AgentConfig, *, session_id: str | None = None) 
                 )
 
 
+def _check_new_gateway_entries(
+    incoming: list, stored_raw: Optional[dict], *, session_id: str | None = None
+) -> None:
+    """422 for a gateway entry that is new to the session and not available.
+
+    "New" means its service name is not among the stored config's gateway entries;
+    stored entries are kept even if their connection has since been removed. The
+    registry is read only when at least one entry is new.
+    """
+    from src.services import gateway_mcp_registry
+
+    wanted = [t.service_name for t in incoming if isinstance(t, GatewayMcpTool)]
+    if not wanted:
+        return
+    stored = {
+        t.get("service_name")
+        for t in (stored_raw or {}).get("tools", []) or []
+        if isinstance(t, dict) and t.get("type") == "gateway_mcp"
+    }
+    new_names = list(dict.fromkeys(n for n in wanted if n not in stored))
+    if not new_names:
+        return
+    with get_db_session() as db:
+        available = gateway_mcp_registry.enabled_by_service(db, new_names)
+    for name in new_names:
+        if name not in available:
+            raise HTTPException(
+                status_code=422,
+                detail=f"gateway connection {name} is not available",
+            )
+
+
 def _save_agent_config(session_id: str, config: AgentConfig) -> dict:
     """Persist *config* onto the session row and return its dict representation."""
     with get_db_session() as db:
@@ -244,6 +277,19 @@ async def put_agent_config(session_id: str, config: AgentConfig):
     # is sanitized (cleared in place) rather than rejected, so what is persisted
     # and returned below is the effective config.
     _validate_references(config, session_id=session_id)
+    if any(isinstance(t, GatewayMcpTool) for t in config.tools):
+        try:
+            stored = await asyncio.to_thread(
+                get_session_manager().get_session, session_id
+            )
+        except SessionNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+        await asyncio.to_thread(
+            _check_new_gateway_entries,
+            config.tools,
+            stored.get("agent_config"),
+            session_id=session_id,
+        )
     # THEN make the style sources exclusive. Order matters: reference validation
     # clears a DANGLING design system first, so a user who picks a slide style
     # while holding a dead pin keeps their style. Normalising first would drop the
@@ -273,12 +319,23 @@ async def patch_tools(session_id: str, body: PatchToolRequest):
     config = resolve_agent_config(session.get("agent_config"))
 
     if body.action == "add":
+        if isinstance(body.tool, GatewayMcpTool):
+            await asyncio.to_thread(
+                _check_new_gateway_entries,
+                [body.tool],
+                session.get("agent_config"),
+                session_id=session_id,
+            )
         config.tools.append(body.tool)
     elif body.action == "remove":
         # Match by discriminator key (e.g. genie:space_id, mcp:connection_name)
         from src.api.schemas.agent_config import (
-            GenieTool, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool,
+            AgentBricksTool,
             GenieOneTool,
+            GenieTool,
+            MCPTool,
+            ModelEndpointTool,
+            VectorIndexTool,
         )
 
         def _key(t):
@@ -294,6 +351,8 @@ async def patch_tools(session_id: str, body: PatchToolRequest):
                 return f"agent_bricks:{t.endpoint_name}"
             elif isinstance(t, GenieOneTool):
                 return "genie_one"
+            elif isinstance(t, GatewayMcpTool):
+                return f"gateway_mcp:{t.service_name}"
             return None
 
         remove_key = _key(body.tool)
