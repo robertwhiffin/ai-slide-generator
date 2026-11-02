@@ -2,7 +2,7 @@ import type { ChatResponse } from '../types/message';
 import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
-import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayMcpStatus } from '../types/agentConfig';
+import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayMcpStatus, GatewayConnection, GatewayConnectionCreate, GatewayConnectionUpdate } from '../types/agentConfig';
 import type { TurnProgress } from '../types/turnProgress';
 
 // Use relative URLs in production, explicit IPv4 in development
@@ -22,6 +22,26 @@ export class ApiError extends Error {
     this.status = status;
     this.name = 'ApiError';
   }
+}
+
+/** FastAPI `detail` is a string, or (422) an array of `{loc, msg}` objects. */
+async function throwGatewayAdminError(response: Response, fallback: string): Promise<never> {
+  let detail: unknown;
+  try {
+    detail = (await response.json())?.detail;
+  } catch {
+    detail = undefined;
+  }
+  let message = fallback;
+  if (typeof detail === 'string') {
+    message = detail;
+  } else if (Array.isArray(detail)) {
+    const parts = detail
+      .map((d) => (d && typeof d.msg === 'string' ? d.msg : typeof d === 'string' ? d : ''))
+      .filter(Boolean);
+    if (parts.length) message = parts.join('; ');
+  }
+  throw new ApiError(response.status, message);
 }
 
 /**
@@ -2349,6 +2369,54 @@ export const api = {
     if (!response.ok) {
       throw new Error(`Could not get Gateway MCP status (${response.status}).`);
     }
+    return response.json();
+  },
+
+  /** Admin: list registered AI Gateway MCP connections. */
+  async listGatewayConnections(): Promise<GatewayConnection[]> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/gateway-mcp-connections`);
+    if (!response.ok) await throwGatewayAdminError(response, 'Failed to load connections');
+    return response.json();
+  },
+
+  /** Admin: register a connection. */
+  async createGatewayConnection(body: GatewayConnectionCreate): Promise<GatewayConnection> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/gateway-mcp-connections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) await throwGatewayAdminError(response, 'Failed to create connection');
+    return response.json();
+  },
+
+  /** Admin: update a connection (only the six editable fields). */
+  async updateGatewayConnection(id: number, body: GatewayConnectionUpdate): Promise<GatewayConnection> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/gateway-mcp-connections/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) await throwGatewayAdminError(response, 'Failed to update connection');
+    return response.json();
+  },
+
+  /** Admin: delete a connection. */
+  async deleteGatewayConnection(id: number): Promise<void> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/gateway-mcp-connections/${id}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) await throwGatewayAdminError(response, 'Failed to delete connection');
+  },
+
+  /** Admin: run tools/list against a service as the admin. */
+  async testGatewayConnection(serviceName: string): Promise<GatewayMcpStatus> {
+    const response = await fetch(`${API_BASE_URL}/api/admin/gateway-mcp-connections/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service_name: serviceName }),
+    });
+    if (!response.ok) await throwGatewayAdminError(response, 'Connection test failed');
     return response.json();
   },
 

@@ -198,3 +198,35 @@ export const TOOL_TYPE_COLORS: Record<ToolType, string> = {
   model_endpoint: 'bg-amber-100 text-amber-800',
   agent_bricks: 'bg-teal-100 text-teal-800',
 };
+
+export type GatewayConnectionAgent = 'architect' | 'data_analyst';
+
+/** A registered AI Gateway MCP connection (admin view). */
+export interface GatewayConnection {
+  id: number;
+  service_name: string;
+  display_name: string;
+  description: string | null;
+  agent: GatewayConnectionAgent;
+  instructions: string | null;
+  tool_allowlist: string[] | null;
+  enabled: boolean;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** The six editable fields; PUT is extra="forbid". */
+export interface GatewayConnectionUpdate {
+  display_name: string;
+  description: string | null;
+  agent: GatewayConnectionAgent;
+  instructions: string | null;
+  tool_allowlist: string[] | null;
+  enabled: boolean;
+}
+
+export interface GatewayConnectionCreate extends GatewayConnectionUpdate {
+  service_name: string;
+}
