@@ -118,9 +118,10 @@ def _statuses(manager) -> dict[str, list[str]]:
 # --- how many runners ------------------------------------------------------------
 
 
-def test_default_concurrency_is_four(monkeypatch):
+def test_default_concurrency_is_one(monkeypatch):
+    """One runner per process until 429 handling can take more concurrent turns."""
     monkeypatch.delenv(job_queue.CHAT_JOB_CONCURRENCY_ENV, raising=False)
-    assert job_queue.chat_job_concurrency() == 4
+    assert job_queue.chat_job_concurrency() == 1
 
 
 @pytest.mark.parametrize("raw, expected", [("1", 1), ("6", 6), (" 3 ", 3)])
