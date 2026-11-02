@@ -233,7 +233,12 @@ def build_gateway_tools(
         if row.tool_allowlist is not None:
             allowed = set(row.tool_allowlist)
             specs = [spec for spec in specs if spec.name in allowed]
-        return list(specs)
+        # Two tools of one name make the provider reject the whole model call, so a
+        # name the service lists twice is bound once (its first listing).
+        unique: dict[str, GatewayToolSpec] = {}
+        for spec in specs:
+            unique.setdefault(spec.name, spec)
+        return list(unique.values())
 
     results: dict[str, list[GatewayToolSpec] | GatewayFailure] = {}
     if rows:

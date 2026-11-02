@@ -277,6 +277,20 @@ def test_reconcile_html_bare_ref_outside_img_or_url_is_removed():
     assert reconcile_html(html, {_token()}) == ("<p>See  here</p>", [INVENTED])
 
 
+def test_reconcile_html_custom_property_ending_in_background_image_is_not_cut():
+    """``--hero-background-image`` is not a ``background-image`` declaration: only
+    its placeholder goes, and the declaration after it survives."""
+    html = (
+        "<div style=\"--hero-background-image: url('" + _ref(INVENTED) + "'); color: red\">"
+        "x</div>"
+    )
+
+    assert reconcile_html(html, {_token()}) == (
+        "<div style=\"--hero-background-image: url(''); color: red\">x</div>",
+        [INVENTED],
+    )
+
+
 def test_reconcile_html_unknown_ref_in_another_css_context_never_survives():
     """Whatever the context, an unknown reference is never left in the HTML."""
     html = (

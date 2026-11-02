@@ -479,6 +479,19 @@ def test_no_allowlist_binds_every_tool():
     assert sorted(tool.name for tool in build.tools) == ["delete_everything", "lookup", "search"]
 
 
+def test_a_service_listing_one_name_twice_binds_it_once():
+    """Two tools of one name in a request make the provider reject the whole call,
+    so a service that lists a name twice binds only its first listing."""
+    docs = FakeClient(
+        DOCS, [_spec("search", "First."), _spec("lookup"), _spec("search", "Second.")]
+    )
+
+    build = _build([_entry(DOCS, "Docs")], {DOCS: _conn(DOCS, "Docs")}, Factory(docs))
+
+    assert [tool.name for tool in build.tools] == ["search", "lookup"]
+    assert build.tools[0].description == "Docs: First."
+
+
 def test_a_tool_left_out_by_the_allowlist_does_not_force_a_prefix():
     """Collisions are resolved over the BOUND tools: Docs' ``search`` is not
     allowlisted, so Web Search's ``search`` keeps its own name."""

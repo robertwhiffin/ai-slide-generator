@@ -26,8 +26,13 @@ IMAGE_REF_RE: Final = IMAGE_PLACEHOLDER_PATTERN
 
 _PREFIX_LEN: Final = 12
 _IMG_RE: Final = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+#: A ``background-image: url('{{image:TOKEN}}')`` declaration (group 1 is the token,
+#: from the shared pattern).  The lookbehind keeps a custom property such as
+#: ``--hero-background-image`` from being cut in half.
 _BG_DECL_RE: Final = re.compile(
-    r"\s*background-image\s*:\s*url\(\s*['\"]?\{\{image:([A-Za-z0-9_-]+)\}\}['\"]?\s*\)\s*;?",
+    r"\s*(?<![\w-])background-image\s*:\s*url\(\s*['\"]?"
+    + IMAGE_PLACEHOLDER_PATTERN.pattern
+    + r"['\"]?\s*\)\s*;?",
     re.IGNORECASE,
 )
 _SLIDE_PATH_RE: Final = re.compile(r"^deck_spec\.slides\[(\d+)\]")
