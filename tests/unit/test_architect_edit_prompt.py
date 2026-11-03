@@ -119,8 +119,11 @@ HEAD_UNCHANGED_BLOCK_HASHES = {
     # Architect edit operations rewrote only the PAYLOAD RULES edit line and the EDITING
     # and SLIDE NUMBERS blocks; every other block is pinned at its pre-change bytes
     # (recompute from `git show 2b653079:src/core/skills/architect.py`).
-    "deck_scale_and_structure": "7ece01e9ffbada7e8273f132640a9c2355177135584273a35f1c56981a45dcdc",
-    "vary_the_exhibits": "be654859ee8af4682e4f33380da40ccd3d57b07af10f278287b5064dc47aa0f0",
+    # Re-pinned by brief-starter: DECK SCALE AND STRUCTURE drops the 14-20 slide default for a
+    # five-to-eight-slide starter, and both blocks say "content slides" for "developing slides";
+    # pinned by TestArchitectProse in test_skill_prose.py.
+    "deck_scale_and_structure": "161e424a42a9641fad78a2574897a95bc40e513d41d8ea901d37bf7b0547e732",
+    "vary_the_exhibits": "03ae83369a7f25f30df8a789b3f0ea09011cfaf8b635ceb3c5ca7f130c3da7b8",
     # Re-pinned by the architect deck style (deck-style-b): DECKSPEC CONSTRUCTION gains a
     # `deck_style:` line after `slides:`, SLIDESPEC FIELDS a `look:` line, and VISUAL /
     # TEMPLATE BINDING its bind-where-it-fits sentences; the new DECK STYLE block and the
