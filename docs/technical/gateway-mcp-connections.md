@@ -94,8 +94,8 @@ In the deck's agent config bar, open the **MCP Server** picker. Registered conne
 
 Services behind a per-user OAuth (U2M) connection, such as LakeDraw, GitHub or Slack, need each user to sign in once.
 
-- **On the chip:** a **Sign in to {name}** link opens `{host}/mcp-service-login?name=<service>` in a new tab. After signing in, click **Check again**.
-- **Mid-turn:** if a turn needs the service and the user is not signed in, the chat posts "To use {name}, sign in here: ..." with a clickable link, and the deck still builds without that connection. Ask again after signing in. That notice is the only chat message with a link: the server marks it, and only its https sign-in URL is clickable. Every other message, including any URL a model or a service writes, is plain text.
+- **On the chip:** a **Sign in to `<name>`** link opens `{host}/mcp-service-login?name=<service>` in a new tab. After signing in, click **Check again**.
+- **Mid-turn:** if a turn needs the service and the user is not signed in, the chat posts "To use `<name>`, sign in here: ..." with a clickable link, and the deck still builds without that connection. Ask again after signing in. That notice is the only chat message with a link: the server marks it, and only its https sign-in URL is clickable. Every other message, including any URL a model or a service writes, is plain text.
 
 Other chip states: " · agent mode only" (legacy deck), " · no access", " · needs permission", " · not found", " · unavailable" (also shown if an admin removed or disabled the connection).
 
