@@ -1,10 +1,9 @@
-"""Task 3: the discovery union and the per-user Gateway status endpoint.
+"""Gateway discovery (the deck's connection pills) and the per-user Gateway status endpoint.
 
-``GET /api/tools/discover/mcp`` keeps its UC ``items`` (and, on a UC failure, its
-``error`` / ``error_code``) exactly as before, and adds ``gateway_items``: the
-ENABLED registry rows, each exactly ``{service_name, display_name, description,
-agent}``. The registry is read in its OWN try/except (T3.1): a registry failure
-gives ``gateway_items: []`` with a WARNING and never touches the UC result.
+``GET /api/tools/discover/gateway-mcp`` returns ``{"items": [...]}``: the ENABLED
+registry rows, each exactly ``{service_name, display_name, description, agent}``. It
+reads only the registry, never Unity Catalog; a registry failure gives ``items: []``
+with a WARNING. ``GET /api/tools/discover/mcp`` is Unity Catalog only, as on main.
 
 ``GET /api/tools/gateway-mcp/status?service_name=...`` returns ``GatewayStatusOut``
 (``{state, message, sign_in_url, tools: [{name, description}]}``):
@@ -60,6 +59,7 @@ from src.services.agent_tools.gateway_mcp import (
 )
 
 DISCOVER = "/api/tools/discover/mcp"
+DISCOVER_GATEWAY = "/api/tools/discover/gateway-mcp"
 STATUS = "/api/tools/gateway-mcp/status"
 
 FIXTURE = (
@@ -319,128 +319,89 @@ def _client_kwargs(call: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# GET /api/tools/discover/mcp
+# GET /api/tools/discover/gateway-mcp
 # ---------------------------------------------------------------------------
 
 
-def test_discover_mcp_includes_enabled_gateway_items_only(
+def test_discover_gateway_lists_enabled_connections_only(
     http: TestClient, db_factory: sessionmaker
 ) -> None:
     _register_three(db_factory)
-    set_user_client(_uc_client(list_return=_uc_connections()))
 
-    response = http.get(DISCOVER)
+    response = http.get(DISCOVER_GATEWAY)
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) == {"items", "gateway_items"}
-    assert body["items"] == [JIRA_ITEM]  # the UC shape is unchanged
-    assert _by_service(body["gateway_items"]) == [LAKEDRAW_ITEM, WEB_SEARCH_ITEM]
+    assert set(body) == {"items"}
+    # Exactly the four public fields: never the model-facing instructions or the allowlist.
+    assert _by_service(body["items"]) == [LAKEDRAW_ITEM, WEB_SEARCH_ITEM]
 
 
-def test_discover_mcp_with_no_registered_connections_has_empty_gateway_items(
+def test_discover_gateway_with_no_registered_connections_is_empty(
     http: TestClient, db_factory: sessionmaker
 ) -> None:
-    set_user_client(_uc_client(list_return=_uc_connections()))
-
-    response = http.get(DISCOVER)
+    response = http.get(DISCOVER_GATEWAY)
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"items": [JIRA_ITEM], "gateway_items": []}
+    assert response.json() == {"items": []}
 
 
-def test_discover_mcp_gateway_items_survive_uc_scope_error(
+def test_discover_gateway_never_calls_unity_catalog(
     http: TestClient, db_factory: sessionmaker
 ) -> None:
+    """The pills render on every config-bar open, so they must not wait on (or fail
+    with) the user's UC connection listing."""
     _register_three(db_factory)
-    set_user_client(_uc_client(list_side_effect=_missing_scope_error()))
+    uc = _uc_client(list_side_effect=AssertionError("UC was listed"))
+    set_user_client(uc)
 
-    response = http.get(DISCOVER)
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    gateway_items = body.pop("gateway_items")
-    assert body == {
-        "items": [],
-        "error": consent_message(oauth_client_id=CLIENT_ID),
-        "error_code": "missing_scope",
-    }
-    assert _by_service(gateway_items) == [LAKEDRAW_ITEM, WEB_SEARCH_ITEM]
-
-
-def test_discover_mcp_gateway_items_survive_uc_discovery_failure(
-    http: TestClient, db_factory: sessionmaker
-) -> None:
-    _register_three(db_factory)
-    set_user_client(_uc_client(list_side_effect=RuntimeError("internal detail")))
-
-    response = http.get(DISCOVER)
+    response = http.get(DISCOVER_GATEWAY)
 
     assert response.status_code == 200, response.text
-    body = response.json()
-    gateway_items = body.pop("gateway_items")
-    assert body == {
-        "items": [],
-        "error": "Could not list MCP connections: RuntimeError",
-        "error_code": "discovery_failed",
-    }
-    assert _by_service(gateway_items) == [LAKEDRAW_ITEM, WEB_SEARCH_ITEM]
+    assert _by_service(response.json()["items"]) == [LAKEDRAW_ITEM, WEB_SEARCH_ITEM]
+    uc.connections.list.assert_not_called()
 
 
-def test_discover_mcp_gateway_items_do_not_need_the_user_client(
-    http: TestClient, db_factory: sessionmaker
-) -> None:
-    """The registry is read from the database, so it never needs the user's client
-    (or a scope): when building the client fails, the UC half fails as before and
-    the Gateway half still answers."""
-    _register_three(db_factory)
-
-    def _no_client() -> None:
-        raise RuntimeError("no user client")
-
-    with patch.object(tools_routes, "get_user_client", side_effect=_no_client):
-        response = http.get(DISCOVER)
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    gateway_items = body.pop("gateway_items")
-    assert body == {
-        "items": [],
-        "error": "Could not list MCP connections: RuntimeError",
-        "error_code": "discovery_failed",
-    }
-    assert _by_service(gateway_items) == [LAKEDRAW_ITEM, WEB_SEARCH_ITEM]
-
-
-def test_discover_mcp_registry_failure_leaves_uc_items_untouched(
+def test_discover_gateway_registry_failure_is_empty_with_a_warning(
     http: TestClient, broken_registry: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """T3.1: the registry read has its own try/except; its failure is not a
-    ``discovery_failed`` and adds no error keys."""
+    caplog.set_level(logging.WARNING, logger="src.api.routes.tools")
+
+    response = http.get(DISCOVER_GATEWAY)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"items": []}
+    assert _tools_warnings(caplog), "a registry read failure must be logged at WARNING"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/tools/discover/mcp: Unity Catalog only, as on main
+# ---------------------------------------------------------------------------
+
+
+def test_discover_mcp_lists_uc_items_only(http: TestClient, db_factory: sessionmaker) -> None:
+    """Gateway connections have their own pills now, so the MCP Server panel no longer
+    repeats them."""
+    _register_three(db_factory)
+    set_user_client(_uc_client(list_return=_uc_connections()))
+
+    response = http.get(DISCOVER)
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"items": [JIRA_ITEM]}
+
+
+def test_discover_mcp_does_not_read_the_registry(
+    http: TestClient, broken_registry: str, caplog: pytest.LogCaptureFixture
+) -> None:
     set_user_client(_uc_client(list_return=_uc_connections()))
     caplog.set_level(logging.WARNING, logger="src.api.routes.tools")
 
     response = http.get(DISCOVER)
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"items": [JIRA_ITEM], "gateway_items": []}
-    assert _tools_warnings(caplog), "a registry read failure must be logged at WARNING"
-
-
-def test_discover_mcp_registry_failure_keeps_the_uc_error(
-    http: TestClient, broken_registry: str
-) -> None:
-    set_user_client(_uc_client(list_side_effect=_missing_scope_error()))
-
-    response = http.get(DISCOVER)
-
-    assert response.status_code == 200, response.text
-    assert response.json() == {
-        "items": [],
-        "error": consent_message(oauth_client_id=CLIENT_ID),
-        "error_code": "missing_scope",
-        "gateway_items": [],
-    }
+    assert response.json() == {"items": [JIRA_ITEM]}
+    assert not _tools_warnings(caplog)
 
 
 # ---------------------------------------------------------------------------

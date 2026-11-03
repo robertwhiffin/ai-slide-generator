@@ -13,7 +13,6 @@ import type {
   ToolType,
   ToolEntry,
   AgentBricksTool,
-  GatewayMcpTool,
   MCPTool,
   ModelEndpointTool,
   VectorIndexTool,
@@ -29,14 +28,6 @@ export interface AgentBricksPreview {
   toolType: 'agent_bricks';
   name: string;
   endpointName: string;
-  description?: string;
-}
-
-export interface GatewayMcpPreview {
-  toolType: 'gateway_mcp';
-  name: string;
-  serviceName: string;
-  agent: 'architect' | 'data_analyst';
   description?: string;
 }
 
@@ -68,7 +59,6 @@ export interface VectorIndexPreview {
 export type ToolPreviewData =
   | AgentBricksPreview
   | MCPPreview
-  | GatewayMcpPreview
   | ModelEndpointPreview
   | VectorIndexPreview;
 
@@ -145,16 +135,6 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
         tool = t;
         break;
       }
-      case 'gateway_mcp': {
-        // The description is admin-owned and read-only here; the entry carries identity only.
-        const t: GatewayMcpTool = {
-          type: 'gateway_mcp',
-          service_name: preview.serviceName,
-          display_name: preview.name,
-        };
-        tool = t;
-        break;
-      }
       case 'model_endpoint': {
         const t: ModelEndpointTool = {
           type: 'model_endpoint',
@@ -193,10 +173,6 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
       break;
     case 'mcp':
       infoRows.push({ label: 'Connection', value: preview.connectionName });
-      break;
-    case 'gateway_mcp':
-      infoRows.push({ label: 'Service', value: preview.serviceName });
-      infoRows.push({ label: 'Agent', value: preview.agent === 'architect' ? 'Architect' : 'Data analyst' });
       break;
     case 'model_endpoint':
       infoRows.push({ label: 'Endpoint', value: preview.endpointName });
@@ -296,15 +272,6 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
         </div>
       )}
 
-      {preview.toolType === 'gateway_mcp' ? (
-        preview.description && (
-          <div className="mb-4">
-            <label className="block text-sm text-gray-500 mb-1">Description</label>
-            <div className="text-sm text-gray-700">{preview.description}</div>
-          </div>
-        )
-      ) : (
-        <>
       {/* Editable description */}
       <div className="mb-4">
         <div className="flex items-baseline justify-between mb-1">
@@ -321,9 +288,6 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
           className="w-full border rounded px-3 py-2 text-sm resize-y min-h-[80px] focus:outline-none focus:ring-2 focus:ring-blue-400"
         />
       </div>
-
-        </>
-      )}
 
       {/* Buttons */}
       <div className="flex items-center justify-end gap-2">

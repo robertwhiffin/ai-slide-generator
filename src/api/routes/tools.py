@@ -238,7 +238,7 @@ def _discover_vector_columns(endpoint_name: str, index_name: str) -> dict:
 
 
 def _discover_gateway_items() -> list[dict]:
-    """Enabled AI Gateway connections. Own try/except: never fails UC discovery."""
+    """Enabled AI Gateway connections, from the registry only (never Unity Catalog)."""
     try:
         from src.core.database import get_db_session
         from src.services import gateway_mcp_registry
@@ -260,13 +260,6 @@ def _discover_gateway_items() -> list[dict]:
 
 
 def _discover_mcp_connections() -> dict:
-    """Discover UC HTTP connections (usable as MCP servers), plus Gateway items."""
-    result = _discover_uc_mcp_connections()
-    result["gateway_items"] = _discover_gateway_items()
-    return result
-
-
-def _discover_uc_mcp_connections() -> dict:
     """Discover UC HTTP connections (usable as MCP servers)."""
     try:
         client = get_user_client()
@@ -485,6 +478,12 @@ def discover_vector_columns(endpoint_name: str, index_name: str):
 def discover_mcp():
     """List UC HTTP connections usable as MCP servers."""
     return _discover_mcp_connections()
+
+
+@router.get("/discover/gateway-mcp")
+def discover_gateway_mcp():
+    """List the enabled admin-registered AI Gateway connections (the deck's connection pills)."""
+    return {"items": _discover_gateway_items()}
 
 
 @router.get("/gateway-mcp/status", response_model=GatewayStatusOut)

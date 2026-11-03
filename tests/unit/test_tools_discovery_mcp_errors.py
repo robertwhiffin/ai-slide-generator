@@ -90,7 +90,6 @@ class TestMissingScope:
             "items": [],
             "error": consent_message(oauth_client_id=CLIENT_ID),
             "error_code": "missing_scope",
-            "gateway_items": [],
         }
         # Independent of consent_message: the revoke command names this app's client id.
         assert f"/api/2.0/oauth-app-integrations/{CLIENT_ID}/user-consent/me" in body["error"]
@@ -110,7 +109,6 @@ class TestMissingScope:
             "items": [],
             "error": consent_message(oauth_client_id=None),
             "error_code": "missing_scope",
-            "gateway_items": [],
         }
         assert "<this app's OAuth client ID>" in body["error"]
 
@@ -148,7 +146,6 @@ class TestDiscoveryFailed:
             "items": [],
             "error": "Could not list MCP connections: RuntimeError",
             "error_code": "discovery_failed",
-            "gateway_items": [],
         }
         assert _warnings_from_tools(caplog), "discovery failure must be logged at WARNING"
 
@@ -166,7 +163,6 @@ class TestDiscoveryFailed:
             "items": [],
             "error": "Could not list MCP connections: PermissionDenied",
             "error_code": "discovery_failed",
-            "gateway_items": [],
         }
 
 
@@ -190,5 +186,4 @@ class TestSuccessUnchanged:
             "items": [
                 {"id": "jira-conn", "name": "jira-conn", "description": "Jira integration"},
             ],
-            "gateway_items": [],
         }

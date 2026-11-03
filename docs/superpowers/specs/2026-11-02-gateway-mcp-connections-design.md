@@ -32,7 +32,9 @@ it as a PNG. It belongs to the **architect**: a diagram is part of planning a sl
 - An **admin-only page** for manually creating Gateway MCP connections: "a way of manually creating
   the Genie One–type connection". It must be **general-purpose and reusable**, not LakeDraw-specific.
 - **Keep the current MCP Server button.** Its list becomes the union of today's UC connections and
-  the Gateway connections the admin registered.
+  the Gateway connections the admin registered. *Superseded 2026-11-03:* the owner asked for
+  "genie one, (any connections created by admin)" as pills, with "all other existing pills
+  wrapped into an 'other tools' expandable button".
 - LakeDraw goes **into the architect, not the data analyst**.
 - Morning deliverable: a devloop instance link and instructions for creating a LakeDraw connection.
 
@@ -46,8 +48,8 @@ it as a PNG. It belongs to the **architect**: a diagram is part of planning a sl
   - an optional allowlist of its tools.
 
   "Test connection" lists the service's tools as the admin, or says why it can't.
-- **User adds it to a deck** from the existing MCP Server picker, where registered connections appear
-  beside the UC connections.
+- **User adds it to a deck** from its own pill in the Tools row (owner's direction, 2026-11-03; this
+  replaces the union in the MCP Server picker).
 - **Agent mode uses it as the user.** The bound agent calls the service's tools in its tool loop with
   the signed-in user's token, never the service principal's.
 - **Per-user sign-in is handled.** Services behind U2M connections (LakeDraw, GitHub, Slack, Google
@@ -129,16 +131,20 @@ Saving does not require a passing test: the admin may not be signed in or grante
 
 ### Adding a connection to a deck
 
-- `GET /api/tools/discover/mcp` keeps its `items` (UC connections) exactly as today. It adds
-  `gateway_items`: the enabled registered connections, each `{service_name, display_name, description, agent}`.
-  - A UC-listing failure still returns its `error`/`error_code`, and `gateway_items` still comes back.
-  - The registry is read from the database, so it never needs a scope.
-- The MCP Server picker (`tools/MCPDiscovery.tsx`) shows two groups:
-  - **"AI Gateway"**, listing the registered connections, first;
-  - then the existing UC connections.
-
-  Picking a Gateway item opens the existing detail panel and adds a tool entry
-  `{type: "gateway_mcp", service_name, display_name}`.
+- **Tools row layout** (owner's direction, 2026-11-03):
+  - **+ Genie One**, then one pill per enabled registered connection, then an **Other tools** toggle;
+  - the toggle reveals the original pills: Genie Agent, Agent Bricks, Vector Index, MCP Server,
+    Model Endpoint;
+  - a vanilla install, with no connections, shows just two pills.
+- `GET /api/tools/discover/gateway-mcp` returns `{"items": [...]}`:
+  - the enabled registered connections, each `{service_name, display_name, description, agent}`;
+  - it reads only the registry, so it needs no scope and never waits on the UC listing;
+  - a registry failure gives `items: []`.
+- `GET /api/tools/discover/mcp` and the MCP Server picker stay Unity Catalog only, as on main.
+- **Clicking a connection pill** adds `{type: "gateway_mcp", service_name, display_name}` in one click,
+  like Genie One.
+  - The pill's tooltip is the description.
+  - The pill is hidden while that connection is in the deck.
 - Saving an agent config rejects (422) a `gateway_mcp` entry whose service is not registered or not
   enabled. Duplicates are keyed by `service_name`.
 - The chip:
@@ -404,8 +410,9 @@ On each workspace, the admin does two things.
 ## Calls made without the owner
 
 - D4: register existing services; don't create UC objects from Tellr.
-- D5: union in the existing MCP Server picker (the owner's first idea), as a new `gateway_mcp` type
-  keyed by service name.
+- D5: a new `gateway_mcp` type keyed by service name. It first shipped as a union in the MCP Server
+  picker (the owner's first idea). On 2026-11-03 the owner replaced that with a pill per connection
+  in the Tools row, and moved the other pills behind "Other tools".
 - D6: agent mode only.
 - D7: Architect or Data analyst only.
 - D8: guidance in tool descriptions; no prompt changes.

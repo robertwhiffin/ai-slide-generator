@@ -20,7 +20,8 @@ async function openAgentConfig(page: import('@playwright/test').Page) {
   await expect(page.getByTestId('agent-config-bar')).toBeVisible();
   // Expand the config bar
   await page.getByTestId('agent-config-toggle').click();
-  // Wait for expanded content
+  // The category pills sit behind "Other tools"
+  await page.getByTestId('toggle-other-tools').click();
   await expect(page.getByTestId('add-tool-genie')).toBeVisible();
 }
 

@@ -2,7 +2,7 @@ import type { ChatResponse } from '../types/message';
 import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
-import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayMcpStatus, GatewayConnection, GatewayConnectionCreate, GatewayConnectionUpdate } from '../types/agentConfig';
+import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayItem, GatewayMcpStatus, GatewayConnection, GatewayConnectionCreate, GatewayConnectionUpdate } from '../types/agentConfig';
 import type { TurnProgress } from '../types/turnProgress';
 
 // Use relative URLs in production, explicit IPv4 in development
@@ -2348,7 +2348,6 @@ export const api = {
         const body = await response.json();
         return {
           items: body?.items ?? [],
-          gateway_items: body?.gateway_items ?? [],
           error: body?.error ?? fallback,
           error_code: body?.error_code,
         };
@@ -2357,6 +2356,17 @@ export const api = {
       }
     }
     return response.json();
+  },
+
+  /**
+   * The enabled admin-registered AI Gateway connections (one pill each in the Tools row).
+   * A non-OK answer gives no pills rather than an error.
+   */
+  async discoverGatewayConnections(): Promise<GatewayItem[]> {
+    const response = await fetch(`${API_BASE_URL}/api/tools/discover/gateway-mcp`);
+    if (!response.ok) return [];
+    const body = await response.json();
+    return body?.items ?? [];
   },
 
   /**

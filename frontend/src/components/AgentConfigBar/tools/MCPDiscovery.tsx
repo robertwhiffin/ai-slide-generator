@@ -9,12 +9,12 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Loader2, RefreshCw, Search, X } from 'lucide-react';
 import { api } from '../../../services/api';
-import type { DiscoveryItem, GatewayItem, MCPTool, ToolEntry } from '../../../types/agentConfig';
-import type { GatewayMcpPreview, MCPPreview } from '../ToolDetailPanel';
+import type { DiscoveryItem, MCPTool, ToolEntry } from '../../../types/agentConfig';
+import type { MCPPreview } from '../ToolDetailPanel';
 
 interface MCPDiscoveryProps {
   onSelect: (tool: MCPTool) => void;
-  onPreview: (preview: MCPPreview | GatewayMcpPreview) => void;
+  onPreview: (preview: MCPPreview) => void;
   onClose: () => void;
   existingTools: ToolEntry[];
 }
@@ -28,7 +28,6 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const [connections, setConnections] = useState<DiscoveryItem[]>([]);
-  const [gatewayItems, setGatewayItems] = useState<GatewayItem[]>([]);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +56,6 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
     try {
       const result = await api.discoverMCPConnections();
       setConnections(result.items ?? []);
-      setGatewayItems(result.gateway_items ?? []);
       setDiscoveryError(result.error ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load MCP connections');
@@ -70,20 +68,6 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
     return existingTools.some(
       t => t.type === 'mcp' && t.connection_name === connectionId,
     );
-  };
-
-  const isGatewayAdded = (serviceName: string): boolean =>
-    existingTools.some(t => t.type === 'gateway_mcp' && t.service_name === serviceName);
-
-  const handleSelectGateway = (item: GatewayItem) => {
-    onPreview({
-      toolType: 'gateway_mcp',
-      name: item.display_name,
-      serviceName: item.service_name,
-      agent: item.agent,
-      description: item.description ?? undefined,
-    });
-    onClose();
   };
 
   const handleSelect = (item: DiscoveryItem) => {
@@ -101,12 +85,6 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
   const filtered = connections.filter(c =>
     c.name.toLowerCase().includes(lowerQuery) ||
     (c.description ?? '').toLowerCase().includes(lowerQuery),
-  );
-
-  const filteredGateway = gatewayItems.filter(g =>
-    g.display_name.toLowerCase().includes(lowerQuery) ||
-    g.service_name.toLowerCase().includes(lowerQuery) ||
-    (g.description ?? '').toLowerCase().includes(lowerQuery),
   );
 
   return (
@@ -169,42 +147,10 @@ export const MCPDiscovery: React.FC<MCPDiscoveryProps> = ({
             {discoveryError && (
               <p className="text-sm text-red-600 py-4 px-2 whitespace-pre-line">{discoveryError}</p>
             )}
-            {filteredGateway.length > 0 && (
-              <>
-                <p className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">AI Gateway</p>
-                {filteredGateway.map(item => {
-                  const added = isGatewayAdded(item.service_name);
-                  return (
-                    <button
-                      key={`gateway-${item.service_name}`}
-                      disabled={added}
-                      onClick={() => handleSelectGateway(item)}
-                      className={`w-full text-left px-3 py-2 rounded text-sm transition-colors ${
-                        added
-                          ? 'text-gray-400 cursor-not-allowed'
-                          : 'text-gray-700 hover:bg-gray-100'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{item.display_name}</span>
-                        {added && <span className="text-xs text-gray-400 ml-auto">added</span>}
-                      </div>
-                      {item.description && (
-                        <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{item.description}</p>
-                      )}
-                    </button>
-                  );
-                })}
-              </>
-            )}
-            {!discoveryError && filtered.length === 0 && filteredGateway.length === 0 && (
+            {!discoveryError && filtered.length === 0 && (
               <p className="text-sm text-gray-500 py-4 text-center">
                 {query ? 'No matching connections.' : 'No MCP connections available.'}
               </p>
-            )}
-            {/* Below a Gateway group, the UC items need their own heading or they read as Gateway items. */}
-            {filteredGateway.length > 0 && filtered.length > 0 && (
-              <p className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wide text-gray-500">Unity Catalog</p>
             )}
             {filtered.map((item, idx) => {
               const added = isAlreadyAdded(item.id);

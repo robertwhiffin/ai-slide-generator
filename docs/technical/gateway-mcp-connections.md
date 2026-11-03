@@ -88,7 +88,7 @@ The instructions reach the model in each tool's description, as `<display name>:
 
 ## 5. Step 3: users add it to a deck
 
-In the deck's agent config bar, open the **MCP Server** picker. Registered connections appear first, under an **AI Gateway** heading; the existing Unity Catalog connections follow under **Unity Catalog**. Each user adds the connection to their own deck config. Tellr rejects saving a connection that is not registered or has been disabled.
+In the deck's agent config bar, the **Tools** row shows **+ Genie One**, then one pill per enabled registered connection (for example **+ LakeDraw**; hover for its description), then **Other tools**, which reveals the remaining tool types (Genie Agent, Agent Bricks, Vector Index, MCP Server, Model Endpoint). Clicking a connection's pill adds it to the deck in one click, and the pill disappears while the connection is in the deck. A disabled connection has no pill. Each user adds the connection to their own deck config. Tellr rejects saving a connection that is not registered or has been disabled.
 
 ### Per-user sign-in
 

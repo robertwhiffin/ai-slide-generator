@@ -124,7 +124,6 @@ export interface DiscoveryItem {
 
 export interface DiscoveryResponse {
   items: DiscoveryItem[];
-  gateway_items?: GatewayItem[];
   error?: string;
   error_code?: string;
 }

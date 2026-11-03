@@ -167,16 +167,24 @@ export async function setupIntegrationMocks(page: Page): Promise<void> {
 /** Expand the agent config bar by clicking its toggle. */
 export async function expandConfigBar(page: Page): Promise<void> {
   await page.locator('[data-testid="agent-config-toggle"]').click();
+  await page.locator('[data-testid="toggle-other-tools"]').waitFor({ state: 'visible', timeout: 10000 });
+}
+
+/** Reveal the category pills behind "Other tools"; a no-op when they already show. */
+export async function showOtherTools(page: Page): Promise<void> {
+  const toggle = page.locator('[data-testid="toggle-other-tools"]');
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
   await page.locator('[data-testid="add-tool-genie"]').waitFor({ state: 'visible', timeout: 10000 });
 }
 
 /**
  * Add a Genie space via the tool picker flow:
- *   1. Click "+ Genie Agent" button → genie discovery dropdown appears
+ *   1. Open "Other tools", click "+ Genie Agent" → genie discovery dropdown appears
  *   2. Click the space name → genie-detail-panel appears
  *   3. Click "Save & Add" → panel hides
  */
 export async function addGenieSpace(page: Page, spaceName: string): Promise<void> {
+  await showOtherTools(page);
   await page.locator('[data-testid="add-tool-genie"]').click();
   await page.locator('[data-testid="genie-discovery"]').waitFor({ state: 'visible', timeout: 10000 });
   await page.getByText(spaceName).click();
