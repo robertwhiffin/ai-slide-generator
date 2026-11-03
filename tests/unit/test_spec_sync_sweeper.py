@@ -50,6 +50,7 @@ import ast
 import asyncio
 import contextlib
 import io
+import logging
 import os
 import sys
 import tempfile
@@ -67,6 +68,7 @@ from src.api.services.session_manager import SessionManager
 from src.core.database import Base, _run_migrations
 from src.core.user_context import get_current_user, set_current_user
 from src.database.models.session import SessionSlideDeck, UserSession
+from src.services.conversation_pins import ConversationPinMissingError
 from src.services.spec_sync import (
     ARC_REVIEW_MESSAGE,
     CLAIM_TTL_SECONDS,
@@ -1246,6 +1248,67 @@ class TestTheMarkerOutcomes:
                 owner_deck.session_id,
                 _SECOND_AUTHOR,
             )
+
+    @staticmethod
+    def _a_claimed_deck_with_no_graph_pin(owner_deck):
+        """Claim the marker, then run a review whose conversation has no pin.
+
+        What ``invoke_graph`` raises first, before any node, for a legacy deck: its
+        root session's ``graph_release_id`` is NULL, and pins never change outside
+        the one-time deck-mode lock, so no later sweep can review it.  Measured on
+        prod and logfood (2026-11-03): one such deck was re-claimed and failed every
+        ~7 s, a traceback each time, for ever.
+        """
+        owner_deck.set_marker(age_seconds=DEBOUNCE_SECONDS + 1, author=_AUTHOR)
+        with _patched(owner_deck._factory):
+            assert claim_due_marker(datetime.utcnow()) is not None
+            spy = _GraphSpy(raises=ConversationPinMissingError(owner_deck.session_id))
+            with patch(_INVOKE_GRAPH, spy):
+                return run_arc_review(owner_deck.session_id, _AUTHOR)
+
+    def test_a_deck_with_no_graph_pin_reports_that_no_review_ran(self, owner_deck):
+        assert self._a_claimed_deck_with_no_graph_pin(owner_deck) is False
+
+    def test_a_deck_with_no_graph_pin_has_its_marker_discarded_not_kept(
+        self, owner_deck
+    ):
+        """No retry can succeed, so the marker is dropped instead of re-queued."""
+        self._a_claimed_deck_with_no_graph_pin(owner_deck)
+
+        row = owner_deck.row()
+        assert row.spec_dirty_at is None, (
+            "the marker of a deck with no graph pin was kept, so every sweep "
+            "re-claims a review that can never run"
+        )
+        assert row.spec_dirty_by is None
+        assert row.spec_dirty_claimed_at is None
+
+    def test_a_deck_with_no_graph_pin_is_not_claimed_again(self, owner_deck):
+        self._a_claimed_deck_with_no_graph_pin(owner_deck)
+
+        later = datetime.utcnow() + timedelta(seconds=CLAIM_TTL_SECONDS + 1)
+        with _patched(owner_deck._factory):
+            assert claim_due_marker(later) is None
+
+    def test_a_deck_with_no_graph_pin_logs_no_error(self, owner_deck, caplog):
+        """An unreviewable legacy deck is expected, not a fault: no ERROR, no traceback."""
+        with caplog.at_level(logging.INFO, logger="src.services.spec_sync"):
+            self._a_claimed_deck_with_no_graph_pin(owner_deck)
+
+        records = [r for r in caplog.records if r.name == "src.services.spec_sync"]
+        assert not [r for r in records if r.levelno >= logging.ERROR], (
+            "an unreviewable deck was logged as an error"
+        )
+        assert not [r for r in records if r.exc_info], "a traceback was logged"
+        assert any("no graph pin" in r.getMessage() for r in records)
+
+    def test_any_other_failure_still_keeps_the_marker_for_retry(self, owner_deck):
+        """Only the missing pin is final: a transient failure still retries."""
+        self._a_claimed_deck_whose_review_fails(
+            owner_deck, exc=RuntimeError("model unavailable")
+        )
+
+        assert owner_deck.row().spec_dirty_at is not None
 
     def test_a_review_for_a_vanished_session_does_not_raise_and_keeps_nothing(
         self, owner_deck

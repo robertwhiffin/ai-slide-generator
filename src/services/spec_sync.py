@@ -126,6 +126,7 @@ from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.user_context import get_current_user, set_current_user
 from src.database.models.session import SessionSlideDeck, UserSession
+from src.services.conversation_pins import ConversationPinMissingError
 
 logger = logging.getLogger(__name__)
 
@@ -601,7 +602,9 @@ def run_arc_review(session_id: str, author: str) -> bool:
     **Never raises.**  A failure releases the **claim** and keeps the
     **marker**, so the next sweep retries rather than the deck wedging — the
     same fail-open direction as the rest of this PR's identity and mode
-    resolution.
+    resolution.  The one failure no retry can fix is a conversation with no
+    Graph Release pin (a legacy deck, ``ConversationPinMissingError``): its
+    marker is discarded instead, with one INFO line and no traceback.
 
     Identity is BOUND, not merely stamped.  Two separate mechanisms, both
     needed:
@@ -644,7 +647,8 @@ def run_arc_review(session_id: str, author: str) -> bool:
     Returns:
         ``True`` when the review ran and the marker was dealt with — cleared,
         or deliberately kept by :func:`clear_marker`'s re-dirty rule.
-        ``False`` when the review failed and the marker was left queued.
+        ``False`` when the review did not run: it failed and the marker was left
+        queued, or the conversation has no graph pin and the marker was discarded.
 
         **A ``False`` from :func:`clear_marker` is not a failure.**  It means
         "kept, still queued" — the deck was marked again after this claim was
@@ -681,6 +685,22 @@ def run_arc_review(session_id: str, author: str) -> bool:
                 # review — with no emitter, so nobody watching.
                 describe_only=True,
             )
+        except ConversationPinMissingError:
+            # A legacy deck: its root session has no Graph Release pin, which
+            # invoke_graph checks before any node runs (Ruling C-3: never infer
+            # one).  Pins change only in the one-time deck-mode lock, so no later
+            # sweep can review this deck either — keeping the marker re-claimed
+            # and failed it on every tick, for ever (measured on prod, ~7 s).  An
+            # unpinned deck has never run a graph turn, so there is no committed
+            # narrative to go stale; if it is ever pinned, that first turn
+            # describes the deck afresh.  So the marker is discarded, quietly.
+            logger.info(
+                "spec_sync.run_arc_review: the deck's conversation has no graph "
+                "pin (a legacy deck), so no arc review can run; marker discarded",
+                extra={"deck_owner_session_id": session_id, "author": author},
+            )
+            discard_marker(session_id)
+            return False
         except Exception:
             logger.exception(
                 "spec_sync.run_arc_review: the arc review failed; marker kept "

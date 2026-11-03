@@ -170,10 +170,15 @@ class TestASweeperTurnDoesNotRebuildTheDeck:
             1,
         )
 
-    def test_null_pinned_legacy_root_stays_retryable_without_write_or_event(
+    def test_null_pinned_legacy_root_is_not_retried_and_writes_nothing(
         self, sweeper_env
     ):
-        """C-3: never infer active/latest provenance for a legacy root."""
+        """C-3: never infer active/latest provenance for a legacy root.
+
+        No write and no event, and its marker is discarded rather than kept: pins
+        change only in the one-time deck-mode lock, so no later sweep can review
+        this deck, and a kept marker was re-claimed and failed every ~7 s on prod.
+        """
         env = sweeper_env
         env.recorder.slide_count = 2
         env.run()
@@ -197,7 +202,8 @@ class TestASweeperTurnDoesNotRebuildTheDeck:
             deck = root.slide_deck
             assert (deck.deck_spec_json, deck.version, deck.updated_at) == before_deck
             assert len(list(db.scalars(select(SharedDeckMutationEvent)))) == before_events
-            assert deck.spec_dirty_at is not None
+            assert deck.spec_dirty_at is None
+            assert deck.spec_dirty_by is None
             assert deck.spec_dirty_claimed_at is None
 
     def test_the_hand_edit_survives_the_arc_review(self, sweeper_env):
