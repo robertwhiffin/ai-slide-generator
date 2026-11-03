@@ -45,6 +45,7 @@ import contextlib
 import copy
 import inspect
 import json
+import logging
 import queue
 import secrets
 import threading
@@ -54,6 +55,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, get_type_hints
 
 import pytest
+from langchain_core.exceptions import OutputParserException
 from mcp.types import CallToolResult, TextContent
 from sqlalchemy import event
 
@@ -62,6 +64,7 @@ from src.api.services.deck_level_writer import read_deck_spec, write_deck_level_
 from src.api.services.session_manager import get_session_manager
 from src.core.scope_errors import consent_message
 from src.database.models.image import ImageAsset
+from src.domain.deck_spec import DeckStyle, DeckStyleComponent
 from src.domain.skill_io import AnalystOutput, ArchitectOutput, DataRequest
 from src.services import image_service
 from src.services.agent_runtime import AgentAssemblyContext, DatabricksModelAdapter
@@ -95,6 +98,7 @@ from src.services.graph.state import (
     scoped_vals,
     turn_scoped_concat,
 )
+from src.services.persisted_graph_release import PinnedInvocationEndpointError
 from src.utils.image_utils import IMAGE_PLACEHOLDER_PATTERN
 from tests.fixtures.model_payload_keys import ARCHITECT_MODEL_KEYS, BUILDER_MODEL_KEYS
 from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
@@ -2260,3 +2264,510 @@ def test_the_known_set_never_reaches_a_models_payload(graph_env):
         assert "gateway_known_images" not in text, role
     builder_payload = json.loads(keyed["builder"])
     assert set(builder_payload) <= BUILDER_MODEL_KEYS | {"deck_style"}
+
+
+# ===========================================================================
+# Final whole-branch review fixes (I1, I2, T6-1, m2, m6)
+# ===========================================================================
+
+#: The reason the "unavailable" notice gives when a model call that carried a
+#: connection's tools raised (I2).  Global Constraints copy around it.
+TOOLS_FAILED_REASON = "the model could not use its tools"
+
+
+def _tools_failed(name: str) -> str:
+    return unavailable_notice(name, TOOLS_FAILED_REASON)
+
+
+def _pinned_error() -> PinnedInvocationEndpointError:
+    """What the runtime raises when the provider refuses the call (e.g. a tool's raw
+    ``inputSchema``): the endpoint error, naming the model endpoint."""
+    return PinnedInvocationEndpointError(
+        endpoint_name="databricks-claude-endpoint",
+        graph_release_id=1,
+        agent_definition_revision_id=1,
+    )
+
+
+def _loop_gave_up() -> OutputParserException:
+    """What the tool loop raises when the model never calls the output schema."""
+    return OutputParserException("the model did not call the output schema after 15 rounds")
+
+
+def _lakedraw_deck(env, monkeypatch, **service_kwargs) -> _Service:
+    lakedraw = _Service(LAKEDRAW, LAKEDRAW_TOOLS, **service_kwargs)
+    _gateway_deck(
+        env,
+        monkeypatch,
+        entries=[_entry(LAKEDRAW, "LakeDraw")],
+        rows=[LAKEDRAW_ROW],
+        services=[lakedraw],
+    )
+    return lakedraw
+
+
+# ---- I1: the sign-in notice row is marked with its URL ----------------------
+
+
+def test_sign_in_notice_row_carries_its_url_on_every_path(graph_env, monkeypatch):
+    """I1: the chat links ONLY the server-marked sign-in notice.  The row is written
+    with ``metadata = {"sign_in_url": <url>}``, and that reaches the client on both
+    paths: the polling projection (``msg_to_stream_event``) and the session load
+    (``get_messages``, which ``GET /api/sessions/{id}`` returns as it is)."""
+    _lakedraw_deck(
+        graph_env,
+        monkeypatch,
+        list_error=GatewayMcpError(
+            "sign_in_required", "You're not signed in to LakeDraw.", sign_in_url=SIGN_IN_URL
+        ),
+    )
+    _install(monkeypatch, _Runtime(architect=architect_build(make_spec((0, 1)))))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    notice = sign_in_notice("LakeDraw", SIGN_IN_URL)
+    (row,) = [r for r in t.rows if r["content"] == notice]
+    assert (row["message_type"], row["metadata"]) == ("info", {"sign_in_url": SIGN_IN_URL})
+    sm = get_session_manager()
+    (polled,) = [
+        sm.msg_to_stream_event(m)
+        for m in sm.get_messages_for_request(REQUEST_ID)
+        if m["content"] == notice
+    ]
+    assert (polled["type"], polled["metadata"]) == ("assistant", {"sign_in_url": SIGN_IN_URL})
+    (loaded,) = [m for m in sm.get_messages(graph_env.session_id) if m["content"] == notice]
+    assert loaded["metadata"] == {"sign_in_url": SIGN_IN_URL}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GatewayMcpError("sign_in_required", "You're not signed in.", sign_in_url=None),
+        GatewayMcpError("access_denied", "403 Forbidden"),
+        GatewayMcpError("not_found", "does not exist"),
+        GatewayMcpError("unavailable", "see https://h.example/status for details"),
+    ],
+    ids=["sign-in-without-a-url", "access_denied", "not_found", "unavailable-with-a-url"],
+)
+def test_no_other_notice_is_marked_with_a_sign_in_url(graph_env, monkeypatch, error):
+    """Only a sign-in notice that SAYS a link is marked: every other notice row (one
+    whose text carries a service-authored URL included) is written with no metadata,
+    so the chat renders it as plain text."""
+    _lakedraw_deck(graph_env, monkeypatch, list_error=error)
+    _install(monkeypatch, _Runtime(architect=architect_build(make_spec((0, 1)))))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    notices = [r for r in t.rows if r["message_type"] == "info"]
+    assert len(notices) == 1
+    assert notices[0]["metadata"] is None
+    sm = get_session_manager()
+    polled = [
+        sm.msg_to_stream_event(m)
+        for m in sm.get_messages_for_request(REQUEST_ID)
+        if m["message_type"] == "info"
+    ]
+    assert [p["metadata"] for p in polled] == [None]
+
+
+# ---- I2: a failed Gateway-bound call is made once more without the tools ---
+
+
+@pytest.mark.parametrize(
+    "make_error", [_pinned_error, _loop_gave_up], ids=["provider-refuses", "loop-gives-up"]
+)
+def test_a_failed_gateway_bound_architect_call_is_made_again_without_tools(
+    graph_env, monkeypatch, caplog, make_error
+):
+    """I2: the call that carried LakeDraw's tools raises (the provider refused it, or
+    the tool loop gave up).  It is made ONCE more, through the same call site, with
+    no toolset (today's call) and the same payload; the turn completes with that
+    answer; the user is told once that LakeDraw is unavailable; one WARNING names
+    the exception type and never the token; and the pass records its usage."""
+    _lakedraw_deck(graph_env, monkeypatch)
+    spec = make_spec((0, 1))
+
+    def bound(call):
+        assert call.toolset is not None
+        call.use(CREATE, {"diagram_data": {"n": 1}})
+        raise make_error()
+
+    runtime = _install(monkeypatch, _Runtime(architect=[bound, architect_build(spec)]))
+
+    with caplog.at_level(logging.WARNING, logger=nodes.__name__):
+        t = _architect(graph_env, _state(graph_env))
+
+    first, second = runtime.calls_for("architect")
+    assert first.tool_names == sorted([CREATE, EXPORT])
+    assert second.context.toolset is None
+    assert second.context == AgentAssemblyContext(
+        False, graph_env.session_id, graph_env.session_id
+    )
+    assert second.payload == first.payload
+    assert t.updates["architect_intent"] == "build"
+    assert t.updates["deck_spec"].title == spec.title
+    assert t.updates["error_state"] is None
+    assert t.info == [_tools_failed("LakeDraw")]
+    assert _tools_failed("LakeDraw") == (
+        "LakeDraw is unavailable right now (the model could not use its tools). "
+        "The deck was built without it."
+    )
+    (entry,) = _usage_vals(t.updates)
+    assert (entry["agent"], entry["calls"], entry["notified"]) == ("architect", 1, [LAKEDRAW])
+    name = type(make_error()).__name__
+    warned = [
+        r
+        for r in caplog.records
+        if r.name == nodes.__name__ and r.levelno == logging.WARNING and name in r.getMessage()
+    ]
+    assert len(warned) == 1
+    assert TOKEN not in caplog.text
+
+
+def test_each_bound_connection_is_said_unavailable_once(graph_env, monkeypatch):
+    """Two architect connections bound to the failed call: one notice for each."""
+    lakedraw = _Service(LAKEDRAW, LAKEDRAW_TOOLS)
+    web = _Service(WEB, _web_tools())
+    _gateway_deck(
+        graph_env,
+        monkeypatch,
+        entries=[_entry(LAKEDRAW, "LakeDraw"), _entry(WEB, "Web Search")],
+        rows=[LAKEDRAW_ROW, WEB_ARCHITECT_ROW],
+        services=[lakedraw, web],
+    )
+
+    def bound(call):
+        assert call.has_tool(CREATE) and call.has_tool("web_search")
+        raise _loop_gave_up()
+
+    runtime = _install(
+        monkeypatch, _Runtime(architect=[bound, architect_build(make_spec((0, 1)))])
+    )
+
+    t = _architect(graph_env, _state(graph_env))
+
+    assert [call.context.toolset is None for call in runtime.calls_for("architect")] == [
+        False,
+        True,
+    ]
+    assert sorted(t.info) == sorted([_tools_failed("LakeDraw"), _tools_failed("Web Search")])
+    assert t.updates["error_state"] is None
+
+
+def test_a_failed_gateway_bound_retry_is_made_again_without_tools(graph_env, monkeypatch):
+    """The edit retry's own bound call raises: it too is made once more without the
+    tools (the same retry payload), and that answer is the turn's.  Before the fix
+    the endpoint error failed the turn."""
+    _lakedraw_deck(graph_env, monkeypatch)
+    refused = architect_build(make_spec((0, 1), slide_type="title"))
+    good = architect_build(make_spec((0, 1)))
+
+    def first(call):
+        assert call.toolset is not None
+        return refused
+
+    def retry_bound(call):
+        assert call.toolset is not None and "rejected_edit" in call.payload
+        raise _pinned_error()
+
+    runtime = _install(monkeypatch, _Runtime(architect=[first, retry_bound, good]))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    calls = runtime.calls_for("architect")
+    assert [call.context.toolset is None for call in calls] == [False, False, True]
+    assert calls[2].payload == calls[1].payload
+    assert t.updates["architect_intent"] == "build"
+    assert t.updates["error_state"] is None
+    assert t.info == [_tools_failed("LakeDraw")]
+
+
+def test_after_a_failed_bound_call_the_pass_binds_no_more_tools(graph_env, monkeypatch):
+    """Once a call with the tools has failed, the pass's later attempts are today's
+    calls: the fallback's answer is refused (retryable) and the retry carries no
+    toolset; the notice is said once."""
+    lakedraw = _lakedraw_deck(graph_env, monkeypatch)
+
+    def bound(call):
+        assert call.toolset is not None
+        raise _pinned_error()
+
+    refused = architect_build(make_spec((0, 1), slide_type="title"))
+    good = architect_build(make_spec((0, 1)))
+    runtime = _install(monkeypatch, _Runtime(architect=[bound, refused, good]))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    calls = runtime.calls_for("architect")
+    assert [call.context.toolset is None for call in calls] == [False, True, True]
+    assert "rejected_edit" in calls[2].payload
+    assert lakedraw.list_calls == 1
+    assert t.updates["architect_intent"] == "build"
+    assert t.info == [_tools_failed("LakeDraw")]
+
+
+def test_the_architect_fallbacks_failure_propagates_as_today(graph_env, monkeypatch):
+    """The fallback (no tools) raises too: that failure fails the turn exactly as a
+    first call's always has, and nothing claims the deck was built."""
+    _lakedraw_deck(graph_env, monkeypatch)
+
+    def bound(call):
+        raise _loop_gave_up()
+
+    def fallback(call):
+        assert call.toolset is None
+        raise RuntimeError("the model endpoint is down")
+
+    runtime = _install(monkeypatch, _Runtime(architect=[bound, fallback]))
+    state = _state(graph_env)
+    before = len(get_session_manager().get_messages(graph_env.session_id))
+
+    with pytest.raises(RuntimeError, match="the model endpoint is down"):
+        _architect(graph_env, state)
+
+    assert len(runtime.calls_for("architect")) == 2
+    rows = get_session_manager().get_messages(graph_env.session_id)[before:]
+    assert _tools_failed("LakeDraw") not in _info(rows)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [None, {"tools": [GENIE_ONE_ENTRY]}],
+    ids=["no-config", "genie-one-only"],
+)
+def test_without_gateway_entries_a_failed_architect_call_fails_the_turn(
+    graph_env, monkeypatch, config
+):
+    """C2: a deck without a Gateway entry is unchanged; its failing call is made once
+    and its error propagates."""
+    _set_agent_config(graph_env, graph_env.session_id, config)
+
+    def fails(call):
+        raise _pinned_error()
+
+    runtime = _install(monkeypatch, _Runtime(architect=fails))
+
+    with pytest.raises(PinnedInvocationEndpointError):
+        _architect(graph_env, _state(graph_env))
+
+    assert len(runtime.calls_for("architect")) == 1
+
+
+def test_a_gateway_decks_call_without_tools_still_fails_the_turn(graph_env, monkeypatch):
+    """A Gateway deck whose call carried no tools (the connection failed at list
+    time) is today's call: its failure is not retried."""
+    _lakedraw_deck(graph_env, monkeypatch, list_error=GatewayMcpError("unavailable", "502"))
+
+    def fails(call):
+        assert call.toolset is None
+        raise _loop_gave_up()
+
+    runtime = _install(monkeypatch, _Runtime(architect=fails))
+
+    with pytest.raises(OutputParserException):
+        _architect(graph_env, _state(graph_env))
+
+    assert len(runtime.calls_for("architect")) == 1
+
+
+def test_mixed_analyst_falls_back_to_genie_one_alone(graph_env, monkeypatch):
+    """I2, the analyst with Genie One and Web Search: the call with both raises, and
+    it is made once more with Genie One's own toolset exactly as before this branch
+    (3 questions / 300 s, no Gateway tool).  Figures are built from that run's
+    answers, and Web Search is said unavailable once."""
+    web = _Service(WEB, _web_tools(), results={"web_search": _web_result()})
+    _gateway_deck(
+        graph_env,
+        monkeypatch,
+        entries=[GENIE_ONE_ENTRY, _entry(WEB, "Web Search")],
+        rows=[WEB_ANALYST_ROW],
+        services=[web],
+    )
+    _serve(monkeypatch, _Replay(q1_replies()))
+
+    def bound(call):
+        assert call.has_tool(GENIE_TOOL_NAME) and call.has_tool("web_search")
+        call.use("web_search", {"query": "Databricks AI Gateway MCP services"})
+        raise _loop_gave_up()
+
+    def genie_only(call):
+        call.use(GENIE_TOOL_NAME, {"question": Q1})
+        return _success(["Genie One"])
+
+    runtime = _install(monkeypatch, _Runtime(data_analyst=[bound, genie_only]))
+
+    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+
+    first, second = runtime.calls_for("data_analyst")
+    assert first.at_start == (6, 300.0, 0)
+    assert second.tool_names == [GENIE_TOOL_NAME]
+    assert second.at_start == (3, 300.0, 0)
+    assert second.toolset is not first.toolset
+    assert second.payload == first.payload
+    assert _info(t.rows).count(_tools_failed("Web Search")) == 1
+    assert t.updates["architect_message"].startswith(SYNTHESIS + "\nSources: Genie One")
+    assert scoped_vals({"turn_id": TURN, **t.updates}, "analyst_figures")
+    assert t.updates["analyst_rounds"] == scoped(TURN, [{"answers": 1}])
+    vals = _usage_vals(t.updates)
+    assert [(entry["agent"], entry["notified"]) for entry in vals] == [("data_analyst", [WEB])]
+
+
+def test_gateway_only_analyst_falls_back_to_no_tools(graph_env, monkeypatch):
+    """I2, the analyst with only a Gateway connection: the call with its tools raises,
+    and it is made once more with no toolset, today's no-tool call."""
+    web = _Service(WEB, _web_tools())
+    _gateway_deck(
+        graph_env,
+        monkeypatch,
+        entries=[_entry(WEB, "Web Search")],
+        rows=[WEB_ANALYST_ROW],
+        services=[web],
+    )
+
+    def bound(call):
+        assert call.tool_names == ["web_search"]
+        raise _pinned_error()
+
+    runtime = _install(monkeypatch, _Runtime(data_analyst=[bound, _success(["The request"])]))
+
+    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+
+    first, second = runtime.calls_for("data_analyst")
+    assert first.toolset is not None
+    assert second.context.toolset is None
+    assert second.payload == first.payload
+    message = SYNTHESIS + "\nSources: The request"
+    assert t.updates["architect_message"] == message
+    assert _info(t.rows) == [message, _tools_failed("Web Search")]
+
+
+def test_the_analyst_fallbacks_failure_propagates_as_today(graph_env, monkeypatch):
+    """The analyst's fallback (no tools) raises too: that failure propagates."""
+    web = _Service(WEB, _web_tools())
+    _gateway_deck(
+        graph_env,
+        monkeypatch,
+        entries=[_entry(WEB, "Web Search")],
+        rows=[WEB_ANALYST_ROW],
+        services=[web],
+    )
+
+    def bound(call):
+        raise _loop_gave_up()
+
+    def fallback(call):
+        assert call.toolset is None
+        raise RuntimeError("the model endpoint is down")
+
+    runtime = _install(monkeypatch, _Runtime(data_analyst=[bound, fallback]))
+
+    with pytest.raises(RuntimeError, match="the model endpoint is down"):
+        _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+
+    assert len(runtime.calls_for("data_analyst")) == 2
+
+
+def test_genie_only_analyst_failure_is_unchanged(graph_env, monkeypatch):
+    """C2: Genie One alone (no Gateway entry): a failing call is made once and its
+    error propagates, as before this branch."""
+    _set_agent_config(graph_env, graph_env.session_id, {"tools": [GENIE_ONE_ENTRY]})
+    _sign_in()
+    _serve(monkeypatch, _Replay(q1_replies()))
+
+    def fails(call):
+        assert call.tool_names == [GENIE_TOOL_NAME]
+        raise _loop_gave_up()
+
+    runtime = _install(monkeypatch, _Runtime(data_analyst=fails))
+
+    with pytest.raises(OutputParserException):
+        _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+
+    assert len(runtime.calls_for("data_analyst")) == 1
+
+
+# ---- T6-1: no image notice for a refused answer ----------------------------
+
+
+def test_no_image_notice_when_the_committed_answer_is_a_refusal(graph_env, monkeypatch):
+    """T6-1: both attempts are refused and invent an image reference on slide 2.
+    The turn degrades and only the refusal is said: no image notice for a spec that
+    was never committed."""
+    _lakedraw_deck(graph_env, monkeypatch)
+    refused = architect_build(
+        _with_slides(
+            make_spec((0, 1), slide_type="title"),
+            content_brief={1: "Diagram " + ref(INVENTED) + "."},
+        )
+    )
+    runtime = _install(monkeypatch, _Runtime(architect=[refused, refused]))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    assert len(runtime.calls_for("architect")) == 2
+    assert t.updates["error_state"] is not None
+    assert _image_notices(t.info) == []
+
+
+# ---- m2: the builder's known set includes the deck style's references ------
+
+
+def test_the_known_set_includes_deck_style_and_resolved_style_refs(graph_env):
+    """m2: a reference in the deck style (its css or a component's example) or in the
+    resolved style is one the slide may place, so a Gateway turn's builder keeps it."""
+    in_css, in_component, in_style = new_token(), new_token(), new_token()
+    deck_style = DeckStyle(
+        css=".logo { background-image: url('" + ref(in_css) + "'); }",
+        components=[
+            DeckStyleComponent(
+                name="logo",
+                class_names=["logo"],
+                use="on every slide",
+                example_html='<img class="logo" src="' + ref(in_component) + '"/>',
+            )
+        ],
+    )
+    spec = make_spec((0, 1)).model_copy(update={"deck_style": deck_style})
+    state = _branch_state(
+        graph_env, spec, resolved_style=DEFAULT_STYLE + "\nLogo: " + ref(in_style)
+    )
+
+    payload = build_branch_payload(state, 0)
+
+    assert {in_css, in_component, in_style} <= set(payload["gateway_known_images"])
+    html = (
+        '<div class="slide"><img class="logo" src="' + ref(in_component) + '"/>'
+        + "<div style=\"background-image: url('" + ref(in_css) + "')\">x</div>"
+        + '<img src="' + ref(in_style) + '"/><p>a</p></div>'
+    )
+    t = _run_builder(graph_env, payload, html)
+    assert t.html == html
+    assert _image_notices(t.info) == []
+
+
+# ---- m6: the SSE progress event carries the row's tool_input ---------------
+
+
+def test_the_progress_event_carries_the_rows_tool_input(graph_env, monkeypatch):
+    """m6: the SSE ``TOOL_CALL`` event names the connection and the tool exactly as
+    the persisted row does (``tool_input``), never the model's arguments."""
+    _lakedraw_deck(graph_env, monkeypatch)
+
+    def answer(call):
+        call.use(CREATE, {"diagram_data": {"title": "SECRET-ARG"}})
+        return architect_build(make_spec((0, 1)))
+
+    _install(monkeypatch, _Runtime(architect=answer))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    tool_input = {"connection": "LakeDraw", "tool": CREATE}
+    (row,) = [r for r in t.rows if r["message_type"] == "tool_call"]
+    assert row["metadata"] == {"tool_name": "gateway_mcp", "tool_input": tool_input}
+    (event,) = [e for e in t.events if e.type == StreamEventType.TOOL_CALL]
+    assert event.metadata == {
+        "node": "architect",
+        "tool_name": "gateway_mcp",
+        "tool_input": tool_input,
+    }
+    assert "SECRET-ARG" not in json.dumps(event.metadata)

@@ -2067,10 +2067,14 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
     # a turn that ran the Gateway path carries THIS turn's ``gateway_usage``
     # (the architect writes one entry per pass on it), so every other turn's
     # payload is exactly what it was.  A JSON list (Ruling C-21), never a set.
+    # The deck style and the resolved style are the slide's too: a reference in
+    # either is one the builder may place.
     if scoped_vals(state, "gateway_usage"):
         branch_payload["gateway_known_images"] = sorted(
             refs_in(branch_payload["slide_spec"])
             | refs_in(section_html)
+            | refs_in(branch_payload.get("deck_style"))
+            | refs_in(branch_payload["resolved_style"])
             | _turn_gateway_images(state)
         )
     return branch_payload
@@ -3478,6 +3482,11 @@ _CONSENT_NOTIFIED: Final = "consent"
 _IMAGE_NOT_PLACED: Final = "An image from a connected tool couldn't be placed on slide {n}."
 _IMAGE_NOT_PLACED_UNNUMBERED: Final = "An image from a connected tool couldn't be placed."
 
+#: The reason the "unavailable" notice gives for a connection whose tools rode on
+#: a model call that raised (the provider refused a tool's schema, or the tool loop
+#: gave up): the call is made once more without them.
+_GATEWAY_CALL_FAILED_REASON: Final = "the model could not use its tools"
+
 
 def _image_not_placed_notice(slide: Optional[int]) -> str:
     """The notice for an image reference removed from slide *slide* (1-based), or
@@ -3601,7 +3610,13 @@ class _GatewayNotices:
         )
 
     def failures(self, failures: Sequence[GatewayFailure]) -> None:
-        """Say each failure's notice, once per service per turn."""
+        """Say each failure's notice, once per service per turn.
+
+        A sign-in notice that says its link is marked ``{"sign_in_url": <url>}``:
+        the chat renders a link for exactly that URL in exactly that row, and every
+        other message stays plain text (so no model- or service-authored URL can
+        look like Tellr's own link).
+        """
         for failure in failures:
             if self._told(failure.service_name):
                 continue
@@ -3613,6 +3628,11 @@ class _GatewayNotices:
                     self._state,
                     failure_notice(failure, oauth_client_id=self._oauth_client_id),
                     message_type="info",
+                    metadata=(
+                        {"sign_in_url": failure.sign_in_url}
+                        if failure.kind == "sign_in_required" and failure.sign_in_url
+                        else None
+                    ),
                 )
 
 
@@ -3627,6 +3647,10 @@ class _GatewayPass:
     per-run budget).  Either way the seconds are clipped to the turn deadline
     (``turn_started_at`` + :data:`GATEWAY_TURN_DEADLINE_SECONDS`), and every tool
     refuses a call that would start after it.
+
+    A model call that carried these tools and raised (:meth:`without_tools`) is
+    made once more without them, and from then on the pass binds none: every
+    later attempt is today's call.
     """
 
     def __init__(
@@ -3660,6 +3684,8 @@ class _GatewayPass:
         self.notices = _GatewayNotices(state, user.token)
         self._build: Optional[GatewayToolsetBuild] = None
         self._failures: List[GatewayFailure] = []
+        #: A model call that carried this pass's tools raised: bind them no more.
+        self._model_call_failed = False
         #: The Gateway calls this pass started, and the seconds its toolsets ran.
         self.calls = 0
         self.seconds = 0.0
@@ -3684,20 +3710,23 @@ class _GatewayPass:
         """
         self.calls += 1
         connection, _, tool = line.rpartition(" · ")
+        tool_input = {"connection": connection, "tool": tool}
         _emit(
             StreamEventType.TOOL_CALL,
             content=line,
-            # The agent names its node: "architect" or "data_analyst".
-            metadata={"node": self._agent, "tool_name": _GATEWAY_PROGRESS_TOOL},
+            # The agent names its node: "architect" or "data_analyst".  The same
+            # tool_input as the row, so both surfaces name the connection and tool.
+            metadata={
+                "node": self._agent,
+                "tool_name": _GATEWAY_PROGRESS_TOOL,
+                "tool_input": dict(tool_input),
+            },
         )
         _say(
             self._state,
             line,
             message_type="tool_call",
-            metadata={
-                "tool_name": _GATEWAY_PROGRESS_TOOL,
-                "tool_input": {"connection": connection, "tool": tool},
-            },
+            metadata={"tool_name": _GATEWAY_PROGRESS_TOOL, "tool_input": tool_input},
         )
 
     def tools(self) -> Tuple[AgentTool, ...]:
@@ -3754,7 +3783,10 @@ class _GatewayPass:
 
     def toolset(self) -> Optional[AgentToolset]:
         """A NEW toolset of this pass's tools holding what is left of the budget, or
-        ``None`` (no tools, or nothing left): the call is then today's."""
+        ``None`` (no tools, nothing left, or a call with them already failed): the
+        call is then today's."""
+        if self._model_call_failed:
+            return None
         tools = self.tools()
         if not tools:
             return None
@@ -3770,6 +3802,48 @@ class _GatewayPass:
         self.seconds += max(0.0, toolset.budget_seconds - toolset.remaining_seconds())
         if self._build is not None:
             self._failures.extend(self._build.access_failures(toolset))
+
+    def _bound(self, toolset: Optional[AgentToolset]) -> List[Tuple[str, str]]:
+        """``(display_name, service_name)`` of each connection whose tools *toolset*
+        carries, first seen first; ``[]`` for a toolset with none (Genie One's)."""
+        if toolset is None or self._build is None:
+            return []
+        mine = {id(tool) for tool in self._build.tools}
+        bound: Dict[str, Tuple[str, str]] = {}
+        for tool in toolset.tools:
+            owner = self._build.owners.get(tool.name) if id(tool) in mine else None
+            if owner is not None:
+                bound.setdefault(owner[1], owner)
+        return list(bound.values())
+
+    def without_tools(self, exc: Exception, toolset: Optional[AgentToolset]) -> bool:
+        """A model call raised *exc*: ``True`` when it carried this pass's tools, so
+        the caller makes the same call once more without them.
+
+        Then the failure is logged (its type, never the token), each connection the
+        call carried is to be said unavailable (once per turn, with
+        :meth:`say_failures`), and the pass binds no tools again.  A call that
+        carried none is not this pass's to handle: ``False``, and the caller fails
+        exactly as it always has.
+        """
+        bound = self._bound(toolset)
+        if not bound:
+            return False
+        self._model_call_failed = True
+        logger.warning(
+            "gateway_tools_failed: the %s's call with its AI Gateway MCP tools (%s) "
+            "raised %s; it is made once more without them",
+            self._agent,
+            ", ".join(service for _, service in bound),
+            type(exc).__name__,
+            exc_info=exc,
+            extra={"session_id": self._state.get("session_id")},
+        )
+        self._failures.extend(
+            GatewayFailure(display, service, "unavailable", _GATEWAY_CALL_FAILED_REASON, None)
+            for display, service in bound
+        )
+        return True
 
     def say_failures(self) -> None:
         """Tell the user about every connection that could not be used, once each."""
@@ -3821,8 +3895,11 @@ def _reconcile_architect_output(out: Any, known: Set[str]) -> Tuple[Any, List[Op
     A known reference is kept, a mistyped tail is fixed, anything else is removed
     (``reconcile_model_strings``), and the answer is re-validated.  An answer
     that cannot be reconciled (one that would no longer validate) is kept as
-    the model wrote it, never failing the turn: the builders reconcile their
-    HTML too.  An answer with nothing to change is returned as it is.
+    the model wrote it, never failing the turn, and the failure is logged.
+    Nothing later fixes such a reference: the builder counts every reference in
+    its own slide's spec as known (``gateway_known_images``), so it reaches the
+    slide's HTML and stays an unresolved ``{{image:…}}`` placeholder there.  An
+    answer with nothing to change is returned as it is.
     """
     try:
         dumped = out.model_dump()
@@ -3924,11 +4001,18 @@ def architect_node(state: dict) -> Dict[str, Any]:
     attempt is handed a NEW toolset of the architect's Gateway tools holding
     what is left of the TURN's budget (every architect pass and attempt this turn
     spends one :data:`ARCHITECT_GATEWAY_MAX_CALLS` / seconds budget, clipped to
-    the turn deadline); with nothing left the call is today's.  Each answer's
-    image references are reconciled before it is planned (a mistyped tail fixed,
-    an unknown one removed), each connection that could not be used is said
-    once per turn, and ``gateway_usage`` / ``gateway_images`` are written on
-    every return path.  Without a Gateway entry none of this runs.
+    the turn deadline); with nothing left the call is today's.  A call that
+    carried the tools and raised (the provider refused a tool's schema, or the
+    tool loop gave up) is made once more, through the same call site, with no
+    toolset, and every later attempt of the pass is today's call; each connection
+    it carried is said unavailable, and only the fallback's own failure fails
+    the turn (or, on the retry, leaves the first answer's refusal standing), as
+    any call's always has.  Each answer's image references are reconciled before
+    it is planned (a mistyped tail fixed, an unknown one removed), each
+    connection that could not be used is said once per turn, the slides an image
+    could not be placed on are said only for a committed (unrefused) answer, and
+    ``gateway_usage`` / ``gateway_images`` are written on every return path.
+    Without a Gateway entry none of this runs.
     """
     session_id = state["session_id"]
     turn_id = state["turn_id"]
@@ -4083,43 +4167,57 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # A NEW toolset per attempt, holding what is left of the turn's budget
         # (a retry never inherits the first attempt's counters).
         toolset = gateway.toolset() if gateway is not None else None
-        try:
-            out = get_agent_runtime().run(
-                "architect",
-                state["graph_release_id"],
-                # A NEW dict on the retry, never the first one mutated: the
-                # runtime, and the trace of the first call, keep the payload they
-                # were handed.
-                payload if rejected_edit is None else payload | {"rejected_edit": rejected_edit},
-                _assembly_context(
-                    brand["design_system_active"],
-                    state.get("root_session_id"),
-                    state.get("actor_session_id"),
-                    toolset=toolset,
-                ),
-            ).output
-        except Exception as exc:
-            if gateway is not None:
-                gateway.spent(toolset)
-            if answer is None:
-                # The first call fails the turn as it always has: there is no
-                # refusal to fall back on.
-                raise
-            # The retry is a second chance, not a new way to fail the turn: a
-            # retry call that raises (the endpoint, an answer that does not parse)
-            # leaves the turn refused exactly as the first answer earned, with
-            # its code, sentence and problems — `answer` is still the first
-            # one's.  The persisted-runtime family still fails the turn, as it
-            # does on every model call.
-            _raise_if_persisted_runtime_failure(exc)
-            logger.warning(
-                "architect_retry_failed: the architect's retry call raised %s; the "
-                "turn is refused with the first answer's refusal (%s)",
-                type(exc).__name__,
-                answer.refusal["code"],
-                exc_info=True,
-                extra={"session_id": session_id},
-            )
+        retry_failed = False
+        # At most twice round: a call that carried Gateway tools and raised is
+        # made once more, through this same call site, with no toolset (today's
+        # call).  A call without them runs once, exactly as before.
+        for fallback in (False, True):
+            try:
+                out = get_agent_runtime().run(
+                    "architect",
+                    state["graph_release_id"],
+                    # A NEW dict on the retry, never the first one mutated: the
+                    # runtime, and the trace of the first call, keep the payload
+                    # they were handed.
+                    payload
+                    if rejected_edit is None
+                    else payload | {"rejected_edit": rejected_edit},
+                    _assembly_context(
+                        brand["design_system_active"],
+                        state.get("root_session_id"),
+                        state.get("actor_session_id"),
+                        toolset=toolset,
+                    ),
+                ).output
+            except Exception as exc:
+                if gateway is not None:
+                    gateway.spent(toolset)
+                    if not fallback and gateway.without_tools(exc, toolset):
+                        # The Gateway must never be what fails the turn (I2).
+                        toolset = None
+                        continue
+                if answer is None:
+                    # The first call fails the turn as it always has: there is no
+                    # refusal to fall back on.
+                    raise
+                # The retry is a second chance, not a new way to fail the turn: a
+                # retry call that raises (the endpoint, an answer that does not
+                # parse) leaves the turn refused exactly as the first answer
+                # earned, with its code, sentence and problems — `answer` is still
+                # the first one's.  The persisted-runtime family still fails the
+                # turn, as it does on every model call.
+                _raise_if_persisted_runtime_failure(exc)
+                logger.warning(
+                    "architect_retry_failed: the architect's retry call raised %s; the "
+                    "turn is refused with the first answer's refusal (%s)",
+                    type(exc).__name__,
+                    answer.refusal["code"],
+                    exc_info=True,
+                    extra={"session_id": session_id},
+                )
+                retry_failed = True
+            break
+        if retry_failed:
             break
         if gateway is not None:
             gateway.spent(toolset)
@@ -4171,9 +4269,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
 
     if gateway is not None:
         # Each connection that could not be used (listed or called), once per
-        # service per turn, then each slide an image could not be placed on.
+        # service per turn, then each slide an image could not be placed on —
+        # only for an answer that is committed: a refused one's slides are never
+        # built, so there is nothing to tell the user about them (T6-1).
         gateway.say_failures()
-        _say_images_not_placed(state, images_not_placed)
+        if answer.refusal is None:
+            _say_images_not_placed(state, images_not_placed)
 
     intent = answer.intent
     message = answer.message
@@ -5067,17 +5168,37 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     elif gateway is not None:
         # The Gateway tools alone: their own budget, clipped to the turn deadline.
         toolset = gateway.toolset()
-    out = get_agent_runtime().run(
-        "data_analyst",
-        state["graph_release_id"],
-        payload,
-        _assembly_context(
-            state.get("design_system_active"),
-            state.get("root_session_id"),
-            state.get("actor_session_id"),
-            toolset=toolset,
-        ),
-    ).output
+    # At most twice round: a call that carried Gateway tools and raised is made
+    # once more, through this same call site, exactly as before this branch —
+    # Genie One's own toolset, or no tools.  Any other failure propagates.
+    for fallback in (False, True):
+        try:
+            out = get_agent_runtime().run(
+                "data_analyst",
+                state["graph_release_id"],
+                payload,
+                _assembly_context(
+                    state.get("design_system_active"),
+                    state.get("root_session_id"),
+                    state.get("actor_session_id"),
+                    toolset=toolset,
+                ),
+            ).output
+        except Exception as exc:
+            if gateway is not None:
+                # First, so a refusal the run recorded (a sign-in, say) is the
+                # notice said for its connection, not the "unavailable" one.
+                gateway.spent(toolset)
+            if fallback or gateway is None or not gateway.without_tools(exc, toolset):
+                raise
+            genie = (
+                _genie_one_run(state, config, notices=gateway.notices)
+                if genie is not None
+                else None
+            )
+            toolset = genie.toolset if genie is not None else None
+            continue
+        break
     if gateway is not None:
         gateway.spent(toolset)
 
