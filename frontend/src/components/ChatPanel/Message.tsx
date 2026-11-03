@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
-import { linkifyText } from '../../utils/linkify';
 import { splitDeckAdvisory, splitFindingRequest } from '../../utils/findingText';
 
 // Human labels for the keys a failure notice's details carry; unknown keys render as-is.
@@ -9,6 +8,41 @@ const DETAIL_LABELS: Record<string, string> = {
   stage: 'Stage',
   error: 'Error',
   request_id: 'Request ID',
+};
+
+/** Only an https sign-in link is ever rendered (the same rule as the Gateway chip). */
+const isHttpsUrl = (value: string | undefined): value is string => {
+  if (!value || !/^https:\/\//i.test(value)) return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * `text` with each occurrence of exactly `signInUrl` as a new-tab link, when the server marked the
+ * message with an https sign-in link; otherwise `text` itself, plain, exactly as before. No other
+ * URL is ever linked, so a model- or service-authored link can never look like Tellr's own.
+ */
+const withSignInLink = (text: string, signInUrl: string | undefined): React.ReactNode => {
+  if (!isHttpsUrl(signInUrl) || !text.includes(signInUrl)) return text;
+  return text.split(signInUrl).flatMap((part, i) =>
+    i === 0
+      ? [part]
+      : [
+          <a
+            key={`sign-in-${i}`}
+            href={signInUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 break-all"
+          >
+            {signInUrl}
+          </a>,
+          part,
+        ],
+  );
 };
 
 interface MessageProps {
@@ -204,7 +238,7 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
       >
         <div className="whitespace-pre-wrap">
           {message.role === 'assistant'
-            ? linkifyText(split ? split.lead : message.content)
+            ? withSignInLink(split ? split.lead : message.content, message.sign_in_url)
             : split ? split.lead : message.content}
         </div>
         {split && (

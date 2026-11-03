@@ -158,22 +158,64 @@ describe('Message data analyst card', () => {
 });
 
 describe('Message links (Gateway MCP sign-in notice)', () => {
-  // An `info` notice (message_type="info") reaches the UI as an assistant-role message.
+  // An `info` notice (message_type="info") reaches the UI as an assistant-role message. Only the
+  // row the server marked (metadata.sign_in_url -> message.sign_in_url) gets a link, and only for
+  // that exact URL: every other message renders as plain text, exactly as before.
   const SIGN_IN_URL =
     'https://fevm-db-tellr-dev-workspace.cloud.databricks.com/mcp-service-login?name=db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw&o=7474645249186749';
   const SIGN_IN =
     'To use LakeDraw, sign in here: https://fevm-db-tellr-dev-workspace.cloud.databricks.com/mcp-service-login?name=db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw&o=7474645249186749 — then ask again.';
 
-  it('info message with a URL renders an anchor', () => {
-    const { container } = render(<Message message={message({ content: SIGN_IN })} />);
+  it('a marked sign-in notice renders exactly one anchor for its URL', () => {
+    const { container } = render(
+      <Message message={message({ content: SIGN_IN, sign_in_url: SIGN_IN_URL })} />,
+    );
 
     const links = screen.getAllByRole('link');
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toBe(SIGN_IN_URL);
     expect(links[0].textContent).toBe(SIGN_IN_URL);
     expect(links[0].getAttribute('target')).toBe('_blank');
-    expect(links[0].getAttribute('rel') ?? '').toContain('noopener');
+    expect(links[0].getAttribute('rel')).toBe('noopener noreferrer');
     // The whole sentence is still there, around the link.
     expect(container.textContent).toContain(SIGN_IN);
+  });
+
+  it('links only the marked URL: another https URL in the same notice stays plain text', () => {
+    const text = `${SIGN_IN} Status: https://status.example.com/now`;
+    render(<Message message={message({ content: text, sign_in_url: SIGN_IN_URL })} />);
+
+    const links = screen.getAllByRole('link');
+    expect(links.map((a) => a.getAttribute('href'))).toEqual([SIGN_IN_URL]);
+  });
+
+  it.each([
+    ['the sign-in sentence', SIGN_IN],
+    ['a model-authored link', 'See https://evil.example.com/login for the official sign-in.'],
+  ])('an unmarked message with an https URL (%s) renders no anchor', (_label, content) => {
+    const { container } = render(<Message message={message({ content })} />);
+
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(container.querySelector('a')).toBeNull();
+    expect(screen.getByText(content).textContent).toBe(content);
+  });
+
+  it.each([
+    ['http', SIGN_IN_URL.replace('https://', 'http://')],
+    ['javascript', 'javascript:alert(1)'],
+    ['not a URL', 'https://'],
+  ])('a notice whose sign_in_url is not https (%s) renders no anchor', (_label, url) => {
+    const content = `To use LakeDraw, sign in here: ${url} — then ask again.`;
+    const { container } = render(<Message message={message({ content, sign_in_url: url })} />);
+
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(container.querySelector('a')).toBeNull();
+    expect(screen.getByText(content).textContent).toBe(content);
+  });
+
+  it('a user message is never linked, even when marked', () => {
+    render(<Message message={message({ role: 'user', content: SIGN_IN, sign_in_url: SIGN_IN_URL })} />);
+
+    expect(screen.queryByRole('link')).toBeNull();
   });
 });

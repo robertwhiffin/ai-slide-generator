@@ -74,6 +74,22 @@ interface ChatPanelProps {
 // #317: the turn-end id read asks for the newest rows only (GET …/messages keeps messages[-limit:]).
 const MESSAGE_ID_READ_LIMIT = 200;
 
+/** A Gateway sign-in notice's link (metadata.sign_in_url), as a string or nothing; Message
+ *  decides whether it is a link it will render (https only). */
+const readSignInUrl = (value: unknown): string | undefined =>
+  typeof value === 'string' && value ? value : undefined;
+
+/** The live label for a tool call. A Gateway MCP call names its connection and tool, as its
+ *  progress row does ("{connection} · {tool}"); every other tool reads "Querying <tool>...". */
+const toolCallLabel = (name: string, input: Record<string, unknown> | undefined): string => {
+  const connection = input?.connection;
+  const tool = input?.tool;
+  if (name === 'gateway_mcp' && typeof connection === 'string' && connection && typeof tool === 'string' && tool) {
+    return `${connection} · ${tool}`;
+  }
+  return `Querying ${name}...`;
+};
+
 export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   rawHtml,
   onSlidesGenerated,
@@ -168,6 +184,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           } : undefined,
           details: readMessageDetails(msg.metadata?.details),
           agent: typeof msg.metadata?.agent === 'string' ? msg.metadata.agent : undefined,
+          sign_in_url: readSignInUrl(msg.metadata?.sign_in_url),
         }));
         setMessages(uiMessages);
       } else {
@@ -368,6 +385,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
                 timestamp: new Date().toISOString(),
                 details: readMessageDetails(event.metadata?.details),
                 agent: event.agent,
+                sign_in_url: readSignInUrl(event.metadata?.sign_in_url),
               },
             ]);
           }
@@ -388,7 +406,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
               },
             ]);
             // Update loading message to show tool being used
-            setLoadingMessage(`Querying ${event.tool_name}...`);
+            setLoadingMessage(toolCallLabel(event.tool_name, event.tool_input));
           }
           break;
 
