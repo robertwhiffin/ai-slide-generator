@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FeedbackDashboard } from '../Feedback/FeedbackDashboard';
 import { GoogleSlidesAuthForm } from '../config/GoogleSlidesAuthForm';
 import { AdminDesignSystemDefault } from './AdminDesignSystemDefault';
+import { AdminGenieOneDefault } from './AdminGenieOneDefault';
 import { AdminJudgeSettings } from './AdminJudgeSettings';
 import { AdminSlideStyleDefault } from './AdminSlideStyleDefault';
 import { UsageDashboard } from './UsageDashboard';
@@ -251,7 +252,12 @@ export const AdminPage: React.FC = () => {
           hidden={activeTab !== 'connections'}
           className={activeTab !== 'connections' ? 'sr-only' : ''}
         >
-          {activeTab === 'connections' && <AdminConnections />}
+          {activeTab === 'connections' && (
+            <>
+              <AdminGenieOneDefault />
+              <AdminConnections />
+            </>
+          )}
         </div>
 
         <div

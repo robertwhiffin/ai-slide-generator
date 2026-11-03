@@ -147,6 +147,13 @@ export const APP_SHELL_RESPONSES: readonly ShellResponse[] = [
     body: mockSlideStyles,
   },
   {
+    // The new-deck default load reads the admin "Add Genie One to new decks" setting.
+    name: 'genie-one-default',
+    matches: (method, url) => method === 'GET' && url.pathname === '/api/tools/genie-one-default',
+    status: 200,
+    body: { enabled: false },
+  },
+  {
     name: 'admin-sibling-panel',
     matches: (method, url) => method === 'GET'
       && (url.pathname.startsWith('/api/admin/') || url.pathname.startsWith('/api/feedback/'))

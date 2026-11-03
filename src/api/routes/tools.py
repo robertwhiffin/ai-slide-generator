@@ -16,6 +16,7 @@ from src.api.schemas.gateway_mcp import GatewayStatusOut, GatewayToolOut
 from src.core.config_loader import load_config
 from src.core.databricks_client import get_user_client
 from src.core.scope_errors import oauth_client_id_from_token, oauth_scopes_from_token
+from src.core.settings_db import get_genie_one_default
 from src.services.agent_tools.gateway_mcp import GatewayMcpClient, probe_service
 
 logger = logging.getLogger(__name__)
@@ -484,6 +485,12 @@ def discover_mcp():
 def discover_gateway_mcp():
     """List the enabled admin-registered AI Gateway connections (the deck's connection pills)."""
     return {"items": _discover_gateway_items()}
+
+
+@router.get("/genie-one-default")
+def genie_one_default():
+    """Whether a new deck starts with the Genie One tool (the admin setting)."""
+    return {"enabled": get_genie_one_default()}
 
 
 @router.get("/gateway-mcp/status", response_model=GatewayStatusOut)

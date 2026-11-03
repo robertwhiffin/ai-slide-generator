@@ -80,6 +80,15 @@ export const adminApi = {
       body: JSON.stringify({ backend }),
     }),
 
+  getGenieOneDefault: (): Promise<{ enabled: boolean }> =>
+    fetchJson(`${ADMIN_BASE}/genie-one-default`),
+
+  setGenieOneDefault: (enabled: boolean): Promise<{ enabled: boolean }> =>
+    fetchJson(`${ADMIN_BASE}/genie-one-default`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
   listAdmins: (): Promise<AppAdminsResponse> => fetchJson(`${ADMIN_BASE}/admins`),
 
   addAdmin: (body: {

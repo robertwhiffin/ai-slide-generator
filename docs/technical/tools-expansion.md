@@ -164,6 +164,7 @@ All modules are in `src/services/tools/`:
 ### Tool Picker (`AgentConfigBar/ToolPicker.tsx`)
 - Renders `+ Genie One`, then one one-click pill per enabled admin-registered AI Gateway connection (`GET /api/tools/discover/gateway-mcp`; see `gateway-mcp-connections.md`), then an `Other tools` toggle
 - `Other tools` reveals 5 category buttons: `+ Genie Agent`, `+ Agent Bricks`, `+ Vector Index`, `+ MCP Server`, `+ Model Endpoint`
+- When an admin turns on **Add Genie One to new decks** (Admin → Connections; `GET/PUT /api/admin/genie-one-default`, stored in `workspace_settings`), a new deck starts with the Genie One chip already added. The browser seeds it on a new pre-session surface (`GET /api/tools/genie-one-default`), and the chat route seeds it on a new session whose request sent no `tools`. A stored or existing deck config is never changed, and users can remove the chip
 - Each category button opens a type-specific discovery panel inline
 
 ### Discovery Panels (`AgentConfigBar/tools/`)

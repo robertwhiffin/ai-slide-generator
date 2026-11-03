@@ -310,6 +310,20 @@ async function withDefaultTemplate(config: AgentConfig): Promise<AgentConfig> {
 }
 
 /**
+ * Add the Genie One tool when an admin turned on "Add Genie One to new decks".
+ *
+ * Like {@link withDefaultTemplate}, used only where a genuinely new surface is
+ * seeded: a stored config is the user's own state, and they may have removed
+ * the pill. The server fills the same gap on a chat request that sends no tools.
+ */
+async function withGenieOneDefault(config: AgentConfig): Promise<AgentConfig> {
+  const tools = config.tools ?? [];
+  if (tools.some(t => t.type === 'genie_one')) return config;
+  if (!(await api.getGenieOneDefault())) return config;
+  return { ...config, tools: [...tools, { type: 'genie_one' }] };
+}
+
+/**
  * Fill in whichever style SOURCE a config is missing, honouring the product
  * decision that an org-default design system OUTRANKS the default slide style —
  * and, for the same reason, that a user's PERSONAL default design system
@@ -697,6 +711,7 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
         // the one place org-default seeding belongs.
         config = await withResolvedStyleSource(config, { isNewSurface: true });
         config = await withDefaultTemplate(config);
+        config = await withGenieOneDefault(config);
         if (config.deck_prompt_id == null) {
           config.deck_prompt_id = resolveDefaultDeckPromptId();
         }

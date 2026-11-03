@@ -2370,6 +2370,21 @@ export const api = {
   },
 
   /**
+   * Whether a new deck starts with the Genie One tool (the admin setting).
+   * Any failure reads as off, so a new deck never waits on it or errors.
+   */
+  async getGenieOneDefault(): Promise<boolean> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/tools/genie-one-default`);
+      if (!response.ok) return false;
+      const body = await response.json();
+      return body?.enabled === true;
+    } catch {
+      return false;
+    }
+  },
+
+  /**
    * Per-user sign-in / access status of one AI Gateway MCP connection.
    */
   async getGatewayMcpStatus(serviceName: string): Promise<GatewayMcpStatus> {
