@@ -4321,6 +4321,16 @@ class SessionManager:
 
         metadata = msg.get("metadata") or {}
         details = metadata.get("details")
+        sign_in_url = metadata.get("sign_in_url")
+        # Only a failure notice's technical detail (#321) and a Gateway sign-in
+        # notice's own link — never the row's whole metadata, which for a tool row
+        # carries its input. None on every other row, including every row persisted
+        # before notices had details.
+        forwarded: Dict[str, Any] = {}
+        if isinstance(details, dict) and details:
+            forwarded["details"] = details
+        if isinstance(sign_in_url, str) and sign_in_url:
+            forwarded["sign_in_url"] = sign_in_url
 
         return {
             "type": event_type,
@@ -4331,12 +4341,7 @@ class SessionManager:
             "message_id": msg["id"],
             # Which agent spoke (the data analyst's report is drawn as its own card).
             "agent": metadata.get("agent"),
-            # Only a failure notice's technical detail (#321) — never the row's whole
-            # metadata, which for a tool row carries its input. None on every other
-            # row, including every row persisted before notices had details.
-            "metadata": (
-                {"details": details} if isinstance(details, dict) and details else None
-            ),
+            "metadata": forwarded or None,
         }
 
     def cleanup_stale_requests(self, max_age_hours: int = 24) -> int:
