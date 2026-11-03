@@ -2,6 +2,9 @@
 *.spec.ts in frontend/tests/e2e/ or list it in DELIBERATE_EXCLUSIONS
 with a non-empty reason.
 
+The matrix is a list of shards (``include: [{shard: n, specs: [...]}]``);
+"in the matrix" means named in some shard's ``specs:`` list.
+
 An empty reason is not allowed — that is exactly how an exclusion
 becomes a silent gap, indistinguishable from a spec that was simply
 forgotten.  A new spec that silently goes uncollected by CI is the
@@ -16,6 +19,13 @@ Three assertions
    *.spec.ts, so helpers like user-guide/shared.ts staying put is fine).
 3. pin: slide-viewer is in the matrix (the only spec that exercises the
    findings drawer, which ws4b and ws4e depend on).
+
+Plus two that sharding needs:
+
+5. no spec is in two shards (it would run twice, and a shard's balance
+   would be wrong).
+6. the job actually hands each shard's list to the runner — a list the
+   run step ignores would make every assertion above decorative.
 
 DELIBERATE_EXCLUSIONS — two distinct kinds
 ------------------------------------------
@@ -129,11 +139,27 @@ DELIBERATE_EXCLUSIONS: dict[str, str] = {
 }
 
 
-def _load_matrix() -> list[str]:
+def _e2e_job() -> dict:
     """Parse the workflow with yaml.safe_load; never a regex."""
     with open(WORKFLOW) as f:
         wf = yaml.safe_load(f)
-    return wf["jobs"]["e2e-tests"]["strategy"]["matrix"]["test"]
+    return wf["jobs"]["e2e-tests"]
+
+
+def _load_shards() -> list[dict]:
+    """The matrix is a list of shards, each ``{shard: <n>, specs: [<stem>, ...]}``."""
+    shards = _e2e_job()["strategy"]["matrix"]["include"]
+    assert shards, "the e2e matrix declares no shards"
+    for entry in shards:
+        assert isinstance(entry.get("specs"), list) and entry["specs"], (
+            f"e2e shard {entry.get('shard')!r} has no `specs:` list"
+        )
+    return shards
+
+
+def _load_matrix() -> list[str]:
+    """Every spec stem named by any shard, duplicates kept (see the test below)."""
+    return [spec for entry in _load_shards() for spec in entry["specs"]]
 
 
 def _e2e_spec_stems() -> set[str]:
@@ -254,4 +280,74 @@ def test_slide_viewer_is_in_matrix():
         "'slide-viewer' is missing from the e2e matrix in "
         ".github/workflows/test.yml.  It is the only spec covering the "
         "findings drawer — restore it to the matrix."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Assertion 5 — each spec in exactly one shard
+# ---------------------------------------------------------------------------
+def test_no_spec_is_in_two_shards():
+    """A spec named by two shards runs twice and skews both shards' run time."""
+    seen: dict[str, list] = {}
+    for entry in _load_shards():
+        for spec in entry["specs"]:
+            seen.setdefault(spec, []).append(entry.get("shard"))
+    duplicated = {spec: shards for spec, shards in seen.items() if len(shards) > 1}
+    assert not duplicated, (
+        "These specs are named by more than one e2e shard in "
+        ".github/workflows/test.yml:\n"
+        + "\n".join(f"  - {s} (shards {shards})" for s, shards in sorted(duplicated.items()))
+        + "\n\nKeep each spec in exactly one shard."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Assertion 6 — the shard's list is what actually runs
+# ---------------------------------------------------------------------------
+def test_run_step_passes_the_shards_specs_to_the_runner():
+    """The shard lists are only coverage if the run step consumes them.
+
+    Every assertion above inspects ``specs:``; none would notice a run step
+    that ran a hard-coded list, or nothing, instead.
+    """
+    runs = [step.get("run", "") for step in _e2e_job()["steps"]]
+    consuming = [
+        run for run in runs
+        if "scripts/run_e2e_specs.sh" in run and "matrix.specs" in run
+    ]
+    assert consuming, (
+        "No step of the e2e-tests job passes `matrix.specs` to "
+        "scripts/run_e2e_specs.sh, so the shard lists in "
+        ".github/workflows/test.yml are not what runs. Expected a step like:\n"
+        "  run: ./scripts/run_e2e_specs.sh ${{ join(matrix.specs, ' ') }}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Assertion 7 — a change to the runner runs E2E
+# ---------------------------------------------------------------------------
+def test_runner_changes_trigger_e2e():
+    """e2e-tests runs only when the `frontend` paths filter matches.
+
+    The runner script decides how every spec runs, so a PR that edits only it
+    must still run E2E — otherwise the change that most needs E2E skips it.
+    """
+    with open(WORKFLOW) as f:
+        wf = yaml.safe_load(f)
+    assert "needs.changes.outputs.frontend" in str(_e2e_job()["if"]), (
+        "e2e-tests is no longer gated on the `frontend` filter; update this test "
+        "to check whichever filter gates it now"
+    )
+    filter_step = next(
+        s for s in wf["jobs"]["changes"]["steps"] if s.get("id") == "filter"
+    )
+    frontend_paths = yaml.safe_load(filter_step["with"]["filters"])["frontend"]
+    missing = [
+        p for p in ("scripts/run_e2e_specs.sh", ".github/workflows/test.yml")
+        if p not in frontend_paths
+    ]
+    assert not missing, (
+        "The `frontend` paths filter in .github/workflows/test.yml (which gates "
+        f"e2e-tests) does not match {missing}, so a PR changing only that would "
+        "skip E2E."
     )
