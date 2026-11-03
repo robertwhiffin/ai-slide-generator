@@ -8,6 +8,15 @@ on:
       - main
       - 'release/**'
 
+# A new push to a PR cancels that PR's run still in flight: its result is about
+# to be superseded, and its ~20 jobs would otherwise hold slots of the account's
+# 20-concurrent-job cap that the new run (and every other PR) is queueing for.
+# Pushes to main are never cancelled: each one gets a group of its own (run_id),
+# because one shared group would also cancel a merge that is merely pending.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   NODE_VERSION: '20'
 
@@ -88,7 +97,11 @@ jobs:
               - 'src/tools/genie*.py'
               - 'tests/integration/test_genie*.py'
 
-  # Fast unit tests - always run, gate for other tests
+  # Unit tests. Not a gate: the integration and E2E jobs start alongside this one
+  # instead of waiting ~9 minutes for it. They run the same tests either way, and
+  # Actions minutes are free on this public repo, so a unit failure that used to
+  # save their minutes now just lets them finish too. test-summary still fails the
+  # build on any failure. (agentic-tests alone keeps the gate: it spends money.)
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -156,11 +169,8 @@ jobs:
     name: "Integration: API Routes"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      (needs.changes.outputs.api == 'true' || needs.changes.outputs.backend == 'true')
+    needs: changes
+    if: needs.changes.outputs.api == 'true' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:15
@@ -200,11 +210,8 @@ jobs:
     name: "Integration: Config API"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      (needs.changes.outputs.config == 'true' || needs.changes.outputs.backend == 'true')
+    needs: changes
+    if: needs.changes.outputs.config == 'true' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:15
@@ -249,11 +256,8 @@ jobs:
     name: "Integration: Export"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      (needs.changes.outputs.export == 'true' || needs.changes.outputs.backend == 'true')
+    needs: changes
+    if: needs.changes.outputs.export == 'true' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:15
@@ -293,11 +297,8 @@ jobs:
     name: "Integration: Streaming"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      (needs.changes.outputs.streaming == 'true' || needs.changes.outputs.backend == 'true')
+    needs: changes
+    if: needs.changes.outputs.streaming == 'true' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:15
@@ -337,11 +338,8 @@ jobs:
     name: "Integration: Slides"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      (needs.changes.outputs.slides == 'true' || needs.changes.outputs.backend == 'true')
+    needs: changes
+    if: needs.changes.outputs.slides == 'true' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:15
@@ -395,11 +393,8 @@ jobs:
     name: "Integration: Graph Orchestration"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      needs.changes.outputs.backend == 'true'
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:15
@@ -480,11 +475,8 @@ jobs:
     name: "Integration: Genie"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      (needs.changes.outputs.genie == 'true' || needs.changes.outputs.backend == 'true')
+    needs: changes
+    if: needs.changes.outputs.genie == 'true' || needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:15
@@ -532,11 +524,8 @@ jobs:
     # regression that re-introduces the SCIM-retry hang fails fast instead of
     # burning the runner for hours.
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      needs.changes.outputs.backend == 'true'
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python-env
@@ -670,19 +659,28 @@ jobs:
           pip install --dry-run dist/databricks_tellr-*.whl
           pip install --dry-run dist/databricks_tellr_app-*.whl
 
-  # E2E tests with Playwright - run each test file in isolation
+  # E2E tests with Playwright: six shards, each running its specs one at a time.
+  #
+  # Each spec still gets a fresh copy of the seeded database and a freshly started
+  # backend (scripts/run_e2e_specs.sh), exactly as when every spec had a job of its
+  # own. Sharding only stops paying ~1.7 min of setup per spec, and stops 56 jobs
+  # queueing behind the account's 20-concurrent-job cap (measured 2026-11-03: a
+  # spec's tests ran a median ~20 s inside a ~2 min job).
+  #
+  # Shards are balanced by measured spec run time (~6.5 min each). A new spec goes
+  # in whichever shard is currently fastest (see the job's step summary for
+  # per-spec times); tests/unit/test_e2e_matrix_covers_specs.py fails until every
+  # spec is in exactly one shard or deliberately excluded.
   e2e-tests:
-    name: E2E - ${{ matrix.test }}
+    name: E2E - shard ${{ matrix.shard }}
     # Pinned: ubuntu-latest moved to 26.04 on 2026-10-30, and Playwright 1.57
     # cannot install chromium there ("does not support chromium on ubuntu26.04-x64").
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    needs: [changes, unit-tests, frontend-build]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      needs.frontend-build.result == 'success' &&
-      needs.changes.outputs.frontend == 'true'
+    # A shard takes ~8 min. Bounded per spec too (E2E_SPEC_TIMEOUT, 15 min), so a
+    # runaway spec fails on its own instead of taking the shard's later specs down.
+    timeout-minutes: 45
+    needs: [changes, frontend-build]
+    if: needs.changes.outputs.frontend == 'true'
 
     # Job-level so every step sees it. This job runs Playwright, not pytest, so
     # nothing here reads it today; it is exported because
@@ -696,64 +694,76 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test:
-          - admin-page
-          - admin-route-gate
-          - agent-config-integration
-          - agent-definition-workbench
-          - agent-insert-slide
-          - api-route-matcher
-          - app-tour
-          - chat-ui
-          - clear-chat
-          - conversation-graph-version
-          - css-bg-export
-          - deck-integrity
-          - deck-mode-toggle
-          - deck-review-flag
-          - deck-prompts-integration
-          - deck-prompts-ui
-          - delete-message
-          - design-system-brand-text-uncapped
-          - design-system-selector
-          - design-systems-ui
-          - export-csp
-          - export-frame-isolation
-          - export-ui
-          - findings-drawer
-          - graph-release-admin-journey
-          - graph-release-conversation-journey
-          - graph-release-history
-          - graph-release-review
-          - help-ui
-          - history-integration
-          - incremental-slide-delivery
-          - history-ui
-          - inline-svg-records-export
-          - manual-insert-slide
-          - mixed-release-collaboration
-          - presentation-mode
-          - profile-ui
-          - profiles-integration
-          - session-config-isolation
-          - session-loading
-          - slide-operations-ui
-          - slide-security
-          - slide-style-preview
-          - slide-styles-integration
-          - slide-styles-ui
-          - slide-surface-fidelity
-          - slide-viewer
-          - spec-view
-          - stale-session-recovery
-          - style-source-exclusivity
-          - svg-raster-export
-          - template-cards
-          - template-preview-import-scan
-          - template-viewer
-          - turn-progress
-          - viewer-readonly
-    
+        include:
+          - shard: 1
+            specs:
+              - admin-page
+              - agent-definition-workbench
+              - design-system-brand-text-uncapped
+              - graph-release-admin-journey
+              - graph-release-review
+              - slide-style-preview
+              - svg-raster-export
+              - template-viewer
+          - shard: 2
+            specs:
+              - conversation-graph-version
+              - design-system-selector
+              - design-systems-ui
+              - export-csp
+              - findings-drawer
+              - graph-release-conversation-journey
+              - help-ui
+              - presentation-mode
+              - stale-session-recovery
+          - shard: 3
+            specs:
+              - app-tour
+              - deck-mode-toggle
+              - deck-prompts-integration
+              - deck-prompts-ui
+              - delete-message
+              - session-config-isolation
+              - slide-surface-fidelity
+              - template-preview-import-scan
+              - turn-progress
+          - shard: 4
+            specs:
+              - agent-insert-slide
+              - clear-chat
+              - css-bg-export
+              - deck-integrity
+              - deck-review-flag
+              - export-ui
+              - incremental-slide-delivery
+              - profiles-integration
+              - slide-styles-integration
+              - slide-styles-ui
+          - shard: 5
+            specs:
+              - admin-route-gate
+              - agent-config-integration
+              - api-route-matcher
+              - export-frame-isolation
+              - graph-release-history
+              - manual-insert-slide
+              - profile-ui
+              - slide-operations-ui
+              - slide-security
+              - slide-viewer
+          - shard: 6
+            specs:
+              - chat-ui
+              - history-integration
+              - history-ui
+              - inline-svg-records-export
+              - mixed-release-collaboration
+              - session-loading
+              - spec-view
+              - style-source-exclusivity
+              - template-cards
+              - viewer-readonly
+
     # Use PostgreSQL for E2E tests - matches production and handles concurrency well
     services:
       postgres:
@@ -920,99 +930,40 @@ jobs:
                   raise Exception('No sessions found - seeding failed!')
           "
 
-      - name: Start backend server
-        run: |
-          DATABASE_URL="postgresql://test@localhost:5432/test_db" \
-          ENVIRONMENT="test" \
-          DATABRICKS_HOST="https://test.databricks.com" \
-          DATABRICKS_TOKEN="test-token" \
-          python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 &
-          for i in {1..30}; do
-            if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
-              echo "Backend is ready"
-              break
-            fi
-            if [ $i -eq 30 ]; then
-              echo "Backend failed to start"
-              exit 1
-            fi
-            echo "Waiting for backend... ($i/30)"
-            sleep 1
-          done
-
-      - name: Verify API endpoints work
-        run: |
-          echo "Testing API endpoints..."
-          echo "--- Health check ---"
-          curl -s http://localhost:8000/api/health | head -c 200
-          echo ""
-          echo "--- Profiles API ---"
-          curl -s --max-time 10 http://localhost:8000/api/settings/profiles | head -c 500
-          echo ""
-          echo "--- Deck Prompts API ---"
-          curl -s --max-time 10 http://localhost:8000/api/settings/deck-prompts | head -c 500
-          echo ""
-          echo "--- Slide Styles API ---"
-          curl -s --max-time 10 http://localhost:8000/api/settings/slide-styles | head -c 500
-          echo ""
-          echo "--- Sessions API ---"
-          curl -s --max-time 10 http://localhost:8000/api/sessions | head -c 500
-          echo ""
-          echo "API verification complete"
-
-      - name: Debug API from frontend context
-        working-directory: frontend
+      # The seeded database becomes the template every spec's database is copied
+      # from, so the seed steps above run once per shard, not once per spec.
+      - name: Snapshot the seeded database
         env:
-          VITE_API_URL: http://127.0.0.1:8000
-        run: |
-          echo "=== Debug: Testing API connectivity from frontend dev server context ==="
-          echo ""
-          echo "--- Test 1: Direct curl to 127.0.0.1:8000 ---"
-          curl -v --max-time 10 http://127.0.0.1:8000/api/settings/profiles 2>&1 | head -50
-          echo ""
-          echo "--- Test 2: Direct curl to localhost:8000 ---"
-          curl -v --max-time 10 http://localhost:8000/api/settings/profiles 2>&1 | head -50
-          echo ""
-          echo "--- Test 3: Check sessions API (known working) ---"
-          curl -v --max-time 10 http://127.0.0.1:8000/api/sessions 2>&1 | head -50
-          echo ""
-          echo "--- Test 4: Network interfaces ---"
-          ip addr 2>/dev/null || ifconfig 2>/dev/null || echo "Cannot get network info"
-          echo ""
-          echo "--- Test 5: Port 8000 listeners ---"
-          ss -tlnp 2>/dev/null | grep 8000 || netstat -tlnp 2>/dev/null | grep 8000 || echo "Cannot get port info"
-          echo ""
-          echo "=== End Debug ==="
+          DATABASE_URL: postgresql://test@localhost:5432/test_db
+        run: ./scripts/run_e2e_specs.sh --snapshot
 
-      - name: Run E2E tests - ${{ matrix.test }}
-        working-directory: frontend
+      # Per spec: stop the backend, re-create test_db from the snapshot, start the
+      # backend, run the spec. Every spec runs even after one fails; the step fails
+      # at the end if any did, names each failure as an annotation, and prints
+      # per-spec results to the step summary.
+      - name: Run E2E specs (shard ${{ matrix.shard }})
         env:
           CI: true
           VITE_API_URL: http://127.0.0.1:8000
-        run: |
-          echo "=== Pre-flight backend check ==="
-          echo "Checking 127.0.0.1:8000..."
-          curl -s --max-time 5 http://127.0.0.1:8000/api/health || echo "127.0.0.1:8000 FAILED"
-          echo ""
-          echo "Checking backend process..."
-          ps aux | grep uvicorn | grep -v grep || echo "No uvicorn process found"
-          echo "=== End pre-flight check ==="
-          echo ""
-          echo "Running test: ${{ matrix.test }}.spec.ts"
-          npx playwright test tests/e2e/${{ matrix.test }}.spec.ts --project=chromium --workers=1
+          DATABASE_URL: postgresql://test@localhost:5432/test_db
+          ENVIRONMENT: test
+          DATABRICKS_HOST: https://test.databricks.com
+          DATABRICKS_TOKEN: test-token
+        run: ./scripts/run_e2e_specs.sh ${{ join(matrix.specs, ' ') }}
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: playwright-report-${{ matrix.test }}
+          name: playwright-report-shard-${{ matrix.shard }}
           path: frontend/playwright-report/
 
+      # Includes each spec's backend log, under _backend/.
       - name: Upload Playwright test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: playwright-results-${{ matrix.test }}
+          name: playwright-results-shard-${{ matrix.shard }}
           path: frontend/test-results/
 
   # -------------------------------------------------------------------------
@@ -1101,11 +1052,8 @@ jobs:
     name: "Integration: Layer 4 Concurrency"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [changes, unit-tests]
-    if: |
-      always() &&
-      (needs.unit-tests.result == 'success' || needs.unit-tests.result == 'skipped') &&
-      needs.changes.outputs.backend == 'true'
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     services:
       postgres:
         image: postgres:15
