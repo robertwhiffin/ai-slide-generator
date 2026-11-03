@@ -307,9 +307,22 @@ class GatewayMcpClient:
                 service_name=self._service_name,
                 lacks_gateway_scope=self._lacks_gateway_scope,
             )
-            logger.warning(
-                "Gateway MCP %s on %s failed: %s", what, self._service_name, mapped, exc_info=exc
-            )
+            if mapped.kind == "sign_in_required":
+                # An expected user state (they have not signed in yet), not a fault:
+                # one line, no traceback.
+                logger.info(
+                    "Gateway MCP %s on %s: the user is not signed in",
+                    what,
+                    self._service_name,
+                )
+            else:
+                logger.warning(
+                    "Gateway MCP %s on %s failed: %s",
+                    what,
+                    self._service_name,
+                    mapped,
+                    exc_info=exc,
+                )
             raise mapped from exc
 
     def list_tools(self, *, timeout_seconds: float = LIST_TIMEOUT_SECONDS) -> list[GatewayToolSpec]:

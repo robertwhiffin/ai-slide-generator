@@ -44,6 +44,7 @@ import dataclasses
 import http.server
 import inspect
 import json
+import logging
 import subprocess
 import sys
 import threading
@@ -1468,3 +1469,63 @@ def test_genie_one_builds_its_client_on_the_shared_transport():
     assert gateway.oauth_discovery_requests() == []
     to_service = gateway.requests_to(genie_one.GENIE_ONE_SERVICE_PATH)
     assert to_service and {r.authorization for r in to_service} == {f"Bearer {TOKEN}"}
+
+
+# ---------------------------------------------------------------------------
+# Final review m8: "not signed in" is an expected user state, not a crash
+# ---------------------------------------------------------------------------
+
+_CLIENT_LOGGER = "src.services.agent_tools.gateway_mcp"
+
+
+def _client_records(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == _CLIENT_LOGGER]
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize(
+    ("make_exception", "host", "service"),
+    [
+        (_github_rejection, HOST, WEB_SEARCH),
+        (_lakedraw_not_signed_in_error, LAKEDRAW_HOST, LAKEDRAW),
+    ],
+    ids=["200-jsonrpc-32006", "401-32006"],
+)
+def test_a_sign_in_failure_logs_one_line_without_a_traceback(
+    caplog, operation, make_exception, host, service
+):
+    """m8: both measured "not signed in" shapes log ONE line, with no traceback
+    (``exc_info``), naming the service and never the token."""
+    client, _ = make_client(
+        FakeMcpClient(raises=make_exception()), host=host, service_name=service
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=_CLIENT_LOGGER):
+        with pytest.raises(GatewayMcpError) as info:
+            _run(client, operation)
+
+    assert info.value.kind == "sign_in_required"
+    (record,) = _client_records(caplog)
+    assert record.exc_info is None
+    assert record.levelno in (logging.INFO, logging.WARNING)
+    assert service in record.getMessage()
+    assert TOKEN not in caplog.text
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize(
+    "make_exception",
+    [lambda: KeyError("unexpected"), lambda: _in_groups(_http_error(403, "Forbidden"), 1)],
+    ids=["unexpected", "access_denied"],
+)
+def test_other_failures_still_log_their_traceback(caplog, operation, make_exception):
+    """Every other failure keeps its WARNING with the traceback."""
+    client, _ = make_client(FakeMcpClient(raises=make_exception()))
+
+    with caplog.at_level(logging.DEBUG, logger=_CLIENT_LOGGER):
+        with pytest.raises(GatewayMcpError):
+            _run(client, operation)
+
+    (record,) = _client_records(caplog)
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None
