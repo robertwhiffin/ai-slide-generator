@@ -910,6 +910,76 @@ def test_a_retry_after_the_budget_is_spent_has_no_toolset(graph_env, monkeypatch
     assert _architect_calls(_usage_vals(t.updates)) == 12
 
 
+def test_a_refused_pass_still_returns_gateway_usage(graph_env, monkeypatch):
+    """T6.3, the refusal return: both attempts are refused, so the turn degrades
+    (``_degrade_edit``), and that return still carries what the pass spent and saved."""
+    lakedraw = _Service(LAKEDRAW, LAKEDRAW_TOOLS, results={EXPORT: _export_result()})
+    _gateway_deck(
+        graph_env,
+        monkeypatch,
+        entries=[_entry(LAKEDRAW, "LakeDraw")],
+        rows=[LAKEDRAW_ROW],
+        services=[lakedraw],
+    )
+    refused = architect_build(make_spec((0, 1), slide_type="title"))
+    saved: List[str] = []
+
+    def first(call):
+        saved.extend(IMAGE_PLACEHOLDER_PATTERN.findall(call.use(EXPORT, {"diagram_id": "d"})))
+        call.use(CREATE, {"diagram_data": {"n": 1}})
+        return refused
+
+    def second(call):
+        call.use(CREATE, {"diagram_data": {"n": 2}})
+        return refused
+
+    runtime = _install(monkeypatch, _Runtime(architect=[first, second]))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    assert len(runtime.calls_for("architect")) == 2
+    assert t.updates["error_state"] is not None  # degraded, not built
+    assert _architect_calls(_usage_vals(t.updates)) == 3
+    assert len(saved) == 1
+    assert t.updates["gateway_images"] == scoped(TURN, saved)
+
+
+def test_the_retry_answer_is_reconciled_too(graph_env, monkeypatch):
+    """T6.2: the reconcile runs on EVERY attempt's answer, before it is planned.
+    Attempt 1 is refused (retryable) and invents a reference on slide 1; the retry,
+    which is the answer committed, invents one on slide 2.  The committed spec has
+    it removed and the user is told about slide 2 only: the refused answer's slides
+    are never said."""
+    lakedraw = _Service(LAKEDRAW, LAKEDRAW_TOOLS)
+    _gateway_deck(
+        graph_env,
+        monkeypatch,
+        entries=[_entry(LAKEDRAW, "LakeDraw")],
+        rows=[LAKEDRAW_ROW],
+        services=[lakedraw],
+    )
+    refused = architect_build(
+        _with_slides(
+            make_spec((0, 1), slide_type="title"),
+            content_brief={0: "Logo " + ref(INVENTED_2)},
+        )
+    )
+    good = architect_build(
+        _with_slides(make_spec((0, 1)), content_brief={1: "Diagram " + ref(INVENTED) + "."})
+    )
+    runtime = _install(monkeypatch, _Runtime(architect=[refused, good]))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    assert len(runtime.calls_for("architect")) == 2
+    assert t.updates["architect_intent"] == "build"
+    committed = t.updates["deck_spec"]
+    assert committed.slide_at(1).content_brief == "Diagram ."
+    persisted = read_deck_spec(graph_env.session_id)
+    assert all(INVENTED not in json.dumps(slide) for slide in persisted["slides"])
+    assert _image_notices(t.info) == [image_notice(2)]
+
+
 @pytest.mark.parametrize(
     ("prior", "expected"),
     [
