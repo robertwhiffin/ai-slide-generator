@@ -320,6 +320,89 @@ describe('AdminConnections', () => {
     expect(screen.getByText('12 / 4000')).toBeInTheDocument();
   });
 
+  // Final review m4 (T8-5): an empty allowlist binds zero tools, so it is never saved.
+  it('blocks Save with an inline message when every tool is unticked', async () => {
+    render(<AdminConnections />);
+    await openAddForm();
+    fillBasics();
+    runTest();
+    for (const name of ['search', 'fetch', 'image']) {
+      fireEvent.click(await screen.findByRole('checkbox', { name }));
+    }
+    expect(
+      screen.getByText('Select at least one tool, or tick all to allow every tool.'),
+    ).toBeInTheDocument();
+    const saveButton = screen.getByRole('button', { name: 'Save' });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
+    expect(createGatewayConnection).not.toHaveBeenCalled();
+    expect(updateGatewayConnection).not.toHaveBeenCalled();
+
+    // Ticking one tool again clears the message and saves that one.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'fetch' }));
+    expect(
+      screen.queryByText('Select at least one tool, or tick all to allow every tool.'),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(createGatewayConnection).toHaveBeenCalledTimes(1));
+    expect(createGatewayConnection.mock.calls[0][0].tool_allowlist).toEqual(['fetch']);
+  });
+
+  it('blocks an edit Save that would untick every tool, too', async () => {
+    render(<AdminConnections />);
+    await screen.findByText('Web search');
+    fireEvent.click(within(rowFor('Web search')).getByRole('button', { name: /edit/i }));
+    runTest();
+    for (const name of ['search', 'fetch', 'image']) {
+      fireEvent.click(await screen.findByRole('checkbox', { name }));
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(updateGatewayConnection).not.toHaveBeenCalled();
+    expect(
+      screen.getByText('Select at least one tool, or tick all to allow every tool.'),
+    ).toBeInTheDocument();
+  });
+
+  // Final review m5 (T8-4): the edit form must not undo a toggle made in the table.
+  it('edit Save sends the current enabled and stored allowlist, not the form snapshot', async () => {
+    render(<AdminConnections />);
+    await screen.findByText('Web search');
+    fireEvent.click(within(rowFor('Web search')).getByRole('button', { name: /edit/i }));
+    // Disabled in the table while the form is open; the server also has a new allowlist.
+    updateGatewayConnection.mockResolvedValueOnce(
+      conn({ enabled: false, tool_allowlist: ['search'] }),
+    );
+    fireEvent.click(within(rowFor('Web search')).getByRole('checkbox', { name: /enabled/i }));
+    await waitFor(() => expect(updateGatewayConnection).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(within(rowFor('Web search')).getByRole('checkbox', { name: /enabled/i })).not.toBeChecked(),
+    );
+
+    fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Web search v2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(updateGatewayConnection).toHaveBeenCalledTimes(2));
+    const [id, body] = updateGatewayConnection.mock.calls[1];
+    expect(id).toBe(1);
+    expect(Object.keys(body).sort()).toEqual(SIX_KEYS);
+    expect(body.display_name).toBe('Web search v2');
+    expect(body.enabled).toBe(false);
+    expect(body.tool_allowlist).toEqual(['search']);
+  });
+
+  // Final review I3: "GRANT EXECUTE ON SERVICE" is a parse error on DBSQL.
+  it('the help panel shows the verified MCP SERVICE grant', async () => {
+    render(<AdminConnections />);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'How to create the service in Databricks' }),
+    );
+    const help = document.getElementById('gateway-help-body')!;
+    expect(help.textContent).toContain(
+      'GRANT EXECUTE ON MCP SERVICE <catalog>.<schema>.<service> TO <users>;',
+    );
+    expect(help.textContent).not.toMatch(/EXECUTE ON SERVICE/);
+  });
+
   it('has a help panel collapsed by default that expands on click', async () => {
     render(<AdminConnections />);
     const toggle = await screen.findByRole('button', {

@@ -48,7 +48,11 @@ const SERVICE_BODY = `ai_gateway.create_mcp_service
 
 const GRANTS = `GRANT USE CATALOG ON CATALOG <catalog> TO <users>;
 GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO <users>;
-GRANT EXECUTE ON SERVICE <catalog>.<schema>.<service> TO <users>;`;
+GRANT EXECUTE ON MCP SERVICE <catalog>.<schema>.<service> TO <users>;`;
+
+const GRANT_API =
+  'PATCH /api/2.1/unity-catalog/permissions/mcp_service/<catalog>.<schema>.<service> ' +
+  '{"changes": [{"principal": "<user>", "add": ["EXECUTE"]}]}';
 
 const HelpPanel: React.FC = () => {
   const [open, setOpen] = useState(false);
@@ -74,6 +78,10 @@ const HelpPanel: React.FC = () => {
           <pre className="bg-gray-50 p-2 rounded overflow-x-auto text-xs">{SERVICE_BODY}</pre>
           <p>3. Grant users access:</p>
           <pre className="bg-gray-50 p-2 rounded overflow-x-auto text-xs">{GRANTS}</pre>
+          <p>
+            Or grant EXECUTE with the permissions API:
+            <code className="ml-1 text-xs break-all">{GRANT_API}</code>
+          </p>
           <p>Then register the service here, using its three-part name.</p>
         </div>
       )}
@@ -193,27 +201,42 @@ export const AdminConnections: React.FC = () => {
       return next;
     });
 
+  /** The row being edited as the table holds it NOW: a toggle made in the table while the form
+   *  is open has replaced it, and the form must not undo that toggle. */
+  const currentEditing = (): GatewayConnection | null => {
+    const editing = form?.editing;
+    if (!editing) return null;
+    return connections?.find((c) => c.id === editing.id) ?? editing;
+  };
+
   const allowlistToSave = (): string[] | null => {
     if (testResult?.state === 'ready') {
       const names = testResult.tools.map((t) => t.name);
       const picked = names.filter((n) => checked.has(n));
       return picked.length === names.length ? null : picked;
     }
-    // No (successful) test this session: keep whatever was stored.
-    return form?.editing?.tool_allowlist ?? null;
+    // No (successful) test this session: keep whatever is stored.
+    return currentEditing()?.tool_allowlist ?? null;
   };
+
+  // An empty allowlist would bind zero tools, so it is never saved: Save is disabled, with a message.
+  const noToolPicked =
+    testResult?.state === 'ready' &&
+    testResult.tools.length > 0 &&
+    !testResult.tools.some((t) => checked.has(t.name));
 
   const save = async () => {
     if (!form) return;
     setSaving(true);
     setSaveError(null);
+    const current = currentEditing();
     const fields: GatewayConnectionUpdate = {
       display_name: form.displayName.trim(),
       description: form.description.trim() || null,
       agent: form.agent,
       instructions: form.instructions.trim() || null,
       tool_allowlist: allowlistToSave(),
-      enabled: form.enabled,
+      enabled: current ? current.enabled : form.enabled,
     };
     try {
       if (form.editing) {
@@ -378,6 +401,11 @@ export const AdminConnections: React.FC = () => {
                 ))}
               </ul>
             )}
+            {noToolPicked && (
+              <p role="status" className="mt-2 text-sm text-amber-700">
+                Select at least one tool, or tick all to allow every tool.
+              </p>
+            )}
             {testResult && testResult.state !== 'ready' && (
               <div className="mt-2 text-sm text-gray-700">
                 {testResult.state === 'sign_in_required' && signInUrl && (
@@ -405,7 +433,7 @@ export const AdminConnections: React.FC = () => {
             <button
               type="button"
               onClick={() => void save()}
-              disabled={saving}
+              disabled={saving || noToolPicked}
               className="px-3 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
             >
               Save
