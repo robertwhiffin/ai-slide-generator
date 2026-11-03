@@ -2555,19 +2555,73 @@ def test_without_gateway_entries_a_failed_architect_call_fails_the_turn(
 
 def test_a_gateway_decks_call_without_tools_still_fails_the_turn(graph_env, monkeypatch):
     """A Gateway deck whose call carried no tools (the connection failed at list
-    time) is today's call: its failure is not retried."""
+    time) is today's call: the Gateway adds no retry of its own, so a failure that
+    is not a parse error is made once and fails the turn.  (An answer that does not
+    parse gets the architect's own one retry: the test below and
+    test_architect_parse_retry.py.)"""
     _lakedraw_deck(graph_env, monkeypatch, list_error=GatewayMcpError("unavailable", "502"))
 
     def fails(call):
         assert call.toolset is None
-        raise _loop_gave_up()
+        raise _pinned_error()
 
     runtime = _install(monkeypatch, _Runtime(architect=fails))
+
+    with pytest.raises(PinnedInvocationEndpointError):
+        _architect(graph_env, _state(graph_env))
+
+    assert len(runtime.calls_for("architect")) == 1
+
+
+def test_a_gateway_decks_unparseable_answer_without_tools_is_asked_once_more(
+    graph_env, monkeypatch
+):
+    """The same Gateway deck, its no-tools call answering text the parser refuses:
+    the architect's parse retry makes the same call once more (still no toolset, the
+    same payload) and that answer is the turn's.  The Gateway says nothing: no call
+    carried its tools."""
+    _lakedraw_deck(graph_env, monkeypatch, list_error=GatewayMcpError("unavailable", "502"))
+    spec = make_spec((0, 1))
+
+    def unparseable(call):
+        assert call.toolset is None
+        raise _loop_gave_up()
+
+    runtime = _install(monkeypatch, _Runtime(architect=[unparseable, architect_build(spec)]))
+
+    t = _architect(graph_env, _state(graph_env))
+
+    first, second = runtime.calls_for("architect")
+    assert second.context.toolset is None
+    assert second.payload == first.payload
+    assert t.updates["architect_intent"] == "build"
+    assert t.updates["deck_spec"].title == spec.title
+    assert t.updates["error_state"] is None
+    assert _tools_failed("LakeDraw") not in t.info
+
+
+def test_an_unparseable_fallback_answer_fails_the_turn(graph_env, monkeypatch):
+    """The call with the tools raises and its no-tools fallback answers text the parser
+    refuses: that is already the second call, so the turn fails with the parse error.
+    Two calls, never three: the parse retry is for a first call, not the fallback."""
+    _lakedraw_deck(graph_env, monkeypatch)
+
+    def bound(call):
+        assert call.toolset is not None
+        raise _pinned_error()
+
+    def fallback(call):
+        assert call.toolset is None
+        raise _loop_gave_up()
+
+    runtime = _install(
+        monkeypatch, _Runtime(architect=[bound, fallback, architect_build(make_spec((0,)))])
+    )
 
     with pytest.raises(OutputParserException):
         _architect(graph_env, _state(graph_env))
 
-    assert len(runtime.calls_for("architect")) == 1
+    assert len(runtime.calls_for("architect")) == 2
 
 
 def test_mixed_analyst_falls_back_to_genie_one_alone(graph_env, monkeypatch):
