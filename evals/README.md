@@ -1906,3 +1906,56 @@ Only the search backend is fake. Token usage on that path is summed across round
   `python -m evals.harness.promote --config builder=evals/configs/builder/one-footer-source.yaml --run-id builder=012033f6bb2a44b58377224735afd5c1 --config architect=evals/configs/architect/brand-footer-genie.yaml --run-id architect=6b470f5931a34e79aef1e51a6dc97c42`,
   under main's promote rule (27481337): only roles still on the legacy v1 assembly are locked,
   and neither of these is. The frontend lifecycle contract was re-recorded.
+
+## Architect: a short starter instead of 14 to 20 slides (`brief-starter`), 2026-11-03
+
+**Why.** The owner found the architect's decks too long. The 14-20 slide default came from the deck-parity loop,
+where graph decks of 8 slides were matched to the monolith's 19. With its fixed shape (cover, agenda, a divider and
+two or three slides per beat, closing) every short request came back at 12 to 23 slides. The owner wants a bias
+toward brevity. A short request gets a starter of five to eight slides, and the message suggests where the deck
+could go next. The architect asks a question only when the request gives no topic.
+
+**The candidate** `brief-starter` (`7a4f1e04`, `evals/configs/architect/`) is the shipped `brand-footer-genie`
+with only DECK SCALE AND STRUCTURE rewritten:
+- A stated slide count is followed. A full or detailed request, or one that supplies its material, gets the
+  slides that material needs and no more.
+- Otherwise the architect builds a starter: five to eight slides (a cover, the content slides and a closing
+  slide), with no agenda or dividers. `message` says it is a starter and lists three or four areas to explore
+  next, one `- ` line each. (The chat shows `message` as plain text, line breaks kept.)
+- It uses discuss only when the request names no topic.
+- An agenda and dividers appear only past about twelve slides.
+- "developing slides" becomes "content slides" in that block and in "Vary the exhibits".
+
+**Probes** (not pack cases; the train `build_request` payload with the message swapped; scripts and outputs are
+in `~/tellr-loop/architect-brevity/`):
+
+| Message | v1 (`brand-footer-genie`) | `brief-starter` |
+|---|---|---|
+| "Build me a deck on Databricks" | 16 slides, agenda and four dividers (×1) | 7 and 7 slides, no agenda, four next areas (×2) |
+| "make me a presentation" | — | discuss: asks what it is about and who it is for (×2) |
+| "deck on why we should move our pipelines from Airflow to Lakeflow Jobs" | — | 7 and 7 slides, four next areas (×2) |
+| "Make a 12-slide deck on remote work productivity" | — | 12 slides (×1) |
+| A full, detailed 45-minute training with four named parts | — | 20 slides, with an agenda and four dividers (×1) |
+
+**Runs.** The judge is `databricks-claude-sonnet-5` throughout. Calibration on train (`build_request`,
+`build_technical_deck`, `discuss`) and on all of held-out matched the trust tables above. Held-out
+`mixed_operations` hit a judge `KeyError: 'result'` and was re-run to trusted.
+
+| Run | Config | Split | Cases | Repeats | Rows | Pass rate | Judge errors | Mean in/out tokens |
+|---|---|---|---|---|---|---|---|---|
+| S1 fef04dc2 | brief-starter (7a4f1e04) | train | `build_request`, `build_technical_deck`, `discuss`, `ask_data`, `restyle_deck`, `confirm_design` | 3 | 18 | 1.00 | 1 | 19.2k / 2.8k |
+| F1 4f3c9d1f | brief-starter | train | the other 16 | 1 | 16 | 1.00 | 0 | 20.9k / 1.2k |
+| H1 731becf5 | brief-starter | held-out | all 22 | 1 | 22 | 0.95 | 2 | 18.8k / 1.4k |
+
+- **Held-out 0.95**, against 1.00 for `brand-footer` (f84c20e5). With the owner's leave, only the one failing
+  row was opened. It is held-out `build_request`, `incomplete`: the model put `deck_style` at the top level
+  of ArchitectOutput instead of inside `deck_spec` (`extra_forbidden`). That is a schema slip of the kind seen
+  under earlier prompts (Screen of `deck-style`, above), not a deck judged too short. Across the candidate's
+  13 builds, 1 was invalid. In production a first architect call that does not parse fails the turn; that
+  retry is a separate change.
+- **Spend** about USD 14.4 (USD 15 cap), with agent tokens at USD 4 / 20 per million and the judge at
+  USD 0.05 a call.
+- **Promoted** with `promote({"architect": load_config("evals/configs/architect/brief-starter.yaml")},
+  run_ids={"architect": "4f3c9d1fbe9c48d3ba16c7c9e81b6b0c"})`. The frontend lifecycle contract was
+  re-recorded. These pins were re-pinned by hand: the hashing literal, the
+  `deck_scale_and_structure` and `vary_the_exhibits` block hashes, and the slide-scale prose pins.

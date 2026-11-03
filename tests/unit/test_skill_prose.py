@@ -225,14 +225,26 @@ class TestBuilderProse:
 
 
 class TestArchitectProse:
-    """The architect plans a full deck from reusable sections (deck-parity loop)."""
+    """The architect plans a short deck from reusable sections."""
 
-    def test_architect_plans_a_full_length_deck_by_default(self):
-        """Without it the architect planned 8 slides, one per template section,
-        against the monolith's 19 for the same prompt."""
+    def test_architect_plans_a_short_starter_by_default(self):
+        """A short request gets a five-to-eight-slide starter and a list of areas to
+        explore next, not the old 14-20 slide default (2026-11-03: 16 slides with an
+        agenda and four dividers for "Build me a deck on Databricks")."""
         instructions = load_skill("architect").instructions
-        assert "14 to 20 slides" in instructions
+        assert "14 to 20 slides" not in instructions
+        assert "five to eight slides" in instructions
+        assert "with no agenda and no section dividers" in instructions
+        assert "areas the deck could explore next" in instructions
         assert "reusable layouts, not a one-of-each menu" in instructions
+
+    def test_architect_asks_only_when_there_is_no_topic(self):
+        instructions = load_skill("architect").instructions
+        assert (
+            "Use discuss instead of build only when the request gives nothing to "
+            "build a starter on" in instructions
+        )
+        assert "When the request names a topic, build the starter rather than asking." in instructions
 
     def test_architect_self_checks_each_binding_pair(self):
         """One mismatched slide_type/index pair rejects the whole plan."""

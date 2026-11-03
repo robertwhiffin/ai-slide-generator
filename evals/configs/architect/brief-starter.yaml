@@ -1,0 +1,13 @@
+# Architect v1 prompt with the deck-scale block rewritten for brevity: `brand-footer-genie` (the
+# shipped v1) except DECK SCALE AND STRUCTURE. The 14-20 slide default and its fixed shape (cover,
+# agenda, a divider per beat with two or three slides each, closing) are gone. A stated count is
+# kept; a full or detailed request, or one that supplies its material, gets the slides it needs; a
+# short request ("build me a deck on X") gets a five-to-eight-slide starter with no agenda or
+# dividers, and the message lists three or four areas to explore next. Discuss (ask what the deck
+# is about and who it is for) only when the request names no topic. An agenda and dividers only
+# past about twelve slides. "developing slides" becomes "content slides" in the two rules that
+# used it. Every other byte is identical to `brand-footer-genie`.
+agent_key: architect
+name: brief-starter
+base: v1
+prompt_file: brief-starter.md

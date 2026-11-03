@@ -1016,7 +1016,8 @@ def test_design_systems_contract_phrase_survives(phrase):
 
 # Copied by hand from tests/unit/test_skill_prose.py TestArchitectProse (C25).
 ARCHITECT_PROSE = (
-    "14 to 20 slides",
+    "five to eight slides",
+    "areas the deck could explore next",
     "reusable layouts, not a one-of-each menu",
     "its slide_type must equal the label of the template_sections entry",
 )
