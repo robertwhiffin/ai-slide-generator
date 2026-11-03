@@ -58,8 +58,10 @@ Skip this if the service already exists (for example the built-in ones). Tellr d
 ```sql
 GRANT USE CATALOG ON CATALOG <catalog> TO <users>;
 GRANT USE SCHEMA ON SCHEMA <catalog>.<schema> TO <users>;
-GRANT EXECUTE ON SERVICE <catalog>.<schema>.<service> TO <users>;
+GRANT EXECUTE ON MCP SERVICE <catalog>.<schema>.<service> TO <users>;
 ```
+
+`ON MCP SERVICE` is required: `GRANT EXECUTE ON SERVICE …` is a parse error on DBSQL. The permissions API works too: `PATCH /api/2.1/unity-catalog/permissions/mcp_service/<catalog>.<schema>.<service>` with `{"changes": [{"principal": "<user>", "add": ["EXECUTE"]}]}`.
 
 Unity Catalog's `EXECUTE` grant is the only access control. Tellr has no per-connection permissions of its own.
 
@@ -75,7 +77,7 @@ On the Admin page, open the **Connections** tab and click **Add connection**.
 | Agent | **Architect** or **Data analyst** (radio). See below. |
 | Instructions | Optional, up to 4000 characters (counter shown). Model-facing guidance for using the tools. |
 
-**Test connection** lists the service's tools **as you (the admin)**, as checkboxes, or says why it cannot (sign-in link, access denied, missing scope, not found, unavailable). Untick tools to build an **allowlist**; leaving all ticked means "All tools". You can **Save** without a passing test, since you may not be signed in or granted yet. Edit, enable/disable and Delete (with a confirm) are in the table.
+**Test connection** lists the service's tools **as you (the admin)**, as checkboxes, or says why it cannot (sign-in link, access denied, missing scope, not found, unavailable). Untick tools to build an **allowlist**; leaving all ticked means "All tools". Unticking every tool is not allowed (Save is disabled until at least one is ticked). You can **Save** without a passing test, since you may not be signed in or granted yet. Edit, enable/disable and Delete (with a confirm) are in the table.
 
 **Which agent.** A connection is bound to exactly one agent:
 
@@ -93,7 +95,7 @@ In the deck's agent config bar, open the **MCP Server** picker. Registered conne
 Services behind a per-user OAuth (U2M) connection, such as LakeDraw, GitHub or Slack, need each user to sign in once.
 
 - **On the chip:** a **Sign in to {name}** link opens `{host}/mcp-service-login?name=<service>` in a new tab. After signing in, click **Check again**.
-- **Mid-turn:** if a turn needs the service and the user is not signed in, the chat posts "To use {name}, sign in here: ..." with a clickable link, and the deck still builds without that connection. Ask again after signing in.
+- **Mid-turn:** if a turn needs the service and the user is not signed in, the chat posts "To use {name}, sign in here: ..." with a clickable link, and the deck still builds without that connection. Ask again after signing in. That notice is the only chat message with a link: the server marks it, and only its https sign-in URL is clickable. Every other message, including any URL a model or a service writes, is plain text.
 
 Other chip states: " · agent mode only" (legacy deck), " · no access", " · needs permission", " · not found", " · unavailable" (also shown if an admin removed or disabled the connection).
 
@@ -144,4 +146,5 @@ The admin must sign in to LakeDraw (via the Test connection sign-in link) before
 | Missing scope / "needs permission" | The token lacks `ai-gateway` | Check `user_api_scopes` (section 2); the user re-consents |
 | Not found | Wrong service name, or the service was deleted | Check the three-part name in Databricks |
 | "unavailable" | Admin disabled or removed the connection, or the service timed out or failed | Re-enable or re-register it on the Connections tab; retry |
+| "unavailable right now (the model could not use its tools)" | The model call that carried the connection's tools failed (for example, the model provider refused a tool's input schema, or the model never finished its tool calls). Tellr made the same call again without the Gateway tools, so the deck was still built | Check the app log for `gateway_tools_failed` (it names the exception type); narrow the allowlist to the tools the agent needs |
 | Tools never appear in a turn | Connection bound to the other agent, or the allowlist excludes them | Check the Agent radio and the allowlist |

@@ -343,6 +343,10 @@ On each workspace, the admin does two things.
   - config `source_connection.name = connections/<catalog>.<schema>.<conn>` and
     `include_tool_selectors = ["*"]`.
 - Grants for users: `USE CATALOG` on the catalog, `USE SCHEMA` on the schema, `EXECUTE` on the service.
+  The verified SQL is `GRANT EXECUTE ON MCP SERVICE <catalog>.<schema>.<service> TO <principal>`
+  (`GRANT EXECUTE ON SERVICE …` is a parse error on DBSQL). The permissions API also works:
+  `PATCH /api/2.1/unity-catalog/permissions/mcp_service/<service>` with
+  `{"changes": [{"principal": "<principal>", "add": ["EXECUTE"]}]}`.
 
 **2. Registers it on Tellr's Admin → Connections tab.**
 - On Logfood: `main.gtm_ai_tooling.lakedraw` (it already exists there).
