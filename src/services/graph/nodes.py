@@ -4170,7 +4170,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
         retry_failed = False
         # At most twice round: a call that carried Gateway tools and raised is
         # made once more, through this same call site, with no toolset (today's
-        # call).  A call without them runs once, exactly as before.
+        # call).  A first call without them is made once more only when its
+        # answer did not parse (architect_parse_retry, below).
         for fallback in (False, True):
             try:
                 out = get_agent_runtime().run(
@@ -4197,6 +4198,28 @@ def architect_node(state: dict) -> Dict[str, Any]:
                         toolset = None
                         continue
                 if answer is None:
+                    if (
+                        not fallback
+                        and not describe_only
+                        and is_provider_parse_error(exc)
+                    ):
+                        # An answer the parser refused (a field in the wrong place,
+                        # text that is not the schema) is a model glitch, not a
+                        # verdict on the request: the same call is made once more,
+                        # as the builder, build reviewer and fixer each do.  This
+                        # call carried no Gateway tools (one that did took the
+                        # branch above), so the second call is the same call, and a
+                        # second refusal fails the turn below.  A describe-only turn
+                        # builds nothing, so a second call buys it nothing.
+                        logger.warning(
+                            "architect_parse_retry: the architect's answer did not "
+                            "parse (%s); asking once more",
+                            type(exc).__name__,
+                            exc_info=True,
+                            extra={"session_id": session_id},
+                        )
+                        toolset = None
+                        continue
                     # The first call fails the turn as it always has: there is no
                     # refusal to fall back on.
                     raise
