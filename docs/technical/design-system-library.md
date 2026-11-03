@@ -12,7 +12,7 @@ Design systems sit *above* slide styles rather than beside them. A slide style s
 
 Key design decisions:
 
-- **User-contributed, admin-governed** — any user may import a bundle and manage the ones they uploaded; only a workspace admin may set the *org default*. Authorship does not buy the org default, because that changes what every user gets.
+- **User-contributed, admin-governed** — any user may import a bundle and manage the ones they uploaded; only a Tellr admin may set the *org default*. Authorship does not buy the org default, because that changes what every user gets.
 - **Compile-to-prompt** — a bundle is flattened once into `compiled_style_content`, a single text artifact that flows through the existing `build_generation_system_prompt` path. The generation pipeline is unchanged and remains style-agnostic.
 - **Bytes live in Lakebase** — assets, fonts and template files are stored as rows, not on a filesystem, so a fork of the database carries the brand with it.
 - **Retention over tidiness** — a deleted design system is *hidden*, not *gone*. Its bytes remain servable because stored decks reference them. See §7.

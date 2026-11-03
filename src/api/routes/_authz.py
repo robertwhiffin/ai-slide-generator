@@ -5,11 +5,10 @@ Consolidates the deck-permission helpers that previously lived in
 
 - ``_require_export_job_access`` — job-ID → session_id → deck permission
   (closes the job-ID IDOR on export poll/download and Google Slides poll).
-- ``require_admin`` — HIGH-2 admin primitive. Admin == holds CAN_MANAGE on
-  the Databricks App itself, tested by reading the app's ACL with the
-  caller's own OBO client (reading an object's ACL requires CAN_MANAGE on
-  it, so the read succeeding *is* the admin test; group-held / inherited
-  CAN_MANAGE resolves server-side for free).
+- ``require_admin`` — HIGH-2 admin primitive. Admin == a ``permissions`` row
+  for (``app``, ``""``, ``admin``) that matches the caller's email or one of
+  the caller's own group display names. Rows come from the CAN_MANAGE sync and
+  the Admins tab (see the HIGH-2 block below).
 """
 
 import logging
@@ -288,41 +287,44 @@ def _require_export_job_access(
 
 
 # ---------------------------------------------------------------------------
-# HIGH-2: admin primitive — caller is a member of the workspace ``admins`` group
+# HIGH-2: admin primitive — a ``permissions`` row matches the caller
 # ---------------------------------------------------------------------------
 #
-# SEMANTIC DEFINITION (Robert's decision, "Direction C"): admin == the caller
-# is a member of the workspace ``admins`` group. This is NOT "holds CAN_MANAGE
-# on this specific app" — the earlier app-ACL designs are abandoned because
-# ``apps.get_permissions`` is simply the wrong primitive for a Databricks App
-# to call at runtime. Three deploys proved the walls empirically:
+# HISTORY (July, PR #228): three attempts to decide admin from the app's ACL
+# (``apps.get_permissions``) each hit a wall:
 #
 #   1. OBO-can-read-the-ACL as the verdict           -> fail-OPEN (every user
-#      could read the ACL, so every user was "admin").
+#      could read the ACL, so every user was "admin"). Those verifications
+#      used a full-scope CLI token, which carries ``access-management``;
+#      the runtime OBO token (wall 3) does not.
 #   2. SP/system client reads the ACL                -> fail-CLOSED for all:
-#      PermissionDenied ``apps.ruleSets/get`` (the app's own SP is not in its
+#      PermissionDenied ``apps.ruleSets/get`` (the app's own SP was not in its
 #      own ACL).
-#   3. OBO client reads the ACL (apps.get_permissions) -> fail-CLOSED for all:
-#      ``PermissionDenied: Provided OAuth token does not have required scopes:
-#      access-management``. The runtime OBO x-forwarded-access-token is scoped
-#      down to the app's declared user_api_scopes and does NOT carry
-#      ``access-management``; only a full-scope human/CLI token does, which the
-#      app never has at runtime (that scope gap is exactly what made the first
-#      three "verifications" — all done with a CLI token — false positives).
+#   3. OBO client reads the ACL                      -> fail-CLOSED for all:
+#      ``Provided OAuth token does not have required scopes: access-management``.
+#      The runtime OBO token is scoped to the app's declared user_api_scopes
+#      and never carries ``access-management``.
 #
-# So we drop object-ACL reads entirely and decide admin from the caller's OWN
-# group membership: ``current_user.me()`` is governed by ``iam.current-user:read``,
-# which IS in the app's effective OBO scopes (unlike access-management), needs
-# no object-ACL permission and no SP. Presence-in-own-group-list cannot fail
-# open — a non-admin's ``me().groups`` will not contain ``admins`` and a caller
-# cannot forge membership in a group they are not in. ``DATABRICKS_APP_NAME`` is
-# no longer needed on this path.
+# So the check fell back to "caller is in the workspace ``admins`` group",
+# which made workspace admins (not Tellr's owners) the Tellr admins.
+#
+# SPIKE (2026-11-02, tellr-dev): wall 2 is lifted once the app's own SP holds
+# CAN_MANAGE on its own app. With nothing or CAN_USE the read is still denied;
+# a CAN_MANAGE grant takes roughly 30-60 s to propagate. The SP can list the
+# permissions but cannot see group members (SCIM ``members`` comes back empty),
+# so it cannot expand a group into users. A caller's OWN groups remain
+# readable with their own token via ``current_user.me().groups``.
+#
+# DEFINITION: admin == a ``permissions`` row for (``app``, ``""``, ``admin``)
+# that matches the caller's email (USER row) or one of the caller's own group
+# display names (GROUP row), case-insensitively. Rows come from the CAN_MANAGE
+# sync (direct CAN_MANAGE holders on the app) or are added on the Admins tab.
+# Membership of the workspace ``admins`` group confers nothing by itself.
+# Presence in one's own group list cannot be forged, and every lookup error
+# denies.
 
 _ADMIN_CACHE: dict = {}
 _ADMIN_CACHE_TTL_SECONDS = 60.0
-
-# The workspace group whose members are treated as Tellr admins.
-_ADMIN_GROUP = "admins"
 
 
 def _is_production() -> bool:
@@ -344,34 +346,35 @@ def _caller_group_display_names(client, user_name: str) -> set:
 
 
 def _admin_acl_probe(user_name: str) -> bool:
-    """Return True iff the caller is a member of the workspace ``admins`` group.
+    """Return True iff a ``permissions`` admin row matches the caller.
 
-    Admin is decided from the caller's OWN group membership (resolved via the
-    OBO/user client's ``current_user.me().groups``), NOT from any app-object
-    ACL — see the SEMANTIC DEFINITION / three-walls note above for why
-    ``apps.get_permissions`` cannot work from an app's runtime OBO token or SP.
+    Kept under its old name because many tests patch it as the seam. The
+    caller's email is matched against USER rows first; only when GROUP rows
+    exist are the caller's own group display names looked up (OBO
+    ``current_user.me().groups``). See the HIGH-2 block above.
 
-    This cannot fail open: ``me().groups`` returns only the caller's own
-    memberships, so a non-admin's list will not contain ``admins`` and the
-    caller cannot forge it. Raises on genuine infra/API errors so
-    ``require_admin`` can fail closed without caching a transient blip.
+    Raises on any DB or group-lookup error so ``require_admin`` can fail
+    closed without caching a transient blip.
     """
     from src.core.databricks_client import get_user_client
+    from src.services.admin_permissions import is_app_admin
 
-    client = get_user_client()
-    caller_groups = _caller_group_display_names(client, user_name)
-    return _ADMIN_GROUP in caller_groups
+    with get_db_session() as db:
+        return is_app_admin(
+            db,
+            user_name,
+            lambda: _caller_group_display_names(get_user_client(), user_name),
+        )
 
 
 def require_admin() -> None:
-    """FastAPI dependency: caller must be a member of the workspace ``admins`` group.
+    """FastAPI dependency: caller must be a Tellr admin (a ``permissions`` row).
 
     - Local dev/test: bypass (dev auth is DEV_USER_ID with no token or group
       membership behind it) — same pattern as the dev-only CORS gate in main.py.
-    - Admin verdict = ``_admin_acl_probe`` (caller is in the workspace
-      ``admins`` group, resolved from their own OBO ``current_user.me()``).
-      See the SEMANTIC DEFINITION note above for why this is a group-membership
-      decision and not an app-object-ACL check.
+    - Admin verdict = ``_admin_acl_probe`` (a ``permissions`` admin row
+      matches the caller's email or one of their own group display names).
+      See the HIGH-2 block above for the definition and history.
     - Verdicts cached per-username with a short TTL. The cache is in-memory
       and therefore per-worker — deliberately fine here: a cache miss on
       another worker just re-runs the lookup; correctness never depends on
@@ -399,7 +402,7 @@ def require_admin() -> None:
             _ADMIN_CACHE[user] = (verdict, now)
         except Exception:
             logger.warning(
-                "require_admin: ACL membership check failed for %s; failing "
+                "require_admin: admin permissions lookup failed for %s; failing "
                 "closed (uncached)",
                 user,
                 exc_info=True,
@@ -423,12 +426,12 @@ def is_caller_admin() -> bool:
     Deliberately implemented by *delegating to* ``require_admin`` and mapping
     its 403 to ``False`` rather than re-deriving the verdict. The flag then
     cannot drift from the gate it advertises, and there is exactly one
-    group-lookup, cache and fail-closed policy in the codebase.
+    admin lookup, cache and fail-closed policy in the codebase.
 
     Consequently the non-production bypass is inherited too: in local dev/test
     this returns ``True`` for everyone, matching the routes that also allow
     everyone there, so devloop testing of admin surfaces is not obstructed.
-    In production the verdict is real workspace ``admins`` group membership.
+    In production the verdict is the real ``permissions``-table check.
 
     Never raises: unlike the dependency form, a caller asking "am I admin?"
     must always get an answer, so any unexpected error degrades to ``False``
