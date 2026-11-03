@@ -334,8 +334,9 @@ def invoke_graph(
     # The pin FIRST, and that order is load-bearing (Ruling C-3): a legacy
     # conversation with no persisted release must raise
     # ConversationPinMissingError here, before any node runs, any row is written
-    # and any mutation event is recorded.  ws4d's sweeper catches that failure,
-    # releases its claim and leaves the marker queued and retryable.  Resolving
+    # and any mutation event is recorded.  ws4d's sweeper catches that failure
+    # and discards the marker: no retry can pin the conversation, so a queued
+    # marker would fail on every sweep (spec_sync.run_arc_review).  Resolving
     # the owner first would spend a query on a turn that cannot legally run.
     graph_release_id = pin_loader(get_session_local(), session_id)
     root_session_id = root_loader(get_session_local(), session_id)
