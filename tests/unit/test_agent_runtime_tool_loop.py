@@ -79,8 +79,8 @@ NUDGE_TEXT = f"Respond by calling {SCHEMA_NAME}."
 MALFORMED_TEXT = "Tool error: the arguments were not valid JSON."
 #: The answer to every tool call after the first in one reply (one question per round).
 NOT_RUN_TEXT = (
-    "Not run: ask one question at a time. Read the answer to your previous question "
-    "first, then ask again if you still need this."
+    "Not run: call one tool at a time. Read the previous result first, then call again "
+    "if you still need this."
 )
 
 
@@ -935,6 +935,163 @@ def test_bound_tools_are_schema_plus_toolset_tools_in_one_bind_call():
         }
     ]
     assert harness.client_calls == [harness.system_client]
+
+
+def test_tool_definition_uses_raw_schema():
+    """gateway-mcp Task 4: a tool with ``parameters_json_schema`` is bound with that raw
+    JSON schema (the MCP inputSchema minus ``$schema``), not a Pydantic conversion of its
+    ``args_schema``; a Genie One tool, and any tool without the attribute, is unchanged."""
+    # Local imports: the rest of this file must not depend on the new module.
+    from src.services.agent_runtime import _tool_definition
+    from src.services.agent_tools.gateway_mcp import GatewayToolSpec
+    from src.services.agent_tools.gateway_tool import GatewayMcpAgentTool, GatewayToolContext
+    from src.services.agent_tools.registry import GenieOneAgentTool, GenieQuestion
+
+    raw = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "diagram_data": {
+                "type": "object",
+                "properties": {
+                    "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+                    "edges": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"from": {"type": "string"}, "to": {"type": "string"}},
+                            "required": ["from", "to"],
+                        },
+                    },
+                },
+                "required": ["nodes"],
+            },
+            "validation_digest": {"type": "string"},
+        },
+        "required": ["diagram_data"],
+        "$defs": {
+            "node": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "type": {"type": "string"}},
+                "required": ["id", "type"],
+            }
+        },
+    }
+    expected = {key: value for key, value in raw.items() if key != "$schema"}
+    gateway = GatewayMcpAgentTool(
+        GatewayToolSpec("lakedraw_create_from_spec", "Create a diagram from a spec.", raw),
+        GatewayToolContext(
+            display_name="LakeDraw",
+            service_name="db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw",
+            client=object(),
+            save_image=lambda data, mime: "unused",
+            on_call=lambda line: None,
+            session_id=None,
+            deadline_at=None,
+        ),
+        model_name="lakedraw_create_from_spec",
+        description_prefix=None,
+    )
+
+    assert _tool_definition(gateway) == {
+        "type": "function",
+        "function": {
+            "name": "lakedraw_create_from_spec",
+            "description": "LakeDraw: Create a diagram from a spec.",
+            "parameters": expected,
+        },
+    }
+    genie = GenieOneAgentTool(
+        object(), conversation_id=None, on_question=lambda question: None, session_id=None
+    )
+    assert (
+        _tool_definition(genie)["function"]["parameters"]
+        == convert_to_openai_tool(GenieQuestion)["function"]["parameters"]
+    )
+    assert (
+        _tool_definition(RecordingTool())["function"]["parameters"]
+        == convert_to_openai_tool(LookupArgs)["function"]["parameters"]
+    )
+
+    # And it is that definition the loop binds the model to.
+    harness = _harness(_final())
+    _loop(harness, _toolset(gateway, RecordingTool()))
+    tools, _ = harness.chat.bindings[0]
+    bound = {
+        function["name"]: function
+        for function in (convert_to_openai_tool(tool)["function"] for tool in tools)
+    }
+    assert bound["lakedraw_create_from_spec"]["parameters"] == expected
+    assert (
+        bound["lookup"]["parameters"]
+        == convert_to_openai_tool(LookupArgs)["function"]["parameters"]
+    )
+
+
+def test_extra_allow_args_reach_the_service():
+    """gateway-mcp Task 4: ``_answer_tool_call`` parses a Gateway tool's args with its
+    ``extra="allow"`` model, so the model's nested args reach ``call_tool`` unchanged
+    (nulls and falses included), with the call timeout clipped to 90 s."""
+    from mcp.types import CallToolResult, TextContent
+
+    from src.services.agent_tools.gateway_mcp import GatewayToolSpec
+    from src.services.agent_tools.gateway_tool import GatewayMcpAgentTool, GatewayToolContext
+
+    class RecordingGatewayClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, Any, float]] = []
+
+        def call_tool(self, name, arguments, *, timeout_seconds=90):
+            self.calls.append((name, arguments, timeout_seconds))
+            return CallToolResult(
+                content=[TextContent(type="text", text="created dgm_1 version 1")], isError=False
+            )
+
+    client = RecordingGatewayClient()
+    tool = GatewayMcpAgentTool(
+        GatewayToolSpec(
+            "lakedraw_create_from_spec",
+            "Create a diagram from a spec.",
+            {"type": "object", "properties": {"diagram_data": {"type": "object"}}},
+        ),
+        GatewayToolContext(
+            display_name="LakeDraw",
+            service_name="db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw",
+            client=client,
+            save_image=lambda data, mime: "unused",
+            on_call=lambda line: None,
+            session_id=None,
+            deadline_at=None,
+        ),
+        model_name="lakedraw__lakedraw_create_from_spec",
+        description_prefix=None,
+    )
+    args = {
+        "diagram_data": {
+            "title": "Lakehouse",
+            "nodes": [
+                {"id": "src", "type": "source.kafka", "label": "Kafka", "meta": {"tier": 1}},
+                {"id": "uc", "type": "databricks.unity_catalog", "label": None},
+            ],
+            "edges": [{"from": "src", "to": "uc", "label": None}],
+        },
+        "validation_digest": "sha256:4b1e9d0c6a7f2e83",
+        "client_create_id": None,
+        "dry_run": False,
+    }
+    toolset = _toolset(tool)
+
+    answer = DatabricksModelAdapter._answer_tool_call(
+        _call("lakedraw__lakedraw_create_from_spec", args, "call_1"),
+        {tool.name: tool},
+        toolset,
+        budget_text=BUDGET_TEXT,
+    )
+
+    assert client.calls == [("lakedraw_create_from_spec", args, 90)]
+    assert answer == spotlight("LakeDraw", "created dgm_1 version 1")
+    assert toolset.calls_made == 1
+    assert toolset.access_errors == []
 
 
 def _scripted_gateway_workspace(bodies: list[dict[str, Any]]):

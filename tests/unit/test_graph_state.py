@@ -275,7 +275,7 @@ class TestScopedVals:
         state = {"turn_id": "t1"}
         assert scoped_vals(state, "fix_map") == {}
 
-    def test_all_twelve_keys_are_registered(self):
+    def test_all_fourteen_keys_are_registered(self):
         """_EMPTY_FOR covers exactly the keys read through scoped_vals.
 
         ws4d added the tenth, ``describe_only`` — the turn-scoped flag
@@ -284,7 +284,8 @@ class TestScopedVals:
         through ``scoped_vals`` and missing here raises ``KeyError``; this test is
         what makes adding one a deliberate act.
 
-        Genie One in agent mode added ``analyst_figures`` and ``analyst_rounds``.
+        Genie One in agent mode added ``analyst_figures`` and ``analyst_rounds``;
+        AI Gateway MCP connections added ``gateway_usage`` and ``gateway_images``.
         """
         expected = {
             "describe_only",
@@ -292,6 +293,7 @@ class TestScopedVals:
             "slides", "dispatched_at", "fix_map", "fixed",
             "emitted_style_blocks", "foreman_wakes",
             "analyst_figures", "analyst_rounds",
+            "gateway_usage", "gateway_images",
         }
         assert set(_EMPTY_FOR.keys()) == expected
 

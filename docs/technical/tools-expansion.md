@@ -162,8 +162,9 @@ All modules are in `src/services/tools/`:
 ## Frontend Components
 
 ### Tool Picker (`AgentConfigBar/ToolPicker.tsx`)
-- Renders 5 category buttons: `+ Genie Space`, `+ Agent Bricks`, `+ Vector Index`, `+ MCP Server`, `+ Model Endpoint`
-- Each opens a type-specific discovery panel inline
+- Renders `+ Genie One`, then one one-click pill per enabled admin-registered AI Gateway connection (`GET /api/tools/discover/gateway-mcp`; see `gateway-mcp-connections.md`), then an `Other tools` toggle
+- `Other tools` reveals 5 category buttons: `+ Genie Agent`, `+ Agent Bricks`, `+ Vector Index`, `+ MCP Server`, `+ Model Endpoint`
+- Each category button opens a type-specific discovery panel inline
 
 ### Discovery Panels (`AgentConfigBar/tools/`)
 | Component | Tool Type | Flow |

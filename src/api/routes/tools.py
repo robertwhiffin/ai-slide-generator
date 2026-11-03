@@ -7,12 +7,16 @@ available Genie spaces, vector search endpoints/indexes, UC HTTP connections
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 from fastapi import APIRouter
 
+from src.api.schemas.gateway_mcp import GatewayStatusOut, GatewayToolOut
 from src.core.config_loader import load_config
 from src.core.databricks_client import get_user_client
+from src.core.scope_errors import oauth_client_id_from_token, oauth_scopes_from_token
+from src.services.agent_tools.gateway_mcp import GatewayMcpClient, probe_service
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +235,28 @@ def _discover_vector_columns(endpoint_name: str, index_name: str) -> dict:
             f"Failed to discover columns for {index_name} on {endpoint_name}: {e}"
         )
         return {"columns": [], "source_table": None, "primary_key": None}
+
+
+def _discover_gateway_items() -> list[dict]:
+    """Enabled AI Gateway connections, from the registry only (never Unity Catalog)."""
+    try:
+        from src.core.database import get_db_session
+        from src.services import gateway_mcp_registry
+
+        with get_db_session() as db:
+            return [
+                {
+                    "service_name": c.service_name,
+                    "display_name": c.display_name,
+                    "description": c.description,
+                    "agent": c.agent,
+                }
+                for c in gateway_mcp_registry.list_connections(db)
+                if c.enabled
+            ]
+    except Exception as e:
+        logger.warning(f"Failed to read Gateway MCP connections: {e}")
+        return []
 
 
 def _discover_mcp_connections() -> dict:
@@ -452,6 +478,61 @@ def discover_vector_columns(endpoint_name: str, index_name: str):
 def discover_mcp():
     """List UC HTTP connections usable as MCP servers."""
     return _discover_mcp_connections()
+
+
+@router.get("/discover/gateway-mcp")
+def discover_gateway_mcp():
+    """List the enabled admin-registered AI Gateway connections (the deck's connection pills)."""
+    return {"items": _discover_gateway_items()}
+
+
+@router.get("/gateway-mcp/status", response_model=GatewayStatusOut)
+def gateway_mcp_status(service_name: str):
+    """Probe one registered Gateway service AS THE CALLING USER."""
+    from src.core.database import get_db_session
+    from src.services import gateway_mcp_registry
+
+    with get_db_session() as db:
+        conn = gateway_mcp_registry.get_by_service(db, service_name.strip().lower())
+    if conn is None or not conn.enabled:
+        return GatewayStatusOut(
+            state="not_registered",
+            message=(
+                f"{conn.display_name} is no longer available."
+                if conn is not None
+                else f"{service_name} is no longer available."
+            ),
+        )
+
+    config = get_user_client().config
+    token = config.token
+    client = GatewayMcpClient(
+        host=config.host,
+        token=token,
+        service_name=conn.service_name,
+        token_scopes=oauth_scopes_from_token(token),
+    )
+    probe = probe_service(client)
+    allowed = None if conn.tool_allowlist is None else set(conn.tool_allowlist)
+    tools = [
+        GatewayToolOut(name=t.name, description=t.description)
+        for t in probe.tools
+        if allowed is None or t.name in allowed
+    ]
+    message = gateway_mcp_registry.status_message(
+        probe.state,
+        display_name=conn.display_name,
+        service_name=conn.service_name,
+        detail=probe.detail,
+        sign_in_url=probe.sign_in_url,
+        oauth_client_id=oauth_client_id_from_token(token),
+    )
+    return GatewayStatusOut(
+        state=probe.state,
+        message=message,
+        sign_in_url=probe.sign_in_url,
+        tools=tools,
+    )
 
 
 @router.get("/discover/model-endpoints")

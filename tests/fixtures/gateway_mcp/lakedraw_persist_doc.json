@@ -1,0 +1,49 @@
+{
+ "_source": "doc",
+ "_note": "Doc-sourced, not recorded: LakeDraw tool results need a browser sign-in, so this follows the examples in the LakeDraw integration doc (\"Tellr x LakeDraw: Using LakeDraw as Tellr's diagram engine\", 2026-10-30). lakedraw_create_from_spec, persist phase (validation_digest from the validate phase).",
+ "tool": "lakedraw_create_from_spec",
+ "arguments": {
+  "diagram_data": {
+   "title": "Lakehouse reference architecture",
+   "nodes": [
+    {
+     "id": "src",
+     "type": "source.kafka",
+     "label": "Kafka"
+    },
+    {
+     "id": "dlt",
+     "type": "databricks.lakeflow",
+     "label": "Lakeflow pipelines"
+    },
+    {
+     "id": "uc",
+     "type": "databricks.unity_catalog",
+     "label": "Unity Catalog"
+    }
+   ],
+   "edges": [
+    {
+     "from": "src",
+     "to": "dlt",
+     "label": "events"
+    },
+    {
+     "from": "dlt",
+     "to": "uc"
+    }
+   ]
+  },
+  "validation_digest": "sha256:4b1e9d0c6a7f2e83",
+  "client_create_id": "tellr-0b5e7c1d"
+ },
+ "result": {
+  "content": [
+   {
+    "type": "text",
+    "text": "{\"diagram_id\": \"dgm_7f3c2a91e4b04d6a\", \"diagram_url\": \"https://lakedraw-stg-7474654280603666.aws.databricksapps.com/d/dgm_7f3c2a91e4b04d6a\", \"version\": 1}"
+   }
+  ],
+  "isError": false
+ }
+}

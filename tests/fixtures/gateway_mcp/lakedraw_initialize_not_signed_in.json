@@ -1,0 +1,31 @@
+{
+ "request": {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+   "protocolVersion": "2025-06-18",
+   "capabilities": {},
+   "clientInfo": {
+    "name": "tellr-fixture",
+    "version": "0"
+   }
+  }
+ },
+ "status": 401,
+ "headers": {
+  "content-type": "application/json",
+  "www-authenticate": "Bearer resource_metadata=\"https://fevm-db-tellr-dev-workspace.cloud.databricks.com/.well-known/oauth-protected-resource/ai-gateway/mcp-services/db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw\"",
+  "x-databricks-org-id": "7474645249186749"
+ },
+ "body_json": {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+   "code": -32006,
+   "message": "You're not signed in to the MCP service 'db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw'. Sign in at https://fevm-db-tellr-dev-workspace.cloud.databricks.com/mcp-service-login?name=db_tellr_dev_workspace_catalog.tellr_mcp.lakedraw&o=7474645249186749, then retry your request.",
+   "data": null
+  }
+ },
+ "body_text": null
+}

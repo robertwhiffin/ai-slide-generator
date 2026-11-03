@@ -17,7 +17,9 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { ContributorsManager } from './ContributorsManager';
 
 interface ToolEntry {
-  type: 'genie_one' | 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
+  type: 'gateway_mcp' | 'genie_one' | 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
+  service_name?: string;
+  display_name?: string;
   space_id?: string;
   space_name?: string;
   description?: string;
@@ -53,6 +55,7 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
   const mcpTools = tools.filter(t => t.type === 'mcp');
   const vectorTools = tools.filter(t => t.type === 'vector_index');
   const modelTools = tools.filter(t => t.type === 'model_endpoint');
+  const gatewayTools = tools.filter(t => t.type === 'gateway_mcp');
   const genieOneTools = tools.filter(t => t.type === 'genie_one');
   const agentTools = tools.filter(t => t.type === 'agent_bricks');
   const styleName = cfg.slide_style_id != null
@@ -77,6 +80,12 @@ const ConfigSummary: React.FC<{ config: Record<string, unknown> | null; names: N
                 <Badge key={`genie_one-${i}`} variant="outline" className="text-xs font-normal gap-1 bg-sky-50 text-sky-800 border-sky-200">
                   <MessageSquare className="size-3" />
                   Genie One
+                </Badge>
+              ))}
+              {gatewayTools.map(t => (
+                <Badge key={`gateway-${t.service_name}`} variant="outline" className="text-xs font-normal gap-1 bg-violet-50 text-violet-800 border-violet-200">
+                  <Wrench className="size-3" />
+                  {t.display_name ?? t.service_name}
                 </Badge>
               ))}
               {genieTools.map(t => (

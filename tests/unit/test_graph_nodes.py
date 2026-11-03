@@ -5055,9 +5055,15 @@ _EXPECTED_NODE_WRITES = {
         "error_state", "external_scripts", "fix_target", "head_meta",
         "resolved_style", "target_positions", "template_layout_html", "title",
         "token_css",
+        # AI Gateway MCP connections: the turn's Gateway usage and saved images.
+        "gateway_usage", "gateway_images",
     },
-    # Genie One in agent mode: code-built figures and the per-turn round marker.
-    "data_analyst_node": {"architect_message", "analyst_figures", "analyst_rounds"},
+    # Genie One in agent mode: code-built figures and the per-turn round marker;
+    # AI Gateway MCP connections: the run's Gateway usage and saved images.
+    "data_analyst_node": {
+        "architect_message", "analyst_figures", "analyst_rounds",
+        "gateway_usage", "gateway_images",
+    },
     "foreman_node": {"dispatched_at", "error_state", "foreman_wakes"},
     "builder_node": {"placeheld_positions", "slides"},
     "build_reviewer_node": {
@@ -6563,8 +6569,10 @@ class TestNoCallSiteMayTraceBlank:
         ), [ast.unparse(arg) for arg in fourth]
         # Deck style addendum A, B3 (Ruling RA2, re-pinned for RA19): the
         # builder's and the fixer's two calls each (first attempt and safety
-        # retry) pass the brand-search toolset, and the data analyst's one call
-        # passes Genie One's.  Every other call site builds its context from
+        # retry) pass the brand-search toolset, the data analyst's one call
+        # passes Genie One's (and its Gateway tools), and the architect's one
+        # call (both attempts) passes its Gateway tools (AI Gateway MCP
+        # connections).  Every other call site builds its context from
         # exactly the three ids, with no toolset.  ``_runtime_run_calls`` parses
         # its own tree, so calls are matched to their enclosing top-level
         # function by source position.
@@ -6582,7 +6590,12 @@ class TestNoCallSiteMayTraceBlank:
                     if isinstance(node, ast.Call) and _at(node) in positions:
                         owners.setdefault(top.name, []).append(positions[_at(node)])
         assert sum(len(found) for found in owners.values()) == 10
-        tool_sites = {"builder_node": 2, "data_analyst_node": 1, "fixer_node": 2}
+        tool_sites = {
+            "architect_node": 1,
+            "builder_node": 2,
+            "data_analyst_node": 1,
+            "fixer_node": 2,
+        }
         assert {name: len(owners.get(name, [])) for name in tool_sites} == tool_sites
         for name, found in owners.items():
             for call in found:

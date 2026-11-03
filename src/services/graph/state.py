@@ -72,6 +72,8 @@ _EMPTY_FOR: dict[str, Any] = {
     "foreman_wakes":        [],
     "analyst_figures":      [],
     "analyst_rounds":       [],
+    "gateway_usage":        [],
+    "gateway_images":       [],
 }
 
 
@@ -289,6 +291,14 @@ class GraphState(TypedDict, total=False):
     # JSON-native throughout ({"turn": str, "vals": bool}), per Ruling W-8(b).
     describe_only: Optional[dict]
 
+    # When this turn started, in epoch seconds: ``time.time()``, never a
+    # monotonic clock, because it crosses the checkpointer and the nodes compare
+    # it with ``time.time()``.  Set by invoke_graph AFTER the caller's
+    # ``initial``, so a seeded value is overwritten, and rewritten every turn.
+    # Read by the AI Gateway MCP tools' turn deadline: no Gateway call starts
+    # 700 s into a turn.  Single-writer, no reducer, not turn-scoped.
+    turn_started_at: float
+
     # -- fan-in keys (reducer required) ------------------------------------
 
     # Append-only log of review findings across ALL turns.
@@ -333,6 +343,19 @@ class GraphState(TypedDict, total=False):
     # inherit turn 1's figures or its round count from the checkpoint.
     analyst_figures: Annotated[Any, turn_scoped_concat]
     analyst_rounds: Annotated[Any, turn_scoped_concat]
+
+    # AI Gateway MCP connections.  Written by architect_node and
+    # data_analyst_node, once per pass, and ONLY when the actor's agent config
+    # has a ``gateway_mcp`` entry and a user is signed in: a deck without one
+    # never carries either key.  gateway_usage: one entry per pass,
+    # ``{"agent", "calls", "seconds", "notified"}``; the architect's entries are
+    # summed into its per-turn call and time budget, and ``notified`` (the
+    # services the user was told about, plus a consent marker) keeps each
+    # notice to once per turn.  gateway_images: the image tokens the pass's
+    # Gateway tools saved, which image-reference reconciliation treats as known.
+    # Both accumulate across the turn's passes and start empty each turn.
+    gateway_usage: Annotated[Any, turn_scoped_concat]
+    gateway_images: Annotated[Any, turn_scoped_concat]
 
 
 # ---------------------------------------------------------------------------

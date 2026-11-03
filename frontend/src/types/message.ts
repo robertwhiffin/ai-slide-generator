@@ -23,6 +23,9 @@ export interface Message {
   details?: MessageDetails;
   /** Which agent wrote this message; 'data_analyst' draws the collapsed analyst card. */
   agent?: string;
+  /** The link a Gateway sign-in notice says (the server marks the row with metadata.sign_in_url).
+   *  The only URL chat ever renders as a link, and only when it is https. */
+  sign_in_url?: string;
 }
 
 export interface ChatMetadata {

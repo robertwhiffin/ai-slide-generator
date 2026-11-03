@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from typing import Any, Callable, Dict, Optional
 
@@ -361,6 +362,9 @@ def invoke_graph(
             "root_session_id": root_session_id,
             "actor_session_id": session_id,
             "describe_only": scoped(turn_id, bool(describe_only)),
+            # Epoch seconds, fresh every turn (a seeded value is overwritten):
+            # the AI Gateway MCP tools' 700 s turn deadline counts from here.
+            "turn_started_at": time.time(),
         }
     )
 

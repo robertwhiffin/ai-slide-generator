@@ -41,9 +41,38 @@ export interface GenieOneTool {
   conversation_id?: string | null;
 }
 
-export type ToolType = 'genie_one' | 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
+export interface GatewayMcpTool {
+  type: 'gateway_mcp';
+  service_name: string;
+  display_name: string;
+}
 
-export type ToolEntry = GenieTool | MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool | GenieOneTool;
+export interface GatewayItem {
+  service_name: string;
+  display_name: string;
+  description: string | null;
+  agent: 'architect' | 'data_analyst';
+}
+
+export type GatewayMcpState =
+  | 'ready'
+  | 'sign_in_required'
+  | 'missing_scope'
+  | 'access_denied'
+  | 'not_found'
+  | 'unavailable'
+  | 'not_registered';
+
+export interface GatewayMcpStatus {
+  state: GatewayMcpState;
+  message: string | null;
+  sign_in_url: string | null;
+  tools: { name: string; description: string }[];
+}
+
+export type ToolType = 'gateway_mcp' | 'genie_one' | 'genie' | 'mcp' | 'vector_index' | 'model_endpoint' | 'agent_bricks';
+
+export type ToolEntry = GenieTool | MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool | GenieOneTool | GatewayMcpTool;
 
 /**
  * Where a config's style source CAME FROM — persisted, never inferred.
@@ -140,6 +169,7 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
 };
 
 export const TOOL_TYPE_LABELS: Record<ToolType, string> = {
+  gateway_mcp: 'AI Gateway MCP',
   genie_one: 'Genie One',
   genie: 'Genie Agent',
   mcp: 'MCP Server',
@@ -149,6 +179,7 @@ export const TOOL_TYPE_LABELS: Record<ToolType, string> = {
 };
 
 export const TOOL_TYPE_BADGE_LABELS: Record<ToolType, string> = {
+  gateway_mcp: 'Gateway',
   genie_one: 'Genie One',
   genie: 'GENIE',
   mcp: 'MCP',
@@ -158,6 +189,7 @@ export const TOOL_TYPE_BADGE_LABELS: Record<ToolType, string> = {
 };
 
 export const TOOL_TYPE_COLORS: Record<ToolType, string> = {
+  gateway_mcp: 'bg-violet-100 text-violet-800',
   genie_one: 'bg-sky-100 text-sky-800',
   genie: 'bg-blue-100 text-blue-800',
   mcp: 'bg-green-100 text-green-800',
@@ -165,3 +197,35 @@ export const TOOL_TYPE_COLORS: Record<ToolType, string> = {
   model_endpoint: 'bg-amber-100 text-amber-800',
   agent_bricks: 'bg-teal-100 text-teal-800',
 };
+
+export type GatewayConnectionAgent = 'architect' | 'data_analyst';
+
+/** A registered AI Gateway MCP connection (admin view). */
+export interface GatewayConnection {
+  id: number;
+  service_name: string;
+  display_name: string;
+  description: string | null;
+  agent: GatewayConnectionAgent;
+  instructions: string | null;
+  tool_allowlist: string[] | null;
+  enabled: boolean;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** The six editable fields; PUT is extra="forbid". */
+export interface GatewayConnectionUpdate {
+  display_name: string;
+  description: string | null;
+  agent: GatewayConnectionAgent;
+  instructions: string | null;
+  tool_allowlist: string[] | null;
+  enabled: boolean;
+}
+
+export interface GatewayConnectionCreate extends GatewayConnectionUpdate {
+  service_name: string;
+}

@@ -85,8 +85,8 @@ MODEL_CALL_CEILING = SEARCH_CAP + 3
 
 #: The loop's own texts, as the model must see them (main's, RA19).
 NOT_RUN_TEXT = (
-    "Not run: ask one question at a time. Read the answer to your previous question "
-    "first, then ask again if you still need this."
+    "Not run: call one tool at a time. Read the previous result first, then call again "
+    "if you still need this."
 )
 MALFORMED_TEXT = "Tool error: the arguments were not valid JSON."
 

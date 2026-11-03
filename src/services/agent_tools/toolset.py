@@ -21,18 +21,27 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel
 
-ToolAccessKind = Literal["missing_scope", "access_denied"]
+ToolAccessKind = Literal["missing_scope", "access_denied", "sign_in_required"]
 
 
 class ToolAccessError(Exception):
-    """A tool was refused for the signed-in user: a missing OAuth scope or a denied grant.
+    """A tool was refused for the signed-in user: a missing OAuth scope, a denied grant
+    or a service the user has not signed in to (``sign_in_url`` then carries the link).
 
     The loop records it on :attr:`AgentToolset.access_errors` and answers the
     model in-band; it is never a provider failure.
     """
 
-    def __init__(self, kind: ToolAccessKind, tool_name: str, message: str) -> None:
+    def __init__(
+        self,
+        kind: ToolAccessKind,
+        tool_name: str,
+        message: str,
+        *,
+        sign_in_url: str | None = None,
+    ) -> None:
         super().__init__(message)
+        self.sign_in_url = sign_in_url
         self.kind: ToolAccessKind = kind
         self.tool_name = tool_name
         self.message = message

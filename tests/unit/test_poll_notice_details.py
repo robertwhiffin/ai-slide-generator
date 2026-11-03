@@ -240,3 +240,62 @@ def test_the_poll_route_carries_the_details_on_the_wire(monkeypatch):
     assert events[22]["metadata"] == {"details": DETAILS}
     assert events[21]["metadata"] is None
     assert events[21]["tool_input"] == {"query": "secret"}
+
+
+# ---------------------------------------------------------------------------
+# Gateway MCP final review I1: a sign-in notice's own link is forwarded too
+# ---------------------------------------------------------------------------
+
+SIGN_IN_URL = "https://h.example/mcp-service-login?name=cat.sch.lakedraw&o=1"
+SIGN_IN = f"To use LakeDraw, sign in here: {SIGN_IN_URL} — then ask again."
+
+
+def test_a_sign_in_notice_row_forwards_its_link():
+    """The chat links only a row the server marked, so the mark must reach the poll."""
+    row = _row(
+        30,
+        role="assistant",
+        message_type="info",
+        content=SIGN_IN,
+        metadata={"sign_in_url": SIGN_IN_URL},
+    )
+
+    event = _project(row)
+
+    assert event == {
+        "type": "assistant",
+        "content": SIGN_IN,
+        "tool_name": None,
+        "tool_input": None,
+        "tool_output": None,
+        "message_id": 30,
+        "agent": None,
+        "metadata": {"sign_in_url": SIGN_IN_URL},
+    }
+
+
+def test_details_and_a_sign_in_link_are_both_forwarded_and_nothing_else():
+    row = _row(
+        31,
+        role="assistant",
+        message_type="info",
+        content=SIGN_IN,
+        metadata={"details": dict(DETAILS), "sign_in_url": SIGN_IN_URL, "node": "architect"},
+    )
+
+    assert _project(row)["metadata"] == {"details": DETAILS, "sign_in_url": SIGN_IN_URL}
+
+
+@pytest.mark.parametrize(
+    "sign_in_url", ["", None, 5, ["https://h.example"]], ids=["empty", "none", "int", "list"]
+)
+def test_a_sign_in_link_that_is_not_a_non_empty_string_projects_none(sign_in_url):
+    row = _row(
+        32,
+        role="assistant",
+        message_type="info",
+        content=SIGN_IN,
+        metadata={"sign_in_url": sign_in_url},
+    )
+
+    assert _project(row)["metadata"] is None
