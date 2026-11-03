@@ -57,8 +57,13 @@ jobs:
               - '.github/actions/setup-python-env/**'
               - '.github/workflows/test.yml'
               - 'frontend/tests/**'
+            # `frontend` also gates E2E, so it names what E2E runs on besides
+            # frontend/: this workflow and the per-spec runner. Without them a
+            # change to how E2E runs would skip E2E.
             frontend:
               - 'frontend/**'
+              - '.github/workflows/test.yml'
+              - 'scripts/run_e2e_specs.sh'
             packages:
               - 'packages/**'
               - 'frontend/**'

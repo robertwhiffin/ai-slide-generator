@@ -321,3 +321,33 @@ def test_run_step_passes_the_shards_specs_to_the_runner():
         ".github/workflows/test.yml are not what runs. Expected a step like:\n"
         "  run: ./scripts/run_e2e_specs.sh ${{ join(matrix.specs, ' ') }}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Assertion 7 — a change to the runner runs E2E
+# ---------------------------------------------------------------------------
+def test_runner_changes_trigger_e2e():
+    """e2e-tests runs only when the `frontend` paths filter matches.
+
+    The runner script decides how every spec runs, so a PR that edits only it
+    must still run E2E — otherwise the change that most needs E2E skips it.
+    """
+    with open(WORKFLOW) as f:
+        wf = yaml.safe_load(f)
+    assert "needs.changes.outputs.frontend" in str(_e2e_job()["if"]), (
+        "e2e-tests is no longer gated on the `frontend` filter; update this test "
+        "to check whichever filter gates it now"
+    )
+    filter_step = next(
+        s for s in wf["jobs"]["changes"]["steps"] if s.get("id") == "filter"
+    )
+    frontend_paths = yaml.safe_load(filter_step["with"]["filters"])["frontend"]
+    missing = [
+        p for p in ("scripts/run_e2e_specs.sh", ".github/workflows/test.yml")
+        if p not in frontend_paths
+    ]
+    assert not missing, (
+        "The `frontend` paths filter in .github/workflows/test.yml (which gates "
+        f"e2e-tests) does not match {missing}, so a PR changing only that would "
+        "skip E2E."
+    )
