@@ -581,6 +581,83 @@ class TestOrgDefaultDesignSystemPreselect:
         assert config["slide_style_id"] is None
 
 
+class TestGenieOneDefaultSeeding:
+    """The admin "Add Genie One to new decks" setting seeds a NEW session's tools.
+
+    Same per-field rule as the style source: a ``tools`` list the client sent is
+    the client's decision (the browser adds the pill itself, and a user who
+    removed it sends ``[]``), so only a request that never mentioned ``tools``
+    gets Genie One added.
+    """
+
+    def _complete_stream(self, mock_chat_service):
+        from src.api.schemas.streaming import StreamEvent
+
+        mock_chat_service.send_message_streaming.return_value = iter(
+            [StreamEvent(type=StreamEventType.COMPLETE, slides={"slides": []})]
+        )
+
+    def _created_tools(self, client, mock_session_manager, mock_chat_service, payload, *, enabled):
+        self._complete_stream(mock_chat_service)
+        with patch("src.api.routes.chat.get_genie_one_default", return_value=enabled), \
+             patch("src.api.routes.chat.get_default_design_system_id", return_value=None), \
+             patch("src.api.routes.chat.get_default_slide_style_id", return_value=None):
+            response = client.post("/api/chat/stream", json=payload)
+        assert response.status_code == 200
+        return mock_session_manager.create_session.call_args.kwargs["agent_config"]["tools"]
+
+    def test_no_config_gets_genie_one_when_on(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        tools = self._created_tools(
+            client, mock_session_manager, mock_chat_service,
+            {"message": "Create slides"}, enabled=True,
+        )
+        assert [t["type"] for t in tools] == ["genie_one"]
+
+    def test_no_config_gets_no_tools_when_off(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        tools = self._created_tools(
+            client, mock_session_manager, mock_chat_service,
+            {"message": "Create slides"}, enabled=False,
+        )
+        assert tools == []
+
+    def test_config_without_tools_gets_genie_one_when_on(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        tools = self._created_tools(
+            client, mock_session_manager, mock_chat_service,
+            {"message": "Create slides", "agent_config": {"deck_prompt_id": 4}},
+            enabled=True,
+        )
+        assert [t["type"] for t in tools] == ["genie_one"]
+
+    def test_explicit_empty_tools_stay_empty_when_on(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """The user removed the pill before sending: that is their choice."""
+        tools = self._created_tools(
+            client, mock_session_manager, mock_chat_service,
+            {"message": "Create slides", "agent_config": {"tools": []}},
+            enabled=True,
+        )
+        assert tools == []
+
+    def test_explicit_tools_are_kept_as_sent_when_on(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        tools = self._created_tools(
+            client, mock_session_manager, mock_chat_service,
+            {"message": "Create slides", "agent_config": {"tools": [
+                {"type": "genie", "space_id": "g1", "space_name": "Sales"},
+            ]}},
+            enabled=True,
+        )
+        assert [t["type"] for t in tools] == ["genie"]
+
+
 class TestOrgDefaultIsNewSessionOnly:
     """Default seeding is a NEW-SESSION default only.
 
@@ -659,6 +736,18 @@ class TestOrgDefaultIsNewSessionOnly:
             )
 
         assert synced["design_system_id"] == 3
+
+    def test_existing_session_is_not_given_genie_one(
+        self, client, mock_session_manager, mock_chat_service
+    ):
+        """Turning on "Add Genie One to new decks" never reaches an existing deck."""
+        with patch("src.api.routes.chat.get_genie_one_default", return_value=True):
+            synced = self._synced_config(
+                client, mock_session_manager, mock_chat_service,
+                {"design_system_id": 3},
+            )
+
+        assert synced["tools"] == []
 
     def test_an_existing_session_never_consults_the_org_default_at_all(
         self, client, mock_session_manager, mock_chat_service

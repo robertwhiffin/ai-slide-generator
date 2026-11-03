@@ -55,6 +55,7 @@ from src.database.models.slide_style_library import SlideStyleLibrary
 from src.database.models.slide_style_preview import SlideStylePreviewPayload
 from src.database.models.usage_event import UsageEvent
 from src.database.models.user_preference import UserProfilePreference
+from src.database.models.workspace_setting import WorkspaceSetting
 
 __all__ = [
     "AppIdentity",
@@ -104,4 +105,5 @@ __all__ = [
     "UsageEvent",
     "UserProfilePreference",
     "UserSession",
+    "WorkspaceSetting",
 ]

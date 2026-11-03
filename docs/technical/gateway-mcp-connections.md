@@ -69,6 +69,8 @@ Unity Catalog's `EXECUTE` grant is the only access control. Tellr has no per-con
 
 On the Admin page, open the **Connections** tab and click **Add connection**.
 
+The **Genie One** box at the top of the tab holds one switch, **Add Genie One to new decks**. It is off by default. When it is on, every new deck starts with Genie One in its Tools row, and users can still remove it. Existing decks are not changed.
+
 | Field | Notes |
 |-------|-------|
 | Service name | `catalog.schema.service`. Cannot be changed after saving. |

@@ -21,6 +21,7 @@ from src.core.settings_db import (
 from src.core.user_context import get_current_user
 from src.database.models import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
+from src.services import workspace_settings
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,27 @@ def put_judge_backend(body: JudgeBackendUpdate, db: Session = Depends(get_db)):
     reload_settings()
     logger.info("Admin updated llm_judge_backend", extra={"llm_judge_backend": raw})
     return {"backend": raw}
+
+
+class GenieOneDefaultUpdate(BaseModel):
+    """Request body for PUT /api/admin/genie-one-default."""
+
+    enabled: bool = Field(..., description="Add the Genie One tool to every new deck")
+
+
+@router.get("/genie-one-default")
+def get_genie_one_default_setting(db: Session = Depends(get_db)):
+    """Whether new decks start with the Genie One tool (off until an admin turns it on)."""
+    return {"enabled": workspace_settings.genie_one_default(db)}
+
+
+@router.put("/genie-one-default")
+def put_genie_one_default_setting(body: GenieOneDefaultUpdate, db: Session = Depends(get_db)):
+    """Turn "Add Genie One to new decks" on or off. Existing decks are not changed."""
+    user = get_current_user() or "unknown"
+    enabled = workspace_settings.set_genie_one_default(db, enabled=body.enabled, user=user)
+    logger.info("Admin updated genie_one_default", extra={"genie_one_default": enabled})
+    return {"enabled": enabled}
 
 
 @router.post("/google-credentials")

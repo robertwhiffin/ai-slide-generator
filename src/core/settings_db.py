@@ -185,6 +185,24 @@ def get_default_template_id(design_system_id: Optional[int]) -> Optional[int]:
         return None
 
 
+def get_genie_one_default() -> bool:
+    """Whether an admin has turned on "Add Genie One to new decks".
+
+    Read fresh on every call (never cached in-process), so a change made on one
+    worker reaches every worker's next new session. Used by the browser chat flow
+    to seed a new session's tools and by ``GET /api/tools/genie-one-default``.
+    Off when unset, and when the table does not exist yet.
+    """
+    from src.services.workspace_settings import genie_one_default
+
+    try:
+        with get_db_session() as db:
+            return genie_one_default(db)
+    except Exception:
+        # Table may not exist yet (pre-migration)
+        return False
+
+
 class GenieSettings(BaseSettings):
     """Genie configuration settings."""
 

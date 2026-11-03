@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session as DBSession
 
 from src.api.routes._authz import _check_deck_permission_for_session
-from src.api.schemas.agent_config import normalize_style_source_exclusivity
+from src.api.schemas.agent_config import GenieOneTool, normalize_style_source_exclusivity
 from src.api.schemas.requests import ChatRequest
 from src.api.schemas.responses import ChatResponse
 from src.api.schemas.streaming import StreamEvent, StreamEventType
@@ -50,6 +50,7 @@ from src.core.settings_db import (
     get_default_design_system_id,
     get_default_slide_style_id,
     get_default_template_id,
+    get_genie_one_default,
 )
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
@@ -259,6 +260,28 @@ def _apply_org_default_style_source(
         agent_config_data["slide_style_id"] = default_style_id
 
 
+def _apply_genie_one_default(
+    agent_config_data: dict,
+    *,
+    client_set_fields: frozenset[str] = frozenset(),
+) -> None:
+    """Add Genie One to a new session's tools when an admin turned that on, in place.
+
+    The same gap rule as :func:`_apply_org_default_style_source`: a ``tools`` list
+    the client sent is its decision (the browser adds the pill itself, and a user
+    who removed it sends ``[]``), so only a request that never mentioned ``tools``
+    is seeded.
+    """
+    if "tools" in client_set_fields:
+        return
+    if not get_genie_one_default():
+        return
+    tools = list(agent_config_data.get("tools") or [])
+    if not any(t.get("type") == "genie_one" for t in tools):
+        tools.append(GenieOneTool().model_dump())
+    agent_config_data["tools"] = tools
+
+
 def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     """Create a session if request.session_id is missing, or sync agent_config if provided.
 
@@ -326,9 +349,11 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         keeps that null.
 
         See ``TestNewSessionSeedingTruthTable`` for the full documented table.
+        The admin's Genie One default fills a ``tools`` gap the same way.
         """
         seeded = dict(config_data)
         _apply_org_default_style_source(seeded, client_set_fields=client_set_fields)
+        _apply_genie_one_default(seeded, client_set_fields=client_set_fields)
         return seeded
 
     def _without_template_pin(config_data: dict) -> dict:
