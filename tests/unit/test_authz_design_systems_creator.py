@@ -633,6 +633,28 @@ def test_frozen_org_default_denial_explains_why_without_leaking_the_row(
         assert leak not in detail, f"denial leaked {leak!r}: {detail!r}"
 
 
+def test_frozen_org_default_denial_names_the_tellr_admin_tier(
+    client, db_session, non_admin, as_creator
+):
+    """(j8) The freeze denial tells the user WHO can act, in today's terms.
+
+    Admin no longer means "workspace admin": it is a Tellr admin (direct
+    CAN_MANAGE on the app, or added on the Admins tab). A workspace admin who
+    holds only the inherited CAN_MANAGE is no longer one, so "only a workspace
+    admin can rename or delete it" would send the user to the wrong people.
+    Both gated routes (PUT rename, DELETE) share the one message."""
+    ds = _seed(db_session, CREATOR, is_default=True)
+
+    for resp in (
+        client.put(f"{BASE}/{ds.id}", json={"name": "Renamed by the author"}),
+        client.delete(f"{BASE}/{ds.id}"),
+    ):
+        assert resp.status_code == 403, resp.text
+        detail = resp.json()["detail"]
+        assert "only a Tellr admin can rename or delete it" in detail, detail
+        assert "workspace admin" not in detail.lower(), detail
+
+
 # --- (k) HANGUL FILLERS are blank, and identity is compared EXACTLY ----------
 #
 # Two defects in the creator check, found by an adversarial review.

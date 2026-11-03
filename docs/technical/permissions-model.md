@@ -486,19 +486,32 @@ GET    /api/settings/identities/provider    # Returns current mode
 
 ---
 
-## Workspace Admin
+## App Admin
 
-A tier above the per-resource permissions above, used for workspace-wide state rather than for a single deck or profile.
+A tier above the per-resource permissions above, used for app-wide state rather than for a single deck or profile.
 
-**`require_admin` resolves group membership on-behalf-of the caller.** It asks Databricks, using the caller's own credentials, whether their groups include the workspace `admins` group. It is not a flag the application stores or trusts.
+**Who is an admin.** A Tellr admin is anyone with direct `CAN_MANAGE` on the Databricks App, or anyone added on the Admins tab. Membership of the workspace `admins` group confers nothing by itself.
 
-**It fails closed.** A missing identity, non-membership, or a lookup error all return `403`. There is no ambiguous outcome that resolves to "allow".
+**The `permissions` table.** Admins are rows in the Lakebase `permissions` table (resource `app`, resource id `""`, privilege `admin`). Each row has one of two sources:
 
-**In dev and test it short-circuits to allow.** When the environment is not production the check returns early, so **a local run is not evidence that the gate works** — a test asserting that `require_admin` *blocks* something will pass against code that does not gate at all. Production always evaluates membership.
+- `can_manage_sync`: written by the background CAN_MANAGE sync (`src/services/can_manage_sync.py`).
+- `manual`: added or removed on the Admins tab through the admin API (`src/api/routes/admin_permissions.py`, mounted at `/api/admin/admins`). Only manual rows can be removed there.
+
+**The sync.** The app's own service principal reads the app's ACL (`apps.get_permissions`) and reconciles the `can_manage_sync` rows (`reconcile_can_manage` in `src/services/admin_permissions.py`). Only **direct** `CAN_MANAGE` users and groups count; inherited entries and service-principal entries are skipped. It runs in each uvicorn worker: every 30 s until the first success and every 300 s after that. A failed read, or an ACL with no direct holders, changes nothing: the existing rows stay as they were. The outcome of each run is stored in `permission_sync_state` (key `app_can_manage`), which drives the status line on the Admins tab.
+
+**Matching the caller.** A `USER` row matches the caller's email; a `GROUP` row matches one of the caller's own groups, read with the caller's own token (`current_user.me().groups`). Matching is case-insensitive. The app SP can list ACL entries but cannot expand a group into its members, so groups are matched from the caller's side.
+
+**The deploy grant.** The sync only works if the app's service principal holds `CAN_MANAGE` on its own app. A spike on 2026-11-02 showed that with nothing or `CAN_USE` the ACL read is denied, and that a `CAN_MANAGE` grant takes about 30-60 s to propagate. The runtime OBO token cannot read the ACL either, because it never carries the `access-management` scope. Every deploy path (`tellr.create`, `tellr.update`, `scripts/deploy_local.py`) therefore grants it, additively, through `_ensure_app_sp_can_manage`. See [Databricks App Deployment](databricks-app-deployment.md).
+
+**`require_admin` reads the table.** It checks the caller against the `permissions` rows. It is not a flag the application stores or trusts from the request.
+
+**It fails closed.** A missing identity, no matching row, or a lookup error all return `403`. There is no ambiguous outcome that resolves to "allow".
+
+**In dev and test it short-circuits to allow.** When the environment is not production the check returns early, so **a local run is not evidence that the gate works** — a test asserting that `require_admin` *blocks* something will pass against code that does not gate at all. Production always evaluates the table.
 
 **The client-side guard is cosmetic.** `/admin` is wrapped in `<RequireAdmin>`, which redirects a non-admin away from the page. Tampering with browser state could reveal page chrome, but it cannot authorize a single API call — the server check is the control.
 
-**Verdicts are cached briefly**, so a principal removed from the `admins` group retains access for up to the cache window.
+**Verdicts are cached for 60 s per worker**, so a removed admin retains access for up to that window on each worker.
 
 ### Where the admin tier applies
 
@@ -508,6 +521,7 @@ A tier above the per-resource permissions above, used for workspace-wide state r
 | System default slide style | Same reasoning |
 | Usage analytics endpoints | Workspace-wide activity data |
 | Google credentials management | App-wide OAuth configuration |
+| Admins tab (`/api/admin/admins`) | Decides who else is an admin |
 
 **On design systems the tiers compose.** Reads are open (org-shared content), mutations are creator-or-admin, and the org default is admin-only *even for the row's creator* — and that check is made on the loaded row **before** the authorship comparison, so being the creator cannot bypass it. A row whose `created_by` is NULL or blank is admin-only to mutate, because an unattributed row must never become "anyone may manage this". See [Design System Library §5.1](design-system-library.md).
 

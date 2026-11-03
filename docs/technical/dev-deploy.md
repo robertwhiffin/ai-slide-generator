@@ -147,6 +147,10 @@ deploy triggers a serverless job (running as a dedicated granter SP) that grants
 the instance's service principal into that role, so its migrations can alter the
 inherited tables. See `docs/technical/lakebase-table-ownership.md`.
 
+A fork also inherits prod's `permissions` rows and `permission_sync_state`. Its own
+CAN_MANAGE sync then mirrors the devloop app's CAN_MANAGE list, while the manual
+admins copied from prod remain.
+
 ### Live verification checklist — secret-mode devloop fork
 
 When the source app (`devloop`) uses a secret-backed encryption key, verify

@@ -6,6 +6,7 @@ import { AdminJudgeSettings } from './AdminJudgeSettings';
 import { AdminSlideStyleDefault } from './AdminSlideStyleDefault';
 import { UsageDashboard } from './UsageDashboard';
 import { AgentDefinitionWorkbench } from './AgentDefinitionWorkbench';
+import { AdminAdmins } from './AdminAdmins';
 import { AdminConnections } from './AdminConnections';
 
 type TabId =
@@ -16,11 +17,13 @@ type TabId =
   | 'slide_style'
   | 'judge'
   | 'agent_definitions'
-  | 'connections';
+  | 'connections'
+  | 'admins';
 
 export const AdminPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('usage');
   const [hasVisitedAgentDefinitions, setHasVisitedAgentDefinitions] = useState(false);
+  const [hasVisitedAdmins, setHasVisitedAdmins] = useState(false);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -152,6 +155,23 @@ export const AdminPage: React.FC = () => {
           >
             Connections
           </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'admins'}
+            aria-controls="admins-panel"
+            id="admins-tab"
+            onClick={() => {
+              setHasVisitedAdmins(true);
+              setActiveTab('admins');
+            }}
+            className={`px-4 py-2 font-medium text-sm border-b-2 transition-colors -mb-px ${
+              activeTab === 'admins'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+            }`}
+          >
+            Admins
+          </button>
         </div>
 
         <div
@@ -232,6 +252,16 @@ export const AdminPage: React.FC = () => {
           className={activeTab !== 'connections' ? 'sr-only' : ''}
         >
           {activeTab === 'connections' && <AdminConnections />}
+        </div>
+
+        <div
+          role="tabpanel"
+          id="admins-panel"
+          aria-labelledby="admins-tab"
+          hidden={activeTab !== 'admins'}
+          className={activeTab !== 'admins' ? 'sr-only' : ''}
+        >
+          {hasVisitedAdmins && <AdminAdmins />}
         </div>
       </div>
     </div>

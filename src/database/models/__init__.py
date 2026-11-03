@@ -32,6 +32,7 @@ from src.database.models.graph_configuration import (
 )
 from src.database.models.identity import AppIdentity
 from src.database.models.image import ImageAsset
+from src.database.models.permission import Permission, PermissionSyncState
 from src.database.models.profile import ConfigProfile
 from src.database.models.profile_contributor import (
     ConfigProfileContributor,
@@ -88,7 +89,9 @@ __all__ = [
     "GraphReleaseTestRun",
     "IdentityType",
     "ImageAsset",
+    "Permission",
     "PermissionLevel",
+    "PermissionSyncState",
     "ProfileContributor",  # Backward compatibility alias
     "RequestLog",
     "SessionMessage",

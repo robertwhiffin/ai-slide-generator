@@ -21,7 +21,9 @@ import yaml
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import (
     App,
+    AppAccessControlRequest,
     AppDeployment,
+    AppPermissionLevel,
     AppResource,
     AppResourceDatabase,
     AppResourceDatabaseDatabasePermission,
@@ -493,6 +495,7 @@ def _create_databricks(
             encryption_secret_key=encryption_secret_key,
         )
         print("   App registered")
+        _ensure_app_sp_can_manage(ws, app_name, _get_app_client_id(app))
         print()
 
         # Step 3b: For autoscaling, create SP role via Postgres API
@@ -699,6 +702,10 @@ def _update_databricks(
                 "   Genie One needs ai-gateway — add it in the app settings "
                 "(the MCP picker also needs catalog.connections)."
             )
+
+        # The admin sync reads the app's ACL as the app's own service
+        # principal, which needs CAN_MANAGE on the app. Never aborts the update.
+        _ensure_app_sp_can_manage(ws, app_name)
 
         # Trigger new deployment
         print("   Deploying...")
@@ -1744,6 +1751,64 @@ def _ensure_app_user_api_scopes(
     )
     print(f"   Scopes added: {', '.join(missing)}")
     return missing
+
+
+def _ensure_app_sp_can_manage(
+    ws: WorkspaceClient,
+    app_name: str,
+    client_id: str | None = None,
+) -> bool:
+    """Grant the app's own service principal CAN_MANAGE on the app.
+
+    The admin permissions sync reads the app's ACL as the app's service
+    principal, which only works with CAN_MANAGE. Uses ``update_permissions``
+    (additive) -- never ``set_permissions``, which would replace the ACL.
+
+    Never raises. When ``client_id`` is None it is looked up from the app.
+
+    Returns:
+        True if the grant was made, False if it failed (a warning with the
+        manual fix is printed).
+    """
+    try:
+        if client_id is None:
+            client_id = _get_app_client_id(ws.apps.get(name=app_name))
+        if not client_id:
+            raise ValueError("app has no service principal client id")
+        ws.apps.update_permissions(
+            app_name=app_name,
+            access_control_list=[
+                AppAccessControlRequest(
+                    service_principal_name=client_id,
+                    permission_level=AppPermissionLevel.CAN_MANAGE,
+                )
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 -- the deploy continues without it
+        print(
+            f"   WARNING: could not grant the app service principal CAN_MANAGE "
+            f"on {app_name}: {exc}"
+        )
+        if client_id:
+            fix = (
+                f"databricks apps update-permissions {app_name} --json "
+                f"'{{\"access_control_list\":[{{\"service_principal_name\":"
+                f"\"{client_id}\",\"permission_level\":\"CAN_MANAGE\"}}]}}'"
+            )
+        else:
+            fix = (
+                "add the app's service principal with Can Manage in the app's "
+                "Permissions tab"
+            )
+        print(f"   Admin sync will not work until this is fixed: {fix}")
+        print(
+            "   Without the grant, Tellr cannot read who holds CAN_MANAGE. On an "
+            "install that has never synced, there are no admins at all until the "
+            "grant works."
+        )
+        return False
+    print("   App service principal granted CAN_MANAGE on the app (admin sync)")
+    return True
 
 
 def _deploy_app(ws: WorkspaceClient, app_name: str, workspace_path: str) -> App:

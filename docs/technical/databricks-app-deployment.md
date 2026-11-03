@@ -264,6 +264,8 @@ Creates all infrastructure and deploys the app:
    - Attach database resource with CAN_CONNECT_AND_CREATE permission
    - Configure user API scopes (sql, genie, catalog tables/schemas/catalogs, serving-endpoints)
 
+   - Grant the app's service principal `CAN_MANAGE` on its own app (additive `update_permissions`, never `set_permissions`). The admin sync reads the app's ACL as that service principal and is denied without it. A failure prints a `WARNING` with the fix and does not abort the deploy.
+
 5. **Setup Database Schema**
    - Create PostgreSQL schema
    - Grant permissions to app service principal
@@ -271,6 +273,16 @@ Creates all infrastructure and deploys the app:
 6. **Deploy App**
    - Trigger deployment
    - Wait for app to be running
+
+### tellr.update()
+
+Besides re-uploading files, `update()` grants the app's service principal `CAN_MANAGE` on its own app, after the user API scopes check and before the new deployment. This repairs apps created before the grant existed. It never aborts the update; on failure it prints a `WARNING` and the manual fix:
+
+```bash
+databricks apps update-permissions <app_name> --json '{"access_control_list":[{"service_principal_name":"<app service principal client id>","permission_level":"CAN_MANAGE"}]}'
+```
+
+Or add the app's service principal with Can Manage in the app's Permissions tab. Without the grant, Tellr cannot read who holds CAN_MANAGE. On an install that has never synced, there are no admins at all until the grant works. See [Permissions Model](permissions-model.md#app-admin).
 
 ### Generated app.yaml
 
