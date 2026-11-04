@@ -9,6 +9,7 @@ import {
   mockSlides,
 } from '../fixtures/mocks';
 import { goToGenerator, getSlideCountLocator } from '../helpers/new-ui';
+import { apiPathMatching } from '../helpers/api-route';
 
 /**
  * Chat UI Tests
@@ -722,10 +723,10 @@ test.describe('Failure notice details', () => {
   test.beforeEach(async ({ page }) => {
     await setupMocks(page);
     // Registered after setupMocks, so Playwright tries it first. It owns ONLY the GET of one
-    // session (api.getSession); anything else under that URL (PATCH/DELETE) falls back to
-    // setupMocks. The regex runs on the full URL, so sub-resources (/slides, /lock,
-    // /agent-config) and query-string lists (?limit=, /shared?limit=) never reach it.
-    await page.route(/\/api\/sessions\/[^/?]+$/, (route) => {
+    // session (api.getSession, which sends ?include_deck=false); anything else under that URL
+    // (PATCH/DELETE) falls back to setupMocks. The regex runs on the pathname, so sub-resources
+    // (/slides, /lock, /agent-config) never reach it, and /shared is excluded by name.
+    await page.route(apiPathMatching(/^\/api\/sessions\/(?!shared$)[^/]+$/), (route) => {
       if (route.request().method() !== 'GET') return route.fallback();
       return route.fulfill({
         status: 200,

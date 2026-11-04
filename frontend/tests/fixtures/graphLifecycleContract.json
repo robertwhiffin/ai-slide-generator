@@ -1,6 +1,6 @@
 {
   "contract_version": 1,
-  "recorded_at_commit": "ab358bd52f9e4423afadd4ef5673c61a9186d545",
+  "recorded_at_commit": "bdce7a70760c1243f51aed8fd9013b8308a1217e",
   "exchanges": [
     {
       "id": "S01-workbench",
@@ -16,8 +16,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-11-03T13:26:14.773158Z",
-          "effective_from": "2026-11-03T13:26:14.773158Z",
+          "published_at": "2026-11-04T11:28:26.575303Z",
+          "effective_from": "2026-11-04T11:28:26.575303Z",
           "effective_to": null
         },
         "draft": {
@@ -26,7 +26,7 @@
           "base_version_number": 1,
           "lock_version": 0,
           "updated_by": "system:bootstrap",
-          "updated_at": "2026-11-03T13:26:14.773158Z"
+          "updated_at": "2026-11-04T11:28:26.575303Z"
         },
         "nodes": [
           {
@@ -1839,8 +1839,8 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:14.856522",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.726306",
         "deck_mode": null,
         "graph_version": 1,
         "active_graph_version": 1,
@@ -1862,8 +1862,8 @@
         "session_id": "control-legacy",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:14.859637",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.729523",
         "deck_mode": null,
         "graph_version": null,
         "active_graph_version": 1,
@@ -1886,8 +1886,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-11-03T13:26:14.773158Z",
-          "effective_from": "2026-11-03T13:26:14.773158Z",
+          "published_at": "2026-11-04T11:28:26.575303Z",
+          "effective_from": "2026-11-04T11:28:26.575303Z",
           "effective_to": null
         },
         "draft": {
@@ -1896,7 +1896,7 @@
           "base_version_number": 1,
           "lock_version": 0,
           "updated_by": "system:bootstrap",
-          "updated_at": "2026-11-03T13:26:14.773158Z"
+          "updated_at": "2026-11-04T11:28:26.575303Z"
         },
         "nodes": [
           {
@@ -3720,7 +3720,7 @@
           "base_version_number": 1,
           "lock_version": 1,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.883853Z"
+          "updated_at": "2026-11-04T11:28:26.754202Z"
         },
         "definition": {
           "base_revision_id": 1,
@@ -4061,7 +4061,7 @@
           "base_version_number": 1,
           "lock_version": 2,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.897777Z"
+          "updated_at": "2026-11-04T11:28:26.768006Z"
         },
         "definition": {
           "base_revision_id": 3,
@@ -4387,7 +4387,7 @@
             "base_version_number": 1,
             "lock_version": 2,
             "updated_by": "lifecycle-admin@example.com",
-            "updated_at": "2026-11-03T13:26:14.897777Z"
+            "updated_at": "2026-11-04T11:28:26.768006Z"
           },
           "definitions": {
             "architect": {
@@ -5273,8 +5273,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-11-03T13:26:14.773158Z",
-          "effective_from": "2026-11-03T13:26:14.773158Z",
+          "published_at": "2026-11-04T11:28:26.575303Z",
+          "effective_from": "2026-11-04T11:28:26.575303Z",
           "effective_to": null
         },
         "draft": {
@@ -5283,7 +5283,7 @@
           "base_version_number": 1,
           "lock_version": 2,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.897777Z"
+          "updated_at": "2026-11-04T11:28:26.768006Z"
         },
         "nodes": [
           {
@@ -7098,7 +7098,7 @@
           "base_version_number": 1,
           "lock_version": 3,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.924121Z"
+          "updated_at": "2026-11-04T11:28:26.794753Z"
         },
         "definition": {
           "base_revision_id": 3,
@@ -7437,7 +7437,7 @@
           "base_version_number": 1,
           "lock_version": 4,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.932156Z"
+          "updated_at": "2026-11-04T11:28:26.803225Z"
         },
         "definition": {
           "base_revision_id": 3,
@@ -7763,7 +7763,7 @@
           "base_version_number": 1,
           "lock_version": 5,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.941067Z"
+          "updated_at": "2026-11-04T11:28:26.812031Z"
         },
         "definition": {
           "base_revision_id": 1,
@@ -8121,7 +8121,7 @@
           "base_version_number": 1,
           "lock_version": 6,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.951897Z"
+          "updated_at": "2026-11-04T11:28:26.823318Z"
         },
         "definition": {
           "base_revision_id": 1,
@@ -8490,8 +8490,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-11-03T13:26:14.773158Z",
-          "effective_from": "2026-11-03T13:26:14.773158Z",
+          "published_at": "2026-11-04T11:28:26.575303Z",
+          "effective_from": "2026-11-04T11:28:26.575303Z",
           "effective_to": null
         },
         "draft": {
@@ -8500,7 +8500,7 @@
           "base_version_number": 1,
           "lock_version": 6,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.951897Z"
+          "updated_at": "2026-11-04T11:28:26.823318Z"
         },
         "nodes": [
           {
@@ -10360,7 +10360,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.974726Z"
+          "updated_at": "2026-11-04T11:28:26.846612Z"
         },
         "definition": {
           "base_revision_id": 5,
@@ -10675,8 +10675,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-11-03T13:26:14.773158Z",
-          "effective_from": "2026-11-03T13:26:14.773158Z",
+          "published_at": "2026-11-04T11:28:26.575303Z",
+          "effective_from": "2026-11-04T11:28:26.575303Z",
           "effective_to": null
         },
         "draft": {
@@ -10685,7 +10685,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.974726Z"
+          "updated_at": "2026-11-04T11:28:26.846612Z"
         },
         "nodes": [
           {
@@ -12557,9 +12557,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-11-03T13:26:14.773158Z",
+            "created_at": "2026-11-04T11:28:26.575303Z",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-11-03T13:26:14.773158Z",
+            "updated_at": "2026-11-04T11:28:26.575303Z",
             "is_synthetic_data_warning": true
           }
         ]
@@ -12646,11 +12646,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.024708977434784174,
+        "latency_ms": 0.02575002145022154,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-11-03T13:26:15.000810Z",
+        "run_at": "2026-11-04T11:28:26.872892Z",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -12739,11 +12739,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.024708977434784174,
+            "latency_ms": 0.02575002145022154,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-11-03T13:26:15.000810Z",
+            "run_at": "2026-11-04T11:28:26.872892Z",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -12964,9 +12964,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-11-03T13:26:14.773158Z",
+            "created_at": "2026-11-04T11:28:26.575303Z",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-11-03T13:26:14.773158Z",
+            "updated_at": "2026-11-04T11:28:26.575303Z",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13064,11 +13064,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.019291997887194157,
+        "latency_ms": 0.023250002413988113,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-11-03T13:26:15.015236Z",
+        "run_at": "2026-11-04T11:28:26.888536Z",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -13168,11 +13168,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.019291997887194157,
+            "latency_ms": 0.023250002413988113,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-11-03T13:26:15.015236Z",
+            "run_at": "2026-11-04T11:28:26.888536Z",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -13392,9 +13392,9 @@
               "design_system_active": false
             },
             "created_by": "system:bootstrap",
-            "created_at": "2026-11-03T13:26:14.773158Z",
+            "created_at": "2026-11-04T11:28:26.575303Z",
             "updated_by": "system:bootstrap",
-            "updated_at": "2026-11-03T13:26:14.773158Z",
+            "updated_at": "2026-11-04T11:28:26.575303Z",
             "is_synthetic_data_warning": true
           }
         ]
@@ -13500,11 +13500,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.020708015654236078,
+        "latency_ms": 0.02295803278684616,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-11-03T13:26:15.027784Z",
+        "run_at": "2026-11-04T11:28:26.902361Z",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -13612,11 +13612,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.020708015654236078,
+            "latency_ms": 0.02295803278684616,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-11-03T13:26:15.027784Z",
+            "run_at": "2026-11-04T11:28:26.902361Z",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -13880,14 +13880,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.019291997887194157,
+        "latency_ms": 0.023250002413988113,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-11-03T13:26:15.015236Z",
+        "run_at": "2026-11-04T11:28:26.888536Z",
         "verdict": "rejected",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-11-03T13:26:15.036214Z",
+        "verdict_at": "2026-11-04T11:28:26.910216Z",
         "verdict_notes": "Lifecycle: rerun.",
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14135,14 +14135,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.024708977434784174,
+        "latency_ms": 0.02575002145022154,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-11-03T13:26:15.000810Z",
+        "run_at": "2026-11-04T11:28:26.872892Z",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-11-03T13:26:15.043240Z",
+        "verdict_at": "2026-11-04T11:28:26.917588Z",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14408,14 +14408,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.020708015654236078,
+        "latency_ms": 0.02295803278684616,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-11-03T13:26:15.027784Z",
+        "run_at": "2026-11-04T11:28:26.902361Z",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-11-03T13:26:15.050408Z",
+        "verdict_at": "2026-11-04T11:28:26.923489Z",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -14672,11 +14672,11 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.021875021047890186,
+        "latency_ms": 0.020958948880434036,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-11-03T13:26:15.060182Z",
+        "run_at": "2026-11-04T11:28:26.932664Z",
         "verdict": null,
         "verdict_reviewer": null,
         "verdict_at": null,
@@ -14776,11 +14776,11 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.021875021047890186,
+            "latency_ms": 0.020958948880434036,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-11-03T13:26:15.060182Z",
+            "run_at": "2026-11-04T11:28:26.932664Z",
             "verdict": null,
             "verdict_reviewer": null,
             "verdict_at": null,
@@ -14869,14 +14869,14 @@
             },
             "baseline_raw_output": null,
             "baseline_structured_output": null,
-            "latency_ms": 0.019291997887194157,
+            "latency_ms": 0.023250002413988113,
             "input_tokens": null,
             "output_tokens": null,
             "run_by": "lifecycle-admin@example.com",
-            "run_at": "2026-11-03T13:26:15.015236Z",
+            "run_at": "2026-11-04T11:28:26.888536Z",
             "verdict": "rejected",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-11-03T13:26:15.036214Z",
+            "verdict_at": "2026-11-04T11:28:26.910216Z",
             "verdict_notes": "Lifecycle: rerun.",
             "candidate_is_current": null,
             "base_release_is_current": null
@@ -15135,14 +15135,14 @@
         },
         "baseline_raw_output": null,
         "baseline_structured_output": null,
-        "latency_ms": 0.021875021047890186,
+        "latency_ms": 0.020958948880434036,
         "input_tokens": null,
         "output_tokens": null,
         "run_by": "lifecycle-admin@example.com",
-        "run_at": "2026-11-03T13:26:15.060182Z",
+        "run_at": "2026-11-04T11:28:26.932664Z",
         "verdict": "approved",
         "verdict_reviewer": "lifecycle-admin@example.com",
-        "verdict_at": "2026-11-03T13:26:15.068005Z",
+        "verdict_at": "2026-11-04T11:28:26.940632Z",
         "verdict_notes": null,
         "candidate_is_current": null,
         "base_release_is_current": null
@@ -15320,7 +15320,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.974726Z"
+          "updated_at": "2026-11-04T11:28:26.846612Z"
         },
         "active_release": {
           "release_id": 1,
@@ -15329,8 +15329,8 @@
           "restored_from_release_id": null,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-11-03T13:26:14.773158Z",
-          "effective_from": "2026-11-03T13:26:14.773158Z",
+          "published_at": "2026-11-04T11:28:26.575303Z",
+          "effective_from": "2026-11-04T11:28:26.575303Z",
           "effective_to": null
         },
         "next_version_number": 2,
@@ -15622,8 +15622,8 @@
         "session_id": "mid-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:15.081934",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.953950",
         "deck_mode": null,
         "graph_version": 1,
         "active_graph_version": 1,
@@ -15655,7 +15655,7 @@
           "base_version_number": 1,
           "lock_version": 7,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:14.974726Z"
+          "updated_at": "2026-11-04T11:28:26.846612Z"
         }
       },
       "response_model": "src.api.schemas.graph_releases.StalePublicationResponse",
@@ -15678,8 +15678,8 @@
           "restored_from_release_id": null,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-11-03T13:26:15.087396Z",
-          "effective_from": "2026-11-03T13:26:15.087396Z",
+          "published_at": "2026-11-04T11:28:26.960443Z",
+          "effective_from": "2026-11-04T11:28:26.960443Z",
           "effective_to": null
         },
         "previous_release_id": 1,
@@ -15754,7 +15754,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:15.087396Z"
+          "updated_at": "2026-11-04T11:28:26.960443Z"
         }
       },
       "response_model": "src.api.schemas.graph_releases.PublishReleaseSuccessResponse",
@@ -15774,8 +15774,8 @@
           "restored_from_release_id": null,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-11-03T13:26:15.087396Z",
-          "effective_from": "2026-11-03T13:26:15.087396Z",
+          "published_at": "2026-11-04T11:28:26.960443Z",
+          "effective_from": "2026-11-04T11:28:26.960443Z",
           "effective_to": null
         },
         "draft": {
@@ -15784,7 +15784,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:15.087396Z"
+          "updated_at": "2026-11-04T11:28:26.960443Z"
         },
         "nodes": [
           {
@@ -17669,8 +17669,8 @@
         "session_id": "new-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:15.112253",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.984684",
         "deck_mode": null,
         "graph_version": 2,
         "active_graph_version": 2,
@@ -17686,12 +17686,12 @@
       "request": null,
       "status": 200,
       "body": {
-        "session_id": "1vgp6WduMM5kSDnGjL98n9yvy9-5Lfyo9LZsGUyCytc",
+        "session_id": "me_9fNOIKOL2gFQWs80_D87MvCXZbhRQf3RDoaJHZz8",
         "created_by": "contributor@example.com",
-        "title": "Session 2026-11-03 13:26",
+        "title": "Session 2026-11-04 11:28",
         "parent_session_id": "old-root",
         "is_contributor_session": true,
-        "created_at": "2026-11-03T13:26:15.123639",
+        "created_at": "2026-11-04T11:28:26.995885",
         "my_permission": "CAN_VIEW"
       },
       "response_model": null,
@@ -17704,10 +17704,10 @@
       "request": null,
       "status": 201,
       "body": {
-        "session_id": "sLGWHGT8jLCMc_sIpH1lYUr9rhnaEVBSMHEmDZssVLQ",
-        "title": "Copy of Session 2026-11-03 13:26",
+        "session_id": "jo3lZ-Ah8M4_ruO_tg7UjE_b3ndzp95870Js6EI2eqw",
+        "title": "Copy of Session 2026-11-04 11:28",
         "created_by": "contributor@example.com",
-        "created_at": "2026-11-03T13:26:15.127661",
+        "created_at": "2026-11-04T11:28:26.999923",
         "slide_count": 1,
         "source_session_id": "old-root"
       },
@@ -17717,7 +17717,7 @@
     {
       "id": "S12-get-old-root",
       "method": "GET",
-      "path": "/api/sessions/old-root",
+      "path": "/api/sessions/old-root?include_deck=false",
       "request": null,
       "status": 200,
       "body": {
@@ -17725,9 +17725,9 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:14.856522",
-        "last_activity": "2026-11-03T13:26:14.867823",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.726306",
+        "last_activity": "2026-11-04T11:28:26.737880",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -17750,40 +17750,10 @@
             "role": "user",
             "content": "USE AGENT MODE build the lifecycle deck",
             "message_type": null,
-            "created_at": "2026-11-03T13:26:14.861347",
+            "created_at": "2026-11-04T11:28:26.731210",
             "metadata": null
           }
         ],
-        "slide_deck": {
-          "title": "Lifecycle deck",
-          "slide_count": 1,
-          "css": ".slide{}",
-          "external_scripts": [],
-          "head_meta": {},
-          "scripts": "",
-          "slides": [
-            {
-              "index": 0,
-              "html": "<div class=\"slide\">One</div>",
-              "slide_id": "slide-one",
-              "scripts": "",
-              "created_by": null,
-              "created_at": "2026-11-03T13:26:14.865201Z",
-              "modified_by": null,
-              "modified_at": "2026-11-03T13:26:14.865201Z",
-              "content_hash": "0861ce3c3874c657",
-              "verification": null
-            }
-          ],
-          "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-11-03T13:26:14.864093Z",
-          "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-11-03T13:26:14.865493Z",
-          "version": 1,
-          "deck_spec": null,
-          "findings": [],
-          "html_content": "<div class=\"slide\">One</div>"
-        },
         "my_permission": "CAN_MANAGE"
       },
       "response_model": null,
@@ -17792,7 +17762,7 @@
     {
       "id": "S12-get-mid-root",
       "method": "GET",
-      "path": "/api/sessions/mid-root",
+      "path": "/api/sessions/mid-root?include_deck=false",
       "request": null,
       "status": 200,
       "body": {
@@ -17800,9 +17770,9 @@
         "session_id": "mid-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:15.081934",
-        "last_activity": "2026-11-03T13:26:15.081935",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.953950",
+        "last_activity": "2026-11-04T11:28:26.953950",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -17820,7 +17790,6 @@
         "active_graph_version": 2,
         "is_older_than_active": true,
         "messages": [],
-        "slide_deck": null,
         "my_permission": "CAN_MANAGE"
       },
       "response_model": null,
@@ -17829,17 +17798,17 @@
     {
       "id": "S12-get-contributor",
       "method": "GET",
-      "path": "/api/sessions/1vgp6WduMM5kSDnGjL98n9yvy9-5Lfyo9LZsGUyCytc",
+      "path": "/api/sessions/me_9fNOIKOL2gFQWs80_D87MvCXZbhRQf3RDoaJHZz8?include_deck=false",
       "request": null,
       "status": 200,
       "body": {
         "id": 5,
-        "session_id": "1vgp6WduMM5kSDnGjL98n9yvy9-5Lfyo9LZsGUyCytc",
+        "session_id": "me_9fNOIKOL2gFQWs80_D87MvCXZbhRQf3RDoaJHZz8",
         "user_id": null,
         "created_by": "contributor@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:15.123639",
-        "last_activity": "2026-11-03T13:26:15.123640",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.995885",
+        "last_activity": "2026-11-04T11:28:26.995886",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -17857,36 +17826,6 @@
         "active_graph_version": 2,
         "is_older_than_active": false,
         "messages": [],
-        "slide_deck": {
-          "title": "Lifecycle deck",
-          "slide_count": 1,
-          "css": ".slide{}",
-          "external_scripts": [],
-          "head_meta": {},
-          "scripts": "",
-          "slides": [
-            {
-              "index": 0,
-              "html": "<div class=\"slide\">One</div>",
-              "slide_id": "slide-one",
-              "scripts": "",
-              "created_by": null,
-              "created_at": "2026-11-03T13:26:14.865201Z",
-              "modified_by": null,
-              "modified_at": "2026-11-03T13:26:14.865201Z",
-              "content_hash": "0861ce3c3874c657",
-              "verification": null
-            }
-          ],
-          "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-11-03T13:26:14.864093Z",
-          "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-11-03T13:26:14.865493Z",
-          "version": 1,
-          "deck_spec": null,
-          "findings": [],
-          "html_content": "<div class=\"slide\">One</div>"
-        },
         "my_permission": "CAN_VIEW"
       },
       "response_model": null,
@@ -17906,13 +17845,13 @@
             "actor_label": "Contributor 1",
             "graph_version": 2,
             "mutation_count": 2,
-            "last_mutation_at": "2026-11-03T13:26:15.151994"
+            "last_mutation_at": "2026-11-04T11:28:27.017971"
           },
           {
             "actor_label": "Contributor 2",
             "graph_version": 1,
             "mutation_count": 4,
-            "last_mutation_at": "2026-11-03T13:26:15.147179"
+            "last_mutation_at": "2026-11-04T11:28:27.013794"
           }
         ]
       },
@@ -17937,8 +17876,8 @@
             "is_active": true,
             "release_note": "Lifecycle Graph Version 2.",
             "published_by": "lifecycle-admin@example.com",
-            "published_at": "2026-11-03T13:26:15.087396Z",
-            "effective_from": "2026-11-03T13:26:15.087396Z",
+            "published_at": "2026-11-04T11:28:26.960443Z",
+            "effective_from": "2026-11-04T11:28:26.960443Z",
             "effective_to": null,
             "previous": {
               "release_id": 1,
@@ -17958,9 +17897,9 @@
             "is_active": false,
             "release_note": "Bootstrap Graph Version 1",
             "published_by": "system:bootstrap",
-            "published_at": "2026-11-03T13:26:14.773158Z",
-            "effective_from": "2026-11-03T13:26:14.773158Z",
-            "effective_to": "2026-11-03T13:26:15.087396Z",
+            "published_at": "2026-11-04T11:28:26.575303Z",
+            "effective_from": "2026-11-04T11:28:26.575303Z",
+            "effective_to": "2026-11-04T11:28:26.960443Z",
             "previous": null,
             "restored_from": null,
             "restored_by": [],
@@ -17992,9 +17931,9 @@
           "is_active": false,
           "release_note": "Bootstrap Graph Version 1",
           "published_by": "system:bootstrap",
-          "published_at": "2026-11-03T13:26:14.773158Z",
-          "effective_from": "2026-11-03T13:26:14.773158Z",
-          "effective_to": "2026-11-03T13:26:15.087396Z",
+          "published_at": "2026-11-04T11:28:26.575303Z",
+          "effective_from": "2026-11-04T11:28:26.575303Z",
+          "effective_to": "2026-11-04T11:28:26.960443Z",
           "previous": null,
           "restored_from": null,
           "restored_by": [],
@@ -18418,8 +18357,8 @@
           "is_active": true,
           "release_note": "Lifecycle Graph Version 2.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-11-03T13:26:15.087396Z",
-          "effective_from": "2026-11-03T13:26:15.087396Z",
+          "published_at": "2026-11-04T11:28:26.960443Z",
+          "effective_from": "2026-11-04T11:28:26.960443Z",
           "effective_to": null,
           "previous": {
             "release_id": 1,
@@ -18817,10 +18756,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-11-03T13:26:15.043240Z",
+            "verdict_at": "2026-11-04T11:28:26.917588Z",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-11-03T13:26:15.000810Z"
+            "run_at": "2026-11-04T11:28:26.872892Z"
           },
           {
             "agent_test_run_id": 104,
@@ -18831,10 +18770,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-11-03T13:26:15.068005Z",
+            "verdict_at": "2026-11-04T11:28:26.940632Z",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-11-03T13:26:15.060182Z"
+            "run_at": "2026-11-04T11:28:26.932664Z"
           },
           {
             "agent_test_run_id": 103,
@@ -18845,10 +18784,10 @@
             "source": null,
             "verdict": "approved",
             "verdict_reviewer": "lifecycle-admin@example.com",
-            "verdict_at": "2026-11-03T13:26:15.050408Z",
+            "verdict_at": "2026-11-04T11:28:26.923489Z",
             "execution_status": "completed",
             "deterministic_checks_passed": true,
-            "run_at": "2026-11-03T13:26:15.027784Z"
+            "run_at": "2026-11-04T11:28:26.902361Z"
           }
         ]
       },
@@ -19243,7 +19182,7 @@
           "base_version_number": 2,
           "lock_version": 8,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:15.087396Z"
+          "updated_at": "2026-11-04T11:28:26.960443Z"
         }
       },
       "response_model": "src.api.schemas.graph_release_history.StaleRollbackResponse",
@@ -19266,8 +19205,8 @@
           "restored_from_release_id": 1,
           "release_note": "Roll back to Graph Version 1.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-11-03T13:26:15.181202Z",
-          "effective_from": "2026-11-03T13:26:15.181202Z",
+          "published_at": "2026-11-04T11:28:27.047309Z",
+          "effective_from": "2026-11-04T11:28:27.047309Z",
           "effective_to": null
         },
         "restored_from": {
@@ -19324,7 +19263,7 @@
           "base_version_number": 3,
           "lock_version": 9,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:15.181202Z"
+          "updated_at": "2026-11-04T11:28:27.047309Z"
         },
         "draft_effect": {
           "architect": "reset",
@@ -19353,8 +19292,8 @@
           "restored_from_release_id": 1,
           "release_note": "Roll back to Graph Version 1.",
           "published_by": "lifecycle-admin@example.com",
-          "published_at": "2026-11-03T13:26:15.181202Z",
-          "effective_from": "2026-11-03T13:26:15.181202Z",
+          "published_at": "2026-11-04T11:28:27.047309Z",
+          "effective_from": "2026-11-04T11:28:27.047309Z",
           "effective_to": null
         },
         "draft": {
@@ -19363,7 +19302,7 @@
           "base_version_number": 3,
           "lock_version": 9,
           "updated_by": "lifecycle-admin@example.com",
-          "updated_at": "2026-11-03T13:26:15.181202Z"
+          "updated_at": "2026-11-04T11:28:27.047309Z"
         },
         "nodes": [
           {
@@ -21176,8 +21115,8 @@
         "session_id": "post-rollback-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:15.204247",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:27.070094",
         "deck_mode": null,
         "graph_version": 3,
         "active_graph_version": 3,
@@ -21189,7 +21128,7 @@
     {
       "id": "S16-get-new-root",
       "method": "GET",
-      "path": "/api/sessions/new-root",
+      "path": "/api/sessions/new-root?include_deck=false",
       "request": null,
       "status": 200,
       "body": {
@@ -21197,9 +21136,9 @@
         "session_id": "new-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:15.112253",
-        "last_activity": "2026-11-03T13:26:15.112254",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.984684",
+        "last_activity": "2026-11-04T11:28:26.984684",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -21217,7 +21156,6 @@
         "active_graph_version": 3,
         "is_older_than_active": true,
         "messages": [],
-        "slide_deck": null,
         "my_permission": "CAN_MANAGE"
       },
       "response_model": null,
@@ -21226,7 +21164,7 @@
     {
       "id": "S16-get-old-root",
       "method": "GET",
-      "path": "/api/sessions/old-root",
+      "path": "/api/sessions/old-root?include_deck=false",
       "request": null,
       "status": 200,
       "body": {
@@ -21234,9 +21172,9 @@
         "session_id": "old-root",
         "user_id": null,
         "created_by": "lifecycle-owner@example.com",
-        "title": "Session 2026-11-03 13:26",
-        "created_at": "2026-11-03T13:26:14.856522",
-        "last_activity": "2026-11-03T13:26:15.150231",
+        "title": "Session 2026-11-04 11:28",
+        "created_at": "2026-11-04T11:28:26.726306",
+        "last_activity": "2026-11-04T11:28:27.016483",
         "genie_conversation_id": null,
         "experiment_id": null,
         "experiment_url": null,
@@ -21259,40 +21197,10 @@
             "role": "user",
             "content": "USE AGENT MODE build the lifecycle deck",
             "message_type": null,
-            "created_at": "2026-11-03T13:26:14.861347",
+            "created_at": "2026-11-04T11:28:26.731210",
             "metadata": null
           }
         ],
-        "slide_deck": {
-          "title": "Lifecycle deck",
-          "slide_count": 1,
-          "css": ".slide{}",
-          "external_scripts": [],
-          "head_meta": {},
-          "scripts": "",
-          "slides": [
-            {
-              "index": 0,
-              "html": "<div class=\"slide\">One, contributor</div>",
-              "slide_id": "slide-one",
-              "scripts": "",
-              "created_by": null,
-              "created_at": "2026-11-03T13:26:15.148590Z",
-              "modified_by": null,
-              "modified_at": "2026-11-03T13:26:15.148590Z",
-              "content_hash": "dfc4a0562849c398",
-              "verification": null
-            }
-          ],
-          "created_by": "lifecycle-owner@example.com",
-          "created_at": "2026-11-03T13:26:14.864093Z",
-          "modified_by": "lifecycle-owner@example.com",
-          "modified_at": "2026-11-03T13:26:15.148695Z",
-          "version": 3,
-          "deck_spec": null,
-          "findings": [],
-          "html_content": "<div class=\"slide\">One, contributor</div>"
-        },
         "my_permission": "CAN_MANAGE"
       },
       "response_model": null,

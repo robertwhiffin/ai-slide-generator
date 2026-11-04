@@ -381,7 +381,7 @@ Reports are statement-level calls (`report_phase`, `report_slide`, `report_slide
 
 ### Updated Session Endpoint
 
-`GET /api/sessions/{id}` now returns messages and slide deck for restoration:
+`GET /api/sessions/{id}` returns messages (creator only) and, by default, the slide deck:
 
 ```json
 {
@@ -394,6 +394,8 @@ Reports are statement-level calls (`report_phase`, `report_slide`, `report_slide
   "slide_deck": { ... }
 }
 ```
+
+The web UI calls it with `?include_deck=false` (`api.getSession`): the response then has no `slide_deck` key and the server never loads the deck. A restore takes the deck from `GET /api/sessions/{id}/slides`. Neither deck read sends the knitted `html_content`.
 
 ---
 

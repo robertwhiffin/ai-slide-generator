@@ -1,6 +1,7 @@
 import { test, expect } from '../fixtures/base-test';
 import type { Page } from '@playwright/test';
 import { setupMocks } from '../helpers/setup-mocks';
+import { apiPath } from '../helpers/api-route';
 import { mockSlidesResponse } from '../helpers/session-helpers';
 
 /**
@@ -105,7 +106,7 @@ async function mockSessionDetail(
   isOlder: boolean,
   hasSlideDeck = false,
 ) {
-  await page.route(`http://127.0.0.1:8000/api/sessions/${sessionId}`, async (route) => {
+  await page.route(apiPath(`/api/sessions/${sessionId}`), async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',

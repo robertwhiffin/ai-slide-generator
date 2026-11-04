@@ -5,6 +5,7 @@
 import type { Page } from '@playwright/test';
 import { mockSlides, mockDefaultAgentConfig } from '../fixtures/mocks';
 import { mockFindings } from '../fixtures/findings';
+import { apiPath } from './api-route';
 
 // Fixed session IDs for deterministic test URLs
 export const TEST_SESSION_ID = 'b1b4d8e3-6cf6-47cb-ad58-9fdc6ad205cc';
@@ -54,19 +55,14 @@ export const mockSlidesResponse = {
  * so this more specific route takes precedence over the generic sessions** handler.
  */
 export async function mockSessionWithSlides(page: Page, sessionId: string = TEST_SESSION_ID) {
-  // Mock session detail endpoint (exact URL match, no sub-paths)
-  await page.route(`http://127.0.0.1:8000/api/sessions/${sessionId}`, (route) => {
-    const url = route.request().url();
-    // Only handle exact session detail URL, not sub-paths like /slides, /versions
-    if (url.endsWith(sessionId)) {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ ...mockSessionDetail, session_id: sessionId }),
-      });
-    } else {
-      route.fallback();
-    }
+  // Mock session detail endpoint. apiPath matches the pathname exactly, so sub-paths like
+  // /slides and /versions never reach it, whatever query getSession sends (?include_deck=false).
+  await page.route(apiPath(`/api/sessions/${sessionId}`), (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ...mockSessionDetail, session_id: sessionId }),
+    });
   });
 
   // Mock slides endpoint for this specific session
@@ -115,16 +111,11 @@ export async function mockSessionWithSlides(page: Page, sessionId: string = TEST
  * Mock a session that returns 404 (doesn't exist).
  */
 export async function mockSessionNotFound(page: Page, sessionId: string) {
-  await page.route(`http://127.0.0.1:8000/api/sessions/${sessionId}`, (route) => {
-    const url = route.request().url();
-    if (url.endsWith(sessionId)) {
-      route.fulfill({
-        status: 404,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'Session not found' }),
-      });
-    } else {
-      route.fallback();
-    }
+  await page.route(apiPath(`/api/sessions/${sessionId}`), (route) => {
+    route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: 'Session not found' }),
+    });
   });
 }

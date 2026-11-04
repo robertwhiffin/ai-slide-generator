@@ -41,6 +41,7 @@ import {
   mockDefaultAgentConfig,
 } from '../fixtures/mocks';
 import { ALLOWED_ACTION_NAMES } from '../fixtures/forbiddenActionNames';
+import { apiPath, apiPathMatching } from '../helpers/api-route';
 
 const contract = loadContract();
 
@@ -205,8 +206,9 @@ test.describe.serial(
       // The v3 session's GET: the contract records the POST that creates it
       // but no subsequent GET.  Serve the POST response body (all graph fields
       // match: graph_version=3, active_graph_version=3, is_older_than_active=false).
+      // Pathname match: api.getSession sends ?include_deck=false.
       await context.route(
-        '**/api/sessions/post-rollback-root',
+        apiPath('/api/sessions/post-rollback-root'),
         async (route, request) => {
           expect(request.method()).toBe('GET');
           await route.fulfill({
@@ -357,9 +359,9 @@ test.describe.serial(
       // Unknown (locally-generated) session detail GETs.  UUID pattern only:
       // named sessions (old-root, new-root, post-rollback-root) are not UUIDs
       // and therefore bypass this route, going directly to the contract or to
-      // a dedicated handler above.
+      // a dedicated handler above. Pathname match: api.getSession sends ?include_deck=false.
       await context.route(
-        /\/api\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        apiPathMatching(/^\/api\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
         async (route) => {
           await route.fulfill({ status: 404 });
         },

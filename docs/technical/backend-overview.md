@@ -8,7 +8,7 @@ This guide explains how the FastAPI/LangChain backend works, how it serves the f
 
 - **Runtime:** Python 3.11+, FastAPI (ASGI) with Uvicorn/Gunicorn, packaged under `src/`.
 - **Core libs:** LangChain (tool-calling agent), Databricks `WorkspaceClient`, MLflow for tracing, BeautifulSoup for HTML parsing.
-- **Entry:** `src/api/main.py` instantiates FastAPI, wires CORS, user auth middleware, request logging middleware, and registers 20+ routers under `/api`.
+- **Entry:** `src/api/main.py` instantiates FastAPI, wires CORS, user auth middleware, gzip compression (level 6; `text/event-stream` is left uncompressed), request logging middleware, and registers 20+ routers under `/api`.
 - **Process lifecycle:** `lifespan` context starts the chat job queue runners (`TELLR_CHAT_JOB_CONCURRENCY`, default 1), the export job queue worker, the export job TTL cleanup worker, and the request log cleanup task. It also recovers stuck requests on startup, initializes the database, runs profile-to-agent-config migrations, and starts the Lakebase token refresh loop when running in Databricks Apps.
 
 ---
@@ -349,7 +349,7 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | `src/api/services/export_job_queue.py` | Async export processing | In-memory job queue with background worker for PPTX and Google Slides exports. |
 | `src/api/services/feedback_service.py` | Feedback orchestration | LLM chat-based feedback, structured feedback submission, surveys, and reporting. |
 | `src/api/services/session_naming.py` | Session naming | Auto-generates session titles from conversation content. |
-| `src/api/routes/sessions.py` | Session CRUD + sharing endpoints | Create, list, get (with messages), rename, delete, shared presentations, contributor sessions, editing locks. |
+| `src/api/routes/sessions.py` | Session CRUD + sharing endpoints | Create, list, get (with messages; `?include_deck=false` skips the deck, which is what the web UI sends), rename, delete, shared presentations, contributor sessions, editing locks. The deck reads (`GET /{id}` with the deck, `GET /{id}/slides`) do not send the knitted `html_content`. |
 | `src/api/routes/agent_config.py` | Agent config endpoints | GET/PUT/PATCH for session agent config (tools, style, prompt). |
 | `src/api/routes/slides.py` | Slide CRUD endpoints | Session-scoped operations with locking. |
 | `src/api/routes/export.py` | PPTX export endpoints | Sync and async PPTX generation with LLM code-gen converter. |

@@ -578,10 +578,15 @@ export const api = {
   },
 
   /**
-   * Get a specific session
+   * Get a specific session: metadata, messages (creator only) and the caller's permission.
+   *
+   * Without its deck (`include_deck=false`): no caller reads `slide_deck`, the deck comes from
+   * `getSlides`, and the deck copy was the bulk of this response (a 3.16 MB download per call on a
+   * real deck, twice per deck open, once of them ahead of the chat). `has_slide_deck` still says
+   * whether one exists.
    */
   async getSession(sessionId: string): Promise<Session> {
-    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`);
+    const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}?include_deck=false`);
 
     if (!response.ok) {
       throw new ApiError(response.status, 'Failed to get session');

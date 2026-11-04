@@ -72,6 +72,18 @@ class UpdateSessionRequest(BaseModel):
     slide_count: Optional[int] = Field(None, ge=0, description="Deck slide count")
 
 
+def _drop_knitted_html(deck_dict: dict) -> None:
+    """Remove ``html_content`` from a deck dict bound for the browser.
+
+    It is the whole deck knitted into one document, so it repeats every
+    slide, the css and every image and font. On a real 18-slide deck it was
+    1.56 MB of a 3.16 MB response, and no screen renders it. Server code that
+    needs it reads ``SessionManager.get_slide_deck`` directly, which keeps it.
+    Dropped before image substitution, so its placeholders are never resolved.
+    """
+    deck_dict.pop("html_content", None)
+
+
 def _substitute_deck_images(deck_dict: dict, session_id: str) -> None:
     """Substitute {{image:ID}} + {{ds-asset:ID}} placeholders in a deck dict with
     base64 data URIs.
@@ -521,7 +533,14 @@ async def get_collaboration_history_for_session(
 
 
 @router.get("/{session_id}")
-async def get_session(session_id: str, db: Session = Depends(get_db)):
+async def get_session(
+    session_id: str,
+    include_deck: bool = Query(
+        True,
+        description="Include slide_deck. The web UI sends false and reads the deck from /slides.",
+    ),
+    db: Session = Depends(get_db),
+):
     """Get session details including slides, and messages if user is session creator.
 
     Conversations are private: only the session creator can see chat messages.
@@ -531,10 +550,14 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
 
     Args:
         session_id: Session identifier
+        include_deck: When false, the response has no ``slide_deck`` key and
+            the deck is never loaded. ``has_slide_deck`` still says whether
+            one exists.
 
     Returns:
-        Session information with slide_deck, user's permission level,
-        and messages (only if user is the session creator)
+        Session information with slide_deck (unless include_deck is false),
+        user's permission level, and messages (only if user is the session
+        creator)
     """
     try:
         session_manager = get_session_manager()
@@ -556,11 +579,19 @@ async def get_session(session_id: str, db: Session = Depends(get_db)):
         if is_creator:
             messages = await asyncio.to_thread(session_manager.get_messages, session_id)
 
+        if not include_deck:
+            return {
+                **session,
+                "messages": messages,
+                "my_permission": permission.value,
+            }
+
         # Get slide deck if it exists
         slide_deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
 
         # Substitute {{image:ID}} placeholders with base64 before sending to client
         if slide_deck:
+            _drop_knitted_html(slide_deck)
             await asyncio.to_thread(_substitute_deck_images, slide_deck, session_id)
 
         return {
@@ -1060,6 +1091,7 @@ async def get_session_slides(session_id: str):
         deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
 
         if deck:
+            _drop_knitted_html(deck)
             await asyncio.to_thread(_substitute_deck_images, deck, session_id)
 
         return {"session_id": session_id, "slide_deck": deck}
