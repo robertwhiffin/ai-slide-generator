@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures/base-test';
 import { setupMocks } from '../helpers/setup-mocks';
+import { apiPath } from '../helpers/api-route';
 
 const SESSION_A = '11111111-1111-4111-8111-111111111111';
 const SESSION_B = '22222222-2222-4222-8222-222222222222';
@@ -38,7 +39,7 @@ test.describe('conversation graph versions', () => {
     await setupMocks(page);
     const requests: Array<{ kind: 'create' | 'chat'; body: Record<string, unknown> }> = [];
 
-    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}`, async (route, request) => {
+    await page.route(apiPath(`/api/sessions/${SESSION_A}`), async (route, request) => {
       if (request.method() !== 'GET') {
         await route.fallback();
         return;
@@ -87,7 +88,7 @@ test.describe('conversation graph versions', () => {
     const creationBodies: Array<Record<string, unknown>> = [];
     const graphTurns: Array<Record<string, unknown>> = [];
 
-    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}`, async (route, request) => {
+    await page.route(apiPath(`/api/sessions/${SESSION_A}`), async (route, request) => {
       if (request.method() !== 'GET') {
         await route.fallback();
         return;
@@ -200,7 +201,7 @@ test.describe('conversation graph versions', () => {
           await route.fallback();
           return;
         }
-        const sessionId = request.url().split('/').pop()!;
+        const sessionId = new URL(request.url()).pathname.split('/').pop()!;
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -231,7 +232,7 @@ test.describe('conversation graph versions', () => {
     const creationBodies: Array<Record<string, unknown>> = [];
     const oldSessionMutations: string[] = [];
 
-    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}`, async (route, request) => {
+    await page.route(apiPath(`/api/sessions/${SESSION_A}`), async (route, request) => {
       if (request.method() !== 'GET') oldSessionMutations.push(request.method());
       await route.fulfill({
         status: 200,
@@ -239,7 +240,7 @@ test.describe('conversation graph versions', () => {
         body: JSON.stringify(sessionResponse(SESSION_A, 1, 2, true)),
       });
     });
-    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_B}`, async (route) => {
+    await page.route(apiPath(`/api/sessions/${SESSION_B}`), async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -275,7 +276,7 @@ test.describe('conversation graph versions', () => {
     const graphTurns: Array<Record<string, unknown>> = [];
     const oldSessionMutations: string[] = [];
 
-    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}`, async (route, request) => {
+    await page.route(apiPath(`/api/sessions/${SESSION_A}`), async (route, request) => {
       if (request.method() !== 'GET') oldSessionMutations.push(request.method());
       await route.fulfill({
         status: 200,
@@ -354,7 +355,7 @@ test.describe('conversation graph versions', () => {
 
     // An existing, fully-pinned session (version=2, not older) so that
     // isSessionPersisted becomes true and ensureGraphCapableRoot is NOT called.
-    await page.route(`http://127.0.0.1:8000/api/sessions/${SESSION_A}`, async (route, request) => {
+    await page.route(apiPath(`/api/sessions/${SESSION_A}`), async (route, request) => {
       if (request.method() !== 'GET') {
         await route.fallback();
         return;

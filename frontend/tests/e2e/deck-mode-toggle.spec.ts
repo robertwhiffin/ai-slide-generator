@@ -1,6 +1,7 @@
 import { test, expect } from '../fixtures/base-test';
 import type { Page } from '@playwright/test';
 import { setupMocks } from '../helpers/setup-mocks';
+import { apiPath } from '../helpers/api-route';
 
 /**
  * Deck Mode toggle, Task 8: the Mode dropdown under the chat box, and the agent-only furniture
@@ -72,7 +73,7 @@ async function allowEditing(page: Page) {
 }
 
 async function mockSessionDetail(page: Page, sessionId: string, s: SessionShape) {
-  await page.route(`http://127.0.0.1:8000/api/sessions/${sessionId}`, async (route, request) => {
+  await page.route(apiPath(`/api/sessions/${sessionId}`), async (route, request) => {
     if (request.method() !== 'GET') {
       await route.fallback();
       return;
