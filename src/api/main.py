@@ -494,6 +494,16 @@ async def user_auth_middleware(request: Request, call_next):
         set_permission_context(None)
 
 
+# Response compression. A deck read is mostly HTML, css and base64 fonts and
+# images; on a real deck gzip halved it, and over a ~0.5 MB/s link the
+# download, not the server, was most of a deck open. Level 6 compresses that
+# deck as well as Starlette's default 9 at ~60% of the CPU. Starlette leaves
+# text/event-stream uncompressed, so the SSE chat stream is not held back.
+# Registered before RequestLoggingMiddleware so the logged duration includes it.
+from starlette.middleware.gzip import GZipMiddleware  # noqa: E402
+
+app.add_middleware(GZipMiddleware, compresslevel=6)
+
 # Request logging middleware - registered after auth middleware so it wraps outermost
 from src.api.middleware.request_logging import RequestLoggingMiddleware
 
@@ -505,7 +515,7 @@ app.add_middleware(RequestLoggingMiddleware)
 # outside these markers). Starlette wraps later-added middleware outermost;
 # ordering here is deliberate:
 #   SecurityHeaders (outermost, added last) -> CSRF -> RequestLogging ->
-#   user_auth -> CORS(dev) -> normalize_mcp_path -> routes
+#   GZip -> user_auth -> CORS(dev) -> normalize_mcp_path -> routes
 # Headers must stamp EVERY response (including CSRF 403s); CSRF must reject
 # forged cross-site requests before OBO auth work and before request_logs
 # DB writes. CSRF runs outside normalize_mcp_path, so it sees the raw
