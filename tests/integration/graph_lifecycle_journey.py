@@ -140,6 +140,9 @@ BUILDER_SUFFIX = " Lifecycle B."
 CHANGED_ROLES = ["architect", "builder", "fixer"]
 UNCHANGED_ROLES = ["data_analyst", "build_reviewer", "fix_reviewer", "deck_reviewer"]
 
+#: The query ``api.getSession`` sends on every session read, so the recorded contract
+#: holds the request the UI makes (the deck comes from ``/slides``, not this read).
+SESSION_READ = "?include_deck=false"
 #: Graph projection keys a conversation response must never carry (S02).
 FORBIDDEN_CONVERSATION_KEYS = frozenset(
     {"graph_release_id", "prompt_text", "endpoint_name", "content_hash"}
@@ -1310,7 +1313,9 @@ def _s12_pinned(j: LifecycleJourney) -> None:
     j.state["duplicate_id"] = duplicate["session_id"]
 
     for session_id, label in (("old-root", "get-old-root"), ("mid-root", "get-mid-root")):
-        body = j.call(label, "GET", f"/api/sessions/{session_id}", principal=OWNER, expect=200)
+        body = j.call(
+            label, "GET", f"/api/sessions/{session_id}{SESSION_READ}", principal=OWNER, expect=200
+        )
         assert not FORBIDDEN_CONVERSATION_KEYS & set(body), sorted(body)
         assert (
             body["graph_version"],
@@ -1320,7 +1325,7 @@ def _s12_pinned(j: LifecycleJourney) -> None:
     contributor_view = j.call(
         "get-contributor",
         "GET",
-        f"/api/sessions/{contributor['session_id']}",
+        f"/api/sessions/{contributor['session_id']}{SESSION_READ}",
         principal=CONTRIBUTOR,
         expect=200,
     )
@@ -1582,13 +1587,17 @@ def _s16_post_rollback_pins(j: LifecycleJourney) -> None:
     ), body
     assert j.pin_of("post-rollback-root") == j.state["v3_id"]
 
-    new_root = j.call("get-new-root", "GET", "/api/sessions/new-root", principal=OWNER, expect=200)
+    new_root = j.call(
+        "get-new-root", "GET", f"/api/sessions/new-root{SESSION_READ}", principal=OWNER, expect=200
+    )
     assert (
         new_root["graph_version"],
         new_root["active_graph_version"],
         new_root["is_older_than_active"],
     ) == (2, 3, True), new_root
-    old_root = j.call("get-old-root", "GET", "/api/sessions/old-root", principal=OWNER, expect=200)
+    old_root = j.call(
+        "get-old-root", "GET", f"/api/sessions/old-root{SESSION_READ}", principal=OWNER, expect=200
+    )
     assert (old_root["graph_version"], old_root["is_older_than_active"]) == (1, True), old_root
     assert j.pins() == {
         "old-root": 1,

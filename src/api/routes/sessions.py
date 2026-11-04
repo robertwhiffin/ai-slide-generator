@@ -579,13 +579,12 @@ async def get_session(
         if is_creator:
             messages = await asyncio.to_thread(session_manager.get_messages, session_id)
 
-        response = {
-            **session,
-            "messages": messages,
-            "my_permission": permission.value,
-        }
         if not include_deck:
-            return response
+            return {
+                **session,
+                "messages": messages,
+                "my_permission": permission.value,
+            }
 
         # Get slide deck if it exists
         slide_deck = await asyncio.to_thread(session_manager.get_slide_deck, session_id)
@@ -595,8 +594,12 @@ async def get_session(
             _drop_knitted_html(slide_deck)
             await asyncio.to_thread(_substitute_deck_images, slide_deck, session_id)
 
-        response["slide_deck"] = slide_deck
-        return response
+        return {
+            **session,
+            "messages": messages,
+            "slide_deck": slide_deck,
+            "my_permission": permission.value,
+        }
 
     except SessionNotFoundError:
         raise HTTPException(
