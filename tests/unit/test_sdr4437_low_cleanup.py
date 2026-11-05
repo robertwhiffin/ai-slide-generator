@@ -21,7 +21,7 @@ def test_obo_middleware_does_not_log_any_token_bytes(monkeypatch, caplog):
     def _boom(token):
         raise RuntimeError("no client in test")
 
-    monkeypatch.setattr(main_module, "get_or_create_user_client", _boom)
+    monkeypatch.setattr(main_module, "get_or_create_user_client_and_identity", _boom)
     client = TestClient(main_module.app, raise_server_exceptions=False)
 
     marker = "SECRET_BEARER_TOKEN_abcdefghijklmnopqrstuvwxyz0123456789"

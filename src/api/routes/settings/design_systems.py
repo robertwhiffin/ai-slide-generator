@@ -236,12 +236,10 @@ def _current_user() -> str:
     """Current username (dev/test fallback to 'system'). Mirrors images.py."""
     if os.getenv("ENVIRONMENT") in ("development", "test"):
         return "system"
-    try:
-        from src.core.databricks_client import get_user_client
+    # The middleware's resolved identity, not another SCIM /Me call (logfood rate-limits it).
+    from src.core.user_context import get_current_user
 
-        return get_user_client().current_user.me().user_name or "system"
-    except Exception:
-        return "system"
+    return get_current_user() or "system"
 
 
 # Unicode categories whose members carry no visible content:
@@ -327,7 +325,7 @@ def _require_creator_or_admin(ds: DesignSystem) -> None:
 
     Identity comes from ``get_permission_context().user_name``, which the OBO
     middleware derives server-side from the caller's authenticated token
-    (``src/api/main.py``: ``user_client.current_user.me()``, or ``DEV_USER_ID``
+    (``src/api/main.py``: one cached SCIM ``/Me`` per token, or ``DEV_USER_ID``
     locally). It is never read from the request body, query string or a client
     header, so a caller cannot assert someone else's identity. The creator half
     of the check follows the house pattern at ``src/api/routes/profiles.py:191``

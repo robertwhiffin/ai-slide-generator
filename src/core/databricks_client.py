@@ -25,14 +25,23 @@ from typing import Optional, Tuple
 
 import yaml
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.iam import User
+
+from src.core.user_context import get_current_user
 
 logger = logging.getLogger(__name__)
 
-# User client cache: avoid creating a new client on every request (e.g. poll every 2s)
+# User client cache: avoid creating a new client (and calling SCIM /Me) on every
+# request (e.g. poll every 2s). Each entry holds the client, the token holder's
+# identity from that one /Me call, and its expiry.
 _USER_CLIENT_CACHE_TTL_SEC = 300  # 5 minutes
 _USER_CLIENT_CACHE_MAX_SIZE = 100
-_user_client_cache: dict[str, Tuple[WorkspaceClient, float]] = {}
+_user_client_cache: dict[str, Tuple[WorkspaceClient, User, float]] = {}
+# Guards the two dicts only; never held across a network call, so one user's slow
+# /Me lookup cannot stall every other user's.
 _user_client_cache_lock = threading.Lock()
+# Per-token locks: concurrent cache misses for one token share a single lookup.
+_user_client_key_locks: dict[str, threading.Lock] = {}
 
 # =============================================================================
 # Product Tracking Constants
@@ -405,8 +414,15 @@ _user_client_var: ContextVar[Optional[WorkspaceClient]] = ContextVar(
 
 
 def create_user_client(token: str) -> WorkspaceClient:
+    """Create a user-scoped WorkspaceClient from forwarded token (see ``_create_user_client``)."""
+    return _create_user_client(token)[0]
+
+
+def _create_user_client(token: str) -> Tuple[WorkspaceClient, Optional[User]]:
     """
-    Create a user-scoped WorkspaceClient from forwarded token.
+    Create a user-scoped WorkspaceClient from forwarded token, plus the token
+    holder's identity from the one SCIM ``/Me`` call that creation makes
+    (``None`` if that lookup failed).
 
     Used for user-specific operations (Genie queries, LLM calls, MLflow).
     The token comes from the x-forwarded-access-token header set by
@@ -420,7 +436,8 @@ def create_user_client(token: str) -> WorkspaceClient:
         token: User's access token from request headers
 
     Returns:
-        WorkspaceClient configured with user's credentials and product tracking
+        (WorkspaceClient configured with user's credentials and product tracking,
+        the token holder's ``User`` or ``None``)
 
     Raises:
         DatabricksClientError: If client creation fails
@@ -455,7 +472,8 @@ def create_user_client(token: str) -> WorkspaceClient:
             auth_type="pat",
         )
 
-        # Get username for product tracking
+        # Get username for product tracking (and, for the caller, the identity)
+        current_user: Optional[User] = None
         try:
             current_user = initial_client.current_user.me()
             username = current_user.user_name or "unknown"
@@ -486,7 +504,7 @@ def create_user_client(token: str) -> WorkspaceClient:
             "create_user_client: client created successfully",
             extra={"product": product_name, "product_version": version},
         )
-        return client
+        return client, current_user
     except Exception as e:
         raise DatabricksClientError(
             f"Failed to create user Databricks client: {e}"
@@ -498,30 +516,69 @@ def _user_client_cache_key(token: str) -> str:
 
 
 def get_or_create_user_client(token: str) -> WorkspaceClient:
+    """Return the cached user-scoped WorkspaceClient for ``token`` (see below)."""
+    return get_or_create_user_client_and_identity(token)[0]
+
+
+def _cached_user_entry(key: str) -> Optional[Tuple[WorkspaceClient, User]]:
+    """Fresh cache entry for ``key`` or ``None``. Caller holds ``_user_client_cache_lock``."""
+    entry = _user_client_cache.get(key)
+    if entry is None:
+        return None
+    client, user, expiry = entry
+    if time.monotonic() < expiry:
+        return client, user
+    del _user_client_cache[key]
+    return None
+
+
+def get_or_create_user_client_and_identity(
+    token: str,
+) -> Tuple[WorkspaceClient, Optional[User]]:
     """
-    Return a cached user-scoped WorkspaceClient when possible to avoid creating
-    a new client on every request (e.g. chat poll every 2s). Uses a short TTL
-    so token refresh is still respected.
+    Return the user-scoped WorkspaceClient for ``token`` and the token holder's
+    identity, calling SCIM ``/Me`` at most once per token per TTL.
+
+    Logfood's shared workspace rate-limits ``/Me`` (429), and the SDK retries a
+    throttled call for up to 5 min, so this blocks: callers on the event loop
+    must run it in a threadpool. Concurrent misses for one token wait for a
+    single lookup; other tokens never wait on it. A failed identity lookup is not
+    cached, so the next request retries it instead of locking the user out for
+    the TTL. Uses a short TTL so token refresh is still respected.
     """
-    now = time.monotonic()
     key = _user_client_cache_key(token)
     with _user_client_cache_lock:
-        if key in _user_client_cache:
-            client, expiry = _user_client_cache[key]
-            if now < expiry:
-                logger.debug("OBO auth: using cached user client")
-                return client
-            del _user_client_cache[key]
-        # Evict oldest entries if at capacity
-        while len(_user_client_cache) >= _USER_CLIENT_CACHE_MAX_SIZE:
-            oldest_key = min(
-                _user_client_cache.keys(),
-                key=lambda k: _user_client_cache[k][1],
-            )
-            del _user_client_cache[oldest_key]
-        client = create_user_client(token)
-        _user_client_cache[key] = (client, now + _USER_CLIENT_CACHE_TTL_SEC)
-        return client
+        cached = _cached_user_entry(key)
+        if cached is not None:
+            logger.debug("OBO auth: using cached user client")
+            return cached
+        key_lock = _user_client_key_locks.setdefault(key, threading.Lock())
+
+    with key_lock:
+        try:
+            with _user_client_cache_lock:
+                cached = _cached_user_entry(key)  # filled while we waited?
+            if cached is not None:
+                return cached
+            client, user = _create_user_client(token)
+            if user is not None:
+                with _user_client_cache_lock:
+                    # Evict oldest entries if at capacity
+                    while len(_user_client_cache) >= _USER_CLIENT_CACHE_MAX_SIZE:
+                        oldest_key = min(
+                            _user_client_cache.keys(),
+                            key=lambda k: _user_client_cache[k][2],
+                        )
+                        del _user_client_cache[oldest_key]
+                    _user_client_cache[key] = (
+                        client,
+                        user,
+                        time.monotonic() + _USER_CLIENT_CACHE_TTL_SEC,
+                    )
+            return client, user
+        finally:
+            with _user_client_cache_lock:
+                _user_client_key_locks.pop(key, None)
 
 
 def set_user_client(client: Optional[WorkspaceClient]) -> None:
@@ -584,6 +641,20 @@ def get_user_client() -> WorkspaceClient:
     raise UserClientRequiredError(
         "No user-scoped Databricks client is bound to this request context"
     )
+
+
+def require_request_username() -> str:
+    """
+    Return the username the auth middleware resolved for this request, without
+    another SCIM ``/Me`` call.
+
+    HIGH-6 (SDR-4437): fails closed like ``get_user_client`` — a request with no
+    resolved identity raises ``UserClientRequiredError`` (401), never a fallback.
+    """
+    user_name = get_current_user()
+    if not user_name:
+        raise UserClientRequiredError("No user identity resolved for this request")
+    return user_name
 
 
 def reset_user_client() -> None:

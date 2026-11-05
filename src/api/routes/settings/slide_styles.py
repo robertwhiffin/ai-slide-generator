@@ -241,11 +241,9 @@ def create_slide_style(
             # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
             # must not silently degrade to "system"; a missing OBO client or
             # empty user_name raises instead of storing a fallback identity.
-            from src.core.databricks_client import UserClientRequiredError, get_user_client
+            from src.core.databricks_client import require_request_username
 
-            user = get_user_client().current_user.me().user_name
-            if not user:
-                raise UserClientRequiredError("OBO client resolved no user_name")
+            user = require_request_username()
         
         style = SlideStyleLibrary(
             name=request.name,
@@ -394,11 +392,9 @@ def update_slide_style(
             # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
             # must not silently degrade to "system"; a missing OBO client or
             # empty user_name raises instead of storing a fallback identity.
-            from src.core.databricks_client import UserClientRequiredError, get_user_client
+            from src.core.databricks_client import require_request_username
 
-            user_name = get_user_client().current_user.me().user_name
-            if not user_name:
-                raise UserClientRequiredError("OBO client resolved no user_name")
+            user_name = require_request_username()
             style.updated_by = user_name
         
         db.commit()
@@ -500,11 +496,9 @@ def delete_slide_style(
                 # HIGH-6 (SDR-4437): no except-Exception fallback — attribution
                 # must not silently degrade to "system"; a missing OBO client or
                 # empty user_name raises instead of storing a fallback identity.
-                from src.core.databricks_client import UserClientRequiredError, get_user_client
+                from src.core.databricks_client import require_request_username
 
-                user_name = get_user_client().current_user.me().user_name
-                if not user_name:
-                    raise UserClientRequiredError("OBO client resolved no user_name")
+                user_name = require_request_username()
                 style.updated_by = user_name
             logger.info(f"Soft deleted slide style: {style.name} (id={style.id})")
         
