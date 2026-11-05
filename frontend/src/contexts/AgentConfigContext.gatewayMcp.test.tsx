@@ -20,6 +20,8 @@ vi.mock('../services/api', () => ({
     listProfiles: vi.fn().mockResolvedValue({ profiles: [] }),
     getAgentConfig: vi.fn().mockResolvedValue({ tools: [] }),
     updateAgentConfig: vi.fn(),
+    // The admin "Add Genie One to new decks" setting, off (the real call never rejects).
+    getGenieOneDefault: vi.fn().mockResolvedValue(false),
   },
   ApiError: class ApiError extends Error {},
 }));

@@ -312,9 +312,13 @@ async function withDefaultTemplate(config: AgentConfig): Promise<AgentConfig> {
 /**
  * Add the Genie One tool when an admin turned on "Add Genie One to new decks".
  *
- * Like {@link withDefaultTemplate}, used only where a genuinely new surface is
- * seeded: a stored config is the user's own state, and they may have removed
- * the pill. The server fills the same gap on a chat request that sends no tools.
+ * Applied wherever a new deck's config is loaded: the new pre-session surface,
+ * a session with no stored config yet ("New Deck" creates the session before
+ * its config), and a reload of the pre-session surface, which is a reset for
+ * this default even if the user removed the pill there. Never applied to a
+ * session with a stored config: that deck is the user's own state, and they may
+ * have removed the pill. The server fills the same gap on a chat request that
+ * creates a session and sends no tools.
  */
 async function withGenieOneDefault(config: AgentConfig): Promise<AgentConfig> {
   const tools = config.tools ?? [];
@@ -674,16 +678,21 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
     // over — first `tools.length > 0`, then a value test on provenance/ids —
     // because a config whose only edit was choosing "Design System: None" is
     // byte-identical to the placeholder. See `isConfigMeaningful`.
+    //
+    // The one exception is the admin's Genie One default: a reload is a reset
+    // for it, so a pill the user removed on this surface comes back.
     if (storedConfig) {
-      if (storedConfig.design_system_id == null || storedConfig.deck_prompt_id == null) {
-        // NOT a new surface: this is the user's own stored state, so a missing
-        // provenance marker is read as their choice and never seeded over.
-        void withResolvedStyleSource(storedConfig).then(resolved => {
-          const updated = { ...resolved };
+      void (async () => {
+        let updated = storedConfig;
+        if (storedConfig.design_system_id == null || storedConfig.deck_prompt_id == null) {
+          // NOT a new surface: this is the user's own stored state, so a missing
+          // provenance marker is read as their choice and never seeded over.
+          updated = { ...(await withResolvedStyleSource(storedConfig)) };
           if (updated.deck_prompt_id == null) updated.deck_prompt_id = resolveDefaultDeckPromptId();
-          applyUnlessEdited(updated);
-        });
-      }
+        }
+        updated = await withGenieOneDefault(updated);
+        if (updated !== storedConfig) applyUnlessEdited(updated);
+      })();
       return;
     }
 
@@ -792,8 +801,10 @@ export const AgentConfigProvider: React.FC<{ children: React.ReactNode }> = ({ c
           //
           // This branch is gated on `!isConfigured`, i.e. the server holds NO
           // stored config for the session — genuine creation, so seeding applies.
+          // "New Deck" lands here: it creates the session before its config.
           config = await withResolvedStyleSource(config, { isNewSurface: true });
           config = await withDefaultTemplate(config);
+          config = await withGenieOneDefault(config);
         }
 
         if (config.deck_prompt_id == null) {
