@@ -6,7 +6,16 @@ from typing import Any
 
 
 def gateway_openai_client(workspace_client: Any) -> Any:
-    """``DatabricksOpenAI`` bound to ``{host}/ai-gateway/mlflow/v1`` with the caller's identity."""
+    """``DatabricksOpenAI`` bound to ``{host}/ai-gateway/mlflow/v1`` with the caller's identity.
+
+    Every request carries Tellr's Gateway attribution headers (``gateway_headers``).
+    """
     from databricks_openai import DatabricksOpenAI
 
-    return DatabricksOpenAI(workspace_client=workspace_client, use_ai_gateway=True)
+    from src.services.gateway_headers import gateway_request_headers
+
+    return DatabricksOpenAI(
+        workspace_client=workspace_client,
+        use_ai_gateway=True,
+        default_headers=gateway_request_headers(),
+    )

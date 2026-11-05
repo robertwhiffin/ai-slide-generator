@@ -22,7 +22,7 @@
 ## Global Constraints
 
 - Header name exactly `Databricks-Ai-Gateway-Request-Tags`; value exactly `json.dumps({"source": "tellr"})`, i.e. `{"source": "tellr"}`.
-- User-Agent key spelled exactly `User-Agent` (the OpenAI SDK merges header dicts case-sensitively; any other casing sends two UAs). Value exactly `f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"`, `_get_package_version` from `src/core/databricks_client.py`.
+- User-Agent key spelled `User-Agent` (Task 1 ruling: the OpenAI SDK merges headers case-insensitively, so casing cannot send two UAs; the one-UA assertion stays as a guard). Value exactly `f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"`, `_get_package_version` from `src/core/databricks_client.py`.
 - **Do not touch how Databricks SDK clients are created.** `src/core/databricks_client.py` must have an empty diff: its `product=` / `product_version=` tags (`tellr-app-system`, `tellr-app-<hash>`) on SDK requests are how installs are tracked. The new headers go only on OpenAI-client requests to `/ai-gateway/...`.
 - No new dependencies. Python env is the per-worktree uv `.venv`; run everything via `uv run` (never `pip install`).
 - Baseline (2026-11-05, before Task 1): `uv run pytest tests/unit/test_gateway_openai.py tests/unit/test_session_naming.py tests/unit/test_agent_runtime.py tests/unit/test_agent_runtime_tool_loop.py tests/unit/test_model_endpoint_probe.py tests/unit/test_html_to_pptx.py tests/unit/test_google_slides_converter.py -q` → `349 passed`. Compare failures by cause, not count.
