@@ -1183,12 +1183,22 @@ export const api = {
         let lastProgressSeq = 0;
         // Whether this turn was last reported as waiting for a free job runner.
         let queued = false;
+        // Whether a poll is waiting for its answer.  A tick that finds one does
+        // nothing: a poll slower than the interval used to be overlapped by polls
+        // carrying the same stale lastMessageId, each forwarding the same rows.
+        let polling = false;
+        // The persisted messages already forwarded, by id, so a row the server
+        // sends again (its cursor is the last row by created_at, not the highest
+        // id) is not drawn twice.
+        const forwardedMessageIds = new Set<number>();
 
         pollInterval = setInterval(async () => {
           if (cancelled) {
             if (pollInterval) clearInterval(pollInterval);
             return;
           }
+          if (polling) return;
+          polling = true;
 
           try {
             const response = await this.pollChat(
@@ -1209,6 +1219,10 @@ export const api = {
 
             // Process new events (streaming path emits real slide_ready events here)
             for (const event of response.events) {
+              if (event.message_id != null) {
+                if (forwardedMessageIds.has(event.message_id)) continue;
+                forwardedMessageIds.add(event.message_id);
+              }
               onEvent(event);
               // E0: keep the cursor up-to-date as slide_ready events arrive
               if (event.type === 'slide_ready' && event.slide_cursor != null) {
@@ -1294,6 +1308,8 @@ export const api = {
           } catch (err) {
             console.error('Poll error:', err);
             // Don't stop polling on transient errors
+          } finally {
+            polling = false;
           }
         }, POLL_INTERVAL_MS);
 
