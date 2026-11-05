@@ -638,16 +638,58 @@ class TestBuildSessionTitleModel:
 
         monkeypatch.setattr("src.core.databricks_client.get_user_client", _user_client_forbidden)
 
+        from src.services.gateway_headers import gateway_request_headers
+
         assert session_naming.build_session_title_model() == "model"
         assert constructed == [{
             "model": "system.ai.claude-opus-5-5",
             "use_ai_gateway": True,
             "max_tokens": 50,
             "workspace_client": sp_client,
+            "extra_params": {"extra_headers": gateway_request_headers()},
         }]
         # ws2a follow-up A: newer Claude models 400 on sampling parameters.
         for sampling in ("temperature", "top_p", "top_k"):
             assert sampling not in constructed[0]
+
+    def test_title_model_sends_the_tellr_tag_and_user_agent(self, monkeypatch):
+        """Title calls are attributable to Tellr in ``system.ai_gateway.usage``;
+        the headers ride as headers only, never in the JSON body."""
+        import json
+
+        import httpx
+        import openai
+
+        from src.api.services import session_naming
+        from src.core.databricks_client import _get_package_version
+        from tests.fixtures.mock_chat_completions import (
+            MockChatCompletionsWorkspace,
+            install_mock_gateway_transport,
+        )
+
+        install_mock_gateway_transport(monkeypatch)
+        workspace = MockChatCompletionsWorkspace({}, usage=None)
+
+        def _text_reply(request):
+            workspace.requests.append(request)
+            return httpx.Response(200, json={
+                "id": "x", "object": "chat.completion", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "A Title"}}],
+            })
+
+        workspace._handle = _text_reply
+        monkeypatch.setattr("src.core.databricks_client.get_system_client", lambda: workspace)
+
+        session_naming.build_session_title_model().invoke("hi")
+
+        assert len(workspace.requests) == 1
+        request = workspace.requests[0]
+        expected_ua = f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"
+        assert request.headers.get_list("databricks-ai-gateway-request-tags") == ['{"source": "tellr"}']
+        assert request.headers.get_list("user-agent") == [expected_ua]
+        sent = json.loads(request.content)
+        assert "extra_headers" not in sent and "extra_params" not in sent
 
     def test_both_chat_service_title_sites_use_the_helper(self):
         import inspect

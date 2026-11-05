@@ -108,12 +108,15 @@ def build_session_title_model():
 
     from src.core.databricks_client import get_system_client
     from src.core.defaults import SESSION_TITLE_MODEL
+    from src.services.gateway_headers import gateway_request_headers
 
     return ChatDatabricks(
         model=SESSION_TITLE_MODEL,
         use_ai_gateway=True,
         max_tokens=50,
         workspace_client=get_system_client(),
+        # Tellr's Gateway attribution tag; ``extra_params`` reaches create() as kwargs.
+        extra_params={"extra_headers": gateway_request_headers()},
     )
 
 

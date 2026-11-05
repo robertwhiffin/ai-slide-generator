@@ -1174,6 +1174,39 @@ def test_the_real_provider_client_accepts_the_tools_and_the_tool_result_history(
     assert second["messages"][2]["content"] == "42 rows"
 
 
+def test_every_tool_loop_round_carries_the_tellr_tag(monkeypatch):
+    """Each round re-invokes the bound model; none may lose Tellr's Gateway attribution."""
+    from src.core.databricks_client import _get_package_version
+    from tests.fixtures.mock_chat_completions import install_mock_gateway_transport
+
+    install_mock_gateway_transport(monkeypatch)
+    workspace = _scripted_gateway_workspace(
+        [
+            _completion("lookup", {"question": "sales by region"}, "call_lookup"),
+            _completion(SCHEMA_NAME, OUTPUT, "call_final"),
+        ]
+    )
+    adapter = DatabricksModelAdapter(client_factory=lambda: workspace)
+
+    adapter.invoke_with_tools(
+        agent_key="data_analyst",
+        configuration=CONFIGURATION,
+        schema=SCHEMA,
+        prompt=PROMPT,
+        toolset=_toolset(RecordingTool(results=("42 rows",))),
+    )
+
+    assert len(workspace.requests) == 2
+    expected_ua = f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"
+    for request in workspace.requests:
+        assert request.headers.get_list("databricks-ai-gateway-request-tags") == [
+            '{"source": "tellr"}'
+        ]
+        assert request.headers.get_list("user-agent") == [expected_ua]
+        sent = json.loads(request.content)
+        assert "extra_headers" not in sent and "extra_params" not in sent
+
+
 def test_the_real_provider_client_sends_a_malformed_call_back_so_it_is_answered(monkeypatch):
     """Why a malformed call must be answered: the REAL ``ChatDatabricks`` parses it
     into ``invalid_tool_calls`` and still sends it back in the assistant turn, so
