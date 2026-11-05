@@ -14,7 +14,7 @@
 
 - **Purpose:** internal reporting/attribution only — Databricks counts customers and tokens per workspace by filtering `system.ai_gateway.usage` on `request_tags['source'] = 'tellr'`. Reporting job/dashboard is out of scope (the teammate's side).
 - **Tag content:** exactly `{"source": "tellr"}`. No per-agent, per-user, per-deck or version tags.
-- **User-Agent:** `tellr/<version> OpenAI/Python <openai version>` (orchestrator's call, user did not object): product first, the SDK's own UA kept after it, as Isaac's `ucode/<v> claude/<v>` does.
+- **User-Agent:** `tellr/<version> DatabricksOpenAI/Python <openai version>` (final review: the SDK's own UA for `DatabricksOpenAI` is `DatabricksOpenAI/Python`) (orchestrator's call, user did not object): product first, the SDK's own UA kept after it, as Isaac's `ucode/<v> claude/<v>` does.
 - **In scope:** the three Gateway call sites — graph agents (`DatabricksModelAdapter._default_model_factory`, `src/services/agent_runtime.py:535-540`; also reached by the #266 probe and #267 workbench), session titles (`build_session_title_model`, `src/api/services/session_naming.py:112-117`), PPTX + Google Slides export (`gateway_openai_client`, `src/services/gateway_openai.py:8-12`).
 - **Out of scope:** every `/serving-endpoints` path (legacy monolith `agent_factory.py`/`agent.py`, `feedback_service.py`, `config_validator.py`, `evaluation/llm_judge.py`) — an undercount is acceptable, graph agents are ~99% of spend; Genie One / Gateway MCP calls (`mcp_transport.py`) — no token spend, and the docs don't say tags are accepted on MCP routes.
 - **Done:** devloop deploy where deck generation, a title and a PPTX export all succeed (proves the real Gateway accepts the header), then rows with `request_tags['source'] = 'tellr'` in that workspace's `system.ai_gateway.usage`; then a PR.
@@ -22,7 +22,7 @@
 ## Global Constraints
 
 - Header name exactly `Databricks-Ai-Gateway-Request-Tags`; value exactly `json.dumps({"source": "tellr"})`, i.e. `{"source": "tellr"}`.
-- User-Agent key spelled `User-Agent` (Task 1 ruling: the OpenAI SDK merges headers case-insensitively, so casing cannot send two UAs; the one-UA assertion stays as a guard). Value exactly `f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"`, `_get_package_version` from `src/core/databricks_client.py`.
+- User-Agent key spelled `User-Agent` (Task 1 ruling: the OpenAI SDK merges headers case-insensitively, so casing cannot send two UAs; the one-UA assertion stays as a guard). Value `f"tellr/{version} DatabricksOpenAI/Python {openai.__version__}"`, where version = installed `databricks-tellr-app` metadata, falling back to `_get_package_version()` (final-review fix: shipped wheels carry no `_version.py`, so `_get_package_version` alone says `0.1.0`).
 - **Do not touch how Databricks SDK clients are created.** `src/core/databricks_client.py` must have an empty diff: its `product=` / `product_version=` tags (`tellr-app-system`, `tellr-app-<hash>`) on SDK requests are how installs are tracked. The new headers go only on OpenAI-client requests to `/ai-gateway/...`.
 - No new dependencies. Python env is the per-worktree uv `.venv`; run everything via `uv run` (never `pip install`).
 - Baseline (2026-11-05, before Task 1): `uv run pytest tests/unit/test_gateway_openai.py tests/unit/test_session_naming.py tests/unit/test_agent_runtime.py tests/unit/test_agent_runtime_tool_loop.py tests/unit/test_model_endpoint_probe.py tests/unit/test_html_to_pptx.py tests/unit/test_google_slides_converter.py -q` → `349 passed`. Compare failures by cause, not count.
@@ -208,6 +208,6 @@ WHERE event_time >= current_timestamp() - INTERVAL 6 HOURS
 GROUP BY ALL
 ```
 
-(`request_tags` is a MAP and cannot be grouped on; select the key.) Expected: ≥1 row, `user_agent` starting `tellr/<version> OpenAI/Python`, `source = 'tellr'`. No rows after 3 h = stop and report.
+(`request_tags` is a MAP and cannot be grouped on; select the key.) Expected: ≥1 row, `user_agent` = `tellr/<deployed version> DatabricksOpenAI/Python <v>`, `source = 'tellr'`. No rows after 3 h = stop and report.
 - [ ] **Step 6: PR** — body written with `mattpocock-skills:pr`; include the Step 5 result, the out-of-scope list from the Design section, and a note for the reporting side that Databricks-internal workspaces (dev, evals) also emit `source=tellr` and should be excluded. End the body with `This pull request and its description were written by Isaac.`
 - [ ] **Step 7: After merge** — delete devloop `gw-tags`, remove the worktree, update memory `gateway-request-tags`.
