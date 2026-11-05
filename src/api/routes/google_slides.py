@@ -63,12 +63,9 @@ def _get_user_identity() -> str:
     """
     if os.getenv("ENVIRONMENT") in ("development", "test"):
         return "local_dev"
-    from src.core.databricks_client import UserClientRequiredError, get_user_client
+    from src.core.databricks_client import require_request_username
 
-    user_name = get_user_client().current_user.me().user_name
-    if not user_name:
-        raise UserClientRequiredError("OBO client resolved no user_name")
-    return user_name
+    return require_request_username()
 
 
 def _get_auth(db: Session) -> GoogleSlidesAuth:

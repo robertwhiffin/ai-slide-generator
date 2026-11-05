@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from src.api.routes import (
     admin,
@@ -59,7 +60,7 @@ from src.core.database import (
     start_token_refresh,
     stop_token_refresh,
 )
-from src.core.databricks_client import get_or_create_user_client, set_user_client
+from src.core.databricks_client import get_or_create_user_client_and_identity, set_user_client
 from src.core.permission_context import build_permission_context, set_permission_context
 from src.core.user_context import get_current_user as get_ctx_user
 from src.core.user_context import set_current_user
@@ -433,17 +434,19 @@ async def user_auth_middleware(request: Request, call_next):
         if is_sp_token:
             logger.warning("OBO auth: token appears to be service principal ID, not user token!")
         try:
-            user_client = get_or_create_user_client(token)
+            # Cached per token (one SCIM /Me per TTL) and run off the event loop:
+            # a throttled /Me retries for minutes and would otherwise freeze the worker.
+            user_client, me = await run_in_threadpool(
+                get_or_create_user_client_and_identity, token
+            )
             set_user_client(user_client)
             logger.debug("OBO auth: user client set successfully")
-            # Extract user info from the token-scoped client
-            try:
-                me = user_client.current_user.me()
+            if me is not None:
                 user_id = me.id
                 user_name = me.user_name
                 set_current_user(user_name)
-            except Exception as e:
-                logger.warning(f"OBO auth: failed to resolve user info from token: {e}")
+            else:
+                logger.warning("OBO auth: failed to resolve user info from token")
         except Exception as e:
             logger.warning(f"Failed to create user client from token: {e}")
     else:
