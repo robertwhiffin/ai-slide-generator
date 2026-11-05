@@ -69,18 +69,92 @@ def test_each_call_returns_a_fresh_dict():
     assert gateway_request_headers()["User-Agent"] == EXPECTED_UA
 
 
+_GATEWAY_FLAGS = ("use_ai_gateway", "use_ai_gateway_native_api")
+
+
+def _is_headers_call(node: ast.AST | None) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "gateway_request_headers"
+    )
+
+
+def _carries_extra_headers(node: ast.AST | None) -> bool:
+    """``extra_params={"extra_headers": gateway_request_headers()}``."""
+    return isinstance(node, ast.Dict) and any(
+        isinstance(key, ast.Constant) and key.value == "extra_headers" and _is_headers_call(value)
+        for key, value in zip(node.keys, node.values)
+    )
+
+
+def _gateway_calls(source: str) -> list[tuple[int, bool]]:
+    """``(line, tagged)`` for each call in ``source`` that builds a Unity AI Gateway client.
+
+    A call builds one when it passes a Gateway flag that is not literally ``False``,
+    or a ``base_url`` under ``/ai-gateway/``.  It is tagged when it passes
+    ``default_headers=gateway_request_headers()`` or the ``extra_params`` form.
+    Comments and prose are not calls, so they neither count nor tag.
+    """
+    calls = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+        flagged = any(
+            name in kwargs
+            and not (isinstance(kwargs[name], ast.Constant) and kwargs[name].value is False)
+            for name in _GATEWAY_FLAGS
+        )
+        gateway_url = "base_url" in kwargs and "/ai-gateway/" in ast.unparse(kwargs["base_url"])
+        if flagged or gateway_url:
+            tagged = _is_headers_call(kwargs.get("default_headers")) or _carries_extra_headers(
+                kwargs.get("extra_params")
+            )
+            calls.append((node.lineno, tagged))
+    return sorted(calls)
+
+
+TAGGED = 'extra_params={"extra_headers": gateway_request_headers()}'
+
+
+def test_guard_flags_an_untagged_construction_beside_a_tagged_one():
+    source = f"a = ChatDatabricks(use_ai_gateway=True, {TAGGED})\nb = ChatDatabricks(use_ai_gateway=True)\n"
+    assert _gateway_calls(source) == [(1, True), (2, False)]
+
+
+def test_guard_flags_a_commented_out_header_argument():
+    source = "DatabricksOpenAI(\n    use_ai_gateway=True,\n    # default_headers=gateway_request_headers(),\n)\n"
+    assert _gateway_calls(source) == [(1, False)]
+
+
+def test_guard_flags_a_client_built_from_an_ai_gateway_base_url():
+    source = 'DatabricksOpenAI(base_url=f"{host}/ai-gateway/mlflow/v1")\n'
+    assert _gateway_calls(source) == [(1, False)]
+
+
+def test_guard_accepts_both_tagging_forms():
+    source = (
+        "DatabricksOpenAI(use_ai_gateway=True, default_headers=gateway_request_headers())\n"
+        f"ChatDatabricks(use_ai_gateway_native_api=True, {TAGGED}, **kwargs)\n"
+    )
+    assert _gateway_calls(source) == [(1, True), (2, True)]
+
+
+def test_guard_ignores_prose_and_disabled_flags():
+    source = '"""Mentions use_ai_gateway=True and /ai-gateway/ in prose."""\nx = f(use_ai_gateway=False)\n'
+    assert _gateway_calls(source) == []
+
+
 def test_every_gateway_client_construction_sends_the_tellr_headers():
     """Isaac's tag was once silently dropped; a new Gateway client must not ship untagged."""
     src = Path(__file__).resolve().parents[2] / "src"
-    sites = {
-        p.relative_to(src).as_posix()
-        for p in src.rglob("*.py")
-        if "use_ai_gateway" in p.read_text()  # also catches use_ai_gateway_native_api
-    }
-    assert sites == {
+    found = {p.relative_to(src).as_posix(): _gateway_calls(p.read_text()) for p in src.rglob("*.py")}
+    sites = {path: calls for path, calls in found.items() if calls}
+    assert set(sites) == {
         "services/agent_runtime.py",
         "api/services/session_naming.py",
         "services/gateway_openai.py",
     }
-    for site in sites:
-        assert "gateway_request_headers()" in (src / site).read_text(), site
+    untagged = [(path, line) for path, calls in sites.items() for line, tagged in calls if not tagged]
+    assert untagged == []
