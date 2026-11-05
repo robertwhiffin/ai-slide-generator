@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from databricks.sdk import WorkspaceClient
 
-from src.services.gateway_openai import gateway_openai_client
+from src.services.gateway_clients import gateway_openai_client
 from src.services.pptx_prompts_defaults import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT_TEMPLATE,

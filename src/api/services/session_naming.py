@@ -104,19 +104,14 @@ def build_session_title_model():
     No sampling parameter is sent: newer Claude models on the Gateway reject
     ``temperature`` with a 400 (ws2a follow-up A).
     """
-    from databricks_langchain import ChatDatabricks
-
     from src.core.databricks_client import get_system_client
     from src.core.defaults import SESSION_TITLE_MODEL
-    from src.services.gateway_headers import gateway_request_headers
+    from src.services.gateway_clients import gateway_chat_model
 
-    return ChatDatabricks(
+    return gateway_chat_model(
         model=SESSION_TITLE_MODEL,
-        use_ai_gateway=True,
         max_tokens=50,
         workspace_client=get_system_client(),
-        # Tellr's Gateway attribution tag; ``extra_params`` reaches create() as kwargs.
-        extra_params={"extra_headers": gateway_request_headers()},
     )
 
 

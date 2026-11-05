@@ -638,7 +638,7 @@ class TestBuildSessionTitleModel:
 
         monkeypatch.setattr("src.core.databricks_client.get_user_client", _user_client_forbidden)
 
-        from src.services.gateway_headers import gateway_request_headers
+        from src.services.gateway_clients import gateway_request_headers
 
         assert session_naming.build_session_title_model() == "model"
         assert constructed == [{
@@ -660,7 +660,7 @@ class TestBuildSessionTitleModel:
         import httpx
 
         from src.api.services import session_naming
-        from src.services.gateway_headers import gateway_request_headers
+        from src.services.gateway_clients import gateway_request_headers
         from tests.fixtures.mock_chat_completions import (
             MockChatCompletionsWorkspace,
             install_mock_gateway_transport,

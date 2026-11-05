@@ -7,7 +7,7 @@ no-op ``__init__`` that sets only what ``DatabricksOpenAI`` reads
 transport.  Because it is a real ``WorkspaceClient`` subclass, ChatDatabricks
 0.20.0 accepts it as ``workspace_client`` directly (pydantic ``isinstance``
 check passes), and the entire production path from ``client_factory`` through
-``_default_model_factory`` → ``ChatDatabricks`` → ``DatabricksOpenAI`` →
+``_default_model_factory`` → ``gateway_chat_model`` → ``ChatDatabricks`` → ``DatabricksOpenAI`` →
 ``_get_authorized_http_client`` runs unmodified — only the HTTP transport
 layer is replaced.
 

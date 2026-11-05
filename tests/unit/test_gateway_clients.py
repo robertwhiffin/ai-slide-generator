@@ -1,16 +1,27 @@
-"""Tellr's Unity AI Gateway attribution headers (``source=tellr`` + a tellr User-Agent)."""
+"""The one module that builds Tellr's Unity AI Gateway clients, and the tag they carry."""
 
 import ast
 import json
 from importlib import metadata
 from pathlib import Path
 
+import httpx
 import openai
 import pytest
+from langchain_core.messages import HumanMessage
 
 from src.core.databricks_client import _get_package_version
-from src.services import gateway_headers
-from src.services.gateway_headers import REQUEST_TAGS_HEADER, gateway_request_headers
+from src.services import gateway_clients
+from src.services.gateway_clients import (
+    REQUEST_TAGS_HEADER,
+    gateway_chat_model,
+    gateway_openai_client,
+    gateway_request_headers,
+)
+from tests.fixtures.mock_chat_completions import (
+    MockChatCompletionsWorkspace,
+    install_mock_gateway_transport,
+)
 
 #: The SDK's own User-Agent for ``DatabricksOpenAI`` (``openai._base_client``:
 #: ``f"{self.__class__.__name__}/Python {version}"``), kept as the suffix.
@@ -22,9 +33,9 @@ EXPECTED_UA = f"tellr/{_get_package_version()} {SDK_UA}"
 
 @pytest.fixture(autouse=True)
 def _fresh_version_cache():
-    gateway_headers._tellr_version.cache_clear()
+    gateway_clients._tellr_version.cache_clear()
     yield
-    gateway_headers._tellr_version.cache_clear()
+    gateway_clients._tellr_version.cache_clear()
 
 
 def test_request_tags_header_is_the_source_tellr_json_object():
@@ -45,7 +56,7 @@ def test_user_agent_reports_the_installed_wheel_version(monkeypatch):
             return "9.9.9"
         raise metadata.PackageNotFoundError(name)
 
-    monkeypatch.setattr(gateway_headers.metadata, "version", _version)
+    monkeypatch.setattr(gateway_clients.metadata, "version", _version)
 
     assert gateway_request_headers()["User-Agent"] == f"tellr/9.9.9 {SDK_UA}"
 
@@ -54,7 +65,7 @@ def test_user_agent_falls_back_to_the_source_version_outside_a_wheel(monkeypatch
     def _not_installed(name):
         raise metadata.PackageNotFoundError(name)
 
-    monkeypatch.setattr(gateway_headers.metadata, "version", _not_installed)
+    monkeypatch.setattr(gateway_clients.metadata, "version", _not_installed)
 
     assert gateway_request_headers()["User-Agent"] == f"tellr/{_get_package_version()} {SDK_UA}"
 
@@ -67,6 +78,60 @@ def test_each_call_returns_a_fresh_dict():
     first = gateway_request_headers()
     first["User-Agent"] = "mutated"
     assert gateway_request_headers()["User-Agent"] == EXPECTED_UA
+
+
+def _text_workspace(monkeypatch) -> MockChatCompletionsWorkspace:
+    """A mock-transport workspace that answers every chat completion with plain text."""
+    install_mock_gateway_transport(monkeypatch)
+    workspace = MockChatCompletionsWorkspace({}, usage=None)
+
+    def handle(request):
+        workspace.requests.append(request)
+        return httpx.Response(200, json={
+            "id": "x", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "ok"}}],
+        })
+
+    workspace._handle = handle
+    return workspace
+
+
+def _assert_tagged_gateway_chat_request(request: httpx.Request, model: str) -> None:
+    assert request.url.path == "/ai-gateway/mlflow/v1/chat/completions"
+    assert request.headers["authorization"] == "Bearer unit-test-dummy-key"
+    assert request.headers.get_list("databricks-ai-gateway-request-tags") == ['{"source": "tellr"}']
+    assert request.headers.get_list("user-agent") == [EXPECTED_UA]
+    sent = json.loads(request.content)
+    assert sent["model"] == model
+    assert "extra_headers" not in sent and "extra_params" not in sent
+
+
+def test_gateway_openai_client_sends_tagged_requests_to_the_gateway_chat_route(monkeypatch):
+    """Exports: the raw client, bound to {host}/ai-gateway/mlflow/v1, tagged."""
+    workspace = _text_workspace(monkeypatch)
+
+    gateway_openai_client(workspace).chat.completions.create(
+        model="system.ai.claude-sonnet-4-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=5,
+    )
+
+    assert len(workspace.requests) == 1
+    _assert_tagged_gateway_chat_request(workspace.requests[0], "system.ai.claude-sonnet-4-5")
+
+
+def test_gateway_chat_model_sends_tagged_requests_to_the_gateway_chat_route(monkeypatch):
+    """Graph agents and titles: the LangChain model, as the given identity, tagged."""
+    workspace = _text_workspace(monkeypatch)
+
+    model = gateway_chat_model(model="system.ai.claude-opus-5-5", max_tokens=5, workspace_client=workspace)
+    model.invoke([HumanMessage(content="hi")])
+
+    assert model.workspace_client is workspace
+    assert len(workspace.requests) == 1
+    _assert_tagged_gateway_chat_request(workspace.requests[0], "system.ai.claude-opus-5-5")
+    assert json.loads(workspace.requests[0].content)["max_tokens"] == 5
 
 
 _GATEWAY_FLAGS = ("use_ai_gateway", "use_ai_gateway_native_api")
@@ -146,15 +211,15 @@ def test_guard_ignores_prose_and_disabled_flags():
     assert _gateway_calls(source) == []
 
 
-def test_every_gateway_client_construction_sends_the_tellr_headers():
-    """Isaac's tag was once silently dropped; a new Gateway client must not ship untagged."""
+def test_only_gateway_clients_builds_gateway_clients_and_every_one_is_tagged():
+    """Isaac's tag was once silently dropped; a new Gateway client must not ship untagged.
+
+    Every Gateway client in ``src`` is built in ``services/gateway_clients.py``;
+    a construction anywhere else should call its builders instead.
+    """
     src = Path(__file__).resolve().parents[2] / "src"
     found = {p.relative_to(src).as_posix(): _gateway_calls(p.read_text()) for p in src.rglob("*.py")}
     sites = {path: calls for path, calls in found.items() if calls}
-    assert set(sites) == {
-        "services/agent_runtime.py",
-        "api/services/session_naming.py",
-        "services/gateway_openai.py",
-    }
+    assert set(sites) == {"services/gateway_clients.py"}
     untagged = [(path, line) for path, calls in sites.items() for line, tagged in calls if not tagged]
     assert untagged == []

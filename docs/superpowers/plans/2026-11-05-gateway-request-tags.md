@@ -211,3 +211,11 @@ GROUP BY ALL
 (`request_tags` is a MAP and cannot be grouped on; select the key.) Expected: ≥1 row, `user_agent` = `tellr/<deployed version> DatabricksOpenAI/Python <v>`, `source = 'tellr'`. No rows after 3 h = stop and report.
 - [ ] **Step 6: PR** — body written with `mattpocock-skills:pr`; include the Step 5 result, the out-of-scope list from the Design section, and a note for the reporting side that Databricks-internal workspaces (dev, evals) also emit `source=tellr` and should be excluded. End the body with `This pull request and its description were written by Isaac.`
 - [ ] **Step 7: After merge** — delete devloop `gw-tags`, remove the worktree, update memory `gateway-request-tags`.
+
+---
+
+### Task 4 (added 2026-11-05 at the user's request): one module builds every Gateway client
+
+**Models:** `test=opus impl=sonnet` — executed inline.
+
+The three construction sites (graph agents, session titles, exports) were two wrappers over one `DatabricksOpenAI`, built in three files. `src/services/gateway_clients.py` now owns all of it: `gateway_request_headers()`, `gateway_chat_model(**kwargs)` (LangChain `ChatDatabricks`, used by `DatabricksModelAdapter._default_model_factory` — kept as the graph's seam for the #266 probe / #267 workbench identity checks — and by `build_session_title_model`), and `gateway_openai_client(ws)` (exports). `gateway_headers.py` and `gateway_openai.py` are gone; `tests/unit/test_gateway_clients.py` replaces their tests and its AST guard now asserts **no file but `services/gateway_clients.py` builds a Gateway client**, and every one there is tagged. Sabotage: a tagged `ChatDatabricks(use_ai_gateway=True, …)` added to `session_naming.py` → guard red.

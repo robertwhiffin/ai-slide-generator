@@ -1843,7 +1843,7 @@ def test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route(monk
 def test_production_adapter_sends_the_tellr_tag_and_user_agent(monkeypatch):
     """Graph-agent Gateway calls are attributable to Tellr in ``system.ai_gateway.usage``;
     the headers ride as headers only, never in the JSON body the Gateway validates."""
-    from src.services.gateway_headers import gateway_request_headers
+    from src.services.gateway_clients import gateway_request_headers
     from tests.fixtures.mock_chat_completions import (
         MockChatCompletionsWorkspace,
         install_mock_gateway_transport,
