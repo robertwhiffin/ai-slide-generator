@@ -658,10 +658,9 @@ class TestBuildSessionTitleModel:
         import json
 
         import httpx
-        import openai
 
         from src.api.services import session_naming
-        from src.core.databricks_client import _get_package_version
+        from src.services.gateway_headers import gateway_request_headers
         from tests.fixtures.mock_chat_completions import (
             MockChatCompletionsWorkspace,
             install_mock_gateway_transport,
@@ -685,7 +684,7 @@ class TestBuildSessionTitleModel:
 
         assert len(workspace.requests) == 1
         request = workspace.requests[0]
-        expected_ua = f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"
+        expected_ua = gateway_request_headers()["User-Agent"]
         assert request.headers.get_list("databricks-ai-gateway-request-tags") == ['{"source": "tellr"}']
         assert request.headers.get_list("user-agent") == [expected_ua]
         sent = json.loads(request.content)

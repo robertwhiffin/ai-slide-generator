@@ -1176,7 +1176,7 @@ def test_the_real_provider_client_accepts_the_tools_and_the_tool_result_history(
 
 def test_every_tool_loop_round_carries_the_tellr_tag(monkeypatch):
     """Each round re-invokes the bound model; none may lose Tellr's Gateway attribution."""
-    from src.core.databricks_client import _get_package_version
+    from src.services.gateway_headers import gateway_request_headers
     from tests.fixtures.mock_chat_completions import install_mock_gateway_transport
 
     install_mock_gateway_transport(monkeypatch)
@@ -1197,7 +1197,7 @@ def test_every_tool_loop_round_carries_the_tellr_tag(monkeypatch):
     )
 
     assert len(workspace.requests) == 2
-    expected_ua = f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"
+    expected_ua = gateway_request_headers()["User-Agent"]
     for request in workspace.requests:
         assert request.headers.get_list("databricks-ai-gateway-request-tags") == [
             '{"source": "tellr"}'

@@ -1843,9 +1843,7 @@ def test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route(monk
 def test_production_adapter_sends_the_tellr_tag_and_user_agent(monkeypatch):
     """Graph-agent Gateway calls are attributable to Tellr in ``system.ai_gateway.usage``;
     the headers ride as headers only, never in the JSON body the Gateway validates."""
-    import openai
-
-    from src.core.databricks_client import _get_package_version
+    from src.services.gateway_headers import gateway_request_headers
     from tests.fixtures.mock_chat_completions import (
         MockChatCompletionsWorkspace,
         install_mock_gateway_transport,
@@ -1869,7 +1867,7 @@ def test_production_adapter_sends_the_tellr_tag_and_user_agent(monkeypatch):
 
     assert len(workspace.requests) == 1
     request = workspace.requests[0]
-    expected_ua = f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"
+    expected_ua = gateway_request_headers()["User-Agent"]
     assert request.headers.get_list("databricks-ai-gateway-request-tags") == ['{"source": "tellr"}']
     assert request.headers.get_list("user-agent") == [expected_ua]
     sent = json.loads(request.content)

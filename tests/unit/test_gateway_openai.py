@@ -22,9 +22,7 @@ def test_gateway_openai_client_posts_to_the_gateway_chat_route(monkeypatch):
 
 def test_gateway_openai_client_sends_the_tellr_tag_and_user_agent(monkeypatch):
     """Export LLM calls are attributable to Tellr in ``system.ai_gateway.usage``."""
-    import openai
-
-    from src.core.databricks_client import _get_package_version
+    from src.services.gateway_headers import gateway_request_headers
 
     install_mock_gateway_transport(monkeypatch)
     workspace = MockChatCompletionsWorkspace({}, usage=None)
@@ -35,7 +33,7 @@ def test_gateway_openai_client_sends_the_tellr_tag_and_user_agent(monkeypatch):
                                    messages=[{"role": "user", "content": "hi"}], max_tokens=5)
 
     request = workspace.requests[0]
-    expected_ua = f"tellr/{_get_package_version()} OpenAI/Python {openai.__version__}"
+    expected_ua = gateway_request_headers()["User-Agent"]
     assert request.headers.get_list("databricks-ai-gateway-request-tags") == ['{"source": "tellr"}']
     assert request.headers.get_list("user-agent") == [expected_ua]
     assert request.headers["authorization"] == "Bearer unit-test-dummy-key"
