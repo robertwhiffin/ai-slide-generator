@@ -874,6 +874,34 @@ export const api = {
   },
 
   /**
+   * Save a slide's speaker notes only (never touches the slide HTML)
+   */
+  async updateSlideNotes(
+    index: number,
+    speakerNotes: string,
+    sessionId: string,
+    slideId?: string,
+    expectedVersion?: number
+  ): Promise<{ index: number; slide_id: string; speaker_notes: string; version: number }> {
+    const response = await fetch(`${API_BASE_URL}/api/slides/${index}/notes`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        speaker_notes: speakerNotes,
+        slide_id: slideId,
+        expected_version: expectedVersion,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new ApiError(response.status, response.status === 409 ? 'Deck was modified by another user' : 'Failed to save speaker notes');
+    }
+
+    return response.json();
+  },
+
+  /**
    * Duplicate a slide
    */
   async duplicateSlide(

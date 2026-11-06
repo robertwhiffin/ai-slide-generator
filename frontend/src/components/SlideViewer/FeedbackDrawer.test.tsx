@@ -23,7 +23,7 @@
  *  - Render the toggle only on the open-finding branch -> test 7 goes red.
  *  - Key the expanded set by array index instead of `f.id` -> test 8 goes red.
  */
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { FeedbackDrawer } from './FeedbackDrawer';
 import { ViewerProvider } from '../../contexts/ViewerContext';
 import { PLAIN_MESSAGE_FALLBACK, type DrawerCallbacks, type SlideFinding } from '../../types/finding';
@@ -355,5 +355,240 @@ describe('FeedbackDrawer — while a turn is running', () => {
 
     expect(screen.getByTestId('finding-apply-f-open')).toBeEnabled();
     expect(screen.getByTestId('finding-discuss-f-open')).toBeEnabled();
+  });
+});
+
+// ── Speaker notes (plan Task 9, D6, D10): an editable Notes tab ─────────────
+
+const NOTES_HINT =
+  'Notes you save here are kept when the slide is rebuilt. Chat does not edit notes yet.';
+const VIEW_STATE_KEY = 'tellr-viewer-view-state';
+
+interface NotesDrawerProps {
+  findings?: SlideFinding[];
+  hasUnseen?: boolean;
+  speakerNotes?: string;
+  slideKey?: string;
+  onSaveNotes?: (notes: string) => Promise<void>;
+}
+
+function notesTree({ findings = [], hasUnseen = false, ...rest }: NotesDrawerProps = {}) {
+  return (
+    <ViewerProvider slideCount={2}>
+      <FeedbackDrawer findings={findings} callbacks={callbacks} hasUnseen={hasUnseen} {...rest} />
+    </ViewerProvider>
+  );
+}
+
+function renderNotesDrawer(props: NotesDrawerProps = {}) {
+  return render(notesTree(props));
+}
+
+const openNotesTab = () => fireEvent.click(screen.getByTestId('drawer-tab-notes'));
+const notesInput = () => screen.getByTestId('drawer-notes-input') as HTMLTextAreaElement;
+const saveButton = () => screen.getByTestId('drawer-notes-save');
+
+describe('FeedbackDrawer: Notes tab', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('read-only: shows the slide\'s notes as plain text', () => {
+    // Sabotage target: render the notes with dangerouslySetInnerHTML.
+    const notes = '<b>bold</b>\n\nSecond';
+    renderNotesDrawer({ speakerNotes: notes, slideKey: 's1' });
+    openNotesTab();
+
+    const body = screen.getByTestId('drawer-notes');
+    expect(body.textContent).toBe(notes);
+    expect(body.querySelector('b')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-save')).toBeNull();
+  });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace-only', '  \n\t '],
+    ['missing', undefined],
+  ])('read-only: shows the empty state when the notes are %s', (_label, speakerNotes) => {
+    // Sabotage target: drop the `speakerNotes.trim() !== ''` guard on the read-only branch.
+    renderNotesDrawer({ speakerNotes, slideKey: 's1' });
+    openNotesTab();
+
+    expect(screen.getByTestId('drawer-notes-empty')).toHaveTextContent('No speaker notes for this slide.');
+    expect(screen.queryByTestId('drawer-notes')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
+  });
+
+  it('editable: the editor holds the notes and saves the draft', async () => {
+    // Sabotage target: call onSaveNotes(speakerNotes) instead of onSaveNotes(draft).
+    const onSaveNotes = vi.fn(async (_notes: string) => {});
+    renderNotesDrawer({ speakerNotes: 'Open with the result.', slideKey: 's1', onSaveNotes });
+    openNotesTab();
+
+    expect(notesInput().value).toBe('Open with the result.');
+    expect(notesInput()).toHaveAccessibleName('Speaker notes');
+    expect(notesInput()).toHaveAttribute('placeholder', 'Add speaker notes for this slide.');
+    expect(screen.queryByTestId('drawer-notes')).toBeNull();
+    // Unchanged draft: nothing to save.
+    expect(saveButton()).toBeDisabled();
+
+    const draft = 'Open with the result.\nThen show the chart.';
+    fireEvent.change(notesInput(), { target: { value: draft } });
+    expect(saveButton()).toBeEnabled();
+    expect(saveButton()).toHaveTextContent('Save notes');
+
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(onSaveNotes).toHaveBeenCalledTimes(1));
+    expect(onSaveNotes).toHaveBeenCalledWith(draft);
+  });
+
+  it('editable: Save is disabled while a save is in flight', async () => {
+    // Sabotage target: drop the saving flag from the Save button's disabled condition.
+    let resolveSave: () => void = () => undefined;
+    const onSaveNotes = vi.fn(
+      (_notes: string) => new Promise<void>((resolve) => { resolveSave = resolve; }),
+    );
+    renderNotesDrawer({ speakerNotes: 'A', slideKey: 's1', onSaveNotes });
+    openNotesTab();
+
+    fireEvent.change(notesInput(), { target: { value: 'A and B' } });
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(saveButton()).toBeDisabled());
+    fireEvent.click(saveButton());
+    expect(onSaveNotes).toHaveBeenCalledTimes(1);
+
+    await act(async () => { resolveSave(); });
+  });
+
+  it('editable: the hint says saved notes survive a rebuild and chat does not edit notes', () => {
+    // Sabotage target: drop the hint, or keep the superseded "Notes are plain text." copy (D10 delta).
+    renderNotesDrawer({ speakerNotes: '', slideKey: 's1', onSaveNotes: vi.fn(async () => {}) });
+    openNotesTab();
+
+    expect(screen.getByTestId('drawer-notes-hint').textContent).toBe(NOTES_HINT);
+    // An editable, empty slide shows the editor, not the read-only empty state.
+    expect(notesInput().value).toBe('');
+    expect(screen.queryByTestId('drawer-notes-empty')).toBeNull();
+  });
+
+  it('editable: a failed save keeps the draft and shows the error', async () => {
+    // Sabotage target: reset the draft (or skip the error state) when onSaveNotes rejects.
+    const onSaveNotes = vi.fn(async (_notes: string) => {
+      throw new Error('boom');
+    });
+    renderNotesDrawer({ speakerNotes: 'Before.', slideKey: 's1', onSaveNotes });
+    openNotesTab();
+    expect(screen.queryByTestId('drawer-notes-error')).toBeNull();
+
+    fireEvent.change(notesInput(), { target: { value: 'Before. After.' } });
+    fireEvent.click(saveButton());
+
+    expect(await screen.findByTestId('drawer-notes-error')).toHaveTextContent('Could not save the notes.');
+    expect(notesInput().value).toBe('Before. After.');
+    // The user can retry: the draft still differs and nothing is in flight.
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+  });
+
+  it('editable: the draft resets when the slide changes', () => {
+    // Sabotage target: initialise the draft once (useState(speakerNotes)) with no reset on slideKey/speakerNotes.
+    const onSaveNotes = vi.fn(async () => {});
+    const { rerender } = renderNotesDrawer({ speakerNotes: 'Slide one notes.', slideKey: 's1', onSaveNotes });
+    openNotesTab();
+    fireEvent.change(notesInput(), { target: { value: 'Unsaved draft on slide one.' } });
+
+    rerender(notesTree({ speakerNotes: 'Slide two notes.', slideKey: 's2', onSaveNotes }));
+    expect(notesInput().value).toBe('Slide two notes.');
+    expect(saveButton()).toBeDisabled();
+  });
+
+  it('editable: the draft resets on a slide change even when both slides have the same notes', () => {
+    // Sabotage target: reset the draft on speakerNotes only, ignoring slideKey.
+    const onSaveNotes = vi.fn(async () => {});
+    const { rerender } = renderNotesDrawer({ speakerNotes: '', slideKey: 's1', onSaveNotes });
+    openNotesTab();
+    fireEvent.change(notesInput(), { target: { value: 'Typed on slide one.' } });
+
+    rerender(notesTree({ speakerNotes: '', slideKey: 's2', onSaveNotes }));
+    expect(notesInput().value).toBe('');
+  });
+
+  it('editable: the draft follows new notes for the same slide (the refreshed deck after a save)', () => {
+    // Sabotage target: reset the draft on slideKey only, ignoring speakerNotes.
+    const onSaveNotes = vi.fn(async () => {});
+    const { rerender } = renderNotesDrawer({ speakerNotes: 'Old.', slideKey: 's1', onSaveNotes });
+    openNotesTab();
+    expect(notesInput().value).toBe('Old.');
+
+    rerender(notesTree({ speakerNotes: 'New from the server.', slideKey: 's1', onSaveNotes }));
+    expect(notesInput().value).toBe('New from the server.');
+  });
+
+  it('switching back to AI feedback shows the findings again', () => {
+    // Sabotage target: render the findings list regardless of activeTab.
+    renderNotesDrawer({
+      findings: [openFinding],
+      speakerNotes: 'Talk track.',
+      slideKey: 's1',
+      onSaveNotes: vi.fn(async () => {}),
+    });
+    expect(screen.getByTestId('drawer-tab-notes')).toHaveTextContent('Notes');
+    expect(screen.getByTestId('drawer-tab-notes')).toHaveAttribute('data-active', 'false');
+    expect(screen.getByTestId('finding-apply-f-open')).toBeInTheDocument();
+
+    openNotesTab();
+    expect(screen.getByTestId('drawer-tab-notes')).toHaveAttribute('data-active', 'true');
+    expect(screen.getByTestId('drawer-tab-feedback')).toHaveAttribute('data-active', 'false');
+    expect(screen.queryByTestId('finding-f-open')).toBeNull();
+    expect(screen.queryByTestId('drawer-empty')).toBeNull();
+    for (const name of ['Apply', 'Dismiss', 'Discuss']) {
+      expect(screen.queryByRole('button', { name })).toBeNull();
+    }
+    expect(notesInput().value).toBe('Talk track.');
+
+    fireEvent.click(screen.getByTestId('drawer-tab-feedback'));
+    expect(screen.getByTestId('drawer-tab-feedback')).toHaveAttribute('data-active', 'true');
+    expect(screen.getByTestId('finding-apply-f-open')).toBeInTheDocument();
+    expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
+  });
+
+  it('the unread dot stays on the AI feedback tab', () => {
+    // Sabotage target: render the unseen dot inside (or move it to) the Notes tab button.
+    renderNotesDrawer({ findings: [openFinding], hasUnseen: true, speakerNotes: 'x', slideKey: 's1' });
+    openNotesTab();
+
+    const dot = screen.getByTestId('drawer-tab-unseen');
+    expect(screen.getByTestId('drawer-tab-feedback')).toContainElement(dot);
+    expect(screen.getByTestId('drawer-tab-notes')).not.toContainElement(dot);
+    expect(screen.getAllByTestId('drawer-tab-unseen')).toHaveLength(1);
+  });
+
+  it('reopens on Notes when that tab was persisted', () => {
+    // Sabotage target: readViewState rejects 'notes' (DRAWER_TABS missing it) or ignores the stored tab.
+    localStorage.setItem(
+      VIEW_STATE_KEY,
+      JSON.stringify({ drawerOpen: true, drawerHeight: 180, activeTab: 'notes' }),
+    );
+    renderNotesDrawer({ findings: [openFinding], speakerNotes: 'Persisted.', slideKey: 's1' });
+
+    expect(screen.getByTestId('drawer-tab-notes')).toHaveAttribute('data-active', 'true');
+    expect(screen.getByTestId('drawer-notes')).toHaveTextContent('Persisted.');
+    expect(screen.queryByTestId('finding-apply-f-open')).toBeNull();
+  });
+
+  it('falls back to AI feedback for an unknown persisted tab', () => {
+    // Sabotage target: drop the DRAWER_TABS validation in readViewState.
+    localStorage.setItem(
+      VIEW_STATE_KEY,
+      JSON.stringify({ drawerOpen: true, drawerHeight: 180, activeTab: 'bogus' }),
+    );
+    renderNotesDrawer({ findings: [openFinding], speakerNotes: 'x', slideKey: 's1' });
+
+    expect(screen.getByTestId('drawer-tab-feedback')).toHaveAttribute('data-active', 'true');
+    expect(screen.getByTestId('drawer-tab-notes')).toHaveAttribute('data-active', 'false');
+    expect(screen.getByTestId('finding-apply-f-open')).toBeInTheDocument();
   });
 });

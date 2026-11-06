@@ -17,7 +17,8 @@
  * Starting closed prevents the effect from firing — `seen` stays empty — so the
  * filter is the only thing distinguishing fixed from open.
  */
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { api } from '../../services/api';
 import { SlideViewer } from './SlideViewer';
 import { ToastProvider } from '../../contexts/ToastContext';
 import { SEEN_STORAGE_KEY } from './seenState';
@@ -29,6 +30,9 @@ vi.mock('../../services/api', () => ({
   api: {
     getSlides: vi.fn().mockResolvedValue({ slide_deck: null }),
     verifySlide: vi.fn().mockResolvedValue({}),
+    // Task 9: the notes-only save, and the HTML save it must never fall back to.
+    updateSlideNotes: vi.fn(),
+    updateSlide: vi.fn(),
   },
 }));
 
@@ -168,5 +172,135 @@ describe('SlideViewer — fixed findings excluded from hasUnseen prop (:525)', (
 
     // An open unseen finding on the current slide must set hasUnseen.
     expect(screen.getByTestId('drawer-tab-unseen')).toBeInTheDocument();
+  });
+});
+
+// ── Task 9 (D6, D8): the drawer's Notes tab inside the viewer ────────────────
+//
+// The plain renderViewer above is read-only with sessionId={null}. These tests
+// need an editable viewer: sessionId "s1", an onSlideChange spy, readOnly false,
+// and the drawer persisted OPEN on the Notes tab. Paging uses the window
+// keydown listener (SlideViewer.tsx onKeyDown), which skips typing targets, so
+// focus must stay off the textarea when a test pages.
+
+/** Two slides with distinct notes; no content_hash, so auto-verify stays idle. */
+function makeNotesDeck(notes: [string, string] = ['N1', 'N2']): SlideDeck {
+  return {
+    title: 'Notes Deck',
+    slide_count: 2,
+    css: '',
+    external_scripts: [],
+    scripts: '',
+    slides: [
+      { index: 0, slide_id: 'slide-1', html: '<div>slide 1</div>', scripts: '', speaker_notes: notes[0], speaker_notes_source: 'model' },
+      { index: 1, slide_id: 'slide-2', html: '<div>slide 2</div>', scripts: '', speaker_notes: notes[1], speaker_notes_source: 'model' },
+    ],
+  };
+}
+
+function openOnNotesTab() {
+  localStorage.setItem(
+    'tellr-viewer-view-state',
+    JSON.stringify({ drawerOpen: true, drawerHeight: 180, activeTab: 'notes' }),
+  );
+}
+
+function renderEditableViewer(deck: SlideDeck, { readOnly = false }: { readOnly?: boolean } = {}) {
+  openOnNotesTab();
+  const onSlideChange = vi.fn();
+  const utils = render(
+    <ToastProvider>
+      <SlideViewer
+        slideDeck={deck}
+        deckKey="notes-deck"
+        findings={[]}
+        callbacks={callbacks}
+        onReorder={noop}
+        sessionId="s1"
+        onSlideChange={onSlideChange}
+        readOnly={readOnly}
+      />
+    </ToastProvider>,
+  );
+  return { ...utils, onSlideChange };
+}
+
+const nextSlide = () => fireEvent.keyDown(window, { key: 'ArrowRight' });
+const notesEditor = () => screen.getByTestId('drawer-notes-input') as HTMLTextAreaElement;
+
+describe('SlideViewer: Notes tab (Task 9)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.getSlides).mockResolvedValue({ slide_deck: null } as never);
+  });
+
+  it('the Notes tab follows the current slide', () => {
+    // Sabotage target: pass slides[0].speaker_notes (or a fixed index) instead of currentSlide's notes.
+    renderEditableViewer(makeNotesDeck());
+    expect(notesEditor().value).toBe('N1');
+
+    nextSlide();
+    expect(notesEditor().value).toBe('N2');
+  });
+
+  it('saving notes calls the notes route for the current slide and refreshes the deck', async () => {
+    // Sabotage target: save through api.updateSlide, or pass index 0 / slides[0].slide_id from a stale closure.
+    const refreshed = makeNotesDeck(['N1', 'N2, then the chart.']);
+    refreshed.slides[1].speaker_notes_source = 'user';
+    vi.mocked(api.updateSlideNotes).mockResolvedValue({
+      index: 1, slide_id: 'slide-2', speaker_notes: 'N2, then the chart.', version: 2,
+    } as never);
+    vi.mocked(api.getSlides).mockResolvedValue({ slide_deck: refreshed } as never);
+
+    const { onSlideChange } = renderEditableViewer(makeNotesDeck());
+    nextSlide();
+    expect(notesEditor().value).toBe('N2');
+
+    fireEvent.change(notesEditor(), { target: { value: 'N2, then the chart.' } });
+    fireEvent.click(screen.getByTestId('drawer-notes-save'));
+
+    await waitFor(() => expect(onSlideChange).toHaveBeenCalledWith(refreshed));
+    const saveMock = vi.mocked(api.updateSlideNotes);
+    expect(saveMock).toHaveBeenCalledTimes(1);
+    expect(saveMock.mock.calls[0].slice(0, 4)).toEqual([1, 'N2, then the chart.', 's1', 'slide-2']);
+    expect(api.updateSlide).not.toHaveBeenCalled();
+    // The refresh follows the save, for the same session.
+    expect(api.getSlides).toHaveBeenCalledWith('s1');
+    const getSlidesOrder = vi.mocked(api.getSlides).mock.invocationCallOrder;
+    expect(Math.max(...getSlidesOrder)).toBeGreaterThan(saveMock.mock.invocationCallOrder[0]);
+  });
+
+  it('a version conflict alerts, refreshes the deck, and the drawer shows its error', async () => {
+    // Sabotage target: swallow the error in handleSaveNotes instead of rethrowing it to the drawer.
+    const conflict = Object.assign(new Error('Deck was modified by another user'), { status: 409 });
+    vi.mocked(api.updateSlideNotes).mockRejectedValue(conflict);
+    const latest = makeNotesDeck(['Someone else\'s N1', 'N2']);
+    vi.mocked(api.getSlides).mockResolvedValue({ slide_deck: latest } as never);
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+
+    try {
+      const { onSlideChange } = renderEditableViewer(makeNotesDeck());
+      fireEvent.change(notesEditor(), { target: { value: 'N1, edited.' } });
+      fireEvent.click(screen.getByTestId('drawer-notes-save'));
+
+      expect(await screen.findByTestId('drawer-notes-error')).toHaveTextContent('Could not save the notes.');
+      expect(alertSpy).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(onSlideChange).toHaveBeenCalledWith(latest));
+      expect(api.updateSlide).not.toHaveBeenCalled();
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('a read-only viewer gets no notes editor', () => {
+    // Sabotage target: drop `readOnly ||` from the onSaveNotes gate on the FeedbackDrawer mount.
+    renderEditableViewer(makeNotesDeck(), { readOnly: true });
+
+    expect(screen.getByTestId('drawer-notes')).toHaveTextContent('N1');
+    expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
+    expect(screen.queryByTestId('drawer-notes-save')).toBeNull();
+
+    nextSlide();
+    expect(screen.getByTestId('drawer-notes')).toHaveTextContent('N2');
   });
 });

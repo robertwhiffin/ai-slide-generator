@@ -1,7 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
-/** Single member today; speaker notes add 'notes' later without restructuring (spec §5). */
-export type DrawerTab = 'feedback';
+/** The drawer's tabs: AI feedback, and the editable speaker notes. */
+export type DrawerTab = 'feedback' | 'notes';
+
+// Module-private on purpose: exporting a non-component value breaks react-refresh.
+const DRAWER_TABS: readonly DrawerTab[] = ['feedback', 'notes'];
 
 const VIEW_STATE_KEY = 'tellr-viewer-view-state';
 const DEFAULT_HEIGHT = 180;
@@ -24,7 +27,11 @@ function readViewState(): PersistedViewState {
   try {
     const raw = localStorage.getItem(VIEW_STATE_KEY);
     if (!raw) return DEFAULT_VIEW_STATE;
-    return { ...DEFAULT_VIEW_STATE, ...(JSON.parse(raw) as Partial<PersistedViewState>) };
+    const stored = JSON.parse(raw) as Partial<PersistedViewState>;
+    const merged = { ...DEFAULT_VIEW_STATE, ...stored };
+    // A stale or unknown stored tab falls back to AI feedback.
+    if (!DRAWER_TABS.includes(merged.activeTab)) merged.activeTab = DEFAULT_VIEW_STATE.activeTab;
+    return merged;
   } catch {
     return DEFAULT_VIEW_STATE;
   }

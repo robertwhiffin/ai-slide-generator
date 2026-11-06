@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, ChevronUp } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { CATEGORY_LABEL, type DrawerCallbacks, type SlideFinding } from '../../types/finding';
@@ -11,6 +11,11 @@ interface FeedbackDrawerProps {
   hasUnseen: boolean;
   /** A turn is running: Apply and Discuss send a chat message, so they wait (Dismiss sends nothing). */
   actionsDisabled?: boolean;
+  speakerNotes?: string;
+  /** The current slide's id; a change resets the notes draft. */
+  slideKey?: string;
+  /** Absent = read-only viewer (no editor). */
+  onSaveNotes?: (notes: string) => Promise<void>;
 }
 
 export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
@@ -18,6 +23,9 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
   callbacks,
   hasUnseen,
   actionsDisabled = false,
+  speakerNotes = '',
+  slideKey,
+  onSaveNotes,
 }) => {
   const { drawerOpen, setDrawerOpen, drawerHeight, setDrawerHeight, activeTab, setActiveTab } = useViewer();
   // Captures the pointer's starting Y and the drawer's starting height at drag begin.
@@ -34,6 +42,28 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
       return next;
     });
   }, []);
+
+  // Notes draft: reset whenever the slide or its saved notes change. An unsaved
+  // draft is discarded on a slide switch (accepted).
+  const [draft, setDraft] = useState(speakerNotes);
+  const [saving, setSaving] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+  useEffect(() => {
+    setDraft(speakerNotes);
+    setSaveFailed(false);
+  }, [slideKey, speakerNotes]);
+  const saveNotes = useCallback(async () => {
+    if (!onSaveNotes || saving) return;
+    setSaving(true);
+    setSaveFailed(false);
+    try {
+      await onSaveNotes(draft);
+    } catch {
+      setSaveFailed(true);
+    } finally {
+      setSaving(false);
+    }
+  }, [onSaveNotes, saving, draft]);
 
   // Pointer down: record drag origin and capture the pointer so moves/up fire
   // even when the pointer moves fast and leaves the thin handle element.
@@ -85,8 +115,7 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
       )}
 
       <div className="flex items-center gap-1 px-2 py-1">
-        {/* Tabbed shell: one tab today; 'notes' lands as a second tab later
-            (spec §5.1). Building the shell now makes that additive. */}
+        {/* Tabbed shell: AI feedback and Notes. The unread dot belongs to AI feedback. */}
         <button
           type="button"
           data-testid="drawer-tab-feedback"
@@ -106,6 +135,18 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
               className="ml-2 inline-block size-2 rounded-full bg-amber-500 align-middle"
             />
           )}
+        </button>
+        <button
+          type="button"
+          data-testid="drawer-tab-notes"
+          data-active={activeTab === 'notes' ? 'true' : 'false'}
+          onClick={() => setActiveTab('notes')}
+          className={[
+            'relative rounded-t px-3 py-1.5 text-xs font-medium',
+            activeTab === 'notes' ? 'bg-muted text-foreground' : 'text-muted-foreground',
+          ].join(' ')}
+        >
+          Notes
         </button>
 
         <Button
@@ -128,7 +169,51 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
         >
           {/* Stays-on-empty: when there are no findings, show the empty state —
               never auto-switch tabs (spec §5.3). */}
-          {findings.length === 0 ? (
+          {activeTab === 'notes' ? (
+            onSaveNotes ? (
+              <div className="flex flex-col gap-2 py-2">
+                <textarea
+                  data-testid="drawer-notes-input"
+                  aria-label="Speaker notes"
+                  placeholder="Add speaker notes for this slide."
+                  value={draft}
+                  onChange={e => setDraft(e.target.value)}
+                  rows={4}
+                  className="w-full resize-y rounded-md border border-border bg-background p-2 text-xs text-foreground"
+                />
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    data-testid="drawer-notes-save"
+                    disabled={saving || draft === speakerNotes}
+                    onClick={saveNotes}
+                  >
+                    Save notes
+                  </Button>
+                  {saveFailed && (
+                    <span data-testid="drawer-notes-error" role="alert" className="text-xs text-destructive">
+                      Could not save the notes.
+                    </span>
+                  )}
+                </div>
+                <p data-testid="drawer-notes-hint" className="text-[11px] text-muted-foreground">
+                  Notes you save here are kept when the slide is rebuilt. Chat does not edit notes yet.
+                </p>
+              </div>
+            ) : speakerNotes.trim() !== '' ? (
+              <p
+                data-testid="drawer-notes"
+                className="whitespace-pre-wrap break-words py-2 text-xs text-foreground"
+              >
+                {speakerNotes}
+              </p>
+            ) : (
+              <p data-testid="drawer-notes-empty" className="py-4 text-xs text-muted-foreground">
+                No speaker notes for this slide.
+              </p>
+            )
+          ) : findings.length === 0 ? (
             <p data-testid="drawer-empty" className="py-4 text-xs text-muted-foreground">
               No feedback for this slide.
             </p>
