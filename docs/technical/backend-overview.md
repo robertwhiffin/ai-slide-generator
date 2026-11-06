@@ -108,6 +108,7 @@ delete of all users' expired sessions) and `POST /api/sessions/{id}/export`
 | `PATCH` | `/api/slides/{index}` | Update HTML (requires `session_id` in body) | `routes/slides.update_slide` |
 | `POST` | `/api/slides/{index}/duplicate` | Clone (requires `session_id` in body) | `routes/slides.duplicate_slide` |
 | `DELETE` | `/api/slides/{index}` | Delete (requires `session_id` query param) | `routes/slides.delete_slide` |
+| `PATCH` | `/api/slides/{index}/notes` | Save speaker notes only (requires `session_id` in body); HTML, hash, verification and spec untouched; no save point | `routes/slides.update_slide_notes` |
 | `PATCH` | `/api/slides/{index}/verification` | Update verification result (persists with session) | `routes/slides.update_slide_verification` |
 
 ### Verification Endpoints (LLM as Judge)

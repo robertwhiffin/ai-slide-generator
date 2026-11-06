@@ -247,13 +247,14 @@ Navigation is handled by a single keydown function stored in a ref so it can be 
 | → / ↓ / Space | Next slide |
 | ← / ↑ | Previous slide |
 | Home / End | Jump to first / last slide |
+| N | Toggle the speaker notes panel |
 | F | Toggle browser fullscreen |
 | Esc | Exit (two-stage — see Full-Window section above) |
 
-The handler is attached to **three** targets:
+The handler is reached from **two** sources:
 
 1. `window` and `document` of the parent page (capture phase) — catches keys when focus is on the body or any non-iframe element.
-2. The iframe's `contentDocument` — re-attached on every iframe `srcdoc` load. Without this, if focus lands inside the iframe (which happens after tab switch back, after re-entering fullscreen, or after clicking on slide content), keydown events fire inside the iframe and don't bubble to the parent window.
+2. The `tellr:slide-key` `postMessage` bridge from the iframe. The iframe is sandboxed without `allow-same-origin`, so the parent cannot reach its `contentDocument`. Instead, `KEY_BRIDGE_SCRIPT` (`frontend/src/services/slideDocument.ts:31`) runs inside the slide document and posts each keydown to the parent. A `message` listener in `PresentationMode.tsx` (`:274`) accepts only messages whose `source` is the iframe's `contentWindow`, then passes the key to the same handler. This covers focus that lands inside the iframe (after a tab switch back, after re-entering fullscreen, or after clicking on slide content).
 
 A `visibilitychange` listener also refocuses the container when the tab becomes visible again, so the parent-level listener has a chance to receive keys cleanly.
 
@@ -331,11 +332,11 @@ Computed on click (not via a live observer) — cheaper, deterministic, and avoi
 5. Component calculates initial scale factor based on viewport dimensions
 6. `useMemo` generates HTML for the starting slide
 7. Iframe loads with `srcdoc={currentSlideHTML}` and applies scale transform from `transformOrigin: center center`
-8. Container div receives focus; keydown handler is also attached to the iframe's `contentDocument` so navigation works regardless of which document holds focus
+8. Container div receives focus; keys pressed inside the iframe reach the same handler through the `tellr:slide-key` postMessage bridge, so navigation works regardless of which document holds focus
 9. `waitForChartJs` polls then runs current slide's scripts
 10. Keyboard-shortcut hint is visible for ~3s, then fades out
 11. User navigates with arrow keys / Space; `currentSlideIndex` updates
-12. `useEffect` updates iframe `srcdoc` on slide change; the keydown listener is re-attached to the new `contentDocument` on each load
+12. `useEffect` updates iframe `srcdoc` on slide change; the bridge script in the new slide document keeps forwarding keys on each load
 13. Scale recalculates automatically on window resize, orientation change, and fullscreen toggle
 14. (Optional) F key or toolbar button toggles browser fullscreen; toolbar/hint/counter all hide while fullscreen is active
 15. Esc unwinds fullscreen first (browser-handled); a second Esc exits the presentation entirely via the component's keydown handler
@@ -374,10 +375,11 @@ The iframe wrapper uses CSS `transform: scale()` to scale the 1280×720px iframe
 | Space | Next slide |
 | Home | Jump to first slide |
 | End | Jump to last slide |
+| N | Toggle the speaker notes panel |
 | F | Toggle browser fullscreen |
 | Escape | Exit fullscreen (if active) → exit presentation (if already full-window) |
 
-A navigation hint (`← → Navigate · F Fullscreen · Esc Exit`) appears in the top-left for the first ~3 seconds after open, then fades out so it stops covering slide content. In fullscreen the hint stays hidden.
+A navigation hint (`← → Navigate · N Notes · F Fullscreen · Esc Exit`) appears in the top-left for the first ~3 seconds after open, then fades out so it stops covering slide content. In fullscreen the hint stays hidden.
 
 ---
 
@@ -401,15 +403,23 @@ The overlay has three pieces of chrome, all of which **auto-hide in fullscreen**
 - `pointerEvents: 'none'` so clicks pass through to the iframe
 
 ### Toolbar (Top Right)
-- Two interactive buttons rendered with inline SVG icons (Unicode glyphs like `⤢ / ⤡ / ✕` render inconsistently across fonts/OSes):
+- Three interactive buttons rendered with inline SVG icons (Unicode glyphs like `⤢ / ⤡ / ✕` render inconsistently across fonts/OSes):
+  - Notes toggle (`N` shortcut equivalent): `data-testid="presentation-notes-toggle"`, `aria-pressed` reflects the panel state
   - Fullscreen toggle (`F` shortcut equivalent) — icon swaps between "enter" and "exit" arrows
   - Close (`Esc` shortcut equivalent)
 - `pointerEvents` flips to `none` while hidden so users can't accidentally click an invisible button
 
 ### Navigation Hint (Top Left)
-- `← → Navigate · F Fullscreen · Esc Exit`
+- `← → Navigate · N Notes · F Fullscreen · Esc Exit`
 - Visible only for the first ~3 seconds after open, then fades out (opacity transition)
 - `pointerEvents: 'none'`
+
+### Speaker Notes Panel (Bottom Center)
+- Press `N` or click the notes button in the toolbar to show or hide it. It starts hidden.
+- Shows the current slide's `speaker_notes` as plain text (`white-space: pre-wrap`). Notes are never rendered as HTML.
+- Reads from the mount-time deck snapshot, like the slides themselves, so notes saved after presentation starts appear on the next presentation.
+- A slide without notes shows "No speaker notes for this slide."
+- Sits above the slide counter, scrolls when long (max height 30vh), and stays visible in fullscreen once toggled on.
 
 ---
 
@@ -456,26 +466,28 @@ If chart initialization fails:
 - **Chart.js timeout:** After 50 attempts (5 seconds), logs error but continues
 - **Script errors:** Logged to console but don't crash presentation
 - **Keyboard events in inputs:** Ignored to allow typing in form fields within slides
-- **Focus lost to iframe:** Mitigated by attaching the keydown listener to the iframe's `contentDocument` on every load, plus a `visibilitychange` listener that refocuses the container when the tab regains visibility
+- **Focus lost to iframe:** Mitigated by the `tellr:slide-key` postMessage bridge, which forwards keys from inside the iframe, plus a `visibilitychange` listener that refocuses the container when the tab regains visibility
 
 ### Iframe Sandbox
 
-The iframe uses `sandbox="allow-scripts allow-same-origin"` to:
+The iframe uses `sandbox="allow-scripts"` (no `allow-same-origin`, AISEC-248) to:
 - Allow JavaScript execution (for Chart.js and slide scripts)
-- Allow same-origin access (for proper rendering)
+- Give the slide document an opaque origin, so slide scripts cannot reach the parent page
 - Maintain security by restricting other capabilities
+
+Because the parent cannot read the iframe's document, keyboard events cross the boundary through the `tellr:slide-key` postMessage bridge described under Keyboard Navigation.
 
 ---
 
 ## Extension Guidance
 
-1. **Add speaker notes:** Display notes in a separate overlay or side panel, toggle with a key
+1. ~~**Add speaker notes:**~~ Done: the `N` key and toolbar button toggle a notes panel (see Speaker Notes Panel)
 2. **Slide transitions:** Add CSS transitions when `currentSlideIndex` changes (fade, slide, etc.)
 3. **Touch gestures:** Add swipe detection for mobile/tablet navigation
 4. **Timer/clock:** Add presentation timer overlay
 5. **Remote control:** WebSocket integration to sync presenter/audience views
 6. **Slide thumbnails:** Add thumbnail strip for quick navigation
-7. **Notes panel:** Side panel showing speaker notes for current slide
+7. ~~**Notes panel:**~~ Done: shown as a bottom panel rather than a side panel
 8. **Export enhancements:** Add options for PDF export, reveal.js format, or PowerPoint
 
 ---
@@ -519,7 +531,7 @@ Refs:
 - `wrapperRef` — Iframe wrapper (legacy; available for future use)
 - `onExitRef` — Stabilizes the `onExit` callback so it can be read from event handlers without re-running effects on parent re-renders
 - `toggleFullscreenRef` — Same pattern for the fullscreen toggle (invoked from the keydown handler)
-- `handleKeyDownRef` — Single source of truth for the keydown logic; attached to parent window/document AND to the iframe's `contentDocument` on each load
+- `handleKeyDownRef`: single source of truth for the keydown logic. It is attached to the parent window and document, and fed by the `tellr:slide-key` message bridge from the iframe
 - `deckSnapshotRef` — Captures the `slideDeck` prop on mount; the iframe HTML reads from this snapshot, not the live prop (see "Deck Snapshot" above)
 
 ### HTML Generation
@@ -537,7 +549,7 @@ The memoized HTML includes:
 When `currentSlideHTML` changes, a `useEffect` updates the iframe's `srcdoc` property, causing the iframe to reload with the new slide content. The `handleIframeLoad` callback then:
 
 1. Refocuses the container so keyboard nav keeps working
-2. Re-attaches the keydown listener to the **new** `contentDocument` (the old one was destroyed by the srcdoc swap)
+2. Leaves key forwarding to the bridge script embedded in each slide document, which the srcdoc swap reloads with the slide
 
 This ensures:
 - Each slide's scripts execute independently

@@ -319,6 +319,24 @@ PDF and PPTX filenames are timestamped; the deck spec's is not:
 
 If the slide deck has no title, "slides" is used as the default for PDF and PPTX; see *Deck spec as Markdown* below for the spec's naming.
 
+## Speaker Notes
+
+Each slide's speaker notes (`speaker_notes`) go into the PowerPoint notes pane on every live route. Notes are plain text.
+
+| Route | Where the notes come from |
+|---|---|
+| `POST /api/export/pptx/editable/huashu/from-html` | `slide_notes_text(slide)` in `src/api/routes/export.py` |
+| `POST /api/export/google-slides/from-huashu` | The same `slide_notes_text(slide)` helper, imported from `export.py` |
+| `POST /api/export/pptx/editable/from-records` | The records fallback. `buildCompositeHtml` (`frontend/src/services/domWalker.ts`) embeds the notes in a `<script id="speaker-notes" type="application/json">` element, and the export frame runtime reads it (`frontend/src/services/exportFrameRuntime.ts:497`). Every `<` in that JSON is escaped as `\u003c`, so a literal `</script>` in a note cannot close the element |
+| `POST /api/export/google-slides/from-records` | The `notes` in the records the client sends, from the same composite document |
+| `POST /api/export/pptx/editable/from-images` | The optional `notes` request list, one string per image. An entry is written to the slide only when it is not empty. The route is still unreachable from the UI (see the route table above), though the client call in `frontend/src/services/api.ts` now sends the list |
+
+`slide_notes_text` returns `speaker_notes` whenever it is a string, even an empty one. It falls back to the older `notes` key only when `speaker_notes` is absent or `None`. A cleared note therefore stays cleared.
+
+The LLM code-generation converters (`/pptx`, `/pptx/async`, `/google-slides`) carry no notes. The synchronous `POST /api/export/pptx/editable` has no caller, and it carries none either.
+
+---
+
 ## Deck spec as Markdown (client-side)
 
 **Where.** The Spec view header, **Export spec** button (accessible name "Export spec as Markdown"); shown only when the deck has a spec.

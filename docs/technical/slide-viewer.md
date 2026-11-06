@@ -27,7 +27,7 @@ AppLayout
     └── [stage column]
         ├── stage toolbar                        ← verify / new slide / edit HTML / delete (edit mode only)
         ├── SlideStage (flex-1)                  ← single slide iframe + prev/next arrows
-        └── FeedbackDrawer (collapsible bottom)  ← AI findings tabbed shell
+        └── FeedbackDrawer (collapsible bottom)  ← tabbed shell: AI feedback, Notes
 ```
 
 `SlideViewer` is the public surface. It wraps `ViewerProvider` around `ViewerBody`, which composes the above. An empty deck renders a placeholder instead of the full shell.
@@ -105,7 +105,22 @@ All slide iframes — both the full-size stage iframe and each ribbon thumbnail 
 | **Sticky tab** | The active tab is remembered in `ViewerContext` and persisted to `localStorage`. Navigating between slides does not reset it. |
 | **Stays-on-empty** | When a slide has no findings, the drawer shows an empty state message. It never auto-switches tabs or auto-closes. |
 | **Persisted open/height** | `drawerOpen` (boolean) and `drawerHeight` (px, clamped 96–480) are written to `localStorage` key `tellr-viewer-view-state` on every change. |
-| **Tabbed shell** | The drawer is built as a tabbed shell with one tab today (`feedback`). Speaker notes (`notes`) land as a second tab in a later workstream without requiring structural changes. |
+| **Tabbed shell** | The drawer is a tabbed shell with two tabs: `feedback` (AI findings) and `notes` (speaker notes). A stored tab value the viewer does not know falls back to `feedback`. |
+
+### Notes Tab
+
+The **Notes** tab shows the current slide's `speaker_notes`. Notes are plain text and are never rendered as HTML.
+
+| Viewer | What the tab shows |
+|--------|--------------------|
+| **Editor** | A text box and a **Save notes** button. The button is disabled until the text differs from the saved notes, and a failed save shows "Could not save the notes." |
+| **Read-only viewer** | The notes as text, or "No speaker notes for this slide." The tab has no editor. |
+
+- **Save path:** `handleSaveNotes` in `SlideViewer.tsx` calls `api.updateSlideNotes`, which sends `PATCH /api/slides/{index}/notes`. The route changes only the notes, not the slide HTML. The viewer then reloads the deck. A version conflict refreshes the deck and shows the usual alert.
+- **Draft resets per slide:** the text box reloads whenever the current slide or its saved notes change. An unsaved draft is discarded when the user moves to another slide.
+- **Typed notes are kept on rebuild:** notes saved here stay when the slide is rebuilt. New model-written notes replace earlier model-written notes, but they do not replace typed ones.
+- **Chat does not edit notes in this release.** Notes are never sent to a model. The editor says so in its hint.
+- The unread dot and seen-state belong to the `feedback` tab only.
 
 ### Seen-State
 
