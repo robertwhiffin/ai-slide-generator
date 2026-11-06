@@ -1814,6 +1814,7 @@ export const api = {
         session_id: sessionId || null,
         title: deck.title || 'slides',
         images,
+        notes: deck.slides.map((s) => s.speaker_notes ?? ''),
         width_px: 1280,
         height_px: 720,
       }),
