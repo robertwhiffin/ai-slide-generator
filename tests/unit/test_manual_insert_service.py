@@ -1015,3 +1015,29 @@ def test_a_stale_worker_gets_a_409_and_cannot_write_its_stale_deck_back(
         r["slide_id"] for r in _rows(factory, seeded["owner_pk"])
     ]
     assert deck.slides[1].slide_id == b_result["inserted_slide_id"]
+
+
+def test_an_inserted_slide_s_aside_becomes_its_notes(factory, service, seeded):
+    # Sabotage: skip extract_speaker_notes (or the "user" tag) in ChatService.insert_slide.
+    supplied = (
+        '<div class="slide"><h2>MK-NOTED</h2>'
+        '<aside class="speaker-notes"><p>N</p></aside></div>'
+    )
+    real_insert = SessionManager.insert_slide
+    seen: List[Dict[str, Any]] = []
+
+    def _spy(self, *args, **kwargs):
+        seen.append(kwargs["slide"])
+        return real_insert(self, *args, **kwargs)
+
+    with patch.object(SessionManager, "insert_slide", _spy):
+        service.insert_slide(OWNER_SID, 1, html=supplied)
+
+    assert len(seen) == 1
+    slide = seen[0]
+    assert slide["speaker_notes"] == "N"
+    assert slide["speaker_notes_source"] == "user"
+    assert slide["html"] == '<div class="slide"><h2>MK-NOTED</h2></div>'
+    assert _rows(factory, seeded["owner_pk"])[1]["html"] == (
+        '<div class="slide"><h2>MK-NOTED</h2></div>'
+    )

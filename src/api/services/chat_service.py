@@ -63,6 +63,7 @@ from src.services.persisted_graph_release import (
 from src.services.streaming_callback import StreamingCallbackHandler
 from src.utils.html_utils import (
     extract_canvas_ids_from_html,
+    extract_speaker_notes,
     split_script_by_canvas,
 )
 from src.utils.ds_asset_utils import (
@@ -348,6 +349,19 @@ def _turn_still_live(request_id: str) -> bool:
             extra={"request_id": request_id},
         )
         return True
+
+
+def _carry_speaker_notes(
+    new_slide: Slide, orig_notes: Optional[str], orig_source: Optional[str]
+) -> None:
+    """Carry a replaced slide's notes onto its replacement.
+
+    User-written notes always survive; model notes are kept only when the
+    replacement brought its own.
+    """
+    if orig_source == "user" or new_slide.speaker_notes is None:
+        new_slide.speaker_notes = orig_notes
+        new_slide.speaker_notes_source = orig_source
 
 
 class ChatService:
@@ -1590,6 +1604,12 @@ class ChatService:
                             # For now, replace the referenced slides with LLM output
                             for idx, slide_idx in enumerate(valid_refs):
                                 if idx < len(new_deck.slides):
+                                    _orig = existing_deck.slides[slide_idx]
+                                    _carry_speaker_notes(
+                                        new_deck.slides[idx],
+                                        _orig.speaker_notes,
+                                        _orig.speaker_notes_source,
+                                    )
                                     existing_deck.slides[slide_idx] = new_deck.slides[idx]
                             self._reindex_slide_ids(existing_deck)
                             current_deck = existing_deck
@@ -3533,6 +3553,8 @@ class ChatService:
             original_authors.append({
                 "created_by": orig.created_by,
                 "created_at": orig.created_at,
+                "speaker_notes": orig.speaker_notes,
+                "speaker_notes_source": orig.speaker_notes_source,
             })
             original_slide_ids.append(orig.slide_id)
 
@@ -3579,6 +3601,11 @@ class ChatService:
             if idx < len(original_authors):
                 slide.created_by = original_authors[idx]["created_by"]
                 slide.created_at = original_authors[idx]["created_at"]
+                _carry_speaker_notes(
+                    slide,
+                    original_authors[idx]["speaker_notes"],
+                    original_authors[idx]["speaker_notes_source"],
+                )
             if _user:
                 slide.stamp_modified(_user)
                 if not slide.created_by:
@@ -3855,6 +3882,8 @@ class ChatService:
             raise ValueError("HTML must contain <div class='slide'> wrapper")
         # Page-number markers a reader rendered go back to tokens before storing.
         html = retokenise_slide_numbers(html)
+        # Notes the user typed into the HTML move out of it into the notes field.
+        html, _notes = extract_speaker_notes(html)
 
         # Preserve original slide's metadata and scripts before updating
         original_slide = current_deck.slides[index]
@@ -3881,6 +3910,12 @@ class ChatService:
             created_by=original_slide.created_by,
             created_at=original_slide.created_at,
         )
+        if _notes is None:
+            new_slide.speaker_notes = original_slide.speaker_notes
+            new_slide.speaker_notes_source = original_slide.speaker_notes_source
+        else:
+            new_slide.speaker_notes = _notes
+            new_slide.speaker_notes_source = "user" if _notes else None
         try:
             _user = get_current_username()
         except Exception:
@@ -4125,8 +4160,10 @@ class ChatService:
             if html is not None
             else blank_slide_shell([s.html for s in current_deck.slides], landed)
         )
+        insert_notes: Optional[str] = None
         if html is not None:
             slide_html = retokenise_slide_numbers(slide_html)
+            slide_html, insert_notes = extract_speaker_notes(slide_html)
         if not has_slide_wrapper(slide_html):
             raise ValueError("HTML must contain <div class='slide'> wrapper")
 
@@ -4146,6 +4183,8 @@ class ChatService:
             slide_id=str(uuid.uuid4()),
             created_at=created,
             modified_at=created,
+            speaker_notes=insert_notes,
+            speaker_notes_source="user" if insert_notes else None,
         )
         try:
             _user = get_current_username()

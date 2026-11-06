@@ -47,6 +47,8 @@ from src.utils.html_safety import scan_html_for_unsafe_patterns
 from src.utils.html_utils import (
     extract_canvas_ids_from_script,
     find_slide_roots,
+    notes_for_root,
+    pop_speaker_notes,
     split_script_by_canvas,
 )
 from src.utils.js_validator import validate_and_fix_javascript
@@ -1112,6 +1114,7 @@ class SlideGeneratorAgent:
             raise AgentError("LLM response is empty; expected slide HTML output")
 
         soup = BeautifulSoup(llm_response, "html.parser")
+        popped_notes = pop_speaker_notes(soup)
         slide_roots = find_slide_roots(soup)
         replacement_css = self._extract_css_from_response(soup)
 
@@ -1131,7 +1134,13 @@ class SlideGeneratorAgent:
             if not slide_html.strip():
                 raise AgentError(f"Slide {idx} is empty")
 
-            slide = Slide(html=slide_html, slide_id=f"slide_{idx}")
+            notes = notes_for_root(slide_root, popped_notes)
+            slide = Slide(
+                html=slide_html,
+                slide_id=f"slide_{idx}",
+                speaker_notes=notes,
+                speaker_notes_source="model" if notes else None,
+            )
             replacement_slides.append(slide)
 
             # Index canvases in this slide
