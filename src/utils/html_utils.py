@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
@@ -12,6 +12,9 @@ from bs4.element import Tag
 # around a slide body. Only these are promoted to slide root — see
 # find_slide_roots for why a <div> wrapper is deliberately excluded.
 SLIDE_WRAPPER_TAGS = frozenset({"section", "article"})
+
+# Class token marking a slide's presenter notes (``<aside class="speaker-notes">``).
+SPEAKER_NOTES_CLASS = "speaker-notes"
 
 CANVAS_ID_PATTERN = re.compile(r"getElementById\s*\(\s*['\"]([\w\-.:]+)['\"]\s*\)")
 QUERY_SELECTOR_PATTERN = re.compile(r"querySelector\s*\(\s*['\"]#([\w\-.:]+)['\"]\s*\)")
@@ -93,6 +96,91 @@ def _promote_through_slide_wrapper(root: Tag) -> Tag:
         if len(element_children) != 1 or element_children[0] is not root:
             return root
         root = parent
+
+
+def _owned_speaker_asides(soup: BeautifulSoup) -> List[Tuple[Tag, Tag]]:
+    """Return ``(aside, owner_slide)`` pairs for every owned speaker-notes aside.
+
+    An aside is owned when it sits inside a ``.slide`` element (owner: the
+    nearest such ancestor), or is a direct child of a ``section``/``article``
+    whose only other element child is the ``.slide`` (owner: that child).
+    """
+    owned: List[Tuple[Tag, Tag]] = []
+    for aside in soup.find_all("aside", class_=SPEAKER_NOTES_CLASS):
+        owner = aside.find_parent(class_="slide")
+        if owner is None:
+            parent = aside.parent
+            if parent is not None and parent.name in SLIDE_WRAPPER_TAGS:
+                others = [c for c in parent.find_all(recursive=False) if c is not aside]
+                if len(others) == 1 and "slide" in (others[0].get("class") or []):
+                    owner = others[0]
+        if owner is not None:
+            owned.append((aside, owner))
+    return owned
+
+
+def _notes_text(aside: Tag) -> str:
+    """Return an aside's notes: outermost p/li texts joined by blank lines.
+
+    Falls back to the aside's whole text when it has no ``p``/``li``. Script,
+    style, and template content is ignored. Works on a copy.
+    """
+    clone = BeautifulSoup(str(aside), "html.parser")
+    for junk in clone.find_all(["script", "style", "template"]):
+        junk.decompose()
+    blocks = [
+        block
+        for block in clone.find_all(["p", "li"])
+        if block.find_parent(["p", "li"]) is None
+    ]
+    if not blocks:
+        return " ".join(clone.get_text().split())
+    texts = (" ".join(block.get_text().split()) for block in blocks)
+    return "\n\n".join(text for text in texts if text)
+
+
+def pop_speaker_notes(soup: BeautifulSoup) -> List[Tuple[Tag, str]]:
+    """Remove owned speaker-notes asides in place; return ``(owner, text)`` pairs.
+
+    Run before ``find_slide_roots`` so a wrapper that held only the slide and
+    its notes aside can still be promoted to the slide root.
+    """
+    owned = _owned_speaker_asides(soup)
+    popped = [(owner, _notes_text(aside)) for aside, owner in owned]
+    for aside, _ in owned:
+        aside.decompose()
+    return popped
+
+
+def notes_for_root(
+    root: Tag, popped: Sequence[Tuple[Tag, str]]
+) -> Optional[str]:
+    """Return the joined notes for ``root``, ``None`` if none, ``""`` if all empty."""
+    # Identity, not equality: see find_slide_roots.
+    texts = [
+        text
+        for owner, text in popped
+        if owner is root or any(parent is root for parent in owner.parents)
+    ]
+    if not texts:
+        return None
+    return "\n\n".join(text for text in texts if text)
+
+
+def extract_speaker_notes(html: str) -> Tuple[str, Optional[str]]:
+    """Split one slide fragment into ``(html_without_notes, notes)``.
+
+    ``notes`` is ``None`` (and ``html`` is returned unchanged, never
+    reserialised) when there is no owned aside, and ``""`` for an empty one.
+    """
+    if not html or SPEAKER_NOTES_CLASS not in html:
+        return html, None
+    soup = BeautifulSoup(html, "html.parser")
+    popped = pop_speaker_notes(soup)
+    if not popped:
+        return html, None
+    texts = [text for _, text in popped if text]
+    return str(soup), "\n\n".join(texts)
 
 
 def extract_canvas_ids_from_html(html_content: str) -> List[str]:
