@@ -550,7 +550,10 @@ def _upsert_slide_row(
             never the string business key.
         position: 0-based slide position.
         slide_dict: the slide's fields (``html``, ``slide_id``, ``scripts``,
-            ``created_by``, ``created_at``, ``modified_by``, ``modified_at``).
+            ``created_by``, ``created_at``, ``modified_by``, ``modified_at``,
+            ``speaker_notes``, ``speaker_notes_source``).  INSERT and the
+            full-identity UPDATE write ``speaker_notes or None`` and keep the
+            source only when notes are non-empty.
         now_dt: naive-UTC timestamp to use when the slide carries none.  Pass None
             to leave the timestamp NULL instead — the backfill does this, because
             fabricating "now" for a historical slide would misreport when it was
@@ -581,7 +584,10 @@ def _upsert_slide_row(
               * ``base_record`` is ignored (the row's own record is the base);
               * ``deck_spec_slide=None`` means "leave unchanged";
               * absent ``slide_id``/``created_by``/``modified_by`` keys leave the
-                existing values intact instead of clearing them.
+                existing values intact instead of clearing them;
+              * an absent/None ``speaker_notes`` leaves the notes unchanged, ``""``
+                clears them, and a non-user write never replaces notes whose
+                ``speaker_notes_source`` is ``"user"``.
             PR3 relies on these semantics (a reviewer rewrites HTML without
             touching the verdict; the foreman attaches a spec fragment without
             disturbing verification).
@@ -604,6 +610,8 @@ def _upsert_slide_row(
     created_by = slide_dict.get("created_by") or author_fallback
     modified_by = slide_dict.get("modified_by") or author_fallback
     slide_id = slide_dict.get("slide_id")
+    notes = slide_dict.get("speaker_notes")
+    source = slide_dict.get("speaker_notes_source")
 
     spec_json = json.dumps(deck_spec_slide) if deck_spec_slide is not None else None
 
@@ -637,6 +645,11 @@ def _upsert_slide_row(
                 )
             if spec_json is not None:
                 existing.deck_spec_slide = spec_json
+            if notes is not None and not (
+                existing.speaker_notes_source == "user" and source != "user"
+            ):
+                existing.speaker_notes = notes or None
+                existing.speaker_notes_source = (source or "model") if notes else None
         else:
             # Full-identity rewrite: the row describes the slide now at this
             # position, so identity AND the verification record move with the
@@ -654,6 +667,8 @@ def _upsert_slide_row(
             # Treating None as "leave unchanged" here is precisely how a shift
             # stranded a fragment on the slide that replaced its owner.
             existing.deck_spec_slide = spec_json if spec_json is not None else base_spec
+            existing.speaker_notes = notes or None
+            existing.speaker_notes_source = source if notes else None
         return existing
 
     # INSERT.  id is a fresh uuid4, NOT slide_id: `id` is String(64) UNIQUE
@@ -666,6 +681,8 @@ def _upsert_slide_row(
         html=html,
         slide_id=slide_id,
         scripts=scripts,
+        speaker_notes=notes or None,
+        speaker_notes_source=source if notes else None,
         created_by=created_by,
         created_at=created_at,
         modified_by=modified_by,
@@ -818,6 +835,8 @@ def _snapshot_row(row: SessionSlide) -> Dict[str, Any]:
     return {
         "html": row.html,
         "scripts": row.scripts,
+        "speaker_notes": row.speaker_notes,
+        "speaker_notes_source": row.speaker_notes_source,
         "slide_id": row.slide_id,
         "created_by": row.created_by,
         "created_at": row.created_at,
@@ -2825,6 +2844,12 @@ class SessionManager:
                         "html": slide_row.html or "",
                         "slide_id": slide_row.slide_id,
                         "scripts": slide_row.scripts or "",
+                        "speaker_notes": slide_row.speaker_notes or "",
+                        "speaker_notes_source": (
+                            slide_row.speaker_notes_source
+                            if slide_row.speaker_notes
+                            else None
+                        ),
                         "created_by": slide_row.created_by,
                         "created_at": (
                             slide_row.created_at.isoformat() + "Z"
@@ -2949,6 +2974,14 @@ class SessionManager:
                 for slide_index, slide in enumerate(deck_dict.get("slides", [])):
                     # F5 key parity: `index` is part of the per-slide contract.
                     slide.setdefault("index", slide_index)
+                    # F5 key parity: both read paths emit speaker_notes, always a string
+                    slide["speaker_notes"] = slide.get("speaker_notes") or ""
+                    slide["speaker_notes_source"] = (
+                        slide.get("speaker_notes_source")
+                        if slide["speaker_notes"]
+                        and slide.get("speaker_notes_source") in ("model", "user")
+                        else None
+                    )
                     if slide.get("html"):
                         content_hash = compute_slide_hash(slide["html"])
                         slide["verification"] = verification_map.get(content_hash)

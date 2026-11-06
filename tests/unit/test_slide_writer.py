@@ -23,7 +23,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 import src.database.models  # noqa: F401 — register all ORM models
@@ -511,3 +511,159 @@ def test_session_not_found_error_on_list(factory):
         writer = SlideWriter(SessionManager())
         with pytest.raises(SessionNotFoundError):
             writer.list_slides_in_position_order(session_id="does-not-exist")
+
+
+# ---------------------------------------------------------------------------
+# Speaker notes (Task 2, D2 and D10): partial-mode writes through write_slide
+# ---------------------------------------------------------------------------
+
+
+def _notes_columns(factory, owner_int_id: int):
+    """``[(speaker_notes, speaker_notes_source)]`` per row, position order, raw column values."""
+    db = factory()
+    try:
+        rows = (
+            db.query(SessionSlide)
+            .filter(SessionSlide.session_id == owner_int_id)
+            .order_by(SessionSlide.position)
+            .all()
+        )
+        return [(r.speaker_notes, r.speaker_notes_source) for r in rows]
+    finally:
+        db.close()
+
+
+def _seed_notes(factory, owner_int_id: int, position: int, notes, source) -> None:
+    """Set a row's notes columns directly, as an earlier writer would have left them."""
+    db = factory()
+    try:
+        db.execute(
+            text(
+                "UPDATE session_slides SET speaker_notes = :n, speaker_notes_source = :s "
+                "WHERE session_id = :o AND position = :p"
+            ),
+            {"n": notes, "s": source, "o": owner_int_id, "p": position},
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _notes_view(slide: dict) -> dict:
+    return {k: slide[k] for k in ("html", "speaker_notes", "speaker_notes_source")}
+
+
+def test_write_slide_stores_speaker_notes(factory, session_id):
+    # Sabotage target: write_slide never puts speaker_notes into slide_dict (or the INSERT drops it).
+    fake_db = _make_fake_db(factory)
+    with patch("src.api.services.slide_repository.get_db_session", fake_db):
+        writer = SlideWriter(SessionManager())
+        writer.write_slide(
+            session_id=session_id, position=0, html="<p>A</p>", speaker_notes="Say this."
+        )
+        got = writer.get_slide(session_id=session_id, position=0)
+
+    assert _notes_columns(factory, _root_pk(factory)) == [("Say this.", "model")]
+    assert _notes_view(got) == {
+        "html": "<p>A</p>",
+        "speaker_notes": "Say this.",
+        "speaker_notes_source": "model",
+    }
+
+
+def test_write_slide_preserves_speaker_notes_when_none(factory, session_id):
+    # Sabotage target: `existing.speaker_notes = notes or None` unconditionally in the partial branch.
+    fake_db = _make_fake_db(factory)
+    with patch("src.api.services.slide_repository.get_db_session", fake_db):
+        writer = SlideWriter(SessionManager())
+        writer.write_slide(
+            session_id=session_id, position=0, html="<p>v1</p>", speaker_notes="Keep me."
+        )
+        writer.write_slide(session_id=session_id, position=0, html="<p>v2</p>")
+        got = writer.get_slide(session_id=session_id, position=0)
+
+    assert _notes_columns(factory, _root_pk(factory)) == [("Keep me.", "model")]
+    assert _notes_view(got) == {
+        "html": "<p>v2</p>",
+        "speaker_notes": "Keep me.",
+        "speaker_notes_source": "model",
+    }
+
+
+def test_write_slide_empty_string_clears_speaker_notes(factory, session_id):
+    # Sabotage target: the partial branch treating "" like None ("leave unchanged").
+    fake_db = _make_fake_db(factory)
+    with patch("src.api.services.slide_repository.get_db_session", fake_db):
+        writer = SlideWriter(SessionManager())
+        writer.write_slide(
+            session_id=session_id, position=0, html="<p>v1</p>", speaker_notes="Gone soon."
+        )
+        writer.write_slide(session_id=session_id, position=0, html="<p>v2</p>", speaker_notes="")
+        got = writer.get_slide(session_id=session_id, position=0)
+
+    # "" is stored as NULL, and with no notes there is no source (D2, D10).
+    assert _notes_columns(factory, _root_pk(factory)) == [(None, None)]
+    assert _notes_view(got) == {
+        "html": "<p>v2</p>",
+        "speaker_notes": "",
+        "speaker_notes_source": None,
+    }
+
+
+def test_write_slide_never_replaces_user_notes(factory, session_id):
+    # Sabotage target: drop the user guard in _upsert_slide_row's partial branch.
+    fake_db = _make_fake_db(factory)
+    with patch("src.api.services.slide_repository.get_db_session", fake_db):
+        writer = SlideWriter(SessionManager())
+        writer.write_slide(session_id=session_id, position=0, html="<p>v1</p>")
+        _seed_notes(factory, _root_pk(factory), 0, "Typed.", "user")
+        writer.write_slide(
+            session_id=session_id, position=0, html="<p>v2</p>", speaker_notes="M"
+        )
+        got = writer.get_slide(session_id=session_id, position=0)
+
+    assert _notes_columns(factory, _root_pk(factory)) == [("Typed.", "user")]
+    # The model write itself still landed: only the notes were protected.
+    assert _notes_view(got) == {
+        "html": "<p>v2</p>",
+        "speaker_notes": "Typed.",
+        "speaker_notes_source": "user",
+    }
+
+
+def test_write_slide_empty_model_notes_never_clear_user_notes(factory, session_id):
+    # Sabotage target: a user guard that only blocks non-empty model notes (an empty aside clears typed notes).
+    fake_db = _make_fake_db(factory)
+    with patch("src.api.services.slide_repository.get_db_session", fake_db):
+        writer = SlideWriter(SessionManager())
+        writer.write_slide(session_id=session_id, position=0, html="<p>v1</p>")
+        _seed_notes(factory, _root_pk(factory), 0, "Typed.", "user")
+        writer.write_slide(session_id=session_id, position=0, html="<p>v2</p>", speaker_notes="")
+        got = writer.get_slide(session_id=session_id, position=0)
+
+    assert _notes_columns(factory, _root_pk(factory)) == [("Typed.", "user")]
+    assert _notes_view(got) == {
+        "html": "<p>v2</p>",
+        "speaker_notes": "Typed.",
+        "speaker_notes_source": "user",
+    }
+
+
+def test_write_slide_model_notes_replace_model_notes(factory, session_id):
+    # Sabotage target: a guard that protects ANY existing notes instead of only source == "user".
+    fake_db = _make_fake_db(factory)
+    with patch("src.api.services.slide_repository.get_db_session", fake_db):
+        writer = SlideWriter(SessionManager())
+        writer.write_slide(session_id=session_id, position=0, html="<p>v1</p>")
+        _seed_notes(factory, _root_pk(factory), 0, "Old.", "model")
+        writer.write_slide(
+            session_id=session_id, position=0, html="<p>v2</p>", speaker_notes="New."
+        )
+        got = writer.get_slide(session_id=session_id, position=0)
+
+    assert _notes_columns(factory, _root_pk(factory)) == [("New.", "model")]
+    assert _notes_view(got) == {
+        "html": "<p>v2</p>",
+        "speaker_notes": "New.",
+        "speaker_notes_source": "model",
+    }

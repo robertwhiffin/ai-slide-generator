@@ -155,6 +155,8 @@ class SlideWriter:
         modified_by: Optional[str] = None,
         slide_id: Optional[str] = None,
         mutation: Optional[DeckMutationContext] = None,
+        speaker_notes: Optional[str] = None,
+        speaker_notes_source: str = "model",
     ) -> None:
         """Commit a slide row to the database.
 
@@ -173,6 +175,10 @@ class SlideWriter:
           on an INSERT a fresh uuid4 is generated (F9: this writer used to leave
           slide_id NULL, but the frontend type declares it non-optional and uses
           it as the dnd/React key).
+        - If speaker_notes is None, the existing notes are PRESERVED; "" CLEARS
+          them; non-empty text replaces them.  User notes are never replaced by
+          a model write: a ``speaker_notes_source`` other than "user" leaves a
+          row whose notes are source "user" untouched.
 
         ``verification_record`` MUST be shaped ``{content_hash: verdict}`` — the
         shape ``get_slide_deck``'s row branch reads back via
@@ -190,6 +196,8 @@ class SlideWriter:
             deck_spec_slide: Spec fragment, or None to preserve.
             modified_by: Author of this write, or None to preserve.
             slide_id: Stable per-slide id; defaults to a fresh uuid4 on insert.
+            speaker_notes: Notes text, or None to preserve (see above).
+            speaker_notes_source: "model" or "user"; only used with speaker_notes.
 
         Raises:
             SessionNotFoundError: if session_id does not match any session.
@@ -214,6 +222,9 @@ class SlideWriter:
                 db.flush()
 
             slide_dict: Dict[str, Any] = {"html": html, "scripts": scripts}
+            if speaker_notes is not None:
+                slide_dict["speaker_notes"] = speaker_notes
+                slide_dict["speaker_notes_source"] = speaker_notes_source
             if modified_by is not None:
                 # created_by is only consumed on INSERT; on UPDATE the helper's
                 # partial mode leaves an existing created_by alone.
@@ -761,6 +772,10 @@ def _row_to_dict(row: SessionSlide) -> Dict[str, Any]:
         "html": row.html,
         "slide_id": row.slide_id,
         "scripts": row.scripts,
+        "speaker_notes": row.speaker_notes or "",
+        "speaker_notes_source": (
+            row.speaker_notes_source if row.speaker_notes else None
+        ),
         "created_by": row.created_by,
         "created_at": (
             row.created_at.isoformat() + "Z" if row.created_at else None

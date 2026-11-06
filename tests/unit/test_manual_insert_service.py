@@ -447,6 +447,9 @@ def _seed_rows_whole(shape: str = "bare") -> Dict[str, Dict[str, Any]]:
                 {compute_slide_hash(html): {"score": 90, "who": seed["marker"]}}
             ),
             "deck_spec_slide": json.dumps({"purpose": f"FRAGMENT-{seed['marker']}"}),
+            # speaker notes (2026-11-06): the seeded rows carry none.
+            "speaker_notes": None,
+            "speaker_notes_source": None,
         }
     return out
 
