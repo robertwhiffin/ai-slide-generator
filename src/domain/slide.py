@@ -43,6 +43,8 @@ class Slide:
         created_at: ISO timestamp when the slide was first created
         modified_by: Username of the last user who modified this slide
         modified_at: ISO timestamp of the last modification
+        speaker_notes: Plain text moved out of a `speaker-notes` aside (None = parsed with no aside)
+        speaker_notes_source: Who wrote the notes: "model", "user" or None
     """
 
     def __init__(
@@ -54,6 +56,8 @@ class Slide:
         created_at: Optional[str] = None,
         modified_by: Optional[str] = None,
         modified_at: Optional[str] = None,
+        speaker_notes: Optional[str] = None,
+        speaker_notes_source: Optional[str] = None,
     ):
         self.html = html
         self.slide_id = slide_id
@@ -62,6 +66,8 @@ class Slide:
         self.created_at = created_at
         self.modified_by = modified_by
         self.modified_at = modified_at
+        self.speaker_notes = speaker_notes
+        self.speaker_notes_source = speaker_notes_source
 
     def to_html(self) -> str:
         """Return the HTML string for this slide."""
@@ -91,6 +97,8 @@ class Slide:
             created_at=self.created_at,
             modified_by=self.modified_by,
             modified_at=self.modified_at,
+            speaker_notes=self.speaker_notes,
+            speaker_notes_source=self.speaker_notes_source,
         )
 
     def __str__(self) -> str:

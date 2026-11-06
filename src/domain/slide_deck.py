@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 # `content: '<foo>'` and data-URI SVGs (`url('data:image/svg+xml,<svg></svg>')`).
 _STYLE_CLOSER_RE = re.compile(r"</\s*style\s*>", re.IGNORECASE)
 
+_NOTES_SOURCES = ("model", "user")
+
+
+def _stored_notes_source(slide_data: Dict[str, Any]) -> Optional[str]:
+    """Return the stored notes source only when it is a known value and the notes are non-empty."""
+    if not slide_data.get("speaker_notes"):
+        return None
+    source = slide_data.get("speaker_notes_source")
+    return source if source in _NOTES_SOURCES else None
+
 
 class SlideDeck:
     """Container for an entire slide deck with operations for manipulation and rendering.
@@ -127,6 +137,8 @@ class SlideDeck:
                     created_at=slide_data.get("created_at"),
                     modified_by=slide_data.get("modified_by"),
                     modified_at=slide_data.get("modified_at"),
+                    speaker_notes=slide_data.get("speaker_notes") or "",
+                    speaker_notes_source=_stored_notes_source(slide_data),
                 )
             )
 
@@ -515,6 +527,8 @@ class SlideDeck:
                 'html': slide.to_html(),
                 'slide_id': slide.slide_id,
                 'scripts': slide.scripts,
+                'speaker_notes': slide.speaker_notes or '',
+                'speaker_notes_source': slide.speaker_notes_source if slide.speaker_notes else None,
             }
             if slide.created_by:
                 slide_dict['created_by'] = slide.created_by
