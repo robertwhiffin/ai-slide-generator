@@ -425,7 +425,7 @@ describe('FeedbackDrawer: Notes tab', () => {
 
   it('editable: the editor holds the notes and saves the draft', async () => {
     // Sabotage target: call onSaveNotes(speakerNotes) instead of onSaveNotes(draft).
-    const onSaveNotes = vi.fn(async (_notes: string) => {});
+    const onSaveNotes = vi.fn<(notes: string) => Promise<void>>(async () => {});
     renderNotesDrawer({ speakerNotes: 'Open with the result.', slideKey: 's1', onSaveNotes });
     openNotesTab();
 
@@ -449,8 +449,8 @@ describe('FeedbackDrawer: Notes tab', () => {
   it('editable: Save is disabled while a save is in flight', async () => {
     // Sabotage target: drop the saving flag from the Save button's disabled condition.
     let resolveSave: () => void = () => undefined;
-    const onSaveNotes = vi.fn(
-      (_notes: string) => new Promise<void>((resolve) => { resolveSave = resolve; }),
+    const onSaveNotes = vi.fn<(notes: string) => Promise<void>>(
+      () => new Promise<void>((resolve) => { resolveSave = resolve; }),
     );
     renderNotesDrawer({ speakerNotes: 'A', slideKey: 's1', onSaveNotes });
     openNotesTab();
@@ -477,7 +477,7 @@ describe('FeedbackDrawer: Notes tab', () => {
 
   it('editable: a failed save keeps the draft and shows the error', async () => {
     // Sabotage target: reset the draft (or skip the error state) when onSaveNotes rejects.
-    const onSaveNotes = vi.fn(async (_notes: string) => {
+    const onSaveNotes = vi.fn<(notes: string) => Promise<void>>(async () => {
       throw new Error('boom');
     });
     renderNotesDrawer({ speakerNotes: 'Before.', slideKey: 's1', onSaveNotes });
