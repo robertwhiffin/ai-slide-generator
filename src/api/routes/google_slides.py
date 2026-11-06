@@ -23,7 +23,7 @@ from src.api.routes._authz import (
     _check_deck_permission_for_session,
     _require_export_job_access,
 )
-from src.api.routes.export import ExportJobResponse
+from src.api.routes.export import ExportJobResponse, slide_notes_text
 from src.api.services.chat_service import get_chat_service
 from src.core.database import get_db
 from src.core.encryption import decrypt_data
@@ -664,7 +664,7 @@ async def export_google_slides_from_huashu(
     slides_html = [
         {
             "html": _build_slide_html(slide, slide_deck),
-            "notes": slide.get("notes") or "",
+            "notes": slide_notes_text(slide),
         }
         for slide in slides_data
     ]
