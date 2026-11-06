@@ -194,6 +194,7 @@ _EXPECTED_TRIGGERS: Dict[str, bool] = {
     "PATCH /{index}": True,           # the human HTML edit
     "POST /{index}/duplicate": True,  # slide added
     "DELETE /{index}": True,          # slide removed
+    "PATCH /{index}/notes": False,  # speaker notes are not spec content
     # Out of scope for this PR, ruled out here rather than only in prose:
     "PATCH /{index}/verification": False,   # completes a task a prior change began
     "POST /versions/create": False,         # a version save leaves the live deck alone
@@ -259,7 +260,7 @@ class TestEveryMutatingRouteIsPinned:
     def test_each_route_triggers_exactly_as_the_table_says(self):
         assert _route_table() == _EXPECTED_TRIGGERS
 
-    def test_five_routes_trigger_and_nine_do_not(self):
+    def test_five_routes_trigger_and_ten_do_not(self):
         """The counts, stated separately so a wholesale table edit is visible.
 
         Five: the plan's full set, now that `POST /slides` (insert) exists.  The
@@ -276,7 +277,8 @@ class TestEveryMutatingRouteIsPinned:
             "POST /{index}/duplicate",
             "PUT /reorder",
         ]
-        assert len([k for k, v in found.items() if not v]) == 9
+        # Ten: the notes-only save (PATCH /{index}/notes) joined the nine.
+        assert len([k for k, v in found.items() if not v]) == 10
 
     def test_the_insert_route_exists_and_fires_the_trigger(self):
         """Replaces `test_no_insert_route_exists_yet`, which was its negative form.

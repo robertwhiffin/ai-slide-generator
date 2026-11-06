@@ -3963,6 +3963,77 @@ class ChatService:
         # store it and send it back, reintroducing the impersonation from outside.
         return {"index": index, "slide_id": new_slide.slide_id, "html": html}
 
+    def update_slide_notes(
+        self,
+        session_id: str,
+        index: int,
+        speaker_notes: str,
+        *,
+        slide_id: Optional[str] = None,
+        expected_version: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Save a slide's speaker notes alone (notes-only save, D8 and D10).
+
+        Changes only the notes and their source on the cached slide object: no HTML
+        change, no Slide rebuild, no stamp_modified, no save point. The saved notes
+        are user notes (source "user", or None when empty). If the save fails the
+        old pair is restored on the cached slide so the cache never serves notes
+        that were not persisted.
+
+        Raises:
+            ValueError: no deck, bad index, or ``slide_id`` does not match the slide.
+        """
+        current_deck = self._get_or_load_deck(session_id)
+        if not current_deck:
+            raise ValueError("No slide deck available")
+
+        if index < 0 or index >= len(current_deck.slides):
+            raise ValueError(f"Invalid slide index: {index}")
+
+        slide = current_deck.slides[index]
+        if slide_id is not None and slide.slide_id != slide_id:
+            raise ValueError(
+                f"Slide at index {index} is {slide.slide_id!r}, not {slide_id!r}"
+            )
+
+        notes = speaker_notes if speaker_notes.strip() else ""
+        old_notes, old_source = slide.speaker_notes, slide.speaker_notes_source
+        slide.speaker_notes = notes
+        slide.speaker_notes_source = "user" if notes else None
+
+        session_manager = get_session_manager()
+        try:
+            save_result = session_manager.save_slide_deck(
+                session_id=session_id,
+                title=current_deck.title,
+                html_content=current_deck.knit(),
+                scripts_content=current_deck.scripts,
+                slide_count=len(current_deck.slides),
+                deck_dict=current_deck.to_dict(),
+                expected_version=expected_version,
+                mutation=session_manager.deck_mutation_context(
+                    session_id,
+                    operation="update_slide",
+                    object_type="deck",
+                    object_id=slide.slide_id,
+                ),
+            )
+        except Exception:
+            slide.speaker_notes, slide.speaker_notes_source = old_notes, old_source
+            raise
+        self._record_deck_version(session_id, save_result)
+
+        logger.info(
+            "Updated slide notes",
+            extra={"index": index, "session_id": session_id},
+        )
+        return {
+            "index": index,
+            "slide_id": slide.slide_id,
+            "speaker_notes": slide.speaker_notes,
+            "version": (save_result or {}).get("version"),
+        }
+
     def duplicate_slide(self, session_id: str, index: int, *, expected_version: Optional[int] = None) -> Dict[str, Any]:
         """Duplicate a slide.
 
