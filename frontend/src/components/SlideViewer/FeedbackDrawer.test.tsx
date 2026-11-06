@@ -555,6 +555,13 @@ describe('FeedbackDrawer: Notes tab', () => {
     expect(screen.queryByTestId('drawer-notes-input')).toBeNull();
   });
 
+  // Sabotage target: drop maxLength from the notes textarea (the route refuses over 20,000 characters).
+  it('the notes editor stops at the 20,000-character route limit', () => {
+    renderNotesDrawer({ speakerNotes: 'x', slideKey: 's1', onSaveNotes: vi.fn(async () => {}) });
+    openNotesTab();
+    expect(notesInput().maxLength).toBe(20000);
+  });
+
   it('the unread dot stays on the AI feedback tab', () => {
     // Sabotage target: render the unseen dot inside (or move it to) the Notes tab button.
     renderNotesDrawer({ findings: [openFinding], hasUnseen: true, speakerNotes: 'x', slideKey: 's1' });

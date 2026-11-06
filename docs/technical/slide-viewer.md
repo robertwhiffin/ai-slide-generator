@@ -118,7 +118,7 @@ The **Notes** tab shows the current slide's `speaker_notes`. Notes are plain tex
 
 - **Save path:** `handleSaveNotes` in `SlideViewer.tsx` calls `api.updateSlideNotes`, which sends `PATCH /api/slides/{index}/notes`. The route changes only the notes, not the slide HTML. The viewer then reloads the deck. A version conflict refreshes the deck and shows the usual alert.
 - **Draft resets per slide:** the text box reloads whenever the current slide or its saved notes change. An unsaved draft is discarded when the user moves to another slide.
-- **Typed notes are kept on rebuild:** notes saved here stay when the slide is rebuilt. New model-written notes replace earlier model-written notes, but they do not replace typed ones.
+- **Typed notes are kept on rebuild:** notes saved here stay when the slide is rebuilt. New model-written notes replace earlier model-written notes, but they do not replace typed ones. A whole-deck regenerate in Legacy mode makes new slides, so it starts with new notes.
 - **Chat does not edit notes in this release.** Notes are never sent to a model. The editor says so in its hint.
 - The unread dot and seen-state belong to the `feedback` tab only.
 

@@ -170,7 +170,7 @@ Design system names are unique among active systems.
 
   Chat cannot edit notes directly, because notes are never sent to the model. When an answer has no aside, the slide keeps the notes it already had. A duplicated Agent-mode deck carries notes written by the Agent-mode graph only after a later HTML or notes save refreshed the deck blob, so duplicate after a save if notes must travel.
 
-  Typed notes are protected: notes the presenter saves in the Notes tab are kept when the slide is rebuilt. New model notes replace earlier model notes, and typed notes stay until the presenter changes them.
+  Typed notes are protected: notes the presenter saves in the Notes tab are kept when the slide is rebuilt. New model notes replace earlier model notes, and typed notes stay until the presenter changes them. A whole-deck regenerate in Legacy mode makes new slides, so it starts with new notes.
 - **Read the import response's warnings.** They name entries the importer ignored and why, which is the fastest way to find a mis-shaped bundle.
 
 ---

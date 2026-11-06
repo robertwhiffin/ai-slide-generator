@@ -2848,6 +2848,7 @@ class SessionManager:
                         "speaker_notes_source": (
                             slide_row.speaker_notes_source
                             if slide_row.speaker_notes
+                            and slide_row.speaker_notes_source in ("model", "user")
                             else None
                         ),
                         "created_by": slide_row.created_by,

@@ -399,3 +399,27 @@ def test_a_duplicated_save_point_carries_notes(deck_with_three_rows):
     copy_id = fx.duplicate(version_number=version_number)["session_id"]
 
     assert _read_notes(_read_as(fx, copy_id)) == [("", None), ("Pause here.", "model"), ("", None)]
+
+
+def test_the_row_read_paths_drop_an_unknown_notes_source(deck_with_three_rows):
+    # Sabotage target: the row read path (get_slide_deck) or SlideWriter._row_to_dict passing
+    # an unknown stored source through, unlike the deck_json path and SlideDeck.from_dict.
+    from unittest.mock import patch
+
+    from src.api.services.slide_repository import SlideWriter
+    from tests.unit.conftest import _make_fake_db
+
+    fx = deck_with_three_rows
+    _save(fx, _with_notes(fx.get_slide_deck(), [(None, None), ("Say it.", "user"), (None, None)]))
+    db = fx._factory()
+    try:
+        row = db.query(SessionSlide).filter(SessionSlide.slide_id == fx.rows()[1].slide_id).one()
+        row.speaker_notes_source = "agent"
+        db.commit()
+    finally:
+        db.close()
+
+    assert _read_notes(fx.get_slide_deck())[1] == ("Say it.", None)
+    with patch("src.api.services.slide_repository.get_db_session", _make_fake_db(fx._factory)):
+        got = SlideWriter().get_slide(fx._session_id, 1)
+    assert (got["speaker_notes"], got["speaker_notes_source"]) == ("Say it.", None)

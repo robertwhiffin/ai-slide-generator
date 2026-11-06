@@ -125,7 +125,8 @@ export function buildCompositeHtml(deck: SlideDeck): string {
   const notes = JSON.stringify(
     slides.map((s) => {
       const legacy = (s as unknown as { notes?: string }).notes;
-      return s.speaker_notes || legacy || '';
+      // A present speaker_notes string wins even when empty (server rule, slide_notes_text).
+      return typeof s.speaker_notes === 'string' ? s.speaker_notes : legacy || '';
     }),
   ).replace(/</g, '\\u003c');
 

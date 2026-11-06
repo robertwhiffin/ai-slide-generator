@@ -70,6 +70,15 @@ describe('speaker notes in the client-built exports', () => {
     expect(embeddedNotes(doc)).toEqual(['Say A.', '']);
   });
 
+  // Sabotage target: `s.speaker_notes || legacy` (an empty, cleared note falling back to a stale `notes` key).
+  it('a cleared speaker_notes string wins over an older notes key', () => {
+    const deck = deckWithNotes(['', '']);
+    (deck.slides[0] as unknown as { notes: string }).notes = 'Old.';
+    delete (deck.slides[1] as unknown as { speaker_notes?: string }).speaker_notes;
+    (deck.slides[1] as unknown as { notes: string }).notes = 'Legacy B.';
+    expect(embeddedNotes(parse(buildCompositeHtml(deck)))).toEqual(['', 'Legacy B.']);
+  });
+
   // Sabotage target: drop the `.replace(/</g, '\\u003c')` on the notes JSON.
   it('a notes string with </script> cannot close the notes element', () => {
     // Unquoted id: JSON.stringify would turn quotes into \" and the id would no longer match.

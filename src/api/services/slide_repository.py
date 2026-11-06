@@ -774,7 +774,9 @@ def _row_to_dict(row: SessionSlide) -> Dict[str, Any]:
         "scripts": row.scripts,
         "speaker_notes": row.speaker_notes or "",
         "speaker_notes_source": (
-            row.speaker_notes_source if row.speaker_notes else None
+            row.speaker_notes_source
+            if row.speaker_notes and row.speaker_notes_source in ("model", "user")
+            else None
         ),
         "created_by": row.created_by,
         "created_at": (

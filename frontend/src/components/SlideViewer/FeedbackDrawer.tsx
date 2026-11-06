@@ -177,6 +177,7 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
                   aria-label="Speaker notes"
                   placeholder="Add speaker notes for this slide."
                   value={draft}
+                  maxLength={20000}
                   onChange={e => setDraft(e.target.value)}
                   rows={4}
                   className="w-full resize-y rounded-md border border-border bg-background p-2 text-xs text-foreground"
