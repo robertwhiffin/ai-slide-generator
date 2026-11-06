@@ -21,6 +21,7 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
   const [currentSlideIndex, setCurrentSlideIndex] = useState(startIndex);
   const [scale, setScale] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [notesVisible, setNotesVisible] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -225,6 +226,14 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         e.stopPropagation();
         toggleFullscreenRef.current();
         break;
+      case 'n':
+      case 'N':
+        // stopPropagation is required: both capture listeners (window and
+        // document) would otherwise toggle twice.
+        e.preventDefault();
+        e.stopPropagation();
+        setNotesVisible((v) => !v);
+        break;
       case 'Escape':
         e.preventDefault();
         e.stopPropagation();
@@ -405,6 +414,41 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
         {currentSlideIndex + 1} / {slideCount}
       </div>
 
+      {notesVisible && (() => {
+        const notesText = (deck.slides[currentSlideIndex]?.speaker_notes ?? '').trim()
+          ? deck.slides[currentSlideIndex].speaker_notes
+          : '';
+        return (
+          <div
+            role="note"
+            data-testid="presentation-notes"
+            style={{
+              position: 'absolute',
+              bottom: '64px',
+              left: '50%',
+              transform: 'translateX(-50%)',
+              width: 'min(960px, 90vw)',
+              maxHeight: '30vh',
+              overflowY: 'auto',
+              backgroundColor: 'rgba(0, 0, 0, 0.85)',
+              color: '#ffffff',
+              padding: '12px 16px',
+              borderRadius: '8px',
+              fontSize: '18px',
+              fontFamily: 'system-ui, sans-serif',
+              whiteSpace: 'pre-wrap',
+              zIndex: 10000,
+            }}
+          >
+            {notesText ? (
+              notesText
+            ) : (
+              <span data-testid="presentation-notes-empty">No speaker notes for this slide.</span>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Toolbar: fullscreen toggle + close button. Discoverable equivalents
           of the F and Esc keyboard shortcuts. Auto-hides in fullscreen. */}
       <div
@@ -422,6 +466,34 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
           transition: 'opacity 0.2s ease-out',
         }}
       >
+        <button
+          type="button"
+          onClick={() => setNotesVisible((v) => !v)}
+          aria-label={notesVisible ? 'Hide speaker notes' : 'Show speaker notes'}
+          aria-pressed={notesVisible}
+          title="Notes (N)"
+          data-testid="presentation-notes-toggle"
+          style={{
+            backgroundColor: notesVisible ? 'rgba(255, 255, 255, 0.3)' : 'rgba(0, 0, 0, 0.7)',
+            color: '#ffffff',
+            width: '36px',
+            height: '36px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            border: 'none',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            padding: 0,
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+            <path d="M14 3v6h6" />
+            <path d="M8 13h8" />
+            <path d="M8 17h5" />
+          </svg>
+        </button>
         <button
           type="button"
           onClick={toggleFullscreen}
@@ -505,7 +577,7 @@ export const PresentationMode: React.FC<PresentationModeProps> = ({
           transition: 'opacity 0.4s ease-out',
         }}
       >
-        ← → Navigate · F Fullscreen · Esc Exit
+        ← → Navigate · N Notes · F Fullscreen · Esc Exit
       </div>
 
       {/* Iframe wrapper that maintains 16:9 aspect ratio and scales to fit viewport */}
