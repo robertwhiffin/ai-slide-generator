@@ -16,7 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from databricks.sdk import WorkspaceClient
 
 from src.services.converter_jail.codeprep import _fix_apostrophe_strings
-from src.services.gateway_openai import gateway_openai_client
+from src.services.gateway_clients import gateway_openai_client
 from src.services.google_slides_auth import GoogleSlidesAuth, GoogleSlidesAuthError
 from src.services.google_slides_prompts_defaults import (
     DEFAULT_GSLIDES_SYSTEM_PROMPT,

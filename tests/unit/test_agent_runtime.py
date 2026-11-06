@@ -1840,6 +1840,40 @@ def test_production_adapter_sends_the_stored_name_to_the_gateway_chat_route(monk
     assert json.loads(request.content)["model"] == "databricks-claude-opus-4-6"
 
 
+def test_production_adapter_sends_the_tellr_tag_and_user_agent(monkeypatch):
+    """Graph-agent Gateway calls are attributable to Tellr in ``system.ai_gateway.usage``;
+    the headers ride as headers only, never in the JSON body the Gateway validates."""
+    from src.services.gateway_clients import gateway_request_headers
+    from tests.fixtures.mock_chat_completions import (
+        MockChatCompletionsWorkspace,
+        install_mock_gateway_transport,
+    )
+
+    install_mock_gateway_transport(monkeypatch)
+    workspace = MockChatCompletionsWorkspace(fake_output("architect"), usage=None)
+    adapter = DatabricksModelAdapter(client_factory=lambda: workspace)
+
+    adapter.invoke(
+        agent_key="architect",
+        configuration=AgentModelConfiguration(
+            endpoint_name="databricks-claude-opus-4-6",
+            temperature=0.7,
+            max_tokens=60000,
+            top_p=0.95,
+        ),
+        schema=OUTPUT_SCHEMAS["architect"],
+        prompt="assembled prompt",
+    )
+
+    assert len(workspace.requests) == 1
+    request = workspace.requests[0]
+    expected_ua = gateway_request_headers()["User-Agent"]
+    assert request.headers.get_list("databricks-ai-gateway-request-tags") == ['{"source": "tellr"}']
+    assert request.headers.get_list("user-agent") == [expected_ua]
+    sent = json.loads(request.content)
+    assert "extra_headers" not in sent and "extra_params" not in sent
+
+
 def test_the_graph_request_sends_no_sampling_and_auto_tool_choice(monkeypatch):
     """Follow-up A: newer Claude models 400 on ``temperature`` and on forced tool choice.
 

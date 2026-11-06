@@ -533,11 +533,12 @@ class DatabricksModelAdapter:
 
     @staticmethod
     def _default_model_factory(**kwargs: Any) -> Any:
-        from databricks_langchain import ChatDatabricks  # type: ignore[import-untyped]
+        from src.services.gateway_clients import gateway_chat_model
 
         # Workstream 2a: every graph model call goes through Unity AI Gateway
-        # ({host}/ai-gateway/mlflow/v1).  There is no /serving-endpoints fallback.
-        return ChatDatabricks(use_ai_gateway=True, **kwargs)
+        # ({host}/ai-gateway/mlflow/v1), tagged source=tellr.  There is no
+        # /serving-endpoints fallback.
+        return gateway_chat_model(**kwargs)
 
     @staticmethod
     def _default_client_factory() -> Any:
