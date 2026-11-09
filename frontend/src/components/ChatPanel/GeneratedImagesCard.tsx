@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { ImageOff } from 'lucide-react';
+import { ImageOff, Maximize2 } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { api } from '../../services/api';
 import type { GeneratedImageRef } from '../../types/message';
+import { GeneratedImagePreview } from './GeneratedImagePreview';
 
 interface GeneratedImagesCardProps {
   images: GeneratedImageRef[];
@@ -35,16 +36,22 @@ function useThumbnail(token: string): string | null {
 const Option: React.FC<{
   image: GeneratedImageRef;
   onUse: (img: GeneratedImageRef) => void;
+  onEnlarge: () => void;
   actionsDisabled: boolean;
   hideActions: boolean;
-}> = ({ image, onUse, actionsDisabled, hideActions }) => {
+}> = ({ image, onUse, onEnlarge, actionsDisabled, hideActions }) => {
   const src = useThumbnail(image.token);
   const label = `Option ${image.option}`;
   return (
     <li className="flex min-w-0 flex-col gap-1.5 rounded-lg border border-border bg-background p-1.5">
-      <div className="flex h-20 w-full items-center justify-center overflow-hidden rounded bg-white">
+      <div className="relative flex h-20 w-full items-center justify-center overflow-hidden rounded bg-white">
         {src ? (
-          <img src={src} alt={label} className="h-full w-full object-contain" />
+          <img
+            src={src}
+            alt={label}
+            className="h-full w-full cursor-zoom-in object-contain"
+            onClick={onEnlarge}
+          />
         ) : (
           <div
             data-testid="generated-image-placeholder"
@@ -53,6 +60,15 @@ const Option: React.FC<{
             <ImageOff className="size-5" aria-hidden="true" />
           </div>
         )}
+        <button
+          type="button"
+          aria-label={`Enlarge option ${image.option}`}
+          title="Enlarge"
+          onClick={onEnlarge}
+          className="absolute right-1 top-1 rounded bg-white/85 p-1 text-gray-700 shadow-sm hover:bg-white hover:text-gray-900"
+        >
+          <Maximize2 className="size-3" aria-hidden="true" />
+        </button>
       </div>
       <span className="text-xs font-medium text-foreground">{label}</span>
       {image.slides.map((n) => (
@@ -83,17 +99,20 @@ export const GeneratedImagesCard: React.FC<GeneratedImagesCardProps> = ({
   onRegenerate,
   actionsDisabled = false,
   hideActions = false,
-}) => (
+}) => {
+  const [preview, setPreview] = useState<number | null>(null);
+  return (
   <div
     className="w-full max-w-[85%] rounded-xl border border-border bg-card px-3 py-2.5"
     data-testid="generated-images-card"
   >
     <ul className="grid grid-cols-3 gap-2">
-      {images.map((image) => (
+      {images.map((image, index) => (
         <Option
           key={image.token}
           image={image}
           onUse={onUse}
+          onEnlarge={() => setPreview(index)}
           actionsDisabled={actionsDisabled}
           hideActions={hideActions}
         />
@@ -114,5 +133,17 @@ export const GeneratedImagesCard: React.FC<GeneratedImagesCardProps> = ({
         </Button>
       )}
     </div>
+    {preview !== null && images[preview] && (
+      <GeneratedImagePreview
+        images={images}
+        index={preview}
+        onIndexChange={setPreview}
+        onClose={() => setPreview(null)}
+        onUse={onUse}
+        actionsDisabled={actionsDisabled}
+        hideActions={hideActions}
+      />
+    )}
   </div>
-);
+  );
+};
