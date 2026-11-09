@@ -272,3 +272,79 @@ def test_without_image_history_the_conversation_is_unchanged(
     (call,) = runtime.calls_for("architect")
     assert [turn["role"] for turn in call.payload["conversation"]] == ["user", "assistant"]
 
+
+# ---------------------------------------------------------------------------
+# The REAL tool class through the node (the other graph tests use a fake)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def real_image_tool(monkeypatch):
+    """Production's ``ImageGenerationAgentTool`` as the node builds it: only the image model
+    and the Library write are replaced.  Returns the tokens "saved", in order."""
+    import contextlib
+    import io
+    import secrets
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from src.services.agent_tools import image_generation_tool as tool_module
+    from src.services.image_generation import GeneratedImage, ImageGenerator
+
+    def generate(self, prompt, preset_id, model=None, quality=None, *, timeout_s=None):
+        buf = io.BytesIO()
+        Image.new("RGB", (48, 32), (30, 90, 200)).save(buf, format="JPEG")
+        return GeneratedImage(
+            data=buf.getvalue(), mime="image/jpeg", ext="jpg", model="gpt-image-2.6-flare",
+            preset_id=preset_id, revised_prompt=None, latency_s=0.0, usage=None,
+        )
+
+    saved: list = []
+
+    @contextlib.contextmanager
+    def no_db():
+        yield None
+
+    def save(db, img, *, owner, prompt, category, tags, **kwargs):
+        token = secrets.token_urlsafe(32)
+        saved.append(token)
+        return SimpleNamespace(token=token)
+
+    monkeypatch.setattr(ImageGenerator, "generate", generate)
+    monkeypatch.setattr(tool_module, "get_db_session", no_db)
+    monkeypatch.setattr(tool_module, "save_generated_image", save)
+    return saved
+
+
+def test_the_real_tool_numbers_a_retrys_options_after_the_first_attempts(
+    graph_env, monkeypatch, images_on, real_image_tool
+):
+    """Attempt 1 makes 3 options and is refused with a retryable code; the retry makes 1
+    more.  The reply's card numbers them 1..4, and the tool's answers are spotlighted."""
+    refused = architect_build(make_spec((0, 1), slide_type="title"))
+    good = architect_build(make_spec((0, 1)))
+    texts: list = []
+
+    def first(call):
+        texts.append(_generate(call, count=3))
+        return refused
+
+    def second(call):
+        texts.append(_generate(call, count=1))
+        return good
+
+    install_runtime(monkeypatch, FakeRuntime(architect=[first, second]))
+
+    t = _run(graph_env, turn_state(graph_env))
+
+    assert t.updates["error_state"] is None
+    assert len(real_image_tool) == 4
+    assert all(text.startswith('<untrusted-data source="image_generation">') for text in texts)
+    assert "Option 4: " in texts[1] and "Option 1: " not in texts[1]
+    (row,) = _llm_rows(t)
+    entries = row["metadata"]["generated_images"]
+    assert [entry["option"] for entry in entries] == [1, 2, 3, 4]
+    # The 3 options of one call are saved in parallel, so in any order.
+    assert {entry["token"] for entry in entries} == set(real_image_tool)
+
