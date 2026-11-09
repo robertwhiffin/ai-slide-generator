@@ -19,7 +19,6 @@ from src.api.routes.images import ImageResponse
 from src.api.services import image_generation_jobs as jobs
 from src.core.database import get_db
 from src.database.models.image import ImageAsset
-from src.services import workspace_settings
 from src.services.image_generation import (
     DEFAULT_PRESET,
     IMAGE_MODELS,
@@ -27,6 +26,7 @@ from src.services.image_generation import (
     PRESETS,
     QUALITIES,
     QUALITY_DESCRIPTIONS,
+    generation_available,
     is_enabled,
     resolve_request,
 )
@@ -44,7 +44,7 @@ if is_enabled():
 
 def _effective_enabled(db: Session) -> bool:
     """Env capability AND the admin setting, read on every request (never cached)."""
-    return is_enabled() and workspace_settings.image_generation_enabled(db)
+    return generation_available(db)
 
 
 def require_image_generation_enabled(db: Session = Depends(get_db)) -> None:

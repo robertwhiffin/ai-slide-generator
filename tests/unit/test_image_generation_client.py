@@ -492,6 +492,81 @@ def test_svg_generate_sends_one_non_streamed_forced_tool_request(ig, mock_ws):
     assert _read_timeout(request) == preset.timeout_s == 240
 
 
+# ---------------------------------------------------------------------------
+# generate(): the caller's per-call timeout (chat image generation, Unit G)
+#
+# Contract (docs/superpowers/plans/2026-11-09-chat-image-generation-CORRECTIONS.md,
+# "Unit G interface"): ``generate(..., *, timeout_s=None)``. The read timeout on the
+# REAL request is ``preset.timeout_s`` when ``timeout_s`` is None, otherwise
+# ``min(preset.timeout_s, max(5.0, timeout_s))``: a caller may only shorten it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "preset_id,result,timeout_s,expected",
+    [
+        ("illustration", _jpeg(), 30, 30),
+        ("illustration", _jpeg(), 30.5, 30.5),
+        ("illustration", _jpeg(), None, 180),
+        ("illustration", _jpeg(), 999, 180),
+        ("illustration", _jpeg(), 180, 180),
+        ("illustration", _jpeg(), 1, 5),
+        ("illustration", _jpeg(), 0, 5),
+        ("background", _jpeg(), 42, 42),
+        ("icon_png", _rgba_png(), 30, 30),
+        ("icon_png", _rgba_png(), 999, 180),
+        ("icon_svg", SVG.encode(), None, 240),
+        ("icon_svg", SVG.encode(), 30, 30),
+        ("icon_svg", SVG.encode(), 200, 200),
+        ("icon_svg", SVG.encode(), 999, 240),
+    ],
+    ids=[
+        "raster-30",
+        "raster-30.5",
+        "raster-none-is-preset",
+        "raster-999-capped-at-preset",
+        "raster-equal-to-preset",
+        "raster-1-floored-at-5",
+        "raster-0-floored-at-5",
+        "background-42",
+        "icon_png-30",
+        "icon_png-999-capped",
+        "svg-none-is-240",
+        "svg-30",
+        "svg-200-under-its-240",
+        "svg-999-capped-at-240",
+    ],
+)
+def test_the_callers_timeout_reaches_the_request_capped_by_the_preset(
+    ig, mock_ws, preset_id, result, timeout_s, expected
+):
+    ws = mock_ws(result)
+
+    _generator(ig, ws).generate("a lighthouse", preset_id, timeout_s=timeout_s)
+
+    (request,) = ws.requests
+    assert _read_timeout(request) == expected
+
+
+def test_timeout_s_is_keyword_only_and_defaults_to_none(ig):
+    import inspect
+
+    param = inspect.signature(ig.ImageGenerator.generate).parameters["timeout_s"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is None
+
+
+def test_a_timeout_override_changes_nothing_else_in_the_request(ig, mock_ws):
+    """The override is the read timeout only: the body is the same request as without it."""
+    plain = mock_ws(_jpeg())
+    _generator(ig, plain).generate("a lighthouse", "illustration")
+    short = mock_ws(_jpeg())
+    _generator(ig, short).generate("a lighthouse", "illustration", timeout_s=30)
+
+    assert short.bodies() == plain.bodies()
+    assert len(short.requests) == 1
+
+
 def test_orchestrator_defaults_to_gpt_5_4_nano_and_follows_the_env_override(
     ig, mock_ws, monkeypatch
 ):

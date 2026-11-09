@@ -406,6 +406,42 @@ def test_reserved_names_are_prefixed():
     }
 
 
+def test_the_image_tool_name_is_reserved():
+    """Chat image generation (Unit G): the architect binds the code-defined
+    ``generate_image`` tool beside the Gateway tools, so a Gateway service listing a tool
+    of that name is prefixed, exactly like ``genie``."""
+    from src.services.agent_tools.image_generation_tool import IMAGE_TOOL_NAME
+
+    assert IMAGE_TOOL_NAME == "generate_image"
+
+    names = model_tool_names({DOCS: ["generate_image", "genie", "search"]})
+
+    assert names == {
+        (DOCS, "generate_image"): "docs__generate_image",
+        (DOCS, "genie"): "docs__genie",
+        (DOCS, "search"): "search",
+    }
+
+
+def test_a_gateway_generate_image_tool_is_bound_prefixed_and_calls_its_own_service():
+    """The built tool never takes the bare name, yet still calls the service's own
+    ``generate_image`` (by its MCP name, with the model's args)."""
+    docs = FakeClient(DOCS, [_spec("generate_image", "Draw a picture."), _spec("search")])
+
+    build = _build([_entry(DOCS, "Docs")], {DOCS: _conn(DOCS, "Docs")}, Factory(docs))
+
+    names = sorted(tool.name for tool in build.tools)
+    assert names == ["docs__generate_image", "search"]
+    assert "generate_image" not in names
+    by_name = {tool.name: tool for tool in build.tools}
+    toolset = AgentToolset(tools=build.tools, max_calls=12, budget_seconds=360.0)
+
+    answer = _answer(by_name, toolset, "docs__generate_image", {"prompt": "a fox"}, "c1")
+
+    assert docs.calls == [("generate_image", {"prompt": "a fox"})]
+    assert answer == spotlight("Docs", "answer from " + DOCS)
+
+
 def test_long_names_truncated_and_deduplicated():
     # A unique name over 64 characters is truncated.
     long_unique = "t" * 80

@@ -398,3 +398,134 @@ def test_the_admin_switch_drives_the_user_availability_probe(
 
     assert client.put(URL, json={"enabled": True}).status_code == 200
     assert client.get(AVAILABLE_URL).json()["available"] is True
+
+
+# ---------------------------------------------------------------------------
+# generation_available(db): the one gate the routes AND the chat tool share
+#
+# Chat image generation, Unit G (docs/superpowers/plans/2026-11-09-chat-image-generation-
+# CORRECTIONS.md, "Unit G interface"): ``src.services.image_generation.generation_available(db)``
+# is ``is_enabled() and workspace_settings.image_generation_enabled(db)``. It does NOT read the
+# settings table when the env gate is off, and the routes' ``_effective_enabled(db)`` delegates
+# to it, so the routes and the graph can never disagree.
+# ---------------------------------------------------------------------------
+
+
+class _UntouchableDb:
+    """A db that records, and fails, any use: proof the settings table was not read.
+
+    Uses are recorded as well as raised, so an implementation that swallowed the error
+    (``try: ... except Exception: return False``) is still caught by ``touched``.
+    """
+
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        self.touched.append(name)
+        raise AssertionError(f"the settings table was read (db.{name}) with the env gate off")
+
+
+def _generation_available(db: Any) -> Any:
+    from src.services import image_generation as service
+
+    return service.generation_available(db)
+
+
+@pytest.mark.parametrize("env_value", ["0", "false", "no", "off", " OFF "])
+def test_generation_available_is_false_when_the_env_gate_is_off_without_reading_the_db(
+    monkeypatch: pytest.MonkeyPatch, env_value: str
+) -> None:
+    _env(monkeypatch, env_value)
+    db = _UntouchableDb()
+
+    assert _generation_available(db) is False
+    assert db.touched == [], "the env gate must short-circuit before the settings read"
+
+
+@pytest.mark.parametrize("env_value", [None, "1"], ids=["env-unset", "env-1"])
+@pytest.mark.parametrize(
+    "stored, expected",
+    [
+        pytest.param(False, False, id="admin-off"),
+        pytest.param("off", False, id="admin-off-string"),
+        pytest.param(ABSENT, True, id="admin-never-set"),
+        pytest.param(True, True, id="admin-on"),
+    ],
+)
+def test_generation_available_truth_table_with_the_env_gate_on(
+    db: Session, factory: sessionmaker, monkeypatch: pytest.MonkeyPatch,
+    env_value: Optional[str], stored: Any, expected: bool,
+) -> None:
+    _env(monkeypatch, env_value)
+    if stored is not ABSENT:
+        _seed(factory, stored)
+
+    assert _generation_available(db) is expected
+
+
+def test_generation_available_follows_the_admin_switch_with_no_restart(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read on every call (R5: never cached)."""
+    _env(monkeypatch, "1")
+    assert _generation_available(db) is True
+
+    workspace_settings.set_image_generation_enabled(db, enabled=False, user=ADMIN)
+    assert _generation_available(db) is False
+
+    workspace_settings.set_image_generation_enabled(db, enabled=True, user=ADMIN)
+    assert _generation_available(db) is True
+
+
+def _patch_generation_available(monkeypatch: pytest.MonkeyPatch, answer: dict) -> list:
+    """Replace ``generation_available`` wherever the routes could look it up; return the
+    dbs it was called with. ``answer["value"]`` is what it says."""
+    from src.services import image_generation as service
+
+    seen: list = []
+
+    def fake(db: Any) -> bool:
+        seen.append(db)
+        return answer["value"]
+
+    # raising=True on the service: the function must exist there.
+    monkeypatch.setattr(service, "generation_available", fake)
+    # The routes may import the name directly (``from ... import generation_available``).
+    monkeypatch.setattr(image_generation, "generation_available", fake, raising=False)
+    return seen
+
+
+def test_the_routes_gate_follows_generation_available_not_their_own_checks(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ``generation_available`` replaced, the routes follow it even where the real env
+    and admin gates say the opposite, so ``_effective_enabled`` delegates to it."""
+    started: list = []
+    # Never start a real job, whatever the gate says.
+    jobs = image_generation.jobs
+    monkeypatch.setattr(jobs, "create_job", lambda **kw: started.append(kw) or "j1")
+    monkeypatch.setattr(jobs, "submit", lambda *a, **kw: started.append(kw) or True)
+    answer = {"value": False}
+    seen = _patch_generation_available(monkeypatch, answer)
+
+    # The real gates are both on (env 1, admin never set) but generation_available says no.
+    _env(monkeypatch, "1")
+    off = client.get(AVAILABLE_URL)
+    assert off.status_code == 200, off.text
+    assert off.json()["available"] is False
+    assert not off.json().get("presets")
+    refused = client.post("/api/images/generate", json={"prompt": "a lighthouse"})
+    assert refused.status_code == 404, refused.text
+    assert started == [], "a refused gate must not start a job"
+
+    # The real env gate is off but generation_available says yes.
+    _env(monkeypatch, "0")
+    answer["value"] = True
+    on = client.get(AVAILABLE_URL)
+    assert on.status_code == 200, on.text
+    assert on.json()["available"] is True
+    assert on.json()["presets"], "an available deployment is offered the presets"
+
+    assert len(seen) >= 3, "every gated request asks generation_available"
+    assert all(isinstance(s, Session) for s in seen), "it is given the request's db session"

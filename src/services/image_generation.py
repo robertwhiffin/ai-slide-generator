@@ -37,7 +37,7 @@ import openai
 from PIL import Image, UnidentifiedImageError
 
 from src.core.databricks_client import get_system_client
-from src.services import image_service
+from src.services import image_service, workspace_settings
 from src.services.gateway_clients import gateway_openai_client
 
 logger = logging.getLogger(__name__)
@@ -234,6 +234,11 @@ _ENV_OFF_VALUES = frozenset({"0", "false", "no", "off"})
 def is_enabled() -> bool:
     """On by default; a deployment opts out with ``TELLR_IMAGE_GENERATION_ENABLED=0``."""
     return os.getenv(ENV_FLAG, "").strip().lower() not in _ENV_OFF_VALUES
+
+
+def generation_available(db: Any) -> bool:
+    """Env capability AND the admin setting; the settings table is not read when the env is off."""
+    return is_enabled() and workspace_settings.image_generation_enabled(db)
 
 
 def orchestrator_model() -> str:
@@ -476,16 +481,23 @@ class ImageGenerator:
         preset_id: str,
         model: str | None = None,
         quality: str | None = None,
+        *,
+        timeout_s: float | None = None,
     ) -> GeneratedImage:
         preset, model, quality = resolve_request(preset_id, model, quality)
         tool = build_tool(preset, model, quality)
+        effective_timeout = (
+            preset.timeout_s
+            if timeout_s is None
+            else min(preset.timeout_s, max(5.0, timeout_s))
+        )
         return self._run(
             input_=build_prompt(prompt, preset),
             tool=tool,
             model=model,
             quality=quality,
             preset_id=preset.id,
-            timeout_s=preset.timeout_s,
+            timeout_s=effective_timeout,
             stream=preset.output_format != "svg",
             svg=preset.output_format == "svg",
             prompt=prompt,
@@ -561,7 +573,7 @@ class ImageGenerator:
         model: str,
         quality: str,
         preset_id: str | None,
-        timeout_s: int,
+        timeout_s: float,
         stream: bool,
         svg: bool,
         prompt: str,
