@@ -208,3 +208,25 @@ def test_a_spent_time_budget_refuses_the_next_call(library, monkeypatch):
     assert len(fake.calls) == 1
     assert REF_RE.search(result) is None
     assert "time" in _assert_spotlighted(result).lower()
+
+
+# ---------------------------------------------------------------------------
+# A prompt of whitespace is no prompt (it would be a paid call with no subject)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prompt", ["   ", "\n\t "], ids=["spaces", "newline-tab"])
+def test_a_whitespace_prompt_is_rejected(prompt):
+    from pydantic import ValidationError
+
+    from src.services.agent_tools.image_generation_tool import ImageGenerationArgs
+
+    with pytest.raises(ValidationError):
+        ImageGenerationArgs(prompt=prompt, kind="icon")
+
+
+def test_a_prompt_is_stripped():
+    from src.services.agent_tools.image_generation_tool import ImageGenerationArgs
+
+    assert ImageGenerationArgs(prompt="  a shield  ", kind="icon").prompt == "a shield"
+

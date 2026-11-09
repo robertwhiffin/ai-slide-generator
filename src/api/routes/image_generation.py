@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from src.api.routes import images as images_routes
@@ -55,6 +55,7 @@ def require_image_generation_enabled(db: Session = Depends(get_db)) -> None:
 # --- Schemas ---
 
 class GenerateImageRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)  # a blank prompt is no prompt
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     preset: str = DEFAULT_PRESET
     model: Optional[str] = None
@@ -62,6 +63,7 @@ class GenerateImageRequest(BaseModel):
 
 
 class EditImageRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)  # a blank prompt is no prompt
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
     model: Optional[str] = None
     quality: Optional[str] = None

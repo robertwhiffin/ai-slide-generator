@@ -109,6 +109,7 @@ describe('AdminImageGeneration', () => {
     expect(box).toHaveAccessibleDescription(/\bpaid\b/i);
     expect(box).toHaveAccessibleDescription(/service principal/i);
     expect(box).toHaveAccessibleDescription(/on by default/i);
+    expect(box).toHaveAccessibleDescription(/\bchat\b/i);
   });
 
   it('turns it on when clicked while off, and shows the saved value', async () => {

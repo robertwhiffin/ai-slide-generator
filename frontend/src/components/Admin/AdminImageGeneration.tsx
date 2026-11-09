@@ -68,7 +68,8 @@ export const AdminImageGeneration: React.FC = () => {
           <span>
             <span className="font-medium text-gray-900">Let users generate images with AI</span>
             <span id="image-generation-help" className="block text-xs text-gray-500 mt-0.5">
-              Adds Generate and Edit with prompt to the Image Library. Each image is a paid model
+              Adds Generate and Edit with prompt to the Image Library, and lets the assistant
+              generate images in the chat (the Generate image buttons). Each image is a paid model
               call made as the app&apos;s service principal. On by default.
             </span>
           </span>

@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.core.database import get_db_session
 from src.services.image_generation import (
@@ -108,6 +108,9 @@ IMAGE_TOOL_DESCRIPTION: Final = (
 
 
 class ImageGenerationArgs(BaseModel):
+    # A prompt of whitespace would be a paid call with no subject.
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     prompt: str = Field(
         min_length=1,
         max_length=MAX_PROMPT_CHARS,

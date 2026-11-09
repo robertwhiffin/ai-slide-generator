@@ -719,7 +719,11 @@ class TestGenerateValidation:
 
     @pytest.mark.parametrize(
         "prompt",
-        [pytest.param("", id="empty"), pytest.param("a" * (MAX_PROMPT_CHARS + 1), id="too-long")],
+        [
+            pytest.param("", id="empty"),
+            pytest.param("   \n\t ", id="whitespace"),
+            pytest.param("a" * (MAX_PROMPT_CHARS + 1), id="too-long"),
+        ],
     )
     def test_prompt_bounds_are_422(self, env, prompt):
         resp = env.client.post("/api/images/generate", json={"prompt": prompt})
@@ -813,7 +817,11 @@ class TestEdit:
 
     @pytest.mark.parametrize(
         "prompt",
-        [pytest.param("", id="empty"), pytest.param("a" * (MAX_PROMPT_CHARS + 1), id="too-long")],
+        [
+            pytest.param("", id="empty"),
+            pytest.param("   \n\t ", id="whitespace"),
+            pytest.param("a" * (MAX_PROMPT_CHARS + 1), id="too-long"),
+        ],
     )
     def test_prompt_bounds_are_422(self, env, prompt):
         token = env.seed_image(owner=ALICE)
