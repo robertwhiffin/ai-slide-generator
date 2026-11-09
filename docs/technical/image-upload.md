@@ -15,6 +15,8 @@ Images live entirely in PostgreSQL/Lakebase (no external storage). The agent ref
 | Database model | SQLAlchemy | `src/database/models/image.py` |
 | Frontend library | React + TypeScript | `frontend/src/components/ImageLibrary/` |
 | Frontend types | TypeScript | `frontend/src/types/image.ts` |
+| AI image generation | Responses API `image_generation` tool via the AI Gateway | `src/services/image_generation.py`, `src/api/routes/image_generation.py` |
+| Architect image tool | `AgentTool` | `src/services/agent_tools/image_generation_tool.py` |
 
 ---
 
@@ -197,6 +199,102 @@ search_images(
     tags: Optional[List[str]], # Filter by tags
 ) -> str                       # JSON: {message, images: [{id, filename, description, tags, category, mime_type, usage}]}
 ```
+
+---
+
+## AI image generation
+
+Generated images are ordinary library rows (`ImageAsset`): tagged `ai_generated` plus the model
+and the preset, with the prompt as the description. Anything that takes `{{image:TOKEN}}` can use
+them.
+
+### Switches
+
+Both are read on every request and every turn, never cached on the server:
+
+- the env flag `TELLR_IMAGE_GENERATION_ENABLED`: on unless set to `0`, `false`, `no` or `off`;
+- the admin setting `image_generation_enabled` (`workspace_settings`, Admin > Connections): on
+  unless a row says off.
+
+`image_generation.generation_available(db)` is the one gate: the routes and the graph both call it.
+The frontend asks `GET /api/images/generate/available` through one cached probe
+(`hooks/useImageGenerationOptions.ts`, 5-minute TTL), which the admin switch invalidates.
+
+### The model call (`src/services/image_generation.py`)
+
+- **Presets.** `background` (2048x1152 JPEG), `illustration` (1536x1024 JPEG), `icon_png`
+  (1024x1024 transparent PNG) and `icon_svg` (SVG, GPT Image 2.6 only). The default model is
+  `gpt-image-2.6-flare` at `medium`.
+- **The request.** `ImageGenerator.generate(prompt, preset_id, model=None, quality=None, *,
+  timeout_s=None)` drives the Responses API `image_generation` tool through
+  `gateway_openai_client`, with `tool_choice` forced.
+  - The orchestrator is `system.ai.gpt-5-4-nano` (override: `TELLR_IMAGE_GEN_ORCHESTRATOR_MODEL`).
+  - SDK retries are off, because a retry is a second paid image.
+  - `timeout_s` can only shorten the preset's timeout.
+- **Streaming.** Rasters stream, because the Gateway rejects non-streamed responses over 640 KB.
+  SVG is read non-streamed and passes `sanitize_svg`.
+- **Output.** `fit_to_library` keeps output under the 5 MB cap. Edits flatten a transparent source
+  onto white first.
+
+### Image Library: Generate and Edit with prompt
+
+`POST /api/images/generate` and `POST /api/images/{token}/edit` start an owner-scoped job and
+return 202; the browser polls `GET /api/images/generate/jobs/{job_id}`, because the Apps proxy cuts
+requests at 60 s. Jobs reuse `export_jobs` with `session_id = image-generation:<owner>`.
+
+### Chat: the architect's `generate_image` tool
+
+The graph engine's architect gets the tool on every turn that is not describe-only while the gate is
+open. It rides alone, or beside the turn's Gateway MCP tools on one toolset. All usage guidance is
+in the tool's description, not the architect's prompt:
+
+- an open-ended ask means 3 options, a `discuss` intent, nothing placed;
+- an exact ask means 1 image, placed in the same answer by putting its reference in that slide's
+  `content_brief`.
+
+**Limits, enforced in code:**
+
+- 2 calls, 3 images per call and 6 images per turn;
+- 240 s per turn, clipped to the 700 s turn deadline;
+- no call starts with under 30 s left;
+- a process-wide semaphore of 6 slots, taken without blocking;
+- images in one call are generated in parallel on a module-level pool, and a straggler past the
+  wall clock is abandoned before it saves;
+- failure text is fixed ("busy", "not allowed", "did not finish in time", "could not be
+  generated"), never the exception's.
+
+**Saving.** Images are saved as the turn's user, with the tags `chat`, plus `chat_option` when
+there are several.
+
+**What a turn records** (`src/services/graph/nodes.py`, `_ImageToolPass`):
+
+- **State.** Two turn-scoped keys: `generated_images` (`{token, kind, option, prompt,
+  for_slide}`) and `image_tool_usage` (`{calls, images, seconds}` per pass). Options are numbered
+  across the turn.
+- **Reply metadata.** The architect's reply row and its ASSISTANT event carry
+  `metadata.generated_images` in the shared shape from `src/utils/generated_images.py`, with
+  `slides` as the 1-based slides of the committed spec that reference each image.
+  `SessionManager.msg_to_stream_event` forwards it, sanitised, to polling clients.
+- **Image-reference safety.** When the turn generated images, the architect's references are
+  reconciled and the builders' allow-list holds the new tokens, as on a Gateway turn. A dropped
+  reference is reported as "A generated image couldn't be placed on slide N."
+- **Next turn.** `_conversation` replays a `system` note after such a reply, listing each option's
+  exact reference, so "use the second one" works.
+- **Progress.** Each call emits a `TOOL_CALL` event with top-level `tool_name="image_generation"`
+  and `tool_input={kind, count}`, and writes a `tool_call` row.
+
+**Frontend.**
+
+- **Options card.** `GeneratedImagesCard` renders under the reply: thumbnails, "On slide N" badges,
+  "Use this" on unplaced options, and Regenerate.
+- **Card actions.** Both send ordinary chat messages. Use attaches the token (`image_ids`), so
+  `ChatService` names it in the message. The graph ignores `slide_context`, so every message names
+  the slide in its text.
+- **Entry points.** The chat input's **Generate image** button and the stage's **Generate image for
+  this slide** both open `GenerateImageRequestDialog`, which composes the request. Both show only
+  when the feature is available and the deck is not legacy.
+
+**Not covered.** The legacy (monolith) engine.
 
 ---
 

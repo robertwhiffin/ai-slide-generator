@@ -88,6 +88,18 @@ The pre-pass ran on 2026-11-09 against `feat/ai-image-generation`.
 - **R14. The new Playwright spec goes in the CI e2e shard matrix.** `test_e2e_matrix_covers_specs`
   requires it.
 
+Rulings from the live check (2026-11-09):
+
+- **R15. `regenerateMessage` never carries the stored prompt**, for example "Generate 3 new
+  illustration options for slide 2." The stored prompt is the model's own, cut to 300 characters.
+  In the user's bubble it read as the user's words cut off mid-word, and the architect replied "your
+  description was cut off". The reply above the card already describes the images.
+- **R16. No image tool, but the conversation showed generated images.** The architect's
+  conversation then ends with a `system` turn, `_IMAGE_TOOL_OFF_NOTE`, saying image generation is
+  not available this turn. Live, with the admin switch off, a session with earlier options got "I
+  made three picture options ... shown below this reply" with nothing generated. A conversation that
+  never showed generated images is unchanged.
+
 ## Shared metadata shape (backend writes it, polling forwards it, frontend reads it)
 
 ```json
@@ -272,7 +284,7 @@ pickImageMessage(img)
     // for_slide set → `Use option ${img.option} on slide ${img.for_slide}.`
     // otherwise     → `Use option ${img.option} where it fits best.`
 regenerateMessage(images)
-    // `Generate 3 new ${singular(kind)} options${for_slide ? ` for slide ${n}` : ''}${prompt ? `: ${prompt}` : '.'}`  (R12: singular)
+    // `Generate 3 new ${singular(kind)} options${for_slide ? ` for slide ${n}` : ''}.`  (R12: singular; R15: no prompt)
 generateImageMessage({prompt, kind, options, forSlide})
     // options: `Generate 3 ${singular(kind)} options${forSlide ? ` for slide ${n}` : ''}: ${prompt}`
     // single:  `Generate ${a(kind)} and add it to slide ${n}: ${prompt}` when forSlide is set,
