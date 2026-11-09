@@ -20,12 +20,15 @@ export function pickImageMessage(img: GeneratedImageRef): string {
     : `Use option ${img.option} where it fits best.`;
 }
 
+/**
+ * Never the stored prompt (R15): it is the model's own, cut to 300 characters, and in the user's
+ * bubble it read as the user's words, cut off mid-word. The reply above describes the images.
+ */
 export function regenerateMessage(images: GeneratedImageRef[]): string {
   const first = images[0];
   const kind = first ? label(first.kind) : 'illustration';
   const slide = first?.for_slide ? ` for slide ${first.for_slide}` : '';
-  const prompt = first?.prompt?.trim();
-  return `Generate 3 new ${kind} options${slide}${prompt ? `: ${prompt}` : '.'}`;
+  return `Generate 3 new ${kind} options${slide}.`;
 }
 
 export function generateImageMessage(args: {

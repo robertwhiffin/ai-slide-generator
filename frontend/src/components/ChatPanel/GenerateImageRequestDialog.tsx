@@ -30,6 +30,7 @@ export const GenerateImageRequestDialog: React.FC<GenerateImageRequestDialogProp
   const [options, setOptions] = useState(true);
   const [slide, setSlide] = useState<number | null>(forSlide);
   const titleId = useId();
+  const slideSelectId = useId();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -93,9 +94,10 @@ export const GenerateImageRequestDialog: React.FC<GenerateImageRequestDialogProp
           Show me 3 options
         </label>
 
-        <label className="flex items-center gap-2 text-sm">
-          For slide
+        <div className="flex items-center gap-2 text-sm">
+          <label htmlFor={slideSelectId}>For slide</label>
           <select
+            id={slideSelectId}
             value={slide === null ? '' : String(slide)}
             onChange={(e) => setSlide(e.target.value === '' ? null : Number(e.target.value))}
             className="rounded border border-input bg-background px-2 py-1 text-sm"
@@ -107,7 +109,7 @@ export const GenerateImageRequestDialog: React.FC<GenerateImageRequestDialogProp
               </option>
             ))}
           </select>
-        </label>
+        </div>
 
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onClose}>

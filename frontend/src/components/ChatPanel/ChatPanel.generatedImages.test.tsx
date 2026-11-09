@@ -403,7 +403,7 @@ describe('ChatPanel card actions', () => {
 
     await waitFor(() => expect(h.sendChatMessage).toHaveBeenCalledTimes(1));
     const args = h.sendChatMessage.mock.calls[0];
-    expect(args[1]).toBe(`Generate 3 new illustration options for slide 3: ${PROMPT}`);
+    expect(args[1]).toBe('Generate 3 new illustration options for slide 3.');
     expect(args[5]).toBeUndefined();
   });
 

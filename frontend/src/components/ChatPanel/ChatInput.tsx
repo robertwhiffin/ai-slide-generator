@@ -237,14 +237,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         </div>
 
         <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-          <span>Enter to send · Shift+Enter new line</span>
-          <div className="flex items-center gap-3">
+          <span className="min-w-0 truncate">Enter to send · Shift+Enter new line</span>
+          <div className="flex shrink-0 items-center gap-3">
             {imageRequest && (
               <button
                 type="button"
                 disabled={disabled}
                 onClick={() => setIsImageDialogOpen(true)}
-                className="flex items-center gap-1 hover:text-foreground disabled:opacity-50 disabled:hover:text-muted-foreground"
+                className="flex shrink-0 items-center gap-1 whitespace-nowrap hover:text-foreground disabled:opacity-50 disabled:hover:text-muted-foreground"
               >
                 <WandSparkles className="size-3" aria-hidden="true" />
                 Generate image

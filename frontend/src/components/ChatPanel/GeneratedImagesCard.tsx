@@ -41,7 +41,7 @@ const Option: React.FC<{
   const src = useThumbnail(image.token);
   const label = `Option ${image.option}`;
   return (
-    <li className="flex w-28 flex-col gap-1.5 rounded-lg border border-border bg-background p-1.5">
+    <li className="flex min-w-0 flex-col gap-1.5 rounded-lg border border-border bg-background p-1.5">
       <div className="flex h-20 w-full items-center justify-center overflow-hidden rounded bg-white">
         {src ? (
           <img src={src} alt={label} className="h-full w-full object-contain" />
@@ -85,10 +85,10 @@ export const GeneratedImagesCard: React.FC<GeneratedImagesCardProps> = ({
   hideActions = false,
 }) => (
   <div
-    className="max-w-[85%] rounded-xl border border-border bg-card px-3 py-2.5"
+    className="w-full max-w-[85%] rounded-xl border border-border bg-card px-3 py-2.5"
     data-testid="generated-images-card"
   >
-    <ul className="flex flex-wrap gap-2">
+    <ul className="grid grid-cols-3 gap-2">
       {images.map((image) => (
         <Option
           key={image.token}

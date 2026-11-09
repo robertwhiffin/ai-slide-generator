@@ -11,7 +11,9 @@
  *     for_slide set -> `Use option ${img.option} on slide ${img.for_slide}.`
  *     otherwise     -> `Use option ${img.option} where it fits best.`
  *   regenerateMessage(images)        (kind / for_slide / prompt of the set; the cards are one set)
- *     `Generate 3 new ${plural(kind)} options${for_slide ? ` for slide ${n}` : ''}${prompt ? `: ${prompt}` : '.'}`
+ *     `Generate 3 new ${singular(kind)} options${for_slide ? ` for slide ${n}` : ''}.`
+ *     (R15: never the prompt. The stored prompt is the model's, cut to 300 characters; in the
+ *     user's bubble it read as the user's own words, cut off mid-word.)
  *   generateImageMessage({prompt, kind, options, forSlide})
  *     options: `Generate 3 ${singular(kind)} options${forSlide ? ` for slide ${n}` : ''}: ${prompt}`
  *     single:  `Generate ${a(kind)} and add it to slide ${n}: ${prompt}` when forSlide is set,
@@ -75,18 +77,18 @@ describe('pickImageMessage', () => {
 
 describe('regenerateMessage', () => {
   it.each<[Kind, number | null, string | undefined, string]>([
-    ['illustration', 3, 'A calm lake at dawn', 'Generate 3 new illustration options for slide 3: A calm lake at dawn'],
-    ['icon', null, 'A shield', 'Generate 3 new icon options: A shield'],
+    ['illustration', 3, 'A calm lake at dawn', 'Generate 3 new illustration options for slide 3.'],
+    ['icon', null, 'A shield', 'Generate 3 new icon options.'],
     ['background', 1, '', 'Generate 3 new background options for slide 1.'],
     ['vector_icon', null, undefined, 'Generate 3 new vector icon options.'],
-    ['vector_icon', 2, 'A padlock', 'Generate 3 new vector icon options for slide 2: A padlock'],
+    ['vector_icon', 2, 'A padlock', 'Generate 3 new vector icon options for slide 2.'],
   ])('%s, slide %s, prompt %j', (kind, forSlide, prompt, expected) => {
     expect(regenerateMessage(set(kind, forSlide, prompt))).toBe(expected);
   });
 
   it('works from a single image too (count stays 3)', () => {
     expect(regenerateMessage([ref({ kind: 'icon', for_slide: 4, prompt: 'A rocket' })])).toBe(
-      'Generate 3 new icon options for slide 4: A rocket',
+      'Generate 3 new icon options for slide 4.',
     );
   });
 });
@@ -167,5 +169,16 @@ describe('generateImageMessage: the prompt is trimmed', () => {
     expect(generateImageMessage({ prompt: '   ', kind: 'icon', options: true, forSlide: 4 })).toBe(
       'Generate 3 icon options for slide 4.',
     );
+  });
+});
+
+// Controller addition (R15): a long stored prompt (the model's, cut to 300 characters) never
+// reaches the message the user's bubble shows.
+describe('regenerateMessage never carries the stored prompt', () => {
+  it('drops a long, truncated prompt', () => {
+    const long = 'Flat, modern vector-style illustration of data silos with broken connection lines be';
+    const text = regenerateMessage([ref({ kind: 'illustration', for_slide: 2, prompt: long })]);
+    expect(text).toBe('Generate 3 new illustration options for slide 2.');
+    expect(text).not.toContain('broken');
   });
 });
