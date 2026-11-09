@@ -1,4 +1,4 @@
-# Findings: AI image generation in the Image Library
+# Findings: AI image generation in the Image Library and the chat
 
 Status: proposed in this PR. Built as a prototype and verified on a laptop and on a single-user
 dev app before review.
@@ -23,6 +23,25 @@ dev app before review.
 
 It uses the Responses API `image_generation` tool, driven through Tellr's existing AI Gateway
 client.
+
+### In the chat (second iteration, after review feedback)
+
+Review feedback was that most people never leave the chat, so image generation has to be available
+there, callable by the architect, with "make me a picture to get this message across" producing 3
+options to choose from or regenerate.
+
+- **The architect's tool.** The graph engine's architect gets a `generate_image` tool whenever image
+  generation is available. All its guidance is in the tool description, not the agent prompt:
+  - an open-ended ask gets 3 options in a discuss reply, with nothing placed;
+  - an exact ask ("add a shield icon to slide 2") gets 1 image placed on that slide.
+- **The options card.** A reply that generated images shows them as a card under it: thumbnails,
+  **Use this** and **Regenerate**. Both actions send an ordinary chat message, so the architect
+  does the work, and "use the second one" typed later works too.
+- **Entry points.** A **Generate image** button in the chat input and **Generate image for this
+  slide** on the stage open one dialog that composes the request. Both show only on agent-mode
+  decks while the feature is on.
+- **Limits, in code.** 2 calls, 3 images per call and 6 per turn, 240 s, and 6 concurrent
+  generations per process. Images in one call run in parallel.
 
 ## Headline results
 
@@ -77,6 +96,15 @@ measured here; `system.ai_gateway.usage` has it per request.
   `gateway_openai_client` now forwards keyword arguments. SDK retries are off because a retry is a
   second paid image.
 
+- **A model with no tool can still claim to have used it.** With the admin switch off, a session
+  whose earlier replies showed generated options got "I made three picture options ... shown below
+  this reply", with nothing generated: the model followed its own earlier replies. When the tool is
+  not bound and the conversation shows generated images, the architect is now told image generation
+  is not available, and it says so (it even corrected the earlier claim).
+- **Never echo a model-written prompt as the user's words.** Regenerate first re-sent the stored
+  prompt, cut to 300 characters, in the user's bubble. The architect read it as the user's text
+  "cut off" and said so. Regenerate now sends a short request and relies on the conversation.
+
 ## How it is put together
 
 - `src/services/image_generation.py`: presets, the tool builder (only parameters verified on the
@@ -106,6 +134,36 @@ measured here; `system.ai_gateway.usage` has it per request.
 - **Not hardened yet.** There is no wall-clock deadline on a streamed call (httpx's timeout is
   per-read) and no byte cap on the edit input.
 
+### Measured in the chat (local app, graph engine, 4-slide deck)
+
+| Turn | Time |
+|---|---|
+| "Make me a picture to get slide 2's message across" (3 illustrations, discuss) | 24 s |
+| "Give me 3 icon options for slide 3" | 26 s |
+| Regenerate (3 new illustrations) | 21 s |
+| **Use this** on an icon (edit, slide rebuilt and reviewed) | 59 s |
+| Exact ask from the Generate image dialog (1 background, placed on slide 1) | 64 s |
+
+The 3 images of an options turn are generated in parallel in about 15 s. The deck had no image
+activity on "Make slide 4 more concise", and with the admin switch off the architect said image
+generation was not available.
+
+### Does description-only guidance work? (architect evals)
+
+The architect gets no prompt change; everything is in the tool description. The eval harness binds
+the real tool over fake backends (`--case-set image_tool`, `evals/configs/architect/image-tool.yaml`),
+with 8 cases, 3 repeats each, and a deterministic scorer (count, kind, intent, and where the reference
+ends up):
+
+| Run | Image-tool pass rate |
+|---|---|
+| First description | 22 / 24 |
+| Tightened description (open-ended is the default, even for "a picture") | 24 / 24 |
+| The 22 ordinary architect cases with the tool bound (no image asked for) | 22 / 22, no call made |
+
+Both early failures were the review's own phrase, "make me a picture to get slide 2's message
+across": in 2 of 3 runs the architect made one image and placed it instead of offering 3.
+
 ## Gaps found in Tellr itself (not caused by this change)
 
 - **The default (graph) engine ignored slide-style image guidelines** (fixed in this change).
@@ -119,7 +177,13 @@ measured here; `system.ai_gateway.usage` has it per request.
   still says `{{image:3}}` and never resolves. Found on a dev app (its Databricks Brand
   style) and fixed there by hand; every deployment with a pre-token style has the same breakage.
 - **The graph engine still has no `search_images` tool**, so it cannot find library images by itself;
-  it only uses images it is given (style guidelines, chat attachments, the HTML editor's picker).
+  it only uses images it is given (style guidelines, chat attachments, the HTML editor's picker, and
+  now the images its own `generate_image` tool makes).
+- **Slides streamed during a graph turn carry raw `{{image:…}}` placeholders.** Neither the
+  `slide_ready` SSE event nor `GET /chat/poll`'s slides substitute image placeholders (they do
+  substitute page numbers and design-system assets), so a slide with a newly placed image shows it
+  broken until the turn ends and the deck is reloaded (about 2 s in testing). It applies to any
+  image a graph turn places, not only generated ones.
 - **The database URL is logged at WARNING on every engine creation**, first 50 characters
   (`src/core/database.py`, `get_engine`). For a `databricks://token:<PAT>@...` URL that includes
   part of the token.
@@ -130,10 +194,10 @@ measured here; `system.ai_gateway.usage` has it per request.
    its logo as a labelled reference image, to generate backgrounds, illustrations and **consistent
    icon sets**: generate one icon, then use it as the style reference for the rest of the deck's
    icons.
-2. **Agent-generated imagery.** A `generate_image` tool for the graph-engine slide builder (same
-   pattern as brand search), so decks get bespoke icons and backgrounds when the library has nothing
-   suitable. This should come with wiring library search and `image_guidelines` into the graph
-   engine.
+2. **Agent-generated imagery: done for the architect** (the chat iteration above). Still open:
+   library search for the graph engine, so it can reuse an image before generating one, and an
+   owner-only or "options" filter in the Image Library, since unused options are kept there
+   (tagged `chat_option`).
 
 ## How it was verified on a dev app
 
