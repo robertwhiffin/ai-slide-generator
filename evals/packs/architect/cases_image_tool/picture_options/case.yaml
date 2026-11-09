@@ -1,0 +1,11 @@
+kind: mutation
+fault: 'open-ended ask: three illustration options in one call, discussed, nothing
+  placed'
+expect:
+  intent: discuss
+  image_tool:
+    called: true
+    count: 3
+    kinds:
+    - illustration
+design_system_active: true

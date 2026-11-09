@@ -1,0 +1,8 @@
+kind: mutation
+fault: 'a question about images is not a request for one: answer it, call no image
+  tool'
+expect:
+  intent: discuss
+  image_tool:
+    called: false
+design_system_active: true

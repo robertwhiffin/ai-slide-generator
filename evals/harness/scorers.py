@@ -1,16 +1,17 @@
 """Deterministic scorers for the eval harness."""
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import NamedTuple
 
-from src.core import database  # noqa: F401 - break import cycle before src.* imports
 import tinycss2
 from pydantic import ValidationError
 
 from evals.harness.render import RenderMeasures
+from src.core import database  # noqa: F401 - break import cycle before src.* imports
 from src.domain.deck_spec import DeckSpec, SlideSpec
 from src.domain.deck_style import (
     DECK_STYLE_MAX_CHARS,
@@ -29,7 +30,7 @@ from src.domain.slide_operations import (
     compose_edit_spec,
 )
 from src.utils.ds_asset_utils import DS_ASSET_PLACEHOLDER_PATTERN
-
+from src.utils.image_refs import reconcile_model_strings, refs_in
 
 #: Longest error detail quoted in a contract-fail rationale; longer is cut + marked.
 CONTRACT_DETAIL_MAX_CHARS = 2000
@@ -774,6 +775,164 @@ def brand_asset_use_score(
         f"{BRAND_SEARCH_TOOL} call")
 
 
+# --------------------------------------------------------------------------- the image tool
+
+#: The architect's image tool (``image_generation_tool.IMAGE_TOOL_NAME``), as a run records it.
+IMAGE_TOOL = "generate_image"
+
+
+def image_tool_calls(tool_calls) -> list[Mapping]:
+    """The run's ``generate_image`` calls, in call order; another tool's calls are ignored.
+
+    ``tool_calls`` is the run's record (``RunResult.tool_calls``: ``()``, ``None`` or the list
+    MLflow stores), one entry per call the tool started.
+    """
+    return [
+        call for call in (tool_calls or ())
+        if isinstance(call, Mapping) and call.get("name") == IMAGE_TOOL
+    ]
+
+
+def image_tool_tokens(tool_calls) -> list[str]:
+    """Every token the run's image calls saved, in order, each once."""
+    tokens: list[str] = []
+    for call in image_tool_calls(tool_calls):
+        for saved in call.get("saved") or ():
+            token = saved.get("token") if isinstance(saved, Mapping) else None
+            if isinstance(token, str) and token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def _committed_slides(answer: dict, current_deck_spec) -> tuple[list[SlideSpec] | None, str]:
+    """The slides an edit leaves, in deck order (index ``n - 1`` is slide ``n``), as production
+    commits them: an operations edit composed over the current deck, else the answer's
+    ``deck_spec``. The reason is empty on success."""
+    if _operations_given(answer):
+        composed = _compose(answer, current_deck_spec)
+        if isinstance(composed, str):
+            return None, composed
+        return list(composed.spec.slides), ""
+    if answer.get("deck_spec") is None:
+        return None, "the answer carries no deck_spec or operations to place the image with"
+    spec, why = _validate_deck(answer["deck_spec"])
+    if spec is None:
+        return None, f"deck_spec is not a valid DeckSpec ({why})"
+    return sorted(spec.slides, key=lambda slide: slide.position), ""
+
+
+def image_tool_score(
+    structured: dict | None, expect: dict, *, tool_calls, current_deck_spec: dict | None = None
+) -> tuple[bool, str]:
+    """Score how an architect answer uses the ``generate_image`` tool (a case whose ``expect``
+    has ``image_tool``: ``called``, then ``count``, ``kinds`` and, for an exact ask, the 1-based
+    ``slide`` the image goes on). ``tool_calls`` is the run's record. The row passes only when:
+
+    * the intent is ``expect["intent"]``, when the case gives one;
+    * with ``called``: the run made exactly one image call, of ``count`` images and of a kind in
+      ``kinds``. Without it: the run made no image call;
+    * no image reference in the answer is invented. As production does on a turn whose tool
+      made images, the answer's references are first reconciled against the returned tokens and
+      the references the current deck carries (``reconcile_model_strings``): a mistyped tail is
+      corrected, anything else is removed, and a removed one fails the row;
+    * ``message`` carries no ``{{image:...}}`` reference and no returned token;
+    * with ``slide`` (an exact ask): a returned token's reference is in that slide's
+      ``content_brief`` in the deck the edit leaves (an operations edit composed over the current
+      deck, as production composes it), and on no other slide. Without it (options, or no image
+      ask): nothing outside ``message`` references a returned token either.
+
+    Whether the reply asks the user to pick an option is the judge's to read, not this scorer's.
+    Every failing condition is named in the rationale.
+    """
+    want = dict((expect or {}).get("image_tool") or {})
+    if not isinstance(structured, dict):
+        return False, "Image tool: no architect output to score"
+    calls = image_tool_calls(tool_calls)
+    tokens = image_tool_tokens(tool_calls)
+    reasons: list[str] = []
+    notes: list[str] = []
+
+    want_intent = (expect or {}).get("intent")
+    if want_intent is not None and structured.get("intent") != want_intent:
+        reasons.append(f"intent {structured.get('intent')!r}, expected {want_intent!r}")
+
+    if want.get("called"):
+        if len(calls) != 1:
+            reasons.append(f"called {IMAGE_TOOL} {len(calls)} time(s), expected exactly once")
+        if calls:
+            args = calls[0].get("args") or {}
+            if args.get("count") != want.get("count"):
+                reasons.append(f"count {args.get('count')!r}, expected {want.get('count')!r}")
+            kinds = list(want.get("kinds") or [])
+            if kinds and args.get("kind") not in kinds:
+                reasons.append(f"kind {args.get('kind')!r}, expected one of {', '.join(kinds)}")
+    elif calls:
+        reasons.append(
+            f"called {IMAGE_TOOL} {len(calls)} time(s) on a turn that asks for no image")
+
+    known = set(tokens) | refs_in(current_deck_spec)
+    if tokens:
+        answer, removed = reconcile_model_strings(structured, known)
+        invented = sorted({ref for _, ref in removed})
+        corrected = sorted(refs_in(structured) - known - set(invented))
+        if corrected:
+            notes.append(
+                "a mistyped reference was corrected, as production does: " + ", ".join(corrected))
+    else:
+        answer = structured
+        invented = sorted(refs_in(structured) - known)
+    if invented:
+        reasons.append(
+            "invented image reference(s), which production removes: " + ", ".join(invented))
+
+    message = structured.get("message") or ""
+    if refs_in(message) or any(token in message for token in tokens):
+        reasons.append(
+            "message carries an image reference or a generated token; a reference belongs only "
+            "in a slide's content_brief")
+
+    slide = want.get("slide")
+    if slide is not None:
+        slides, why = _committed_slides(answer, current_deck_spec)
+        if slides is None:
+            reasons.append(f"cannot place the image: {why}")
+        elif not 1 <= slide <= len(slides):
+            reasons.append(f"the edited deck has no slide {slide}")
+        else:
+            if not set(tokens) & refs_in(slides[slide - 1].content_brief):
+                reasons.append(f"no generated image reference in slide {slide}'s content_brief")
+            elsewhere = [
+                number for number, other in enumerate(slides, start=1)
+                if number != slide and set(tokens) & refs_in(other.model_dump())
+            ]
+            if elsewhere:
+                reasons.append(
+                    "a generated image is also on "
+                    + ", ".join(f"slide {number}" for number in elsewhere))
+    else:
+        rest = json.dumps({key: value for key, value in answer.items() if key != "message"})
+        leaked = [token for token in tokens if token in rest]
+        if leaked:
+            reasons.append(
+                "the answer references generated image(s) on a turn that places nothing: "
+                + ", ".join(leaked))
+
+    if reasons:
+        return False, "Image tool: " + "; ".join(reasons)
+    if want.get("called"):
+        args = calls[0].get("args") or {}
+        parts = [f"one {IMAGE_TOOL} call (count {args.get('count')}, kind {args.get('kind')})"]
+    else:
+        parts = [f"no {IMAGE_TOOL} call"]
+    if want_intent is not None:
+        parts.append(f"intent {want_intent}")
+    if slide is not None:
+        parts.append(f"a generated image is in slide {slide}'s content_brief and in no message")
+    elif tokens:
+        parts.append(f"nothing references the {len(tokens)} generated image(s)")
+    return True, "Image tool: " + "; ".join(parts + notes)
+
+
 def expected_category_score(
     agent_key: str,
     structured: dict,
@@ -799,7 +958,8 @@ def expected_category_score(
       Otherwise an edit case whose ``expect`` has ``"inserted"`` is scored by ``_insert_score``.
       Both need the case's ``reference`` output and the payload's ``current_deck_spec``.
     - data_analyst: checks outcome match
-    - build_reviewer/fix_reviewer/deck_reviewer: checks findings against expected criteria/positions,
+    - build_reviewer/fix_reviewer/deck_reviewer: checks findings against expected
+      criteria/positions,
       guards unknown criteria, and optionally checks verdict for fix_reviewer
     """
     if not isinstance(structured, dict):
@@ -812,7 +972,9 @@ def expected_category_score(
 
         # Check intent match
         if structured.get("intent") != expect.get("intent"):
-            return False, f"Intent mismatch: got {structured.get('intent')!r}, expected {expect.get('intent')!r}"
+            return False, (
+                f"Intent mismatch: got {structured.get('intent')!r}, "
+                f"expected {expect.get('intent')!r}")
 
         # A build case that expects a deck style: ANDed after the intent check
         if expect.get("deck_style"):
@@ -835,14 +997,18 @@ def expected_category_score(
             got_positions = set(structured.get("target_positions", []))
             expect_positions = set(expect.get("positions", []))
             if got_positions != expect_positions:
-                return False, f"Target positions mismatch: got {got_positions}, expected {expect_positions}"
+                return False, (
+                    f"Target positions mismatch: got {got_positions}, "
+                    f"expected {expect_positions}")
 
         return True, "Architect intent and positions match"
 
     elif agent_key == "data_analyst":
         # Check outcome match
         if structured.get("outcome") != expect.get("outcome"):
-            return False, f"Outcome mismatch: got {structured.get('outcome')!r}, expected {expect.get('outcome')!r}"
+            return False, (
+                f"Outcome mismatch: got {structured.get('outcome')!r}, "
+                f"expected {expect.get('outcome')!r}")
         return True, "Data analyst outcome matches"
 
     elif agent_key in ["build_reviewer", "fix_reviewer", "deck_reviewer"]:
@@ -931,7 +1097,8 @@ def render_measures_score(measures: RenderMeasures, html: str) -> tuple[bool, st
         reasons.append(f"Console errors: {measures.console_errors}")
 
     if measures.safe_area_px > 0:
-        reasons.append(f"Safe area intrusion: {measures.safe_area_px}px past the 88px/56px safe area")
+        reasons.append(
+            f"Safe area intrusion: {measures.safe_area_px}px past the 88px/56px safe area")
 
     if "<style" in html.lower():
         reasons.append("Inline style tag found in HTML")

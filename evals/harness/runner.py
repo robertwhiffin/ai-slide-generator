@@ -17,6 +17,16 @@ and call budget); only its search backend is faked, answering from the Meridian
 fake asset index and recording each call on the run's own list, returned as
 ``RunResult.tool_calls``.
 
+The architect's image tool (chat image generation, Task 9): an architect run of a config
+that opts in (``image_tool: true``) gets production's ``generate_image`` tool
+(``ImageGenerationAgentTool``: its name, description, args schema, caps and spotlighted
+answer) on a toolset of production's first-pass budget, as ``architect_node`` binds it
+(``_ImageToolPass`` and ``_architect_toolset``).  Only its backends are faked: the generator
+answers with a small valid image of the preset's format and the Library save returns a fresh
+token, so nothing reaches a model, a network or a database.  Each call the tool starts, and
+each image it saves, is recorded on the run's own list (``RunResult.tool_calls``).  A config
+that does not opt in binds nothing for the architect, exactly as before.
+
 A test run's context never carries a toolset (``AgentRuntime.run_candidate``
 refuses one), so the toolset reaches the model through the Runner's adapter
 instead: :class:`_ToolLoopAdapter` hands it to the inner adapter's
@@ -27,8 +37,11 @@ instead: :class:`_ToolLoopAdapter` hands it to the inner adapter's
 from __future__ import annotations
 
 import html
+import io
 import json
 import logging
+import secrets
+import threading
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -37,7 +50,7 @@ from typing import Any, Mapping, Optional
 
 import src.core.database  # break import cycle before src.services imports  # noqa: F401
 from evals.harness.case import MERIDIAN_DIR
-from evals.harness.config import AgentEvalConfig
+from evals.harness.config import IMAGE_TOOL_ROLES, AgentEvalConfig
 from src.services.agent_runtime import (
     AgentAssemblyContext,
     AgentRuntime,
@@ -81,9 +94,11 @@ class RunResult:
     output_tokens: int | None
     error_detail: str | None
     infra_error: bool
-    #: The run's brand-asset searches, in call order: ``{"name": "search_brand_assets",
-    #: "args": {"query": ..., "kind": ...}}`` each (JSON-serialisable). Empty when no tool was
-    #: bound or the model never called it.
+    #: The run's tool calls, in call order, JSON-serialisable. A brand-asset search is
+    #: ``{"name": "search_brand_assets", "args": {"query": ..., "kind": ...}}``; an image call
+    #: the architect's tool started is ``{"name": "generate_image", "args": {"kind": ...,
+    #: "count": ...}, "saved": [{"token", "prompt", "category", "tags"}, ...]}``. Empty when no
+    #: tool was bound or the model never called it.
     tool_calls: tuple = ()
 
 
@@ -178,7 +193,123 @@ def _fake_brand_search_toolset(record: list[dict]) -> AgentToolset:
     return build_brand_search_toolset(_fake_brand_search(record))
 
 
-#: The brand-search toolset of the run in flight on this thread, or ``None``.
+def _binds_image_tool(config: AgentEvalConfig) -> bool:
+    """Whether a run gets the architect's image tool: its config opted in (``image_tool``).
+
+    Production binds it for the architect when image generation is available and the turn is
+    not the sweeper's describe-only one; in the harness the config's opt-in stands for both.
+    """
+    return config.agent_key in IMAGE_TOOL_ROLES and config.image_tool
+
+
+#: The owner the fake Library save is handed (the tool refuses to run without one). Never a
+#: real user: nothing is saved.
+EVAL_IMAGE_OWNER = "eval-harness"
+
+#: A small valid image per preset output format: (Pillow format or None, mime, extension).
+_FAKE_IMAGE_FORMATS = {
+    "jpeg": ("JPEG", "image/jpeg", "jpg"),
+    "png": ("PNG", "image/png", "png"),
+    "svg": (None, "image/svg+xml", "svg"),
+}
+_FAKE_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">'
+    b'<circle cx="8" cy="8" r="6" fill="#0f766e"/></svg>'
+)
+
+
+def _fake_image_bytes(output_format: str) -> tuple[bytes, str, str]:
+    """``(data, mime, ext)`` of a small valid image in a preset's ``output_format``."""
+    pil_format, mime, ext = _FAKE_IMAGE_FORMATS[output_format]
+    if pil_format is None:
+        return _FAKE_SVG, mime, ext
+    from PIL import Image
+
+    buf = io.BytesIO()
+    mode = "RGBA" if pil_format == "PNG" else "RGB"
+    Image.new(mode, (24, 16), (15, 118, 110)).save(buf, format=pil_format)
+    return buf.getvalue(), mime, ext
+
+
+class _FakeImageGenerator:
+    """``ImageGenerator.generate``'s shape, with no client: a small valid image, at once.
+
+    The request is resolved by production's ``resolve_request`` (an unknown preset or model fails
+    as it does there), and the image carries the preset's default model, which the tool tags.
+    """
+
+    def generate(self, prompt, preset_id, model=None, quality=None, *, timeout_s=None):
+        del prompt, timeout_s
+        from src.services.image_generation import GeneratedImage, resolve_request
+
+        preset, model, _quality = resolve_request(preset_id, model, quality)
+        data, mime, ext = _fake_image_bytes(preset.output_format)
+        return GeneratedImage(
+            data=data, mime=mime, ext=ext, model=model, preset_id=preset.id,
+            revised_prompt=None, latency_s=0.0, usage=None,
+        )
+
+
+def _fake_image_toolset(record: list[dict]) -> AgentToolset:
+    """Production's ``generate_image`` tool over fake backends: a fresh one per attempt.
+
+    Sized as ``_ImageToolPass.tool`` sizes a turn's first pass (``turn_budget`` over the tool's
+    per-turn caps, the turn deadline from now), on a toolset of that budget alone, as
+    ``_architect_toolset`` builds one with no Gateway tools.  The tool's ``on_call`` opens the
+    call's entry on ``record`` (``{"name", "args": {"kind", "count"}, "saved": []}``); each save
+    appends ``{"token", "prompt", "category", "tags"}`` to it and returns a fresh token shaped as
+    the Image Library mints one (``secrets.token_urlsafe(32)``, 43 url-safe characters).
+    """
+    from src.services.agent_tools.gateway_toolset import (
+        GATEWAY_TURN_DEADLINE_SECONDS,
+        turn_budget,
+    )
+    from src.services.agent_tools.image_generation_tool import (
+        BUDGET_SECONDS,
+        IMAGE_TOOL_NAME,
+        MAX_CALLS_PER_TURN,
+        MAX_IMAGES_PER_TURN,
+        ImageGenerationAgentTool,
+        ImageToolContext,
+    )
+
+    lock = threading.Lock()
+
+    def on_call(kind: str, count: int) -> None:
+        with lock:
+            record.append({"name": IMAGE_TOOL_NAME, "args": {"kind": kind, "count": count},
+                           "saved": []})
+
+    def save(img, *, owner, prompt, category, tags) -> str:
+        del img, owner
+        token = secrets.token_urlsafe(32)
+        with lock:
+            if not record or record[-1].get("name") != IMAGE_TOOL_NAME:
+                record.append({"name": IMAGE_TOOL_NAME, "args": {}, "saved": []})
+            record[-1]["saved"].append(
+                {"token": token, "prompt": prompt, "category": category, "tags": list(tags)})
+        return token
+
+    now = time.time()
+    calls_left, seconds_left = turn_budget(
+        used_calls=0, used_seconds=0.0, max_calls=MAX_CALLS_PER_TURN,
+        budget_seconds=BUDGET_SECONDS, turn_started_at=now, now=now,
+    )
+    tool = ImageGenerationAgentTool(ImageToolContext(
+        owner=EVAL_IMAGE_OWNER,
+        session_id=None,
+        on_call=on_call,
+        calls_left=calls_left,
+        images_left=MAX_IMAGES_PER_TURN,
+        seconds_left=seconds_left,
+        deadline_at=now + GATEWAY_TURN_DEADLINE_SECONDS,
+        generator_factory=_FakeImageGenerator,
+        save=save,
+    ))
+    return AgentToolset(tools=(tool,), max_calls=calls_left, budget_seconds=seconds_left)
+
+
+#: The toolset of the run in flight on this thread (brand search or image tool), or ``None``.
 _RUN_TOOLSET: ContextVar[AgentToolset | None] = ContextVar("eval_run_toolset", default=None)
 
 
@@ -305,12 +436,14 @@ class Runner:
         max_infra_retries retries returns RunResult(infra_error=True).
 
         A builder or fixer run on a deck style with a design system active is handed the
-        brand-search toolset over the fake backend (``_binds_brand_search``); every other run
-        binds no tool, exactly as before.  Each attempt gets a fresh toolset and record, so its
-        budget is its own and the result's ``tool_calls`` are the searches of the attempt it
-        reports.
+        brand-search toolset over the fake backend (``_binds_brand_search``); an architect run
+        of a config that opts in is handed the image tool over fake backends
+        (``_binds_image_tool``); every other run binds no tool, exactly as before.  Each attempt
+        gets a fresh toolset and record, so its budget is its own and the result's
+        ``tool_calls`` are the calls of the attempt it reports.
         """
         binds_search = _binds_brand_search(config, payload, design_system_active)
+        binds_image = _binds_image_tool(config)
         obs = RunObservation()
         record: list[dict] = []
         outcome: CandidateRunOutcome | None = None
@@ -321,7 +454,11 @@ class Runner:
                 time.sleep(2 ** (attempt - 1))
 
             record = []
-            toolset = _fake_brand_search_toolset(record) if binds_search else None
+            toolset = (
+                _fake_brand_search_toolset(record) if binds_search
+                else _fake_image_toolset(record) if binds_image
+                else None
+            )
             obs = RunObservation()
             scope = _RUN_TOOLSET.set(toolset)
             try:

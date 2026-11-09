@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import argparse
-import os
 import warnings
 
 import src.core.database  # noqa: F401 - break import cycle before src.* imports
-
 from evals.harness import auth, judge, mlflow_run
 from evals.harness import render as render_mod
-from evals.harness.case import split_kwargs
+from evals.harness.case import case_set_dir, split_kwargs
 from evals.harness.config import AgentEvalConfig, load_config, prices, v1_baseline
 from src.services.graph_definition_manifest import GRAPH_V1_AGENT_KEYS
 from src.services.model_endpoint_catalog import gateway_endpoint_name
@@ -40,7 +38,8 @@ def _endpoint_reachable(endpoint_name: str) -> bool:
 def validate_endpoint(config: AgentEvalConfig) -> None:
     name = config.content.model.endpoint_name
     if name not in prices():
-        warnings.warn(f"endpoint_name {name!r} has no entry in prices.yaml; cost will be unestimated",
+        warnings.warn(
+            f"endpoint_name {name!r} has no entry in prices.yaml; cost will be unestimated",
                       UserWarning, stacklevel=2)
     if not _endpoint_reachable(name):
         raise SystemExit(
@@ -59,7 +58,8 @@ def _load(agent_key: str, config_arg: str) -> AgentEvalConfig:
 
 
 def _calibration_render_fn(case, candidate):
-    """Render a calibration output as a sweep renders the candidate: Meridian, then the case's deck style."""
+    """Render a calibration output as a sweep renders the candidate: Meridian, then the case's
+    deck style."""
     return render_mod.render_slide(
         candidate.get("html", ""), candidate.get("scripts") or "",
         section_css=mlflow_run.render_section_css(case))
@@ -77,10 +77,12 @@ def _print_trust_table(agent_key: str, rows: list[dict]) -> None:
 
 
 def _heldout_summary(agent_key: str, run_id: str) -> str:
-    """One aggregate line read back from the MLflow run: no case ids, rationales, payloads or references."""
+    """One aggregate line read back from the MLflow run: no case ids, rationales, payloads or
+    references."""
     from mlflow.tracking import MlflowClient
 
-    metrics = MlflowClient(tracking_uri=mlflow_run.default_tracking_uri()).get_run(run_id).data.metrics
+    client = MlflowClient(tracking_uri=mlflow_run.default_tracking_uri())
+    metrics = client.get_run(run_id).data.metrics
     pr = metrics.get("pass_rate")
     pr_s = f"{pr:.3f}" if pr is not None else "n/a"
     return (f"{agent_key}: run_id={run_id} pass_rate={pr_s} "
@@ -88,16 +90,36 @@ def _heldout_summary(agent_key: str, run_id: str) -> str:
             f"judge_error_count={int(metrics.get('judge_error_count', 0))}")
 
 
+def _image_tool_summary(agent_key: str, run_id: str) -> str:
+    """The train line of an image-tool sweep: the run's pass rate and its ``image_tool`` scorer's,
+    read back from the MLflow run."""
+    from mlflow.tracking import MlflowClient
+
+    client = MlflowClient(tracking_uri=mlflow_run.default_tracking_uri())
+    metrics = client.get_run(run_id).data.metrics
+
+    def rate(key: str) -> str:
+        value = metrics.get(key)
+        return f"{value:.3f}" if value is not None else "n/a"
+
+    return (f"{agent_key}: run_id={run_id} pass_rate={rate('pass_rate')} "
+            f"{mlflow_run.IMAGE_TOOL_METRIC}={rate(mlflow_run.IMAGE_TOOL_METRIC)}")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="run_eval")
     ap.add_argument("--agent", default="all", help="'all' or an agent key")
-    ap.add_argument("--config", default="v1-baseline", help="path to a YAML config or 'v1-baseline'")
+    ap.add_argument("--config", default="v1-baseline",
+                    help="path to a YAML config or 'v1-baseline'")
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--max-workers", type=int, default=8)
     ap.add_argument("--judge-endpoint", default=judge.JUDGE_ENDPOINT)
     ap.add_argument("--cases", default=None, help="comma-separated case ids, e.g. 2,4")
     ap.add_argument("--split", choices=("train", "heldout"), default="train",
                     help="case set to evaluate (heldout runs print only aggregate counts)")
+    ap.add_argument("--case-set", default=None,
+                    help="sweep or calibrate a named case set (evals/packs/<agent>/cases_<NAME>/, "
+                         "e.g. image_tool) instead of the split's cases; train only")
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--no-render", action="store_true")
     ap.add_argument("--profile", default=auth.DEFAULT_PROFILE,
@@ -110,6 +132,14 @@ def main(argv: list[str] | None = None) -> None:
         if a not in GRAPH_V1_AGENT_KEYS:
             raise SystemExit(f"unknown agent {a!r}; valid: {list(GRAPH_V1_AGENT_KEYS)}")
 
+    if args.case_set is not None:
+        if args.split != "train":
+            raise SystemExit(f"--case-set {args.case_set!r} has no {args.split!r} split")
+        try:
+            case_set_dir(agents[0], args.case_set)
+        except ValueError as e:
+            raise SystemExit(f"--case-set: {e}") from e
+
     if args.profile:
         # Before any model call: pin host/credentials so the .env's DATABRICKS_* cannot win.
         apply_profile(args.profile)
@@ -119,11 +149,13 @@ def main(argv: list[str] | None = None) -> None:
     if args.calibrate:
         calibrated: set[str] = set()
         for a in agents:
+            where = (split_kwargs(args.split) if args.case_set is None
+                     else {"root": case_set_dir(a, args.case_set)})
             rows = judge.calibrate(
                 a, model=args.judge_endpoint,
                 render_fn=_calibration_render_fn if a in HTML_ROLES else None,
                 case_filter=case_filter,
-                **split_kwargs(args.split))
+                **where)
             calibrated.update(r["case_id"] for r in rows)
             if case_filter and not rows:
                 print(f"{a}: skipped - no case matches --cases {case_filter}")
@@ -137,7 +169,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.agent == "all" and args.config != "v1-baseline":
-        raise SystemExit("--agent all requires --config v1-baseline (a YAML config targets one agent)")
+        raise SystemExit(
+            "--agent all requires --config v1-baseline (a YAML config targets one agent)")
     ran = 0
     for a in agents:
         cfg = _load(a, args.config)
@@ -147,17 +180,22 @@ def main(argv: list[str] | None = None) -> None:
                 cfg, agent_key=a, repeats=args.repeats, max_workers=args.max_workers,
                 judge_endpoint=args.judge_endpoint, case_filter=case_filter,
                 render_enabled=not args.no_render,
-                tracking_uri=mlflow_run.default_tracking_uri(), **split_kwargs(args.split))
+                tracking_uri=mlflow_run.default_tracking_uri(), case_set=args.case_set,
+                **split_kwargs(args.split))
         except mlflow_run.NoCasesError as e:
             print(f"{a}: skipped - {e}")
             continue
         ran += 1
-        if args.split == "train":
+        if args.split == "train" and (cfg.image_tool or args.case_set is not None):
+            print(_image_tool_summary(a, run_id))
+        elif args.split == "train":
             print(f"{a}: run_id={run_id}")
         else:
             print(_heldout_summary(a, run_id))
     if not ran:
-        raise SystemExit(f"no cases to evaluate for {agents} (packs have no cases yet or --cases matched none)")
+        raise SystemExit(
+            f"no cases to evaluate for {agents} "
+            "(packs have no cases yet or --cases matched none)")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 import json
 import pathlib
+import re
 from dataclasses import dataclass
 from typing import Literal
+
 import yaml
 
 EVALS_DIR = pathlib.Path(__file__).resolve().parents[1]   # .../evals
@@ -46,19 +48,44 @@ def cases_dirname(split: str = "train") -> str:
 
 
 def split_kwargs(split: str = "train") -> dict:
-    """Keyword args to pass a case loader: empty for train (the default), ``{"split": ...}`` otherwise."""
+    """Keyword args to pass a case loader: empty for train (the default), ``{"split": ...}``
+    otherwise."""
     return {} if split == "train" else {"split": split}
 
 
-def cases_dir(agent_key: str, root: pathlib.Path | None = None, split: str = "train") -> pathlib.Path:
-    """The directory holding an agent's case dirs: ``root`` if given, else the committed tree for ``split``."""
+def cases_dir(
+    agent_key: str, root: pathlib.Path | None = None, split: str = "train"
+) -> pathlib.Path:
+    """The directory holding an agent's case dirs: ``root`` if given, else the committed tree for
+    ``split``."""
     _check_split(split)
     if root is not None:
         return pathlib.Path(root)
     return PACKS_DIR / agent_key / cases_dirname(split)
 
 
-def load_case(agent_key: str, case_id: str, *, root: pathlib.Path | None = None, split: str = "train") -> Case:
+#: A case set's name: lower-case words joined by underscores (it names a directory).
+_CASE_SET_NAME = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def case_set_dir(agent_key: str, case_set: str) -> pathlib.Path:
+    """The directory of a named case set: ``evals/packs/<agent>/cases_<case_set>/``.
+
+    A case set is a group of cases kept apart from the train and held-out splits (the
+    architect's ``image_tool`` set, for one). ``heldout`` is refused: the held-out cases are
+    reached with ``split="heldout"`` alone, so their discipline cannot be side-stepped.
+    """
+    if not isinstance(case_set, str) or not _CASE_SET_NAME.fullmatch(case_set):
+        raise ValueError(
+            f"Invalid case set: {case_set!r} (lower-case letters, digits and underscores)")
+    if case_set == "heldout":
+        raise ValueError("Invalid case set: 'heldout' is a split; use split='heldout'")
+    return PACKS_DIR / agent_key / f"cases_{case_set}"
+
+
+def load_case(
+    agent_key: str, case_id: str, *, root: pathlib.Path | None = None, split: str = "train"
+) -> Case:
     """Load a case from the packs directory (or from ``root``, a generated ``cases`` dir)."""
     case_dir = cases_dir(agent_key, root, split) / case_id
 
@@ -92,7 +119,9 @@ def load_case(agent_key: str, case_id: str, *, root: pathlib.Path | None = None,
     )
 
 
-def load_cases(agent_key: str, *, root: pathlib.Path | None = None, split: str = "train") -> list[Case]:
+def load_cases(
+    agent_key: str, *, root: pathlib.Path | None = None, split: str = "train"
+) -> list[Case]:
     """Load all cases for an agent, sorted by case_id (from ``root`` if given)."""
     base = cases_dir(agent_key, root, split)
 

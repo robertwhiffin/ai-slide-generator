@@ -1,0 +1,9 @@
+kind: mutation
+fault: 'no image ask: trimming slide 4 (position 3) calls no image tool'
+expect:
+  intent: edit
+  positions:
+  - 3
+  image_tool:
+    called: false
+design_system_active: true

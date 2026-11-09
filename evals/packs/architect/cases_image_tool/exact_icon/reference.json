@@ -1,0 +1,26 @@
+{
+  "intent": "edit",
+  "message": "I've added a shield icon beside the title on slide 2.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [
+    1
+  ],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 1,
+      "slides": [
+        {
+          "purpose": "Explain why passkeys stop phishing",
+          "content_brief": "Three short bullets: a passkey only works on the real site, so a fake sign-in page gets nothing; there is no secret to reuse or leak; the private key never leaves the device. Close with a callout: a passkey cannot be phished Place {{image:0gRwFgCXETSpBNcZ9TP8IPNYqgJWXsPr724YH0pC-Yo}} as a small shield icon beside the slide title, about 64px square.",
+          "assumes": "The audience has seen a phishing email that asked for a password",
+          "hands_off": "Passkeys remove the thing attackers steal",
+          "data_references": [],
+          "slide_type": null
+        }
+      ]
+    }
+  ]
+}

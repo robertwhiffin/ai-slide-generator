@@ -1,0 +1,11 @@
+kind: mutation
+fault: 'empty deck: a picture request gets options to discuss, never a deck built
+  around it'
+expect:
+  intent: discuss
+  image_tool:
+    called: true
+    count: 3
+    kinds:
+    - illustration
+design_system_active: true

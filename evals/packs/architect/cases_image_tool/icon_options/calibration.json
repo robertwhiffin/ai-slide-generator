@@ -1,0 +1,28 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I've added icons to slide 3.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [
+      2
+    ],
+    "proposed_design_contract": null,
+    "operations": [
+      {
+        "op": "update",
+        "position": 2,
+        "slides": [
+          {
+            "purpose": "Make the switch feel easy",
+            "content_brief": "Three numbered steps side by side: open your account settings, choose 'Create a passkey', then confirm with your fingerprint, face or device PIN. Note that the whole switch takes under a minute Put {{image:MI7vmsqODALJ6BGOIWayzhfda0Ri4kmuz06wxmYcgLA}} above each step.",
+            "assumes": "Staff worry that changing how they sign in will be a chore",
+            "hands_off": "Setting up a passkey is quick",
+            "data_references": [],
+            "slide_type": null
+          }
+        ]
+      }
+    ]
+  }
+}

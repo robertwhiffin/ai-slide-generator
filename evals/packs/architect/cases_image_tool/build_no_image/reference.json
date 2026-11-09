@@ -1,0 +1,78 @@
+{
+  "intent": "build",
+  "message": "Here is a 5-slide deck on why teams should write down their decisions.",
+  "deck_spec": {
+    "title": "Write It Down: Why Teams Should Record Their Decisions",
+    "audience": "Team leads and members of cross-functional teams",
+    "purpose": "Persuade teams to keep a written record of the decisions they make",
+    "argument": "Unwritten decisions get lost, reopened and misremembered; a short shared decision log fixes that at almost no cost",
+    "call_to_action": "Record your team's next three decisions in a shared log",
+    "narrative_arc": [
+      "Frame the problem: decisions that live only in meetings get lost",
+      "Show what unwritten decisions cost",
+      "Describe a good decision record",
+      "Make the habit easy to start",
+      "Close with a clear ask"
+    ],
+    "design_contract": {
+      "design_system_id": 3,
+      "template_id": 5,
+      "slide_style_id": null
+    },
+    "resolved_data": {
+      "synthesis": "",
+      "figures": [],
+      "gaps": []
+    },
+    "slides": [
+      {
+        "position": 0,
+        "purpose": "Open the talk and frame the problem: decisions that live only in meetings get lost",
+        "content_brief": "Title slide with the deck title 'Write It Down: Why Teams Should Record Their Decisions' and a subtitle saying that a decision nobody wrote down gets made again",
+        "assumes": "The audience works in a team that makes decisions",
+        "hands_off": "The case for writing decisions down builds",
+        "data_references": [],
+        "slide_type": null
+      },
+      {
+        "position": 1,
+        "purpose": "Show the cost of unwritten decisions",
+        "content_brief": "Three bullets: the same debate is reopened months later, newcomers cannot learn why things are the way they are, and people leave a meeting with different memories of what was agreed",
+        "assumes": "The audience works in a team that makes decisions",
+        "hands_off": "The case for writing decisions down builds",
+        "data_references": [],
+        "slide_type": null
+      },
+      {
+        "position": 2,
+        "purpose": "Describe what a good decision record holds",
+        "content_brief": "A short template in four parts: the decision, the context, the options considered and who decided, each with a one-line example",
+        "assumes": "The audience works in a team that makes decisions",
+        "hands_off": "The case for writing decisions down builds",
+        "data_references": [],
+        "slide_type": null
+      },
+      {
+        "position": 3,
+        "purpose": "Make the habit easy to start",
+        "content_brief": "Three steps: keep one shared decision log, add an entry before the meeting ends, and link to it from the work it affects",
+        "assumes": "The audience works in a team that makes decisions",
+        "hands_off": "The case for writing decisions down builds",
+        "data_references": [],
+        "slide_type": null
+      },
+      {
+        "position": 4,
+        "purpose": "Close with a clear ask",
+        "content_brief": "Ask each team to record its next three decisions in a shared log and review the log after a month",
+        "assumes": "The audience works in a team that makes decisions",
+        "hands_off": "The case for writing decisions down builds",
+        "data_references": [],
+        "slide_type": null
+      }
+    ]
+  },
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}
