@@ -593,7 +593,11 @@ class ImageGenerator:
         try:
             client = self._client_factory()
             if stream:
-                b64, revised, usage = self._read_stream(client.responses.create(**kwargs))
+                # httpx's timeout caps each read, not the call: the reader also stops at
+                # the call's own deadline, so an endless stream cannot hold a job or a slot.
+                b64, revised, usage = self._read_stream(
+                    client.responses.create(**kwargs), deadline=started + timeout_s
+                )
             else:
                 b64, revised, usage = self._read_response(client.responses.create(**kwargs))
         except ImageGenerationError:
@@ -656,11 +660,38 @@ class ImageGenerator:
         )
 
     @staticmethod
-    def _read_stream(events: Any) -> tuple[str | None, str | None, dict | None]:
+    def _read_stream(
+        events: Any,
+        *,
+        deadline: float | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> tuple[str | None, str | None, dict | None]:
+        """The image, revised prompt and usage from a streamed response.
+
+        Stops with an error once *clock* (``time.monotonic``) passes *deadline*, and closes
+        the stream however it ends.
+        """
+        now = clock or time.monotonic
+        try:
+            return ImageGenerator._read_events(events, deadline, now)
+        finally:
+            close = getattr(events, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - closing is best effort
+                    logger.debug("closing the image stream failed", exc_info=True)
+
+    @staticmethod
+    def _read_events(
+        events: Any, deadline: float | None, now: Callable[[], float]
+    ) -> tuple[str | None, str | None, dict | None]:
         b64: str | None = None
         revised: str | None = None
         usage: dict | None = None
         for event in events:
+            if deadline is not None and now() > deadline:
+                raise ImageGenerationError("Image generation took too long")
             kind = getattr(event, "type", None)
             if kind == "response.output_item.done":
                 item = event.item
