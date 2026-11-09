@@ -260,15 +260,27 @@ def test_the_fake_never_reaches_the_network_or_the_database(monkeypatch):
     import src.services.image_generation as image_generation
 
     touched: list[str] = []
+    test_thread = threading.current_thread()
 
-    def tripwire(name):
+    def ours() -> bool:
+        """This test's thread or the tool's pool: a thread another test left running in this
+        worker (a keep-alive, a logger) is not this run's and keeps its real socket."""
+        current = threading.current_thread()
+        return current is test_thread or current.name.startswith("chat-image-gen")
+
+    def tripwire(name, original=None):
         def _raise(*args, **kwargs):
+            if original is not None and not ours():
+                return original(*args, **kwargs)
             touched.append(name)
             raise AssertionError(f"{name} reached")
         return _raise
 
-    monkeypatch.setattr(socket.socket, "connect", tripwire("socket.connect"))
-    monkeypatch.setattr(socket, "create_connection", tripwire("socket.create_connection"))
+    monkeypatch.setattr(
+        socket.socket, "connect", tripwire("socket.connect", socket.socket.connect))
+    monkeypatch.setattr(
+        socket, "create_connection",
+        tripwire("socket.create_connection", socket.create_connection))
     monkeypatch.setattr(image_generation, "default_client", tripwire("default_client"))
     monkeypatch.setattr(image_generation.ImageGenerator, "generate", tripwire("ImageGenerator"))
     monkeypatch.setattr(tool_mod, "get_db_session", tripwire("get_db_session"))
