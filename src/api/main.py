@@ -29,6 +29,7 @@ from src.api.routes import (
     feedback,
     google_slides,
     graph_shipping,
+    image_generation,
     images,
     local_version,
     profiles,
@@ -563,6 +564,7 @@ app.include_router(agent_definitions.router)
 app.include_router(graph_shipping.router)
 app.include_router(chat.router)
 app.include_router(feedback.router)
+app.include_router(image_generation.router)
 app.include_router(images.router)
 app.include_router(slides.router)
 app.include_router(tools.router)

@@ -60,6 +60,53 @@ class TestAppRoutes:
         assert "/api/admin/google-credentials/status" in route_paths
         assert "/api/admin/judge-backend" in route_paths
 
+    def test_image_generation_routes_registered(self):
+        """The four image-generation routes are always mounted (the flag gates per request)."""
+        from fastapi.routing import APIRoute
+
+        from src.api.main import app
+
+        expected = {
+            ("GET", "/api/images/generate/available"),
+            ("POST", "/api/images/generate"),
+            ("POST", "/api/images/{token}/edit"),
+            ("GET", "/api/images/generate/jobs/{job_id}"),
+        }
+        live = {
+            (method, route.path): route
+            for route in app.routes
+            if isinstance(route, APIRoute)
+            for method in route.methods
+        }
+        missing = sorted(expected - set(live))
+        assert not missing, f"image-generation routes not registered: {missing}"
+        for key in sorted(expected):
+            module = live[key].endpoint.__module__
+            assert module == "src.api.routes.image_generation", (key, module)
+
+    def test_image_generation_router_precedes_images_router(self):
+        """Included BEFORE images.router so its literal paths win over ``/{token}`` ones."""
+        from fastapi.routing import APIRoute
+
+        from src.api.main import app
+
+        api_routes = [r for r in app.routes if isinstance(r, APIRoute)]
+        positions = {
+            (method, r.path): i for i, r in enumerate(api_routes) for method in r.methods
+        }
+        first_images_route = min(
+            i for i, r in enumerate(api_routes)
+            if r.endpoint.__module__ == "src.api.routes.images"
+        )
+        for key in (
+            ("GET", "/api/images/generate/available"),
+            ("POST", "/api/images/generate"),
+            ("POST", "/api/images/{token}/edit"),
+            ("GET", "/api/images/generate/jobs/{job_id}"),
+        ):
+            assert key in positions, f"{key} not registered"
+            assert positions[key] < first_images_route, key
+
     def test_health_endpoint(self):
         """Health endpoint still works."""
         from src.api.main import app

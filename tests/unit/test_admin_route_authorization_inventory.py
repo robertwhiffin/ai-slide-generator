@@ -11,13 +11,14 @@ prompt text is serialised in the response, or any service is invoked.
 Fix round 1: the require_admin check now scans the full /api/admin namespace
 (not just /api/admin/agent-definitions) so an unguarded route registered
 directly on ``app`` at any /api/admin/* path is caught.  A second test asserts
-the full /api/admin/* route set equals the known 47 pairs.
+the full /api/admin/* route set equals the known 49 pairs.
 
 Known /api/admin/* routes outside agent-definitions (all carry require_admin):
   src.api.routes.graph_shipping — packaged-update status (GET) and adopt (POST)
   src.api.routes.admin        — judge-backend (GET, PUT), genie-one-default
-                                (GET, PUT), google-credentials
-                                (POST, GET /status, DELETE)
+                                (GET, PUT), image-generation (GET, PUT;
+                                AI image generation),
+                                google-credentials (POST, GET /status, DELETE)
   src.api.routes.admin_usage  — usage/summary, daily, top-users, funnel,
                                 retention, heatmap (all GET)
   src.api.routes.admin_gateway_mcp — gateway-mcp-connections list (GET),
@@ -107,8 +108,8 @@ _SINGLE_ROUTER_MODULE = "src.api.routes.agent_definitions"
 _TEST_USER = "task9-user@example.com"
 
 # ---------------------------------------------------------------------------
-# All 47 known /api/admin/* (method, path) pairs — the agent-definitions 24,
-# the 2 graph-shipping routes, the 13 routes from src.api.routes.admin and
+# All 49 known /api/admin/* (method, path) pairs — the agent-definitions 24,
+# the 2 graph-shipping routes, the 15 routes from src.api.routes.admin and
 # src.api.routes.admin_usage, the 5 from src.api.routes.admin_gateway_mcp
 # and the 3 from src.api.routes.admin_permissions.
 # A route registered at /api/admin/* that is absent from this set is a gap
@@ -130,9 +131,11 @@ EXPECTED_ALL_ADMIN_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("DELETE", "/api/admin/google-credentials"),
         ("GET", "/api/admin/genie-one-default"),
         ("GET", "/api/admin/google-credentials/status"),
+        ("GET", "/api/admin/image-generation"),
         ("GET", "/api/admin/judge-backend"),
         ("POST", "/api/admin/google-credentials"),
         ("PUT", "/api/admin/genie-one-default"),
+        ("PUT", "/api/admin/image-generation"),
         ("PUT", "/api/admin/judge-backend"),
         # src.api.routes.admin_usage
         ("GET", "/api/admin/usage/daily"),
@@ -232,12 +235,12 @@ def _non_admin_app(
 # ---------------------------------------------------------------------------
 
 
-def test_the_expected_route_sets_have_exactly_24_2_and_47_pairs() -> None:
+def test_the_expected_route_sets_have_exactly_24_2_and_49_pairs() -> None:
     """The literal sets themselves: an entry dropped from both the app and the
     set would otherwise pass the equality tests below."""
     assert len(EXPECTED_ADMIN_ROUTES) == 24
     assert len(EXPECTED_SHIPPING_ROUTES) == 2
-    assert len(EXPECTED_ALL_ADMIN_ROUTES) == 47
+    assert len(EXPECTED_ALL_ADMIN_ROUTES) == 49
 
 
 def test_app_has_exactly_the_expected_24_admin_route_pairs() -> None:
