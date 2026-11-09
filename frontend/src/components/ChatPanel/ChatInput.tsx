@@ -237,7 +237,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         </div>
 
         <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-          <span className="min-w-0 truncate">Enter to send · Shift+Enter new line</span>
+          <span>Enter to send · Shift+Enter new line</span>
           <div className="flex shrink-0 items-center gap-3">
             {imageRequest && (
               <button
