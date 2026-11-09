@@ -1113,6 +1113,34 @@ def _with_default_template(
     return contract.model_copy(update={"template_id": template_id})
 
 
+_STYLE_IMAGE_GUIDELINES_HEADER = (
+    "IMAGE GUIDELINES (from the slide style)\n"
+    "The images below are supplied for this deck by the slide style's author. Each "
+    "{{image:ID}} is a pre-validated Image Library id: treat it as supplied, copy it exactly, "
+    "and never invent other ids.\n"
+    "- Planning the deck: when a slide should show one of these images, put its exact "
+    "{{image:ID}} token, and where it goes, in that slide's content_brief.\n"
+    "- Building a slide: an image named in the brief or in these guidelines counts as "
+    'supplied; embed it with <img src="{{image:ID}}" alt="short description" /> or '
+    "background-image: url('{{image:ID}}').\n\n"
+)
+
+
+def _style_with_image_guidelines(slide_style: str, image_guidelines: Optional[str]) -> str:
+    """``slide_style`` with the style's image guidelines appended, when it has any.
+
+    The monolith puts a legacy style's ``image_guidelines`` in its prompt
+    (``prompt_modules._build_image_section``); the graph engine used to drop them, so
+    images an author placed in a style never reached the architect or the builders.
+    ``resolved_style`` is the one style string every graph agent receives, and the
+    image allow-lists are built from ``refs_in`` over it, so the guidelines ride there.
+    A style without guidelines is returned unchanged.
+    """
+    if not image_guidelines or not image_guidelines.strip():
+        return slide_style
+    return f"{slide_style}\n\n{_STYLE_IMAGE_GUIDELINES_HEADER}{image_guidelines.strip()}"
+
+
 def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
     """Resolve every brand-related value for *contract*, in one place.
 
@@ -1173,7 +1201,7 @@ def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
             )
 
     return {
-        "resolved_style": style.slide_style,
+        "resolved_style": _style_with_image_guidelines(style.slide_style, style.image_guidelines),
         "design_system_active": bool(style.design_system_active),
         "template_layout_html": layout_html,
         "token_css": token_css,
