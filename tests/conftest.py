@@ -79,6 +79,33 @@ def reset_singleton_client():
 
 
 @pytest.fixture(autouse=True)
+def _image_generation_off_unless_marked(request, monkeypatch):
+    """The architect's ``generate_image`` tool is unbound unless a test opts in.
+
+    Image generation is ON by default (no env flag and no admin row both mean
+    "enabled"), and the graph reads ``nodes._image_generation_available()`` on
+    every architect turn.  Left alone, every existing architect test would bind
+    the tool, and the many that pin ``toolset is None`` would go red.  So it
+    answers ``False`` for every test, except one marked
+    ``@pytest.mark.image_tool``, which gets the real gate.
+
+    ``raising=False``: the function may not exist yet (the fixture predates it).
+    A ``nodes`` that cannot be imported is left to the graph tests to report;
+    it must not fail an unrelated test here.
+    """
+    if request.node.get_closest_marker("image_tool") is None:
+        try:
+            from src.services.graph import nodes
+        except Exception:  # noqa: BLE001 - reported by the graph tests themselves
+            nodes = None
+        if nodes is not None:
+            monkeypatch.setattr(
+                nodes, "_image_generation_available", lambda: False, raising=False
+            )
+    yield
+
+
+@pytest.fixture(autouse=True)
 def clear_settings_cache():
     """
     Clear settings cache before each test.

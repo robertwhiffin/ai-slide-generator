@@ -67,7 +67,7 @@ from src.database.models.image import ImageAsset
 from src.domain.deck_spec import DeckStyle, DeckStyleComponent
 from src.domain.skill_io import AnalystOutput, ArchitectOutput, DataRequest
 from src.services import image_service
-from src.services.agent_runtime import AgentAssemblyContext, DatabricksModelAdapter
+from src.services.agent_runtime import AgentAssemblyContext
 from src.services.agent_tools import gateway_tool
 from src.services.agent_tools.gateway_mcp import (
     GatewayMcpClient,
@@ -100,6 +100,14 @@ from src.services.graph.state import (
 )
 from src.services.persisted_graph_release import PinnedInvocationEndpointError
 from src.utils.image_utils import IMAGE_PLACEHOLDER_PATTERN
+from tests.fixtures.graph_tool_runtime import (
+    BUDGET_TEXT,
+    ref,
+)
+from tests.fixtures.graph_tool_runtime import FakeRuntime as _Runtime
+from tests.fixtures.graph_tool_runtime import fold as _fold
+from tests.fixtures.graph_tool_runtime import install_runtime as _install
+from tests.fixtures.graph_tool_runtime import with_slides as _with_slides
 from tests.fixtures.model_payload_keys import ARCHITECT_MODEL_KEYS, BUILDER_MODEL_KEYS
 from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
     DEFAULT_STYLE,
@@ -151,17 +159,10 @@ SIGN_IN_URL = HOST + "/mcp-service-login?name=" + LAKEDRAW + "&o=123456789012345
 DOT = "·"
 DASH = "—"
 
-#: The budget text this file's fake loop answers a spent budget with.
-BUDGET_TEXT = "Tool budget exhausted. Call the output schema now with what you have."
-
 
 # ---------------------------------------------------------------------------
 # Exact copy (Global Constraints), built by concatenation
 # ---------------------------------------------------------------------------
-
-
-def ref(token: str) -> str:
-    return "{{image:" + token + "}}"
 
 
 def progress_line(name: str, tool: str) -> str:
@@ -358,89 +359,6 @@ class _Gateway:
 
 
 # ---------------------------------------------------------------------------
-# The fake runtime: plays tool calls through the runtime's own dispatcher
-# ---------------------------------------------------------------------------
-
-
-class _Call:
-    """One ``run(...)`` call: its arguments, and the tool calls the "model" made."""
-
-    def __init__(self, name: str, graph_release_id: Any, payload: Any, context: Any) -> None:
-        self.name = name
-        self.graph_release_id = graph_release_id
-        self.payload = copy.deepcopy(payload)
-        self.context = context
-        self.toolset: Optional[AgentToolset] = context.toolset
-        #: (max_calls, budget_seconds, calls_made) as the node handed the toolset over.
-        self.at_start = (
-            None
-            if self.toolset is None
-            else (self.toolset.max_calls, self.toolset.budget_seconds, self.toolset.calls_made)
-        )
-        self.tool_texts: List[str] = []
-        self._started = False
-
-    @property
-    def tool_names(self) -> List[str]:
-        return sorted(tool.name for tool in self.toolset.tools) if self.toolset else []
-
-    def has_tool(self, name: str) -> bool:
-        return self.toolset is not None and name in self.tool_names
-
-    def use(self, name: str, args: Optional[Dict[str, Any]] = None) -> str:
-        """One tool call, answered as the production loop answers it."""
-        toolset = self.toolset
-        assert toolset is not None, "this call carries no toolset"
-        if not self._started:
-            toolset.start()
-            self._started = True
-        text = DatabricksModelAdapter._answer_tool_call(
-            {
-                "name": name,
-                "args": dict(args or {}),
-                "id": f"{self.name}-{len(self.tool_texts) + 1}",
-                "type": "tool_call",
-            },
-            {tool.name: tool for tool in toolset.tools},
-            toolset,
-            budget_text=BUDGET_TEXT,
-        )
-        self.tool_texts.append(text)
-        return text
-
-
-class _Runtime:
-    """Stands in for ``AgentRuntime``.  Each role has answers, used in order (the last
-    one repeats): an output, or a callable ``(call) -> output``.  A role with no
-    answers fails loudly."""
-
-    def __init__(self, **answers: Any) -> None:
-        self.answers = {
-            role: list(value) if isinstance(value, list) else [value]
-            for role, value in answers.items()
-        }
-        self.calls: List[_Call] = []
-
-    def run(self, name, graph_release_id, payload, assembly_context):
-        call = _Call(name, graph_release_id, payload, assembly_context)
-        self.calls.append(call)
-        answers = self.answers.get(name)
-        if not answers:
-            raise AssertionError(f"unexpected runtime call for {name!r}")
-        answer = answers.pop(0) if len(answers) > 1 else answers[0]
-        output = answer(call) if callable(answer) else answer
-        return SimpleNamespace(output=output)
-
-    def calls_for(self, name: str) -> List[_Call]:
-        return [call for call in self.calls if call.name == name]
-
-
-def _install(monkeypatch, runtime: _Runtime) -> _Runtime:
-    monkeypatch.setattr(nodes, "get_agent_runtime", lambda: runtime)
-    return runtime
-
-
-# ---------------------------------------------------------------------------
 # Decks, registry rows, identity
 # ---------------------------------------------------------------------------
 
@@ -529,29 +447,6 @@ def _state(env, **overrides) -> Dict[str, Any]:
     )
     state.update(overrides)
     return state
-
-
-def _fold(state: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
-    """*state* after *updates*, through GraphState's own reducers."""
-    hints = get_type_hints(GraphState, include_extras=True)
-    out = dict(state)
-    for key, value in updates.items():
-        meta = getattr(hints.get(key), "__metadata__", None)
-        out[key] = meta[0](out.get(key), value) if meta else value
-    return out
-
-
-def _with_slides(spec, **fields_by_position: Dict[int, str]):
-    """*spec* with some slides' fields replaced: ``content_brief={0: "..."}``."""
-    slides = []
-    for slide in spec.slides:
-        update = {
-            field: values[slide.position]
-            for field, values in fields_by_position.items()
-            if slide.position in values
-        }
-        slides.append(slide.model_copy(update=update) if update else slide)
-    return spec.model_copy(update={"slides": slides})
 
 
 def _architect(env, state: Dict[str, Any]) -> SimpleNamespace:
