@@ -30,7 +30,11 @@ from src.services.image_generation import (
 logger = logging.getLogger(__name__)
 
 JOB_SESSION_PREFIX = "image-generation:"
-JOB_STALE_SECONDS = 300
+#: How long after it was created a pending or running job reads as timed out.  A queued job
+#: can wait behind one run on each worker, then run itself, and every run is capped by its
+#: preset timeout (the stream reader stops at it), so this is twice the longest timeout
+#: (240 s) plus time to save.
+JOB_STALE_SECONDS = 600
 MAX_WORKERS = 2
 MAX_INFLIGHT = 4  # per process; running + queued
 
@@ -122,6 +126,22 @@ def _update_job(job_id: str, session_factory, **fields: Any) -> bool:
     return True
 
 
+def _update_running_job(job_id: str, session_factory, **fields: Any) -> bool:
+    """Commit ``fields`` onto the job only while it is still running.
+
+    ``get_job`` flips a job that ran too long to "timed out", and the user is told so. A
+    plain write after that would report the same job completed (or failed again), so every
+    write after the job started is conditional. False when the job is no longer running.
+    """
+    with session_factory() as db:
+        moved = (
+            db.query(ExportJob)
+            .filter(ExportJob.job_id == job_id, ExportJob.status == "running")
+            .update(fields, synchronize_session=False)
+        )
+    return bool(moved)
+
+
 def _start_running(job_id: str, session_factory) -> Optional[str]:
     """Move a PENDING job to running. None when started; otherwise the row's status
     ("missing" when there is no row), so a job already timed out by ``get_job`` is never
@@ -188,14 +208,20 @@ def run_job(
                 tags = ["ai_generated", img.model, spec.preset_id]
                 description = None
 
-            _update_job(job_id, session_factory, status="running", status_message="Saving...")
+            if not _update_running_job(
+                job_id, session_factory, status="running", status_message="Saving..."
+            ):
+                logger.warning(
+                    "Image job %s timed out while generating; its image is not saved", job_id
+                )
+                return
             with session_factory() as db:
                 asset = save_generated_image(
                     db, img, owner=owner, prompt=spec.prompt, category=category,
                     tags=tags, description=description,
                 )
                 token = asset.token
-            _update_job(
+            _update_running_job(
                 job_id, session_factory,
                 status="completed", status_message="Done",
                 output_path=json.dumps({"image_token": token}),
@@ -208,7 +234,7 @@ def run_job(
             else:
                 logger.error("Image job %s failed", job_id, exc_info=True)
             try:
-                _update_job(
+                _update_running_job(
                     job_id, session_factory,
                     status="error", status_message="Failed",
                     error_message=_error_message(exc), completed_at=datetime.utcnow(),

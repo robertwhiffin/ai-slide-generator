@@ -302,7 +302,10 @@ def _stale(extra_seconds: int = 60) -> datetime:
 
 def test_interface_constants():
     assert JOB_SESSION_PREFIX == "image-generation:"
-    assert JOB_STALE_SECONDS == 300
+    # A queued job can wait behind one run on each worker, then run itself; every run is
+    # capped by its preset timeout (the stream reader's deadline), plus time to save.
+    assert JOB_STALE_SECONDS == 600
+    assert JOB_STALE_SECONDS >= 2 * max(p.timeout_s for p in PRESETS.values()) + 60
     assert MAX_WORKERS == 2
     assert MAX_INFLIGHT == 4
 
@@ -1014,6 +1017,29 @@ class TestReviewFixes:
         row = _job(factory, job_id)
         assert row["status"] == "error"
         assert row["error_message"] == "Image generation timed out"
+        assert _images(factory) == []
+
+    def test_a_job_timed_out_while_generating_is_not_reported_completed_after_all(
+        self, factory, session_factory
+    ):
+        """The stale check flips the job to error while the image is being generated: the
+        late "Saving..." / "completed" writes do not overwrite what the user was told."""
+        job_id = create_job(owner=OWNER, title=PROMPT, session_factory=session_factory)
+
+        def timed_out_meanwhile() -> None:
+            _set_job(factory, job_id, status="error", status_message="Failed",
+                     error_message="Image generation timed out", completed_at=datetime.utcnow())
+
+        fake = FakeGenerator(_generated("icon_png"), during=timed_out_meanwhile)
+
+        run_job(job_id, owner=OWNER, spec=GenerationSpec(prompt=PROMPT, preset_id="icon_png"),
+                generator=fake, session_factory=session_factory)
+
+        row = _job(factory, job_id)
+        assert row["status"] == "error"
+        assert row["error_message"] == "Image generation timed out"
+        assert row["status_message"] == "Failed"
+        # A job past its time limit saves nothing, like a chat straggler.
         assert _images(factory) == []
 
     def test_failure_log_line_is_capped(self, factory, session_factory, caplog):
