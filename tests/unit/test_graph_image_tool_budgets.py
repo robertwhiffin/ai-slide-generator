@@ -20,7 +20,9 @@ from __future__ import annotations
 import pytest
 
 from src.domain.skill_io import ArchitectOutput
+from src.services.graph import nodes
 from src.services.graph.state import scoped
+from src.services.image_generation import ENV_FLAG
 from tests.fixtures.graph_tool_runtime import (
     FakeRuntime,
     install_runtime,
@@ -43,6 +45,7 @@ from tests.unit.test_graph_image_tool import (  # noqa: F401 — images_on, imag
     _llm_rows,
     _meta,
     _run,
+    _seed_reply,
     _three_committed_slides,
     image_tools,
     images_on,
@@ -195,4 +198,77 @@ def test_slide_numbers_follow_positions_not_the_order_the_model_listed_them(
     assert t.updates["error_state"] is None
     (row,) = _llm_rows(t)
     assert _meta(row["metadata"]["generated_images"]) == [(token, "icon", 1, 2, [2])]
+
+
+# ---------------------------------------------------------------------------
+# R16: with no image tool, a conversation that showed images says so
+# ---------------------------------------------------------------------------
+# Found live: with the admin switch off, a session whose earlier replies showed
+# generated options got "I made three picture options ... shown below this reply"
+# with no tool bound and nothing generated.  The model copied the conversation.
+
+_OPTIONS = {
+    "generated_images": [
+        {"token": "tokA_1", "kind": "illustration", "option": 1, "for_slide": 2, "slides": []},
+        {"token": "tokB_2", "kind": "illustration", "option": 2, "for_slide": 2, "slides": []},
+    ]
+}
+
+
+def _off_notes(conversation):
+    return [
+        turn for turn in conversation
+        if turn["role"] == "system" and turn["content"] == nodes._IMAGE_TOOL_OFF_NOTE
+    ]
+
+
+@pytest.mark.parametrize("switch", ["env-off", "gate-false"])
+def test_without_the_tool_a_conversation_that_showed_images_is_told_it_cannot_make_more(
+    graph_env, monkeypatch, images_on, image_tools, switch
+):
+    """The note is the conversation's LAST turn (after the replayed options note), and
+    it says new images cannot be made this turn."""
+    if switch == "env-off":
+        monkeypatch.setenv(ENV_FLAG, "0")
+    else:
+        monkeypatch.setattr(nodes, "_image_generation_available", lambda: False)
+    _seed_reply(graph_env, _OPTIONS)
+    runtime = install_runtime(monkeypatch, FakeRuntime(architect=_discuss("Sure.")))
+
+    _run(graph_env, turn_state(graph_env))
+
+    (call,) = runtime.calls_for("architect")
+    assert call.context.toolset is None
+    conversation = call.payload["conversation"]
+    assert conversation[-1]["role"] == "system"
+    assert conversation[-1]["content"] == nodes._IMAGE_TOOL_OFF_NOTE
+    assert len(_off_notes(conversation)) == 1
+    note = nodes._IMAGE_TOOL_OFF_NOTE.lower()
+    assert "not available" in note
+    assert "image library" in note
+
+
+def test_with_the_tool_bound_no_off_note_is_added(graph_env, monkeypatch, images_on, image_tools):
+    _seed_reply(graph_env, _OPTIONS)
+    runtime = install_runtime(monkeypatch, FakeRuntime(architect=_discuss("Sure.")))
+
+    _run(graph_env, turn_state(graph_env))
+
+    (call,) = runtime.calls_for("architect")
+    assert call.tool_names == [IMAGE_TOOL]
+    assert _off_notes(call.payload["conversation"]) == []
+
+
+def test_without_image_history_the_conversation_is_unchanged(
+    graph_env, monkeypatch, images_on, image_tools
+):
+    """A session that never showed generated images: no note, exactly today's payload."""
+    monkeypatch.setenv(ENV_FLAG, "0")
+    _seed_reply(graph_env, None)
+    runtime = install_runtime(monkeypatch, FakeRuntime(architect=_discuss("Sure.")))
+
+    _run(graph_env, turn_state(graph_env))
+
+    (call,) = runtime.calls_for("architect")
+    assert [turn["role"] for turn in call.payload["conversation"]] == ["user", "assistant"]
 

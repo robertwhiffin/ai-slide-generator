@@ -4103,6 +4103,18 @@ _GENERATED_IMAGES_NOTE_SUFFIX: Final = (
     ". To use one, put its exact reference in that slide's content_brief."
 )
 
+#: The ``system`` turn that closes the architect's conversation on a turn with no
+#: ``generate_image`` tool, when the conversation already showed generated images
+#: (R16).  Found live: with the admin switch off, such a session got "I made three
+#: picture options ... shown below this reply" with no tool bound and nothing made,
+#: because the model followed the conversation's earlier image replies.
+_IMAGE_TOOL_OFF_NOTE: Final = (
+    "Image generation is not available in this turn: there is no generate_image tool. "
+    "Do not say you made, saved or are showing new images. If the user asks for a new "
+    "image, say that image generation is not available right now. Images generated "
+    "earlier are still in the user's Image Library and can be used by their exact reference."
+)
+
 
 def _image_generation_available() -> bool:
     """Whether the architect may generate images this turn: the env flag AND the
@@ -4122,6 +4134,15 @@ def _image_generation_available() -> bool:
             exc_info=True,
         )
         return False
+
+
+def _showed_generated_images(conversation: Sequence[Dict[str, str]]) -> bool:
+    """Whether *conversation* replays a generated-images note (:func:`_conversation`)."""
+    return any(
+        turn.get("role") == "system"
+        and str(turn.get("content") or "").startswith(_GENERATED_IMAGES_NOTE_PREFIX)
+        for turn in conversation
+    )
 
 
 def _image_kind_label(kind: Any, count: int) -> str:
@@ -4759,6 +4780,15 @@ def architect_node(state: dict) -> Dict[str, Any]:
         if not describe_only and _image_generation_available()
         else None
     )
+    if images is None and not describe_only and _showed_generated_images(conversation):
+        # R16: no image tool this turn, but the conversation showed generated images,
+        # so the architect is told it cannot make new ones (else it may follow the
+        # earlier image replies and claim images it never made).  A conversation that
+        # never showed any is exactly what it was.
+        payload["conversation"] = [
+            *conversation,
+            {"role": "system", "content": _IMAGE_TOOL_OFF_NOTE},
+        ]
     known_images: Set[str] = (
         _turn_tool_images(state) | refs_in(payload) | refs_in(committed_htmls)
         if gateway is not None or images is not None or _turn_generated_tokens(state)
