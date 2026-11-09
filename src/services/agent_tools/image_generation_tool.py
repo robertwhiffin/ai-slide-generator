@@ -224,7 +224,10 @@ class ImageGenerationAgentTool:
         room = ctx.images_left - self.images
         if room <= 0:
             return self._reply(_REFUSE_IMAGES)
-        wall = min(remaining_seconds, ctx.seconds_left)
+        # seconds_left is this tool's budget for ALL its calls: on a toolset whose own clock
+        # runs longer (beside Gateway tools), remaining_seconds alone would hand a second
+        # call the whole budget again.
+        wall = min(remaining_seconds, ctx.seconds_left - self.seconds)
         if ctx.deadline_at is not None:
             wall = min(wall, ctx.deadline_at - ctx.clock())
         if wall < MIN_START_SECONDS:

@@ -160,3 +160,51 @@ def test_first_option_defaults_to_one(library):
 
     assert "Option 1:" in body and "Option 2:" in body
     assert [ref["option"] for ref in tool.generated] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# The time budget is the tool's whole budget, across its calls
+# ---------------------------------------------------------------------------
+
+
+class _SlowGenerator(FakeGenerator):
+    """Each ``generate`` takes *delay* seconds (after recording its call)."""
+
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self.delay = delay
+
+    def generate(self, prompt, preset_id, model=None, quality=None, *, timeout_s=None):
+        image = super().generate(prompt, preset_id, model, quality, timeout_s=timeout_s)
+        time.sleep(self.delay)
+        return image
+
+
+def test_a_second_call_gets_only_what_the_first_left_of_seconds_left(library, monkeypatch):
+    """``seconds_left`` is the tool's budget for ALL its calls: on a toolset whose own clock
+    runs longer (the image tool beside Gateway tools), a second call must not be handed the
+    whole budget again.  4 s budget, the first call takes at least 1 s: the second call's
+    wall is at most 3 s, not 4 s."""
+    monkeypatch.setattr(tool_module, "MIN_START_SECONDS", 0.1)
+    fake = _SlowGenerator(delay=1.0)
+    tool = _tool(fake, seconds_left=4.0)
+
+    _run(tool, kind="icon", count=1, remaining=120.0)
+    _run(tool, kind="icon", count=1, remaining=120.0)
+
+    first, second = (call["timeout_s"] for call in fake.calls)
+    assert first == pytest.approx(4.0, abs=0.05)
+    assert second <= first - 1.0 + 0.05, f"the second call was handed {second:.2f}s of a 4s budget"
+
+
+def test_a_spent_time_budget_refuses_the_next_call(library, monkeypatch):
+    monkeypatch.setattr(tool_module, "MIN_START_SECONDS", 0.5)
+    fake = _SlowGenerator(delay=1.0)
+    tool = _tool(fake, seconds_left=1.2)
+
+    _run(tool, kind="icon", count=1, remaining=120.0)
+    result = _run(tool, kind="icon", count=1, remaining=120.0)
+
+    assert len(fake.calls) == 1
+    assert REF_RE.search(result) is None
+    assert "time" in _assert_spotlighted(result).lower()
