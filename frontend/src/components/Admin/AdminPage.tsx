@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FeedbackDashboard } from '../Feedback/FeedbackDashboard';
 import { GoogleSlidesAuthForm } from '../config/GoogleSlidesAuthForm';
 import { AdminDesignSystemDefault } from './AdminDesignSystemDefault';
+import { AdminImageGeneration } from './AdminImageGeneration';
 import { AdminGenieOneDefault } from './AdminGenieOneDefault';
 import { AdminJudgeSettings } from './AdminJudgeSettings';
 import { AdminSlideStyleDefault } from './AdminSlideStyleDefault';
@@ -254,6 +255,7 @@ export const AdminPage: React.FC = () => {
         >
           {activeTab === 'connections' && (
             <>
+              <AdminImageGeneration />
               <AdminGenieOneDefault />
               <AdminConnections />
             </>

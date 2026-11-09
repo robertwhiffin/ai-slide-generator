@@ -12,11 +12,33 @@
  *   - mount <AdminAdmins /> unconditionally                 -> "does not mount the Admins panel ..."
  *   - mount it only while the tab is active (unmount on leave) -> "... stays mounted ..."
  *   - put the tab anywhere but last / change its ids         -> "adds an Admins tab last ..."
+ *
+ * the Connections tab also renders AdminImageGeneration,
+ * above AdminGenieOneDefault. Both stay REAL here, over a mocked admin API (every call
+ * resolves, so neither can leave an unhandled rejection); AdminConnections is stubbed.
+ *   - not mounted in the Connections tab / mounted below Genie One -> "mounts the image
+ *     generation switch ..."
  */
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AdminPage } from './AdminPage';
 
+const getImageGeneration = vi.fn();
+
+vi.mock('../../api/admin', () => ({
+  adminApi: {
+    getImageGeneration: (...args: unknown[]) => getImageGeneration(...args),
+    setImageGeneration: () => Promise.resolve({ available: true, enabled: true }),
+    getGenieOneDefault: () => Promise.resolve({ enabled: false }),
+    setGenieOneDefault: () => Promise.resolve({ enabled: true }),
+  },
+}));
+vi.mock('../../contexts/ToastContext', () => ({
+  useToast: () => ({ showToast: () => undefined }),
+}));
+vi.mock('./AdminConnections', () => ({
+  AdminConnections: () => <div data-testid="admin-connections-stub" />,
+}));
 vi.mock('./AdminAdmins', () => ({
   AdminAdmins: () => <div data-testid="admin-admins-stub" />,
 }));
@@ -73,5 +95,33 @@ describe('AdminPage — Admins tab', () => {
     const panel = document.getElementById('admins-panel')!;
     expect(panel).toHaveAttribute('hidden');
     expect(within(panel).getByTestId('admin-admins-stub')).toBeInTheDocument();
+  });
+});
+
+describe('AdminPage — Connections tab', () => {
+  afterEach(() => {
+    cleanup();
+    getImageGeneration.mockReset();
+  });
+
+  it('mounts the image generation switch on the Connections tab, above Genie One', async () => {
+    getImageGeneration.mockResolvedValue({ available: true, enabled: false });
+    render(<AdminPage />);
+    expect(getImageGeneration).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Connections' }));
+
+    await waitFor(() => expect(getImageGeneration).toHaveBeenCalledTimes(1));
+    const panel = document.getElementById('connections-panel')!;
+    const imageSwitch = await within(panel).findByRole('checkbox', {
+      name: 'Let users generate images with AI',
+    });
+    const genieSwitch = await within(panel).findByRole('checkbox', {
+      name: 'Add Genie One to new decks',
+    });
+    expect(
+      imageSwitch.compareDocumentPosition(genieSwitch) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(within(panel).getByTestId('admin-connections-stub')).toBeInTheDocument();
   });
 });

@@ -238,3 +238,56 @@ describe('adminApi — /api/admin/admins', () => {
     expect((err as Error).message).toContain('503');
   });
 });
+
+/**
+ * the admin on/off switch for AI image generation.
+ *   GET /api/admin/image-generation -> 200 {available, enabled}
+ *   PUT /api/admin/image-generation {enabled} -> 200 {available: true, enabled};
+ *       409 {detail: "Image generation is not available on this deployment ..."}
+ * SABOTAGE: wrong method / path / body -> that call's request test; drop the detail
+ * parsing -> the 409 case.
+ */
+describe('adminApi — /api/admin/image-generation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('getImageGeneration sends GET /api/admin/image-generation and resolves to the parsed body', async () => {
+    const fetchMock = stubFetch(() => jsonResponse(200, { available: true, enabled: false }));
+
+    const result = await adminApi.getImageGeneration();
+
+    const req = onlyRequest(fetchMock);
+    expect(req.method).toBe('GET');
+    expect(req.path).toBe('/api/admin/image-generation');
+    expect(req.search).toBe('');
+    expect(result).toEqual({ available: true, enabled: false });
+  });
+
+  it.each([true, false])(
+    'setImageGeneration(%s) sends PUT /api/admin/image-generation with {enabled} as JSON',
+    async (enabled) => {
+      const fetchMock = stubFetch(() => jsonResponse(200, { available: true, enabled }));
+
+      const result = await adminApi.setImageGeneration(enabled);
+
+      const req = onlyRequest(fetchMock);
+      expect(req.method).toBe('PUT');
+      expect(req.path).toBe('/api/admin/image-generation');
+      expect(req.body).toEqual({ enabled });
+      expect(req.contentType).toBe('application/json');
+      expect(result).toEqual({ available: true, enabled });
+    },
+  );
+
+  it('setImageGeneration rejects with the 409 detail verbatim when the deployment lacks the capability', async () => {
+    const detail = 'Image generation is not available on this deployment.';
+    stubFetch(() => jsonResponse(409, { detail }));
+
+    const err = await rejectionOf(adminApi.setImageGeneration(true));
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe(detail);
+  });
+});

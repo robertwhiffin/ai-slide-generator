@@ -25,3 +25,62 @@ export interface ImageDataResponse {
   base64_data: string;
   data_uri: string;
 }
+
+export interface ImageModelOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface ImagePresetOption {
+  id: string;
+  label: string;
+  description: string;
+  output_format: 'jpeg' | 'png' | 'svg';
+  category: string;
+  transparent: boolean;
+  models: ImageModelOption[];
+  default_model: string;
+  qualities: string[];
+  default_quality: string;
+}
+
+export interface ImageEditOptions {
+  models: ImageModelOption[];
+  default_model: string;
+  qualities: string[];
+  default_quality: string;
+}
+
+export interface ImageGenerationOptions {
+  available: boolean;
+  max_prompt_chars: number;
+  default_preset: string | null;
+  presets: ImagePresetOption[];
+  edit: ImageEditOptions | null;
+  /** What each quality is for, keyed by quality id; shown under the Quality picker. */
+  quality_descriptions?: Record<string, string>;
+}
+
+export interface ImageGenerationRequest {
+  prompt: string;
+  preset: string;
+  model?: string;
+  quality?: string;
+}
+
+export interface ImageEditRequest {
+  prompt: string;
+  model?: string;
+  quality?: string;
+}
+
+export interface ImageGenerationJob {
+  job_id: string;
+  status: 'pending' | 'running' | 'completed' | 'error';
+  progress: number;
+  total_slides: number;
+  status_message?: string | null;
+  error?: string | null;
+  image?: ImageAsset | null;
+}
