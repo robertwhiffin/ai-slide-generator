@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FiExternalLink, FiEdit2, FiZap } from 'react-icons/fi';
 import type { ImageAsset, ImageGenerationOptions } from '../../types/image';
 import { api } from '../../services/api';
+import { getImageGenerationOptions } from '../../hooks/useImageGenerationOptions';
 import { DOCS_URLS } from '../../constants/docs';
 import { GenerateImageDialog } from './GenerateImageDialog';
 
@@ -69,8 +70,7 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
   useEffect(() => {
     if (readOnly) return;
     let cancelled = false;
-    api
-      .imageGenerationOptions()
+    getImageGenerationOptions()
       .then((opts) => {
         if (!cancelled) setGenOptions(opts);
       })

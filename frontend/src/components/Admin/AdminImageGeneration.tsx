@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import { adminApi } from '../../api/admin';
 import { useToast } from '../../contexts/ToastContext';
+import { invalidateImageGenerationOptions } from '../../hooks/useImageGenerationOptions';
 
 export const AdminImageGeneration: React.FC = () => {
   const [state, setState] = useState<{ available: boolean; enabled: boolean } | null>(null);
@@ -34,6 +35,7 @@ export const AdminImageGeneration: React.FC = () => {
     try {
       const res = await adminApi.setImageGeneration(!state.enabled);
       setState({ available: res.available === true, enabled: res.enabled === true });
+      invalidateImageGenerationOptions();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       showToast(`Failed to save: ${message}`, 'error');

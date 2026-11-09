@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Trash2 } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
-import { Message } from './Message';
+import { Message, type ImageCardActions } from './Message';
 import { ToolActivityBar } from './ToolActivityBar';
 import { ChatWelcome } from './ChatWelcome';
 import { Button } from '@/ui/button';
@@ -21,6 +21,8 @@ interface MessageListProps {
   progressLabel?: string;
   /** Absent: no message offers delete (a viewer, an unsaved session, a save-point preview). */
   deleteAction?: MessageDeleteAction;
+  /** What the options card under a reply that generated images can do. */
+  imageActions?: ImageCardActions;
 }
 
 const isToolMessage = (m: MessageType): boolean => Boolean(m.tool_call) || m.role === 'tool';
@@ -49,6 +51,7 @@ export const MessageList: React.FC<MessageListProps> = ({
   isLoading,
   progressLabel = DEFAULT_TURN_LABEL,
   deleteAction,
+  imageActions,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -73,7 +76,7 @@ export const MessageList: React.FC<MessageListProps> = ({
         return (
         // A named group: Message's own `group-hover` chevrons must not react to this row's hover.
         <div key={row.start} className="group/row relative" data-testid="chat-message-row">
-          <Message message={message} />
+          <Message message={message} imageActions={imageActions} />
           {deleteAction && message.role === 'user' && typeof message.id === 'number' && (
             <Button
               type="button"

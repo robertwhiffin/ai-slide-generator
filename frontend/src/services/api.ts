@@ -1419,6 +1419,12 @@ export const api = {
     return response.json();
   },
 
+  async getImage(token: string): Promise<ImageAsset> {
+    const response = await fetch(`${API_BASE_URL}/api/images/${encodeURIComponent(token)}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to get image');
+    return response.json();
+  },
+
   async getImageData(imageId: string): Promise<ImageDataResponse> {
     const response = await fetch(`${API_BASE_URL}/api/images/${imageId}/data`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to get image data');

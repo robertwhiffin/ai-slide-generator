@@ -156,6 +156,20 @@ const UNAVAILABLE: ImageGenerationOptions = {
 
 const listResponse = (images: ImageAsset[]): ImageListResponse => ({ images, total: images.length });
 
+/**
+ * Chat image generation (2026-11-09 CORRECTIONS, Unit I): the library reads availability through the
+ * module-cached probe in hooks/useImageGenerationOptions, so each test starts from an empty cache
+ * (otherwise the first test's answer is served to the next and "asked once" counts leak across tests).
+ * Loaded through a glob so this file keeps running before that module exists.
+ */
+const optionsCacheModules = import.meta.glob<{ __resetImageGenerationOptionsCacheForTests?: () => void }>(
+  '../../hooks/useImageGenerationOptions.{ts,tsx}',
+  { eager: true },
+);
+const resetOptionsCache = () => {
+  for (const mod of Object.values(optionsCacheModules)) mod.__resetImageGenerationOptionsCacheForTests?.();
+};
+
 // ---------------------------------------------------------------------------------------------
 // Helpers (roles, accessible names, visible text)
 // ---------------------------------------------------------------------------------------------
@@ -193,6 +207,7 @@ const lastDialogProps = () => h.dialogProps[h.dialogProps.length - 1] as DialogP
 describe('ImageLibrary image generation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetOptionsCache();
     h.dialogProps.length = 0;
     h.createdImage = NEW_IMAGE;
     h.listImages.mockResolvedValue(listResponse(IMAGES));
@@ -339,5 +354,37 @@ describe('ImageLibrary image generation', () => {
       expect(queryEditButtons()).toHaveLength(0);
       expect(screen.getAllByText('AI')).toHaveLength(1);
     });
+  });
+});
+
+// Controller addition (chat image generation): the library reads availability through the one
+// app-wide probe, so a probe the chat already answered is not asked again when the library mounts.
+describe('ImageLibrary shares the app-wide availability probe', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetOptionsCache();
+    h.dialogProps.length = 0;
+    h.listImages.mockResolvedValue(listResponse(IMAGES));
+    h.imageGenerationOptions.mockResolvedValue(AVAILABLE);
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('does not ask the server again when the probe was already answered', async () => {
+    const [mod] = Object.values(
+      import.meta.glob<{ getImageGenerationOptions: () => Promise<ImageGenerationOptions> }>(
+        '../../hooks/useImageGenerationOptions.{ts,tsx}',
+        { eager: true },
+      ),
+    );
+    await expect(mod.getImageGenerationOptions()).resolves.toEqual(AVAILABLE);
+    expect(h.imageGenerationOptions).toHaveBeenCalledTimes(1);
+
+    render(<ImageLibrary />);
+
+    expect(await generateButton()).toBeInTheDocument();
+    expect(h.imageGenerationOptions).toHaveBeenCalledTimes(1);
   });
 });

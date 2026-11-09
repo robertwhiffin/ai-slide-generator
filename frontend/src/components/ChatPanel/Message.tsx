@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { Message as MessageType } from '../../types/message';
 import { splitDeckAdvisory, splitFindingRequest } from '../../utils/findingText';
+import { GeneratedImagesCard } from './GeneratedImagesCard';
+import type { GeneratedImageRef } from '../../types/message';
 
 // Human labels for the keys a failure notice's details carry; unknown keys render as-is.
 const DETAIL_LABELS: Record<string, string> = {
@@ -45,11 +47,19 @@ const withSignInLink = (text: string, signInUrl: string | undefined): React.Reac
   );
 };
 
-interface MessageProps {
-  message: MessageType;
+export interface ImageCardActions {
+  onUse: (img: GeneratedImageRef) => void;
+  onRegenerate: (images: GeneratedImageRef[]) => void;
+  disabled: boolean;
+  hidden: boolean;
 }
 
-export const Message: React.FC<MessageProps> = ({ message }) => {
+interface MessageProps {
+  message: MessageType;
+  imageActions?: ImageCardActions;
+}
+
+export const Message: React.FC<MessageProps> = ({ message, imageActions }) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
   const getMessageLabel = () => {
@@ -227,7 +237,9 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
   // /80 would be 3.9:1, below AA at this size.
   const detailsTone = isUser ? 'text-primary-foreground' : 'text-muted-foreground';
 
-  return (
+  const showImages = message.role === 'assistant' && (message.generated_images?.length ?? 0) > 0;
+
+  const bubble = (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
         className={`max-w-[85%] rounded-xl px-3.5 py-2.5 text-[13px] leading-relaxed ${
@@ -264,5 +276,21 @@ export const Message: React.FC<MessageProps> = ({ message }) => {
         )}
       </div>
     </div>
+  );
+
+  if (!showImages) return bubble;
+  return (
+    <>
+      {bubble}
+      <div className="mt-2 flex justify-start">
+        <GeneratedImagesCard
+          images={message.generated_images!}
+          onUse={imageActions?.onUse ?? (() => {})}
+          onRegenerate={imageActions?.onRegenerate ?? (() => {})}
+          actionsDisabled={imageActions?.disabled ?? true}
+          hideActions={imageActions?.hidden ?? !imageActions}
+        />
+      </div>
+    </>
   );
 };

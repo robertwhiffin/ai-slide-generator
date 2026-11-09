@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Edit3, LayoutGrid, Loader2, Plus, Trash2 } from 'lucide-react';
+import { Edit3, LayoutGrid, Loader2, Plus, Trash2, WandSparkles } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
 import type { SlideDeck } from '../../types/slide';
@@ -22,6 +22,7 @@ import { diffNewSlides, NEW_SLIDE_INDICATOR_MS } from './newSlides';
 import { HTMLEditorModal } from '../SlidePanel/HTMLEditorModal';
 import { VerificationBadge } from '../SlidePanel/VerificationBadge';
 import { ConfirmDialog } from '../ConfirmDialog';
+import { GenerateImageRequestDialog } from '../ChatPanel/GenerateImageRequestDialog';
 import { PresentationMode } from '../PresentationMode';
 import { api } from '../../services/api';
 import { useToast } from '../../contexts/ToastContext';
@@ -57,6 +58,8 @@ interface SlideViewerProps {
   sessionId?: string | null;
   /** Disables the insert controls (AppLayout passes `isGenerating`: a turn is running on this deck). */
   insertDisabled?: boolean;
+  /** Offers "Generate image for this slide" on the stage toolbar (AppLayout: the feature is on and the deck is not legacy). */
+  imageGenerationAvailable?: boolean;
 }
 
 export interface SlideViewerHandle {
@@ -103,9 +106,10 @@ const ViewerBody = forwardRef<
 >(({
   slideDeck, deckKey, findings, callbacks, onReorder,
   onSlideChange, onSendMessage, readOnly = false, lockedBy = null,
-  onVerificationComplete, sessionId, insertDisabled = false,
+  onVerificationComplete, sessionId, insertDisabled = false, imageGenerationAvailable = false,
 }, ref) => {
   const { showToast } = useToast();
+  const [isImageDialogOpen, setIsImageDialogOpen] = useState(false);
   const {
     currentIndex, next, prev, first, last, activeTab, drawerOpen,
     setCurrentIndex, setDrawerOpen, setActiveTab,
@@ -584,6 +588,18 @@ const ViewerBody = forwardRef<
         />
       )}
 
+      {isImageDialogOpen && onSendMessage && (
+        <GenerateImageRequestDialog
+          slideCount={slideDeck.slides.length}
+          forSlide={currentIndex + 1}
+          onClose={() => setIsImageDialogOpen(false)}
+          onSubmit={(message) => {
+            setIsImageDialogOpen(false);
+            onSendMessage(message);
+          }}
+        />
+      )}
+
       {/* Presentation mode */}
       {isPresentationMode && (
         <PresentationMode
@@ -649,6 +665,22 @@ const ViewerBody = forwardRef<
                     {isOptimizing
                       ? <Loader2 className="size-3.5 animate-spin" />
                       : <LayoutGrid className="size-3.5" />}
+                  </Button>
+                </Tooltip>
+              )}
+              {!readOnly && onSendMessage && imageGenerationAvailable && (
+                <Tooltip text="Generate image for this slide">
+                  <Button
+                    data-testid="stage-generate-image"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setIsImageDialogOpen(true)}
+                    // Sends a chat message, so it waits for a running turn like the other stage actions.
+                    disabled={insertDisabled}
+                    className="h-7 w-7"
+                    aria-label="Generate image for this slide"
+                  >
+                    <WandSparkles className="size-3.5" />
                   </Button>
                 </Tooltip>
               )}
