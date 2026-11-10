@@ -275,7 +275,7 @@ class TestScopedVals:
         state = {"turn_id": "t1"}
         assert scoped_vals(state, "fix_map") == {}
 
-    def test_all_fourteen_keys_are_registered(self):
+    def test_all_sixteen_keys_are_registered(self):
         """_EMPTY_FOR covers exactly the keys read through scoped_vals.
 
         ws4d added the tenth, ``describe_only`` — the turn-scoped flag
@@ -285,7 +285,9 @@ class TestScopedVals:
         what makes adding one a deliberate act.
 
         Genie One in agent mode added ``analyst_figures`` and ``analyst_rounds``;
-        AI Gateway MCP connections added ``gateway_usage`` and ``gateway_images``.
+        AI Gateway MCP connections added ``gateway_usage`` and ``gateway_images``;
+        the architect's ``generate_image`` tool added ``generated_images`` and
+        ``image_tool_usage`` (both ``[]``).
         """
         expected = {
             "describe_only",
@@ -294,8 +296,11 @@ class TestScopedVals:
             "emitted_style_blocks", "foreman_wakes",
             "analyst_figures", "analyst_rounds",
             "gateway_usage", "gateway_images",
+            "generated_images", "image_tool_usage",
         }
         assert set(_EMPTY_FOR.keys()) == expected
+        assert _EMPTY_FOR["generated_images"] == []
+        assert _EMPTY_FOR["image_tool_usage"] == []
 
     def test_describe_only_defaults_to_the_SAFE_value(self):
         """It gates a destructive branch, so "no flag" must mean "may build".

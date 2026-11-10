@@ -29,6 +29,10 @@ import {
 import { withoutTurn, withPersistedUserIds } from '../../utils/conversationTurns';
 import { getRotatingLoadingMessage } from '../../utils/loadingMessages';
 import { readMessageDetails } from '../../utils/messageDetails';
+import { readGeneratedImages } from '../../utils/generatedImages';
+import { pickImageMessage, regenerateMessage } from '../../utils/imageChatMessages';
+import { useImageGenerationOptions } from '../../hooks/useImageGenerationOptions';
+import type { GeneratedImageRef } from '../../types/message';
 import {
   QUEUED_TURN_LABEL,
   describeTurnProgress,
@@ -69,6 +73,8 @@ interface ChatPanelProps {
   viewOnlyReason?: string;  // When provided, show why the user cannot edit
   /** Whether the live deck has a Spec. Chooses Clear chat's wording: with a Spec the assistant carries on from it; without one the wording promises nothing about a Spec (#317 lifted #323's Spec gate). */
   hasDeckSpec?: boolean;
+  /** Slides in the live deck: the choices of the Generate image dialog's For-slide select. */
+  slideCount?: number;
 }
 
 // #317: the turn-end id read asks for the newest rows only (GET …/messages keeps messages[-limit:]).
@@ -79,6 +85,12 @@ const MESSAGE_ID_READ_LIMIT = 200;
 const readSignInUrl = (value: unknown): string | undefined =>
   typeof value === 'string' && value ? value : undefined;
 
+/** The images a reply generated, or undefined (no card) when there are none. */
+const toGeneratedImages = (value: unknown): GeneratedImageRef[] | undefined => {
+  const images = readGeneratedImages(value);
+  return images.length > 0 ? images : undefined;
+};
+
 /** The live label for a tool call. A Gateway MCP call names its connection and tool, as its
  *  progress row does ("{connection} · {tool}"); every other tool reads "Querying <tool>...". */
 const toolCallLabel = (name: string, input: Record<string, unknown> | undefined): string => {
@@ -88,6 +100,14 @@ const toolCallLabel = (name: string, input: Record<string, unknown> | undefined)
     return `${connection} · ${tool}`;
   }
   return `Querying ${name}...`;
+};
+
+/** The live label for the architect's image tool: "Generating 3 images…". */
+const imageGenerationLabel = (input: Record<string, unknown> | undefined): string => {
+  const count = input?.count;
+  return typeof count === 'number' && Number.isInteger(count) && count >= 1
+    ? `Generating ${count} ${count === 1 ? 'image' : 'images'}…`
+    : 'Generating images…';
 };
 
 export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
@@ -101,6 +121,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   previewMessages = null,
   viewOnlyReason,
   hasDeckSpec = false,
+  slideCount = 0,
 }, ref) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -127,6 +148,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   const { sessionId, isSessionPersisted, isInitializing, error: sessionError, setExperimentUrl, setSessionTitle, storedDeckMode, selectedDeckMode, setStoredDeckMode, setSelectedDeckMode } = useSession();
   const { agentConfig, refreshConfig, configOwnerSessionId, isPreSession } = useAgentConfig();
   const { setIsGenerating } = useGeneration();
+  const imageOptions = useImageGenerationOptions();
   // Synchronously clear messages when sessionId changes (avoids old-message flash on session switch).
   // React discards the intermediate render and immediately re-renders with empty messages,
   // so the user never sees old messages from the previous session.
@@ -185,6 +207,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           details: readMessageDetails(msg.metadata?.details),
           agent: typeof msg.metadata?.agent === 'string' ? msg.metadata.agent : undefined,
           sign_in_url: readSignInUrl(msg.metadata?.sign_in_url),
+          generated_images: toGeneratedImages(msg.metadata?.generated_images),
         }));
         setMessages(uiMessages);
       } else {
@@ -386,6 +409,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
                 details: readMessageDetails(event.metadata?.details),
                 agent: event.agent,
                 sign_in_url: readSignInUrl(event.metadata?.sign_in_url),
+                generated_images: toGeneratedImages(event.metadata?.generated_images),
               },
             ]);
           }
@@ -406,7 +430,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
               },
             ]);
             // Update loading message to show tool being used
-            setLoadingMessage(toolCallLabel(event.tool_name, event.tool_input));
+            setLoadingMessage(
+              event.tool_name === 'image_generation'
+                ? imageGenerationLabel(event.tool_input)
+                : toolCallLabel(event.tool_name, event.tool_input),
+            );
           }
           break;
 
@@ -610,6 +638,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     }
   };
 
+  const chatInputDisabled =
+    isLoading || isInitializing || !sessionId || disabled || isClearing || isDeletingMessage;
+  const effectiveDeckMode = storedDeckMode ?? selectedDeckMode;
+  const imageRequestAvailable = imageOptions?.available === true && effectiveDeckMode !== 'legacy';
+
   // Expose sendMessage method to parent components via ref
   useImperativeHandle(ref, () => ({
     sendMessage: (content: string, slideContext?: SlideContext) => {
@@ -683,6 +716,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           isLoading={isLoading && !previewMessages}
           progressLabel={isQueued && !turnProgress ? QUEUED_TURN_LABEL : describeTurnProgress(turnProgress)}
           deleteAction={canDeleteMessages ? { disabled: deleteMessageDisabled, onDelete: setPendingDeleteId } : undefined}
+          imageActions={{
+            onUse: (img) => { void handleSendMessage(pickImageMessage(img), [img.token]); },
+            onRegenerate: (images) => { void handleSendMessage(regenerateMessage(images)); },
+            disabled: chatInputDisabled,
+            hidden: previewMessages != null,
+          }}
         />
       </div>
 
@@ -694,11 +733,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
       <ChatInput
         onSend={handleSendMessage}
-        disabled={
-          isLoading || isInitializing || !sessionId || disabled
-          || isClearing
-          || isDeletingMessage
-        }
+        disabled={chatInputDisabled}
+        imageRequest={imageRequestAvailable ? { slideCount } : undefined}
         placeholder={
           viewOnlyReason
             ? viewOnlyReason

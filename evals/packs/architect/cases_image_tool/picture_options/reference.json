@@ -1,0 +1,8 @@
+{
+  "intent": "discuss",
+  "message": "Here are three illustration options for slide 2, each showing a fake sign-in page that gets nothing from a passkey. Which one would you like on the slide?",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

@@ -158,6 +158,13 @@ ALLOWLIST = {
     ("POST", "/api/images/upload"):
         "Shared image library: any authenticated user may upload; writes to "
         "existing images are owner-scoped (SDR-4437 HIGH-1).",
+    # Image generation: image jobs reuse export_jobs rows but are NOT
+    # session-bound, so no deck helper applies. Behaviour is pinned by
+    # test_image_generation_routes.py::TestPollAuthz and
+    # test_image_generation_jobs.py::TestGetJob.
+    ("GET", "/api/images/generate/jobs/{job_id}"):
+        "owner-only inline: get_job returns None unless the row's session_id is "
+        "image-generation:<caller>, so another user's id 404s",
     ("POST", "/api/feedback/chat"): FEEDBACK_WRITE_RATIONALE,
     ("POST", "/api/feedback/submit"): FEEDBACK_WRITE_RATIONALE,
     ("POST", "/api/feedback/survey"): FEEDBACK_WRITE_RATIONALE,

@@ -6,6 +6,7 @@ import { SlideViewer, type SlideViewerHandle } from '../SlideViewer/SlideViewer'
 import { syntheticSlideId } from '../SlideViewer/newSlides';
 import { SpecView } from '../SpecView/SpecView';
 import { useDeckExport } from '../../hooks/useDeckExport';
+import { useImageGenerationOptions } from '../../hooks/useImageGenerationOptions';
 import { AgentConfigBar } from '../AgentConfigBar/AgentConfigBar';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
@@ -216,6 +217,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   } = useSession();
   // Legacy decks have no graph version or release-mix status to show.
   const isLegacyDeck = (storedDeckMode ?? selectedDeckMode) === 'legacy';
+  const imageGenerationOptions = useImageGenerationOptions();
+  const imageGenerationAvailable = imageGenerationOptions?.available === true && !isLegacyDeck;
   const { isGenerating } = useGeneration();
   /** Ref-tracked sessionId so the URL effect guard doesn't need sessionId as a dep (which would cause it to re-fire when switchSession internally calls setSessionId). */
   const sessionIdRef = useRef(sessionId);
@@ -1249,6 +1252,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       rawHtml={rawHtml}
                       disabled={isReadOnly}
                       hasDeckSpec={!!slideDeck?.deck_spec}
+                      slideCount={slideDeck?.slides.length ?? 0}
                       onGenerationStart={() => {
                         onGenerationStart();
                         // E0: reset released-position tracking for the new turn.
@@ -1365,6 +1369,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       onVerificationComplete={handleVerificationComplete}
                       sessionId={sessionId}
                       insertDisabled={isGenerating}
+                      imageGenerationAvailable={imageGenerationAvailable}
                     />
                   </div>
 

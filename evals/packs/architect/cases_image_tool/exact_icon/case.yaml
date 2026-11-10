@@ -1,0 +1,15 @@
+kind: mutation
+fault: 'exact ask: one icon placed in slide 2''s content_brief (position 1), not three
+  options'
+expect:
+  intent: edit
+  positions:
+  - 1
+  image_tool:
+    called: true
+    count: 1
+    kinds:
+    - icon
+    - vector_icon
+    slide: 2
+design_system_active: true

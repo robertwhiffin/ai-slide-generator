@@ -10,26 +10,36 @@ import subprocess
 from collections import defaultdict
 from typing import Callable
 
-import src.core.database  # noqa: F401 - break import cycle before src.* imports
-
 import mlflow
 from mlflow.entities import Feedback
 from mlflow.genai.scorers import scorer
 
+import src.core.database  # noqa: F401 - break import cycle before src.* imports
 from evals.harness import judge as judge_mod  # aliased: "judge" is also a scorer name
 from evals.harness import scorers as det
 from evals.harness.case import (
-    EVALS_DIR, PACKS_DIR, Case, cases_dirname, load_case, load_cases, meridian_section_css, split_kwargs,
+    EVALS_DIR,
+    PACKS_DIR,
+    Case,
+    case_set_dir,
+    cases_dirname,
+    load_case,
+    load_cases,
+    meridian_section_css,
+    split_kwargs,
 )
-from evals.harness.config import AgentEvalConfig, prices
+from evals.harness.config import IMAGE_TOOL_ROLES, AgentEvalConfig, prices
 from evals.harness.render import RenderMeasures, render_slide
 from evals.harness.runner import Runner
 
 HTML_ROLES = ("builder", "fixer")
-DETERMINISTIC_CATEGORY_ROLES = ("architect", "data_analyst", "build_reviewer", "fix_reviewer", "deck_reviewer")
+DETERMINISTIC_CATEGORY_ROLES = (
+    "architect", "data_analyst", "build_reviewer", "fix_reviewer", "deck_reviewer")
 EXPERIMENT_NAME = "tellr-agent-eval"
 EXPERIMENT_NAMES = {"train": "tellr-agent-eval", "heldout": "tellr-agent-eval-heldout"}
 NOT_COMPARABLE_INFRA_RATE = 0.10
+#: The run metric that isolates the ``image_tool`` scorer's pass rate (chat image generation).
+IMAGE_TOOL_METRIC = "image_tool_pass_rate"
 
 
 class NoCasesError(ValueError):
@@ -64,7 +74,8 @@ def git_sha() -> str:
 
 
 def mark_superseded(tracking_uri: str, experiment_name: str, reason: str) -> int:
-    """Tag every existing run in ``experiment_name`` superseded=true with ``reason``; return the count."""
+    """Tag every existing run in ``experiment_name`` superseded=true with ``reason``; return the
+    count."""
     from mlflow.tracking import MlflowClient
 
     client = MlflowClient(tracking_uri=tracking_uri)
@@ -104,13 +115,32 @@ def row_outcome(values: dict[str, str]) -> str:
     return "pass"
 
 
-def build_dataset(cases: list[Case], repeats: int, split: str = "train") -> list[dict]:
+def case_kwargs(agent_key: str, split: str = "train", case_set: str | None = None) -> dict:
+    """Keyword args that load a row's case: none for the train set (the default), ``split`` for
+    held-out, ``root`` for a named case set (``case.case_set_dir``)."""
+    if case_set is not None:
+        return {"root": case_set_dir(agent_key, case_set)}
+    return split_kwargs(split)
+
+
+def _row_case(inputs: dict) -> Case:
+    """The case a dataset row was built from, read the way ``predict_fn`` reads it."""
+    return load_case(inputs["agent_key"], inputs["case_id"], **case_kwargs(
+        inputs["agent_key"], inputs.get("split", "train"), inputs.get("case_set")))
+
+
+def build_dataset(
+    cases: list[Case], repeats: int, split: str = "train", case_set: str | None = None
+) -> list[dict]:
     rows = []
     for c in cases:
         for r in range(repeats):
             inputs = {"agent_key": c.agent_key, "case_id": c.case_id, "repeat": r}
             if split != "train":
-                inputs["split"] = split  # train rows omit the key; readers use inputs.get("split", "train")
+                # train rows omit the key; readers use inputs.get("split", "train")
+                inputs["split"] = split
+            if case_set is not None:
+                inputs["case_set"] = case_set  # likewise only on a named case set's rows
             expectations = {
                 "expect": c.expect,
                 "reference": c.reference,
@@ -138,8 +168,11 @@ def render_section_css(case: Case) -> str:
 
 
 def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: bool) -> Callable:
-    def predict_fn(agent_key: str, case_id: str, repeat: int, split: str = "train") -> dict:
-        case = load_case(agent_key, case_id, **split_kwargs(split))
+    def predict_fn(
+        agent_key: str, case_id: str, repeat: int, split: str = "train",
+        case_set: str | None = None,
+    ) -> dict:
+        case = load_case(agent_key, case_id, **case_kwargs(agent_key, split, case_set))
         result = runner.run(config, case.payload, design_system_active=case.design_system_active)
         render = None
         if (render_enabled and agent_key in HTML_ROLES and not result.infra_error
@@ -159,8 +192,9 @@ def make_predict_fn(config: AgentEvalConfig, runner: Runner, *, render_enabled: 
             "status": result.status,
             "infra_error": result.infra_error,
             "error_detail": result.error_detail,
-            # The run's brand-asset searches (``RunResult.tool_calls``), which render_measures reads
-            # for a brand-asset case; a runner result written before the field existed has none.
+            # The run's tool calls (``RunResult.tool_calls``): brand-asset searches, which
+            # render_measures reads for a brand-asset case, or image calls, which image_tool
+            # reads; a runner result written before the field existed has none.
             "tool_calls": list(getattr(result, "tool_calls", ()) or ()),
         }
 
@@ -187,7 +221,10 @@ def _render_from(outputs: dict) -> RenderMeasures | None:
     return RenderMeasures(**r)
 
 
-def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
+def build_scorers(agent_key: str, *, judge_endpoint: str, image_tool: bool = False) -> list:
+    """The row scorers for ``agent_key``. ``image_tool`` adds the architect's ``image_tool``
+    scorer (``run_sweep`` asks for it when the config binds the tool or a swept case expects it);
+    every other list is unchanged."""
     judge_obj = judge_mod.build_judge(agent_key, model=judge_endpoint)
 
     @scorer(name="contract")
@@ -223,8 +260,7 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
         # holds the deck style and the template CSS, is the row's own case's. A brand-asset case
         # (Addendum A) also scores the icons it places against the run's searches. Each is ANDed:
         # a failing row names only what failed; a passing row names every check.
-        case = load_case(
-            inputs["agent_key"], inputs["case_id"], **split_kwargs(inputs.get("split", "train")))
+        case = _row_case(inputs)
         expect = case.expect or {}
         checks = []
         if "deck_style_classes" in expect:
@@ -247,17 +283,32 @@ def build_scorers(agent_key: str, *, judge_endpoint: str) -> list:
         structured = outputs.get("structured")
         if structured is None:
             return _fb(False, "no candidate output to judge")
-        case = load_case(inputs["agent_key"], inputs["case_id"], **split_kwargs(inputs.get("split", "train")))
+        case = _row_case(inputs)
         v, detail = judge_mod._verdict(judge_obj, case, structured, _render_from(outputs))
         if v == "error":
             return _skip(f"judge_error: {detail}")  # never retried, never pass/fail
         return _fb(v == "pass", detail or "judge verdict (no rationale given)")
+
+    @scorer(name="image_tool")
+    def image_tool_scorer(inputs, outputs, expectations):
+        # A case with no image-tool expectation asks for no image: on a run that binds the tool,
+        # it is scored as "no call" (the tool must not disturb the turn).
+        if outputs.get("infra_error"):
+            return _skip("infra error")
+        expect = expectations.get("expect") or {}
+        if "image_tool" not in expect:
+            expect = {"image_tool": {"called": False}}
+        return _fb(*det.image_tool_score(
+            outputs.get("structured"), expect, tool_calls=outputs.get("tool_calls"),
+            current_deck_spec=expectations.get("current_deck_spec")))
 
     out = [contract]
     if agent_key in DETERMINISTIC_CATEGORY_ROLES:
         out.append(expected_category)
     if agent_key in HTML_ROLES:
         out.append(render_measures)
+    if image_tool and agent_key in IMAGE_TOOL_ROLES:
+        out.append(image_tool_scorer)
     out.append(judge)
     return out
 
@@ -280,13 +331,24 @@ def run_sweep(
     runner: Runner | None = None,
     tracking_uri: str | None = None,
     split: str = "train",
+    case_set: str | None = None,
 ) -> str:
-    cases = load_cases(agent_key, **split_kwargs(split))
+    """Sweep ``config`` over the agent's cases and log one MLflow run; return its id.
+
+    ``case_set`` names a case set kept apart from the splits (``case.case_set_dir``) to sweep
+    instead of the train cases; it has no held-out split. The ``image_tool`` scorer is added
+    when the config binds the image tool or a swept case expects it; only then is
+    ``IMAGE_TOOL_METRIC`` logged, and the ``image_tool`` / ``case_set`` tags only when set.
+    """
+    if case_set is not None and split != "train":
+        raise ValueError(f"case set {case_set!r} has no {split!r} split; sweep it as train")
+    cases = load_cases(agent_key, **case_kwargs(agent_key, split, case_set))
     if case_filter:
         wanted = {str(c) for c in case_filter}
         cases = [c for c in cases if c.case_id in wanted]
     if not cases:
-        where = PACKS_DIR / agent_key / cases_dirname(split)
+        where = (case_set_dir(agent_key, case_set) if case_set is not None
+                 else PACKS_DIR / agent_key / cases_dirname(split))
         split_note = "" if split == "train" else f" (split {split})"
         raise NoCasesError(
             f"no cases for agent {agent_key!r}{split_note} under {where}"
@@ -295,10 +357,11 @@ def run_sweep(
     os.environ["MLFLOW_GENAI_EVAL_SKIP_TRACE_VALIDATION"] = "True"
     mlflow.set_tracking_uri(tracking_uri or default_tracking_uri())
     mlflow.set_experiment(EXPERIMENT_NAMES[split])
-    data = build_dataset(cases, repeats, split)
+    data = build_dataset(cases, repeats, split, case_set=case_set)
     runner = runner or Runner()
     predict_fn = mlflow.trace(make_predict_fn(config, runner, render_enabled=render_enabled))
-    scorers = build_scorers(agent_key, judge_endpoint=judge_endpoint)
+    image_tool = config.image_tool or any("image_tool" in (c.expect or {}) for c in cases)
+    scorers = build_scorers(agent_key, judge_endpoint=judge_endpoint, image_tool=image_tool)
 
     with mlflow.start_run(run_name=f"{agent_key}:{config.name}") as run:
         mlflow.set_tags({
@@ -308,16 +371,24 @@ def run_sweep(
             "judge_endpoint": judge_endpoint,
             "repeats": str(repeats),
             "case_filter": ",".join(case_filter) if case_filter else "all",
-            "cases_digest": cases_digest(agent_key, split=split),
+            "cases_digest": cases_digest(
+                agent_key,
+                case_set_dir(agent_key, case_set) if case_set is not None else None,
+                split=split),
             "split": split,
             "git_sha": git_sha(),
         })
+        if config.image_tool:
+            mlflow.set_tag("image_tool", "true")
+        if case_set is not None:
+            mlflow.set_tag("case_set", case_set)
         result = mlflow.genai.evaluate(data=data, scorers=scorers, predict_fn=predict_fn)
         df = result.result_df
 
         names = [s.name for s in scorers]
         per_case: dict[str, list[str]] = defaultdict(list)
         outcomes: list[str] = []
+        image_tool_values: list[str] = []
         latencies, in_toks, out_toks = [], [], []
         infra = judge_err = non_infra = 0
         cost = 0.0
@@ -328,6 +399,8 @@ def run_sweep(
             vals = {n: row[f"{n}/value"] for n in names}
             o = row_outcome(vals)
             outcomes.append(o)
+            if "image_tool" in vals:
+                image_tool_values.append(vals["image_tool"])
             per_case[req["case_id"]].append(o)
             if resp.get("infra_error"):
                 infra += 1
@@ -347,6 +420,9 @@ def run_sweep(
         overall = pass_rate(outcomes)
         if overall is not None:
             mlflow.log_metric("pass_rate", overall)
+        image_tool_rate = pass_rate(image_tool_values)
+        if image_tool_rate is not None:
+            mlflow.log_metric(IMAGE_TOOL_METRIC, image_tool_rate)
         stds = []
         for cid, outs in per_case.items():
             pr = pass_rate(outs)

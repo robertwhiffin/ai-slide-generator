@@ -1,5 +1,13 @@
 import type { ChatResponse } from '../types/message';
-import type { ImageAsset, ImageListResponse, ImageDataResponse } from '../types/image';
+import type {
+  ImageAsset,
+  ImageListResponse,
+  ImageDataResponse,
+  ImageEditRequest,
+  ImageGenerationJob,
+  ImageGenerationOptions,
+  ImageGenerationRequest,
+} from '../types/image';
 import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
 import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayItem, GatewayMcpStatus, GatewayConnection, GatewayConnectionCreate, GatewayConnectionUpdate } from '../types/agentConfig';
@@ -364,6 +372,26 @@ async function pollExportJob(
   }
 
   throw new ApiError(408, 'Export timed out');
+}
+
+/** Shared tail of generate/edit: validate the 202, poll the job, return its image. */
+async function runImageGenerationJob(
+  startResponse: Response,
+  onProgress?: ProgressCallback,
+): Promise<ImageAsset> {
+  if (!startResponse.ok) {
+    await throwGatewayAdminError(startResponse, 'Image generation failed');
+  }
+  const started = (await startResponse.json()) as ImageGenerationJob;
+  const final = (await pollExportJob(
+    `${API_BASE_URL}/api/images/generate/jobs/${started.job_id}`,
+    'IMAGEGEN',
+    onProgress,
+  )) as unknown as ImageGenerationJob;
+  if (!final.image) {
+    throw new ApiError(500, 'No image returned');
+  }
+  return final.image;
 }
 
 // --- Admin Usage Analytics types ---
@@ -1391,6 +1419,12 @@ export const api = {
     return response.json();
   },
 
+  async getImage(token: string): Promise<ImageAsset> {
+    const response = await fetch(`${API_BASE_URL}/api/images/${encodeURIComponent(token)}`);
+    if (!response.ok) throw new ApiError(response.status, 'Failed to get image');
+    return response.json();
+  },
+
   async getImageData(imageId: string): Promise<ImageDataResponse> {
     const response = await fetch(`${API_BASE_URL}/api/images/${imageId}/data`);
     if (!response.ok) throw new ApiError(response.status, 'Failed to get image data');
@@ -1415,6 +1449,51 @@ export const api = {
       method: 'DELETE',
     });
     if (!response.ok) throw new ApiError(response.status, 'Failed to delete image');
+  },
+
+  // ---- AI image generation ----
+
+  /** Never throws: any failure resolves to "unavailable" so the UI just hides the feature. */
+  async imageGenerationOptions(): Promise<ImageGenerationOptions> {
+    const unavailable: ImageGenerationOptions = {
+      available: false,
+      max_prompt_chars: 0,
+      default_preset: null,
+      presets: [],
+      edit: null,
+    };
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/images/generate/available`);
+      if (!response.ok) return unavailable;
+      return (await response.json()) as ImageGenerationOptions;
+    } catch {
+      return unavailable;
+    }
+  },
+
+  async generateImage(
+    req: ImageGenerationRequest,
+    onProgress?: ProgressCallback,
+  ): Promise<ImageAsset> {
+    const response = await fetch(`${API_BASE_URL}/api/images/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    return runImageGenerationJob(response, onProgress);
+  },
+
+  async editImageWithPrompt(
+    imageId: string,
+    req: ImageEditRequest,
+    onProgress?: ProgressCallback,
+  ): Promise<ImageAsset> {
+    const response = await fetch(`${API_BASE_URL}/api/images/${imageId}/edit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    return runImageGenerationJob(response, onProgress);
   },
 
   // ============ Verification API ============

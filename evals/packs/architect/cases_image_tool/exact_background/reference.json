@@ -1,0 +1,26 @@
+{
+  "intent": "edit",
+  "message": "I've put a calm blue background image behind slide 1.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [
+    0
+  ],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 0,
+      "slides": [
+        {
+          "purpose": "Open the talk and name the problem: passwords are the weakest link",
+          "content_brief": "Title slide with the deck title 'Passkeys for Every Employee' and a subtitle saying that stolen and reused passwords are behind most account takeovers. Use {{image:48a2U6nFIMnGnplxsI2qDvM631qv2jUFPRfbYvS3Wsc}} as a full-slide background image behind the title, keeping the title text readable.",
+          "assumes": "Everyone signs in to their work accounts with a password today",
+          "hands_off": "There is a safer and faster way to sign in",
+          "data_references": [],
+          "slide_type": null
+        }
+      ]
+    }
+  ]
+}

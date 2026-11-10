@@ -1,0 +1,14 @@
+kind: mutation
+fault: 'exact ask: one background placed in slide 1''s content_brief (position 0),
+  not three options'
+expect:
+  intent: edit
+  positions:
+  - 0
+  image_tool:
+    called: true
+    count: 1
+    kinds:
+    - background
+    slide: 1
+design_system_active: true

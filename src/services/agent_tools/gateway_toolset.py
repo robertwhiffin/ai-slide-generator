@@ -45,7 +45,7 @@ _GATEWAY_SCOPE: Final = "ai-gateway"
 _MAX_NAME_LEN: Final = 64
 #: Names the model already sees: Genie One's tool and the output-schema tools the
 #: runtime loop binds beside the others.
-_RESERVED_NAMES: Final = frozenset({"genie", "ArchitectOutput", "AnalystOutput"})
+_RESERVED_NAMES: Final = frozenset({"genie", "ArchitectOutput", "AnalystOutput", "generate_image"})
 _UNSAFE_RE: Final = re.compile(r"[^A-Za-z0-9_-]")
 
 FailureKind = Literal[

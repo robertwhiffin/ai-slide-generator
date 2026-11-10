@@ -22,6 +22,7 @@ from src.core.user_context import get_current_user
 from src.database.models import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
 from src.services import workspace_settings
+from src.services.image_generation import is_enabled as image_generation_available
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,41 @@ def put_genie_one_default_setting(body: GenieOneDefaultUpdate, db: Session = Dep
     enabled = workspace_settings.set_genie_one_default(db, enabled=body.enabled, user=user)
     logger.info("Admin updated genie_one_default", extra={"genie_one_default": enabled})
     return {"enabled": enabled}
+
+
+class ImageGenerationUpdate(BaseModel):
+    """Request body for PUT /api/admin/image-generation."""
+
+    enabled: bool = Field(..., description="Let users generate images with AI")
+
+
+@router.get("/image-generation")
+def get_image_generation_setting(db: Session = Depends(get_db)):
+    """Whether this deployment offers AI images, and whether an admin has turned them on."""
+    return {
+        "available": image_generation_available(),
+        "enabled": workspace_settings.image_generation_enabled(db),
+    }
+
+
+@router.put("/image-generation")
+def put_image_generation_setting(body: ImageGenerationUpdate, db: Session = Depends(get_db)):
+    """Turn AI image generation on or off. Refused when the deployment opted out."""
+    if not image_generation_available():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Image generation is not available on this deployment. "
+                "It is turned off with TELLR_IMAGE_GENERATION_ENABLED=0."
+            ),
+        )
+    user = get_current_user() or "unknown"
+    enabled = workspace_settings.set_image_generation_enabled(db, enabled=body.enabled, user=user)
+    logger.info(
+        "Admin updated image_generation_enabled",
+        extra={"image_generation_enabled": enabled},
+    )
+    return {"available": True, "enabled": enabled}
 
 
 @router.post("/google-credentials")

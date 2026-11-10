@@ -26,6 +26,8 @@ export interface Message {
   /** The link a Gateway sign-in notice says (the server marks the row with metadata.sign_in_url).
    *  The only URL chat ever renders as a link, and only when it is https. */
   sign_in_url?: string;
+  /** Images generated with this reply (shown as an options card under it). */
+  generated_images?: GeneratedImageRef[];
 }
 
 export interface ChatMetadata {
@@ -43,4 +45,17 @@ export interface ChatResponse {
   raw_html: string | null;
   metadata: ChatMetadata;
   replacement_info?: ReplacementInfo;
+}
+
+export type GeneratedImageKind = 'illustration' | 'background' | 'icon' | 'vector_icon';
+
+/** One image the architect generated in a turn (server metadata `generated_images`). */
+export interface GeneratedImageRef {
+  token: string;
+  kind: GeneratedImageKind;
+  option: number;
+  prompt?: string;
+  for_slide?: number | null;
+  /** 1-based slides the image is placed on; empty while it is only an option. */
+  slides: number[];
 }

@@ -1,0 +1,9 @@
+# Architect v1 with the generate_image tool bound (chat image generation, Task 9). The prompt and
+# model are v1's own: all usage guidance lives in the tool's description, so this config measures
+# whether that alone makes the architect behave. Sweep it over the image-tool case set:
+#   python -m evals.run_eval --agent architect --config evals/configs/architect/image-tool.yaml \
+#     --case-set image_tool
+agent_key: architect
+name: image-tool
+base: v1
+image_tool: true

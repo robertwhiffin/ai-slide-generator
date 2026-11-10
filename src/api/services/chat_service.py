@@ -2826,7 +2826,17 @@ class ChatService:
                         image_service.ImageAsset.token == img_token,
                         image_service.ImageAsset.is_active == True,
                     ).first()
-                    if img:
+                    if img and {"ai_generated", "chat"} <= set(img.tags or []):
+                        # Made by the architect's generate_image tool: its description is
+                        # the model's own prompt and its filename is built from it, so
+                        # neither goes into the user's message (the card's "Use this"
+                        # attaches these images).
+                        image_descriptions.append(
+                            f"- Image ID {img.token}: an image generated earlier in this "
+                            f'chat. Use: <img src="{{{{image:{img.token}}}}}" '
+                            'alt="Generated image" />'
+                        )
+                    elif img:
                         image_descriptions.append(
                             f'- Image ID {img.token}: "{img.original_filename}" '
                             f'({img.description or "no description"}). '

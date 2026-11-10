@@ -1,11 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { FiExternalLink } from 'react-icons/fi';
-import type { ImageAsset } from '../../types/image';
+import { FiExternalLink, FiEdit2, FiZap } from 'react-icons/fi';
+import type { ImageAsset, ImageGenerationOptions } from '../../types/image';
 import { api } from '../../services/api';
+import { getImageGenerationOptions } from '../../hooks/useImageGenerationOptions';
 import { DOCS_URLS } from '../../constants/docs';
+import { GenerateImageDialog } from './GenerateImageDialog';
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/svg+xml'];
+// Light checkerboard so transparency in PNG/SVG thumbnails is visible.
+const CHECKERBOARD_STYLE: React.CSSProperties = {
+  backgroundColor: '#ffffff',
+  backgroundImage:
+    'linear-gradient(45deg, #e5e7eb 25%, transparent 25%, transparent 75%, #e5e7eb 75%), ' +
+    'linear-gradient(45deg, #e5e7eb 25%, transparent 25%, transparent 75%, #e5e7eb 75%)',
+  backgroundSize: '16px 16px',
+  backgroundPosition: '0 0, 8px 8px',
+};
 const CATEGORIES = ['all', 'branding', 'content', 'background'] as const;
 
 interface ImageLibraryProps {
@@ -31,6 +42,9 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>(filterCategory || 'all');
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [genOptions, setGenOptions] = useState<ImageGenerationOptions | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editSource, setEditSource] = useState<ImageAsset | undefined>(undefined);
 
   const loadImages = useCallback(async () => {
     setLoading(true);
@@ -51,6 +65,29 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
   useEffect(() => {
     loadImages();
   }, [loadImages]);
+
+  // Ask the server once whether image generation is available (editable library only).
+  useEffect(() => {
+    if (readOnly) return;
+    let cancelled = false;
+    getImageGenerationOptions()
+      .then((opts) => {
+        if (!cancelled) setGenOptions(opts);
+      })
+      .catch(() => {
+        /* treated as unavailable */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [readOnly]);
+
+  const canGenerate = !readOnly && !!genOptions?.available;
+
+  const openDialog = (source?: ImageAsset) => {
+    setEditSource(source);
+    setDialogOpen(true);
+  };
 
   const validateFile = (file: File): string | null => {
     if (!ALLOWED_TYPES.includes(file.type)) {
@@ -154,6 +191,15 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
             </a>
           </p>
         </div>
+        {canGenerate && (
+          <button
+            type="button"
+            onClick={() => openDialog()}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
+            <FiZap size={14} /> Generate
+          </button>
+        )}
       </div>
 
       {/* Search + Category Filter */}
@@ -246,7 +292,14 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
               onClick={() => onSelect?.(image)}
             >
               {/* Thumbnail */}
-              <div className="aspect-square bg-gray-100 flex items-center justify-center">
+              <div
+                className="aspect-square bg-gray-100 flex items-center justify-center"
+                style={
+                  image.mime_type === 'image/png' || image.mime_type === 'image/svg+xml'
+                    ? CHECKERBOARD_STYLE
+                    : undefined
+                }
+              >
                 {image.thumbnail_base64 ? (
                   <img
                     src={image.thumbnail_base64}
@@ -271,6 +324,28 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
                 </p>
               </div>
 
+              {image.tags?.includes('ai_generated') && (
+                <span className="absolute top-1 left-1 px-1.5 py-0.5 bg-purple-600 text-white rounded text-[10px] font-semibold leading-none">
+                  AI
+                </span>
+              )}
+
+              {/* Edit with prompt (hover) */}
+              {canGenerate && !onSelect && image.mime_type !== 'image/svg+xml' && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openDialog(image);
+                  }}
+                  className="absolute bottom-12 right-1 p-1 bg-white/90 text-gray-700 border border-gray-200 rounded opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                  title="Edit with prompt"
+                  aria-label="Edit with prompt"
+                >
+                  <FiEdit2 size={12} />
+                </button>
+              )}
+
               {/* Delete button (hover) */}
               {!readOnly && !onSelect && (
                 <button
@@ -287,6 +362,18 @@ export const ImageLibrary: React.FC<ImageLibraryProps> = ({
             </div>
           ))}
         </div>
+      )}
+
+      {genOptions && (
+        <GenerateImageDialog
+          isOpen={dialogOpen}
+          onClose={() => setDialogOpen(false)}
+          onCreated={() => {
+            loadImages();
+          }}
+          options={genOptions}
+          source={editSource}
+        />
       )}
     </div>
   );

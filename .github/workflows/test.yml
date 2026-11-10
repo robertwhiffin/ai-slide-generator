@@ -713,6 +713,7 @@ jobs:
               - template-viewer
           - shard: 2
             specs:
+              - chat-image-generation
               - conversation-graph-version
               - design-system-selector
               - design-systems-ui

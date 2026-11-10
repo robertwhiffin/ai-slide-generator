@@ -67,6 +67,11 @@ vi.mock('../AdminDesignSystemDefault', () => ({ AdminDesignSystemDefault: () => 
 vi.mock('../AdminJudgeSettings', () => ({ AdminJudgeSettings: () => <div>Judge fixture</div> }));
 vi.mock('../AdminSlideStyleDefault', () => ({ AdminSlideStyleDefault: () => <div>Slide Style fixture</div> }));
 
+// 229 full-render tests: about 65 s for the file on an idle machine, about 135 s on a contended
+// CI runner, where single cases have crossed vitest's 5 s default. The cases are not slow
+// individually; they wait on the runner.
+vi.setConfig({ testTimeout: 20_000 });
+
 const NODE_ORDER = [
   'Architect',
   'Data Analyst',

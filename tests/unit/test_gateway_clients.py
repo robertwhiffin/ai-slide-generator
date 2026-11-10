@@ -121,6 +121,26 @@ def test_gateway_openai_client_sends_tagged_requests_to_the_gateway_chat_route(m
     _assert_tagged_gateway_chat_request(workspace.requests[0], "system.ai.claude-sonnet-4-5")
 
 
+def test_gateway_openai_client_forwards_client_kwargs_and_stays_tagged(monkeypatch):
+    """Image generation builds its client with ``max_retries=0`` (no silent paid
+    retries) and a timeout; ``with_options()`` is broken on ``DatabricksOpenAI``
+    0.17.1, so the builder forwards them to the constructor (corrections doc, C5)."""
+    workspace = _text_workspace(monkeypatch)
+
+    client = gateway_openai_client(workspace, max_retries=0, timeout=12.5)
+    client.chat.completions.create(
+        model="system.ai.claude-sonnet-4-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=5,
+    )
+
+    assert client.max_retries == 0
+    assert client.timeout == 12.5
+    assert len(workspace.requests) == 1
+    _assert_tagged_gateway_chat_request(workspace.requests[0], "system.ai.claude-sonnet-4-5")
+    assert workspace.requests[0].extensions["timeout"]["read"] == 12.5
+
+
 def test_gateway_chat_model_sends_tagged_requests_to_the_gateway_chat_route(monkeypatch):
     """Graph agents and titles: the LangChain model, as the given identity, tagged."""
     workspace = _text_workspace(monkeypatch)

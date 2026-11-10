@@ -7,7 +7,7 @@ from typing import Literal
 
 from mlflow.genai import make_judge
 
-from evals.harness.case import Case, load_cases, PACKS_DIR, cases_dirname, split_kwargs
+from evals.harness.case import PACKS_DIR, Case, cases_dirname, load_cases, split_kwargs
 from evals.harness.scorers import compose_operations_answer
 
 JUDGE_ENDPOINT = "databricks-claude-sonnet-5"
@@ -82,8 +82,12 @@ def judge_payload(case: Case, result, measures) -> dict:
     }
 
 
-def load_calibration(agent_key: str, case_id: str, *, split: str = "train") -> dict | None:
-    path = PACKS_DIR / agent_key / cases_dirname(split) / case_id / "calibration.json"
+def load_calibration(
+    agent_key: str, case_id: str, *, split: str = "train", root: pathlib.Path | None = None
+) -> dict | None:
+    """A case's ``calibration.json``, from ``root`` (a named case set) or the split's tree."""
+    base = pathlib.Path(root) if root is not None else PACKS_DIR / agent_key / cases_dirname(split)
+    path = base / case_id / "calibration.json"
     if not path.exists():
         return None
     return json.loads(path.read_text())
@@ -111,8 +115,11 @@ def _verdict(judge, case: Case, candidate, measures=None) -> tuple[str, str]:
 
 
 def calibrate(agent_key: str, *, model: str = JUDGE_ENDPOINT, render_fn=None,
-              split: str = "train", case_filter: list[str] | None = None) -> list[dict]:
-    kw = split_kwargs(split)
+              split: str = "train", case_filter: list[str] | None = None,
+              root: pathlib.Path | None = None) -> list[dict]:
+    """Judge each case's reference and its ``should_fail``; ``root`` calibrates a named case
+    set (``case.case_set_dir``) instead of the split's cases."""
+    kw = split_kwargs(split) if root is None else {"root": root}
     cases = load_cases(agent_key, **kw)
     if case_filter:
         wanted = {str(c) for c in case_filter}

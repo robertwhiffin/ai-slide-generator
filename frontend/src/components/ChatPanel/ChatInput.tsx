@@ -1,7 +1,8 @@
 import React, { useState, useRef, useLayoutEffect, useCallback } from 'react';
-import { Send, Maximize2, ImagePlus, X } from 'lucide-react';
+import { Send, Maximize2, ImagePlus, X, WandSparkles } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { PromptEditorModal } from './PromptEditorModal';
+import { GenerateImageRequestDialog } from './GenerateImageRequestDialog';
 import { api } from '../../services/api';
 
 interface ChatInputProps {
@@ -10,6 +11,8 @@ interface ChatInputProps {
   placeholder?: string;
   badge?: React.ReactNode;
   modeControl?: React.ReactNode;
+  /** When set, the hint row offers Generate image (slideCount fills the dialog's For-slide choices). */
+  imageRequest?: { slideCount: number };
 }
 
 interface AttachedImage {
@@ -27,9 +30,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   placeholder,
   badge,
   modeControl,
+  imageRequest,
 }) => {
   const [message, setMessage] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isImageDialogOpen, setIsImageDialogOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -233,7 +238,18 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
         <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
           <span>Enter to send · Shift+Enter new line</span>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-3">
+            {imageRequest && (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => setIsImageDialogOpen(true)}
+                className="flex shrink-0 items-center gap-1 whitespace-nowrap hover:text-foreground disabled:opacity-50 disabled:hover:text-muted-foreground"
+              >
+                <WandSparkles className="size-3" aria-hidden="true" />
+                Generate image
+              </button>
+            )}
             {message.length > 0 && (
               <span>
                 {lineCount} {lineCount === 1 ? 'line' : 'lines'} · {charCount} chars
@@ -243,6 +259,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           </div>
         </div>
       </form>
+
+      {isImageDialogOpen && imageRequest && (
+        <GenerateImageRequestDialog
+          slideCount={imageRequest.slideCount}
+          onClose={() => setIsImageDialogOpen(false)}
+          onSubmit={(text) => {
+            setIsImageDialogOpen(false);
+            onSend(text);
+          }}
+        />
+      )}
 
       {isModalOpen && (
         <PromptEditorModal

@@ -89,6 +89,15 @@ export const adminApi = {
       body: JSON.stringify({ enabled }),
     }),
 
+  getImageGeneration: (): Promise<{ available: boolean; enabled: boolean }> =>
+    fetchJson(`${ADMIN_BASE}/image-generation`),
+
+  setImageGeneration: (enabled: boolean): Promise<{ available: boolean; enabled: boolean }> =>
+    fetchJson(`${ADMIN_BASE}/image-generation`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
   listAdmins: (): Promise<AppAdminsResponse> => fetchJson(`${ADMIN_BASE}/admins`),
 
   addAdmin: (body: {

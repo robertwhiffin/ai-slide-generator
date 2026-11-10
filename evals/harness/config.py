@@ -28,8 +28,12 @@ class ConfigError(ValueError):
 
 _KNOWN_KEYS = frozenset({
     "agent_key", "name", "base", "prompt_text", "prompt_file",
-    "endpoint_name", "temperature", "max_tokens", "top_p",
+    "endpoint_name", "temperature", "max_tokens", "top_p", "image_tool",
 })
+
+#: The roles an eval config may bind the ``generate_image`` tool for: production binds it for the
+#: architect alone (``nodes.architect_node``).
+IMAGE_TOOL_ROLES = ("architect",)
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,10 @@ class AgentEvalConfig:
     name: str
     content: DefinitionContent
     content_hash: str
+    #: Bind the architect's ``generate_image`` tool (over fake backends) on every run of this
+    #: config (``runner._binds_image_tool``). A harness setting, not definition content: it leaves
+    #: ``content`` and ``content_hash`` as they are.
+    image_tool: bool = False
 
 
 def v1_baseline(agent_key: str) -> AgentEvalConfig:
@@ -71,6 +79,8 @@ def load_config(path: str | Path) -> AgentEvalConfig:
     temperature    : float (optional)
     max_tokens     : int   (optional)
     top_p          : float (optional)
+    image_tool     : bool  (optional, default false): bind the architect's generate_image tool;
+                     only for a role in IMAGE_TOOL_ROLES
     """
     path = Path(path)
     with open(path) as f:
@@ -96,13 +106,20 @@ def load_config(path: str | Path) -> AgentEvalConfig:
 
     name = raw.get("name", agent_key)
 
+    image_tool = raw.get("image_tool", False)
+    if not isinstance(image_tool, bool):
+        raise ConfigError(f"{path}: image_tool must be true or false, not {image_tool!r}")
+    if image_tool and agent_key not in IMAGE_TOOL_ROLES:
+        raise ConfigError(
+            f"{path}: image_tool is only for {list(IMAGE_TOOL_ROLES)}; agent_key is {agent_key!r}")
+
     # Start from the v1 base definition.
     manifest_by_key = {d.agent_key: d for d in load_graph_v1_manifest().definitions}
     content: DefinitionContent = manifest_by_key[agent_key]
 
     # Apply ModelConfiguration overrides (model_copy bypasses frozen restriction).
-    _MODEL_FIELDS = ("endpoint_name", "temperature", "max_tokens", "top_p")
-    model_overrides = {f: raw[f] for f in _MODEL_FIELDS if f in raw}
+    model_fields = ("endpoint_name", "temperature", "max_tokens", "top_p")
+    model_overrides = {f: raw[f] for f in model_fields if f in raw}
     if model_overrides:
         new_model = content.model.model_copy(update=model_overrides)
         content = content.model_copy(update={"model": new_model})
@@ -127,6 +144,7 @@ def load_config(path: str | Path) -> AgentEvalConfig:
         name=name,
         content=content,
         content_hash=definition_content_hash(content),
+        image_tool=image_tool,
     )
 
 

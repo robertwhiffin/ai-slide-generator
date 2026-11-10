@@ -1,0 +1,28 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I've added an illustration to the title slide.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [
+      0
+    ],
+    "proposed_design_contract": null,
+    "operations": [
+      {
+        "op": "update",
+        "position": 0,
+        "slides": [
+          {
+            "purpose": "Open the talk and name the problem: passwords are the weakest link",
+            "content_brief": "Title slide with the deck title 'Passkeys for Every Employee' and a subtitle saying that stolen and reused passwords are behind most account takeovers. Use {{image:pmwjRd-rGv_4J33Ck-1e7hkX9cVibh5HvHGMbzm6tKA}} as the title slide's illustration.",
+            "assumes": "Everyone signs in to their work accounts with a password today",
+            "hands_off": "There is a safer and faster way to sign in",
+            "data_references": [],
+            "slide_type": null
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -51,6 +51,7 @@ from src.services.shared_deck_attribution import (
     MutationOperation,
     record_shared_deck_mutation,
 )
+from src.utils.generated_images import sanitize_generated_images
 
 logger = logging.getLogger(__name__)
 
@@ -4331,6 +4332,9 @@ class SessionManager:
             forwarded["details"] = details
         if isinstance(sign_in_url, str) and sign_in_url:
             forwarded["sign_in_url"] = sign_in_url
+        generated_images = sanitize_generated_images(metadata.get("generated_images"))
+        if generated_images:
+            forwarded["generated_images"] = generated_images
 
         return {
             "type": event_type,

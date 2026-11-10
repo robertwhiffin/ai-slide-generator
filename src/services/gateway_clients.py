@@ -6,7 +6,8 @@ two builders over the same underlying ``DatabricksOpenAI`` client:
 * :func:`gateway_chat_model` — the LangChain ``ChatDatabricks`` the graph agents
   and session titles use (tool binding, structured output, the tool loop);
 * :func:`gateway_openai_client` — the raw OpenAI-compatible client the PPTX and
-  Google Slides exports call ``chat.completions.create`` on.
+  Google Slides exports call ``chat.completions.create`` on (image generation
+  also calls ``responses.create`` on it, built with ``max_retries=0``).
 
 Both carry Tellr's attribution headers: a
 ``Databricks-Ai-Gateway-Request-Tags: {"source": "tellr"}`` tag and a
@@ -79,12 +80,19 @@ def gateway_chat_model(**kwargs: Any) -> Any:
     )
 
 
-def gateway_openai_client(workspace_client: Any) -> Any:
-    """``DatabricksOpenAI`` bound to ``{host}/ai-gateway/mlflow/v1`` with the caller's identity."""
+def gateway_openai_client(workspace_client: Any, **client_kwargs: Any) -> Any:
+    """``DatabricksOpenAI`` bound to ``{host}/ai-gateway/mlflow/v1`` with the caller's identity.
+
+    ``client_kwargs`` (for example ``max_retries`` or ``timeout``) are forwarded to the
+    ``DatabricksOpenAI`` constructor; ``client.with_options()`` is broken on
+    ``DatabricksOpenAI`` 0.17.1, so client-level options are set here instead.  The tag
+    headers are always applied.
+    """
     from databricks_openai import DatabricksOpenAI
 
     return DatabricksOpenAI(
         workspace_client=workspace_client,
         use_ai_gateway=True,
         default_headers=gateway_request_headers(),
+        **client_kwargs,
     )

@@ -13,6 +13,22 @@ const displayName = (name: string): string =>
     ? TOOL_TYPE_LABELS[name as keyof typeof TOOL_TYPE_LABELS]
     : name;
 
+const IMAGE_KIND_LABELS: Record<string, string> = {
+  illustration: 'illustration',
+  icon: 'icon',
+  background: 'background',
+  vector_icon: 'vector icon',
+};
+
+/** "3 illustrations" / "1 icon" from the image tool's {kind, count}; '' when either is unusable. */
+const imageSummary = (args: Record<string, unknown> | undefined): string => {
+  const kind = args?.kind;
+  const count = args?.count;
+  if (typeof kind !== 'string' || !Object.prototype.hasOwnProperty.call(IMAGE_KIND_LABELS, kind)) return '';
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) return '';
+  return `${count} ${IMAGE_KIND_LABELS[kind]}${count === 1 ? '' : 's'}`;
+};
+
 interface ActivityItem {
   name: string;
   summary: string;
@@ -45,6 +61,8 @@ function buildActivityItems(messages: MessageType[]): ActivityItem[] {
           name: connection || displayName('gateway_mcp'),
           summary: connection ? truncate(tool) : '',
         };
+      } else if (call.name === 'image_generation') {
+        last = { name: 'Image generation', summary: imageSummary(call.arguments) };
       } else {
         last = {
           name: displayName(call.name),

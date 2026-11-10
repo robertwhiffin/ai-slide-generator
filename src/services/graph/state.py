@@ -74,6 +74,8 @@ _EMPTY_FOR: dict[str, Any] = {
     "analyst_rounds":       [],
     "gateway_usage":        [],
     "gateway_images":       [],
+    "generated_images":     [],
+    "image_tool_usage":     [],
 }
 
 
@@ -356,6 +358,19 @@ class GraphState(TypedDict, total=False):
     # Both accumulate across the turn's passes and start empty each turn.
     gateway_usage: Annotated[Any, turn_scoped_concat]
     gateway_images: Annotated[Any, turn_scoped_concat]
+
+    # The architect's generate_image tool.  Written by architect_node once per
+    # pass, and ONLY when image generation is available (the env flag and the
+    # admin toggle) on a turn that is not describe-only: a turn without it
+    # never carries either key.  generated_images: the refs the pass's tool
+    # made, ``{"token", "kind", "option", "prompt", "for_slide"}``, which
+    # image-reference reconciliation and the builder's allow-list treat as
+    # known.  image_tool_usage: one entry per pass, ``{"calls", "images",
+    # "seconds"}``, summed into the turn's image budget and its option
+    # numbering.  Both accumulate across the turn's passes and start empty
+    # each turn.
+    generated_images: Annotated[Any, turn_scoped_concat]
+    image_tool_usage: Annotated[Any, turn_scoped_concat]
 
 
 # ---------------------------------------------------------------------------

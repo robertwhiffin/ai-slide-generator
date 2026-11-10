@@ -1,0 +1,7 @@
+kind: mutation
+fault: 'no image ask: a plain deck build calls no image tool'
+expect:
+  intent: build
+  image_tool:
+    called: false
+design_system_active: true

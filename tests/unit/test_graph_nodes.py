@@ -5057,6 +5057,8 @@ _EXPECTED_NODE_WRITES = {
         "token_css",
         # AI Gateway MCP connections: the turn's Gateway usage and saved images.
         "gateway_usage", "gateway_images",
+        # The architect's generate_image tool: the refs it made and what it spent.
+        "generated_images", "image_tool_usage",
     },
     # Genie One in agent mode: code-built figures and the per-turn round marker;
     # AI Gateway MCP connections: the run's Gateway usage and saved images.

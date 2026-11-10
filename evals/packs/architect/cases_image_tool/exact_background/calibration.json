@@ -1,0 +1,10 @@
+{
+  "should_fail": {
+    "intent": "discuss",
+    "message": "Here are three calm blue background options for slide 1. Which one would you like?",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null
+  }
+}

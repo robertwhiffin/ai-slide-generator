@@ -48,7 +48,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
@@ -142,6 +142,22 @@ from src.services.agent_tools.genie_one import (
     GenieOneAnswer,
     figures_from_answer,
 )
+from src.services.agent_tools.image_generation_tool import (
+    BUDGET_SECONDS as IMAGE_BUDGET_SECONDS,
+)
+from src.services.agent_tools.image_generation_tool import (
+    MAX_CALLS_PER_TURN as IMAGE_MAX_CALLS_PER_TURN,
+)
+from src.services.agent_tools.image_generation_tool import (
+    MAX_IMAGES_PER_TURN as IMAGE_MAX_IMAGES_PER_TURN,
+)
+from src.services.agent_tools.image_generation_tool import (
+    MIN_START_SECONDS as IMAGE_MIN_START_SECONDS,
+)
+from src.services.agent_tools.image_generation_tool import (
+    ImageGenerationAgentTool,
+    ImageToolContext,
+)
 from src.services.agent_tools.registry import (
     GENIE_TOOL_NAME,
     GenieOneAgentTool,
@@ -188,6 +204,7 @@ from src.services.graph.user_notices import (
     unfinished_slides_notice,
     unreviewed_slide_notice,
 )
+from src.services.image_generation import generation_available
 from src.services.persisted_graph_release import PersistedRuntimeError
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
@@ -202,9 +219,11 @@ from src.services.template_sections import (
     resolve_template_bytes,
     section_inventory,
 )
+from src.utils.generated_images import sanitize_generated_images
 from src.utils.graph_safety import gate_emitted_html, spotlight_prior_slides
 from src.utils.html_utils import strip_inter_tag_escapes
 from src.utils.image_refs import (
+    IMAGE_REF_RE,
     reconcile_html,
     reconcile_model_strings,
     refs_in,
@@ -263,8 +282,9 @@ def _assembly_context(
 
     ``toolset`` is keyword-only and invocation-scoped, never an id: only
     ``data_analyst_node`` (Genie One and its AI Gateway MCP tools in agent mode),
-    ``architect_node`` (its AI Gateway MCP tools, ``None`` on a deck without
-    one) and ``builder_node`` and ``fixer_node`` (the brand-asset search,
+    ``architect_node`` (its AI Gateway MCP tools and its ``generate_image``
+    tool, ``None`` on a turn with neither) and ``builder_node`` and
+    ``fixer_node`` (the brand-asset search,
     :func:`_brand_search_toolset`, deck style addendum A) pass it, and every
     other call site leaves it ``None``, so their single structured-output call
     is unchanged.
@@ -358,6 +378,14 @@ _AI_TYPES = {"llm_response", "clarification"}
 # alone reads as a reply the architect chose to give.
 REFUSAL_METADATA_KEY = "architect_refusal"
 
+# The metadata key the architect's reply row and its ASSISTANT event carry the
+# images its ``generate_image`` tool made this turn under: the shared shape of
+# ``src/utils/generated_images.py`` (``{"token", "kind", "option", "prompt",
+# "for_slide", "slides"}``).  The frontend renders the options card from it,
+# ``session_manager`` forwards it to polling clients, and ``_conversation``
+# replays it to the architect next turn as a note after the reply.
+GENERATED_IMAGES_METADATA_KEY: Final = "generated_images"
+
 # The opening of the ``system`` turn ``_conversation`` replays right after such a
 # row (spec §7).  The problems' details follow it.
 _REFUSAL_NOTE_PREFIX = (
@@ -391,16 +419,23 @@ def _emit(
     error: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     agent: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    tool_input: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Queue one event, or do nothing when no emitter is installed.
 
     Uses only shipped ``StreamEventType`` members: ws4c adds no event type, no
     route and no frontend change.
+
+    ``tool_name`` and ``tool_input`` are the event's TOP-LEVEL fields, the ones
+    the frontend's SSE ``tool_call`` case reads (``event.tool_name``); a name in
+    ``metadata`` alone is not shown live.  Both default to ``None``, so every
+    other event is exactly what it was.
     """
     emit_event(
         StreamEvent(
             type=event_type, content=content, error=error, metadata=metadata,
-            agent=agent,
+            agent=agent, tool_name=tool_name, tool_input=tool_input,
         )
     )
 
@@ -1113,6 +1148,34 @@ def _with_default_template(
     return contract.model_copy(update={"template_id": template_id})
 
 
+_STYLE_IMAGE_GUIDELINES_HEADER = (
+    "IMAGE GUIDELINES (from the slide style)\n"
+    "The images below are supplied for this deck by the slide style's author. Each "
+    "{{image:ID}} is a pre-validated Image Library id: treat it as supplied, copy it exactly, "
+    "and never invent other ids.\n"
+    "- Planning the deck: when a slide should show one of these images, put its exact "
+    "{{image:ID}} token, and where it goes, in that slide's content_brief.\n"
+    "- Building a slide: an image named in the brief or in these guidelines counts as "
+    'supplied; embed it with <img src="{{image:ID}}" alt="short description" /> or '
+    "background-image: url('{{image:ID}}').\n\n"
+)
+
+
+def _style_with_image_guidelines(slide_style: str, image_guidelines: Optional[str]) -> str:
+    """``slide_style`` with the style's image guidelines appended, when it has any.
+
+    The monolith puts a legacy style's ``image_guidelines`` in its prompt
+    (``prompt_modules._build_image_section``); the graph engine used to drop them, so
+    images an author placed in a style never reached the architect or the builders.
+    ``resolved_style`` is the one style string every graph agent receives, and the
+    image allow-lists are built from ``refs_in`` over it, so the guidelines ride there.
+    A style without guidelines is returned unchanged.
+    """
+    if not image_guidelines or not image_guidelines.strip():
+        return slide_style
+    return f"{slide_style}\n\n{_STYLE_IMAGE_GUIDELINES_HEADER}{image_guidelines.strip()}"
+
+
 def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
     """Resolve every brand-related value for *contract*, in one place.
 
@@ -1173,7 +1236,7 @@ def _resolve_brand(contract: Optional[DesignContractRef]) -> Dict[str, Any]:
             )
 
     return {
-        "resolved_style": style.slide_style,
+        "resolved_style": _style_with_image_guidelines(style.slide_style, style.image_guidelines),
         "design_system_active": bool(style.design_system_active),
         "template_layout_html": layout_html,
         "token_css": token_css,
@@ -1238,6 +1301,14 @@ def _conversation(session_id: str) -> List[Dict[str, str]]:
     so next turn it cannot tell that a check rejected the plan, nor why, and
     proposes the same edit again.  A row without the key replays exactly as it
     always has.
+
+    **A reply that showed generated images is followed by a ``system`` turn**
+    too: :func:`_generated_images_note`, built from the row's
+    :data:`GENERATED_IMAGES_METADATA_KEY` entries after the shared sanitiser
+    has dropped any malformed one.  The user saw the options as a card, never
+    as references in the reply's text, so without it "use the second one" next
+    turn names an image the architect cannot find.  A row with no valid entry
+    replays as the assistant turn alone.
     """
     try:
         messages = get_session_manager().get_messages(session_id)
@@ -1261,6 +1332,13 @@ def _conversation(session_id: str) -> List[Dict[str, str]]:
             )
             if isinstance(refusal, dict):
                 turns.append({"role": "system", "content": _refusal_note(refusal)})
+            generated = sanitize_generated_images(
+                metadata.get(GENERATED_IMAGES_METADATA_KEY)
+                if isinstance(metadata, dict)
+                else None
+            )
+            if generated:
+                turns.append({"role": "system", "content": _generated_images_note(generated)})
     return turns
 
 
@@ -2069,13 +2147,29 @@ def build_branch_payload(state: dict, position: int) -> Dict[str, Any]:
     # payload is exactly what it was.  A JSON list (Ruling C-21), never a set.
     # The deck style and the resolved style are the slide's too: a reference in
     # either is one the builder may place.
-    if scoped_vals(state, "gateway_usage"):
+    #
+    # The architect's generate_image tool widens the gate: a turn whose tool
+    # made images carries the allow-list too, and the images it made are known.
+    # A turn whose tool was bound but never called made none, so its payload is
+    # exactly what it was.  Such a turn also carries ``turn_image_sources``
+    # (R10), branch-only like ``gateway_known_images`` and never a model payload
+    # key: the sorted sources of the turn's tool images, which picks the
+    # builder's "not placed" wording.  A Gateway-only turn carries no
+    # ``turn_image_sources`` (its payload is exactly what it was), and the
+    # builder reads the absence as the Gateway's.
+    gateway_turn = bool(scoped_vals(state, "gateway_usage"))
+    generated = _turn_generated_tokens(state)
+    if gateway_turn or generated:
         branch_payload["gateway_known_images"] = sorted(
             refs_in(branch_payload["slide_spec"])
             | refs_in(section_html)
             | refs_in(branch_payload.get("deck_style"))
             | refs_in(branch_payload["resolved_style"])
-            | _turn_gateway_images(state)
+            | _turn_tool_images(state)
+        )
+    if generated:
+        branch_payload["turn_image_sources"] = _image_sources(
+            gateway=gateway_turn, generated=True
         )
     return branch_payload
 
@@ -2294,7 +2388,11 @@ def _operations_rejected(
 
 
 def _degrade_edit(
-    state: dict, updates: Dict[str, Any], degrade: Dict[str, Any]
+    state: dict,
+    updates: Dict[str, Any],
+    degrade: Dict[str, Any],
+    *,
+    extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Turn an edit that cannot be applied into a discussion, said on both surfaces.
 
@@ -2305,6 +2403,11 @@ def _degrade_edit(
     "problems"}}``, the problems being the ones a retry is handed
     (:func:`_refusal_problems`).  ``_conversation`` replays them to the
     architect next turn as a note after the refusal.
+
+    *extra_metadata* rides on the row and on the event beside that key: the
+    images the turn's ``generate_image`` tool made (:data:`GENERATED_IMAGES_METADATA_KEY`),
+    which the user can still see and use when the edit that would have placed
+    them is refused.  ``None`` leaves both exactly as they were.
     """
     # An edit that cannot be applied.  Degrade to a discussion turn rather
     # than routing to a foreman that would cover no positions and reach deck
@@ -2332,12 +2435,16 @@ def _degrade_edit(
     # that called the model.  A describe-only turn stays silent the same way the
     # model's line does: _say suppresses it and the sweeper has no emitter.
     _emit(StreamEventType.ASSISTANT, content=degrade["user"],
-          metadata={"node": "architect", "intent": "discuss"})
+          metadata={"node": "architect", "intent": "discuss", **(extra_metadata or {})})
     refusal = {
         "code": degrade["code"],
         "problems": [_problem_payload(p) for p in _refusal_problems(degrade)],
     }
-    _say(state, degrade["user"], metadata={REFUSAL_METADATA_KEY: refusal})
+    _say(
+        state,
+        degrade["user"],
+        metadata={REFUSAL_METADATA_KEY: refusal, **(extra_metadata or {})},
+    )
     return updates
 
 
@@ -2722,7 +2829,9 @@ def _apply_edit_plan(
     return None
 
 
-def _say_architect_message(state: dict, message: str, intent: str) -> None:
+def _say_architect_message(
+    state: dict, message: str, intent: str, *, metadata: Optional[Dict[str, Any]] = None
+) -> None:
     """Say the architect's own message for the turn, on both surfaces.
 
     BOTH surfaces, and the pairing is the fix.  The event is what an SSE client
@@ -2733,10 +2842,15 @@ def _say_architect_message(state: dict, message: str, intent: str) -> None:
 
     WHEN it is said is the caller's (spec §7): straight away on a turn that
     plans nothing, and on a build or an edit only once the plan has landed.
+
+    *metadata* goes on BOTH surfaces too (the event's beside its ``node`` and
+    ``intent``): the images the turn generated
+    (:data:`GENERATED_IMAGES_METADATA_KEY`), which each transport renders under
+    the reply.  ``None`` says the message exactly as before.
     """
     _emit(StreamEventType.ASSISTANT, content=message,
-          metadata={"node": "architect", "intent": intent})
-    _say(state, message)
+          metadata={"node": "architect", "intent": intent, **(metadata or {})})
+    _say(state, message, metadata=metadata)
 
 
 # What an edit's retry is told when the sanitiser kept nothing of its
@@ -3481,6 +3595,13 @@ _CONSENT_NOTIFIED: Final = "consent"
 
 _IMAGE_NOT_PLACED: Final = "An image from a connected tool couldn't be placed on slide {n}."
 _IMAGE_NOT_PLACED_UNNUMBERED: Final = "An image from a connected tool couldn't be placed."
+#: The same notices on a turn whose only tool images are the ones the architect's
+#: ``generate_image`` tool made (R10): no connected tool was involved.
+_IMAGE_NOT_PLACED_GENERATED: Final = "A generated image couldn't be placed on slide {n}."
+_IMAGE_NOT_PLACED_GENERATED_UNNUMBERED: Final = "A generated image couldn't be placed."
+#: The sources a turn's tool images come from (R10's ``turn_image_sources``).
+_GATEWAY_IMAGE_SOURCE: Final = "gateway"
+_GENERATED_IMAGE_SOURCE: Final = "generated"
 
 #: The reason the "unavailable" notice gives for a connection whose tools rode on
 #: a model call that raised (the provider refused a tool's schema, or the tool loop
@@ -3488,17 +3609,67 @@ _IMAGE_NOT_PLACED_UNNUMBERED: Final = "An image from a connected tool couldn't b
 _GATEWAY_CALL_FAILED_REASON: Final = "the model could not use its tools"
 
 
-def _image_not_placed_notice(slide: Optional[int]) -> str:
+def _image_not_placed_notice(
+    slide: Optional[int], sources: Optional[Sequence[str]] = None
+) -> str:
     """The notice for an image reference removed from slide *slide* (1-based), or
-    from no slide (``None``)."""
+    from no slide (``None``).
+
+    *sources* are the turn's image sources (:func:`_image_sources`): exactly
+    ``["generated"]`` says the generated-image wording, and anything else
+    (``None`` included, a Gateway-only turn) says the connected tool's.
+    """
+    if list(sources or ()) == [_GENERATED_IMAGE_SOURCE]:
+        if slide is None:
+            return _IMAGE_NOT_PLACED_GENERATED_UNNUMBERED
+        return _IMAGE_NOT_PLACED_GENERATED.format(n=slide)
     if slide is None:
         return _IMAGE_NOT_PLACED_UNNUMBERED
     return _IMAGE_NOT_PLACED.format(n=slide)
 
 
+def _image_sources(*, gateway: bool, generated: bool) -> List[str]:
+    """The sorted sources of a turn's tool images: ``"gateway"`` and/or ``"generated"``."""
+    return sorted(
+        source
+        for source, present in (
+            (_GATEWAY_IMAGE_SOURCE, gateway),
+            (_GENERATED_IMAGE_SOURCE, generated),
+        )
+        if present
+    )
+
+
 def _turn_gateway_images(state: dict) -> Set[str]:
     """The image tokens this turn's Gateway tools saved, in its earlier passes."""
     return {token for token in scoped_vals(state, "gateway_images") if isinstance(token, str)}
+
+
+def _turn_generated_tokens(state: dict) -> Set[str]:
+    """The image tokens this turn's ``generate_image`` tool made, in its earlier passes."""
+    return {
+        ref["token"]
+        for ref in scoped_vals(state, "generated_images")
+        if isinstance(ref, dict) and isinstance(ref.get("token"), str)
+    }
+
+
+def _turn_tool_images(state: dict) -> Set[str]:
+    """Every image token a tool made this turn: the Gateway's and the generated ones."""
+    return _turn_gateway_images(state) | _turn_generated_tokens(state)
+
+
+def _turn_image_owner(state: dict) -> Optional[str]:
+    """Who the images a tool saves this turn belong to: the turn's initiator, else
+    the requesting user (``None`` when neither can be read)."""
+    owner = state.get("initiated_by")
+    if not owner:
+        try:
+            owner = image_service.resolve_requesting_user()
+        except Exception:
+            logger.warning("Could not resolve the image owner", exc_info=True)
+            owner = None
+    return owner
 
 
 def _actor_agent_config(state: dict, *, consequence: str) -> Optional[AgentConfig]:
@@ -3563,14 +3734,7 @@ def _gateway_user(state: dict, config: Optional[AgentConfig]) -> Optional[_Gatew
             extra={"session_id": state.get("session_id")},
         )
         return None
-    owner = state.get("initiated_by")
-    if not owner:
-        try:
-            owner = image_service.resolve_requesting_user()
-        except Exception:
-            logger.warning("Could not resolve the image owner", exc_info=True)
-            owner = None
-    return _GatewayUser(entries, host, token, owner)
+    return _GatewayUser(entries, host, token, _turn_image_owner(state))
 
 
 class _GatewayNotices:
@@ -3795,22 +3959,32 @@ class _GatewayPass:
             return None
         return AgentToolset(tools=tools, max_calls=calls_left, budget_seconds=seconds_left)
 
-    def spent(self, toolset: Optional[AgentToolset]) -> None:
-        """Account for one run of *toolset*: its seconds and its refusals."""
+    def spent(self, toolset: Optional[AgentToolset], *, exclude_seconds: float = 0.0) -> None:
+        """Account for one run of *toolset*: its seconds and its refusals.
+
+        *exclude_seconds* is time the run spent in tools that are not this pass's
+        (the architect's ``generate_image`` on a merged toolset), which is not
+        charged to the Gateway's budget.
+        """
         if toolset is None:
             return
-        self.seconds += max(0.0, toolset.budget_seconds - toolset.remaining_seconds())
+        self.seconds += max(
+            0.0, toolset.budget_seconds - toolset.remaining_seconds() - exclude_seconds
+        )
         if self._build is not None:
             self._failures.extend(self._build.access_failures(toolset))
 
     def _bound(self, toolset: Optional[AgentToolset]) -> List[Tuple[str, str]]:
         """``(display_name, service_name)`` of each connection whose tools *toolset*
-        carries, first seen first; ``[]`` for a toolset with none (Genie One's)."""
+        carries, first seen first; ``[]`` for a toolset with none (Genie One's).
+        A tool a merged toolset wraps (:class:`_CappedGatewayTool`) is its own."""
         if toolset is None or self._build is None:
             return []
         mine = {id(tool) for tool in self._build.tools}
         bound: Dict[str, Tuple[str, str]] = {}
         for tool in toolset.tools:
+            if isinstance(tool, _CappedGatewayTool):
+                tool = tool.wrapped
             owner = self._build.owners.get(tool.name) if id(tool) in mine else None
             if owner is not None:
                 bound.setdefault(owner[1], owner)
@@ -3888,6 +4062,426 @@ def _gateway_pass(
     )
 
 
+# ---------------------------------------------------------------------------
+# The architect's generate_image tool (chat image generation)
+# ---------------------------------------------------------------------------
+# Bound on every architect attempt of a turn that is not describe-only while
+# image generation is available (the env flag and the admin toggle, read on
+# every turn).  The tool itself is ImageGenerationAgentTool; this section sizes
+# it from the turn's budget, rides it beside any Gateway tools, and turns what
+# it made into the turn's state and the reply's metadata.  With image
+# generation off none of this runs, and the turn is exactly what it was.
+
+
+#: The ``tool_name`` an image generation progress line carries: TOP-LEVEL on its
+#: SSE event and in its row's metadata (the frontend's activity label).
+_IMAGE_PROGRESS_TOOL: Final = "image_generation"
+
+#: ``(singular, plural)`` of each kind, for the progress line and the replay note.
+_IMAGE_KIND_LABELS: Final = {
+    "illustration": ("illustration", "illustrations"),
+    "background": ("background", "backgrounds"),
+    "icon": ("icon", "icons"),
+    "vector_icon": ("vector icon", "vector icons"),
+}
+
+#: What a Gateway tool on a merged toolset answers once the Gateway's own calls
+#: for the turn are used up (R9).  Code-owned, like the Gateway tool's own
+#: "time budget is spent" answer.
+_GATEWAY_CALLS_SPENT: Final = (
+    "Not run: the call budget for connected tools is spent for this turn. "
+    "Continue without them."
+)
+
+#: The ``system`` turn ``_conversation`` replays after a reply that showed
+#: generated images; the options follow the prefix, ``; ``-joined.
+_GENERATED_IMAGES_NOTE_PREFIX: Final = (
+    "Images generated with the reply above, saved to the user's Image Library and "
+    "shown to the user under it as numbered options: "
+)
+_GENERATED_IMAGES_NOTE_SUFFIX: Final = (
+    ". To use one, put its exact reference in that slide's content_brief."
+)
+
+#: The ``system`` turn that closes the architect's conversation on a turn with no
+#: ``generate_image`` tool, when the conversation already showed generated images
+#: (R16).  Found live: with the admin switch off, such a session got "I made three
+#: picture options ... shown below this reply" with no tool bound and nothing made,
+#: because the model followed the conversation's earlier image replies.
+_IMAGE_TOOL_OFF_NOTE: Final = (
+    "Image generation is not available in this turn: there is no generate_image tool. "
+    "Do not say you made, saved or are showing new images. If the user asks for a new "
+    "image, say that image generation is not available right now. Images generated "
+    "earlier are still in the user's Image Library and can be used by their exact reference."
+)
+
+
+def _image_generation_available() -> bool:
+    """Whether the architect may generate images this turn: the env flag AND the
+    admin toggle (``generation_available``, the same gate the routes use).
+
+    Read on every turn, in the node thread, and never cached (R5): an admin who
+    turns the feature off is obeyed from the next turn on.  Any failure to read
+    it means ``False``, so the turn runs without the tool rather than failing.
+    """
+    try:
+        with get_db_session() as db:
+            return bool(generation_available(db))
+    except Exception:
+        logger.warning(
+            "Could not read whether image generation is available; the architect "
+            "runs without its generate_image tool",
+            exc_info=True,
+        )
+        return False
+
+
+def _showed_generated_images(conversation: Sequence[Dict[str, str]]) -> bool:
+    """Whether *conversation* replays a generated-images note (:func:`_conversation`)."""
+    return any(
+        turn.get("role") == "system"
+        and str(turn.get("content") or "").startswith(_GENERATED_IMAGES_NOTE_PREFIX)
+        for turn in conversation
+    )
+
+
+def _image_kind_label(kind: Any, count: int) -> str:
+    """*kind* as the user reads it: "illustration", or "illustrations" for several."""
+    singular, plural = _IMAGE_KIND_LABELS.get(kind, ("image", "images"))
+    return singular if count == 1 else plural
+
+
+class _ImageToolPass:
+    """One architect pass's ``generate_image`` tools, the budget they may spend,
+    and what they made.
+
+    The budget is the TURN's (:data:`IMAGE_MAX_CALLS_PER_TURN` calls,
+    :data:`IMAGE_MAX_IMAGES_PER_TURN` images, :data:`IMAGE_BUDGET_SECONDS`
+    seconds), less what the turn's earlier passes spent (their
+    ``image_tool_usage`` entries, summed) and what this pass's earlier attempts
+    spent, the seconds clipped to the turn deadline (``turn_started_at`` +
+    :data:`GATEWAY_TURN_DEADLINE_SECONDS`).  Each attempt is handed a NEW tool
+    holding what is left (:meth:`tool`), numbering its options after every image
+    the turn already generated (R11); with no call, no image or less than
+    :data:`IMAGE_MIN_START_SECONDS` left, there is none.
+
+    A model call that carried the tool and raised (:meth:`without_tools`) is
+    made once more without it, and from then on the pass binds it no more.
+    """
+
+    def __init__(self, state: dict, owner: Optional[str]) -> None:
+        self._state = state
+        self._owner = owner
+        prior = [
+            entry for entry in scoped_vals(state, "image_tool_usage") if isinstance(entry, dict)
+        ]
+        self._prior_calls = sum(int(entry.get("calls") or 0) for entry in prior)
+        self._prior_images = sum(int(entry.get("images") or 0) for entry in prior)
+        self._prior_seconds = sum(float(entry.get("seconds") or 0.0) for entry in prior)
+        started = state.get("turn_started_at")
+        self._turn_started_at: Optional[float] = (
+            float(started)
+            if isinstance(started, (int, float)) and not isinstance(started, bool)
+            else None
+        )
+        #: Every tool this pass built, in order, and the context each was sized with.
+        self._tools: List[ImageGenerationAgentTool] = []
+        self._contexts: Dict[int, ImageToolContext] = {}
+        #: A model call that carried this pass's tool raised: bind it no more.
+        self._model_call_failed = False
+
+    def _used(self) -> Tuple[int, int, float]:
+        """``(calls, images, seconds)`` this turn has spent, this pass's attempts included."""
+        return (
+            self._prior_calls + sum(tool.calls for tool in self._tools),
+            self._prior_images + sum(tool.images for tool in self._tools),
+            self._prior_seconds + sum(tool.seconds for tool in self._tools),
+        )
+
+    def tool(self) -> Optional[ImageGenerationAgentTool]:
+        """A NEW tool holding what is left of the turn's image budget, or ``None``
+        (nothing left, too little time to start, or a call with it already failed)."""
+        if self._model_call_failed:
+            return None
+        used_calls, used_images, used_seconds = self._used()
+        calls_left, seconds_left = turn_budget(
+            used_calls=used_calls,
+            used_seconds=used_seconds,
+            max_calls=IMAGE_MAX_CALLS_PER_TURN,
+            budget_seconds=IMAGE_BUDGET_SECONDS,
+            turn_started_at=self._turn_started_at,
+            now=time.time(),
+        )
+        images_left = max(0, IMAGE_MAX_IMAGES_PER_TURN - used_images)
+        if calls_left <= 0 or images_left <= 0 or seconds_left < IMAGE_MIN_START_SECONDS:
+            return None
+        context = ImageToolContext(
+            owner=self._owner,
+            session_id=self._state.get("session_id"),
+            on_call=self._on_call,
+            calls_left=calls_left,
+            images_left=images_left,
+            seconds_left=seconds_left,
+            deadline_at=(
+                None
+                if self._turn_started_at is None
+                else self._turn_started_at + GATEWAY_TURN_DEADLINE_SECONDS
+            ),
+            first_option=1 + used_images,
+        )
+        tool = ImageGenerationAgentTool(context)
+        self._tools.append(tool)
+        self._contexts[id(tool)] = context
+        return tool
+
+    def budget(self, tool: ImageGenerationAgentTool) -> Tuple[int, float]:
+        """``(calls, seconds)`` *tool* was sized with: its toolset's share."""
+        context = self._contexts[id(tool)]
+        return context.calls_left, context.seconds_left
+
+    def _on_call(self, kind: str, count: int) -> None:
+        """One image call is starting: "Generating 3 illustrations".
+
+        Said BEFORE the images are generated, on both surfaces: the event, whose
+        TOP-LEVEL ``tool_name`` / ``tool_input`` the frontend reads, and the row,
+        for the polling transport.  The kind and the count, never the prompt.
+        """
+        tool_input = {"kind": kind, "count": count}
+        line = f"Generating {count} {_image_kind_label(kind, count)}"
+        _emit(
+            StreamEventType.TOOL_CALL,
+            content=line,
+            metadata={"node": "architect"},
+            tool_name=_IMAGE_PROGRESS_TOOL,
+            tool_input=dict(tool_input),
+        )
+        _say(
+            self._state,
+            line,
+            message_type="tool_call",
+            metadata={"tool_name": _IMAGE_PROGRESS_TOOL, "tool_input": tool_input},
+        )
+
+    def _mine(self, toolset: Optional[AgentToolset]) -> List[ImageGenerationAgentTool]:
+        if toolset is None:
+            return []
+        return [tool for tool in self._tools if any(tool is bound for bound in toolset.tools)]
+
+    def seconds_in(self, toolset: Optional[AgentToolset]) -> float:
+        """The seconds this pass's tools spent generating in *toolset*'s run."""
+        return sum(tool.seconds for tool in self._mine(toolset))
+
+    def without_tools(self, exc: Exception, toolset: Optional[AgentToolset]) -> bool:
+        """A model call raised *exc*: ``True`` when it carried this pass's tool, so
+        the caller makes the same call once more without it, and the pass binds it
+        no more.  A call that carried none is not this pass's to handle: ``False``.
+        """
+        if not self._mine(toolset):
+            return False
+        self._model_call_failed = True
+        logger.warning(
+            "image_tool_failed: the architect's call with its generate_image tool "
+            "raised %s; it is made once more without it",
+            type(exc).__name__,
+            exc_info=exc,
+            extra={"session_id": self._state.get("session_id")},
+        )
+        return True
+
+    def generated(self) -> List[Dict[str, Any]]:
+        """The refs every tool of this pass made (R3 shape), in the order made."""
+        return [dict(ref) for tool in self._tools for ref in tool.generated]
+
+    def saved_tokens(self) -> List[str]:
+        return [token for tool in self._tools for token in tool.saved_tokens()]
+
+    def usage(self) -> Dict[str, Any]:
+        """This pass's ``image_tool_usage`` entry (JSON-native)."""
+        return {
+            "calls": sum(tool.calls for tool in self._tools),
+            "images": sum(tool.images for tool in self._tools),
+            "seconds": float(sum(tool.seconds for tool in self._tools)),
+        }
+
+
+class _GatewayCallCap:
+    """The Gateway's own share of a toolset it rides with ``generate_image`` (R9).
+
+    Gateway tools do not count their own calls: the toolset does, and a merged
+    toolset's cap is the Gateway's calls left PLUS the image tool's.  So every
+    Gateway tool on it shares this cap, which lets through at most the Gateway's
+    own calls left and refuses the rest without calling the service.  The
+    seconds a Gateway tool is handed are clipped to what is left of the
+    Gateway's own budget, the image tool's seconds not counted against it.
+    """
+
+    def __init__(
+        self,
+        *,
+        calls_left: int,
+        seconds_left: float,
+        toolset_seconds: float,
+        image_seconds: Callable[[], float],
+    ) -> None:
+        self.calls_left = calls_left
+        self.calls = 0
+        #: How much longer the toolset's clock runs than the Gateway's own budget.
+        self._head_room = max(0.0, toolset_seconds - seconds_left)
+        self._image_seconds = image_seconds
+
+    def take(self) -> bool:
+        """Count one Gateway call; ``False`` once the Gateway's calls are used up."""
+        if self.calls >= self.calls_left:
+            return False
+        self.calls += 1
+        return True
+
+    def seconds(self, remaining_seconds: float) -> float:
+        """The Gateway's own seconds left, given the toolset's *remaining_seconds*."""
+        try:
+            image_seconds = float(self._image_seconds())
+        except Exception:
+            image_seconds = 0.0
+        return min(remaining_seconds, remaining_seconds - self._head_room + image_seconds)
+
+
+class _CappedGatewayTool:
+    """A Gateway tool on a merged toolset, under the shared :class:`_GatewayCallCap`.
+
+    Shows the model exactly what the tool shows (its name, description and
+    schema); ``wrapped`` is the tool itself, which the Gateway pass recognises
+    as its own.
+    """
+
+    def __init__(self, tool: AgentTool, cap: _GatewayCallCap) -> None:
+        self.wrapped = tool
+        self._cap = cap
+        self.name = tool.name
+        self.description = tool.description
+        self.args_schema = tool.args_schema
+        self.parameters_json_schema = getattr(tool, "parameters_json_schema", None)
+
+    def run(self, args: Any, *, remaining_seconds: float) -> str:
+        if not self._cap.take():
+            return _GATEWAY_CALLS_SPENT
+        return self.wrapped.run(args, remaining_seconds=self._cap.seconds(remaining_seconds))
+
+
+def _architect_toolset(
+    gateway: Optional[_GatewayPass], images: Optional[_ImageToolPass]
+) -> Optional[AgentToolset]:
+    """A NEW toolset for one architect attempt, or ``None``: the call is today's.
+
+    Without an image tool it is the Gateway pass's own toolset, exactly as before.
+    The image tool alone rides a toolset of its own budget.  Beside Gateway tools
+    it rides the same toolset: the call cap is the Gateway's calls left plus the
+    image tool's, the clock runs for the longer of the two budgets, and every
+    Gateway tool is wrapped in one shared :class:`_GatewayCallCap`, so the
+    Gateway never makes more calls than its own budget allows (R9).
+    """
+    gateway_toolset = gateway.toolset() if gateway is not None else None
+    image_tool = images.tool() if images is not None else None
+    if image_tool is None:
+        return gateway_toolset
+    image_calls, image_seconds = images.budget(image_tool)
+    if gateway_toolset is None:
+        return AgentToolset(
+            tools=(image_tool,), max_calls=image_calls, budget_seconds=image_seconds
+        )
+    budget_seconds = max(gateway_toolset.budget_seconds, image_seconds)
+    cap = _GatewayCallCap(
+        calls_left=gateway_toolset.max_calls,
+        seconds_left=gateway_toolset.budget_seconds,
+        toolset_seconds=budget_seconds,
+        image_seconds=lambda: image_tool.seconds,
+    )
+    return AgentToolset(
+        tools=tuple(_CappedGatewayTool(tool, cap) for tool in gateway_toolset.tools)
+        + (image_tool,),
+        max_calls=gateway_toolset.max_calls + image_calls,
+        budget_seconds=budget_seconds,
+    )
+
+
+def _with_option_labels(message: str, refs: Sequence[Dict[str, Any]]) -> str:
+    """*message* with each generated image's ``{{image:TOKEN}}`` said as "option N".
+
+    The user sees the images as a card of numbered options under the reply, never
+    as references, so one the model wrote in its message (its tool's description
+    tells it not to) is said the way the card names it.  Any other reference is
+    left as it is.
+    """
+    options = {ref["token"]: ref["option"] for ref in sanitize_generated_images(list(refs))}
+    if not message or not options:
+        return message
+
+    def label(match: Any) -> str:
+        token = match.group(1)
+        return f"option {options[token]}" if token in options else match.group(0)
+
+    return IMAGE_REF_RE.sub(label, message)
+
+
+def _generated_images_metadata(
+    refs: Sequence[Dict[str, Any]], spec: Optional[DeckSpec]
+) -> List[Dict[str, Any]]:
+    """The reply's :data:`GENERATED_IMAGES_METADATA_KEY` entries: each ref in the
+    shared shape, ``slides`` the 1-based number of every slide of *spec* that
+    references it.
+
+    *spec* is the COMMITTED, canonical spec (an insert already re-stamped,
+    operations already composed), so the numbers are the ones the user sees.
+    ``None`` (a discussion, a data request, a confirmation or a refusal: nothing
+    is built) places every image on no slide.
+    """
+    placed: Dict[str, List[int]] = {}
+    if spec is not None:
+        ordered = sorted(spec.slides, key=lambda slide: slide.position)
+        for number, slide in enumerate(ordered, start=1):
+            for token in refs_in(slide.model_dump()):
+                placed.setdefault(token, []).append(number)
+    entries = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        token = ref.get("token")
+        entries.append({**ref, "slides": placed.get(token, []) if isinstance(token, str) else []})
+    return sanitize_generated_images(entries)
+
+
+def _generated_images_reply_metadata(
+    refs: Sequence[Dict[str, Any]], spec: Optional[DeckSpec]
+) -> Optional[Dict[str, Any]]:
+    """The reply's metadata for *refs*, or ``None`` when the turn generated none."""
+    entries = _generated_images_metadata(refs, spec)
+    return {GENERATED_IMAGES_METADATA_KEY: entries} if entries else None
+
+
+def _generated_images_note(refs: Sequence[Dict[str, Any]]) -> str:
+    """The ``system`` turn replayed after a reply that showed generated images.
+
+    Each option by number, exact reference, kind and slides.  Built only from the
+    sanitised entries' checked fields, never their prompt: this is a system
+    turn, and the prompt is model-written text.
+    """
+    parts: List[str] = []
+    for ref in sanitize_generated_images(list(refs)):
+        slides = ref.get("slides") or []
+        if not slides:
+            where = "not on a slide"
+        elif len(slides) == 1:
+            where = f"on slide {slides[0]}"
+        else:
+            where = "on slides " + ", ".join(str(number) for number in slides)
+        what = _image_kind_label(ref["kind"], 1)
+        if ref.get("for_slide") is not None:
+            what += f" for slide {ref['for_slide']}"
+        parts.append(
+            f"option {ref['option']} " + "{{image:" + ref["token"] + "}}" + f" ({what}, {where})"
+        )
+    return _GENERATED_IMAGES_NOTE_PREFIX + "; ".join(parts) + _GENERATED_IMAGES_NOTE_SUFFIX
+
+
 def _reconcile_architect_output(out: Any, known: Set[str]) -> Tuple[Any, List[Optional[int]]]:
     """*out* with its image references reconciled against *known*, and the 1-based
     slide number of each reference it removed (``None``: not on a slide).
@@ -3917,13 +4511,15 @@ def _reconcile_architect_output(out: Any, known: Set[str]) -> Tuple[Any, List[Op
     return reconciled, removed_slide_numbers(fixed, removed)
 
 
-def _say_images_not_placed(state: dict, slides: Sequence[Optional[int]]) -> None:
+def _say_images_not_placed(
+    state: dict, slides: Sequence[Optional[int]], sources: Optional[Sequence[str]] = None
+) -> None:
     """One notice per slide an image reference was removed from (and one for any
-    removed from no slide)."""
+    removed from no slide), in the wording of the turn's image *sources*."""
     for slide in sorted({slide for slide in slides if slide is not None}):
-        _say(state, _image_not_placed_notice(slide), message_type="info")
+        _say(state, _image_not_placed_notice(slide, sources), message_type="info")
     if any(slide is None for slide in slides):
-        _say(state, _image_not_placed_notice(None), message_type="info")
+        _say(state, _image_not_placed_notice(None, sources), message_type="info")
 
 
 def architect_node(state: dict) -> Dict[str, Any]:
@@ -4013,6 +4609,22 @@ def architect_node(state: dict) -> Dict[str, Any]:
     could not be placed on are said only for a committed (unrefused) answer, and
     ``gateway_usage`` / ``gateway_images`` are written on every return path.
     Without a Gateway entry none of this runs.
+
+    **The generate_image tool (chat image generation).**  On a turn that is not
+    describe-only, while image generation is available
+    (:func:`_image_generation_available`, read on every turn), every attempt is
+    handed a NEW ``generate_image`` tool holding what is left of the TURN's
+    image budget (:class:`_ImageToolPass`), alone or beside the Gateway's tools
+    on one toolset (:func:`_architect_toolset`).  A call that carried it and
+    raised is made once more without it, exactly as for the Gateway's tools.  A
+    turn whose tool made images reconciles each answer's image references as a
+    Gateway pass does, says the not-placed notice in the generated-image
+    wording, rewrites a generated reference in the reply's text to "option N",
+    and puts the images on the reply's row and event
+    (:data:`GENERATED_IMAGES_METADATA_KEY`, ``slides`` from the committed
+    spec), the refusal's included.  ``generated_images`` / ``image_tool_usage``
+    are written on every return path.  A bound tool that is never called
+    changes nothing else, and with the feature off none of this runs.
     """
     session_id = state["session_id"]
     turn_id = state["turn_id"]
@@ -4157,21 +4769,43 @@ def architect_node(state: dict) -> Dict[str, Any]:
         if state.get("actor_session_id") and not describe_only
         else None
     )
+    # The generate_image tool: ``None`` on a describe-only turn (nobody is there
+    # to see an image) and while image generation is not available, read on
+    # every turn (R5); then every line below runs exactly as before.  When it
+    # is bound, the images it makes are known too, and a turn whose tool made
+    # images has its references reconciled even without a Gateway pass.  A
+    # bound tool that is never called changes nothing.
+    images = (
+        _ImageToolPass(state, _turn_image_owner(state))
+        if not describe_only and _image_generation_available()
+        else None
+    )
+    if images is None and not describe_only and _showed_generated_images(conversation):
+        # R16: no image tool this turn, but the conversation showed generated images,
+        # so the architect is told it cannot make new ones (else it may follow the
+        # earlier image replies and claim images it never made).  A conversation that
+        # never showed any is exactly what it was.
+        payload["conversation"] = [
+            *conversation,
+            {"role": "system", "content": _IMAGE_TOOL_OFF_NOTE},
+        ]
     known_images: Set[str] = (
-        _turn_gateway_images(state) | refs_in(payload) | refs_in(committed_htmls)
-        if gateway is not None
+        _turn_tool_images(state) | refs_in(payload) | refs_in(committed_htmls)
+        if gateway is not None or images is not None or _turn_generated_tokens(state)
         else set()
     )
     images_not_placed: List[Optional[int]] = []
+    image_sources: List[str] = []
     for attempt in range(2):
-        # A NEW toolset per attempt, holding what is left of the turn's budget
-        # (a retry never inherits the first attempt's counters).
-        toolset = gateway.toolset() if gateway is not None else None
+        # A NEW toolset per attempt, holding what is left of the turn's budgets
+        # (a retry never inherits the first attempt's counters): the Gateway's
+        # tools, a fresh generate_image, or both on one toolset.
+        toolset = _architect_toolset(gateway, images)
         retry_failed = False
-        # At most twice round: a call that carried Gateway tools and raised is
-        # made once more, through this same call site, with no toolset (today's
-        # call).  A first call without them is made once more only when its
-        # answer did not parse (architect_parse_retry, below).
+        # At most twice round: a call that carried Gateway tools or the image
+        # tool and raised is made once more, through this same call site, with
+        # no toolset (today's call).  A first call without them is made once
+        # more only when its answer did not parse (architect_parse_retry, below).
         for fallback in (False, True):
             try:
                 out = get_agent_runtime().run(
@@ -4192,11 +4826,20 @@ def architect_node(state: dict) -> Dict[str, Any]:
                 ).output
             except Exception as exc:
                 if gateway is not None:
-                    gateway.spent(toolset)
-                    if not fallback and gateway.without_tools(exc, toolset):
-                        # The Gateway must never be what fails the turn (I2).
-                        toolset = None
-                        continue
+                    gateway.spent(
+                        toolset,
+                        exclude_seconds=images.seconds_in(toolset) if images is not None else 0.0,
+                    )
+                # BOTH passes are told, so the operator is ``|``, never ``or``: a
+                # short-circuit would leave one of them binding its tools on the
+                # next attempt (and the Gateway's connections unsaid).
+                if not fallback and (
+                    (gateway is not None and gateway.without_tools(exc, toolset))
+                    | (images is not None and images.without_tools(exc, toolset))
+                ):
+                    # Neither tool must ever be what fails the turn (I2).
+                    toolset = None
+                    continue
                 if answer is None:
                     if (
                         not fallback
@@ -4207,8 +4850,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
                         # text that is not the schema) is a model glitch, not a
                         # verdict on the request: the same call is made once more,
                         # as the builder, build reviewer and fixer each do.  This
-                        # call carried no Gateway tools (one that did took the
-                        # branch above), so the second call is the same call, and a
+                        # call carried no tools (one that did took the branch
+                        # above), so the second call is the same call, and a
                         # second refusal fails the turn below.  A describe-only turn
                         # builds nothing, so a second call buys it nothing.
                         logger.warning(
@@ -4243,11 +4886,27 @@ def architect_node(state: dict) -> Dict[str, Any]:
         if retry_failed:
             break
         if gateway is not None:
-            gateway.spent(toolset)
+            gateway.spent(
+                toolset,
+                exclude_seconds=images.seconds_in(toolset) if images is not None else 0.0,
+            )
+        generated_tokens = _turn_generated_tokens(state) | (
+            set(images.saved_tokens()) if images is not None else set()
+        )
+        if gateway is not None or generated_tokens:
             # Before anything plans, says or writes this answer: an image
             # reference it may not keep is fixed or removed (Review Focus 4).
+            # Only on a Gateway pass or a turn whose tool made images: an image
+            # tool that was bound and never called reconciles nothing.
             out, images_not_placed = _reconcile_architect_output(
-                out, known_images | set(gateway.saved_tokens())
+                out,
+                known_images
+                | set(gateway.saved_tokens() if gateway is not None else ())
+                | generated_tokens,
+            )
+            image_sources = _image_sources(
+                gateway=gateway is not None or bool(scoped_vals(state, "gateway_usage")),
+                generated=bool(generated_tokens),
             )
         # Every answer's deck style is sanitised before it is planned, so nothing
         # downstream — the plan, the commit, the deck.css write, the retry's echo
@@ -4290,17 +4949,27 @@ def architect_node(state: dict) -> Dict[str, Any]:
             extra={"session_id": session_id},
         )
 
+    # Each connection that could not be used (listed or called), once per
+    # service per turn, then each slide an image could not be placed on, only
+    # for an answer that is committed: a refused one's slides are never built,
+    # so there is nothing to tell the user about them (T6-1).  The wording names
+    # where the turn's images came from (R10).  With no Gateway pass and no
+    # generated image nothing was reconciled, so nothing is said.
     if gateway is not None:
-        # Each connection that could not be used (listed or called), once per
-        # service per turn, then each slide an image could not be placed on —
-        # only for an answer that is committed: a refused one's slides are never
-        # built, so there is nothing to tell the user about them (T6-1).
         gateway.say_failures()
-        if answer.refusal is None:
-            _say_images_not_placed(state, images_not_placed)
+    if answer.refusal is None:
+        _say_images_not_placed(state, images_not_placed, image_sources)
 
     intent = answer.intent
     message = answer.message
+    # The images the turn's generate_image tool made, earlier passes first: the
+    # reply carries them as metadata (the options card), and a reference to one
+    # in the reply's own text is said as the card names it, "option N".
+    turn_generated = [
+        ref for ref in scoped_vals(state, "generated_images") if isinstance(ref, dict)
+    ] + (images.generated() if images is not None else [])
+    if turn_generated:
+        message = _with_option_labels(message, turn_generated)
     # From here on the answer's spec and brand ARE the turn's (an operations
     # plan's composed spec and brand, else the model's spec and the brand of its
     # contract): every later step — classify_spec_change, the re-review, state,
@@ -4323,11 +4992,23 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # this one spent, said and saved.
         updates["gateway_usage"] = scoped(turn_id, [gateway.usage()])
         updates["gateway_images"] = scoped(turn_id, gateway.saved_tokens())
+    if images is not None:
+        # The same, for the generate_image tool: what this pass made (the turn's
+        # later passes reconcile against it and the builders' allow-list holds
+        # it) and what it spent (the turn's later passes are sized from it).
+        updates["generated_images"] = scoped(turn_id, images.generated())
+        updates["image_tool_usage"] = scoped(turn_id, [images.usage()])
 
     if intent not in ("build", "edit"):
         # Said straight away (spec §7): nothing is planned on these turns, so
         # there is nothing to land first and nothing left that could refuse them.
-        _say_architect_message(state, message, intent)
+        # Nothing is built either, so every image the turn made is on no slide.
+        _say_architect_message(
+            state,
+            message,
+            intent,
+            metadata=_generated_images_reply_metadata(turn_generated, None),
+        )
         if intent == "ask_data":
             # GraphState declares no analyst channel and undeclared keys are
             # silently dropped (§11), so the request travels in architect_message —
@@ -4342,7 +5023,14 @@ def architect_node(state: dict) -> Dict[str, Any]:
         return updates
 
     if answer.refusal is not None:
-        _degrade_edit(state, updates, answer.refusal)
+        # A refused edit builds nothing, but the images it made are the user's to
+        # see and use: the refusal row carries them, on no slide.
+        _degrade_edit(
+            state,
+            updates,
+            answer.refusal,
+            extra_metadata=_generated_images_reply_metadata(turn_generated, None),
+        )
         return updates
 
     # ---- Genie One figures are code-owned (Genie One in agent mode) ----------
@@ -4368,7 +5056,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
     if plan is not None:
         landing_degrade = _apply_edit_plan(state, plan, committed_rows, updates)
         if landing_degrade is not None:
-            _degrade_edit(state, updates, landing_degrade)
+            _degrade_edit(
+                state,
+                updates,
+                landing_degrade,
+                extra_metadata=_generated_images_reply_metadata(turn_generated, None),
+            )
             return updates
 
     # An edit that adds slides.  Its spec is re-stamped to positions 0..m-1, the
@@ -4531,7 +5224,12 @@ def architect_node(state: dict) -> Dict[str, Any]:
             logger.exception("Shifting the rows for an insert failed")
             shift_degrade = _rows_failed_degrade(exc)
         if shift_degrade is not None:
-            _degrade_edit(state, updates, shift_degrade)
+            _degrade_edit(
+                state,
+                updates,
+                shift_degrade,
+                extra_metadata=_generated_images_reply_metadata(turn_generated, None),
+            )
             return updates
         logger.info(
             "Inserted slides at %s (revised %s); the rows are shifted and the new "
@@ -4547,8 +5245,15 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # above), so a refused answer's message is never shown — a refusal says only
     # the refusal (_degrade_edit).  Before the notices about blanks below, which
     # qualify it, and before classify_spec_change, so a deck-level re-review's
-    # notice follows the message it reports on.
-    _say_architect_message(state, message, intent)
+    # notice follows the message it reports on.  The images the turn made are
+    # placed by the COMMITTED spec: canonical now (an insert re-stamped,
+    # operations composed), and no later step moves a slide or rewrites a brief.
+    _say_architect_message(
+        state,
+        message,
+        intent,
+        metadata=_generated_images_reply_metadata(turn_generated, spec),
+    )
 
     # #314 follow-up (N1): an untouched blank is never built.  Insert-turn
     # references count the pre-insert deck and name an anchor, so none is passed.
@@ -5589,16 +6294,22 @@ def builder_node(payload: dict) -> Dict[str, Any]:
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
         html = strip_inter_tag_escapes(html)
-        # AI Gateway MCP connections: on a Gateway turn (only its payload carries
-        # the key) an image reference the slide may not place is fixed (a
-        # mistyped tail) or removed with its <img> or background declaration,
-        # and the user is told once for the slide.  A fanned node, so the notice
-        # is an ungated info row, never error_state.
+        # AI Gateway MCP connections and the architect's generate_image tool: on
+        # a turn a tool made images in (only its payload carries the key) an
+        # image reference the slide may not place is fixed (a mistyped tail) or
+        # removed with its <img> or background declaration, and the user is told
+        # once for the slide, in the wording of the turn's image sources (R10).
+        # A fanned node, so the notice is an ungated info row, never error_state.
         known_images = payload.get("gateway_known_images")
         if known_images is not None:
             html, removed_images = reconcile_html(html, known_images)
             if removed_images:
-                _surface_notice(session_id, _image_not_placed_notice(slide_number(position)))
+                _surface_notice(
+                    session_id,
+                    _image_not_placed_notice(
+                        slide_number(position), payload.get("turn_image_sources")
+                    ),
+                )
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Builder failed at position %s", position)

@@ -1,0 +1,26 @@
+{
+  "intent": "edit",
+  "message": "I've cut slide 4 down to the ask, the deadline and where to get help.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [
+    3
+  ],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 3,
+      "slides": [
+        {
+          "purpose": "Close with one clear ask and a deadline",
+          "content_brief": "Ask every employee to set up a passkey for their work account by the end of the quarter. One line on help: the IT service desk and the intranet guide",
+          "assumes": "The audience now wants to switch",
+          "hands_off": "Everyone knows what to do and by when",
+          "data_references": [],
+          "slide_type": null
+        }
+      ]
+    }
+  ]
+}
