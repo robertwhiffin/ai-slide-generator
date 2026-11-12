@@ -58,6 +58,7 @@ from src.api.schemas.agent_config import (
     AgentConfig,
     GatewayMcpTool,
     GenieOneTool,
+    MCPTool,
     resolve_agent_config,
 )
 from src.api.schemas.streaming import StreamEvent, StreamEventType
@@ -3701,6 +3702,7 @@ class _GatewayUser:
     host: str
     token: str = field(repr=False)
     owner: Optional[str]
+    connections: Tuple[MCPTool, ...] = ()
 
 
 def _gateway_user(state: dict, config: Optional[AgentConfig]) -> Optional[_GatewayUser]:
@@ -3714,7 +3716,8 @@ def _gateway_user(state: dict, config: Optional[AgentConfig]) -> Optional[_Gatew
     if config is None or bool(scoped_vals(state, "describe_only")):
         return None
     entries = tuple(tool for tool in config.tools if isinstance(tool, GatewayMcpTool))
-    if not entries:
+    connections = tuple(tool for tool in config.tools if isinstance(tool, MCPTool))
+    if not entries and not connections:
         return None
     try:
         client_config = get_user_client().config
@@ -3734,7 +3737,7 @@ def _gateway_user(state: dict, config: Optional[AgentConfig]) -> Optional[_Gatew
             extra={"session_id": state.get("session_id")},
         )
         return None
-    return _GatewayUser(entries, host, token, _turn_image_owner(state))
+    return _GatewayUser(entries, host, token, _turn_image_owner(state), connections)
 
 
 class _GatewayNotices:
@@ -3782,9 +3785,16 @@ class _GatewayNotices:
         look like Tellr's own link).
         """
         for failure in failures:
-            if self._told(failure.service_name):
+            # A connection's key is prefixed so it cannot collide with a Gateway
+            # service (or the consent marker) of the same name (R9).
+            key = (
+                f"mcp:{failure.service_name}"
+                if failure.source == "connection"
+                else failure.service_name
+            )
+            if self._told(key):
                 continue
-            self.said.append(failure.service_name)
+            self.said.append(key)
             if failure.kind == "missing_scope":
                 self.consent()
             else:
@@ -3905,9 +3915,12 @@ class _GatewayPass:
 
     def _list(self) -> GatewayToolsetBuild:
         user = self._user
+        entries = user.entries
+        registry: Dict[str, Any] = {}
         try:
-            with get_db_session() as db:
-                registry = enabled_by_service(db, [entry.service_name for entry in user.entries])
+            if entries:
+                with get_db_session() as db:
+                    registry = enabled_by_service(db, [entry.service_name for entry in entries])
         except Exception:
             logger.warning(
                 "Could not read the AI Gateway MCP registry; the %s runs without its "
@@ -3916,7 +3929,10 @@ class _GatewayPass:
                 exc_info=True,
                 extra={"session_id": self._state.get("session_id")},
             )
-            return GatewayToolsetBuild(tools=(), failures=())
+            # The connections are still bound; the Gateway entries are skipped
+            # (and so never reported as removed).
+            entries = ()
+            registry = {}
         deadline_at = (
             None
             if self._turn_started_at is None
@@ -3924,7 +3940,7 @@ class _GatewayPass:
         )
         try:
             return build_gateway_tools(
-                user.entries,
+                entries,
                 agent=self._agent,
                 registry=registry,
                 host=user.host,
@@ -3933,6 +3949,7 @@ class _GatewayPass:
                 on_call=self._on_call,
                 session_id=self._state.get("session_id"),
                 deadline_at=deadline_at,
+                connections=user.connections,
             )
         except Exception:
             # Each connection's own failure is already a GatewayFailure; this is
@@ -4013,8 +4030,16 @@ class _GatewayPass:
             exc_info=exc,
             extra={"session_id": self._state.get("session_id")},
         )
+        connection_keys = self._build.connection_keys if self._build is not None else frozenset()
         self._failures.extend(
-            GatewayFailure(display, service, "unavailable", _GATEWAY_CALL_FAILED_REASON, None)
+            GatewayFailure(
+                display,
+                service,
+                "unavailable",
+                _GATEWAY_CALL_FAILED_REASON,
+                None,
+                source="connection" if service in connection_keys else "gateway",
+            )
             for display, service in bound
         )
         return True
