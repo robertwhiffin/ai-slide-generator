@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from databricks.sdk.errors import NotFound, PermissionDenied
 from mcp.shared.exceptions import McpError
@@ -33,12 +33,16 @@ from src.services.agent_tools.mcp_transport import (
 __all__ = [
     "CALL_TIMEOUT_SECONDS",
     "LIST_TIMEOUT_SECONDS",
+    "ConnectionMcpClient",
     "GatewayErrorKind",
     "GatewayMcpClient",
     "GatewayMcpError",
     "GatewayProbe",
     "GatewayToolSpec",
+    "connection_path",
+    "connection_sign_in_url",
     "gateway_service_url",
+    "map_connection_error",
     "map_gateway_error",
     "probe_service",
     "sign_in_url",
@@ -172,6 +176,66 @@ def _body_error(text: str) -> tuple[int | None, str | None]:
     )
 
 
+_CONNECTION_PATH_PREFIX: Final = "/api/2.0/mcp/external/"
+_CONNECTION_LINK_RE: Final = re.compile(r"https://\S+/explore/connections/\S+")
+_CONNECTION_UNAUTH_RE: Final = re.compile(r'"error_code"\s*:\s*"UNAUTHENTICATED"')
+_CONNECTION_LOGIN_TEXT: Final = "Please login first to the connection"
+_LINK_TRAILING: Final = "\"'.,;)}\\"
+
+
+def connection_path(connection_name: str) -> str:
+    """The Unity Catalog proxy path of a connection (the name is one path segment)."""
+    return _CONNECTION_PATH_PREFIX + quote(connection_name, safe="")
+
+
+def connection_sign_in_url(host: str, connection_name: str, *, message: str | None = None) -> str:
+    """Where the user signs in to a connection: the link in *message*, else a built one.
+
+    As :func:`sign_in_url`, a link is used only when it is on *host* itself.
+    """
+    if message:
+        found = _CONNECTION_LINK_RE.search(message)
+        if found:
+            url = found.group(0).rstrip(_LINK_TRAILING)
+            if _on_host(url, host):
+                return url
+    return f"{host}/explore/connections/{quote(connection_name, safe='')}"
+
+
+def _is_connection_signed_out(text: str) -> bool:
+    return bool(_CONNECTION_UNAUTH_RE.search(text)) or _CONNECTION_LOGIN_TEXT in text
+
+
+def map_connection_error(exc: BaseException, *, host: str, connection_name: str) -> GatewayMcpError:
+    """Classify a failed call to a UC connection.
+
+    Rule 0: any exception in the walk whose McpError message, response body or text
+    says the user is not signed in is ``sign_in_required``.  Everything else follows
+    :func:`map_gateway_error` (a connection needs no ``ai-gateway`` scope).
+    """
+    if isinstance(exc, GatewayMcpError):
+        return exc
+    for cur in walk(exc):
+        body = _response_text(cur)
+        candidates = [
+            cur.error.message if isinstance(cur, McpError) else None,
+            # A JSON-RPC error envelope: its message, unescaped, before the raw body.
+            _body_error(body)[1],
+            body,
+            str(cur),
+        ]
+        for text in candidates:
+            if text and _is_connection_signed_out(text):
+                return GatewayMcpError(
+                    "sign_in_required",
+                    f"Not signed in to {connection_name}",
+                    sign_in_url=connection_sign_in_url(host, connection_name, message=text),
+                )
+    return map_gateway_error(
+        exc, host=host, service_name=connection_name, lacks_gateway_scope=False
+    )
+
+
 def _not_signed_in_url(chain: list[BaseException], host: str, service_name: str) -> str | None:
     """The sign-in link, if any exception in *chain* is a JSON-RPC "not signed in" (-32006)."""
     for cur in chain:
@@ -282,10 +346,29 @@ class GatewayMcpClient:
     def _mcp_client(self) -> Any:
         with self._lock:
             if self._client is None:
-                self._client = self._factory(
-                    self._host, self._token, _service_path(self._service_name)
-                )
+                self._client = self._factory(self._host, self._token, self._path())
             return self._client
+
+    def _path(self) -> str:
+        return _service_path(self._service_name)
+
+    def _map_error(self, exc: BaseException) -> GatewayMcpError:
+        return map_gateway_error(
+            exc,
+            host=self._host,
+            service_name=self._service_name,
+            lacks_gateway_scope=self._lacks_gateway_scope,
+        )
+
+    def _signed_out(self, text: str) -> GatewayMcpError | None:
+        """The error for an ``isError`` result that says the user is not signed in."""
+        if _NOT_SIGNED_IN_TEXT_RE.search(text):
+            return GatewayMcpError(
+                "sign_in_required",
+                f"Not signed in to {self._service_name}",
+                sign_in_url=sign_in_url(self._host, self._service_name, message=text),
+            )
+        return None
 
     def _run(self, what: str, fn: Callable[[], Any], timeout_seconds: float) -> Any:
         """Run *fn* in a worker with a timeout; raise only ``GatewayMcpError``."""
@@ -301,12 +384,7 @@ class GatewayMcpClient:
         except GatewayMcpError:
             raise
         except Exception as exc:
-            mapped = map_gateway_error(
-                exc,
-                host=self._host,
-                service_name=self._service_name,
-                lacks_gateway_scope=self._lacks_gateway_scope,
-            )
+            mapped = self._map_error(exc)
             if mapped.kind == "sign_in_required":
                 # An expected user state (they have not signed in yet), not a fault:
                 # one line, no traceback.
@@ -358,13 +436,29 @@ class GatewayMcpClient:
         result = self._run(f"tools/call {name}", run, timeout_seconds)
         if getattr(result, "isError", False):
             text = _result_text(result)
-            if _NOT_SIGNED_IN_TEXT_RE.search(text):
-                raise GatewayMcpError(
-                    "sign_in_required",
-                    f"Not signed in to {self._service_name}",
-                    sign_in_url=sign_in_url(self._host, self._service_name, message=text),
-                )
+            signed_out = self._signed_out(text)
+            if signed_out is not None:
+                raise signed_out
         return result
+
+
+class ConnectionMcpClient(GatewayMcpClient):
+    """The Gateway client over a UC connection proxy; ``service_name`` is the connection."""
+
+    def _path(self) -> str:
+        return connection_path(self._service_name)
+
+    def _map_error(self, exc: BaseException) -> GatewayMcpError:
+        return map_connection_error(exc, host=self._host, connection_name=self._service_name)
+
+    def _signed_out(self, text: str) -> GatewayMcpError | None:
+        if _is_connection_signed_out(text):
+            return GatewayMcpError(
+                "sign_in_required",
+                f"Not signed in to {self._service_name}",
+                sign_in_url=connection_sign_in_url(self._host, self._service_name, message=text),
+            )
+        return None
 
 
 def probe_service(client: GatewayMcpClient) -> GatewayProbe:
