@@ -562,6 +562,8 @@ def test_every_pinned_release_drives_its_own_revisions_through_state_fan_out_and
             # (state) the seed reached the graph input and was overwritten.
             assert turn.initial == {
                 "architect_message": MESSAGE,
+                # A stage-less turn explicitly clears any previous UI snapshot.
+                "stage_slide": None,
                 "graph_release_id": turn.seeded_release_id,
             }, where
             assert turn.seeded_release_id != pin
@@ -572,6 +574,7 @@ def test_every_pinned_release_drives_its_own_revisions_through_state_fan_out_and
             )
             turn_id = turn.checkpoint["turn_id"]
             assert isinstance(turn_id, str) and turn_id, where
+            assert turn.checkpoint["stage_slide"] == {"turn": turn_id, "vals": None}, where
 
             # (fan-out) every Send carries the pin.  One Send per slide now: the
             # build reviewer runs inside the slide's pipeline, on a payload built
