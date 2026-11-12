@@ -904,8 +904,7 @@ class TestFourConcurrentClaimers:
             def claimer():
                 try:
                     start.wait(timeout=10)
-                    with _patched(factory):
-                        outcome = claim_due_marker(now)
+                    outcome = claim_due_marker(now)
                     with lock:
                         results.append(outcome)
                 except BaseException as exc:  # noqa: BLE001 — recorded, asserted on
@@ -913,10 +912,15 @@ class TestFourConcurrentClaimers:
                         errors.append(exc)
 
             threads = [threading.Thread(target=claimer) for _ in range(4)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=60)
+            # ONE process-wide patch, entered from this thread.  ``patch`` is not
+            # thread-safe: entered in each claimer, the last one out restores
+            # another claimer's fake, leaving this (deleted) database wired into
+            # session_manager and spec_sync for every later test on the worker.
+            with _patched(factory):
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=60)
 
             assert not errors, (
                 "a claimer raised, so the winner count is not evidence about "

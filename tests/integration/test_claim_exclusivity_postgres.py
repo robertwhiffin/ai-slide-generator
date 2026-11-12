@@ -98,6 +98,21 @@ def _patched(factory, gates: Optional[Dict[str, _ClaimGate]] = None):
         yield
 
 
+def _patch_for_every_claimer(monkeypatch, factory, gates: Dict[str, _ClaimGate]) -> None:
+    """:func:`_patched` for a fan-out, applied ONCE from the test's own thread.
+
+    ``patch`` is not thread-safe.  Entered inside each claimer thread, every
+    later claimer saves the earlier claimer's fake as "the original", and the
+    last one out restores a fake: ``session_manager`` and ``spec_sync`` were
+    left wired to this test's database, dropped at teardown, for every later
+    test on the same worker.  The fake dispatches on the thread's name anyway,
+    so one process-wide patch serves every claimer; ``monkeypatch`` undoes it.
+    """
+    fake = _thread_aware_db(factory, gates)
+    monkeypatch.setattr(_SPEC_SYNC_DB, fake)
+    monkeypatch.setattr(_MANAGER_DB, fake)
+
+
 # ---------------------------------------------------------------------------
 # The fixture's pool class, proved by behaviour
 # ---------------------------------------------------------------------------
@@ -172,7 +187,7 @@ class TestFourOverlappingClaimersOnPostgres:
     reddens with four winners.  The SQLite version does not.
     """
 
-    def test_exactly_one_of_four_overlapping_claimers_wins(self, postgres_engine):
+    def test_exactly_one_of_four_overlapping_claimers_wins(self, postgres_engine, monkeypatch):
         factory = _make_factory(postgres_engine)
         deck = _seed_owner_deck(factory)
         now = datetime.utcnow()
@@ -183,12 +198,12 @@ class TestFourOverlappingClaimersOnPostgres:
         results: Dict[str, Optional[Tuple[str, str]]] = {}
         errors: List[BaseException] = []
         lock = threading.Lock()
+        _patch_for_every_claimer(monkeypatch, factory, gates)
 
         def claimer() -> None:
             name = threading.current_thread().name
             try:
-                with _patched(factory, gates):
-                    outcome = claim_due_marker(now)
+                outcome = claim_due_marker(now)
                 with lock:
                     results[name] = outcome
             except BaseException as exc:  # noqa: BLE001 — recorded, asserted on
@@ -259,7 +274,7 @@ class TestFourOverlappingClaimersOnPostgres:
         )
         assert row.spec_dirty_by == _AUTHOR
 
-    def test_a_lease_older_than_the_ttl_is_reclaimable(self, postgres_engine):
+    def test_a_lease_older_than_the_ttl_is_reclaimable(self, postgres_engine, monkeypatch):
         """The paired direction: the same four-way overlap DOES yield a winner
         when the existing lease has expired.
 
@@ -284,12 +299,12 @@ class TestFourOverlappingClaimersOnPostgres:
         results: Dict[str, Optional[Tuple[str, str]]] = {}
         errors: List[BaseException] = []
         lock = threading.Lock()
+        _patch_for_every_claimer(monkeypatch, factory, gates)
 
         def claimer() -> None:
             name = threading.current_thread().name
             try:
-                with _patched(factory, gates):
-                    outcome = claim_due_marker(now)
+                outcome = claim_due_marker(now)
                 with lock:
                     results[name] = outcome
             except BaseException as exc:  # noqa: BLE001

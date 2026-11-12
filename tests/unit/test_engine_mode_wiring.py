@@ -73,6 +73,9 @@ from tests.unit.conftest import _make_factory, _make_fake_db
 # it so a delegating implementation would still run against THIS engine.
 _DB_SOURCE = "src.core.database.get_db_session"
 _MANAGER_DB = "src.api.services.session_manager.get_db_session"
+# The generation snapshot and fence bind their own get_db_session.
+_ROLLBACK_DB = "src.services.generation_rollback.get_db_session"
+_FENCE_DB = "src.services.generation_fence.get_db_session"
 
 _PLAIN_MESSAGE = "and now add a slide about eider ducks"
 
@@ -128,7 +131,9 @@ def route_env(client, route_db_engine):
          patch("src.api.routes.chat.get_chat_service") as get_service, \
          patch("src.api.routes.chat.enqueue_job", new_callable=AsyncMock) as enqueue, \
          patch(_DB_SOURCE, fake_db), \
-         patch(_MANAGER_DB, fake_db):
+         patch(_MANAGER_DB, fake_db), \
+         patch(_ROLLBACK_DB, fake_db), \
+         patch(_FENCE_DB, fake_db):
         manager = MagicMock()
         manager.acquire_session_lock.return_value = True
         manager.release_session_lock.return_value = None

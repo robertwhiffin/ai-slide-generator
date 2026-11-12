@@ -194,12 +194,20 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     3. Stores the final result in the database
     4. Releases the session lock
 
+    A graph request (an Agent deck's turn, ``engine_mode == "graph"``) is
+    all-or-nothing: it starts only if it is still ``pending`` (a stop while it
+    was queued already rolled it back), completes only while it is still live,
+    and a failure rolls back its generation snapshot.  Every other request (a
+    Legacy deck's, every MCP job) takes the path it always has.
+
     Args:
         request_id: Unique request identifier
         payload: Job payload with session_id, message, slide_context
     """
+    # Lazy imports: generation_rollback, for one, imports session_manager at its top.
     from src.api.services.chat_service import get_chat_service
     from src.api.services.session_manager import get_session_manager
+    from src.services.generation_rollback import has_generation_snapshot, roll_back_generation
     from src.services.streaming_callback import StreamingCallbackHandler
 
     # Extract captured context (if available) for user auth propagation
@@ -217,6 +225,9 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     # `engine_mode` key, so every MCP job runs on the monolith without
     # mcp_server.py knowing this switch exists.
     engine_mode = payload.get("engine_mode", "monolith")
+    # Only the async route's Agent-deck turns carry engine_mode "graph"; a payload
+    # without the key (every MCP job) is never one.
+    is_graph = payload.get("engine_mode") == "graph"
 
     chat_service = get_chat_service()
     session_manager = get_session_manager()
@@ -225,9 +236,27 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     # Events are persisted to DB which is what polling reads
     event_queue: queue.Queue = queue.Queue()
 
+    # False only for a graph request stopped while it was queued.  It is already
+    # rolled back and its lock released, and maybe a newer request holds the lock:
+    # run nothing, write nothing, release nothing (the finally only stops
+    # counting it as this process's job).
+    started = True
+    # Set once complete_chat_request committed, which dropped the snapshot with it.
+    completed = False
     try:
-        # Update status
-        session_manager.update_chat_request_status(request_id, "running")
+        # Update status.  A graph request starts only while it is still pending,
+        # in its own transaction; a start that raises fails (and rolls back) the
+        # turn like any other failure below.
+        if is_graph:
+            started = session_manager.start_chat_request(request_id)
+            if not started:
+                logger.info(
+                    "Skipped a chat request that was stopped before it started",
+                    extra={"request_id": request_id},
+                )
+                return
+        else:
+            session_manager.update_chat_request_status(request_id, "running")
 
         # Run blocking agent in the chat-job pool via the generator-based streaming
         # (never the default executor: see _chat_executor).  Use captured context if
@@ -294,31 +323,85 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         if result and session_title:
             result["session_title"] = session_title
 
-        session_manager.set_chat_request_result(request_id, result)
-        session_manager.update_chat_request_status(request_id, "completed")
+        if is_graph:
+            # The result, the status and the snapshot's deletion in one
+            # transaction; a request that is no longer live is written nothing.
+            completed = session_manager.complete_chat_request(request_id, result)
+        else:
+            session_manager.set_chat_request_result(request_id, result)
+            session_manager.update_chat_request_status(request_id, "completed")
 
     except _PinnedGraphConfigurationTerminalError:
-        session_manager.update_chat_request_status(
-            request_id,
-            "error",
-            PINNED_GRAPH_CONFIGURATION_ERROR,
-        )
+        if not is_graph:
+            session_manager.update_chat_request_status(
+                request_id,
+                "error",
+                PINNED_GRAPH_CONFIGURATION_ERROR,
+            )
+        elif has_generation_snapshot(request_id):
+            # Enter already saved the user message, locked the deck mode and
+            # pinned the deck, though no node ran: undo all of it.
+            roll_back_generation(
+                request_id,
+                terminal_status="error",
+                error_message=PINNED_GRAPH_CONFIGURATION_ERROR,
+                refuse_on_foreign_change=False,
+            )
+        else:
+            session_manager.fail_chat_request(request_id, PINNED_GRAPH_CONFIGURATION_ERROR)
 
     except Exception as e:
         logger.error(f"Job failed: {e}", extra={"request_id": request_id})
-        session_manager.update_chat_request_status(request_id, "error", str(e))
+        if not is_graph:
+            session_manager.update_chat_request_status(request_id, "error", str(e))
+        elif has_generation_snapshot(request_id):
+            roll_back_generation(
+                request_id,
+                terminal_status="error",
+                error_message=str(e),
+                refuse_on_foreign_change=False,
+            )
+        else:
+            # No snapshot: a stop (or another rollback) has already ended the
+            # turn, and its status must not be overwritten.
+            session_manager.fail_chat_request(request_id, str(e))
         raise
 
     finally:
         # Always release session lock.  Graph requests bind the lock to their
-        # request id, so release only while this request still owns it; monolith
-        # requests (including every MCP job) never bind and release as before.
-        if payload.get("engine_mode") == "graph":
-            session_manager.release_session_lock(session_id, request_id=request_id)
-        else:
+        # request id, so release only while this request still owns it, and not
+        # while its snapshot survives: a failed restore keeps the deck locked to
+        # its sender until a retry restores it.  Monolith requests (including
+        # every MCP job) never bind and release as before.  A graph request that
+        # never started releases nothing: its stop already released the lock.
+        if not is_graph:
             session_manager.release_session_lock(session_id)
+        elif started and (completed or not _snapshot_survives(request_id)):
+            session_manager.release_session_lock(session_id, request_id=request_id)
         # Clean up in-memory tracking
         jobs.pop(request_id, None)
+
+
+def _snapshot_survives(request_id: str) -> bool:
+    """Whether a finished graph job's generation snapshot is still there.
+
+    Only a failed restore leaves one (``restore_failed``), and its deck stays
+    locked until a retry restores it.  An unreadable answer counts as "yes": a
+    lock kept goes stale after ``SESSION_LOCK_TIMEOUT_SECONDS`` once this job
+    stops refreshing it, while a lock released could free a deck whose restore
+    is still pending.  Never raises, so the job's in-memory entry is dropped.
+    """
+    from src.services.generation_rollback import has_generation_snapshot
+
+    try:
+        return has_generation_snapshot(request_id)
+    except Exception:
+        logger.warning(
+            "Could not read the generation snapshot; keeping the session lock",
+            exc_info=True,
+            extra={"request_id": request_id},
+        )
+        return True
 
 
 def _run_streaming_generator(

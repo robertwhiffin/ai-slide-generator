@@ -44,7 +44,12 @@ from src.services.conversation_pins import (
     get_conversation_graph_versions,
     lock_active_graph_release,
 )
-from src.services.generation_fence import LIVE_STATUSES, fence_turn_write
+from src.services.generation_fence import (
+    LIVE_STATUSES,
+    claim_turn_row,
+    fence_turn_write,
+    start_chat_request as _start_chat_request,
+)
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
     MutationActor,
@@ -992,6 +997,23 @@ class DeckModeLockedError(Exception):
     def __init__(self, deck_mode: str):
         self.deck_mode = deck_mode
         super().__init__(f"This deck's Deck Mode is locked to {deck_mode!r}")
+
+
+class GenerationRefusedError(Exception):
+    """An Agent deck's Enter was refused before its snapshot was taken.
+
+    Raised by ``SessionManager.begin_generation`` before anything is written.
+    ``reason`` is :attr:`RESTORE_PENDING` (a failed restore is pending on the
+    deck) or :attr:`ARC_REVIEW_IN_FLIGHT` (the arc-review sweeper holds a live
+    claim on it); the route maps it to its 409 copy.
+    """
+
+    RESTORE_PENDING = "restore_pending"
+    ARC_REVIEW_IN_FLIGHT = "arc_review_in_flight"
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"Generation refused: {reason}")
 
 
 class MessageNotFoundError(Exception):
@@ -4201,6 +4223,113 @@ class SessionManager:
 
             return request_id
 
+    # The all-or-nothing lifecycle of an Agent deck's async turn.  generation_rollback
+    # imports this module at its top, so it is imported lazily here (no cycle).
+
+    def get_deck_mode(self, session_id: str) -> Optional[str]:
+        """The stored Deck Mode of *session_id*'s deck (NULL = not chosen yet). Read-only.
+
+        Read off the deck OWNER's row, through the same owner hop
+        ``chat_service.resolve_engine_mode`` takes: a contributor inherits it.
+
+        Raises:
+            SessionNotFoundError: the session (or its deck owner) is missing.
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            return self._get_deck_owner_session(db, session).deck_mode
+
+    def begin_generation(self, session_id: str, request_id: str) -> None:
+        """Enter on an Agent deck: refuse, or take the turn's generation snapshot.
+
+        One transaction, whose first lock is the deck owner's
+        ``session_slide_decks`` row (``FOR UPDATE``, when the deck has one; a
+        no-op on SQLite), as ``_refuse_during_an_arc_review`` takes it.  That lock
+        is what serialises Enter against the arc-review sweeper's claim.  Then:
+
+        - a failed restore pending on the deck refuses
+          (``GenerationRefusedError.RESTORE_PENDING``): a snapshot now would
+          capture the deck the failed restore left;
+        - an arc review holding a live claim on it refuses
+          (``GenerationRefusedError.ARC_REVIEW_IN_FLIGHT``): its graph turn takes
+          no session lock;
+        - otherwise the snapshot is taken in this transaction, before the user
+          message (which locks the deck mode on a first message).
+
+        Raises:
+            GenerationRefusedError: refused; nothing was written.
+            SessionNotFoundError: the session (or its deck owner) is missing.
+        """
+        from src.services.generation_rollback import (
+            has_pending_restore,
+            take_generation_snapshot,
+        )
+        from src.services.spec_sync import review_in_flight
+
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            owner = self._get_deck_owner_session(db, session)
+            deck = (
+                db.query(SessionSlideDeck)
+                .filter(SessionSlideDeck.session_id == owner.id)
+                .with_for_update()
+                .first()
+            )
+            if has_pending_restore(session_id):
+                raise GenerationRefusedError(GenerationRefusedError.RESTORE_PENDING)
+            if deck is not None and review_in_flight(deck, datetime.utcnow()):
+                raise GenerationRefusedError(GenerationRefusedError.ARC_REVIEW_IN_FLIGHT)
+            take_generation_snapshot(db, request_id=request_id, session_id=session_id)
+
+    def discard_generation_snapshot(self, request_id: str) -> None:
+        """Delete *request_id*'s generation snapshot without restoring anything.
+
+        For an Enter whose turn will not run on the graph after all, or whose
+        user message was refused: the snapshot no longer describes this turn's
+        starting point, so restoring it could undo someone else's change.
+        """
+        from src.services.generation_rollback import discard_generation_snapshot
+
+        with get_db_session() as db:
+            discard_generation_snapshot(db, request_id)
+
+    def abandon_chat_request(self, request_id: str, error: str) -> bool:
+        """End a live request before it ran: delete its messages, mark it ``error``.
+
+        One transaction, the fence claim first.  For a turn that must not run
+        and has no snapshot to restore (the async route's engine race).  The
+        session lock is the caller's to release.
+
+        Returns:
+            False (and nothing written) when the request is no longer live.
+        """
+        with get_db_session() as db:
+            if not claim_turn_row(db, request_id):
+                db.rollback()
+                return False
+            db.execute(
+                delete(SessionMessage)
+                .where(SessionMessage.request_id == request_id)
+                .execution_options(synchronize_session=False)
+            )
+            db.execute(
+                update(ChatRequest)
+                .where(ChatRequest.request_id == request_id)
+                .values(status="error", error_message=error, completed_at=datetime.utcnow())
+                .execution_options(synchronize_session=False)
+            )
+            return True
+
+    def start_chat_request(self, request_id: str) -> bool:
+        """Move a queued request ``pending`` -> ``running``, in its own transaction.
+
+        Returns:
+            False when the request is no longer ``pending`` (it was stopped
+            while it was queued): the job must not run it.
+        """
+        with get_db_session() as db:
+            return _start_chat_request(db, request_id)
+
     def update_chat_request_status(
         self,
         request_id: str,
@@ -4251,6 +4380,59 @@ class SessionManager:
                 return
 
             chat_request.result_json = json.dumps(result) if result else None
+
+    def complete_chat_request(self, request_id: str, result: Optional[dict]) -> bool:
+        """Complete a graph turn: store *result*, mark it ``completed``, drop its snapshot.
+
+        One transaction, the fence claim first, so a stop either lands before it
+        (and this writes nothing) or after it (and finds the request finished).
+        The snapshot may be ``active`` or ``sealed``.
+
+        Returns:
+            False (and nothing written) when the request is no longer live.
+        """
+        from src.services.generation_rollback import discard_generation_snapshot
+
+        with get_db_session() as db:
+            if not claim_turn_row(db, request_id):
+                db.rollback()
+                return False
+            db.execute(
+                update(ChatRequest)
+                .where(ChatRequest.request_id == request_id)
+                .values(
+                    result_json=json.dumps(result) if result else None,
+                    status="completed",
+                    completed_at=datetime.utcnow(),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            discard_generation_snapshot(db, request_id)
+            return True
+
+    def fail_chat_request(self, request_id: str, error: Optional[str]) -> bool:
+        """:meth:`update_chat_request_status` to ``error``, only while the request is live.
+
+        One transaction, the fence claim first, so a stop (``cancelled``) or a
+        rollback is never overwritten by ``error``.
+
+        Returns:
+            False (and nothing written) when the request is no longer live.
+        """
+        values: Dict[str, Any] = {"status": "error", "completed_at": datetime.utcnow()}
+        if error:
+            values["error_message"] = error
+        with get_db_session() as db:
+            if not claim_turn_row(db, request_id):
+                db.rollback()
+                return False
+            db.execute(
+                update(ChatRequest)
+                .where(ChatRequest.request_id == request_id)
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            return True
 
     def record_chat_request_progress(
         self, request_id: str, seq: int, progress: Dict[str, Any]
@@ -4329,6 +4511,9 @@ class SessionManager:
                     if chat_request.progress_json
                     else None
                 ),
+                # How a stopped or failed Agent-deck turn ended: "rolled_back",
+                # "kept_foreign_change", "restore_failed", or None.
+                "rollback_outcome": chat_request.rollback_outcome,
             }
 
     def get_session_id_for_request(self, request_id: str) -> Optional[str]:

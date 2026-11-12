@@ -54,7 +54,7 @@ from src.services.conversation_pins import (
     ConversationPinMissingError,
     ConversationSessionNotFoundError,
 )
-from src.services.generation_fence import TurnFencedError
+from src.services.generation_fence import TurnFencedError, TurnStopped
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
     PersistedRuntimeError,
@@ -2069,6 +2069,17 @@ class ChatService:
         # so drop the cached deck rather than serve a deck that predates the turn.
         self._invalidate_deck_cache(session_id)
 
+        # THE COMMIT POINT: seal the turn's generation snapshot now, BEFORE the
+        # save point and the title join.  A stop that wins this race rolled the
+        # turn back, so it ends here: no save point, no COMPLETE.  A stop that
+        # loses it is "already finished" and the turn completes, so a stop can
+        # never restore the deck yet leave a "Generated N slide(s)" version behind.
+        if request_id:
+            from src.services.generation_rollback import seal_generation
+
+            if not seal_generation(request_id):
+                raise TurnStopped(request_id)
+
         # ONE save point per completed turn, matching the monolith — which makes
         # one here too, at `send_message_streaming`'s own post-persist step.
         # Without it a graph-built deck has EMPTY version history: nothing under
@@ -2087,8 +2098,9 @@ class ChatService:
         # A save-point failure must not fail the turn, exactly as on the monolith
         # path — the deck is already committed by the time this runs.
         #
-        # This thread never has the request id bound, so it is passed explicitly:
-        # a turn stopped as the graph finished leaves no version behind.
+        # This thread never has the request id bound, so it is passed explicitly.
+        # The turn is sealed, so a stop can no longer end it; the fence still
+        # refuses the save point of a turn a failure path (a timeout) ended since.
         try:
             deck_for_save_point = self._get_or_load_deck(session_id)
             if deck_for_save_point is not None:

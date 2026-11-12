@@ -63,6 +63,9 @@ from tests.unit.conftest import _make_fake_db
 
 _DB_SOURCE = "src.core.database.get_db_session"
 _MANAGER_DB = "src.api.services.session_manager.get_db_session"
+# The generation snapshot and fence bind their own get_db_session.
+_ROLLBACK_DB = "src.services.generation_rollback.get_db_session"
+_FENCE_DB = "src.services.generation_fence.get_db_session"
 _LOCK = "src.api.services.session_manager.lock_active_graph_release"
 _RESOLVER = "src.api.services.chat_service.resolve_engine_mode"
 
@@ -290,6 +293,8 @@ def env(client, factory):
     ), patch(
         "src.api.routes.chat.enqueue_job", new_callable=AsyncMock
     ) as enqueue, patch(_DB_SOURCE, fake_db), patch(_MANAGER_DB, fake_db), patch(
+        _ROLLBACK_DB, fake_db
+    ), patch(_FENCE_DB, fake_db), patch(
         "src.api.routes.chat.get_default_design_system_id", return_value=None
     ), patch(
         "src.api.routes.chat.get_default_slide_style_id", return_value=None
@@ -546,7 +551,11 @@ def test_a_locked_legacy_deck_with_no_deck_mode_proceeds_on_monolith(env, route,
 def test_resolution_failure_after_the_first_message_leaves_the_deck_locked(
     env, route, sent, locked_as
 ):
-    """Review Focus 1: the message committed, so the deck IS locked; the turn 503s."""
+    """Review Focus 1: the message committed, so the deck IS locked; the turn 503s.
+
+    Except an Agent deck's async turn, which is all-or-nothing (interrupt
+    generation): its 503 rolls the Enter back, so no message and no lock remain.
+    """
     sid = _seed_deck(env.factory)
     extra = {} if sent is None else {"deck_mode": sent}
 
@@ -558,8 +567,12 @@ def test_resolution_failure_after_the_first_message_leaves_the_deck_locked(
 
     assert response.status_code == 503, response.text
     assert response.json() == {"detail": ENGINE_MODE_UNAVAILABLE_DETAIL}
-    assert [row[0] for row in _user_rows(env.factory, sid)] == [_MESSAGE]
-    assert _deck(env.factory, sid)["deck_mode"] == locked_as
+    if route == "async" and locked_as == "agent":
+        assert _user_rows(env.factory, sid) == []
+        assert _deck(env.factory, sid)["deck_mode"] is None
+    else:
+        assert [row[0] for row in _user_rows(env.factory, sid)] == [_MESSAGE]
+        assert _deck(env.factory, sid)["deck_mode"] == locked_as
     env.nothing_ran()
     _assert_released_once(env, sid)
 

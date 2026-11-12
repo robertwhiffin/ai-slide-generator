@@ -3,7 +3,7 @@
 Phase 1: Return messages, slide_deck, and metadata.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -122,3 +122,19 @@ class ChatResponse(BaseModel):
             }
         }
 
+
+class CancelChatResponse(BaseModel):
+    """Answer of ``POST /api/chat/cancel/{request_id}`` when the stop was decided.
+
+    A refused stop is a 409 instead, whose body carries ``detail`` and
+    ``outcome`` (``"refused_foreign_change"`` or ``"not_stoppable"``).
+
+    Attributes:
+        outcome: ``"cancelled"`` (the turn was stopped and rolled back) or
+            ``"already_finished"`` (it had ended before the stop arrived).
+        status: The request's status after the call (``"cancelled"``, or the
+            status it had already finished with).
+    """
+
+    outcome: Literal["cancelled", "already_finished"]
+    status: Optional[str] = None
