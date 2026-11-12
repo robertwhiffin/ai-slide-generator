@@ -798,6 +798,63 @@ def test_the_retry_builds_fresh_genie_agent_tools(graph_env, monkeypatch):
     assert _info(t.rows).count(_tools_failed("Web Search")) == 1
 
 
+def test_genie_one_a_genie_agent_and_a_gateway_pass_share_one_toolset_and_retry(
+    graph_env, monkeypatch
+):
+    """Genie One, a Genie Agent and a Gateway pass: the first call carries all three
+    in Genie One's toolset (``extra_tools=(*agents, *gateway)``, 6 calls / 300 s).  It
+    raises; the retry drops the Gateway tool but keeps Genie One AND the Genie Agent,
+    the agent built FRESH (a new tool with no answers), and only the retry's answers
+    become figures."""
+    first_rows = (("East", "111"), ("West", "222"))
+    sales = _Space(SALES_ID, [(REVENUE, first_rows), (REVENUE, SALES_ROWS)])
+    web = _Service(WEB, _web_tools(), results={"web_search": _web_result()})
+    _gateway_genie_deck(
+        graph_env, monkeypatch, [GENIE_ONE, SALES, WEB_ENTRY], spaces=[sales], web=web
+    )
+    _serve(monkeypatch, _Replay(q1_replies()))
+    seen: Dict[str, Any] = {}
+
+    def bound(call):
+        seen["first_tools"] = call.tool_names
+        if call.has_tool(SALES_TOOL):
+            call.use(SALES_TOOL, {"question": Q_SALES})
+        if call.has_tool("web_search"):
+            call.use("web_search", {"query": "regional revenue last quarter"})
+        raise _loop_gave_up()
+
+    def retry(call):
+        seen["retry_tools"] = call.tool_names
+        seen["answers_at_start"] = [
+            len(tool.answers)
+            for tool in (call.toolset.tools if call.toolset is not None else ())
+            if isinstance(tool, GenieAgentTool)
+        ]
+        if call.has_tool(SALES_TOOL):
+            call.use(SALES_TOOL, {"question": Q_SALES_2})
+        return _success([SALES_SOURCE])
+
+    runtime = _install(monkeypatch, bound, retry)
+
+    t = _run_analyst(_analyst_state(graph_env))
+
+    first, second = runtime.calls_for("data_analyst")
+    assert seen["first_tools"] == sorted([GENIE_TOOL_NAME, SALES_TOOL, "web_search"])
+    assert first.at_start == (6, 300.0, 0)
+    assert seen["retry_tools"] == sorted([GENIE_TOOL_NAME, SALES_TOOL])
+    assert isinstance(_tool(second, GENIE_TOOL_NAME), GenieOneAgentTool)
+    first_tool, retry_tool = _tool(first, SALES_TOOL), _tool(second, SALES_TOOL)
+    assert isinstance(retry_tool, GenieAgentTool)
+    assert retry_tool is not first_tool, "the retry reused the failed attempt's tool"
+    assert seen["answers_at_start"] == [0]
+    assert len(first_tool.answers) == 1 and len(retry_tool.answers) == 1
+    assert [ask["question"] for ask in sales.asks] == [Q_SALES, Q_SALES_2]
+    # The failed attempt's answer (111 / 222) is not a figure; the retry's are.
+    assert t.updates["analyst_figures"] == scoped(TURN, _figure_dicts(SALES_FIGURES))
+    assert t.updates["analyst_rounds"] == scoped(TURN, [{"answers": 1}])
+    assert _info(t.rows).count(_tools_failed("Web Search")) == 1
+
+
 def test_genie_agents_without_a_user_client_bind_nothing(graph_env, monkeypatch):
     """Identity: a Genie Agent runs only as the signed-in user.  With an entry and no
     user client (production fails closed) no client is built, the call carries no

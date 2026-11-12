@@ -4638,9 +4638,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
     said, and its row records why (:data:`REFUSAL_METADATA_KEY`) so the next
     turn's architect is told.
 
-    **AI Gateway MCP tools (agent mode).**  When the ACTOR's agent config has a
-    ``gateway_mcp`` entry and a user is signed in (:func:`_gateway_pass`), every
-    attempt is handed a NEW toolset of the architect's Gateway tools holding
+    **AI Gateway MCP tools and UC MCP connections (agent mode).**  When the
+    ACTOR's agent config has a ``gateway_mcp`` or ``mcp`` entry and a user is
+    signed in (:func:`_gateway_pass`), every attempt is handed a NEW toolset of
+    the architect's Gateway and connection tools holding
     what is left of the TURN's budget (every architect pass and attempt this turn
     spends one :data:`ARCHITECT_GATEWAY_MAX_CALLS` / seconds budget, clipped to
     the turn deadline); with nothing left the call is today's.  A call that
@@ -4654,7 +4655,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
     connection that could not be used is said once per turn, the slides an image
     could not be placed on are said only for a committed (unrefused) answer, and
     ``gateway_usage`` / ``gateway_images`` are written on every return path.
-    Without a Gateway entry none of this runs.
+    Without a ``gateway_mcp`` or ``mcp`` entry none of this runs.
 
     **The generate_image tool (chat image generation).**  On a turn that is not
     describe-only, while image generation is available
@@ -4801,8 +4802,9 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # nobody and builds nothing, so a second model call buys it nothing.
     rejected_edit: Optional[Dict[str, Any]] = None
     answer: Optional[_PlannedAnswer] = None
-    # AI Gateway MCP tools: ``None`` without a Gateway entry (or a signed-in
-    # user), and then every line below runs exactly as before.  The image
+    # AI Gateway MCP tools and UC MCP connections: ``None`` without a
+    # ``gateway_mcp`` or ``mcp`` entry (or a signed-in user), and then every
+    # line below runs exactly as before.  The image
     # references an answer may keep: the ones the turn's Gateway tools saved,
     # and every one already in the payload (the conversation, the user's message,
     # the persisted spec) or in the committed slides.
