@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 # coerced on read (see ``resolve_agent_config``).
 _VALID_STYLE_SOURCES: Final = frozenset({"seeded", "user"})
 
+# The agent an MCP server entry is stored against (agent mode MCP). Anything
+# else in a STORED entry is coerced to the default on read (see
+# ``resolve_agent_config``).
+McpAgentName = Literal["data_analyst", "architect"]
+_VALID_MCP_AGENTS: Final = frozenset({"data_analyst", "architect"})
+
 # Sentinel telling "key absent" apart from "key present and null". An explicit
 # null is the LEGACY shape and must stay distinguishable from a malformed value.
 _ABSENT: Final[Any] = object()
@@ -41,6 +47,7 @@ class MCPTool(BaseModel):
     server_name: str = Field(..., min_length=1)
     description: Optional[str] = None
     config: dict = Field(default_factory=dict)
+    agent: McpAgentName = "data_analyst"
 
 
 class VectorIndexTool(BaseModel):
@@ -257,7 +264,44 @@ def resolve_agent_config(raw: Optional[dict]) -> AgentConfig:
                 style_source,
             )
             raw = {**raw, "style_source": "user"}
+    raw = _coerce_mcp_agents(raw)
     return AgentConfig.model_validate(raw)
+
+
+def _coerce_mcp_agents(raw: dict) -> dict:
+    """Fail soft on a PRESENT, invalid ``agent`` on a stored MCP tool entry.
+
+    An absent key is the legacy shape and is left alone (it reads as the
+    model default). A present value that is not one of the known agents is
+    rewritten to ``"data_analyst"`` with a warning, so one hand-edited entry
+    cannot make the whole config unloadable. The caller's dict and its tool
+    entries are never mutated: a new list and new entry dicts are built only
+    when a rewrite is actually needed.
+    """
+    tools = raw.get("tools")
+    if not isinstance(tools, list):
+        return raw
+    new_tools: Optional[list] = None
+    for index, entry in enumerate(tools):
+        if not isinstance(entry, dict) or entry.get("type") != "mcp":
+            continue
+        agent = entry.get("agent", _ABSENT)
+        if agent is _ABSENT:
+            continue
+        # Membership is tested only for str (see the style_source guard above).
+        if isinstance(agent, str) and agent in _VALID_MCP_AGENTS:
+            continue
+        logger.warning(
+            "Stored MCP tool entry has an unrecognized agent %r; treating it "
+            "as data_analyst so the config still loads",
+            agent,
+        )
+        if new_tools is None:
+            new_tools = list(tools)
+        new_tools[index] = {**entry, "agent": "data_analyst"}
+    if new_tools is None:
+        return raw
+    return {**raw, "tools": new_tools}
 
 
 def normalize_style_source_exclusivity(

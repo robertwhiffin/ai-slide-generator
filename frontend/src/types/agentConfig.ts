@@ -6,12 +6,15 @@ export interface GenieTool {
   conversation_id?: string;
 }
 
+export type McpAgentName = 'data_analyst' | 'architect';
+
 export interface MCPTool {
   type: 'mcp';
   connection_name: string;
   server_name: string;
   description?: string;
   config?: Record<string, unknown>;
+  agent?: McpAgentName;
 }
 
 export interface VectorIndexTool {

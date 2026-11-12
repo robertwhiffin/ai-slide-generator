@@ -76,6 +76,7 @@ REQUIRED_USER_API_SCOPES: tuple[str, ...] = (
     "serving.serving-endpoints",
     "ai-gateway",
     "catalog.connections",
+    "mcp.external",
 )
 
 
