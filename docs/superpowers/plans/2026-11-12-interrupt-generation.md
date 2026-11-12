@@ -225,7 +225,7 @@ Models: test=opus impl=sonnet
   - `set_genie_one_conversation_id` (`:1779`): fence first, before the `with_for_update()` at `:1794`
   - `update_session` / `rename_session` (`:1557`, `:1561`): new kwarg `request_id: str | None = None`, fenced inside its `with`
   - `create_version` (`:3322`): new kwarg `request_id: str | None = None`, fenced at the top of its `with` (`:3345`)
-- Modify: `src/services/agent_tools/gateway_tool.py`, `make_image_saver`'s `save` (`:300-313`): fence first inside its `with get_db_session()`. Check which thread runs it; if it is a pool thread, copy the context at submit, as for the image tool below. Test: `test_gateway_image_save_refused_after_cancel`.
+- Modify: `src/services/agent_tools/gateway_tool.py`, `make_image_saver`'s `save` (`:301-317`): fence first inside its `with get_db_session()`. It runs on the pool in `src/services/agent_tools/gateway_toolset.py:245-246` (`ThreadPoolExecutor.submit`, no context copy), so submit there with `contextvars.copy_context().run, …`, as for the image tool below. Test: `test_gateway_image_save_refused_after_cancel`.
 - Modify: `src/services/agent_tools/image_generation_tool.py`:
   - `save_to_library` (`:135`): fence first inside the `with` at `:139`
   - the image jobs run on `_POOL` with **no context copy** (`:287`, `_POOL.submit(job_body, job)`), so the ContextVar is None in that thread and the fence would be a silent no-op. Submit `contextvars.copy_context().run, job_body, job` instead.
@@ -275,7 +275,7 @@ Models: test=opus impl=sonnet
   - `def take_generation_snapshot(db: Session, *, request_id: str, session_id: str) -> None`. Inside the caller's transaction; no commit.
   - `def has_generation_snapshot(request_id: str) -> bool`
   - `def has_pending_restore(session_id: str) -> bool`: true when any snapshot for the actor session or its deck owner is in state `restore_failed`.
-  - `def seal_generation(request_id: str) -> bool`: one transaction. `claim_turn_row`, then `UPDATE generation_snapshots SET state='sealed' WHERE request_id=:rid AND state='active'`. Returns True only if both matched; otherwise the transaction rolls back and it returns False. If the claim matched but **no snapshot row exists** (it should be unreachable after Task 5's fail-closed submit), log a WARNING and return True, so a graph turn is never abandoned in `running`.
+  - `def seal_generation(request_id: str) -> bool`: one transaction. `claim_turn_row`, then `UPDATE generation_snapshots SET state='sealed' WHERE request_id=:rid AND state='active'`. Returns True when the claim matched and the `UPDATE` matched a row. If the claim did not match, or the row exists but is not `active`, the transaction rolls back and it returns False. If the claim matched but **no snapshot row exists** (it should be unreachable after Task 5's fail-closed submit), log a WARNING and return True, so a graph turn is never abandoned in `running`.
   - `def discard_generation_snapshot(db: Session, request_id: str) -> None`
   - `class RollbackResult(str, Enum)`: `ROLLED_BACK = "rolled_back"`, `KEPT_FOREIGN_CHANGE = "kept_foreign_change"`, `REFUSED_FOREIGN_CHANGE = "refused_foreign_change"`, `NOT_LIVE = "not_live"`, `NO_SNAPSHOT = "no_snapshot"`, `RESTORE_FAILED = "restore_failed"`, `SEALED_KEPT = "sealed_kept"`
   - `def roll_back_generation(request_id: str, *, terminal_status: Literal["cancelled", "error"], error_message: str | None, refuse_on_foreign_change: bool) -> RollbackResult`
@@ -447,7 +447,7 @@ Models: test=opus impl=sonnet
     - its unconditional `is_processing = False` (`:470`) becomes a release matched on `processing_request_id`
     - requests without a snapshot (monolith) keep today's behaviour
 - Modify: `src/services/generation_rollback.py`:
-  - add `def recover_orphaned_generations(now: datetime | None = None) -> int`. It rolls back (`error`, error_message `"Generation interrupted"`, `refuse_on_foreign_change=False`) every live request that has an **active** snapshot and meets either condition:
+  - add `def recover_orphaned_generations(now: datetime | None = None) -> int`. It rolls back (`error`, error_message `"Generation interrupted"`, `refuse_on_foreign_change=False`) every live request that has a snapshot in `state IN ('active','sealed')` and meets either condition (active snapshots are restored; sealed ones return `SEALED_KEPT`, see below):
     - the actor session's `processing_request_id IS DISTINCT FROM request_id` (NULL-safe; on SQLite use `IS NOT`)
     - the session's `processing_started_at` is older than `ORPHAN_AFTER_SECONDS = 180`. That is three missed 60 s refreshes from `refresh_job_session_locks_once`.
   - A live request with a **sealed** snapshot whose job died goes through `roll_back_generation(…, terminal_status="error", error_message="Generation interrupted")`, which returns `SEALED_KEPT`. The finished deck stays.
@@ -499,8 +499,8 @@ Models: test=opus impl=opus
 - Modify: `src/services/spec_sync.py`, `claim_due_marker` (`:401`):
   - put "no live generation on this deck, and no `restore_failed` snapshot for it" (the same rule as `_live_generation_holder`) into the candidate subquery (`spec_sync.py:401-470` picks the deck inside the `UPDATE`), so a deck busy generating never starves the queue
   - then run it as two steps in one transaction:
-    1. select the candidate id, then `SELECT … FOR UPDATE` that deck row
-    2. re-check the live-generation predicate as its own statement and only then run the claim `UPDATE`
+    1. select the candidate id with the old subquery's predicates plus the new one, then `SELECT … FOR UPDATE` that deck row
+    2. re-check the live-generation predicate as its own statement, then run the claim `UPDATE`. In that `UPDATE`, `.where(id == <the locked literal id>)` replaces the scalar subquery, which is removed. It **keeps** `.where(unclaimed)` (`spec_sync.py:481-482`), which the docstring's exclusivity argument relies on.
   - Test: `test_live_generation_deck_does_not_block_other_due_decks`, `test_sweeper_skips_deck_with_restore_failed_snapshot`
   - submit (Task 5, step 3) takes the same row lock before its `review_in_flight` check and snapshot, so the two serialise. Under READ COMMITTED, a subquery inside the `UPDATE` alone could miss a snapshot committed while it waited.
 - Test: `tests/unit/test_generation_holds_editing_lock.py`
@@ -652,7 +652,7 @@ Models: test=opus impl=sonnet
 - **`ChatTurnError.rollback === 'kept_foreign_change'`:** use today's error path (`ErrorDisplay`, deck refetch, mode reconcile) with the failed-but-kept copy.
 - **`restore_failed`** (whether it arrives from polling or from the poll after a failed `cancelChat`): show the server's `error_message`, which is the restore-pending copy, in `ErrorDisplay`. Refresh messages and the deck as `finishAfterRollback` does, without its notice. This is the only rule for `restore_failed`.
 - **Network error, or 5xx from `cancelChat`:** poll the request once (`api.pollChat(requestId)`).
-  - `status` is terminal with `rollback === 'restore_failed'`: apply the `restore_failed` rule below.
+  - `status` is terminal with `rollback === 'restore_failed'`: apply the `restore_failed` rule above.
   - `status` is terminal with `rollback === 'rolled_back'`: `finishAfterRollback('cancelled')`.
   - still live: `ErrorDisplay` with the stop-failed copy; generation carries on.
 
