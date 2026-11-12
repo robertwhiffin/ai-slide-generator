@@ -40,6 +40,8 @@ ruling for the architect's tools: a refused write inside the runtime's tool loop
 image save, a Gateway image save, either tool's progress row) ENDS the turn.  It is
 never answered to the model in-band, and the architect makes no tool-less fallback
 call after it.  Any other tool error is still answered in-band, as today.
+``TestARefusedWriteEndsTheAnalystLoop`` pins the same for the data analyst (Genie
+One's progress row, a Gateway tool's progress row, no fallback call).
 
 Real SQLite schema throughout (``conftest_graph``); only the models, the brand
 resolvers, the image generator and the title model are stubbed.
@@ -51,6 +53,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional
@@ -67,7 +70,7 @@ from src.api.services.chat_service import ChatService
 from src.api.services.deck_level_writer import write_deck_level_columns
 from src.api.services.session_manager import SessionManager, get_session_manager
 from src.database.models.session import UserSession
-from src.domain.skill_io import OUTPUT_SCHEMAS, ArchitectOutput
+from src.domain.skill_io import OUTPUT_SCHEMAS, AnalystOutput, ArchitectOutput
 from src.services import image_generation as image_generation_service
 from src.services.agent_runtime import AgentModelConfiguration, DatabricksModelAdapter
 from src.services.agent_tools import image_generation_tool as image_tool_module
@@ -82,6 +85,7 @@ from src.services.agent_tools.image_generation_tool import (
     ImageToolContext,
     save_to_library,
 )
+from src.services.agent_tools.registry import GENIE_TOOL_NAME
 from src.services.agent_tools.toolset import AgentToolset
 from src.services.generation_fence import TurnFencedError
 from src.services.graph import nodes
@@ -94,6 +98,17 @@ from tests.unit.conftest_graph import (  # noqa: F401 -- fixtures
     graph_env_threadsafe,
     make_spec,
     review_out,
+)
+from tests.unit.test_data_analyst_genie_one import (
+    GENIE_ONE_ONLY,
+    Q1,
+    _analyst_state,
+    _Replay,
+    _serve,
+    _set_agent_config,
+    _sign_in,
+    _success,
+    q1_replies,
 )
 from tests.unit.test_generation_fence_writers import (
     _THREE,
@@ -112,10 +127,14 @@ from tests.unit.test_graph_gateway_mcp import (
     LAKEDRAW,
     LAKEDRAW_ROW,
     LAKEDRAW_TOOLS,
+    WEB,
+    WEB_ANALYST_ROW,
     _entry,
     _export_result,
     _gateway_deck,
     _Service,
+    _web_result,
+    _web_tools,
 )
 
 USER = "turn-author@example.com"
@@ -1077,13 +1096,15 @@ def _run_architect_turn(env, rid: str):
     return raised, updates
 
 
-def _assert_the_loop_ended(runtime: _LoopRuntime, raised, updates) -> None:
-    assert runtime.model.rounds == ["architect"], (
+def _assert_the_loop_ended(
+    runtime: _LoopRuntime, raised, updates, *, agent: str = "architect"
+) -> None:
+    assert runtime.model.rounds == [agent], (
         "a model round started after the refused write: "
         f"rounds={runtime.model.rounds}, runtime calls={runtime.calls}"
     )
-    assert runtime.calls == [("architect", True)], (
-        f"the architect was called again (a tool-less fallback?): {runtime.calls}"
+    assert runtime.calls == [(agent, True)], (
+        f"the {agent} was called again (a fallback call?): {runtime.calls}"
     )
     assert isinstance(raised, TurnFencedError), (
         f"the refused write did not end the turn; it raised {raised!r} and returned "
@@ -1237,6 +1258,97 @@ class TestARefusedWriteEndsTheToolLoop:
 
         assert lakedraw.calls == [], "the Gateway service was called after the turn was stopped"
         _assert_the_loop_ended(runtime, raised, updates)
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+
+def _analyst_final() -> AIMessage:
+    return tool_call_reply(AnalystOutput, _success())
+
+
+def _run_analyst_turn(env, rid: str):
+    """``data_analyst_node`` once, under *rid*; what it raised (or None) and returned."""
+    raised: Optional[BaseException] = None
+    updates: Any = None
+    with _in_turn(rid):
+        try:
+            updates = nodes.data_analyst_node(
+                _analyst_state(env, turn_started_at=time.time() - 5)
+            )
+        except Exception as exc:  # noqa: BLE001 - asserted by the caller
+            raised = exc
+    return raised, updates
+
+
+class TestARefusedWriteEndsTheAnalystLoop:
+    """The same ruling for the data analyst's tools: Genie One and its Gateway tools.
+
+    The request is cancelled while the model chooses its tool, so the tool's
+    progress row ("Asking Genie One: ...", "Web Search · ...") is the first
+    refused write.  It must end the loop and the node: no question is sent, no
+    service is called, no further model round starts and the analyst makes no
+    fallback call (Genie One's own toolset, or none).
+    """
+
+    def test_refused_genie_one_progress_row_ends_the_loop_before_asking(
+        self, env, monkeypatch
+    ):
+        """Today the Genie One tool swallows a failing progress row, so the question
+        is still sent (an answer takes minutes) and the model reads the answer in a
+        second round."""
+        rid = _request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        _set_agent_config(env, env.session_id, GENIE_ONE_ONLY)
+        _sign_in()
+        genie = _Replay(q1_replies())
+        _serve(monkeypatch, genie)
+
+        def stop_then_ask():
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+            return _tool_call(GENIE_TOOL_NAME, {"question": Q1})
+
+        runtime = install_runtime(
+            monkeypatch, _LoopRuntime(_CountingModel(stop_then_ask, _analyst_final()))
+        )
+
+        raised, updates = _run_analyst_turn(env, rid)
+
+        assert genie.asks() == [], (
+            f"Genie One was asked after the turn was stopped: {genie.asks()}"
+        )
+        _assert_the_loop_ended(runtime, raised, updates, agent="data_analyst")
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_refused_gateway_progress_row_ends_the_analyst_without_a_fallback(
+        self, env, monkeypatch
+    ):
+        """A Gateway tool's refused progress row leaves the loop (Task 3b).  Without
+        the analyst's own re-raise, ``without_tools`` claims the failure as the
+        Gateway pass's and the analyst calls the model again without tools."""
+        rid = _request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        web = _Service(WEB, _web_tools(), results={"web_search": _web_result()})
+        _gateway_deck(
+            env,
+            monkeypatch,
+            entries=[_entry(WEB, "Web Search")],
+            rows=[WEB_ANALYST_ROW],
+            services=[web],
+        )
+
+        def stop_then_search():
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+            return _tool_call("web_search", {"query": "Databricks AI Gateway MCP services"})
+
+        runtime = install_runtime(
+            monkeypatch, _LoopRuntime(_CountingModel(stop_then_search, _analyst_final()))
+        )
+
+        raised, updates = _run_analyst_turn(env, rid)
+
+        assert web.calls == [], "the Gateway service was called after the turn was stopped"
+        _assert_the_loop_ended(runtime, raised, updates, agent="data_analyst")
         _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
 
 

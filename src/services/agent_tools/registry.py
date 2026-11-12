@@ -47,6 +47,7 @@ from src.services.agent_tools.toolset import (
     ToolAccessError,
     ToolAccessKind,
 )
+from src.services.generation_fence import TurnFencedError
 from src.utils.spotlight import spotlight
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,10 @@ class GenieOneAgentTool:
         self._asked += 1
         try:
             self._on_question(question)
+        except TurnFencedError:
+            # The progress row was refused: the turn was stopped, so the question
+            # is never sent.
+            raise
         except Exception:  # noqa: BLE001 - a progress line never stops the question
             logger.warning("Genie One progress line failed (ignored)", exc_info=True)
         try:
