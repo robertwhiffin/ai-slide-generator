@@ -74,6 +74,17 @@ Occasionally one slide fails while the rest of the deck is built. When that happ
 - If the message says a slide is shown without its automatic fix, the slide is still there as first built. Open the **AI feedback** drawer under the slide and choose **Apply** next to an issue to try the fix again.
 - Some messages have a collapsed **Details** line underneath. Expand it to see technical information (stage, error and request ID) to share with support.
 
+## Stopping a Generation
+
+While a request runs on a deck, the **Send** button turns into a **Stop** button, and the hint under the box reads "Esc to cancel". Click **Stop** or press **Esc** to cancel the request.
+
+Stopping is all-or-nothing. Tellr puts the deck and the conversation back exactly as they were before you sent your message, so nothing from the cancelled request is kept: no half-built slides and no partial changes. Your message returns to the box so you can edit it and send it again, and a note confirms "Generation cancelled. Nothing was changed."
+
+- If slides are already being built, Tellr asks "Stop generating?" first, because everything built so far is thrown away. **Keep generating** is selected by default; choose **Stop and discard** to cancel.
+- If the request fails, Tellr undoes it the same way and tells you "Generation failed. Nothing was changed."
+- If someone else edited the deck after you sent your message, Tellr can't roll it back without losing their edit, so it refuses to stop and the generation carries on.
+- Stopping is not available on decks that use the Legacy engine.
+
 ## Clearing the Chat
 
 A long conversation can drift. To start the conversation over without losing your deck, click **Clear chat** at the top of the chat panel, on the right of the "AI Assistant" heading. Clear chat resets the whole conversation; to remove one exchange, see [Deleting a Message](#deleting-a-message).

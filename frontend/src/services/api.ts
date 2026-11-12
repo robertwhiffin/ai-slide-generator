@@ -80,7 +80,7 @@ async function throwGatewayAdminError(response: Response, fallback: string): Pro
  * In production mode, we always use polling to be safe.
  * In development, we use SSE for faster feedback.
  */
-const isPollingMode = (): boolean => {
+export const isPollingMode = (): boolean => {
   // Explicit override via environment variable
   if (import.meta.env.VITE_USE_POLLING === 'true') {
     return true;

@@ -57,7 +57,7 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callba
   }, []);
 
   return (
-    <div data-testid="feedback-drawer" className="flex flex-col border-t border-border bg-card">
+    <div data-testid="feedback-drawer" data-escape-owner className="flex flex-col border-t border-border bg-card">
       {drawerOpen && (
         // Resize handle: visually 1px but padded to 8px tall for an ergonomic
         // grab target. aria-role and label make it accessible.

@@ -620,6 +620,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [renameSession, slideDeck]);
 
+  // Interrupt generation: the server's deck after a rollback replaces whatever the viewer showed mid-turn.
+  // Forced, because it can be older than the mid-turn view. With no deck, reset the version guard as
+  // handleNewSession does, or the next first generation's version-1 deck would be rejected.
+  const handleDeckRestored = useCallback((deck: SlideDeck | null) => {
+    if (deck) {
+      setSlideDeckGated(deck, deck.version, true);
+    } else {
+      deckVersionRef.current = 0;
+      setSlideDeck(null);
+    }
+  }, [setSlideDeckGated]);
+
   const handleNewSession = useCallback(async () => {
     deckVersionRef.current = 0;
     setSlideDeck(null);
@@ -1281,6 +1293,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                         }
                       }}
                       onDeckRefetched={(deck) => setSlideDeckGated(deck, deck.version)}
+                      onDeckRestored={handleDeckRestored}
                       viewOnlyReason={viewOnlyReason}
                     />
                   </div>

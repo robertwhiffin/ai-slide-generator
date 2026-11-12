@@ -1,3 +1,5 @@
+import type { TurnProgress } from '../../types/turnProgress';
+
 /** Stop-generation UI copy (interrupt generation). Exact strings; tests pin them. */
 
 export const STOP_TOOLTIP = 'Stop generating (Esc)';
@@ -22,4 +24,9 @@ const DIALOG_TAIL =
 export function stopDialogMessage(done: number, total: number): string {
   const progress = total > 0 ? ` (${done} of ${total} done)` : '';
   return `Your slides are being built${progress}. ${DIALOG_TAIL}`;
+}
+
+/** Stopping while slides are being built (or the finished deck reviewed) throws work away: ask first. */
+export function stopNeedsConfirmation(progress: TurnProgress | null): boolean {
+  return progress?.phase === 'building' || progress?.phase === 'reviewing_deck';
 }

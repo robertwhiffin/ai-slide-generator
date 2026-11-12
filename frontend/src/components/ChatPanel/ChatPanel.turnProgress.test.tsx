@@ -46,7 +46,8 @@ const h = vi.hoisted(() => {
   };
 });
 
-vi.mock('../../services/api', () => ({
+vi.mock('../../services/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/api')>()),
   api: {
     getSession: (...a: unknown[]) => h.getSession(...a),
     sendChatMessage: (...a: unknown[]) => h.sendChatMessage(...a),

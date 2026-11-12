@@ -40,7 +40,8 @@ const deckModeSession = {
   setStoredDeckMode: vi.fn(),
 };
 
-vi.mock('../../services/api', () => ({
+vi.mock('../../services/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/api')>()),
   api: {
     getSession: (...a: Parameters<typeof getSession>) => getSession(...a),
     getSlides: (...a: Parameters<typeof getSlides>) => getSlides(...a),
