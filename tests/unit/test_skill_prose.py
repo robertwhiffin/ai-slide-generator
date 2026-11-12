@@ -345,6 +345,9 @@ class TestPackagedDataAnalystPrompt:
         "natural-language data analyst",
         "Ask ONE question",
         "Write a synthesis, not a copy",
+        # Task 8b (evals/configs/data_analyst/multi-source.md): several data sources, read-only.
+        "Prefer the Genie Agent whose description fits the question.",
+        "Use tools only to read. Never ask a tool to send, post, create, edit or delete anything",
     )
     FORBIDDEN = ("pass it through verbatim", "vector_index")
 

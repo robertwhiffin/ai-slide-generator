@@ -73,8 +73,10 @@ HEAD_ARCHITECT_HASH_WITHOUT_PROMPT = (
 # (evals/configs/builder/one-footer-source.yaml, Ruling RA19).
 # build_reviewer is unchanged (Ruling R10).
 HEAD_OTHER_ROLE_CONTENT_HASHES = {
-    # Re-pinned: the data analyst was upgraded to protected assembly v2 with a Genie One prompt.
-    "data_analyst": "5bc26a1779f5e9d0da693356b2c77ed2093273912d400c8f98adad7c6b872c96",
+    # Re-pinned: the data analyst was upgraded to protected assembly v2 with a Genie One prompt,
+    # then for its promoted multi-source, read-only prompt
+    # (evals/configs/data_analyst/multi-source.yaml, Task 8b).
+    "data_analyst": "9cacf793fdb4075b3ca311ba60addfb4d735c3a9742d94f060516961a8df09d1",
     "builder": "a0b6c836e54acdc494e0934573b45a0d1ee8a6315c4ecc819be2f7e2c4a4df38",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "5b0186f54e576b885efad0cd33aa67870ca90db300aae9a3314fa7f713610f8f",
@@ -135,7 +137,10 @@ HEAD_UNCHANGED_BLOCK_HASHES = {
     # sentence now sends the footer logo to deck_style_context.logos and icons to the
     # builders' search, while furniture in the selected section's markup stays as it ships
     # (BINDING_RULES still holds).  Every other byte of the block is unchanged.
-    "visual_template_binding": "7d27ec3cebd400f1ee6cfb79be97881df8d03c3fe8d0e61628ba1abbc6e556ed",
+    # Re-pinned by the data-sources prompt (Task 8b): its last sentence now prefers ask_data
+    # only "when `data_sources` lists a source that could hold the figures" (BINDING_RULES
+    # pins the new phrase).  Every other byte of the block is unchanged.
+    "visual_template_binding": "fafdaf6804ae9ec67e5a36d6c4f2c5a5743694ce02abd0f4ed3467ec7cbda981",
 }
 
 # The pre-Task-5 SLIDESPEC FIELDS block.  It must no longer appear verbatim.
@@ -193,6 +198,21 @@ ASK_DATA_PAYLOAD_PHRASES = (
     "in data_request.metric",
     '"which pickup areas are busiest, and how do their fares compare?"',
     "fill time_bound and grouping only when the user specified them",
+)
+# Task 8b (evals/configs/architect/data-sources.md): the architect is told what the analyst can
+# query (`data_sources`), and that its tools only read.  Matched over the backtick-free,
+# normalised block (_plain).
+DATA_SOURCES_PHRASES = (
+    "the payload's data_sources lists what the data analyst can query",
+    "choose ask_data only when the deck needs figures that a listed source could hold",
+    "when data_sources is empty, nothing can fetch data, so do not choose ask_data",
+    "build from what the user gave, and say in message which data would help",
+)
+READ_ONLY_TOOLS_PHRASES = (
+    "your mcp tools are for reading, and for producing material for the deck",
+    "never use them to send, post, create records, edit or delete anything in other systems",
+    "if the user asks for such a change, answer discuss and say in message that tellr does not "
+    "make changes in other systems",
 )
 # The retired edit-line rule: an edit had to carry targets and the whole revised spec.
 RETIRED_EDIT_PAYLOAD_PHRASES = (
@@ -354,6 +374,19 @@ def test_ask_data_payload_rule_asks_for_a_plain_language_business_question():
     line = _ask_data_payload_line(INSTRUCTIONS)
     for phrase in ASK_DATA_PAYLOAD_PHRASES:
         assert phrase in _norm(line), f"ask_data payload line lacks {phrase!r}: {line!r}"
+
+
+@pytest.mark.parametrize(
+    ("heading", "phrases"),
+    [("DATA SOURCES", DATA_SOURCES_PHRASES), ("READ-ONLY TOOLS", READ_ONLY_TOOLS_PHRASES)],
+    ids=["data_sources", "read_only_tools"],
+)
+def test_data_sources_and_read_only_tools_blocks_state_their_rules(heading, phrases):
+    blocks = [b for b in INSTRUCTIONS.split("\n\n") if b.startswith(heading + "\n")]
+    assert len(blocks) == 1, f"expected exactly one {heading!r} block, found {len(blocks)}"
+    block = _plain(blocks[0])
+    for phrase in phrases:
+        assert phrase in block, f"{heading} block lacks {phrase!r}"
 
 
 def test_prompt_no_longer_requires_targets_and_deck_spec_on_an_edit():
@@ -563,9 +596,11 @@ BINDING_RULES = (
     ),
     ("style assets are identity, not evidence", r"identity,? not evidence"),
     (
-        "do not plan exhibits onto missing data; prefer ask_data",
-        r"(never|do not|don't) plan exhibits[^.]{0,80}missing data[^.]{0,80}ask_data|"
-        r"ask_data[^.]{0,80}missing data|missing data[^.]{0,120}ask_data",
+        # Task 8b: ask_data only when a listed data source could hold the figures.
+        "do not plan exhibits onto missing data; prefer ask_data when data_sources lists a "
+        "source that could hold the figures",
+        r"(never|do not|don't) plan exhibits[^.]{0,80}missing data[^.]{0,80}ask_data"
+        r"[^.]{0,20}\bwhen data_sources lists\b[^.]{0,40}\bsource\b[^.]{0,40}figures",
     ),
 )
 

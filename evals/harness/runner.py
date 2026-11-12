@@ -434,12 +434,14 @@ def _fake_data_toolset(record: list[dict]) -> AgentToolset:
     return AgentToolset(tools=(genie, sales, web), max_calls=calls_left, budget_seconds=seconds_left)
 
 
-#: The toolset of the run in flight on this thread (brand search or image tool), or ``None``.
+#: The toolset of the run in flight on this thread (brand search, image tool or the analyst's
+#: data tools), or ``None``.
 _RUN_TOOLSET: ContextVar[AgentToolset | None] = ContextVar("eval_run_toolset", default=None)
 
 
 class _ToolLoopAdapter:
-    """The Runner's model seam: the production tool loop for a run that binds the search.
+    """The Runner's model seam: the production tool loop for a run that binds a toolset (the
+    brand search, the image tool or the analyst's data tools).
 
     The runtime calls ``invoke`` with its four keywords, as for every test run.  With the
     run's toolset set (:data:`_RUN_TOOLSET`) this calls the inner adapter's
@@ -563,8 +565,10 @@ class Runner:
         A builder or fixer run on a deck style with a design system active is handed the
         brand-search toolset over the fake backend (``_binds_brand_search``); an architect run
         of a config that opts in is handed the image tool over fake backends
-        (``_binds_image_tool``); every other run binds no tool, exactly as before.  Each attempt
-        gets a fresh toolset and record, so its budget is its own and the result's
+        (``_binds_image_tool``); a data_analyst run of a config that opts in (``data_tools``)
+        is handed the fake data tools, Genie One, the Sales Genie Agent and a web search
+        (``_binds_data_tools``); every other run binds no tool, exactly as before.  Each
+        attempt gets a fresh toolset and record, so its budget is its own and the result's
         ``tool_calls`` are the calls of the attempt it reports.
         """
         binds_search = _binds_brand_search(config, payload, design_system_active)

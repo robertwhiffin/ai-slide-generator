@@ -483,7 +483,9 @@ def test_data_tool_score_fails_on_a_different_first_call(record, expect):
     [_call("genie_agent_sales", question=BUSINESS_Q),
      _call("genie_agent_sales", question="select region, sum(units) from orders")],
     [_call("genie_agent_sales", question=BUSINESS_Q), _call("genie", question=SQL_Q)],
-], ids=["first-call", "later-call-lower-case", "another-tool"])
+    # The ruling: the regex is DOTALL, so SQL split over lines is still SQL.
+    [_call("genie_agent_sales", question="SELECT region\nFROM sales")],
+], ids=["first-call", "later-call-lower-case", "another-tool", "multi-line"])
 def test_data_tool_score_fails_on_a_sql_question_when_no_sql(record):
     ok, why = _score(record, FITS)
     assert ok is False, why

@@ -1,0 +1,11 @@
+# `multi-source` (the same prompt file, so the same content_hash) with the fake data tools bound:
+# Genie One (`genie`), one Genie Agent (`genie_agent_sales`) and a Gateway MCP web search
+# (`you-search`). Use it ONLY for the data_tools case set:
+#   python -m evals.run_eval --agent data_analyst \
+#     --config evals/configs/data_analyst/multi-source-tools.yaml --case-set data_tools
+# Train, held-out and promote use `multi-source.yaml`, which binds no tool.
+agent_key: data_analyst
+name: multi-source-tools
+base: v1
+prompt_file: multi-source.md
+data_tools: true

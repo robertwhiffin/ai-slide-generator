@@ -16,7 +16,7 @@ The analyst judge sees the request and the answer, never the tool record, so a s
 different outcome from the reference.
 
 Run: ``python -m evals.packs.data_analyst.data_tools``. Sweep: ``python -m evals.run_eval --agent
-data_analyst --config evals/configs/data_analyst/data-tools.yaml --case-set data_tools``.
+data_analyst --config evals/configs/data_analyst/multi-source-tools.yaml --case-set data_tools``.
 """
 import pathlib
 
