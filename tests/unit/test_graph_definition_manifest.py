@@ -734,8 +734,8 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "e48069574db8d58618a1828d54d4904fedb005b167aeef079f60f8a4c25a7016",
-    "data_analyst": "9cacf793fdb4075b3ca311ba60addfb4d735c3a9742d94f060516961a8df09d1",
+    "architect": "6959313bbdb433ab250dddfe50fd0babf8471d03f61e82d823db42b9def746af",
+    "data_analyst": "26ca3192ebf6da1ac6f9482d0579ec183a1e353e356cbf064e576f73f07a026e",
     "builder": "a0b6c836e54acdc494e0934573b45a0d1ee8a6315c4ecc819be2f7e2c4a4df38",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "5b0186f54e576b885efad0cd33aa67870ca90db300aae9a3314fa7f713610f8f",
@@ -1195,9 +1195,10 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
     # brand-footer prompt (Addendum A), then for main's Genie One ask_data line
     # (genie-questions) merged into it (brand-footer-genie), then for the brief-starter
     # deck-scale block (a five-to-eight-slide starter replaces the 14-20 default), then for
-    # the data-sources prompt (DATA SOURCES and READ-ONLY TOOLS blocks, Task 8b).
+    # the data-sources prompt (DATA SOURCES and READ-ONLY TOOLS blocks, Task 8b), then for
+    # its READ-ONLY TOOLS block worded as the spec words it (data-sources-b, final review).
     assert definition_content_hash(built({"1": "a"})) == (
-        "bfd9097bba6032c7c3197dc29762ab0685cf3ec156015971826f1395c2122c05"
+        "041d52ef7ae088105400f9259bbf0edba079b7b06749a75d82ed4cbb05bb2bc8"
     )
 
 
