@@ -83,16 +83,10 @@ interface SlideContext {
 }
 ```
 
-**ChatResponse** (from `/api/chat`):
-```ts
-interface ChatResponse {
-  messages: Message[];
-  slide_deck: SlideDeck | null;
-  raw_html: string | null;
-  metadata: ChatMetadata;
-  replacement_info?: ReplacementInfo;
-}
-```
+**Chat transport:** `api.sendChatMessage()` selects SSE (`POST /api/chat/stream`)
+locally or async submission and polling (`POST /api/chat/async`, then
+`GET /api/chat/poll/{request_id}`) on Databricks Apps. Both resolve the deck's
+mode. The unused synchronous `POST /api/chat` endpoint has been removed (#286).
 
 ---
 
@@ -100,8 +94,8 @@ interface ChatResponse {
 
 ### Generate Slides
 1. User enters prompt in `ChatInput`
-2. `ChatPanel.handleSendMessage()` calls `api.sendMessage()`
-3. Backend returns `ChatResponse` with new `slide_deck`
+2. `ChatPanel.handleSendMessage()` calls `api.sendChatMessage()`
+3. Backend delivers events through SSE or async/polling, including the generated deck
 4. `AppLayout` updates `slideDeck` and `rawHtml` state
 5. `SlidePanel` renders tiles, `SelectionRibbon` shows thumbnails
 
@@ -125,7 +119,9 @@ interface ChatResponse {
 
 | Function | Method | Endpoint |
 |----------|--------|----------|
-| `sendMessage` | POST | `/api/chat` |
+| `streamChat` | POST | `/api/chat/stream` |
+| `submitChatAsync` | POST | `/api/chat/async` |
+| `pollChat` | GET | `/api/chat/poll/{request_id}` |
 | `getSlides` | GET | `/api/slides` |
 | `reorderSlides` | PUT | `/api/slides/reorder` |
 | `updateSlide` | PATCH | `/api/slides/{index}` |

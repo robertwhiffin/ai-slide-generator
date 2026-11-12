@@ -214,7 +214,7 @@ test.describe('User Guide: Exporting to Google Slides', () => {
       // Mock slide deck so the export button is available
       const { mockSlides, createStreamingResponse } = await import('../fixtures/mocks');
       
-      await page.route('http://127.0.0.1:8000/api/chat', (route) => {
+      await page.route('http://127.0.0.1:8000/api/chat/stream', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'text/event-stream',

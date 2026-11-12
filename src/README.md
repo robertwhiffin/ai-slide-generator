@@ -19,7 +19,7 @@ src/
 ├── api/                    # FastAPI application
 │   ├── main.py             # App entry point, CORS, routers
 │   ├── routes/
-│   │   ├── chat.py         # POST /api/chat
+│   │   ├── chat.py         # SSE and async/polling chat endpoints
 │   │   ├── slides.py       # Slide CRUD endpoints
 │   │   ├── sessions.py     # Session management
 │   │   └── settings/       # Config profile endpoints
@@ -135,7 +135,9 @@ Database-backed session persistence:
 
 | Method | Path | Handler | Purpose |
 |--------|------|---------|---------|
-| POST | `/api/chat` | `chat.send_message` | Generate or edit slides |
+| POST | `/api/chat/stream` | `chat.send_message_streaming` | Generate or edit slides via SSE |
+| POST | `/api/chat/async` | `chat.submit_chat_async` | Queue a chat turn |
+| GET | `/api/chat/poll/{request_id}` | `chat.poll_chat` | Poll turn progress and results |
 | GET | `/api/slides` | `slides.get_slides` | Get current deck |
 | PUT | `/api/slides/reorder` | `slides.reorder_slides` | Reorder slides |
 | PATCH | `/api/slides/{idx}` | `slides.update_slide` | Edit slide HTML |

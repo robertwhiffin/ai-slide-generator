@@ -22,7 +22,7 @@ The pipeline narrative below focuses on the shared HTML/CSS/script path that con
 3. **API Layer**
    - REST endpoints in `src/api/routes/slides.py` expose deck operations (get, reorder, update, duplicate, delete).
 4. **Frontend Consumption**
-   - `frontend/src/services/api.ts` talks to `/api/chat` and `/api/slides`.
+   - `frontend/src/services/api.ts` uses chat streaming or async/polling and the `/api/slides` endpoints.
    - `ChatPanel` feeds new decks into React state; `SlidePanel` renders individual slides using `slide.scripts`.
 
 ---
@@ -246,10 +246,7 @@ Key simplification: **No manual script cleanup needed**. When a slide is removed
 ---
 
 ### 4. API Surface
-- `POST /api/chat` (see `src/api/routes/chat.py` via `ChatService.send_message`) returns:
-  - `slide_deck`: serialized `SlideDeck` with per-slide scripts.
-  - `raw_html`: canonical HTML string.
-  - `replacement_info`: metadata for UI messaging (sanitized to remove Slide objects).
+- Chat uses `POST /api/chat/stream` (SSE) or `POST /api/chat/async` followed by `GET /api/chat/poll/{request_id}`. Completion events/results deliver the serialized deck, canonical HTML, and replacement metadata for UI messaging. The unused synchronous `POST /api/chat` endpoint has been removed (#286).
 - `GET /api/slides`, `PUT /api/slides/reorder`, `PATCH /api/slides/{index}`, etc. are thin wrappers around `ChatService` helpers.
 
 `frontend/src/services/api.ts` wraps these endpoints. Example:
