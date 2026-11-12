@@ -17,9 +17,20 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
+from src.services.generation_fence import TurnStopped
 from src.services.persisted_graph_release import PersistedRuntimeError
 
 logger = logging.getLogger(__name__)
+
+# How often (seconds) a graph turn's consumer reads the turn's status while it
+# waits on the graph.  A stop, timeout or orphan rollback ends the turn in the
+# database, from any process; the consumer notices within about this long and
+# frees the job runner, though the abandoned graph thread may still be blocked
+# in a model call (its next write is refused by the fence).
+STOP_POLL_SECONDS = 1.0
+
+#: ``error_message`` of a ``running`` request the startup pass finds stuck.
+CRASH_RECOVERY_ERROR = "Request timed out (worker crash recovery)"
 
 # In-memory job tracking (request_id -> metadata)
 jobs: Dict[str, Dict[str, Any]] = {}
@@ -331,6 +342,15 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
             session_manager.set_chat_request_result(request_id, result)
             session_manager.update_chat_request_status(request_id, "completed")
 
+    except TurnStopped:
+        # A graph turn ended in the database (a stop, a timeout, an orphan
+        # rollback) while its graph was still running.  Whoever ended it wrote
+        # its status; the runner is free now, and the finally releases only
+        # what this request still owns.
+        logger.info(
+            "Chat job ended: its turn was stopped", extra={"request_id": request_id}
+        )
+
     except _PinnedGraphConfigurationTerminalError:
         if not is_graph:
             session_manager.update_chat_request_status(
@@ -521,47 +541,122 @@ async def stop_workers(tasks: List[asyncio.Task]) -> None:
     shutdown_chat_executor()
 
 
-async def recover_stuck_requests() -> int:
-    """Mark running requests as error if worker died.
+def _stuck_requests() -> List[tuple]:
+    """``(request_id, session pk, has a snapshot)`` of every request still
+    ``running`` past the longest hard timeout."""
+    from sqlalchemy import exists, select
 
-    Called on startup to recover from crashes.
+    from src.core.database import get_db_session
+    from src.database.models.generation_snapshot import GenerationSnapshot
+    from src.database.models.session import ChatRequest
+
+    cutoff = datetime.utcnow() - timedelta(seconds=GRAPH_JOB_HARD_TIMEOUT_SECONDS)
+    has_snapshot = (
+        exists()
+        .where(GenerationSnapshot.request_id == ChatRequest.request_id)
+        .correlate(ChatRequest)
+    )
+    with get_db_session() as db:
+        return [
+            tuple(row)
+            for row in db.execute(
+                select(ChatRequest.request_id, ChatRequest.session_id, has_snapshot)
+                .where(ChatRequest.status == "running", ChatRequest.created_at < cutoff)
+                .order_by(ChatRequest.id)
+            )
+        ]
+
+
+def _fail_stuck_request(request_id: str, session_pk: int) -> bool:
+    """A stuck request with nothing to restore (a monolith one): ``error``, and
+    its session's lock freed unless a newer request has taken it.
+
+    An unbound lock (MCP jobs never bind theirs) counts as this request's.
+    """
+    from sqlalchemy import or_, update
+
+    from src.core.database import get_db_session
+    from src.database.models.session import ChatRequest, UserSession
+
+    with get_db_session() as db:
+        failed = db.execute(
+            update(ChatRequest)
+            .where(ChatRequest.request_id == request_id, ChatRequest.status == "running")
+            .values(
+                status="error",
+                error_message=CRASH_RECOVERY_ERROR,
+                completed_at=datetime.utcnow(),
+            )
+            .execution_options(synchronize_session=False)
+        ).rowcount
+        if failed != 1:
+            return False
+        db.execute(
+            update(UserSession)
+            .where(
+                UserSession.id == session_pk,
+                or_(
+                    UserSession.processing_request_id.is_(None),
+                    UserSession.processing_request_id == request_id,
+                ),
+            )
+            .values(is_processing=False, processing_started_at=None, processing_request_id=None)
+            .execution_options(synchronize_session=False)
+        )
+        return True
+
+
+async def recover_stuck_requests() -> int:
+    """End the requests a dead worker left behind.
+
+    Called on startup to recover from crashes.  First the orphan sweep
+    (``recover_orphaned_generations``): every live Agent-deck turn whose lock is
+    no longer refreshed is rolled back, and every failed restore retried.  Then
+    every request still ``running`` past ``GRAPH_JOB_HARD_TIMEOUT_SECONDS``: one
+    with a generation snapshot is rolled back to Enter; any other (a Legacy deck's
+    turn, an MCP job) is marked ``error`` as before, its lock freed unless a newer
+    request holds it.  One request's error is logged and the others go on.
 
     Returns:
         Number of requests recovered
     """
-    from src.api.services.session_manager import get_session_manager
-    from src.core.database import get_db_session
-    from src.database.models.session import ChatRequest, UserSession
+    from src.services.generation_rollback import (
+        RollbackResult,
+        recover_orphaned_generations,
+        roll_back_generation,
+    )
 
-    session_manager = get_session_manager()
     count = 0
+    try:
+        count += await asyncio.to_thread(recover_orphaned_generations)
+    except Exception:
+        logger.warning("Orphaned generation sweep failed at startup", exc_info=True)
 
-    with get_db_session() as db:
-        stuck = (
-            db.query(ChatRequest)
-            .filter(
-                ChatRequest.status == "running",
-                ChatRequest.created_at
-                < datetime.utcnow() - timedelta(seconds=GRAPH_JOB_HARD_TIMEOUT_SECONDS),
+    for request_id, session_pk, has_snapshot in await asyncio.to_thread(_stuck_requests):
+        try:
+            if has_snapshot:
+                result = await asyncio.to_thread(
+                    roll_back_generation,
+                    request_id,
+                    terminal_status="error",
+                    error_message=CRASH_RECOVERY_ERROR,
+                    refuse_on_foreign_change=False,
+                )
+                recovered = result is not RollbackResult.NOT_LIVE
+            else:
+                recovered = await asyncio.to_thread(
+                    _fail_stuck_request, request_id, session_pk
+                )
+        except Exception:
+            logger.exception(
+                "Could not recover a stuck request", extra={"request_id": request_id}
             )
-            .all()
-        )
-
-        for req in stuck:
-            req.status = "error"
-            req.error_message = "Request timed out (worker crash recovery)"
-            req.completed_at = datetime.utcnow()
-
-            # Release any session locks
-            session = db.query(UserSession).get(req.session_id)
-            if session:
-                session.is_processing = False
-                session.processing_started_at = None
-
+            continue
+        if recovered:
             count += 1
 
-        if count > 0:
-            logger.info(f"Recovered {count} stuck requests")
+    if count > 0:
+        logger.info(f"Recovered {count} stuck requests")
 
     return count
 
@@ -575,14 +670,20 @@ async def mark_timed_out_jobs_once() -> int:
     the status to ``"failed"`` and records an explanatory error. Jobs with
     no ``started_at`` are left untouched (we cannot determine age).
 
-    Does NOT cancel the underlying worker coroutine — it only marks the
-    in-memory record. A stuck worker slot remains occupied until the next
-    app restart. See the spec's Error Handling section for the reasoning
-    behind this choice.
+    A timed-out graph job (an Agent deck's turn) is also rolled back to Enter
+    (``error``, the same text, never refused on a foreign change), in a worker
+    thread.  Its consumer then sees the turn is no longer live and frees the
+    runner, though the graph thread may still be blocked.  A monolith job is
+    only marked: it does NOT cancel the underlying worker coroutine, and a stuck
+    worker slot remains occupied until the next app restart.  See the spec's
+    Error Handling section for the reasoning behind this choice.  One entry's
+    rollback error is logged and the sweep goes on.
 
     Returns:
         Number of jobs marked failed in this sweep (useful for logging).
     """
+    from src.services.generation_rollback import roll_back_generation
+
     now = datetime.utcnow()
     marked = 0
 
@@ -611,6 +712,22 @@ async def mark_timed_out_jobs_once() -> int:
                 "age_seconds": (now - started_at).total_seconds(),
             },
         )
+        if entry.get("engine_mode") != "graph":
+            continue
+        try:
+            await asyncio.to_thread(
+                roll_back_generation,
+                request_id,
+                terminal_status="error",
+                error_message=entry["error"],
+                refuse_on_foreign_change=False,
+            )
+        except Exception:
+            logger.warning(
+                "Could not roll back a timed-out graph turn",
+                exc_info=True,
+                extra={"request_id": request_id},
+            )
 
     return marked
 
@@ -622,6 +739,12 @@ async def refresh_job_session_locks_once() -> int:
     graph turn may run for ``GRAPH_JOB_HARD_TIMEOUT_SECONDS`` and a queued turn waits
     first.  Without this a second turn on the same session could take the stale lock
     and run alongside the first.  A failed refresh is logged and the others go on.
+
+    A graph entry refreshes its session's lock only while the lock is bound to its
+    own request: an entry whose turn was stopped while it was queued must not keep
+    a newer request's lock alive (that request's process may have died).  A
+    monolith entry (a Legacy deck's turn, an MCP job) refreshes whatever its
+    session holds, as before.
 
     Returns:
         Number of locks refreshed.
@@ -642,18 +765,25 @@ async def refresh_job_session_locks_once() -> int:
         limit = job_hard_timeout_seconds(entry.get("engine_mode"))
         return queued_at is None or queued_at > now - timedelta(seconds=limit)
 
-    session_ids = {
-        entry["session_id"]
-        for entry in list(jobs.values())
+    # (session_id, request id the lock must be bound to, or None for any).
+    targets = {
+        (entry["session_id"], request_id if entry.get("engine_mode") == "graph" else None)
+        for request_id, entry in list(jobs.items())
         if entry.get("session_id") and _alive(entry)
     }
-    if not session_ids:
+    if not targets:
         return 0
     manager = get_session_manager()
     refreshed = 0
-    for session_id in session_ids:
+    for session_id, bound_to in targets:
         try:
-            if await asyncio.to_thread(manager.refresh_session_lock, session_id):
+            if bound_to is None:
+                ok = await asyncio.to_thread(manager.refresh_session_lock, session_id)
+            else:
+                ok = await asyncio.to_thread(
+                    manager.refresh_session_lock, session_id, request_id=bound_to
+                )
+            if ok:
                 refreshed += 1
         except Exception:
             logger.warning(
@@ -667,19 +797,29 @@ async def refresh_job_session_locks_once() -> int:
 async def mark_timed_out_jobs_loop() -> None:
     """Background loop: every 60 seconds, keeps held session locks live and marks timed-out jobs.
 
-    Runs ``mark_timed_out_jobs_once()`` then ``refresh_job_session_locks_once()``.
+    Runs ``mark_timed_out_jobs_once()``, then ``refresh_job_session_locks_once()``,
+    then ``recover_orphaned_generations()`` in a worker thread (it restores decks):
+    every process sweeps every Agent-deck turn whose job is gone, and retries
+    every failed restore.
 
     Started in the FastAPI lifespan alongside the existing chat/export workers
     and request-log cleanup loop. Survives its own exceptions so a single
     transient failure does not take the loop down for the lifetime of the
     process. Responds to ``asyncio.CancelledError`` for clean shutdown.
     """
+    from src.services import generation_rollback
+
     while True:
         try:
             await asyncio.sleep(TIMEOUT_SWEEP_INTERVAL_SECONDS)
             # Mark first, so a turn that just timed out is not refreshed once more.
             marked = await mark_timed_out_jobs_once()
             await refresh_job_session_locks_once()
+            # After the refresh, so this process's own live turns are fresh.
+            try:
+                await asyncio.to_thread(generation_rollback.recover_orphaned_generations)
+            except Exception:
+                logger.warning("Orphaned generation sweep failed", exc_info=True)
             if marked:
                 logger.info(
                     "Timeout sweep marked %d job(s) as failed", marked

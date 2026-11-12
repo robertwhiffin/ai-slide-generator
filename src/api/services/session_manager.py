@@ -4108,7 +4108,7 @@ class SessionManager:
             )
             return True
 
-    def refresh_session_lock(self, session_id: str) -> bool:
+    def refresh_session_lock(self, session_id: str, request_id: Optional[str] = None) -> bool:
         """Keep a held processing lock live: set ``processing_started_at`` to now.
 
         A lock goes stale after ``SESSION_LOCK_TIMEOUT_SECONDS``, but a graph turn may
@@ -4117,18 +4117,22 @@ class SessionManager:
         (``job_queue.refresh_job_session_locks_once``), so a lock outlives the timeout
         only while its turn is running and not yet timed out, or queued for less than
         its hard timeout.  Only a lock still held (``is_processing``) is refreshed; a
-        released lock is never revived.
+        released lock is never revived.  With ``request_id``, only while that request
+        owns the lock (``processing_request_id``); without it, as before.
 
         Returns:
             True if a held lock was refreshed.
         """
+        conditions = [
+            UserSession.session_id == session_id,
+            UserSession.is_processing.is_(True),
+        ]
+        if request_id is not None:
+            conditions.append(UserSession.processing_request_id == request_id)
         with get_db_session() as db:
             updated = (
                 db.query(UserSession)
-                .filter(
-                    UserSession.session_id == session_id,
-                    UserSession.is_processing.is_(True),
-                )
+                .filter(*conditions)
                 .update(
                     {UserSession.processing_started_at: datetime.utcnow()},
                     synchronize_session=False,

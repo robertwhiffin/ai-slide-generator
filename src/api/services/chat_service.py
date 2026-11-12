@@ -13,6 +13,7 @@ import logging
 import queue
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, Generator, List, Optional
@@ -54,7 +55,7 @@ from src.services.conversation_pins import (
     ConversationPinMissingError,
     ConversationSessionNotFoundError,
 )
-from src.services.generation_fence import TurnFencedError, TurnStopped
+from src.services.generation_fence import TurnFencedError, TurnStopped, turn_is_live
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
     PersistedRuntimeError,
@@ -326,6 +327,27 @@ def _pinned_graph_configuration_error_event() -> StreamEvent:
         error="Pinned graph configuration is unavailable",
         metadata={"code": "pinned_graph_configuration_unavailable"},
     )
+
+
+#: The graph limb's consumer read no event within its poll interval.
+_NO_GRAPH_EVENT = object()
+
+
+def _turn_still_live(request_id: str) -> bool:
+    """:func:`turn_is_live`, where an unreadable status counts as live.
+
+    The graph limb's consumer must not abandon a turn on a database blip: the
+    fence still refuses a stopped turn's writes, and sealing re-checks.
+    """
+    try:
+        return turn_is_live(request_id)
+    except Exception:
+        logger.warning(
+            "Could not read the turn's status; still waiting on its graph",
+            exc_info=True,
+            extra={"request_id": request_id},
+        )
+        return True
 
 
 class ChatService:
@@ -1928,6 +1950,29 @@ class ChatService:
         # Capture context BEFORE starting thread to preserve user auth
         ctx = contextvars.copy_context()
 
+        def abandoned(e: Exception) -> bool:
+            """Whether the graph ended after its turn was stopped or rolled back.
+
+            Its consumer has gone (or is about to), and whoever ended the turn
+            wrote its status, so the ending is not a failure: logged at INFO,
+            with no ERROR event and no error recorded.  An unreadable status
+            counts as live, so a real failure is never hidden.
+            """
+            if isinstance(e, TurnFencedError):
+                ended = True
+            else:
+                ended = bool(request_id) and not _turn_still_live(request_id)
+            if ended:
+                logger.info(
+                    "Abandoned graph turn ended",
+                    extra={
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "error_class": type(e).__name__,
+                    },
+                )
+            return ended
+
         def run_graph():
             """Run the graph in a separate thread, pushing events to the queue."""
             try:
@@ -1942,6 +1987,8 @@ class ChatService:
                 ConversationPinMissingError,
                 ConversationSessionNotFoundError,
             ) as e:
+                if abandoned(e):
+                    return
                 graph_release_id = (
                     _pinned_graph_failure_release_id(e, session_id)
                     if isinstance(e, PersistedRuntimeError)
@@ -1968,6 +2015,8 @@ class ChatService:
                 error_container["error"] = graph_error
                 event_queue.put(_pinned_graph_configuration_error_event())
             except Exception as e:
+                if abandoned(e):
+                    return
                 # The traceback (server-side only) keeps the cause; the client
                 # gets the code-owned message, never ``str(e)``.
                 logger.error(
@@ -2054,12 +2103,35 @@ class ChatService:
             )
             title_thread.start()
 
-        # Yield events as they arrive
+        # Yield events as they arrive.  A turn with a request id is also checked
+        # for liveness at most once per STOP_POLL_SECONDS, whether or not events
+        # are arriving: a stop, timeout or orphan rollback (from any process)
+        # ends it in the database, and the job must free its runner then rather
+        # than wait for a graph thread that may be blocked in a model call.
+        # Sealing, below, is the final liveness check before the save point.
+        from src.api.services.job_queue import STOP_POLL_SECONDS
+
+        next_check = time.monotonic() + STOP_POLL_SECONDS
         while True:
-            event = event_queue.get()
+            wait = (
+                max(0.0, next_check - time.monotonic()) if request_id else STOP_POLL_SECONDS
+            )
+            try:
+                event = event_queue.get(timeout=wait)
+            except queue.Empty:
+                event = _NO_GRAPH_EVENT
             if event is None:
                 break
-            yield event
+            if request_id and time.monotonic() >= next_check:
+                if not _turn_still_live(request_id):
+                    logger.info(
+                        "Graph turn stopped; leaving its graph thread",
+                        extra={"session_id": session_id, "request_id": request_id},
+                    )
+                    raise TurnStopped(request_id)
+                next_check = time.monotonic() + STOP_POLL_SECONDS
+            if event is not _NO_GRAPH_EVENT:
+                yield event
 
         # Check for errors
         if "error" in error_container:

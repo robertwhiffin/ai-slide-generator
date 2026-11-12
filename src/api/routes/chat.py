@@ -134,6 +134,31 @@ async def _roll_back_failed_enter(request_id: str) -> Optional[RollbackResult]:
         return None
 
 
+async def _discard_snapshot_or_end_request(session_manager, request_id: str) -> None:
+    """Drop an Enter's snapshot without restoring it (the turn will not run on the
+    graph after all).
+
+    If the discard itself raises, the request is ended (``error``) before the
+    error goes on, so no ``active`` snapshot is left on a live request: the orphan
+    sweep would otherwise "roll it back" and undo another person's change (C13).
+    """
+    try:
+        await asyncio.to_thread(session_manager.discard_generation_snapshot, request_id)
+    except Exception:
+        logger.exception(
+            "Could not discard a generation snapshot at submit; ending the request",
+            extra={"request_id": request_id},
+        )
+        try:
+            await asyncio.to_thread(session_manager.fail_chat_request, request_id, None)
+        except Exception:
+            logger.exception(
+                "Could not end a chat request whose snapshot discard failed",
+                extra={"request_id": request_id},
+            )
+        raise
+
+
 DECK_MODE_LOCKED_CODE = "deck_mode_locked"
 
 _DECK_MODE_LABELS = {"agent": "Agent mode", "legacy": "Legacy mode"}
@@ -991,11 +1016,10 @@ async def submit_chat_async(
             # deck) can lock the deck to another mode between the two decisions.
             if snapshot_taken and engine_mode != "graph":
                 # The turn runs on the monolith: drop the snapshot, never restore
-                # it (that would undo the other message's lock), even if this fails.
+                # it (that would undo the other message's lock), even if this
+                # fails (then the request is ended and the answer is a 500).
                 snapshot_taken = False
-                await asyncio.to_thread(
-                    session_manager.discard_generation_snapshot, request_id
-                )
+                await _discard_snapshot_or_end_request(session_manager, request_id)
             elif not snapshot_taken and engine_mode == "graph":
                 # Fail closed: a graph turn never runs without a snapshot.
                 await asyncio.to_thread(
@@ -1026,10 +1050,9 @@ async def submit_chat_async(
             # Nothing was saved, and another first message locked the mode (or
             # this message asked for a different one): rolling back would undo
             # that other lock and its pins, so the snapshot is only dropped (C9).
+            # A discard that raises ends the request and answers 500 (C13).
             if snapshot_taken:
-                await asyncio.to_thread(
-                    session_manager.discard_generation_snapshot, request_id
-                )
+                await _discard_snapshot_or_end_request(session_manager, request_id)
             raise
         except Exception:
             if snapshot_taken:
