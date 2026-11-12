@@ -6,7 +6,7 @@
 
 **Architecture:**
 - `POST /chat/async` writes a `generation_snapshots` row before the user message is saved.
-- **Fence:** every write a turn makes first "claims" its `chat_requests` row with a conditional `UPDATE`, which is a row lock on Postgres and the write lock on SQLite. Once the row is terminal (`cancelled` / `error`), every later write raises `TurnFencedError`.
+- **Fence:** every write a turn makes first "claims" its `chat_requests` row with a conditional `UPDATE`, which is a row lock on Postgres and the write lock on SQLite. Once the row is terminal (`completed`, `cancelled` or `error`), every later write raises `TurnFencedError`. The one exception is the title thread, which refuses only `cancelled` and `error` (Task 3b).
 - **Rollback:** claims the same row, flips it terminal, and restores the snapshot in one transaction, so no turn write can land after it.
 - **After a stop:** the job's event loop notices the request is no longer live and frees its runner at once. The abandoned graph thread finishes in the background, writing nothing.
 - **Editing lock:** while a generation is live, it holds the deck's editing lock for its sender.
@@ -45,6 +45,18 @@
   - New tables also get a `Table.create(checkfirst=True)` fallback, as `_migrate_graph_checkpoints` (`:1257`) does.
   - No backfill.
 - The `shared_deck_mutation_event.operation` column has a DB CHECK constraint (`database.py:883`), so do not invent a new operation; reuse `"restore_version"` with `object_type="deck"`.
+- **"Identical" after a restore** means every content column and every slide row is equal. Three columns are excluded:
+  - `session_slide_decks.version`, which is bumped so open clients and other processes reload
+  - `updated_at`
+  - `user_sessions.last_activity`
+
+## Rulings from plan review (round 1)
+
+- **`deck_reviews` stay.** They are content-addressed by `(deck_id, deck_digest)` (`src/database/models/deck_review.py` docstring). A row written during a stopped turn describes that turn's content. If its digest equals the restored deck's, it is a valid review of identical content.
+- **A rolled-back failure deletes its own `info` notice** (the #321 diagnostic, tagged with the request id), along with the rest of the turn's messages. The user sees the failed notice instead, and the server log keeps the cause.
+- **Cost of the snapshot:** about two copies of the deck (deck JSON plus slide rows) per Agent Enter. Decks reach about 3 MB, and the snapshot is deleted at the end of every turn.
+- **Contention:** every turn write row-locks the one `chat_requests` row for a few milliseconds, so parallel slide writes serialise on it. That is accepted.
+- **The stop affordance is polling-only.** It needs a request id, and the dev-only SSE transport has none. The stop sign shows only when `isPollingMode()` (`api.ts:70`) is true.
 
 ## Review Focus
 
@@ -89,7 +101,7 @@ Models: test=n/a impl=controller
   - `session_fields_json` Text, not null
   - `checkpoint_id` String(255), nullable
   - `mutation_watermark` Integer, nullable (max `shared_deck_mutation_event.id` for the deck at snapshot time)
-  - `state` String(20), not null, default `"active"` (`"active"` | `"restore_failed"`)
+  - `state` String(20), not null, default `"active"` (`"active"` | `"restore_failed"` | `"restoring"`)
   - `created_at` DateTime, not null
 - Produces `UserSession.processing_request_id` String(64) nullable; `ChatRequest.rollback_outcome` String(32) nullable.
 - Produces `_migrate_generation_snapshots(conn, schema)` and `_migrate_generation_rollback_columns(conn, schema)`, with the same shape as their neighbours in `_run_migrations`.
@@ -127,7 +139,12 @@ Models: test=opus impl=sonnet
   - `class TurnFencedError(RuntimeError)` with attribute `request_id: str`
   - `class TurnStopped(RuntimeError)` with attribute `request_id: str`. Raised by the job's event loop (Task 6), never by a writer.
   - `def claim_turn_row(db: Session, request_id: str) -> bool`: executes `UPDATE chat_requests SET status = status WHERE request_id = :rid AND status IN ('pending','running')` and returns `rowcount == 1`.
-  - `def fence_turn_write(db: Session, request_id: str | None = None) -> None`: `rid = request_id or get_chat_request_id()` (from `src/services/graph/event_emitter.py:101`). If `rid` is None, return without touching the DB. Otherwise raise `TurnFencedError(rid)` unless `claim_turn_row`.
+  - `def fence_turn_write(db: Session, request_id: str | None = None, *, allow_completed: bool = False) -> None`:
+    - `rid = request_id or get_chat_request_id()` (from `src/services/graph/event_emitter.py:101`)
+    - if `rid` is None, return without touching the DB
+    - otherwise raise `TurnFencedError(rid)` unless `claim_turn_row`
+    - with `allow_completed=True`, the claim also matches `status = 'completed'`, so only `cancelled` / `error` are refused. Only the title thread uses this (Task 3b).
+  - `def start_chat_request(db: Session, request_id: str) -> bool`: `UPDATE chat_requests SET status='running' WHERE request_id=:rid AND status='pending'`, returning `rowcount == 1`.
   - `def turn_is_live(request_id: str) -> bool`: read-only, own `get_db_session()`.
 - Produces in `SessionManager`:
   - `bind_session_lock(self, session_id: str, request_id: str) -> None`: sets `processing_request_id` where `is_processing`.
@@ -138,6 +155,8 @@ Models: test=opus impl=sonnet
   - `test_fence_passes_while_live`: rows `pending` and `running` pass.
   - `test_fence_raises_after_terminal`, parametrised over `cancelled` / `error` / `completed`: it raises `TurnFencedError` whose `.request_id` equals the id.
   - `test_fence_reads_context_var`: `set_chat_request_id(rid)` with status `cancelled` raises.
+  - `test_allow_completed_refuses_only_cancelled_and_error`
+  - `test_start_chat_request_only_from_pending`: True once; False for `running`, `cancelled`, `completed` or `error`.
   - `test_old_request_release_does_not_free_new_lock`:
     - acquire, then bind `r1`, then `release(…, "r1")` returns True
     - acquire, then bind `r2`, then `release(…, "r1")` returns False and `is_processing` stays True
@@ -193,15 +212,17 @@ Models: test=opus impl=sonnet
 
 **Files:**
 - Modify: `src/api/services/session_manager.py`:
-  - `add_message` (`:1905`): fence with its `request_id` arg when not None, at the top of its `with` at `:1927`
+  - `add_message` (`:1905`): fence from the **ContextVar only**, `fence_turn_write(db)` with no `request_id` argument, at the top of its `with` at `:1927`. Do **not** fence on the explicit `request_id` arg: the monolith passes one too (`streaming_callback.py:104, 155, 217, 256, 337`; `chat_service.py:1193, 1230, 1263`), and monolith writes must behave exactly as today. Graph callers (`nodes.py:504`, `:1835`) run under the ContextVar.
   - `record_chat_request_progress` (`:4163`): add `AND status IN ('pending','running')` to the existing conditional `UPDATE`; do not add a separate fence
   - `set_genie_one_conversation_id` (`:1779`): fence first, before the `with_for_update()` at `:1794`
   - `update_session` / `rename_session` (`:1557`, `:1561`): new kwarg `request_id: str | None = None`, fenced inside its `with`
   - `create_version` (`:3322`): new kwarg `request_id: str | None = None`, fenced at the top of its `with` (`:3345`)
-- Modify: `src/services/agent_tools/image_generation_tool.py`: `save_to_library` (`:135`), fence first inside the `with` at `:139`
+- Modify: `src/services/agent_tools/image_generation_tool.py`:
+  - `save_to_library` (`:135`): fence first inside the `with` at `:139`
+  - the image jobs run on `_POOL` with **no context copy** (`:287`, `_POOL.submit(job_body, job)`), so the ContextVar is None in that thread and the fence would be a silent no-op. Submit `contextvars.copy_context().run, job_body, job` instead.
 - Modify: `src/api/services/chat_service.py`:
   - `create_save_point` (`:3153`) gains `request_id: str | None = None`, passed to `create_version`
-  - in `_send_message_streaming_graph`, `run_title_gen` (`:1993`) calls `rename_session(session_id, title, request_id=request_id)`. The thread's context was copied before `invoke_graph` set the ContextVar, so pass it explicitly.
+  - in `_send_message_streaming_graph`, `run_title_gen` (`:1993`) calls `rename_session(session_id, title, request_id=request_id, allow_completed=True)`. The thread's context was copied before `invoke_graph` set the ContextVar, so pass the id explicitly. It is joined for only 10 s (`:2102`), so a slow title can land after `completed`, and it must still land then. `rename_session` and `update_session` therefore gain `allow_completed: bool = False` as well, passed through to the fence.
   - the save-point call (`:2075`) passes `request_id=request_id`
   - catch `TurnFencedError` around the title and save-point writes, log at INFO and continue. That is not a turn failure.
 - Test: `tests/unit/test_generation_fence_session_writers.py`
@@ -211,6 +232,9 @@ Models: test=opus impl=sonnet
 - [ ] **Step 1: Write the failing tests:** one `refused_after_cancel` / `lands_while_live` pair per writer above, as in Task 3a:
   - `add_message`, `record_chat_request_progress` (rowcount 0 and `progress_json` unchanged after cancel), `set_genie_one_conversation_id`, `rename_session`, `create_version` (no new `slide_deck_versions` row), and `save_to_library` (no new `image_assets` row)
   - `test_title_thread_write_after_cancel_is_dropped`: run `run_title_gen`'s path with a cancelled request; the title is unchanged and no exception escapes
+  - `test_title_after_completed_still_lands`
+  - `test_image_save_through_real_pool_refused_after_cancel`: drive `ImageGenerationAgentTool` with a fake generator through the real `_POOL`, under a cancelled request's ContextVar. No `image_assets` row is added. This test fails without the context copy, which is its proof.
+  - `test_monolith_add_message_after_completion_still_lands`: explicit `request_id`, no ContextVar, request `completed`. The row is written, exactly as today.
 - [ ] **Step 2:** `uv run pytest tests/unit/test_generation_fence_session_writers.py -q`. Expected: FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Re-run. Expected: PASS. Then `uv run pytest tests/unit/test_chat_request_progress.py tests/unit/test_turn_progress_graph.py tests/unit -q -n auto -k "genie or title or image or save_point or version"`. Expected: no new failure causes.
@@ -232,12 +256,12 @@ Models: test=opus impl=sonnet
   - `claim_turn_row`, `LIVE_STATUSES` (Task 2)
   - `latest_checkpoint_id`, `delete_checkpoints_after` (Task 3a)
   - `GenerationSnapshot` (Task 1)
-  - `SessionManager._get_deck_owner_session(db, session)` (`session_manager.py:926`)
+  - `SessionManager._get_deck_owner_session(db, session)` (`session_manager.py:1380`)
   - `record_shared_deck_mutation` (`src/services/shared_deck_attribution.py:64`)
 - Produces:
   - `def take_generation_snapshot(db: Session, *, request_id: str, session_id: str) -> None`. Inside the caller's transaction; no commit.
   - `def has_generation_snapshot(request_id: str) -> bool`
-  - `def has_pending_restore(session_id: str) -> bool`: true when any snapshot for the actor session or its deck owner is in state `restore_failed`.
+  - `def has_pending_restore(session_id: str) -> bool`: true when any snapshot for the actor session or its deck owner is in state `restore_failed` or `restoring`.
   - `def discard_generation_snapshot(db: Session, request_id: str) -> None`
   - `class RollbackResult(str, Enum)`: `ROLLED_BACK = "rolled_back"`, `KEPT_FOREIGN_CHANGE = "kept_foreign_change"`, `REFUSED_FOREIGN_CHANGE = "refused_foreign_change"`, `NOT_LIVE = "not_live"`, `NO_SNAPSHOT = "no_snapshot"`, `RESTORE_FAILED = "restore_failed"`
   - `def roll_back_generation(request_id: str, *, terminal_status: Literal["cancelled", "error"], error_message: str | None, refuse_on_foreign_change: bool) -> RollbackResult`
@@ -249,13 +273,13 @@ Models: test=opus impl=sonnet
 - the actor's `title`
 - the actor's `genie_one` agent-config entry `conversation_id`, or absent
 - `latest_checkpoint_id(actor session_id)`
-- `max(shared_deck_mutation_event.id)` for the deck, or None
+- `mutation_watermark`: `max(shared_deck_mutation_event.id) WHERE root_session_id = owner.id`, or **0** when there is none. Matching on `root_session_id` instead of `root_deck_id` keeps the check working on a first generation, when there is no deck row yet.
 
 **`roll_back_generation`, in one `get_db_session()` transaction:**
 1. If `not claim_turn_row(db, rid)`, return `NOT_LIVE`.
 2. Load the snapshot.
    - **None** (monolith): set the terminal status, release the session lock for `rid`, return `NO_SNAPSHOT`.
-3. **Foreign-change check.** There is a foreign change when any `shared_deck_mutation_event` has `root_deck_id == deck.id`, `id > mutation_watermark` and `actor_session_id != actor_session_pk`.
+3. **Foreign-change check.** There is a foreign change when any `shared_deck_mutation_event` has `root_session_id == owner_session_pk`, `id > mutation_watermark` and `actor_session_id != actor_session_pk`.
    - With `refuse_on_foreign_change`: return `REFUSED_FOREIGN_CHANGE` and roll the transaction back, so the status stays live.
    - Otherwise: set `status=terminal_status`, `rollback_outcome="kept_foreign_change"`, delete the snapshot, release the lock, log at ERROR, return `KEPT_FOREIGN_CHANGE`.
 4. **Restore.**
@@ -264,7 +288,7 @@ Models: test=opus impl=sonnet
    - Delete `session_messages WHERE request_id = rid`.
    - Restore the session fields. For `genie_one`, change only the entry's `conversation_id`, and only if the entry still exists.
    - `delete_checkpoints_after(actor session_id, snapshot.checkpoint_id, session=db)`.
-5. Set `status`, `error_message`, `completed_at`, `rollback_outcome="rolled_back"`. Delete the snapshot. Release the session lock with a conditional `UPDATE` matching `processing_request_id == rid`. Commit. Then call `get_chat_service()._invalidate_deck_cache(actor session_id)` in this process.
+5. Set `status`, `error_message`, `completed_at`, `rollback_outcome="rolled_back"`. Delete the snapshot. Release the session lock with a conditional `UPDATE` matching `processing_request_id == rid`. Commit. Then call `get_chat_service()._invalidate_deck_cache(...)` in this process for the actor's session_id **and** the owner's session_id, when they differ.
 
 **If any step after 1 raises:**
 - open a second transaction
@@ -289,6 +313,8 @@ Task 6's sweep retries these.
   - `test_late_writer_after_rollback_is_refused`: after `ROLLED_BACK`, `write_slide` under the `rid` ContextVar raises `TurnFencedError`, and the slide rows are unchanged.
   - `test_other_process_cache_drops_deck_after_first_generation_rollback`: warm a **second** `ChatService` instance's cache with the turn's deck, standing in for another worker. Roll back a first generation. That instance's `_get_or_load_deck` returns None.
   - `test_other_process_cache_reloads_after_edit_rollback`: the version bump makes the second instance reload the restored deck.
+  - `test_first_generation_foreign_change_detected`: no deck at snapshot, watermark 0. Another actor's event on the owner after the snapshot refuses a stop.
+  - Postgres-gated, `test_first_generation_rollback_deletes_deck_row_on_postgres`: a mutation event references the deck that the rollback deletes. The delete succeeds, the event's `root_deck_id` becomes NULL, and the append-only trigger (`database.py` ~930-975) does not block it.
 - [ ] **Step 2:** `uv run pytest tests/unit/test_generation_rollback.py -q`. Expected: FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Re-run. Expected: PASS.
@@ -310,29 +336,29 @@ Models: test=opus impl=opus
   - `get_chat_request` (`:4197`) returns `rollback_outcome`
   - new `complete_chat_request(self, request_id: str, result: dict | None) -> bool`. It runs `claim_turn_row`, then sets `result_json`, `status="completed"` and `completed_at`, and deletes the snapshot, in one transaction. It returns False when not live.
 - Modify: `src/api/services/job_queue.py`, `process_chat_request` (`:188`):
-  - the success path calls `complete_chat_request` instead of `set_chat_request_result` + `update_chat_request_status("completed")`
-  - the generic `except Exception` path calls `roll_back_generation(request_id, terminal_status="error", error_message=str(e), refuse_on_foreign_change=False)` **only when** `has_generation_snapshot(request_id)`; otherwise it runs today's code unchanged
+  - **Start (blocking fix).** Replace the unconditional `update_chat_request_status(request_id, "running")` (`:230`) with `start_chat_request` (Task 2) in its own transaction. If it returns False (the request was stopped while queued), **return at once**: no graph run, no status write, and no lock release (the rollback already released it). The `finally` at `:314` must not run for this early return; move the early return above the `try`, or guard the `finally`.
+  - **Success.** Call `complete_chat_request` instead of `set_chat_request_result` + `update_chat_request_status("completed")`. If it returns False (stopped at the last moment), write nothing.
+  - **Generic failure** (`except Exception`, `:307`). Call `roll_back_generation(request_id, terminal_status="error", error_message=str(e), refuse_on_foreign_change=False)` **only when** `has_generation_snapshot(request_id)`. Otherwise run today's code, with its status write made conditional on the request still being live, so a stop is never overwritten by `error`.
+  - **Pinned-configuration failure** (`except _PinnedGraphConfigurationTerminalError`, `:300`). It fires from `invoke_graph`'s pin loader before any node runs, yet the user message, the deck-mode lock and the snapshot already exist. With a snapshot, call `roll_back_generation(request_id, terminal_status="error", error_message=PINNED_GRAPH_CONFIGURATION_ERROR, refuse_on_foreign_change=False)`. Without one, keep today's write.
 - Test: `tests/integration/test_generation_stop_routes.py`, `tests/unit/test_job_queue_rollback.py`
 
 **Interfaces:**
 - Consumes: Tasks 2 and 4, plus `spec_sync.review_in_flight(deck, now)`.
 - Produces:
-  - **Route.** `POST /api/chat/cancel/{request_id}` returns `CancelChatResponse{outcome: Literal["cancelled","already_finished"], status: str | None}`. The 409 body is `{"detail": <copy>, "outcome": "refused_foreign_change" | "not_stoppable"}`.
+  - **Route.** `POST /api/chat/cancel/{request_id}` returns `CancelChatResponse{outcome: Literal["cancelled","already_finished"], status: str | None}`. The 409 body is `{"detail": <copy>, "outcome": "refused_foreign_change" | "not_stoppable"}`, returned with `JSONResponse(status_code=409, content=…)`, because `HTTPException` cannot carry the extra key.
   - **Poll response.** `rollback: str | None` (from `rollback_outcome`); `status` may be `"cancelled"`.
 
 **Submit order** (`submit_chat_async`):
 1. Run `acquire_session_lock`, `create_chat_request`, `bind_session_lock`.
-2. Refuse with 409 if either applies. Release the lock by `request_id` and mark the request `error` first.
-   - `has_pending_restore(session_id)`: use the restore-pending detail.
-   - The deck owner's arc review is in flight (`review_in_flight`): use the arc-review-busy detail.
-3. Take the snapshot (`with get_db_session() as db: take_generation_snapshot(db, request_id=…, session_id=…)`).
-4. Run `add_user_message`, then resolve the engine.
-   - If `engine_mode == "monolith"`, delete the snapshot (`discard_generation_snapshot`) before enqueueing.
-   - Any exception after step 3 calls `roll_back_generation(…, terminal_status="error", refuse_on_foreign_change=False)` before the existing error mapping runs. A monolith turn gets that call only after its snapshot is already discarded, so it reaches `NO_SNAPSHOT`, which leaves today's behaviour intact.
+2. **Decide the engine read-only**, before anything is written. Use `engine_mode_for_deck_mode(stored_owner_deck_mode or request.deck_mode)` (`src/domain/conversation_engine.py:16`), where the stored mode is read through the owner hop as `resolve_engine_mode` does (`chat_service.py:149`). **Monolith: skip steps 3-4 entirely**, so the turn runs exactly today's path with no snapshot ever written. The existing post-`add_user_message` resolution stays as it is.
+3. Graph only, in **one** transaction that first takes `SELECT … FOR UPDATE` on the owner's `session_slide_decks` row (when one exists), as `_refuse_during_an_arc_review` does (`chat_service.py:288-319`):
+   - refuse with 409 if `has_pending_restore(session_id)` (the restore-pending detail), or if `review_in_flight(deck, now)` (the arc-review-busy detail). Before returning, release the lock by `request_id` and mark the request `error`.
+   - otherwise `take_generation_snapshot(db, request_id=…, session_id=…)` in the same transaction. Taking the deck-row lock first is what serialises submit against the sweeper's claim (Task 7).
+4. Run `add_user_message` and the rest as today. Any exception after step 3 calls `roll_back_generation(…, terminal_status="error", refuse_on_foreign_change=False)` before the existing error mapping runs.
 
 **Cancel route:**
 1. Owner check as in `poll_chat` (`get_session_id_for_request`, `_require_chat_request_owner`); 404 for an unknown request.
-2. Live, but `not has_generation_snapshot`: 409 `not_stoppable`.
+2. **Live and** `not has_generation_snapshot`: 409 `not_stoppable`. A request that is not live falls through to step 3, which returns `already_finished`.
 3. Otherwise, `roll_back_generation(rid, terminal_status="cancelled", error_message=None, refuse_on_foreign_change=True)` in a thread, mapped as follows:
 
 | Result | Response |
@@ -352,10 +378,13 @@ Models: test=opus impl=opus
   - `test_submit_refused_while_restore_pending`
   - `test_submit_refused_during_arc_review`
   - `test_submit_failure_after_snapshot_rolls_back` (patch the engine resolver to raise; no user message remains, and `deck_mode` is restored)
-  - `test_monolith_submit_discards_snapshot`
+  - `test_monolith_submit_writes_no_snapshot` (patch `take_generation_snapshot` to raise if called on a legacy deck; also on a first message that requests `legacy`)
   - In `test_job_queue_rollback.py`:
+    - `test_cancelled_pending_request_never_starts`: roll back while `pending`, then run `process_chat_request`. The graph is never invoked (assert on a stubbed `invoke_graph`), the status stays `cancelled`, and the session lock bound to a newer request is untouched.
     - `test_success_path_completes_and_drops_snapshot`
     - `test_graph_failure_rolls_back`
+    - `test_pinned_configuration_failure_rolls_back` (a first generation whose pin is missing; no user message remains and `deck_mode` is restored)
+    - `test_failure_after_cancel_does_not_overwrite_cancelled`
     - `test_monolith_failure_path_unchanged` (same status and error text as before; patch `has_generation_snapshot` → False)
     - `test_complete_after_cancel_returns_false_and_writes_nothing`
 - [ ] **Step 2:** `uv run pytest tests/integration/test_generation_stop_routes.py tests/unit/test_job_queue_rollback.py -q`. Expected: FAIL.
@@ -378,10 +407,14 @@ Models: test=opus impl=sonnet
   - `process_chat_request`: `except TurnStopped: pass` before the generic `except` (no status write; the `finally` releases by `request_id`)
   - `mark_timed_out_jobs_once` (`:481`): for a timed-out `graph` entry, `await asyncio.to_thread(roll_back_generation, rid, terminal_status="error", error_message=<existing text>, refuse_on_foreign_change=False)`
   - `mark_timed_out_jobs_loop` (`:579`): call `recover_orphaned_generations()` each sweep
-  - `recover_stuck_requests` (`:436`): call it once at startup
+  - `recover_stuck_requests` (`:436`), already called at startup from `main.py:211`:
+    - call `recover_orphaned_generations()` **first**
+    - in its own loop, a stuck request **with** a snapshot goes through `roll_back_generation` instead of the bare flip to `error`
+    - its unconditional `is_processing = False` (`:470`) becomes a release matched on `processing_request_id`
+    - requests without a snapshot (monolith) keep today's behaviour
 - Modify: `src/services/generation_rollback.py`:
   - add `def recover_orphaned_generations(now: datetime | None = None) -> int`. It rolls back (`error`, error_message `"Generation interrupted"`, `refuse_on_foreign_change=False`) every live request that has a snapshot whose actor session's `processing_request_id != request_id`, or whose `processing_started_at` is older than `SESSION_LOCK_TIMEOUT_SECONDS` (300).
-  - It then retries every `restore_failed` snapshot through a restore that skips step 1's liveness claim. On success it sets `rollback_outcome="rolled_back"`, deletes the snapshot and releases the session lock.
+  - It then retries every `restore_failed` snapshot through a restore that skips step 1's liveness claim. Each retry first **claims** its snapshot with `UPDATE generation_snapshots SET state='restoring' WHERE id=:id AND state='restore_failed'`, so two processes never both run it; a failed retry sets the state back to `restore_failed`. On success it sets `rollback_outcome="rolled_back"`, deletes the snapshot and releases the session lock.
   - It returns the number handled.
 - Test: `tests/unit/test_generation_runner_release.py`, `tests/unit/test_generation_recovery.py`
 
@@ -400,6 +433,9 @@ Models: test=opus impl=sonnet
   - `test_orphan_with_stale_lock_rolled_back`
   - `test_live_job_with_fresh_lock_not_touched`
   - `test_restore_failed_retried_and_lock_released`
+  - `test_restore_retry_claimed_once` (two concurrent calls, one restore)
+  - `test_startup_recovery_restores_old_running_request_with_snapshot`: a 1300-second-old `running` request with a snapshot is restored at startup, not just flipped to `error`.
+  - `test_startup_recovery_leaves_monolith_as_today`
 - [ ] **Step 2:** `uv run pytest tests/unit/test_generation_runner_release.py tests/unit/test_generation_recovery.py -q`. Expected: FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Re-run. Expected: PASS. Then `uv run pytest tests/unit/test_job_queue_timeout_sweeper.py tests/unit/test_session_lock_heartbeat.py tests/unit/test_job_queue_concurrency.py -q`. Expected: PASS.
@@ -413,10 +449,14 @@ Models: test=opus impl=opus
 
 **Files:**
 - Modify: `src/api/services/session_manager.py`:
-  - new `_live_generation_holder(self, db: Session, deck_owner: UserSession) -> str | None`. Returns the `created_by` of the newest live `ChatRequest` that has a `GenerationSnapshot` and whose session is the owner or a contributor with `parent_session_id == deck_owner.id`.
+  - new `_live_generation_holder(self, db: Session, deck_owner: UserSession) -> str | None`. Find the newest `GenerationSnapshot` with `owner_session_pk == deck_owner.id` whose `ChatRequest` (joined on `request_id`) is live. Return `UserSession.created_by` of its `actor_session_pk`; that is the same string `get_current_user()` returns and `locked_by` stores. `ChatRequest` has no user column, and `create_chat_request` drops its `created_by` argument (`session_manager.py:4076-4110`).
   - consult it in `require_editing_lock` (`:3836`), `acquire_editing_lock` (`:3859`) and `get_editing_lock_status` (`:3933`). A holder who is not the caller means locked by the holder, whatever `locked_by` / `locked_at` say.
-- Modify: `src/api/routes/chat.py`, `_check_chat_permission` (`:127`): the root-owner branch (`:157`) calls `require_editing_lock(session_id)` and maps `PermissionError` to 423, exactly as the contributor branch does (`:175-178`).
-- Modify: `src/services/spec_sync.py`, `claim_due_marker`: do not claim a deck that has a live generation (the same predicate).
+- Modify: `src/api/routes/chat.py`, `_check_chat_permission` (`:127`), root-owner branch (`:157`):
+  - return 423 **only** when `_live_generation_holder` names someone other than the caller, with the detail `f"Session is locked by {display name}"` as `require_editing_lock` words it
+  - do **not** call `require_editing_lock` there. An ordinary heartbeat lock held by an idle contributor must keep not blocking the owner, on Legacy decks too.
+- Modify: `src/services/spec_sync.py`, `claim_due_marker` (`:401`):
+  - before its conditional `UPDATE`, take `SELECT … FOR UPDATE` on the deck row, then skip the deck if it has a live generation (the same predicate, as its own statement after the lock)
+  - submit (Task 5, step 3) takes the same row lock before its `review_in_flight` check and snapshot, so the two serialise. Under READ COMMITTED, a subquery inside the `UPDATE` alone could miss a snapshot committed while it waited.
 - Test: `tests/unit/test_generation_holds_editing_lock.py`
 
 **Interfaces:** Consumes Task 1's model and Task 5's lifecycle. Produces no new public names.
@@ -426,7 +466,9 @@ Models: test=opus impl=opus
   - `test_lock_follows_normal_rules_after_generation_ends`
   - `test_owner_chat_refused_423_while_contributor_generation_live`
   - `test_owner_chat_allowed_on_unshared_deck`
+  - `test_owner_chat_allowed_while_contributor_holds_idle_heartbeat_lock` (Legacy shared deck as well)
   - `test_sweeper_skips_deck_with_live_generation` (the marker is kept and claimed after the generation ends)
+  - Postgres-gated, `test_submit_and_sweeper_claim_serialise`: either the sweeper claims and submit is refused 409, or submit snapshots and the sweeper skips. Never both.
   - `test_monolith_turn_does_not_hold_lock` (no snapshot, so no hold)
 - [ ] **Step 2:** `uv run pytest tests/unit/test_generation_holds_editing_lock.py -q`. Expected: FAIL.
 - [ ] **Step 3:** Implement.
@@ -521,9 +563,11 @@ Models: test=opus impl=sonnet
 - Modify: `frontend/src/components/ChatPanel/ChatPanel.tsx`:
   - `requestIdRef` and `pendingStopRef`
   - the stop handler, dialog and notice state
-  - pass `generating`, `onStop` and `restoreDraftKey` to `ChatInput` (`:734-754`), but only when `effectiveDeckMode !== 'legacy'`
+  - pass `generating`, `onStop` and `restoreDraftKey` to `ChatInput` (`:734-754`), but only when `effectiveDeckMode !== 'legacy'` **and** `isPollingMode()` (export it from `api.ts:70` if it is not exported; the SSE transport has no request id to stop)
   - handle `request_accepted` and `cancelled` in `handleStreamEvent` (`:399-557`) and `ChatTurnError` in `onError` (`:575-584`)
-- Modify: `frontend/src/components/Layout/AppLayout.tsx`: new ChatPanel prop `onDeckRestored(deck: SlideDeck | null)`. It forces the gate: `setSlideDeckGated(deck, deck.version, true)`, or clears the deck the way a fresh session does when `null`.
+- Modify: `frontend/src/components/Layout/AppLayout.tsx`: new ChatPanel prop `onDeckRestored(deck: SlideDeck | null)`.
+  - with a deck: `setSlideDeckGated(deck, deck.version, true)`
+  - with `null`: `deckVersionRef.current = 0` **and** `setSlideDeck(null)`, mirroring `handleNewSession` (`:594`, `:624`). Without the reset, the version guard (`:152-159`) would reject the next first generation's version-1 deck.
 - Modify: `GeneratedImagePreview.tsx`, `PromptEditorModal.tsx`, `GenerateImageRequestDialog.tsx`, `TemplateViewerModal.tsx`: add `role="dialog"` to the overlay root where it is missing.
 - Modify: the user guide page that covers the chat panel, under `docs/user-guide/` (find it with grep). Add stopping a generation and the "all-or-nothing" behaviour, in plain language.
 - Test: `frontend/src/components/ChatPanel/ChatPanel.stop.test.tsx`, `frontend/src/components/ChatPanel/useEscapeToStop.test.tsx`
@@ -531,7 +575,10 @@ Models: test=opus impl=sonnet
 **Interfaces:**
 - Consumes: Task 9's API and props.
 - Produces:
-  - `useEscapeToStop(active: boolean, onStop: () => void): void`. It adds a window `keydown` listener in the bubble phase. It calls `onStop` only for `key === 'Escape'` when `!e.defaultPrevented` and `document.querySelector('[role="dialog"]')` is null.
+  - `useEscapeToStop(active: boolean, onStop: () => void): void`. It adds a window `keydown` listener in the bubble phase. It calls `onStop` only for `key === 'Escape'`, and only when all three hold:
+    - `!e.defaultPrevented`
+    - `document.querySelector('[role="dialog"]')` is null
+    - the event target is not an `input`, `textarea`, `select` or `[contenteditable]`. Inline Escape handlers in `page-header.tsx:101`, `SessionHistory.tsx:447` and `ElementTreeView.tsx:127` own Escape there.
   - `stopNeedsConfirmation(progress: TurnProgress | null): boolean`, true when `progress?.phase` is `'building'` or `'reviewing_deck'`. It lives in `stopGenerationCopy.ts`.
 
 **Behaviour:**
@@ -569,7 +616,9 @@ Models: test=opus impl=sonnet
   - `test_failure_rolled_back_behaves_like_stop_with_failed_notice`
   - `test_failure_kept_foreign_change_uses_error_display`
   - `test_no_stop_on_legacy_deck`
-  - `useEscapeToStop`: `test_ignores_when_inactive`, `test_ignores_default_prevented`, `test_ignores_when_dialog_present`
+  - `useEscapeToStop`: `test_ignores_when_inactive`, `test_ignores_default_prevented`, `test_ignores_when_dialog_present`, `test_ignores_escape_in_text_input`
+  - `test_no_stop_in_sse_mode`
+  - `test_first_generation_after_empty_rollback_renders` (AppLayout: roll back to empty, then a fresh version-1 deck shows)
 - [ ] **Step 2:** `cd frontend && npx vitest run src/components/ChatPanel/ChatPanel.stop.test.tsx src/components/ChatPanel/useEscapeToStop.test.tsx`. Expected: FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Re-run. Expected: PASS. Then `npx vitest run` (the whole suite) and `npm run typecheck && npm run lint`. Expected: no new failures.
