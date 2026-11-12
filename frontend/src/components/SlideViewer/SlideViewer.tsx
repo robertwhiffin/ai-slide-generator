@@ -10,7 +10,7 @@ import {
 import { Edit3, LayoutGrid, Loader2, Plus, Trash2, WandSparkles } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { Tooltip } from '../common/Tooltip';
-import type { SlideDeck } from '../../types/slide';
+import type { SlideDeck, StageSlideContext } from '../../types/slide';
 import type { VerificationResult } from '../../types/verification';
 import { DECK_LEVEL_CRITERIA, type DrawerCallbacks, type SlideFinding } from '../../types/finding';
 import { ViewerProvider, useViewer, type DrawerTab } from '../../contexts/ViewerContext';
@@ -64,6 +64,8 @@ interface SlideViewerProps {
 
 export interface SlideViewerHandle {
   openPresentationMode: () => void;
+  /** The slide on stage (1-based number + stable id), read synchronously; undefined when nothing is shown. */
+  getStageSlide: () => StageSlideContext | undefined;
 }
 
 /**
@@ -549,6 +551,15 @@ const ViewerBody = forwardRef<
   // Expose presentation mode control via ref
   useImperativeHandle(ref, () => ({
     openPresentationMode: () => setIsPresentationMode(true),
+    getStageSlide: () => {
+      const slides = slideDeck.slides;
+      if (slides.length === 0) return undefined;
+      const position = Math.min(Math.max(currentIndex, 0), slides.length - 1);
+      const slide = slides[position];
+      return slide.slide_id
+        ? { slide_number: position + 1, slide_id: slide.slide_id }
+        : { slide_number: position + 1 };
+    },
   }));
 
   const currentSlide = slideDeck.slides[currentIndex];

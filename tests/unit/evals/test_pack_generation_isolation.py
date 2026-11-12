@@ -12,7 +12,8 @@ AGENTS = ["builder", "build_reviewer", "fixer", "fix_reviewer", "deck_reviewer",
 # #314 manual-insert follow-up two, the edit-operations cases four, the sweeper's re-description
 # one), the build_reviewer seven (two deck-style cases) and the builder eight (those two plus
 # Addendum A's deck_style_icons).
-EXPECTED_CASE_COUNT = {"architect": 22, "builder": 8, "build_reviewer": 7}
+# The architect stage context (plan Task 4) adds six Stage Slide cases: 28.
+EXPECTED_CASE_COUNT = {"architect": 28, "builder": 8, "build_reviewer": 7}
 
 
 def _stat(root):

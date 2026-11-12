@@ -1,0 +1,30 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll make the code block on slide 6 dark with light text.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null,
+    "operations": [
+      {
+        "op": "update",
+        "position": 5,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Evidence beat 3 — Interactivity and animation",
+            "content_brief": "Demonstrate that HTML slides support live code demos, embedded videos, interactive charts (D3, Chart.js), scroll-triggered animations, and audience polling — all native to the browser. Bullet list of interactive capabilities with a callout contrasting PowerPoint's limited preset transitions and broken embedded media",
+            "assumes": "The audience values engagement and dynamic content in presentations",
+            "hands_off": "HTML slides can be genuinely interactive, not just animated — a qualitative leap over PowerPoint",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null,
+            "look": "Bullets on the left; a short dk-code listing of an interactive chart embed on the right; the preset-transitions contrast in a dk-callout Its dk-code listing sits on a dark ground with light text."
+          }
+        ]
+      }
+    ],
+    "deck_changes": null
+  }
+}

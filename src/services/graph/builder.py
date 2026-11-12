@@ -305,6 +305,10 @@ def invoke_graph(
     turn-scoped reducer compares, so reusing one would let turn 2 inherit turn
     1's landed positions and go straight to deck review having built nothing.
 
+    ``initial["stage_slide"]`` (the Stage Slide snapshot, or absent) is wrapped
+    the same way and for the same reason: ``scoped(turn_id, value)`` on every
+    invocation, ``None`` when the caller sent no stage.
+
     The collaboration trace is resolved **once**, here, for the same reason:
     ``actor_session_id`` is this session and ``root_session_id`` is the session
     that owns the deck, so a contributor's turn on a shared deck records
@@ -363,6 +367,11 @@ def invoke_graph(
             "root_session_id": root_session_id,
             "actor_session_id": session_id,
             "describe_only": scoped(turn_id, bool(describe_only)),
+            # The Stage Slide, re-stamped with THIS turn on every invocation —
+            # omission included, as None — so a checkpointed stage from an
+            # earlier turn is overwritten, never inherited.  A caller-seeded
+            # wrapper is data, wrapped like any other value.
+            "stage_slide": scoped(turn_id, (initial or {}).get("stage_slide")),
             # Epoch seconds, fresh every turn (a seeded value is overwritten):
             # the AI Gateway MCP tools' 700 s turn deadline counts from here.
             "turn_started_at": time.time(),

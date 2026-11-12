@@ -95,8 +95,11 @@ def _payload(cid: str) -> dict:
             {"role": "assistant", "content": PRIOR_ASSISTANT},
             {"role": "user", "content": msg},
         ]
+    # Production's shape: architect_node always sends stage_slide (null here: no Stage Slide,
+    # and an eval deck has no committed rows).
     slide_keys = architect_slide_payload(
-        conversation, msg, [s["position"] for s in deck["slides"]] if deck else [])
+        conversation, msg, [s["position"] for s in deck["slides"]] if deck else [],
+        stage_slide=None, slide_rows=[])
     payload = model_payload_for(AGENT, {
         "conversation": conversation,
         "message": msg,

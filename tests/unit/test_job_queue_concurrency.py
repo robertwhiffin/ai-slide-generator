@@ -53,6 +53,7 @@ class _BlockingGenerator:
         is_first_message=False,
         image_ids=None,
         engine_mode="monolith",
+        stage_slide=None,
     ):
         with self.lock:
             self.started.append(request_id)

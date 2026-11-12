@@ -72,7 +72,8 @@ def test_the_set_lives_apart_from_train_and_held_out():
     assert ROOT not in (case.cases_dir(AGENT), case.cases_dir(AGENT, split="heldout"))
     for split in case.SPLITS:
         ids = {c.case_id for c in case.load_cases(AGENT, split=split)}
-        assert len(ids) == 22 and not ids & CASE_IDS, split
+        # 22 plus the six Stage Slide cases (plan Task 4).
+        assert len(ids) == 28 and not ids & CASE_IDS, split
         assert not any(
             "image_tool" in (c.expect or {}) for c in case.load_cases(AGENT, split=split))
 
@@ -246,3 +247,46 @@ def test_a_generated_case_loads_like_the_committed_one(tmp_path):
         a, b = case.load_case(AGENT, cid, root=out), case.load_case(AGENT, cid, root=ROOT)
         assert a == b, cid
         assert copy.deepcopy(a.payload) == b.payload
+
+
+# =========================================================================== production-key parity
+
+#: The production architect payload keys, in architect_node's order (whole-branch review I1):
+#: architect_node always sends ``stage_slide`` (null with no slide on stage), so an eval payload
+#: without it tests a prompt shape the architect never sees.  ``data_sources`` (agent-mode Task 7)
+#: is always last.
+PAYLOAD_KEYS = [
+    "conversation", "message", "current_deck_spec", "committed_slide_count",
+    "slide_numbering", "slide_references", "stage_slide",
+    "previous_deck_review", "available_design_contract", "template_sections",
+    "resolved_style", "design_system_library", "deck_style_context", "data_sources",
+]
+
+
+def test_payload_keys_are_every_production_key():
+    from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
+
+    assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT]) - {"rejected_edit"}
+    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 14
+
+
+@pytest.mark.parametrize("cid", sorted(CASE_IDS))
+def test_the_committed_payload_has_every_production_key_in_order(cid):
+    p = _cases()[cid].payload
+    assert list(p) == PAYLOAD_KEYS, cid
+
+
+@pytest.mark.parametrize("cid", sorted(CASE_IDS))
+def test_the_committed_payload_has_no_stage(cid):
+    """No image-tool case is sent with a slide on stage: ``stage_slide`` is present and null."""
+    p = _cases()[cid].payload
+    assert "stage_slide" in p and p["stage_slide"] is None, cid
+
+
+def test_the_generator_writes_the_production_keys(tmp_path):
+    out = tmp_path / "cases_image_tool"
+    gen.generate(out_dir=out)
+    for cid in sorted(CASE_IDS):
+        p = case.load_case(AGENT, cid, root=out).payload
+        assert list(p) == PAYLOAD_KEYS, cid
+        assert p["stage_slide"] is None, cid

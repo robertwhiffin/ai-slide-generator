@@ -53,9 +53,26 @@ REDESCRIBE_CASES = ["redescribe_deck"]
 DECK_STYLE_BUILD_CASES = ["build_technical_deck"]
 DECK_STYLE_EDIT_CASES = ["restyle_deck"]
 DECK_STYLE_CASES = DECK_STYLE_BUILD_CASES + DECK_STYLE_EDIT_CASES
+# Architect stage context (plan Task 4): six cases sent with a slide on the viewer's stage,
+# defined by evals/packs/architect/stage_cases.py on this split's deck. Folded into
+# NEW_CASE_IDS (all mutations on the deck); tests/unit/evals/test_pack_architect_stage_cases.py
+# checks their content and scoring.
+STAGE_CASES = [
+    "stage_restyle_deck", "stage_explicit_other", "stage_deictic_title",
+    "stage_unqualified_title", "stage_question", "stage_move",
+]
+# Each Stage Slide case's model-facing stage_slide; every other case's is null.
+STAGE_SLIDE = {
+    "stage_restyle_deck": {"slide_number": 3, "position": 2},
+    "stage_explicit_other": {"slide_number": 2, "position": 1},
+    "stage_deictic_title": {"slide_number": 4, "position": 3},
+    "stage_unqualified_title": {"slide_number": 6, "position": 5},
+    "stage_question": {"slide_number": 5, "position": 4},
+    "stage_move": {"slide_number": 6, "position": 5},
+}
 NEW_CASE_IDS = (
     CASES_313 + INSERT_CASES + BLANK_CASES + OPERATIONS_CASES + REDESCRIBE_CASES
-    + DECK_STYLE_CASES
+    + DECK_STYLE_CASES + STAGE_CASES
 )
 CASE_IDS = EXISTING_CASE_IDS + NEW_CASE_IDS
 MUTATIONS = ["edit_request", "ask_data", "confirm_design"] + [
@@ -106,12 +123,31 @@ EXPECT = {
     "restyle_deck": {
         "intent": "edit", "positions": [], "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"],
     },
+    # Architect stage context (plan Task 4): each Stage Slide case's payload carries a slide on
+    # stage (STAGE_SLIDE); its expect is scored like the operations and restyle cases.
+    "stage_restyle_deck": {
+        "intent": "edit", "positions": [], "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"],
+    },
+    "stage_explicit_other": {
+        "intent": "edit", "positions": [4], "inserted": [], "layout": list(range(6)),
+    },
+    "stage_deictic_title": {
+        "intent": "edit", "positions": [3], "inserted": [], "layout": list(range(6)),
+    },
+    "stage_unqualified_title": {
+        "intent": "edit", "positions": [5], "inserted": [], "layout": list(range(6)),
+    },
+    "stage_question": {"intent": "discuss"},
+    "stage_move": {
+        "intent": "edit", "positions": [], "inserted": [], "layout": [0, 1, 5, 2, 3, 4],
+    },
 }
 HAS_DECK = {"edit_request", "confirm_design", "discuss"} | (
     set(NEW_CASE_IDS) - set(DECK_STYLE_BUILD_CASES)
 )
 # The cases whose current deck carries the deck-style fixture and a look on every slide.
-STYLED_DECK_CASES = set(DECK_STYLE_EDIT_CASES)
+# The Stage Slide restyle is sent on the same styled deck as restyle_deck.
+STYLED_DECK_CASES = set(DECK_STYLE_EDIT_CASES) | {"stage_restyle_deck"}
 DECK_STYLE_FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
 EDIT_CASES = [c for c in CASE_IDS if EXPECT[c]["intent"] == "edit"]
 # #314 (D11, finding 11): this case's should_fail is right place and right targets with an
@@ -122,6 +158,9 @@ SLIPPED = ["edit_last_slide", "edit_multi_slide"]
 # D7: adding the #313 cases leaves the five existing cases byte-identical. Digests of the files at
 # 679d2f21. Task 7 adds the two SLIDE_KEYS to every payload.json on purpose and re-pins nothing: a
 # payload.json digest is checked on that payload with the two keys stripped (D11).
+# The architect stage context adds ``"stage_slide": null`` to every payload.json (production
+# shape). Like ``data_sources``, it is stripped by both helpers below, and its value is pinned by
+# ``test_payload_is_the_production_shape``, so no digest here moves for it.
 EXISTING_CASE_SHA256 = {
     "ask_data/calibration.json": "0761dfd021fbf5f9abaa73c0fe33735f16f0d3afce5be5bc46a0d9252f7fd086",
     "ask_data/case.yaml": "507b1f55e8479b02535af8ba1363b7a76bc3ef2d3310849f9af3aca51c17abe6",
@@ -221,7 +260,7 @@ PACK_DIR = case.PACKS_DIR / AGENT
 # The production architect payload keys, in architect_node's order (src/services/graph/nodes.py).
 PAYLOAD_KEYS = [
     "conversation", "message", "current_deck_spec", "committed_slide_count",
-    "slide_numbering", "slide_references",
+    "slide_numbering", "slide_references", "stage_slide",
     "previous_deck_review", "available_design_contract", "template_sections",
     "resolved_style", "design_system_library", "deck_style_context", "data_sources",
 ]
@@ -230,6 +269,8 @@ SLIDE_KEYS = ("slide_numbering", "slide_references")
 DECK_STYLE_CONTEXT_KEY = "deck_style_context"
 # Agent-mode Task 7: every payload now carries the analyst's data sources (always Genie One).
 DATA_SOURCES_KEY = "data_sources"
+# Architect stage context: every payload carries the Stage Slide (null but for the stage cases).
+STAGE_SLIDE_KEY = "stage_slide"
 DECK_SLIDES = 6
 # #313 (plan Task 7, Appendix H): every slide reference resolved in each case's message, pinned.
 SLIDE_REFERENCES = {
@@ -294,6 +335,18 @@ SLIDE_REFERENCES = {
     # Deck style: the build names no slide; the restyle names every code block, not a slide.
     "build_technical_deck": [],
     "restyle_deck": [],
+    # Stage Slide cases: references are lexical, so the stage is never one; only a slide the
+    # message names by number resolves.
+    "stage_restyle_deck": [],
+    "stage_explicit_other": [
+        {"text": "slide 5", "slide_numbers": [5], "positions": [4], "out_of_range": []},
+    ],
+    "stage_deictic_title": [],
+    "stage_unqualified_title": [],
+    "stage_question": [],
+    "stage_move": [
+        {"text": "slide 2", "slide_numbers": [2], "positions": [1], "out_of_range": []},
+    ],
 }
 LAYOUT =case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
 
@@ -501,7 +554,7 @@ def test_payload_keys_are_every_production_key():
     builder's ``corrective_instruction`` is), so no case carries it."""
     assert "rejected_edit" in MODEL_PAYLOAD_KEYS[AGENT]
     assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT]) - {"rejected_edit"}
-    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 13
+    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 14
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -510,6 +563,8 @@ def test_payload_is_the_production_shape(cid):
     gold = case.gold_deck_spec(DECK)
     assert isinstance(p["message"], str) and p["message"]
     assert p["previous_deck_review"] is None
+    # The architect stage context: a Stage Slide case carries its stage, every other none.
+    assert p["stage_slide"] == STAGE_SLIDE.get(cid)
     assert p["available_design_contract"] == {
         "design_system_id": 3, "template_id": 5, "slide_style_id": None,
     }
@@ -720,7 +775,8 @@ def _by_position(spec):
     "cid",
     [c for c in EDIT_CASES
      if c not in INSERT_CASES and c not in BLANK_CASES and c not in OPERATIONS_CASES
-     and c not in REDESCRIBE_CASES and c not in DECK_STYLE_CASES],
+     and c not in REDESCRIBE_CASES and c not in DECK_STYLE_CASES
+     and c not in STAGE_CASES],
 )
 def test_edit_references_revise_only_their_targets(cid):
     ref = _load(cid).reference
@@ -800,7 +856,8 @@ def test_slide_references_are_pinned(cid):
 @pytest.mark.parametrize(
     "cid",
     [c for c in EDIT_CASES
-     if c not in INSERT_CASES and c not in OPERATIONS_CASES and c not in REDESCRIBE_CASES],
+     if c not in INSERT_CASES and c not in OPERATIONS_CASES and c not in REDESCRIBE_CASES
+     and c not in STAGE_CASES],
 )
 def test_resolved_references_equal_the_expected_edit_positions(cid):
     """A2's deterministic proof on the eval messages: the resolver yields every expected target."""
@@ -963,7 +1020,7 @@ def test_calibration_should_fail_is_wrong_and_valid(cid):
     "cid",
     [c for c in CASE_IDS
      if c not in ("edit_request", *SLIPPED, *INSERT_CASES, *BLANK_CASES, *OPERATIONS_CASES,
-                  *REDESCRIBE_CASES, *DECK_STYLE_CASES)],
+                  *REDESCRIBE_CASES, *DECK_STYLE_CASES, *STAGE_CASES)],
 )
 def test_calibration_has_the_wrong_intent(cid):
     assert _cal(cid)["should_fail"]["intent"] != EXPECT[cid]["intent"]
@@ -1016,7 +1073,8 @@ def _without_slide_keys(data: bytes) -> bytes:
     formatting change; removing the keys then leaves every other key, value and order as written.
     The removed keys' values are pinned elsewhere, by
     ``test_committed_slide_keys_are_the_production_helper`` and
-    ``test_committed_deck_style_context_is_the_production_derivation``.
+    ``test_committed_deck_style_context_is_the_production_derivation``; ``data_sources`` and
+    ``stage_slide`` as in ``_without_deck_style_context``.
     """
     obj = json.loads(data)
     assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
@@ -1024,23 +1082,29 @@ def _without_slide_keys(data: bytes) -> bytes:
         {
             k: v
             for k, v in obj.items()
-            if k not in (*SLIDE_KEYS, DECK_STYLE_CONTEXT_KEY, DATA_SOURCES_KEY)
+            if k not in (*SLIDE_KEYS, DECK_STYLE_CONTEXT_KEY, DATA_SOURCES_KEY, STAGE_SLIDE_KEY)
         }
     )
 
 
 def _without_deck_style_context(data: bytes) -> bytes:
-    """A payload.json's bytes with only ``deck_style_context`` and ``data_sources`` removed.
+    """A payload.json's bytes with only ``deck_style_context``, ``data_sources`` and
+    ``stage_slide`` removed.
 
     The key was added to every architect payload on purpose; a payload.json digest is checked on
     the payload without it, so no case is re-pinned.  Its value is pinned instead by
     ``test_committed_deck_style_context_is_the_production_derivation``; ``data_sources`` (agent-mode
-    Task 7) by ``test_every_case_payload_carries_the_genie_one_data_source``.
+    Task 7) by ``test_every_case_payload_carries_the_genie_one_data_source``; ``stage_slide``
+    (architect stage context) by ``test_payload_is_the_production_shape``.
     """
     obj = json.loads(data)
     assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
     return _serialised(
-        {k: v for k, v in obj.items() if k not in (DECK_STYLE_CONTEXT_KEY, DATA_SOURCES_KEY)}
+        {
+            k: v
+            for k, v in obj.items()
+            if k not in (DECK_STYLE_CONTEXT_KEY, DATA_SOURCES_KEY, STAGE_SLIDE_KEY)
+        }
     )
 
 

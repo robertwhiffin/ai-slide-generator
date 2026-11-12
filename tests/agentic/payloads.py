@@ -28,6 +28,7 @@ ARCHITECT_PAYLOAD_KEYS: tuple[str, ...] = (
     "committed_slide_count",
     "slide_numbering",
     "slide_references",
+    "stage_slide",
     "previous_deck_review",
     "available_design_contract",
     "template_sections",
@@ -42,7 +43,7 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
     """The architect's payload, with every production key present.
 
     Absent keys are as significant as present ones: ``architect_node`` always
-    sends all twelve, so a builder that omitted ``template_sections`` would be
+    sends all fourteen, so a builder that omitted ``template_sections`` would be
     testing a prompt shape the architect never sees.
 
     Args:
@@ -60,6 +61,7 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
         "committed_slide_count": 0,
         "slide_numbering": [],
         "slide_references": [],
+        "stage_slide": None,
         "previous_deck_review": None,
         "available_design_contract": None,
         "template_sections": [],

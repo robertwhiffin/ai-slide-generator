@@ -1,0 +1,28 @@
+{
+  "intent": "edit",
+  "message": "I'll cut the callout on slide 2 down to bloated file sizes and font substitution.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 1,
+      "after_position": null,
+      "slides": [
+        {
+          "purpose": "Frame the problem — why presentation quality matters and where PowerPoint falls short",
+          "content_brief": "Explain that presentations are a primary vehicle for persuasion and decision-making, yet most are constrained by a 30-year-old format. Use bullet points with a callout on the two worst PowerPoint pain points: bloated file sizes (8–15 MB average) and font substitution",
+          "assumes": "The audience has experienced frustration with PowerPoint at least once",
+          "hands_off": "PowerPoint's legacy architecture imposes real limits on presentation quality",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null,
+          "look": null
+        }
+      ]
+    }
+  ],
+  "deck_changes": null
+}

@@ -360,12 +360,20 @@ def architect_slide_payload(
     positions: Iterable[int],
     *,
     describe_only: bool = False,
-) -> dict[str, list]:
+    stage_slide: Mapping | None = None,
+    slide_rows: Sequence[Mapping] | None = None,
+) -> dict[str, list | dict[str, int] | None]:
     """The architect payload's ``slide_numbering`` and ``slide_references`` keys.
 
     The one helper that ``architect_node``, the eval generators and the agentic
     test payloads all call.  References are resolved from the latest user turn
     (falling back to ``message``) and are ``[]`` on a describe-only turn (D4).
+
+    A stage-aware call (``stage_slide`` or ``slide_rows`` given, ``[]``
+    included) also gets ``stage_slide``: the Stage Slide resolved by
+    ``resolve_stage_slide`` to ``{"slide_number", "position"}``, or ``None``
+    (always ``None`` on a describe-only turn).  A call with neither keeps the
+    two-key result.  The stage never changes ``slide_references``.
     """
     positions = list(positions)
     references = (
@@ -373,10 +381,56 @@ def architect_slide_payload(
         if describe_only
         else resolve_slide_references(latest_user_message(conversation, message), positions)
     )
-    return {
-        "slide_numbering": slide_numbering(positions),
+    numbering = slide_numbering(positions)
+    payload: dict[str, list | dict[str, int] | None] = {
+        "slide_numbering": numbering,
         "slide_references": references,
     }
+    if stage_slide is not None or slide_rows is not None:
+        payload["stage_slide"] = (
+            None if describe_only else resolve_stage_slide(stage_slide, slide_rows, numbering)
+        )
+    return payload
+
+
+def resolve_stage_slide(
+    stage_slide: object,
+    slide_rows: Sequence[Mapping] | None,
+    numbering: Sequence[Mapping],
+) -> dict[str, int] | None:
+    """The Stage Slide's CURRENT ``{"slide_number", "position"}``, or ``None``.
+
+    ``stage_slide`` is the viewer's send-time snapshot ``{"slide_number": N,
+    "slide_id"?: str}``; ``slide_rows`` are THIS deck's committed rows and
+    ``numbering`` is ``slide_numbering(...)`` of the deck.  A positive integer
+    ``slide_number`` is required.  With a ``slide_id`` the slide is found by that
+    id alone: exactly one row must carry it and its position must be numbered,
+    otherwise there is no stage (a deleted, duplicated or foreign id never falls
+    back to the number).  With no id (absent or ``None``, older slide data) the
+    number is looked up in ``numbering``.  Only ints are returned: no id, row or
+    snapshot field reaches the caller.
+    """
+    if not isinstance(stage_slide, Mapping):
+        return None
+    number = stage_slide.get("slide_number")
+    if type(number) is not int or number < 1:
+        return None
+    slide_id = stage_slide.get("slide_id")
+    if slide_id is None:
+        wanted_key, wanted = "slide_number", number
+    else:
+        if not isinstance(slide_id, str) or not slide_id:
+            return None
+        matches = [row for row in slide_rows or () if row.get("slide_id") == slide_id]
+        if len(matches) != 1:
+            return None
+        wanted_key, wanted = "position", matches[0].get("position")
+        if type(wanted) is not int:
+            return None
+    for entry in numbering:
+        if entry.get(wanted_key) == wanted:
+            return {"slide_number": int(entry["slide_number"]), "position": int(entry["position"])}
+    return None
 
 
 def edit_ignores_references(
