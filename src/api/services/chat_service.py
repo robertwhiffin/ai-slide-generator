@@ -2990,6 +2990,17 @@ class ChatService:
 
         if cached_deck is not None:
             db_version = self._get_deck_version(session_id)
+            if db_version is None and self._deck_row_confirmed_absent(session_id):
+                # Another process deleted the deck row (a first-generation
+                # rollback): the cached deck no longer exists anywhere.
+                logger.info(
+                    "Deck row gone, dropping cached deck",
+                    extra={"session_id": session_id, "cached_version": cached_version},
+                )
+                with self._cache_lock:
+                    self._deck_cache.pop(session_id, None)
+                    self._deck_versions().pop(session_id, None)
+                return None
             if db_version is None or cached_version == db_version:
                 return cached_deck
             logger.info(
@@ -3061,6 +3072,23 @@ class ChatService:
             return session_manager.get_slide_deck_version(session_id)
         except Exception:
             return None
+
+    def _deck_row_confirmed_absent(self, session_id: str) -> bool:
+        """True only when the database confirms the session has no deck row.
+
+        Asked only after :meth:`_get_deck_version` returned None, which also
+        covers a read error.  Any error here, or any answer other than a plain
+        ``False``, is "not confirmed", so the cached deck is served as before.
+        """
+        try:
+            return get_session_manager().slide_deck_exists(session_id) is False
+        except Exception:
+            logger.warning(
+                "Could not confirm whether the deck row exists; serving the cached deck",
+                extra={"session_id": session_id},
+                exc_info=True,
+            )
+            return False
 
     @staticmethod
     def _reindex_slide_ids(deck: "SlideDeck") -> None:

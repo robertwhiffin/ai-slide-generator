@@ -463,6 +463,7 @@ jobs:
             tests/integration/test_spec_row_alignment.py \
             tests/integration/test_claim_exclusivity_postgres.py \
             tests/integration/test_generation_fence_postgres.py \
+            tests/integration/test_generation_rollback_postgres.py \
             tests/integration/test_graph_lifecycle_acceptance_postgres.py \
             tests/integration/test_graph_lifecycle_runtime_postgres.py \
             tests/integration/test_lakebase_contract_failures_postgres.py \

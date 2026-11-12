@@ -2648,6 +2648,29 @@ class SessionManager:
                 .scalar()
             )
 
+    def slide_deck_exists(self, session_id: str) -> bool:
+        """Whether the session's deck row (the owner's, for a contributor) exists.
+
+        ``False`` is a confirmed answer: the session, or its deck row, is not in
+        the database (a first-generation rollback deletes the row).  A database
+        error propagates, so a caller can tell "no row" from "could not read".
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if session is None:
+                return False
+            deck_owner = self._get_deck_owner_session(db, session)
+            return (
+                db.query(SessionSlideDeck.id)
+                .filter(SessionSlideDeck.session_id == deck_owner.id)
+                .first()
+                is not None
+            )
+
     def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get slide deck for a session with verification merged by content hash.
 
