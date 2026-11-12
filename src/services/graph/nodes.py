@@ -58,6 +58,7 @@ from src.api.schemas.agent_config import (
     AgentConfig,
     GatewayMcpTool,
     GenieOneTool,
+    GenieTool,
     MCPTool,
     resolve_agent_config,
 )
@@ -137,11 +138,13 @@ from src.services.agent_tools.gateway_toolset import (
     failure_notice,
     turn_budget,
 )
+from src.services.agent_tools.genie_agent import GENIE_AGENT_SCOPE, GenieAgentTool
 from src.services.agent_tools.genie_one import (
     GENIE_ONE_SCOPE,
     GENIE_ONE_SOURCE,
     GenieOneAnswer,
     figures_from_answer,
+    is_genie_source,
 )
 from src.services.agent_tools.image_generation_tool import (
     BUDGET_SECONDS as IMAGE_BUDGET_SECONDS,
@@ -163,6 +166,7 @@ from src.services.agent_tools.registry import (
     GENIE_TOOL_NAME,
     GenieOneAgentTool,
     build_analyst_toolset,
+    build_genie_agent_tools,
 )
 from src.services.agent_tools.toolset import AgentTool, AgentToolset
 from src.services.deck_css_aggregator import aggregate_deck_css
@@ -3519,19 +3523,22 @@ def _plan_answer(
 
 
 def _with_genie_figures(spec: DeckSpec, figures: List[ResolvedFigure]) -> DeckSpec:
-    """*spec* with *figures* as its code-owned Genie One figures.  Pure.
+    """*spec* with *figures* as its code-owned Genie figures.  Pure.
 
-    Keeps the architect's own figures whose source is not Genie One and whose key
-    is not one of *figures*' keys, in its order, then appends *figures* in order.
-    So a Genie value the architect retyped, a Genie figure it dropped and a stray
-    one it invented are all put right: what reaches ``resolved_data`` is what the
-    code built from Genie One's result rows.
+    Keeps the architect's own figures whose source is not a Genie source
+    (``is_genie_source``: Genie One, or a ``"Genie Agent · "`` source) and whose
+    key is not one of *figures*' keys, in its order, then appends *figures* in
+    order.  So a Genie value the architect retyped, a Genie figure it dropped and
+    a stray one it invented are all put right: what reaches ``resolved_data`` is
+    what the code built from Genie's result rows.  Ownership hinges on the
+    code's own prefix, never on a user-chosen space name (R1): a figure the
+    architect sourced "Sales" stays the architect's.
     """
     keys = {figure.key for figure in figures}
     kept = [
         figure
         for figure in spec.resolved_data.figures
-        if figure.source != GENIE_ONE_SOURCE and figure.key not in keys
+        if not is_genie_source(figure.source) and figure.key not in keys
     ]
     return spec.model_copy(
         update={
@@ -3545,19 +3552,21 @@ def _with_genie_figures(spec: DeckSpec, figures: List[ResolvedFigure]) -> DeckSp
 def _code_owned_genie_figures(
     state: dict, prior_spec: Optional[DeckSpec]
 ) -> List[ResolvedFigure]:
-    """The Genie One figures this turn's spec must carry verbatim.
+    """The Genie figures (Genie One's and every Genie Agent's) this turn's spec
+    must carry verbatim.
 
-    The UNION, keyed by key, of the PERSISTED prior spec's Genie One figures
-    (the one ``architect_node`` read from the database; a contributor's
-    checkpointed ``state["deck_spec"]`` can be stale) and this turn's
-    ``analyst_figures``, so a later edit can neither retype nor drop a figure an
-    untouched slide still cites.  On a key both carry, this turn's value wins, in
-    the prior figure's place; this turn's new keys follow, in order.
+    The UNION, keyed by key, of the PERSISTED prior spec's Genie figures (every
+    figure whose source ``is_genie_source``, in the spec ``architect_node`` read
+    from the database; a contributor's checkpointed ``state["deck_spec"]`` can
+    be stale) and this turn's ``analyst_figures``, so a later edit can neither
+    retype nor drop a figure an untouched slide still cites.  On a key both
+    carry, this turn's value wins, in the prior figure's place; this turn's new
+    keys follow, in order.
     """
     merged: Dict[str, ResolvedFigure] = {}
     if prior_spec is not None:
         for figure in prior_spec.resolved_data.figures:
-            if figure.source == GENIE_ONE_SOURCE:
+            if is_genie_source(figure.source):
                 merged[figure.key] = figure
     for figure in _turn_analyst_figures(state):
         merged[figure.key] = figure
@@ -3579,11 +3588,12 @@ def _turn_analyst_figures(state: dict) -> List[ResolvedFigure]:
 # AI Gateway MCP connections (agent mode)
 # ---------------------------------------------------------------------------
 # The architect and the data analyst may be handed the tools of the AI Gateway
-# MCP services an admin registered and the deck's owner added.  Everything here
-# is gated on the ACTOR's agent config holding a ``gateway_mcp`` entry (C2): a
-# deck without one never reaches for the user's identity, never reads the
-# registry, never writes a ``gateway_*`` state key and adds no payload key, so
-# its turn is exactly what it was.
+# MCP services an admin registered and the deck's owner added, and of the Unity
+# Catalog MCP connections the deck's owner added (``mcp`` entries, each bound to
+# one agent).  Everything here is gated on the ACTOR's agent config holding a
+# ``gateway_mcp`` or ``mcp`` entry (C2): a deck without one never reaches for
+# the user's identity, never reads the registry, never writes a ``gateway_*``
+# state key and adds no payload key, so its turn is exactly what it was.
 
 
 #: The ``tool_name`` a Gateway progress line carries, on SSE and on its row.
@@ -3673,6 +3683,15 @@ def _turn_image_owner(state: dict) -> Optional[str]:
     return owner
 
 
+def _turn_started_at(state: dict) -> Optional[float]:
+    """The turn's ``turn_started_at`` as a float, or ``None`` when it is not a number
+    (then the turn deadline does not apply)."""
+    started = state.get("turn_started_at")
+    if isinstance(started, (int, float)) and not isinstance(started, bool):
+        return float(started)
+    return None
+
+
 def _actor_agent_config(state: dict, *, consequence: str) -> Optional[AgentConfig]:
     """The ACTOR's own agent config, or ``None`` when it cannot be read.
 
@@ -3691,11 +3710,14 @@ def _actor_agent_config(state: dict, *, consequence: str) -> Optional[AgentConfi
 
 @dataclass(frozen=True)
 class _GatewayUser:
-    """The actor's Gateway entries and the signed-in user their tools run as.
+    """The actor's Gateway entries and UC MCP connections, and the signed-in
+    user their tools run as.
 
     Captured in the node thread, where the request's ContextVars are set.
     ``token`` is kept out of ``repr`` so no log line or traceback prints it;
-    ``owner`` is who the images the tools save belong to (C4).
+    ``owner`` is who the images the tools save belong to (C4).  ``entries`` are
+    the ``gateway_mcp`` entries and ``connections`` the ``mcp`` ones (every
+    agent's: the build keeps the ones bound to the pass's agent).
     """
 
     entries: Tuple[GatewayMcpTool, ...]
@@ -3706,12 +3728,13 @@ class _GatewayUser:
 
 
 def _gateway_user(state: dict, config: Optional[AgentConfig]) -> Optional[_GatewayUser]:
-    """The actor's Gateway entries and the user they run as, or ``None``: no tools.
+    """The actor's Gateway entries and UC MCP connections and the user they run
+    as, or ``None``: no tools.
 
-    ``None`` without a ``gateway_mcp`` entry (then nothing else is looked at), on
-    a describe-only turn (the arc-review sweeper: nobody is there to be told or
-    to sign in), and with no user client: a Gateway call runs only as the
-    signed-in user, never the service principal.
+    ``None`` without a ``gateway_mcp`` or ``mcp`` entry (then nothing else is
+    looked at), on a describe-only turn (the arc-review sweeper: nobody is there
+    to be told or to sign in), and with no user client: a Gateway or connection
+    call runs only as the signed-in user, never the service principal.
     """
     if config is None or bool(scoped_vals(state, "describe_only")):
         return None
@@ -3724,16 +3747,16 @@ def _gateway_user(state: dict, config: Optional[AgentConfig]) -> Optional[_Gatew
         host, token = client_config.host, client_config.token
     except Exception:
         logger.warning(
-            "AI Gateway MCP tools are configured but no user client is bound; the "
-            "turn runs without them",
+            "AI Gateway MCP tools or UC MCP connections are configured but no user "
+            "client is bound; the turn runs without them",
             exc_info=True,
             extra={"session_id": state.get("session_id")},
         )
         return None
     if not host or not token:
         logger.warning(
-            "AI Gateway MCP tools are configured but the user client has no host or "
-            "token; the turn runs without them",
+            "AI Gateway MCP tools or UC MCP connections are configured but the user "
+            "client has no host or token; the turn runs without them",
             extra={"session_id": state.get("session_id")},
         )
         return None
@@ -3744,10 +3767,12 @@ class _GatewayNotices:
     """What the user has been told this turn about Gateway connections and consent.
 
     Each notice is said at most once per service per turn (T6.4), and the consent
-    message at most once per turn across Gateway connections and Genie One
-    (T6.5).  Earlier passes' ``notified`` lists are read off this turn's
-    ``gateway_usage``; this pass's are kept in :attr:`said`, for its own entry.
-    Holds the OAuth client id the consent message names, never the token.
+    message at most once per turn across Gateway connections, Genie One and the
+    Genie Agents (T6.5).  Earlier passes' ``notified`` lists are read off this
+    turn's ``gateway_usage``; this pass's are kept in :attr:`said`, for its own
+    entry.  An analyst run with Genie Agents but no Gateway pass keeps a local
+    one, so "once" is then per run (R8).  Holds the OAuth client id the consent
+    message names, never the token.
     """
 
     def __init__(self, state: dict, token: str) -> None:
@@ -3767,14 +3792,20 @@ class _GatewayNotices:
 
     def consent(self) -> None:
         """Say the consent message, unless it was said this turn."""
-        if self._told(_CONSENT_NOTIFIED):
+        self.say_once(_CONSENT_NOTIFIED, consent_message(oauth_client_id=self._oauth_client_id))
+
+    def say_once(self, key: str, text: str) -> None:
+        """Say *text* as an ``info`` row, unless *key* was said this turn.
+
+        The key is recorded in :attr:`said`, so a later pass of the turn reads it
+        off ``gateway_usage``.  Callers pick keys that cannot collide: the consent
+        marker, a Gateway service name, ``mcp:<connection>``,
+        ``genie_agent:<space_id>``.
+        """
+        if self._told(key):
             return
-        self.said.append(_CONSENT_NOTIFIED)
-        _say(
-            self._state,
-            consent_message(oauth_client_id=self._oauth_client_id),
-            message_type="info",
-        )
+        self.said.append(key)
+        _say(self._state, text, message_type="info")
 
     def failures(self, failures: Sequence[GatewayFailure]) -> None:
         """Say each failure's notice, once per service per turn.
@@ -3849,12 +3880,7 @@ class _GatewayPass:
         ]
         self._prior_calls = sum(int(entry.get("calls") or 0) for entry in prior)
         self._prior_seconds = sum(float(entry.get("seconds") or 0.0) for entry in prior)
-        started = state.get("turn_started_at")
-        self._turn_started_at: Optional[float] = (
-            float(started)
-            if isinstance(started, (int, float)) and not isinstance(started, bool)
-            else None
-        )
+        self._turn_started_at = _turn_started_at(state)
         self.notices = _GatewayNotices(state, user.token)
         self._build: Optional[GatewayToolsetBuild] = None
         self._failures: List[GatewayFailure] = []
@@ -4203,12 +4229,7 @@ class _ImageToolPass:
         self._prior_calls = sum(int(entry.get("calls") or 0) for entry in prior)
         self._prior_images = sum(int(entry.get("images") or 0) for entry in prior)
         self._prior_seconds = sum(float(entry.get("seconds") or 0.0) for entry in prior)
-        started = state.get("turn_started_at")
-        self._turn_started_at: Optional[float] = (
-            float(started)
-            if isinstance(started, (int, float)) and not isinstance(started, bool)
-            else None
-        )
+        self._turn_started_at = _turn_started_at(state)
         #: Every tool this pass built, in order, and the context each was sized with.
         self._tools: List[ImageGenerationAgentTool] = []
         self._contexts: Dict[int, ImageToolContext] = {}
@@ -5613,6 +5634,23 @@ _GENIE_ONE_GRANT_MESSAGE: Final = (
 #: The ``tool_name`` a Genie One progress line carries, on SSE and on its row.
 _GENIE_ONE_PROGRESS_TOOL: Final = "genie_one"
 
+#: The ``tool_name`` a Genie Agent progress line carries: TOP-LEVEL on its SSE
+#: event and in its row's metadata, with ``tool_input`` ``{"agent", "question"}``.
+_GENIE_AGENT_PROGRESS_TOOL: Final = "genie"
+
+#: The ``notified`` key of a Genie Agent's refusal notice is this prefix and the
+#: space id, so it can never collide with the consent marker, a Gateway service
+#: name or an ``mcp:`` connection key (R8, R9).
+_GENIE_AGENT_NOTIFIED_PREFIX: Final = "genie_agent:"
+
+
+def _genie_agent_refused(space_name: str) -> str:
+    """Said to the user, once per space, when a Genie Agent refuses them access."""
+    return (
+        f"{space_name} refused the request. You may need access to that Genie Agent; "
+        "ask its owner to share it with you."
+    )
+
 
 @dataclass(frozen=True)
 class _GenieOneRun:
@@ -5646,9 +5684,10 @@ def _genie_one_run(
     in the node thread, where the request's ContextVars are set: no user client
     (production fails closed) means no toolset, never the service principal's.
 
-    *extra_tools* are the analyst's AI Gateway MCP tools, bound beside Genie One
-    (``build_analyst_toolset``); *notices* is that run's record of what the turn
-    has been told, so the consent message is said at most once per turn.
+    *extra_tools* are the analyst's Genie Agent tools and its AI Gateway / UC
+    MCP tools, bound beside Genie One (``build_analyst_toolset``); *notices* is
+    that run's record of what the user has been told (the Gateway pass's, or the
+    Genie Agents' local one), so the consent message is said at most once.
 
     **Scope pre-flight.**  When the user's token says which scopes it carries
     and ``ai-gateway`` (or ``all-apis``) is not among them, every Genie One call
@@ -5725,6 +5764,152 @@ def _genie_one_run(
     return _GenieOneRun(toolset, tool, token, tool.conversation_id)
 
 
+@dataclass(frozen=True)
+class _GenieAgentRun:
+    """One analyst attempt's Genie Agent tools, carried beside :class:`_GenieOneRun`.
+
+    ``host`` and ``token`` are the signed-in user's, captured in the node thread
+    (``get_user_client()`` there) and fixed on every client; ``token`` is kept
+    out of ``repr`` so no log line or traceback prints it.  ``notices`` is the
+    run's record of what the user has been told: the Gateway pass's, or a local
+    one without a pass (R8).  ``tools`` holds one tool per ``genie`` entry of
+    ``config``, in config order, or none when the token's known scopes lack
+    ``dashboards.genie``.  Each tool's ``stored_conversation_id`` is the actor
+    row's, so an unchanged id is not written again.
+    """
+
+    config: AgentConfig
+    host: str
+    token: str = field(repr=False)
+    notices: _GatewayNotices
+    tools: Tuple[GenieAgentTool, ...]
+
+    def fresh(self, state: dict) -> "_GenieAgentRun":
+        """The same run with NEW tools (no answers, no questions asked), for a retry."""
+        if not self.tools:
+            return self
+        return dataclass_replace(self, tools=_build_genie_agent_tools(state, self))
+
+
+def _genie_agent_run(
+    state: dict, config: Optional[AgentConfig], *, notices: Optional[_GatewayNotices]
+) -> Optional[_GenieAgentRun]:
+    """The actor's Genie Agents for this run, or ``None``: no ``genie`` entry, or
+    no signed-in user (a Genie Agent runs only as the user, never the service
+    principal).
+
+    *notices* is the Gateway pass's, when the run has one; without it the run
+    gets its own.  **Scope pre-flight.**  When the token says which scopes it
+    carries and ``dashboards.genie`` (or ``all-apis``) is not among them, every
+    Genie Agent call would be refused: the consent message is said once, here,
+    and the run carries no Genie Agent tools.
+    """
+    if config is None or not any(isinstance(tool, GenieTool) for tool in config.tools):
+        return None
+    try:
+        client_config = get_user_client().config
+        host, token = client_config.host, client_config.token
+    except Exception:
+        logger.warning(
+            "Genie Agents are configured but no user client is bound; the analyst "
+            "runs without them",
+            exc_info=True,
+            extra={"session_id": state.get("session_id")},
+        )
+        return None
+    if not host or not token:
+        logger.warning(
+            "Genie Agents are configured but the user client has no host or token; "
+            "the analyst runs without them",
+            extra={"session_id": state.get("session_id")},
+        )
+        return None
+    run = _GenieAgentRun(
+        config, host, token, notices if notices is not None else _GatewayNotices(state, token), ()
+    )
+    scopes = oauth_scopes_from_token(token)
+    if scopes is not None and not scopes_grant(scopes, GENIE_AGENT_SCOPE):
+        logger.warning(
+            "Genie Agents are configured but the user's token lacks the %s scope; the "
+            "analyst runs without them",
+            GENIE_AGENT_SCOPE,
+            extra={"session_id": state.get("session_id")},
+        )
+        run.notices.consent()
+        return run
+    return dataclass_replace(run, tools=_build_genie_agent_tools(state, run))
+
+
+def _build_genie_agent_tools(state: dict, run: _GenieAgentRun) -> Tuple[GenieAgentTool, ...]:
+    """NEW Genie Agent tools for *run*'s user, each saying its progress line.
+    A failure to build them is logged and counts as none: it never fails the turn."""
+
+    def on_question(space_name: str, question: str) -> None:
+        # Said BEFORE the question is asked, on both surfaces: the event, whose
+        # TOP-LEVEL tool_name / tool_input the frontend reads, and the row, for
+        # the polling transport.
+        line = f"Asking {space_name}: {question}"
+        tool_input = {"agent": space_name, "question": question}
+        _emit(
+            StreamEventType.TOOL_CALL,
+            content=line,
+            metadata={"node": "data_analyst"},
+            tool_name=_GENIE_AGENT_PROGRESS_TOOL,
+            tool_input=dict(tool_input),
+        )
+        _say(
+            state,
+            line,
+            message_type="tool_call",
+            metadata={"tool_name": _GENIE_AGENT_PROGRESS_TOOL, "tool_input": tool_input},
+        )
+
+    try:
+        return build_genie_agent_tools(
+            run.config,
+            host=run.host,
+            token=run.token,
+            on_question=on_question,
+            session_id=state.get("session_id"),
+        )
+    except Exception:
+        logger.warning(
+            "Building the Genie Agent tools failed; the analyst runs without them",
+            exc_info=True,
+            extra={"session_id": state.get("session_id")},
+        )
+        return ()
+
+
+def _genie_agents_toolset(
+    state: dict,
+    tools: Sequence[AgentTool],
+    gateway: Optional[_GatewayPass],
+) -> Optional[AgentToolset]:
+    """The toolset of a run whose Genie One does not run: *tools* (its Genie
+    Agents, and any Gateway tools beside them), or ``None`` with nothing left.
+
+    With a Gateway pass it holds the pass's budget left; without one, the
+    analyst's (:data:`ANALYST_GATEWAY_MAX_CALLS` /
+    :data:`ANALYST_GATEWAY_BUDGET_SECONDS`), clipped to the turn deadline (R4).
+    No call or no second left binds nothing, as ``_GatewayPass.toolset`` does.
+    """
+    if gateway is not None:
+        calls_left, seconds_left = gateway._budget_left()
+    else:
+        calls_left, seconds_left = turn_budget(
+            used_calls=0,
+            used_seconds=0.0,
+            max_calls=ANALYST_GATEWAY_MAX_CALLS,
+            budget_seconds=ANALYST_GATEWAY_BUDGET_SECONDS,
+            turn_started_at=_turn_started_at(state),
+            now=time.time(),
+        )
+    if not tools or calls_left <= 0 or seconds_left <= 0:
+        return None
+    return AgentToolset(tools=tuple(tools), max_calls=calls_left, budget_seconds=seconds_left)
+
+
 def _merge_answer_figures(
     answers: Sequence[GenieOneAnswer],
     *,
@@ -5733,6 +5918,8 @@ def _merge_answer_figures(
 ) -> List[ResolvedFigure]:
     """This run's NEW figures, in order, with repeats across the turn resolved.
 
+    *answers* are every Genie answer of the run: Genie One's first, then each
+    Genie Agent tool's, in tool order; each figure carries its answer's source.
     Seeded with *earlier*, the figures an earlier analyst round of this turn
     already wrote, and numbered turn-wide: this run's answers are questions
     ``earlier_answers + 1`` onwards.  An exact (key, value) repeat of an earlier
@@ -5757,7 +5944,8 @@ def _merge_answer_figures(
 
 
 def _turn_answer_count(state: dict) -> int:
-    """How many Genie One answers this turn's earlier analyst rounds received."""
+    """How many Genie answers (Genie One's and the Genie Agents') this turn's
+    earlier analyst rounds received."""
     count = 0
     for marker in scoped_vals(state, "analyst_rounds"):
         if isinstance(marker, dict) and isinstance(marker.get("answers"), int):
@@ -5768,10 +5956,16 @@ def _turn_answer_count(state: dict) -> int:
 def _genie_one_block(
     figures: Sequence[ResolvedFigure], answers: Sequence[GenieOneAnswer]
 ) -> str:
-    """The figure keys the architect must cite, then each distinct deep link ("" if none)."""
+    """The figure keys the architect must cite, then each distinct deep link ("" if none).
+
+    The header names every distinct figure source, in figure order ("Figures
+    from Genie One, Genie Agent · Sales (...)"); with Genie One alone it is
+    exactly what it was before Genie Agents.
+    """
     lines: List[str] = []
     if figures:
-        lines.append("Figures from Genie One (use these keys in data_references):")
+        sources = list(dict.fromkeys(figure.source for figure in figures))
+        lines.append(f"Figures from {', '.join(sources)} (use these keys in data_references):")
         lines.extend(f"- {figure.key}: {figure.value}" for figure in figures)
     links: List[str] = []
     for answer in answers:
@@ -5779,6 +5973,15 @@ def _genie_one_block(
             links.append(answer.deep_link)
     lines.extend(f"Explore in Databricks: {link}" for link in links)
     return "\n".join(lines)
+
+
+def _genie_block_source(
+    figures: Sequence[ResolvedFigure], answers: Sequence[GenieOneAnswer]
+) -> str:
+    """The spotlight source of the figure block: ``"genie_one"`` when it is Genie
+    One's alone (exactly as before Genie Agents), else ``"genie"``."""
+    sources = {figure.source for figure in figures} | {answer.source for answer in answers}
+    return "genie_one" if sources <= {GENIE_ONE_SOURCE} else "genie"
 
 
 def _persist_genie_one_conversation(state: dict, run: _GenieOneRun) -> None:
@@ -5798,6 +6001,26 @@ def _persist_genie_one_conversation(state: dict, run: _GenieOneRun) -> None:
         )
 
 
+def _persist_genie_agent_conversations(state: dict, tools: Sequence[GenieAgentTool]) -> None:
+    """Store each Genie Agent's new conversation id on the ACTOR's row, in that
+    space's entry only.  An unchanged id is not written again.  Never raises."""
+    for tool in tools:
+        conversation_id = tool.conversation_id
+        if not conversation_id or conversation_id == tool.stored_conversation_id:
+            continue
+        try:
+            get_session_manager().set_genie_agent_conversation_id(
+                state["actor_session_id"], tool.space_id, conversation_id
+            )
+        except Exception:
+            logger.warning(
+                "Could not store a Genie Agent conversation id; the next turn starts "
+                "a new conversation",
+                exc_info=True,
+                extra={"session_id": state.get("session_id"), "space_id": tool.space_id},
+            )
+
+
 def _say_consent(state: dict, token: str) -> None:
     """Tell the user how to give this app the permission their sign-in lacks."""
     _say(
@@ -5812,9 +6035,10 @@ def _say_genie_one_access(
 ) -> None:
     """Tell the user, once per kind, what a Genie One refusal needs them to do.
 
-    Only Genie One's own refusals count: an AI Gateway MCP tool sharing the
-    toolset is told through its own notice (T6.5).  With *notices* (the run has
-    Gateway entries) the consent message is said at most once per turn.
+    Only Genie One's own refusals count: a Genie Agent or an AI Gateway / UC MCP
+    tool sharing the toolset is told through its own notice (T6.5).  With
+    *notices* (the run has a Gateway pass, or Genie Agents) the consent message
+    is said at most once across them all.
     """
     kinds = {
         error.kind for error in run.toolset.access_errors if error.tool_name == GENIE_TOOL_NAME
@@ -5826,6 +6050,29 @@ def _say_genie_one_access(
             notices.consent()
     if "access_denied" in kinds:
         _say(state, _GENIE_ONE_GRANT_MESSAGE, message_type="info")
+
+
+def _say_genie_agent_access(
+    toolset: Optional[AgentToolset], run: Optional[_GenieAgentRun]
+) -> None:
+    """Tell the user what each Genie Agent's refusal needs them to do.
+
+    Only the Genie Agents' own refusals count.  A missing scope says the consent
+    message; a refused space says its notice under ``genie_agent:<space_id>``.
+    Each is said once, through the run's notices: per turn with a Gateway pass,
+    per run without one (R8).
+    """
+    if toolset is None or run is None:
+        return
+    for tool in run.tools:
+        kinds = {error.kind for error in toolset.access_errors if error.tool_name == tool.name}
+        if "missing_scope" in kinds:
+            run.notices.consent()
+        if "access_denied" in kinds:
+            run.notices.say_once(
+                f"{_GENIE_AGENT_NOTIFIED_PREFIX}{tool.space_id}",
+                _genie_agent_refused(tool.space_name),
+            )
 
 
 def data_analyst_node(state: dict) -> Dict[str, Any]:
@@ -5854,20 +6101,40 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     its answers turn-wide (:func:`_merge_answer_figures`).  Every Genie figure of
     the turn and this run's deep links are listed after the analyst's prose: in
     ONE ``spotlight("genie_one", ...)`` wrapper on ``architect_message`` (they are
-    Genie One's output), as plain text for the user.  A new conversation id is
+    Genie One's output; ``"genie"`` once a Genie Agent's are in it), as plain
+    text for the user.  A new conversation id is
     stored on the actor's row, and a refusal tells the user the consent or the
     grant they need.  Without a Genie One entry ``resolved_data.figures`` is
     whatever the architect wrote, as before: ``AnalystOutput`` still declares no
     figure field.
 
-    **AI Gateway MCP tools (agent mode).**  When the actor's config also has a
-    ``gateway_mcp`` entry and a user is signed in, the analyst's Gateway tools
-    ride beside Genie One in one toolset (:data:`ANALYST_GATEWAY_MAX_CALLS` calls
-    / :data:`ANALYST_GATEWAY_BUDGET_SECONDS` s, Genie One still asking at most
-    three questions), or, without Genie One, alone (clipped to the turn
-    deadline).  Figures are still built from Genie One's rows only.  A Gateway
-    refusal is never said as Genie One's, the consent message is said at most
-    once per turn, and ``gateway_usage`` / ``gateway_images`` are written.
+    **Genie Agents (agent mode).**  The actor's ``genie`` entries (curated Genie
+    spaces) are tools too, when a user is signed in and the token's known scopes
+    do not lack ``dashboards.genie`` (then the consent message is said once and
+    none is bound).  They ride beside Genie One in its toolset, or, when Genie
+    One does not run (no entry, or it cannot: :func:`_genie_one_run` is
+    ``None``), in their own: the Gateway pass's budget left, or without a pass
+    :data:`ANALYST_GATEWAY_MAX_CALLS` / :data:`ANALYST_GATEWAY_BUDGET_SECONDS`
+    clipped to the turn deadline (R4).  Each asks at most three questions, each
+    announced by an ``"Asking <space>: <question>"`` progress line.  Their
+    figures are code-built like Genie One's, with the source ``"Genie Agent ·
+    <space>"`` (R1): the answers are Genie One's, then each Genie Agent's in
+    tool order, and the block's header names every figure source.  Each new
+    conversation id is stored on the actor's row, in that space's entry only.
+    A refused space says its notice once, and a missing scope says the consent
+    message once: per turn with a Gateway pass, per run without one (R8).
+
+    **AI Gateway MCP tools and UC MCP connections (agent mode).**  When the
+    actor's config also has a ``gateway_mcp`` or ``mcp`` entry and a user is
+    signed in, the analyst's Gateway and connection tools ride beside Genie One
+    and the Genie Agents in one toolset (:data:`ANALYST_GATEWAY_MAX_CALLS` calls
+    / :data:`ANALYST_GATEWAY_BUDGET_SECONDS` s, each Genie tool still asking at
+    most three questions), or, without them, alone (clipped to the turn
+    deadline).  Figures are still built from Genie rows only.  A Gateway
+    refusal is never said as a Genie one, the consent message is said at most
+    once per turn, and ``gateway_usage`` / ``gateway_images`` are written.  A
+    call that carried Gateway tools and raised is made once more without them,
+    keeping Genie One and the Genie Agents, both built afresh.
 
     **At most** :data:`MAX_ANALYST_ROUNDS_PER_TURN` **runs per turn**
     (``analyst_rounds``, one marker per run): a further request is answered by
@@ -5900,17 +6167,27 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         ),
     }
     config = _actor_agent_config(state, consequence="the analyst runs without tools")
-    # AI Gateway MCP tools: ``None`` without a Gateway entry (or a signed-in
-    # user), and the run is then exactly Genie One's, or today's.  Listed before
-    # Genie One's toolset is built, so they ride beside it; past the turn
-    # deadline nothing is listed.
+    # AI Gateway MCP tools and UC MCP connections: ``None`` without a
+    # ``gateway_mcp`` or ``mcp`` entry (or a signed-in user), and the run is then
+    # exactly Genie's, or today's.  Listed before Genie One's toolset is built,
+    # so they ride beside it; past the turn deadline nothing is listed.
     gateway = _gateway_pass(state, config, agent="data_analyst")
+    # Genie Agents: ``None`` without a ``genie`` entry (or a signed-in user).
+    # Without a Gateway pass they bring their own notices, which Genie One
+    # shares, so the consent message is said once (R8).
+    agents = _genie_agent_run(
+        state, config, notices=gateway.notices if gateway is not None else None
+    )
+    notices = (
+        gateway.notices if gateway is not None else agents.notices if agents is not None else None
+    )
+    agent_tools: Tuple[GenieAgentTool, ...] = agents.tools if agents is not None else ()
+    gateway_tools = gateway.tools() if gateway is not None else ()
+    # Branch on the RESULT, not on the config: ``None`` also when Genie One is
+    # configured but cannot run (no user client, or the token lacks its scope).
     genie = (
         _genie_one_run(
-            state,
-            config,
-            extra_tools=gateway.tools() if gateway is not None else (),
-            notices=gateway.notices if gateway is not None else None,
+            state, config, extra_tools=(*agent_tools, *gateway_tools), notices=notices
         )
         if config is not None
         else None
@@ -5918,12 +6195,17 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     toolset: Optional[AgentToolset] = None
     if genie is not None:
         toolset = genie.toolset
+    elif agent_tools:
+        # The Genie Agents (and any Gateway tools): the pass's budget left, or
+        # the analyst's own clipped to the turn deadline.
+        toolset = _genie_agents_toolset(state, (*agent_tools, *gateway_tools), gateway)
     elif gateway is not None:
         # The Gateway tools alone: their own budget, clipped to the turn deadline.
         toolset = gateway.toolset()
     # At most twice round: a call that carried Gateway tools and raised is made
-    # once more, through this same call site, exactly as before this branch —
-    # Genie One's own toolset, or no tools.  Any other failure propagates.
+    # once more, through this same call site, without them: Genie One and the
+    # Genie Agents, built afresh (a failed attempt's answers and question
+    # counts are discarded), or no tools.  Any other failure propagates.
     for fallback in (False, True):
         try:
             out = get_agent_runtime().run(
@@ -5944,12 +6226,20 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
                 gateway.spent(toolset)
             if fallback or gateway is None or not gateway.without_tools(exc, toolset):
                 raise
+            if agents is not None:
+                agents = agents.fresh(state)
+                agent_tools = agents.tools
             genie = (
-                _genie_one_run(state, config, notices=gateway.notices)
+                _genie_one_run(state, config, extra_tools=agent_tools, notices=gateway.notices)
                 if genie is not None
                 else None
             )
-            toolset = genie.toolset if genie is not None else None
+            if genie is not None:
+                toolset = genie.toolset
+            elif agent_tools:
+                toolset = _genie_agents_toolset(state, agent_tools, gateway)
+            else:
+                toolset = None
             continue
         break
     if gateway is not None:
@@ -5972,28 +6262,41 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         )
 
     # The user is shown the figure block as text; the architect gets it
-    # spotlighted (its column names and cells are Genie One's output).  The
-    # analyst's own prose can quote Genie One, so in the architect's copy its
+    # spotlighted (its column names and cells are Genie's output).  The
+    # analyst's own prose can quote Genie, so in the architect's copy its
     # delimiters are escaped: nothing outside the wrapper can open or close one.
     architect_message = neutralize_delimiters(message)
     figures: List[ResolvedFigure] = []
-    if genie is not None:
+    # Every Genie answer of the run: Genie One's first, then each Genie Agent
+    # tool's, in tool order.
+    answers: List[GenieOneAnswer] = [
+        *(genie.tool.answers if genie is not None else ()),
+        *(answer for tool in agent_tools for answer in tool.answers),
+    ]
+    if genie is not None or agent_tools:
         earlier = _turn_analyst_figures(state)
         figures = _merge_answer_figures(
-            genie.tool.answers, earlier=earlier, earlier_answers=_turn_answer_count(state)
+            answers, earlier=earlier, earlier_answers=_turn_answer_count(state)
         )
         # Every Genie figure of the turn is listed, so the architect can cite an
         # earlier round's keys too; only this run's new ones are written below.
-        block = _genie_one_block(earlier + figures, genie.tool.answers)
+        listed = earlier + figures
+        block = _genie_one_block(listed, answers)
         if block:
             message = f"{message}\n{block}"
             architect_message = "\n".join(
                 [
                     architect_message,
-                    spotlight("genie_one", block, session_id=state.get("actor_session_id")),
+                    spotlight(
+                        _genie_block_source(listed, answers),
+                        block,
+                        session_id=state.get("actor_session_id"),
+                    ),
                 ]
             )
-        _persist_genie_one_conversation(state, genie)
+        if genie is not None:
+            _persist_genie_one_conversation(state, genie)
+        _persist_genie_agent_conversations(state, agent_tools)
 
     _emit(
         StreamEventType.ASSISTANT,
@@ -6014,7 +6317,8 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
     # durable and visible, deliberately outside ``_AI_TYPES``.
     _say(state, message, message_type="info", metadata={"agent": "data_analyst"})
     if genie is not None:
-        _say_genie_one_access(state, genie, gateway.notices if gateway is not None else None)
+        _say_genie_one_access(state, genie, notices)
+    _say_genie_agent_access(toolset, agents)
     if gateway is not None:
         gateway.say_failures()
 
@@ -6022,12 +6326,10 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
         "architect_message": architect_message,
         "analyst_figures": scoped(turn_id, [figure.model_dump() for figure in figures]),
         # The answer count numbers a later round's questions turn-wide.
-        "analyst_rounds": scoped(
-            turn_id, [{"answers": len(genie.tool.answers) if genie is not None else 0}]
-        ),
+        "analyst_rounds": scoped(turn_id, [{"answers": len(answers)}]),
     }
     if gateway is not None:
-        # Figures stay code-built from Genie One alone; the Gateway tools' saved
+        # Figures stay code-built from Genie rows alone; the Gateway tools' saved
         # images and what the run said are the turn's, for its later passes.
         updates["gateway_usage"] = scoped(turn_id, [gateway.usage()])
         updates["gateway_images"] = scoped(turn_id, gateway.saved_tokens())
