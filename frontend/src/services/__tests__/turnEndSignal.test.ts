@@ -54,6 +54,11 @@ function stubPollingFetch(polls: PollBody[]) {
   return { fetchMock, pollUrls };
 }
 
+/** Interrupt generation (Task 9): startPolling also announces `request_accepted`; set it aside so these sequences are unchanged. */
+const recordTurnEvents = (events: StreamEvent[]) => (e: StreamEvent) => {
+  if ((e.type as string) !== 'request_accepted') events.push(e);
+};
+
 function stubStreamingFetch(body: string) {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })));
 }
@@ -77,7 +82,7 @@ describe('turn-end signal: polling transport', () => {
     const events: StreamEvent[] = [];
     const onError = vi.fn();
 
-    const cancel = api.startPolling('sess-1', 'Build a deck about puffins', undefined, e => events.push(e), onError);
+    const cancel = api.startPolling('sess-1', 'Build a deck about puffins', undefined, recordTurnEvents(events), onError);
     await vi.advanceTimersByTimeAsync(1); // the submit resolves and the interval is registered
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS); // poll 1: running
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS); // poll 2: completed
@@ -99,7 +104,7 @@ describe('turn-end signal: polling transport', () => {
     const events: StreamEvent[] = [];
     const onError = vi.fn();
 
-    const cancel = api.startPolling('sess-1', 'Build a deck about puffins', undefined, e => events.push(e), onError);
+    const cancel = api.startPolling('sess-1', 'Build a deck about puffins', undefined, recordTurnEvents(events), onError);
     await vi.advanceTimersByTimeAsync(1);
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
     await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3);

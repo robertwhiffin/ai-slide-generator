@@ -43,6 +43,11 @@ function buildFetchMock(responses: object[]) {
 const types = (events: StreamEvent[]) =>
   events.map((e) => (e.type === 'queued' ? `queued:${e.queued}` : e.type));
 
+/** Interrupt generation (Task 9): startPolling also announces `request_accepted`; set it aside so these sequences are unchanged. */
+const recordTurnEvents = (events: StreamEvent[]) => (e: StreamEvent) => {
+  if ((e.type as string) !== 'request_accepted') events.push(e);
+};
+
 describe('queued turns on the polling transport', () => {
   let cancel: (() => void) | null = null;
 
@@ -56,7 +61,7 @@ describe('queued turns on the polling transport', () => {
 
   async function runPolls(responses: object[], events: StreamEvent[], errors: Error[]) {
     vi.stubGlobal('fetch', buildFetchMock(responses));
-    cancel = api.startPolling('session', 'msg', undefined, (e) => events.push(e), (e) => errors.push(e));
+    cancel = api.startPolling('session', 'msg', undefined, recordTurnEvents(events), (e) => errors.push(e));
     await vi.advanceTimersByTimeAsync(1);
     for (let i = 0; i < responses.length; i += 1) await vi.advanceTimersByTimeAsync(3001);
   }

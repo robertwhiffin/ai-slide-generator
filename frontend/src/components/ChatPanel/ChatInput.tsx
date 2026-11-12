@@ -1,9 +1,10 @@
-import React, { useState, useRef, useLayoutEffect, useCallback } from 'react';
-import { Send, Maximize2, ImagePlus, X, WandSparkles } from 'lucide-react';
+import React, { useState, useRef, useLayoutEffect, useEffect, useCallback } from 'react';
+import { Send, Ban, Maximize2, ImagePlus, X, WandSparkles } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { PromptEditorModal } from './PromptEditorModal';
 import { GenerateImageRequestDialog } from './GenerateImageRequestDialog';
 import { api } from '../../services/api';
+import { GENERATING_HINT, STOP_ARIA_LABEL, STOP_TOOLTIP } from './stopGenerationCopy';
 
 interface ChatInputProps {
   onSend: (message: string, imageIds?: string[]) => void;
@@ -13,6 +14,12 @@ interface ChatInputProps {
   modeControl?: React.ReactNode;
   /** When set, the hint row offers Generate image (slideCount fills the dialog's For-slide choices). */
   imageRequest?: { slideCount: number };
+  /** A turn is running: with `onStop`, the send button becomes a stop button. */
+  generating?: boolean;
+  /** Stop the running turn. Absent for Legacy decks, which keep the send button. */
+  onStop?: () => void;
+  /** Bump to a new non-zero value to put the last submitted message (and images) back. */
+  restoreDraftKey?: number;
 }
 
 interface AttachedImage {
@@ -31,6 +38,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   badge,
   modeControl,
   imageRequest,
+  generating,
+  onStop,
+  restoreDraftKey,
 }) => {
   const [message, setMessage] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -39,6 +49,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // What was last submitted, so a stopped turn can put it back.
+  const lastDraftRef = useRef<{ text: string; images: AttachedImage[] } | null>(null);
+  const handledRestoreKeyRef = useRef(restoreDraftKey ?? 0);
+  const [focusAfterRestore, setFocusAfterRestore] = useState(false);
 
   const addUploadedImage = useCallback((id: string, previewUrl?: string) => {
     setAttachedImages((prev) => (prev.some((a) => a.id === id) ? prev : [...prev, { id, previewUrl }]));
@@ -98,6 +112,28 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     [disabled, uploading, addUploadedImage]
   );
 
+  useEffect(() => {
+    const key = restoreDraftKey ?? 0;
+    if (key === 0 || key === handledRestoreKeyRef.current) return;
+    handledRestoreKeyRef.current = key;
+    const draft = lastDraftRef.current;
+    if (!draft) return;
+    setMessage(draft.text);
+    setAttachedImages(draft.images);
+    setFocusAfterRestore(true);
+  }, [restoreDraftKey]);
+
+  // Focus the restored draft once the textarea can take focus, cursor at the end.
+  useEffect(() => {
+    if (!focusAfterRestore || disabled) return;
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    }
+    setFocusAfterRestore(false);
+  }, [focusAfterRestore, disabled, message]);
+
   // Use useLayoutEffect to avoid visual flicker and prevent infinite loops
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -125,6 +161,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     if (!text && attachedImages.length === 0) return;
     if (disabled) return;
     const imageIds = attachedImages.length > 0 ? attachedImages.map((a) => a.id) : undefined;
+    lastDraftRef.current = { text: message, images: attachedImages };
     onSend(text || 'Use these images', imageIds);
     setMessage('');
     setAttachedImages([]);
@@ -139,6 +176,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const charCount = message.length;
 
   const canSend = message.trim() || attachedImages.length > 0;
+  const stopMode = Boolean(generating && onStop);
 
   return (
     <>
@@ -222,22 +260,37 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               >
                 <Maximize2 className="h-3.5 w-3.5" />
               </Button>
-              <Button
-                type="submit"
-                size="icon"
-                disabled={disabled || !canSend}
-                className="h-7 w-7"
-                title="Send message (Enter)"
-                aria-label="Send"
-              >
-                <Send className="h-3.5 w-3.5" />
-              </Button>
+              {stopMode ? (
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  onClick={onStop}
+                  className="h-7 w-7 text-red-600"
+                  title={STOP_TOOLTIP}
+                  aria-label={STOP_ARIA_LABEL}
+                  data-testid="chat-stop"
+                >
+                  <Ban className="h-3.5 w-3.5" />
+                </Button>
+              ) : (
+                <Button
+                  type="submit"
+                  size="icon"
+                  disabled={disabled || !canSend}
+                  className="h-7 w-7"
+                  title="Send message (Enter)"
+                  aria-label="Send"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                </Button>
+              )}
             </div>
           </div>
         </div>
 
         <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-          <span>Enter to send · Shift+Enter new line</span>
+          <span>{stopMode ? GENERATING_HINT : 'Enter to send · Shift+Enter new line'}</span>
           <div className="flex shrink-0 items-center gap-3">
             {imageRequest && (
               <button

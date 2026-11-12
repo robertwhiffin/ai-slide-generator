@@ -32,6 +32,25 @@ export class ApiError extends Error {
   }
 }
 
+export type RollbackOutcome = 'rolled_back' | 'kept_foreign_change' | 'restore_failed';
+
+/** A failed chat turn; `rollback` says what happened to the deck (null: nothing to report, e.g. Legacy). */
+export class ChatTurnError extends Error {
+  rollback: RollbackOutcome | null;
+
+  constructor(message: string, rollback: RollbackOutcome | null = null) {
+    super(message);
+    this.rollback = rollback;
+    this.name = 'ChatTurnError';
+  }
+}
+
+export type CancelChatResult = {
+  outcome: 'cancelled' | 'already_finished' | 'refused_foreign_change' | 'not_stoppable';
+  status?: string;
+  detail?: string;
+};
+
 /** FastAPI `detail` is a string, or (422) an array of `{loc, msg}` objects. */
 async function throwGatewayAdminError(response: Response, fallback: string): Promise<never> {
   let detail: unknown;
@@ -91,7 +110,7 @@ const isPollingMode = (): boolean => {
 export type StreamEventType = 'assistant' | 'tool_call' | 'tool_result' | 'error' | 'complete' | 'session_title' | 'session_created' | 'slide_ready' | 'turn_progress';
 
 /** Events the client derives itself: 'queued' comes from the poll's `pending` status. */
-export type ClientEventType = 'queued';
+export type ClientEventType = 'queued' | 'request_accepted' | 'cancelled';
 
 export interface StreamEvent {
   type: StreamEventType | ClientEventType;
@@ -123,6 +142,8 @@ export interface StreamEvent {
   turn_progress?: TurnProgress | null;
   /** On a 'queued' event: the turn is waiting for a free job runner (true), or no longer is. */
   queued?: boolean;
+  /** On a 'request_accepted' event: the id of the chat request, for cancelChat. */
+  request_id?: string;
 }
 
 export interface SessionMessage {
@@ -244,7 +265,7 @@ interface SendMessageParams {
  * Response from the poll endpoint
  */
 interface PollResponse {
-  status: 'pending' | 'running' | 'completed' | 'error';
+  status: 'pending' | 'running' | 'completed' | 'error' | 'cancelled';
   events: StreamEvent[];
   last_message_id: number;
   /** E10: released slides delivered batch-style on the polling path */
@@ -260,6 +281,8 @@ interface PollResponse {
   revision_mark?: number;
   /** #319: the running turn's latest stage summary; null when finished or legacy. */
   turn_progress?: TurnProgress | null;
+  /** What a failed turn did to the deck; null/absent for Legacy. */
+  rollback?: RollbackOutcome | null;
   result?: {
     slides?: SlideDeck;
     raw_html?: string;
@@ -1175,6 +1198,23 @@ export const api = {
   },
 
   /**
+   * Ask the backend to stop a running chat turn.  200 and 409 resolve with the
+   * body's outcome (a 409 is a refusal, not a failure); anything else rejects.
+   */
+  async cancelChat(requestId: string): Promise<CancelChatResult> {
+    const response = await fetch(`${API_BASE_URL}/api/chat/cancel/${requestId}`, { method: 'POST' });
+    if (response.ok) {
+      return response.json();
+    }
+    if (response.status === 409) {
+      const body = await response.json().catch(() => ({}));
+      return { outcome: body.outcome, detail: body.detail };
+    }
+    const error = await response.json().catch(() => ({}));
+    throw new ApiError(response.status, error.detail || 'Failed to cancel chat');
+  },
+
+  /**
    * Start polling for chat messages
    * 
    * @param sessionId - Session ID
@@ -1200,6 +1240,9 @@ export const api = {
     (async () => {
       try {
         const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig, deckMode);
+
+        if (cancelled) return;
+        onEvent({ type: 'request_accepted', request_id });
 
         let lastMessageId = 0;
         // E0: track the next-slide cursor so we hand it back on each poll,
@@ -1235,6 +1278,9 @@ export const api = {
               slidesCursor > 0 ? slidesCursor : undefined,
               revisionMark,
             );
+
+            // A stop pressed while this poll was in flight: forward nothing.
+            if (cancelled) return;
 
             // A turn waiting for a free job runner: pending, and not started (no
             // progress yet).  Forwarded once when it starts waiting and once when it
@@ -1309,11 +1355,13 @@ export const api = {
             lastMessageId = response.last_message_id;
 
             // Stop polling on completion
-            if (response.status === 'completed' || response.status === 'error') {
+            if (response.status === 'completed' || response.status === 'error' || response.status === 'cancelled') {
               if (pollInterval) clearInterval(pollInterval);
 
-              if (response.status === 'error') {
-                onError(new Error(response.error || 'Request failed'));
+              if (response.status === 'cancelled') {
+                onEvent({ type: 'cancelled' });
+              } else if (response.status === 'error') {
+                onError(new ChatTurnError(response.error || 'Request failed', response.rollback ?? null));
               } else if (response.result) {
                 // Emit session_title event if title was generated
                 if (response.result.session_title) {
