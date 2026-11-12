@@ -323,3 +323,13 @@ def test_matched_release_is_one_conditional_update(locks):
     updates = [s for s in touching if re.match(r"^\s*UPDATE\b", s, re.IGNORECASE)]
     assert len(updates) == 1, f"expected one UPDATE, got {updates}"
     assert locks.row(sid) == _freed(held)
+
+
+def test_release_never_reports_freeing_a_lock_that_was_not_held(locks):
+    """A free row can carry a leftover id (recover_stuck_requests); a matched
+    release for that id must not claim to have released anything."""
+    sid = locks.new_session(processing=False, request_id="r-leftover")
+    before = locks.row(sid)
+
+    assert locks.sm.release_session_lock(sid, "r-leftover") is False
+    assert locks.row(sid) == before

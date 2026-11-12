@@ -4073,11 +4073,12 @@ class SessionManager:
             True if a lock was released.
         """
         with get_db_session() as db:
-            conditions = [UserSession.session_id == session_id]
+            conditions = [
+                UserSession.session_id == session_id,
+                UserSession.is_processing.is_(True),
+            ]
             if request_id is not None:
                 conditions.append(UserSession.processing_request_id == request_id)
-            else:
-                conditions.append(UserSession.is_processing.is_(True))
             result = db.execute(
                 update(UserSession)
                 .where(*conditions)

@@ -773,3 +773,18 @@ class TestSendMessageStreamingHonoursAPersistedMessage:
             self._drive()
 
         assert manager.add_message.call_count == 1
+
+
+def test_a_failed_bind_still_releases_the_async_lock(env):
+    """If binding the lock to the request fails, the lock was never bound, so the
+    error path must release it unconditionally (as before the bind existed)."""
+    sid = _seed_deck(env.factory)
+
+    with patch.object(
+        SessionManager, "bind_session_lock", side_effect=RuntimeError("bind failed")
+    ):
+        response = env.post("async", _body(sid))
+
+    assert response.status_code == 500, response.text
+    env.nothing_ran()
+    _assert_released_once(env, sid)

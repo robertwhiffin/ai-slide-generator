@@ -136,6 +136,7 @@ class _AsyncTurnEnv:
         manager = get_session_manager()
         assert manager.acquire_session_lock(self.session_id) is True
         request_id = manager.create_chat_request(self.session_id, AUTHOR)
+        manager.bind_session_lock(self.session_id, request_id)
         is_first_message = (
             manager.get_session(self.session_id).get("message_count", 0) == 0
         )
