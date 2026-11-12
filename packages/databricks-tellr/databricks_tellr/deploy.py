@@ -67,6 +67,9 @@ logger = logging.getLogger(__name__)
 
 # OAuth scopes the app's user-token calls need. Requested on create, and
 # ensured on every update so apps created before a scope was added get it.
+# "mcp.external" is src/services/agent_tools/gateway_mcp.py's CONNECTION_SCOPE
+# (the UC MCP connections' scope): change the two together
+# (tests/unit/test_connection_mcp_client.py reads this tuple as text to check).
 REQUIRED_USER_API_SCOPES: tuple[str, ...] = (
     "sql",
     "dashboards.genie",
@@ -701,7 +704,8 @@ def _update_databricks(
             )
             print(
                 "   Genie One needs ai-gateway — add it in the app settings "
-                "(the MCP picker also needs catalog.connections)."
+                "(the MCP picker also needs catalog.connections, and the MCP Server "
+                "tools need mcp.external)."
             )
 
         # The admin sync reads the app's ACL as the app's own service

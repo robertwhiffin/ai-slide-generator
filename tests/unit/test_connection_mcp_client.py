@@ -568,6 +568,40 @@ def test_the_connection_scope_is_mcp_external():
     assert gateway_mcp.CONNECTION_SCOPE == "mcp.external"
 
 
+def _deploy_scope_tuple() -> tuple[str, ...]:
+    """``REQUIRED_USER_API_SCOPES`` as written in the deploy package, read as TEXT (CI
+    cannot import ``databricks_tellr``, so this must not import it)."""
+    import ast
+    from pathlib import Path
+
+    deploy = (
+        Path(__file__).resolve().parents[2]
+        / "packages"
+        / "databricks-tellr"
+        / "databricks_tellr"
+        / "deploy.py"
+    )
+    for node in ast.parse(deploy.read_text(encoding="utf-8")).body:
+        target = node.target if isinstance(node, ast.AnnAssign) else None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id == "REQUIRED_USER_API_SCOPES":
+            value = ast.literal_eval(node.value)  # type: ignore[arg-type]
+            assert isinstance(value, tuple) and all(isinstance(v, str) for v in value)
+            return value
+    raise AssertionError(f"REQUIRED_USER_API_SCOPES is not assigned in {deploy}")
+
+
+def test_the_deploy_scope_list_carries_the_connection_scope():
+    """Final review, fix A6 (I3): a UC MCP connection is called with the user's token,
+    which carries only the scopes the deploy asks the app for.  The deploy package's
+    scope list must hold ``mcp.external`` exactly when the client requires it."""
+    scopes = _deploy_scope_tuple()
+
+    assert ("mcp.external" in scopes) == (gateway_mcp.CONNECTION_SCOPE == "mcp.external")
+    assert gateway_mcp.CONNECTION_SCOPE in scopes
+
+
 @pytest.mark.parametrize("operation", OPERATIONS)
 @pytest.mark.parametrize("body", [USE_CONNECTION_BODY, ""], ids=["use_connection_body", "bare_403"])
 @pytest.mark.parametrize(

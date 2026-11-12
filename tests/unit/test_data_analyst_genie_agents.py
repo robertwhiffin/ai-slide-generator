@@ -63,7 +63,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 
 import pytest
-from databricks.sdk.errors import PermissionDenied
+from databricks.sdk.errors import NotFound, PermissionDenied, Unauthenticated
 from databricks.sdk.service._internal import Wait
 from databricks.sdk.service.dashboards import (
     GenieAPI,
@@ -213,6 +213,14 @@ def refused(space_name: str) -> str:
     return (
         f"{space_name} refused the request. You may need access to that Genie Agent; "
         "ask its owner to share it with you."
+    )
+
+
+def not_found(space_name: str) -> str:
+    """The exact notice a deleted or unshared Genie Agent says (final review, fix A4)."""
+    return (
+        f"{space_name} could not be found. It may have been deleted, or not shared with "
+        "you; ask its owner, or remove it from this deck."
     )
 
 
@@ -493,6 +501,7 @@ def _no_real_workspace_client(monkeypatch):
             raise _HarnessAbort("a real WorkspaceClient was built for a Genie Agent")
 
     monkeypatch.setattr(genie_agent, "WorkspaceClient", _Refuse)
+    monkeypatch.setattr(genie_agent, "Config", _Refuse, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1325,6 +1334,154 @@ def test_a_genie_agent_missing_scope_at_run_time_says_consent_once(graph_env, mo
     info = _info(t.rows)
     assert info.count(CONSENT) == 1
     assert refused("Sales") not in info and refused("Marketing") not in info
+
+
+# ===========================================================================
+# Final review fixes: a deleted space, a stale conversation, a 401, no empty link
+# ===========================================================================
+
+
+@pytest.mark.parametrize("with_pass", [False, True], ids=["no-gateway-pass", "gateway-pass"])
+def test_a_deleted_genie_agent_says_its_not_found_notice_once(graph_env, monkeypatch, with_pass):
+    """Fix A4: Sales answers both questions with a 404 (a deleted space, or one no
+    longer shared with the user); Marketing answers.  The loop records two
+    ``access_denied`` refusals, and the user is told Sales' NOT-FOUND notice once,
+    under the same ``genie_agent:<space_id>`` key as a refusal: never the refusal
+    text, the consent message or Genie One's grant message."""
+    sales = _Space(SALES_ID, [NotFound("No Genie space found with id sp-sales.")] * 2)
+    marketing = _Space(MARKETING_ID, [(LEADS, MARKETING_ROWS)])
+    if with_pass:
+        _gateway_genie_deck(
+            graph_env, monkeypatch, [SALES, MARKETING, WEB_ENTRY], spaces=[sales, marketing]
+        )
+    else:
+        _deck(graph_env, monkeypatch, [SALES, MARKETING], spaces=[sales, marketing])
+    runtime = _install(
+        monkeypatch,
+        _answer(
+            (SALES_TOOL, Q_SALES),
+            (SALES_TOOL, Q_SALES_2),
+            (MARKETING_TOOL, Q_MARKETING),
+            sources=[MARKETING_SOURCE],
+        ),
+    )
+
+    t = _run_analyst(_analyst_state(graph_env))
+
+    (call,) = runtime.calls_for("data_analyst")
+    assert [(e.kind, e.tool_name) for e in call.toolset.access_errors] == [
+        ("access_denied", SALES_TOOL),
+        ("access_denied", SALES_TOOL),
+    ]
+    # Each question started a conversation (none was ever opened), and none was retried.
+    assert sales.asks == [{"question": Q_SALES}, {"question": Q_SALES_2}]
+    info = _info(t.rows)
+    others = [text for text in info if not text.startswith(SYNTHESIS)]
+    assert others == [not_found("Sales")]
+    assert refused("Sales") not in info
+    assert GRANT_MESSAGE not in info and CONSENT not in info
+    assert t.updates["analyst_figures"] == scoped(TURN, _figure_dicts(MARKETING_FIGURES))
+    if with_pass:
+        (usage,) = _usage_vals(t.updates)
+        assert usage["notified"] == [f"genie_agent:{SALES_ID}"]
+
+
+def test_a_stale_genie_agent_conversation_is_restarted_and_the_new_one_persisted(
+    graph_env, monkeypatch
+):
+    """Fix A4: the actor's stored Sales conversation is gone (a 404 on
+    ``create_message``).  The question is asked once more in a new conversation, its
+    figures reach the architect, the NEW conversation id is written on the actor's
+    row, and the user is told nothing about it."""
+    stored = "conv-stale"
+    _set_agent_config(
+        graph_env, graph_env.session_id, {"tools": [dict(SALES, conversation_id=stored)]}
+    )
+    _sign_in(TOKEN_ALL)
+    sales = _Space(SALES_ID, [NotFound(f"Conversation {stored} not found."), (REVENUE, SALES_ROWS)])
+    genie = _Genie(sales).install(monkeypatch)
+    persisted: List[tuple] = []
+    setter = SessionManager.set_genie_agent_conversation_id
+
+    def spy(self, session_id, space_id, conversation_id):
+        persisted.append((session_id, space_id, conversation_id))
+        return setter(self, session_id, space_id, conversation_id)
+
+    monkeypatch.setattr(SessionManager, "set_genie_agent_conversation_id", spy)
+    runtime = _install(monkeypatch, _answer((SALES_TOOL, Q_SALES), sources=[SALES_SOURCE]))
+
+    t = _run_analyst(_analyst_state(graph_env))
+
+    (call,) = runtime.calls_for("data_analyst")
+    assert call.toolset.access_errors == []
+    assert sales.asks == [
+        {"question": Q_SALES, "conversation_id": stored},
+        {"question": Q_SALES},
+    ]
+    assert [name for name, _ in genie.calls].count("start_conversation") == 1
+    assert t.updates["analyst_figures"] == scoped(TURN, _figure_dicts(SALES_FIGURES))
+    assert persisted == [(graph_env.session_id, SALES_ID, f"conv-{SALES_ID}")]
+    stored_tools = resolve_agent_config(_raw_agent_config(graph_env, graph_env.session_id)).tools
+    assert [tool.conversation_id for tool in stored_tools] == [f"conv-{SALES_ID}"]
+    assert [text for text in _info(t.rows) if not text.startswith(SYNTHESIS)] == []
+
+
+def test_a_genie_agent_401_says_consent_once(graph_env, monkeypatch):
+    """Fix A4: an HTTP 401 from a Genie Agent (the SDK's ``Unauthenticated``) is a
+    missing scope, as Genie One maps it: the consent message once, no space notice."""
+    sales = _Space(SALES_ID, [Unauthenticated("Credential was not sent")] * 2)
+    _deck(graph_env, monkeypatch, [SALES], spaces=[sales])
+    output = AnalystOutput(outcome="no_tool", reason="refused", tried_tools=[SALES_TOOL])
+    runtime = _install(
+        monkeypatch, _answer((SALES_TOOL, Q_SALES), (SALES_TOOL, Q_SALES_2), output=output)
+    )
+
+    t = _run_analyst(_analyst_state(graph_env))
+
+    (call,) = runtime.calls_for("data_analyst")
+    assert [(e.kind, e.tool_name) for e in call.toolset.access_errors] == [
+        ("missing_scope", SALES_TOOL),
+        ("missing_scope", SALES_TOOL),
+    ]
+    info = _info(t.rows)
+    assert info.count(CONSENT) == 1
+    assert refused("Sales") not in info and not_found("Sales") not in info
+
+
+def test_a_genie_agent_whose_start_call_timed_out_lists_no_deep_link(graph_env, monkeypatch):
+    """Fix A2: Sales' start call is cut off (so its conversation was never opened);
+    Marketing answers.  The figure block lists Marketing's deep link only: no
+    "Explore in Databricks" line for Sales, and never an empty ``.../chats/`` link."""
+    monkeypatch.setattr(genie_agent, "_CALL_TIMEOUT_SECONDS", 1)
+    release = threading.Event()
+
+    def block(space_id: str, question: str) -> None:
+        if not release.wait(timeout=10):
+            raise _HarnessAbort("the blocking Sales start call was never cut off")
+
+    sales = _Space(SALES_ID, [(REVENUE, SALES_ROWS)], on_ask=block)
+    marketing = _Space(MARKETING_ID, [(LEADS, MARKETING_ROWS)])
+    _deck(graph_env, monkeypatch, [SALES, MARKETING], spaces=[sales, marketing])
+    runtime = _install(
+        monkeypatch,
+        _answer((SALES_TOOL, Q_SALES), (MARKETING_TOOL, Q_MARKETING), sources=[MARKETING_SOURCE]),
+    )
+
+    try:
+        t = _run_analyst(_analyst_state(graph_env))
+    finally:
+        release.set()
+
+    (call,) = runtime.calls_for("data_analyst")
+    sales_tool = _tool(call, SALES_TOOL)
+    assert [(a.status, a.conversation_id, a.deep_link) for a in sales_tool.answers] == [
+        ("timed_out", "", None)
+    ]
+    (message,) = [text for text in _info(t.rows) if text.startswith(SYNTHESIS)]
+    links = [line for line in message.split("\n") if line.startswith("Explore in Databricks")]
+    assert links == [f"Explore in Databricks: {space_link(MARKETING_ID)}"]
+    _, inside = _split_wrapper(t.updates["architect_message"])
+    assert [line for line in inside.split("\n") if line.startswith("Explore in")] == links
 
 
 # ===========================================================================

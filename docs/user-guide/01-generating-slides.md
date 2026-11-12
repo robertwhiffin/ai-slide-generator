@@ -6,14 +6,14 @@ This guide walks you through creating AI-generated presentations using Databrick
 
 The slide generation workflow allows you to:
 - Create presentations from natural language prompts
-- Pull live data from connected Genie rooms
+- Pull live data from connected Genie Agents
 - Iteratively refine slides through conversation
 - Export to PowerPoint, PDF, or HTML
 
 ## Prerequisites
 
 - Access to the Databricks Tellr application
-- A Genie room with relevant data (optional, for data-driven slides)
+- A Genie Agent with relevant data (optional, for data-driven slides)
 
 ## Step-by-Step Instructions
 

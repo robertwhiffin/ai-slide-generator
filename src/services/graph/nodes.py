@@ -138,7 +138,11 @@ from src.services.agent_tools.gateway_toolset import (
     failure_notice,
     turn_budget,
 )
-from src.services.agent_tools.genie_agent import GENIE_AGENT_SCOPE, GenieAgentTool
+from src.services.agent_tools.genie_agent import (
+    GENIE_AGENT_SCOPE,
+    GenieAgentNotFoundError,
+    GenieAgentTool,
+)
 from src.services.agent_tools.genie_one import (
     GENIE_ONE_SCOPE,
     GENIE_ONE_SOURCE,
@@ -5716,6 +5720,14 @@ def _genie_agent_refused(space_name: str) -> str:
     )
 
 
+def _genie_agent_not_found(space_name: str) -> str:
+    """Said instead, under the same key, when the Genie Agent could not be found."""
+    return (
+        f"{space_name} could not be found. It may have been deleted, or not shared with "
+        "you; ask its owner, or remove it from this deck."
+    )
+
+
 @dataclass(frozen=True)
 class _GenieOneRun:
     """One analyst run's Genie One toolset, and what the node needs after it.
@@ -6122,20 +6134,23 @@ def _say_genie_agent_access(
     """Tell the user what each Genie Agent's refusal needs them to do.
 
     Only the Genie Agents' own refusals count.  A missing scope says the consent
-    message; a refused space says its notice under ``genie_agent:<space_id>``.
-    Each is said once, through the run's notices: per turn with a Gateway pass,
-    per run without one (R8).
+    message; a refused space says its notice under ``genie_agent:<space_id>``, and
+    a space that could not be found (``GenieAgentNotFoundError``) says the
+    not-found notice under that key instead.  Each is said once, through the run's
+    notices: per turn with a Gateway pass, per run without one (R8).
     """
     if toolset is None or run is None:
         return
     for tool in run.tools:
-        kinds = {error.kind for error in toolset.access_errors if error.tool_name == tool.name}
+        errors = [error for error in toolset.access_errors if error.tool_name == tool.name]
+        kinds = {error.kind for error in errors}
         if "missing_scope" in kinds:
             run.notices.consent()
         if "access_denied" in kinds:
+            missing = any(isinstance(error, GenieAgentNotFoundError) for error in errors)
             run.notices.say_once(
                 f"{_GENIE_AGENT_NOTIFIED_PREFIX}{tool.space_id}",
-                _genie_agent_refused(tool.space_name),
+                (_genie_agent_not_found if missing else _genie_agent_refused)(tool.space_name),
             )
 
 

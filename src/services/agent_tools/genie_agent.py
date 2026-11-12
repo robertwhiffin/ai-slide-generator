@@ -20,7 +20,8 @@ from collections.abc import Callable, Sequence
 from typing import Any, Final
 
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import PermissionDenied
+from databricks.sdk.config import Config
+from databricks.sdk.errors import NotFound, PermissionDenied, Unauthenticated
 from pydantic import BaseModel, Field
 
 from src.core.scope_errors import is_missing_scope_error, mentions_missing_scope, scopes_grant
@@ -46,7 +47,9 @@ logger = logging.getLogger(__name__)
 GENIE_AGENT_SCOPE: Final = "dashboards.genie"
 GENIE_AGENT_MAX_QUESTIONS: Final = 3
 
-#: The longest any one SDK call may take.
+#: The longest any one SDK call may take.  The default genie's SDK client is bounded
+#: by it too (its HTTP timeout and retry budget), so a worker that a timed-out call
+#: left behind stops calling as the user once it is spent.
 _CALL_TIMEOUT_SECONDS: Final = 60
 #: A call gets what is left of its question's deadline plus this much.
 _CALL_GRACE_SECONDS: Final = 10
@@ -83,6 +86,14 @@ class _CallTimedOutError(Exception):
 
 def _is_denied(exc: BaseException) -> bool:
     return any(_http_status(c) == 403 or isinstance(c, PermissionDenied) for c in _walk(exc))
+
+
+def _is_unauthenticated(exc: BaseException) -> bool:
+    return any(_http_status(c) == 401 or isinstance(c, Unauthenticated) for c in _walk(exc))
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    return any(_http_status(c) == 404 or isinstance(c, NotFound) for c in _walk(exc))
 
 
 class GenieAgentClient:
@@ -128,12 +139,28 @@ class GenieAgentClient:
                 if self._factory is not None:
                     self._genie_obj = self._factory(self._host, self._token)
                 else:
-                    self._genie_obj = WorkspaceClient(
-                        host=self._host, token=self._token, auth_type="pat"
-                    ).genie
+                    config = Config(
+                        host=self._host,
+                        token=self._token,
+                        auth_type="pat",
+                        http_timeout_seconds=_CALL_TIMEOUT_SECONDS,
+                        retry_timeout_seconds=_CALL_TIMEOUT_SECONDS,
+                    )
+                    self._genie_obj = WorkspaceClient(config=config).genie
             return self._genie_obj
 
     def _map_exception(self, exc: BaseException) -> GenieOneError:
+        """Classify a failed call, as Genie One's ``_map_exception`` and the Gateway do.
+
+        1. A scope message: missing scope (its text may also say 403).
+        2. An HTTP 401: missing scope.
+        3. A 403: missing scope when the token's scopes are known and lack
+           ``dashboards.genie``, else a denied grant.
+        4. A 404: ``not_found`` (a deleted space, or one not shared with the user;
+           ``ask`` first retries a stale conversation, ``_completed`` skips a lost
+           result).
+        5. Anything else: a ``GenieOneError``.
+        """
         if isinstance(exc, GenieOneError):
             return exc
         message = _describe(exc)
@@ -142,10 +169,14 @@ class GenieAgentClient:
             mentions_missing_scope(_error_body(c)) for c in chain
         ):
             return GenieOneAccessError(message, kind="missing_scope")
+        if _is_unauthenticated(exc):
+            return GenieOneAccessError(message, kind="missing_scope")
         if _is_denied(exc):
             if self._lacks_scope:
                 return GenieOneAccessError(message, kind="missing_scope")
             return GenieOneAccessError(message, kind="access_denied")
+        if _is_not_found(exc):
+            return GenieOneAccessError(message, kind="not_found")
         return GenieOneError(message)
 
     def _call(self, fn: Callable[[Any], Any], deadline: float) -> Any:
@@ -173,19 +204,34 @@ class GenieAgentClient:
         deadline = self._clock() + timeout_seconds
         conv_id = conversation_id or ""
         msg_id = ""
+
+        def start() -> Any:
+            return self._call(
+                lambda g: g.start_conversation(space_id=self._space_id, content=question),
+                deadline,
+            )
+
         try:
             if conversation_id:
-                sent = self._call(
-                    lambda g: g.create_message(
-                        space_id=self._space_id, conversation_id=conversation_id, content=question
-                    ),
-                    deadline,
-                )
+                try:
+                    sent = self._call(
+                        lambda g: g.create_message(
+                            space_id=self._space_id,
+                            conversation_id=conversation_id,
+                            content=question,
+                        ),
+                        deadline,
+                    )
+                except GenieOneAccessError as exc:
+                    if exc.kind != "not_found":
+                        raise
+                    # The stored conversation is stale or deleted: start a new one,
+                    # once.  A 404 from that too is the space itself, and raises.
+                    logger.info("Genie Agent conversation not found; starting a new one")
+                    conv_id = ""
+                    sent = start()
             else:
-                sent = self._call(
-                    lambda g: g.start_conversation(space_id=self._space_id, content=question),
-                    deadline,
-                )
+                sent = start()
             response = sent.response
             conv_id = getattr(response, "conversation_id", None) or conv_id
             msg_id = getattr(response, "message_id", None) or getattr(response, "id", None) or ""
@@ -220,15 +266,24 @@ class GenieAgentClient:
                 final_answer = attachment.text.content
             if attachment.query is not None:
                 att_id = attachment.attachment_id
-                fetched = self._call(
-                    lambda g, a=att_id: g.get_message_attachment_query_result(
-                        space_id=self._space_id,
-                        conversation_id=conv_id,
-                        message_id=msg_id,
-                        attachment_id=a,
-                    ),
-                    deadline,
-                )
+                try:
+                    fetched = self._call(
+                        lambda g, a=att_id: g.get_message_attachment_query_result(
+                            space_id=self._space_id,
+                            conversation_id=conv_id,
+                            message_id=msg_id,
+                            attachment_id=a,
+                        ),
+                        deadline,
+                    )
+                except GenieOneError as exc:
+                    # As Genie One's ``_fetch_item``: a refusal ends the question; any
+                    # other failure skips this one result and keeps the answer.  The
+                    # space has just answered, so a 404 here is the result, not it.
+                    if isinstance(exc, GenieOneAccessError) and exc.kind != "not_found":
+                        raise
+                    logger.warning("Genie Agent query result %s skipped: %s", att_id, exc)
+                    continue
                 results.append(self._query_result(att_id, attachment.query.query, fetched))
         return self._answer(conv_id, msg_id, "completed", final_answer, tuple(results))
 
@@ -260,7 +315,10 @@ class GenieAgentClient:
             response_id=msg_id,
             status=status,
             final_answer=final_answer,
-            deep_link=f"{self._host}/genie/rooms/{self._space_id}/chats/{conv_id}",
+            # No conversation (its start call timed out, say): no link to one.
+            deep_link=(
+                f"{self._host}/genie/rooms/{self._space_id}/chats/{conv_id}" if conv_id else None
+            ),
             query_results=results,
             source=self._source,
         )
@@ -285,10 +343,29 @@ _ACCESS_REFUSED: Final[dict[ToolAccessKind, str]] = {
         "this Genie Agent. Asking again will not help."
     ),
 }
+#: What the model is told about a space that is not there (code-owned).  It reaches
+#: the loop as ``access_denied`` (asking again will not help), through
+#: :class:`GenieAgentNotFoundError` so the node tells the user it was not found.
+_NOT_FOUND: Final = (
+    "{space} could not be found: it may have been deleted, or not shared with the "
+    "user. Asking again will not help."
+)
 _QUESTIONS_SPENT: Final = (
     "Not asked: {space} has already been asked {n} questions for this request, "
     "the most allowed. Continue with the answers you have."
 )
+
+
+class GenieAgentNotFoundError(ToolAccessError):
+    """A Genie Agent that could not be found: deleted, or not shared with the user.
+
+    Its kind is ``access_denied``, so the loop records it and the model is told
+    asking again will not help; the node says the not-found notice for it rather
+    than the refusal one.
+    """
+
+    def __init__(self, tool_name: str, message: str) -> None:
+        super().__init__("access_denied", tool_name, message)
 
 
 def _description(space_name: str, user_description: str | None, source: str, cap: int) -> str:
@@ -348,7 +425,10 @@ class GenieAgentTool:
     def run(self, args: BaseModel, *, remaining_seconds: float) -> str:
         question = args.question  # type: ignore[attr-defined]
         if self._asked >= self._max_questions:
-            return _QUESTIONS_SPENT.format(space=self.space_name, n=self._max_questions)
+            # Not spotlighted, so the user-chosen name in it is neutralised.
+            return _QUESTIONS_SPENT.format(
+                space=neutralize_delimiters(self.space_name), n=self._max_questions
+            )
         self._asked += 1
         try:
             self._on_question(self.space_name, question)
@@ -365,6 +445,10 @@ class GenieAgentTool:
                 exc,
                 extra={"session_id": self._session_id},
             )
+            if exc.kind == "not_found":
+                raise GenieAgentNotFoundError(
+                    self.name, _NOT_FOUND.format(space=self.space_name)
+                ) from exc
             raise ToolAccessError(
                 exc.kind, self.name, _ACCESS_REFUSED[exc.kind].format(space=self.space_name)
             ) from exc

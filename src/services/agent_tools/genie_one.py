@@ -54,10 +54,15 @@ class GenieOneError(Exception):
     """A Genie One call failed."""
 
 
-class GenieOneAccessError(GenieOneError):
-    """The user cannot use Genie One (missing OAuth scope or no access)."""
+#: ``not_found`` is a Genie Agent's only (a deleted space, or one not shared with the
+#: user: ``genie_agent._map_exception``); Genie One never raises it.
+GenieAccessKind = Literal["missing_scope", "access_denied", "not_found"]
 
-    def __init__(self, message: str, *, kind: Literal["missing_scope", "access_denied"]) -> None:
+
+class GenieOneAccessError(GenieOneError):
+    """The user cannot use Genie One (missing OAuth scope or no access), or a Genie Agent."""
+
+    def __init__(self, message: str, *, kind: GenieAccessKind) -> None:
         super().__init__(message)
         self.kind = kind
 

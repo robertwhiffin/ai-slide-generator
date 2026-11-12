@@ -35,7 +35,8 @@ from typing import Any
 
 import pytest
 import requests
-from databricks.sdk.errors import PermissionDenied
+from databricks.sdk.config import Config
+from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.errors.parser import _Parser
 from databricks.sdk.service._internal import Wait
 from databricks.sdk.service.dashboards import (
@@ -496,6 +497,9 @@ def _no_real_workspace_client(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(databricks.sdk, "WorkspaceClient", _Refuse)
     monkeypatch.setattr(genie_agent, "WorkspaceClient", _Refuse, raising=False)
+    # A real Config fetches the host's metadata at construction (a minute against
+    # the fake host), so it is refused too.
+    monkeypatch.setattr(genie_agent, "Config", _Refuse, raising=False)
 
 
 def make_client(fake: FakeGenie, **kwargs: Any) -> GenieAgentClient:
@@ -774,16 +778,26 @@ def test_each_call_is_bounded_by_the_questions_remaining_time(
 
 
 def test_the_default_genie_is_built_once_as_the_user(monkeypatch: pytest.MonkeyPatch):
-    """Without a ``genie_factory`` the client uses ``WorkspaceClient(host=..., token=...,
-    auth_type="pat").genie`` (the user, never the app's service principal), built once,
-    inside a bounded call."""
+    """Without a ``genie_factory`` the client uses ``WorkspaceClient(config=Config(host=...,
+    token=..., auth_type="pat", ...)).genie`` (the user, never the app's service
+    principal), built once, inside a bounded call.
+
+    The config bounds the SDK's own HTTP timeout and retry budget at the per-call cap
+    (final review, fix A3): ``run_with_timeout`` stops waiting on a call at the cap, but
+    the abandoned worker would otherwise keep calling as the user, retrying 429/503 for
+    the SDK's default 300 s."""
     import databricks.sdk
 
     fake = FakeGenie(
         messages={MSG1: [completed_text_only(MSG1)], MSG2: [completed_text_only(MSG2)]},
         create=create_body(message_id=MSG2),
     )
+    configs: list[dict[str, Any]] = []
     built: list[tuple[dict[str, Any], bool]] = []
+
+    class FakeConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            configs.append(kwargs)
 
     class FakeWorkspaceClient:
         def __init__(self, **kwargs: Any) -> None:
@@ -792,6 +806,7 @@ def test_the_default_genie_is_built_once_as_the_user(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(databricks.sdk, "WorkspaceClient", FakeWorkspaceClient)
     monkeypatch.setattr(genie_agent, "WorkspaceClient", FakeWorkspaceClient, raising=False)
+    monkeypatch.setattr(genie_agent, "Config", FakeConfig, raising=False)
 
     client = GenieAgentClient(
         host=HOST, token=TOKEN, space_id=SPACE_ID, source=SOURCE, clock=fake.clock, sleep=fake.sleep
@@ -802,8 +817,28 @@ def test_the_default_genie_is_built_once_as_the_user(monkeypatch: pytest.MonkeyP
     second = client.ask(Q2, conversation_id=CONV, timeout_seconds=300)
 
     assert first.status == second.status == "completed"
-    assert built == [({"host": HOST, "token": TOKEN, "auth_type": "pat"}, True)]
+    assert configs == [
+        {
+            "host": HOST,
+            "token": TOKEN,
+            "auth_type": "pat",
+            "http_timeout_seconds": genie_agent._CALL_TIMEOUT_SECONDS,
+            "retry_timeout_seconds": genie_agent._CALL_TIMEOUT_SECONDS,
+        }
+    ]
+    assert [(set(kwargs), on_worker) for kwargs, on_worker in built] == [({"config"}, True)]
+    assert isinstance(built[0][0]["config"], FakeConfig)
     assert all(fake.calls_on_worker_threads)
+
+
+def test_the_sdk_config_takes_the_bounded_timeouts():
+    """The installed SDK's ``Config`` declares both settings the default genie passes
+    (an unknown name would raise at the first question, in production only), and
+    neither bound exceeds the per-call cap."""
+    names = {attribute.name for attribute in Config.attributes()}
+
+    assert {"http_timeout_seconds", "retry_timeout_seconds"} <= names
+    assert genie_agent._CALL_TIMEOUT_SECONDS <= 60
 
 
 # ---------------------------------------------------------------------------
@@ -974,13 +1009,10 @@ def test_a_scope_message_is_missing_scope(make_exception, token_scopes):
         ),
         (
             lambda: sdk_error(
-                404,
-                {
-                    "error_code": "RESOURCE_DOES_NOT_EXIST",
-                    "message": "No Genie space found with id sp1.",
-                },
+                500,
+                {"error_code": "INTERNAL_ERROR", "message": "Genie is temporarily unavailable."},
             ),
-            "ResourceDoesNotExist: No Genie space found with id sp1.",
+            "InternalError: Genie is temporarily unavailable.",
         ),
         (
             lambda: sdk_error(
@@ -993,10 +1025,11 @@ def test_a_scope_message_is_missing_scope(make_exception, token_scopes):
             "ResourceExhausted: Too many requests to this Genie space.",
         ),
     ],
-    ids=["plain_exception", "sdk_404", "sdk_429"],
+    ids=["plain_exception", "sdk_500", "sdk_429"],
 )
 def test_any_other_error_is_a_genie_one_error_naming_its_type(make_exception, message: str):
     # Known scopes lacking dashboards.genie must not turn a non-403 into a missing scope.
+    # (A 404 is not here: it is a not-found space, or a stale conversation; see below.)
     fake = FakeGenie(raises={"start_conversation": make_exception()})
 
     with pytest.raises(GenieOneError) as info:
@@ -1006,6 +1039,199 @@ def test_any_other_error_is_a_genie_one_error_naming_its_type(make_exception, me
 
     assert not isinstance(info.value, GenieOneAccessError)
     assert str(info.value) == message
+
+
+# ---------------------------------------------------------------------------
+# Final review fixes: a lost result, a 401, a 404, no empty deep link
+# ---------------------------------------------------------------------------
+
+CONV_STALE = "c-stale"
+CONV_NEW = "c-new"
+
+_UNAUTHENTICATED_401 = {
+    "error_code": "UNAUTHENTICATED",
+    "message": "Credential was not sent or was of an unsupported type for this API.",
+}
+
+
+@pytest.mark.parametrize("failing", [ATT_Q1, ATT_Q2], ids=["first_result", "second_result"])
+@pytest.mark.parametrize(
+    "make_exception",
+    [
+        lambda: RuntimeError("Connection reset by peer"),
+        lambda: sdk_error(
+            500,
+            {"error_code": "INTERNAL_ERROR", "message": "Statement result unavailable."},
+            method="GET",
+        ),
+        # The space has just answered get_message, so a 404 here is the result that is
+        # gone (an expired statement, say), not a deleted space: it is skipped too.
+        lambda: sdk_error(
+            404,
+            {"error_code": "RESOURCE_DOES_NOT_EXIST", "message": "Query result not found."},
+            method="GET",
+        ),
+    ],
+    ids=["plain_exception", "sdk_500", "sdk_404"],
+)
+def test_one_failed_result_fetch_keeps_the_answer_and_the_other_results(make_exception, failing):
+    """Fix A1: as Genie One's ``_fetch_item`` does, a non-access failure of ONE query
+    attachment's result fetch skips that result.  The text answer and the other
+    attachment's rows are kept, and the answer is still ``completed``."""
+    results: dict[str, Any] = {ATT_Q1: RESULT_1, ATT_Q2: RESULT_2}
+    results[failing] = make_exception()
+    fake = FakeGenie(messages={MSG1: [completed()]}, results=results)
+
+    answer = make_client(fake).ask(Q1, conversation_id=None, timeout_seconds=300)
+
+    assert answer.status == "completed"
+    assert answer.final_answer == FINAL_ANSWER
+    # Both results were asked for; only the one that came back is kept.
+    assert [a["attachment_id"] for a in call_args(fake, "get_message_attachment_query_result")] == [
+        ATT_Q1,
+        ATT_Q2,
+    ]
+    kept = ATT_Q2 if failing == ATT_Q1 else ATT_Q1
+    assert [r.item_id for r in answer.query_results] == [kept]
+    assert figures_from_answer(answer), "the kept result's figures still reach the deck"
+
+
+@pytest.mark.parametrize(
+    "token_scopes",
+    [None, frozenset({"sql", "dashboards.genie", "offline_access"})],
+    ids=["scopes_unknown", "scopes_have_dashboards_genie"],
+)
+@pytest.mark.parametrize("method", list(_CALL_SITES))
+def test_a_401_is_missing_scope(method: str, token_scopes):
+    """Fix A4: an HTTP 401 is a missing scope, as Genie One and the Gateway map it, at
+    every call site (a result fetch's 401 still ends the question), whatever the
+    token's scopes say."""
+    fake = _raising_at(method, sdk_error(401, _UNAUTHENTICATED_401))
+
+    with pytest.raises(GenieOneAccessError) as info:
+        make_client(fake, token_scopes=token_scopes).ask(
+            Q1, conversation_id=_CALL_SITES[method], timeout_seconds=300
+        )
+
+    assert info.value.kind == "missing_scope"
+    assert method in fake.call_names
+
+
+_CONVERSATION_404 = {
+    "error_code": "RESOURCE_DOES_NOT_EXIST",
+    "message": f"Conversation {CONV_STALE} not found.",
+}
+_SPACE_404 = {"error_code": "RESOURCE_DOES_NOT_EXIST", "message": "No Genie space found."}
+
+
+@pytest.mark.parametrize(
+    "make_exception",
+    [
+        lambda: sdk_error(
+            404,
+            _CONVERSATION_404,
+            path=f"/api/2.0/genie/spaces/{SPACE_ID}/conversations/{CONV_STALE}/messages",
+        ),
+        lambda: sdk_error(404, ""),
+        lambda: NotFound("Conversation not found."),
+    ],
+    ids=["sdk_404_json_reply", "sdk_404_empty_reply", "not_found"],
+)
+def test_a_stale_conversation_is_restarted_once(make_exception):
+    """Fix A4: a 404 on ``create_message`` with a stored conversation id is a stale (or
+    deleted) conversation: the question is asked again ONCE, in a new conversation,
+    and its answer (with the new conversation's id and link) is returned."""
+    fake = FakeGenie(
+        messages={MSG1: [completed()]},
+        results={ATT_Q1: RESULT_1, ATT_Q2: RESULT_2},
+        start=start_body(conversation_id=CONV_NEW, message_id=MSG1, content=Q2),
+        raises={"create_message": make_exception()},
+    )
+
+    answer = make_client(fake).ask(Q2, conversation_id=CONV_STALE, timeout_seconds=300)
+
+    assert fake.call_names[:3] == ["create_message", "start_conversation", "get_message"]
+    assert fake.call_names.count("start_conversation") == 1
+    assert ids(call_args(fake, "create_message")[0], "conversation_id", "content") == (
+        CONV_STALE,
+        Q2,
+    )
+    assert ids(call_args(fake, "start_conversation")[0], "space_id", "content") == (SPACE_ID, Q2)
+    assert ids(call_args(fake, "get_message")[0], "conversation_id", "message_id") == (
+        CONV_NEW,
+        MSG1,
+    )
+    assert (answer.status, answer.conversation_id, answer.response_id) == (
+        "completed",
+        CONV_NEW,
+        MSG1,
+    )
+    assert answer.final_answer == FINAL_ANSWER
+    assert [r.item_id for r in answer.query_results] == [ATT_Q1, ATT_Q2]
+    assert answer.deep_link == f"{HOST}/genie/rooms/{SPACE_ID}/chats/{CONV_NEW}"
+
+
+def test_a_stale_conversation_in_a_deleted_space_is_not_found_after_one_retry():
+    """Fix A4: when the new conversation is refused with a 404 too, the space itself is
+    gone: ``not_found``, after exactly one ``start_conversation`` (no retry loop)."""
+    fake = FakeGenie(
+        raises={
+            "create_message": sdk_error(404, _CONVERSATION_404),
+            "start_conversation": sdk_error(404, _SPACE_404),
+        }
+    )
+
+    with pytest.raises(GenieOneAccessError) as info:
+        make_client(fake).ask(Q2, conversation_id=CONV_STALE, timeout_seconds=300)
+
+    assert info.value.kind == "not_found"
+    assert fake.call_names == ["create_message", "start_conversation"]
+
+
+@pytest.mark.parametrize("method", ["start_conversation", "get_message"])
+@pytest.mark.parametrize(
+    "make_exception",
+    [
+        lambda: sdk_error(404, _SPACE_404),
+        lambda: sdk_error(404, ""),
+        lambda: NotFound("No Genie space found."),
+    ],
+    ids=["sdk_404_json_reply", "sdk_404_empty_reply", "not_found"],
+)
+def test_a_404_without_a_stored_conversation_is_not_found(make_exception, method: str):
+    """Fix A4: any other 404 (a deleted space, or one no longer shared with the user) is
+    the access kind ``not_found``, whatever the token's scopes say; nothing is retried."""
+    fake = _raising_at(method, make_exception())
+
+    with pytest.raises(GenieOneAccessError) as info:
+        make_client(fake, token_scopes=frozenset({"sql"})).ask(
+            Q1, conversation_id=None, timeout_seconds=300
+        )
+
+    assert info.value.kind == "not_found"
+    assert fake.call_names.count("start_conversation") == 1
+    assert "create_message" not in fake.call_names
+
+
+@pytest.mark.parametrize("blocking", ["start_conversation", "factory"])
+def test_a_start_call_that_times_out_has_no_deep_link(
+    monkeypatch: pytest.MonkeyPatch, blocking: str
+):
+    """Fix A2: a question whose conversation was never opened (its start call, or the
+    lazy genie build before it, was cut off) has no conversation id, so no deep link:
+    never the empty ``.../chats/`` one."""
+    monkeypatch.setattr(genie_agent, "_CALL_GRACE_SECONDS", 0)
+    fake = FakeGenie(messages={MSG1: [completed()]}, block=blocking)
+    client = make_client(fake, clock=time.monotonic, sleep=lambda seconds: None)
+
+    try:
+        answer = client.ask(Q1, conversation_id=None, timeout_seconds=1)
+    finally:
+        fake.release.set()
+
+    assert fake.entered == [blocking]
+    assert (answer.status, answer.conversation_id) == ("timed_out", "")
+    assert answer.deep_link is None
 
 
 # ---------------------------------------------------------------------------

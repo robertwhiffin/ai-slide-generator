@@ -179,7 +179,10 @@ def _body_error(text: str) -> tuple[int | None, str | None]:
 
 _CONNECTION_PATH_PREFIX: Final = "/api/2.0/mcp/external/"
 _CONNECTION_LINK_RE: Final = re.compile(r"https://[^\s\"'<>\\]+/explore/connections/[^\s\"'<>\\]+")
-#: The OAuth scope a token needs to use a UC connection (consent adds it).
+#: The OAuth scope a token needs to use a UC connection (consent adds it).  The
+#: deploy package asks the app for it: ``REQUIRED_USER_API_SCOPES`` in
+#: ``packages/databricks-tellr/databricks_tellr/deploy.py``.  Change the two together
+#: (``test_the_deploy_scope_list_carries_the_connection_scope`` checks them).
 CONNECTION_SCOPE: Final = "mcp.external"
 _CONNECTION_UNAUTH_RE: Final = re.compile(r'"error_code"\s*:\s*"UNAUTHENTICATED"')
 _CONNECTION_LOGIN_TEXT: Final = "Please login first to the connection"
