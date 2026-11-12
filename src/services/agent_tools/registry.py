@@ -24,15 +24,21 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from typing import Final
+from typing import Any, Final
 
 from pydantic import BaseModel, Field
 
-from src.api.schemas.agent_config import AgentConfig, GenieOneTool
+from src.api.schemas.agent_config import AgentConfig, GenieOneTool, GenieTool
 from src.core.scope_errors import oauth_scopes_from_token
 from src.services.agent_tools.gateway_toolset import (
     ANALYST_GATEWAY_BUDGET_SECONDS,
     ANALYST_GATEWAY_MAX_CALLS,
+)
+from src.services.agent_tools.genie_agent import (
+    GenieAgentClient,
+    GenieAgentTool,
+    genie_agent_source,
+    genie_agent_tool_names,
 )
 from src.services.agent_tools.genie_one import (
     GenieOneAccessError,
@@ -226,3 +232,42 @@ def build_analyst_toolset(
             budget_seconds=GENIE_ONE_BUDGET_SECONDS,
         )
     return toolset, tool
+
+
+def build_genie_agent_tools(
+    agent_config: AgentConfig,
+    *,
+    host: str,
+    token: str,
+    on_question: Callable[[str, str], None],
+    session_id: str | None,
+    genie_factory: Callable[[str, str], Any] | None = None,
+) -> tuple[GenieAgentTool, ...]:
+    """One tool per Genie Agent (``GenieTool``) entry, in config order, as the user.
+
+    Each client knows the scopes *token* says it carries, so a 403 for a token
+    without ``dashboards.genie`` is a missing scope.
+    """
+    entries = [t for t in agent_config.tools if isinstance(t, GenieTool)]
+    names = genie_agent_tool_names([e.space_name for e in entries])
+    scopes = oauth_scopes_from_token(token)
+    return tuple(
+        GenieAgentTool(
+            GenieAgentClient(
+                host=host,
+                token=token,
+                space_id=entry.space_id,
+                source=genie_agent_source(entry.space_name),
+                token_scopes=scopes,
+                genie_factory=genie_factory,
+            ),
+            model_name=name,
+            space_id=entry.space_id,
+            space_name=entry.space_name,
+            user_description=entry.description,
+            conversation_id=entry.conversation_id,
+            on_question=on_question,
+            session_id=session_id,
+        )
+        for entry, name in zip(entries, names, strict=True)
+    )
