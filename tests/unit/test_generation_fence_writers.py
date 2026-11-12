@@ -681,19 +681,10 @@ class TestAnAbandonedBranchStops:
             f"{raised!r} and returned {updates!r}"
         )
         assert [c["name"] for c in env.skills.calls] == ["architect"]
-        # The deck tables only: the architect's chat message and the title are the
-        # message and session writers, fenced by Task 3b.
-        deck_tables = (
-            "session_slides",
-            "session_slide_decks",
-            "shared_deck_mutation_event",
-            "deck_reviews",
-        )
-        after = _snapshot(env.engine)
-        _assert_unchanged(
-            {t: at_cancel["tables"][t] for t in deck_tables},
-            {t: after[t] for t in deck_tables},
-        )
+        # EVERY table: the architect's own message (session_messages and the
+        # session's last_activity) is refused as well, since Task 3b fenced
+        # add_message.
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
 
 
 # ---------------------------------------------------------------------------

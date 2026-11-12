@@ -685,7 +685,7 @@ class DatabricksModelAdapter:
         *,
         budget_text: str,
     ) -> str:
-        """The ``ToolMessage`` content for one tool call; it never raises an ``Exception``.
+        """The ``ToolMessage`` content for one tool call.
 
         A spent budget (calls or clock) refuses the call; an unknown name is
         answered as such.  Otherwise the args are parsed with the tool's
@@ -693,11 +693,16 @@ class DatabricksModelAdapter:
         remaining seconds.  A ``ToolAccessError`` is recorded on the toolset;
         any other failure (bad args included) is answered as a tool error.
 
+        The one exception it raises is ``TurnFencedError``: a tool's write was
+        refused because the turn was stopped, so the loop ends instead of
+        answering the model in-band and starting another round.
+
         An error's text is untrusted (it can carry a service's or a payload's
         words), so it reaches the model only inside ``spotlight``.  The tool's
         own return value is the tool's to spotlight.
         """
         from src.services.agent_tools.toolset import ToolAccessError
+        from src.services.generation_fence import TurnFencedError
         from src.utils.spotlight import spotlight
 
         if toolset.exhausted():
@@ -712,6 +717,8 @@ class DatabricksModelAdapter:
         except ToolAccessError as error:
             toolset.access_errors.append(error)
             return "Access denied: " + spotlight("tool_error", error.message)
+        except TurnFencedError:
+            raise
         except Exception as error:  # noqa: BLE001 - a tool failure is answered in-band
             return f"Tool error: {type(error).__name__}: " + spotlight(
                 "tool_error", str(error)[:300]

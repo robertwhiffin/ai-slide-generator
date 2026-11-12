@@ -93,7 +93,7 @@ class MockSessionManager:
         return self.verification_maps.get(session_id, {})
 
     def create_version(self, session_id, description, deck_dict,
-                       verification_map=None, chat_history=None):
+                       verification_map=None, chat_history=None, *, request_id=None):
         v = self._next_version
         self._next_version += 1
         entry = {

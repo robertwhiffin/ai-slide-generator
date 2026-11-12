@@ -44,6 +44,7 @@ from src.services.conversation_pins import (
     get_conversation_graph_versions,
     lock_active_graph_release,
 )
+from src.services.generation_fence import LIVE_STATUSES, fence_turn_write
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
     MutationActor,
@@ -1554,15 +1555,30 @@ class SessionManager:
             logger.info("Deleted session", extra={"session_id": session_id})
             return True
 
-    def rename_session(self, session_id: str, title: str) -> Dict[str, Any]:
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        *,
+        request_id: Optional[str] = None,
+        allow_completed: bool = False,
+    ) -> Dict[str, Any]:
         """Rename a session (delegates to update_session)."""
-        return self.update_session(session_id, title=title)
+        return self.update_session(
+            session_id,
+            title=title,
+            request_id=request_id,
+            allow_completed=allow_completed,
+        )
 
     def update_session(
         self,
         session_id: str,
         title: Optional[str] = None,
         slide_count: Optional[int] = None,
+        *,
+        request_id: Optional[str] = None,
+        allow_completed: bool = False,
     ) -> Dict[str, Any]:
         """Update session metadata (title and/or deck slide count).
 
@@ -1573,14 +1589,22 @@ class SessionManager:
             title: New session title (optional)
             slide_count: New slide count for the session's deck (optional).
                 Only applied if the session has a slide_deck.
+            request_id: The turn this write belongs to, for a caller outside the
+                turn's context (the graph turn's title thread).  The write is
+                refused (``TurnFencedError``) once that turn is no longer live.
+            allow_completed: Also admit a ``completed`` turn: the title thread
+                is joined only briefly, so its title can arrive after the turn
+                finished and must still land.
 
         Returns:
             Updated session info
 
         Raises:
             SessionNotFoundError: If session doesn't exist
+            TurnFencedError: If the turn this write belongs to was stopped
         """
         with get_db_session() as db:
+            fence_turn_write(db, request_id, allow_completed=allow_completed)
             session = self._get_session_or_raise(db, session_id)
             if title is not None:
                 session.title = title
@@ -1786,8 +1810,12 @@ class SessionManager:
         config is re-serialized through ``AgentConfig``, as every agent-config
         write path does.  A row with no ``genie_one`` entry (the user removed it
         mid-turn) is left alone.
+
+        Fenced (``TurnFencedError``) when called from a stopped turn; the claim
+        comes before the row lock, the lock order every turn writer keeps.
         """
         with get_db_session() as db:
+            fence_turn_write(db)
             session = (
                 db.query(UserSession)
                 .filter(UserSession.session_id == session_id)
@@ -1923,8 +1951,15 @@ class SessionManager:
 
         Returns:
             Message info dictionary
+
+        Raises:
+            TurnFencedError: If called from a graph turn that was stopped.  The
+                fence keys on the turn's ContextVar ONLY, never on *request_id*:
+                the monolith passes *request_id* too and never binds the
+                ContextVar, and its writes behave as they always have.
         """
         with get_db_session() as db:
+            fence_turn_write(db)
             session = self._get_session_or_raise(db, session_id)
             message = self._insert_user_message(
                 db,
@@ -3326,6 +3361,8 @@ class SessionManager:
         deck_dict: Dict[str, Any],
         verification_map: Optional[Dict[str, Any]] = None,
         chat_history: Optional[List[Dict[str, Any]]] = None,
+        *,
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new save point (version) for the slide deck.
 
@@ -3338,11 +3375,17 @@ class SessionManager:
             deck_dict: Complete deck snapshot
             verification_map: Verification results at time of snapshot
             chat_history: Chat messages up to this point (auto-captured if not provided)
+            request_id: The turn this save point belongs to, for a caller outside
+                the turn's context (the graph turn's end-of-turn save point).
 
         Returns:
             Version info dictionary
+
+        Raises:
+            TurnFencedError: If the turn this save point belongs to was stopped
         """
         with get_db_session() as db:
+            fence_turn_write(db, request_id)
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
@@ -4206,12 +4249,15 @@ class SessionManager:
         (``progress._persist``) logs it and the next report carries a newer snapshot.
 
         Returns True when this snapshot was stored, False when a newer (or equal)
-        one already was or the request does not exist.
+        one already was, the request does not exist, or the turn is no longer
+        live (``pending``/``running``): a stopped turn's row keeps the stage it
+        had when it stopped.
         """
         table = ChatRequest.__table__
         statement = (
             update(table)
             .where(table.c.request_id == request_id)
+            .where(table.c.status.in_(LIVE_STATUSES))
             .where(or_(table.c.progress_seq.is_(None), table.c.progress_seq < seq))
             .values(progress_json=json.dumps(progress), progress_seq=seq)
         )

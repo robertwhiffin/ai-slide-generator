@@ -54,6 +54,7 @@ from src.services.conversation_pins import (
     ConversationPinMissingError,
     ConversationSessionNotFoundError,
 )
+from src.services.generation_fence import TurnFencedError
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
     PersistedRuntimeError,
@@ -2004,7 +2005,17 @@ class ChatService:
                 naming_model = build_session_title_model()
                 generated_title = generate_session_title(message, naming_model)
                 if generated_title:
-                    session_manager.rename_session(session_id, generated_title)
+                    # This thread's context was copied before invoke_graph bound
+                    # the request id, so the id is passed explicitly.  A slow
+                    # title can outlive the join below and arrive after the turn
+                    # completed; it must still land then (allow_completed), but
+                    # never after a stop.
+                    session_manager.rename_session(
+                        session_id,
+                        generated_title,
+                        request_id=request_id,
+                        allow_completed=True,
+                    )
                     title_container["title"] = generated_title
                     logger.info(
                         "Auto-named graph-mode session from first message",
@@ -2013,6 +2024,12 @@ class ChatService:
                             "generated_title": generated_title,
                         },
                     )
+            except TurnFencedError:
+                # The turn was stopped: the title is dropped, not a failure.
+                logger.info(
+                    "Dropped the session title of a stopped turn",
+                    extra={"session_id": session_id, "request_id": request_id},
+                )
             except Exception:
                 logger.warning(
                     "Failed to auto-name session",
@@ -2069,6 +2086,9 @@ class ChatService:
         #
         # A save-point failure must not fail the turn, exactly as on the monolith
         # path — the deck is already committed by the time this runs.
+        #
+        # This thread never has the request id bound, so it is passed explicitly:
+        # a turn stopped as the graph finished leaves no version behind.
         try:
             deck_for_save_point = self._get_or_load_deck(session_id)
             if deck_for_save_point is not None:
@@ -2078,7 +2098,14 @@ class ChatService:
                         f"Generated {len(deck_for_save_point.slides)} slide(s)"
                     ),
                     deck=deck_for_save_point,
+                    request_id=request_id,
                 )
+        except TurnFencedError:
+            # The turn was stopped: no save point, and not a turn failure.
+            logger.info(
+                "Skipped the save point of a stopped turn",
+                extra={"session_id": session_id, "request_id": request_id},
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to create save point (graph): {e}",
@@ -3155,6 +3182,8 @@ class ChatService:
         session_id: str,
         description: str,
         deck: Optional[SlideDeck] = None,
+        *,
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a save point for the current deck state.
 
@@ -3162,6 +3191,8 @@ class ChatService:
             session_id: Session to create save point for
             description: Auto-generated description of the change
             deck: Optional deck to save (uses cached deck if not provided)
+            request_id: The graph turn this save point belongs to; it is refused
+                (``TurnFencedError``) once that turn is no longer live.
 
         Returns:
             Version info dictionary
@@ -3183,6 +3214,7 @@ class ChatService:
             description=description,
             deck_dict=deck.to_dict(),
             verification_map=verification_map,
+            request_id=request_id,
         )
 
         logger.info(

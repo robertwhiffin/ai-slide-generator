@@ -23,6 +23,7 @@ Failure text is the fixed ``FAIL_*`` constants, never an exception's own text.
 
 from __future__ import annotations
 
+import contextvars
 import io
 import logging
 import threading
@@ -36,6 +37,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.core.database import get_db_session
+from src.services.generation_fence import TurnFencedError, fence_turn_write
 from src.services.image_generation import (
     MAX_PROMPT_CHARS,
     PRESETS,
@@ -135,8 +137,12 @@ class ImageGenerationArgs(BaseModel):
 def save_to_library(
     img: GeneratedImage, *, owner: str, prompt: str, category: str, tags: list[str]
 ) -> str:
-    """Store a generated image in the Image Library as *owner*; return its token."""
+    """Store a generated image in the Image Library as *owner*; return its token.
+
+    Refused (``TurnFencedError``) when the turn it runs for was stopped.
+    """
     with get_db_session() as db:
+        fence_turn_write(db)
         asset = save_generated_image(
             db, img, owner=owner, prompt=prompt, category=category, tags=tags
         )
@@ -262,6 +268,12 @@ class ImageGenerationAgentTool:
 
         try:
             ctx.on_call(args.kind, n)
+        except TurnFencedError:
+            # The turn was stopped before any job started: give back the n slots
+            # ``run`` took (process-wide), and generate nothing.
+            for _ in range(n):
+                _SLOTS.release()
+            raise
         except Exception:  # noqa: BLE001 - the progress line must never break a generation
             logger.debug("image tool on_call failed", exc_info=True)
 
@@ -284,7 +296,9 @@ class ImageGenerationAgentTool:
 
         for index, job in enumerate(jobs):
             try:
-                job.future = _POOL.submit(job_body, job)
+                # A pool thread starts with an empty context: each job runs in a
+                # copy of this one, so the save is fenced on the turn's request id.
+                job.future = _POOL.submit(contextvars.copy_context().run, job_body, job)
             except Exception:  # noqa: BLE001 - the pool is gone: give the slot back
                 _SLOTS.release()
                 submit_errors[index] = FAIL_OTHER
@@ -302,6 +316,14 @@ class ImageGenerationAgentTool:
             ]
         if claimed:
             wait(claimed, timeout=SAVE_GRACE_SECONDS)
+
+        # A refused save means the turn was stopped: the refusal ends the tool loop
+        # (nothing is recorded or reported), rather than becoming "not generated".
+        for job in jobs:
+            if job.future is not None and job.future.done():
+                refused = job.future.exception()
+                if isinstance(refused, TurnFencedError):
+                    raise refused
 
         lines: list[str] = []
         made = 0

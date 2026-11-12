@@ -38,6 +38,7 @@ from src.services.agent_tools.gateway_mcp import (
     GatewayToolSpec,
 )
 from src.services.agent_tools.toolset import ToolAccessError
+from src.services.generation_fence import TurnFencedError, fence_turn_write
 from src.utils.spotlight import spotlight
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,10 @@ class _Shaper:
             return "[image not saved: could not decode the image data]", None
         try:
             token = self._save(data, mime)
+        except TurnFencedError:
+            # The turn was stopped: the refusal ends the tool loop, it is never
+            # answered to the model as an unsaved image.
+            raise
         except ValueError as exc:
             return f"[image not saved: {exc}]", None
         except Exception:  # noqa: BLE001 - one bad image must not cost the rest of the result
@@ -302,6 +307,8 @@ def make_image_saver(*, user: str, service_name: str, display_name: str) -> Imag
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = f"{slug}-{stamp}-{uuid.uuid4().hex[:8]}.{_EXTENSIONS.get(mime, 'bin')}"
         with get_db_session() as db:
+            # Runs in the node's own thread, so the turn's request id is bound.
+            fence_turn_write(db)
             asset = image_service.upload_image(
                 db,
                 data,
@@ -372,6 +379,10 @@ class GatewayMcpAgentTool:
             return f"Not run: the time budget for {ctx.display_name} is spent. Continue without it."
         try:
             ctx.on_call(f"{ctx.display_name} · {self._spec.name}")
+        except TurnFencedError:
+            # The progress row was refused: the turn was stopped, so the service
+            # is never called.
+            raise
         except Exception:  # noqa: BLE001 - a progress line must never stop the call
             logger.warning("Gateway progress line failed", exc_info=True)
         try:

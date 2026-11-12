@@ -493,8 +493,9 @@ def _say(
     it is read HERE rather than passed by each caller so a new caller cannot
     forget it.
 
-    Never raises: like emission, a transcript write must not be the thing that
-    fails a turn that has otherwise produced a deck.
+    Never raises, except ``TurnFencedError``: like emission, a transcript write
+    must not be the thing that fails a turn that has otherwise produced a deck,
+    but a write refused because the turn was stopped ends the node.
     """
     if bool(scoped_vals(state, "describe_only")):
         return
@@ -510,6 +511,10 @@ def _say(
             metadata=metadata,
             request_id=get_chat_request_id(),
         )
+    except TurnFencedError:
+        # The turn was stopped: the refused message ends the node, so no model
+        # call follows it.
+        raise
     except Exception:
         logger.warning(
             "Could not persist an assistant turn; the user may see silence on "
@@ -4829,6 +4834,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
                         toolset=toolset,
                     ),
                 ).output
+            except TurnFencedError:
+                # A tool's write was refused: the turn was stopped.  Never retried
+                # without tools (another model call); it ends the node.
+                raise
             except Exception as exc:
                 if gateway is not None:
                     gateway.spent(
@@ -5921,6 +5930,10 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
                     toolset=toolset,
                 ),
             ).output
+        except TurnFencedError:
+            # A tool's write was refused: the turn was stopped.  Never retried
+            # with other tools (another model call); it ends the node.
+            raise
         except Exception as exc:
             if gateway is not None:
                 # First, so a refusal the run recorded (a sign-in, say) is the
