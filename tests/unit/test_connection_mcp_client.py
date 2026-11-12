@@ -30,6 +30,7 @@ The last section pins that the Gateway client does NOT pick up the connection ru
 from __future__ import annotations
 
 import builtins
+import json
 from typing import Any
 
 import httpx
@@ -556,3 +557,193 @@ def test_the_gateway_client_returns_a_connection_login_iserror_for_the_model():
     client, _ = _gateway_client(FakeMcpClient(result=result))
 
     assert client.call_tool("search", {"query": "q"}) is result
+
+
+# ---------------------------------------------------------------------------
+# Task 3: a known token without mcp.external makes a 403 a missing scope
+# ---------------------------------------------------------------------------
+
+
+def test_the_connection_scope_is_mcp_external():
+    assert gateway_mcp.CONNECTION_SCOPE == "mcp.external"
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize("body", [USE_CONNECTION_BODY, ""], ids=["use_connection_body", "bare_403"])
+@pytest.mark.parametrize(
+    ("token_scopes", "kind"),
+    [
+        (frozenset({"sql"}), "missing_scope"),
+        (frozenset({"sql", "mcp.external"}), "access_denied"),
+        (None, "access_denied"),
+        (frozenset({"all-apis"}), "access_denied"),
+    ],
+    ids=["known_without_mcp_external", "known_with_mcp_external", "scopes_unknown", "all_apis"],
+)
+def test_a_403_with_known_scopes_lacking_mcp_external_is_missing_scope(
+    operation: str, body: str, token_scopes, kind: str
+):
+    """The plan adds ``mcp.external`` to the scopes Tellr asks for (R2), so a token whose
+    scopes are KNOWN and do not grant it is a stale consent: its 403 is
+    ``missing_scope`` (the consent message), not "grant USE CONNECTION".
+    ``all-apis`` grants every scope; unknown scopes never refuse."""
+    client, _ = make_connection_client(
+        FakeMcpClient(raises=_in_groups(_http_error(403, body), 1)),
+        token_scopes=token_scopes,
+    )
+
+    with pytest.raises(GatewayMcpError) as info:
+        _run(client, operation)
+
+    assert info.value.kind == kind
+    assert info.value.sign_in_url is None
+
+
+@pytest.mark.parametrize(
+    ("make_exception", "kind", "url"),
+    [
+        (lambda: _ExceptionGroup("g", [_uc_mcp_error()]), "sign_in_required", GH_LINK),
+        (lambda: _in_groups(_http_error(404, "Not Found"), 1), "not_found", None),
+        (lambda: _in_groups(_http_error(500, "boom"), 1), "unavailable", None),
+    ],
+    ids=["not_signed_in", "http_404", "http_500"],
+)
+def test_a_token_without_mcp_external_changes_only_the_403_rule(make_exception, kind, url):
+    """The scope rule is the Gateway rules' ``lacks_gateway_scope``: Rule 0 still comes
+    first, and a 404 or a 500 is still what it was."""
+    client, _ = make_connection_client(
+        FakeMcpClient(raises=make_exception()), token_scopes=frozenset({"sql"})
+    )
+
+    with pytest.raises(GatewayMcpError) as info:
+        client.list_tools()
+
+    assert info.value.kind == kind
+    assert info.value.sign_in_url == url
+
+
+# ---------------------------------------------------------------------------
+# Task 3 addendum: link extraction robustness
+# ---------------------------------------------------------------------------
+
+
+def _jsonrpc_envelope(message: str) -> str:
+    """A JSON-RPC error response body carrying *message*, compact as a server sends it."""
+    return json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": message}},
+        separators=(",", ":"),
+    )
+
+
+@pytest.mark.parametrize("escape_slashes", [False, True], ids=["plain", "json_escaped_slashes"])
+def test_a_jsonrpc_envelope_body_gives_a_clean_link(escape_slashes: bool):
+    """An HTTP 401 whose body is a JSON-RPC envelope round the UC message. In the raw
+    body the UC message is JSON inside JSON (its quotes escaped; with some encoders its
+    slashes too, as ``\\/``), so the link must come from the envelope's decoded
+    message: the proxy's own link, clean."""
+    body = _jsonrpc_envelope(_uc_not_signed_in_message())
+    if escape_slashes:
+        # JSON allows "\/" for "/"; the body still decodes to the same message.
+        body = body.replace("/", "\\/")
+        assert "https:\\/\\/h.example\\/explore\\/connections\\/gh?o=7" in body
+    assert json.loads(body)["error"]["message"] == _uc_not_signed_in_message()
+    exc = _in_groups(_http_error(401, body), 1)
+    client, _ = make_connection_client(FakeMcpClient(raises=exc))
+
+    with pytest.raises(GatewayMcpError) as info:
+        client.list_tools()
+
+    assert info.value.kind == "sign_in_required"
+    assert info.value.sign_in_url == GH_LINK
+    mapped = map_connection_error(exc, host=HOST, connection_name=GH)
+    assert (mapped.kind, mapped.sign_in_url) == ("sign_in_required", GH_LINK)
+
+
+#: ``"error_code": "UNAUTHENTICATED"`` with spaces, and no "Please login first" phrase.
+_SPACED_UNAUTHENTICATED = {
+    "json_default_separators": json.dumps(
+        {
+            "error_code": "UNAUTHENTICATED",
+            "message": "Credential for user identity('user@example.com') is not found "
+            "for the connection 'gh'.",
+        }
+    ),
+    "spaces_both_sides": '{"error_code" : "UNAUTHENTICATED", "message" : "Credential missing"}',
+}
+
+
+@pytest.mark.parametrize(
+    "message", list(_SPACED_UNAUTHENTICATED.values()), ids=list(_SPACED_UNAUTHENTICATED)
+)
+def test_a_spaced_unauthenticated_marker_is_sign_in_required(message: str):
+    """The marker is JSON, so whitespace round its colon is still the marker: through
+    an ``McpError`` and through an ``isError`` result. With no link in the text, the
+    link is Tellr's own."""
+    assert '"error_code":"UNAUTHENTICATED"' not in message
+    assert "Please login first" not in message
+    client, _ = make_connection_client(
+        FakeMcpClient(raises=_in_groups(McpError(ErrorData(code=-32600, message=message)), 2))
+    )
+
+    with pytest.raises(GatewayMcpError) as info:
+        client.list_tools()
+
+    assert info.value.kind == "sign_in_required"
+    assert info.value.sign_in_url == GH_BUILT_LINK
+
+    client, _ = make_connection_client(FakeMcpClient(result=_error_result(message)))
+
+    with pytest.raises(GatewayMcpError) as info:
+        client.call_tool("search", {"query": "q"})
+
+    assert info.value.kind == "sign_in_required"
+    assert info.value.sign_in_url == GH_BUILT_LINK
+
+
+#: The UC message with a JSON field after the link's closing quote.
+_UC_MESSAGE_WITH_DETAILS = json.dumps(
+    {
+        "error_code": "UNAUTHENTICATED",
+        "message": "Credential for user identity('user@example.com') is not found for the "
+        f"connection 'gh'. Please login first to the connection by visiting {GH_LINK}",
+        "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo"}],
+    },
+    separators=(",", ":"),
+)
+
+_TRAILING_FIELD_CARRIERS = {
+    "mcp_error_in_two_groups": lambda: _in_groups(
+        McpError(ErrorData(code=-32600, message=_UC_MESSAGE_WITH_DETAILS)), 2
+    ),
+    "http_401_body": lambda: _in_groups(_http_error(401, _UC_MESSAGE_WITH_DETAILS), 1),
+    "exception_text": lambda: RuntimeError(_UC_MESSAGE_WITH_DETAILS),
+}
+
+
+@pytest.mark.parametrize(
+    "make_exception", list(_TRAILING_FIELD_CARRIERS.values()), ids=list(_TRAILING_FIELD_CARRIERS)
+)
+def test_a_trailing_json_field_does_not_join_the_link(make_exception):
+    """``...gh?o=7","details":[...]`` is on the host, so the on-host check alone does
+    not stop the trailing field joining the link: the link must end where the URL
+    does."""
+    assert GH_LINK + '","details":[{"@type":' in _UC_MESSAGE_WITH_DETAILS
+    client, _ = make_connection_client(FakeMcpClient(raises=make_exception()))
+
+    with pytest.raises(GatewayMcpError) as info:
+        client.list_tools()
+
+    assert info.value.kind == "sign_in_required"
+    assert info.value.sign_in_url == GH_LINK
+
+
+def test_a_trailing_json_field_does_not_join_the_link_of_an_iserror_result():
+    client, _ = make_connection_client(
+        FakeMcpClient(result=_error_result(_UC_MESSAGE_WITH_DETAILS))
+    )
+
+    with pytest.raises(GatewayMcpError) as info:
+        client.call_tool("search", {"query": "q"})
+
+    assert info.value.kind == "sign_in_required"
+    assert info.value.sign_in_url == GH_LINK

@@ -33,6 +33,7 @@ from src.services.agent_tools.mcp_transport import (
 __all__ = [
     "CALL_TIMEOUT_SECONDS",
     "LIST_TIMEOUT_SECONDS",
+    "CONNECTION_SCOPE",
     "ConnectionMcpClient",
     "GatewayErrorKind",
     "GatewayMcpClient",
@@ -177,7 +178,9 @@ def _body_error(text: str) -> tuple[int | None, str | None]:
 
 
 _CONNECTION_PATH_PREFIX: Final = "/api/2.0/mcp/external/"
-_CONNECTION_LINK_RE: Final = re.compile(r"https://\S+/explore/connections/\S+")
+_CONNECTION_LINK_RE: Final = re.compile(r"https://[^\s\"'<>\\]+/explore/connections/[^\s\"'<>\\]+")
+#: The OAuth scope a token needs to use a UC connection (consent adds it).
+CONNECTION_SCOPE: Final = "mcp.external"
 _CONNECTION_UNAUTH_RE: Final = re.compile(r'"error_code"\s*:\s*"UNAUTHENTICATED"')
 _CONNECTION_LOGIN_TEXT: Final = "Please login first to the connection"
 _LINK_TRAILING: Final = "\"'.,;)}\\"
@@ -206,12 +209,16 @@ def _is_connection_signed_out(text: str) -> bool:
     return bool(_CONNECTION_UNAUTH_RE.search(text)) or _CONNECTION_LOGIN_TEXT in text
 
 
-def map_connection_error(exc: BaseException, *, host: str, connection_name: str) -> GatewayMcpError:
+def map_connection_error(
+    exc: BaseException, *, host: str, connection_name: str, lacks_connection_scope: bool = False
+) -> GatewayMcpError:
     """Classify a failed call to a UC connection.
 
     Rule 0: any exception in the walk whose McpError message, response body or text
     says the user is not signed in is ``sign_in_required``.  Everything else follows
-    :func:`map_gateway_error` (a connection needs no ``ai-gateway`` scope).
+    :func:`map_gateway_error`, where a connection needs ``mcp.external`` rather than
+    ``ai-gateway``: with *lacks_connection_scope* (known scopes that do not grant it) a
+    bare 403 is ``missing_scope``, else ``access_denied``.
     """
     if isinstance(exc, GatewayMcpError):
         return exc
@@ -232,7 +239,7 @@ def map_connection_error(exc: BaseException, *, host: str, connection_name: str)
                     sign_in_url=connection_sign_in_url(host, connection_name, message=text),
                 )
     return map_gateway_error(
-        exc, host=host, service_name=connection_name, lacks_gateway_scope=False
+        exc, host=host, service_name=connection_name, lacks_gateway_scope=lacks_connection_scope
     )
 
 
@@ -443,13 +450,28 @@ class GatewayMcpClient:
 
 
 class ConnectionMcpClient(GatewayMcpClient):
-    """The Gateway client over a UC connection proxy; ``service_name`` is the connection."""
+    """The Gateway client over a UC connection proxy; ``service_name`` is the connection.
+
+    With known ``token_scopes`` that do not grant ``mcp.external`` (a stale consent), a
+    bare 403 is ``missing_scope``; with unknown scopes it stays ``access_denied``.
+    """
+
+    def __init__(self, *, token_scopes: frozenset[str] | None = None, **kwargs: Any) -> None:
+        super().__init__(token_scopes=token_scopes, **kwargs)
+        self._lacks_connection_scope = token_scopes is not None and not scopes_grant(
+            token_scopes, CONNECTION_SCOPE
+        )
 
     def _path(self) -> str:
         return connection_path(self._service_name)
 
     def _map_error(self, exc: BaseException) -> GatewayMcpError:
-        return map_connection_error(exc, host=self._host, connection_name=self._service_name)
+        return map_connection_error(
+            exc,
+            host=self._host,
+            connection_name=self._service_name,
+            lacks_connection_scope=self._lacks_connection_scope,
+        )
 
     def _signed_out(self, text: str) -> GatewayMcpError | None:
         if _is_connection_signed_out(text):
