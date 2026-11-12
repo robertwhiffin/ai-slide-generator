@@ -211,7 +211,8 @@ in the owning task, as named.
 
 **Files:**
 - Modify: `src/services/agent_tools/gateway_toolset.py`
-- Test: `tests/unit/test_gateway_toolset_connections.py` (new).
+- Modify: `src/services/agent_tools/gateway_mcp.py` (the `ConnectionMcpClient` scope rule only)
+- Test: `tests/unit/test_gateway_toolset_connections.py` (new), plus one test added to `tests/unit/test_connection_mcp_client.py`.
 - `tests/unit/test_gateway_toolset.py` must pass with exactly one edit: its pin of
   `dataclasses.fields(GatewayFailure)` (~line 1138) gains `"source"` at the end. Say so in the commit.
 
@@ -243,8 +244,20 @@ in the owning task, as named.
     - access_denied → `f"You don't have access to {name} ({service}). Ask the connection's owner to grant you USE CONNECTION on it."`
     - not_found → `f"{name} ({service}) was not found on this workspace. Check the connection in Catalog Explorer."`
     - Every other kind is unchanged.
+  - **Scope rule (in `gateway_mcp.py`, amending Task 2):**
+    - `ConnectionMcpClient` passes `lacks_gateway_scope=True` to the Gateway rules when its
+      `token_scopes` are KNOWN and do not grant `CONNECTION_SCOPE: Final = "mcp.external"` (use
+      `scopes_grant`, so `all-apis` counts).
+    - A bare 403 is then `missing_scope`, which becomes the consent message, not "grant USE
+      CONNECTION". With unknown scopes it stays `access_denied`.
+    - Why: R2 adds `mcp.external`, so a token without it is a stale consent.
+  - **Names:** `model_tool_names` treats every name starting with `genie_agent_` as reserved. A
+    Gateway or connection tool so named gets the `slug__` prefix, so it never collides with Task 5's
+    Genie Agent tool names.
 
 - [ ] **Step 1: Write the failing tests.** Fakes are modelled on `tests/unit/test_gateway_toolset.py` (its token helper for scoped tokens, and its fake client factory).
+  - `test_a_403_with_known_scopes_lacking_mcp_external_is_missing_scope` (in `tests/unit/test_connection_mcp_client.py`): the same 403 with `token_scopes=frozenset({"sql"})` → `missing_scope`; with `frozenset({"sql","mcp.external"})` or `None` → `access_denied`; with `frozenset({"all-apis"})` → `access_denied`.
+  - `test_a_tool_named_like_a_genie_agent_is_prefixed`: a connection tool named `genie_agent_sales` binds under a different, `slug__`-prefixed name.
   - `test_connection_entries_for_this_agent_are_bound_and_others_skipped`: an analyst entry is bound in an analyst build and absent from an architect build; an architect entry the reverse.
   - `test_a_connection_entry_without_agent_goes_to_the_analyst`.
   - `test_connections_bind_when_the_token_lacks_ai_gateway`: a scoped token without `ai-gateway` → the Gateway entry is a `missing_scope` failure and the connection's tools are bound.
@@ -278,6 +291,7 @@ in the owning task, as named.
   - `_gateway_user(state, config)` returns a user when the config has a `gateway_mcp` OR an `mcp` entry. Every other `None` rule is unchanged: describe-only turns, and no user client.
   - `_GatewayPass._list` reads the registry only when there are Gateway entries (else `{}`), and passes `connections=user.connections`. If the registry read fails, the connections are still bound; the Gateway entries are skipped and not reported as "removed".
   - Notice keys for connections in `_GatewayNotices` (the `notified` list) are `f"mcp:{connection_name}"` (R9). Gateway keys stay the bare service name.
+  - `_GatewayPass.without_tools` (~4000) builds `GatewayFailure(..., "unavailable", ...)` positionally for each bound owner. It sets `source="connection"` when the owner's key is in `self._build.connection_keys`, so that path gets the prefixed key and the connection wording too.
   - Progress lines for connection tools are the Gateway's: `"{server_name} · {tool}"` with `tool_name "gateway_mcp"`.
   - Notices go through `failure_notice`, so the Task 3 wording applies. A sign-in notice carries `metadata={"sign_in_url": ...}` as today.
 
@@ -292,6 +306,7 @@ in the owning task, as named.
   - `test_a_connection_only_deck_never_reads_the_gateway_registry`: patch `enabled_by_service` to raise; with no Gateway entries it is never called, and the connection is bound.
   - `test_a_registry_failure_still_binds_the_connections`: a Gateway entry plus a connection, with `enabled_by_service` raising → the connection is bound, and no "no longer available" notice is said.
   - `test_a_connection_notice_key_is_prefixed`: the pass's `usage()["notified"]` holds `"mcp:<name>"` after a connection failure notice.
+  - `test_a_failed_model_call_marks_connection_owners_as_connections`: a model call carrying a connection tool raises → `without_tools` returns True, and the "unavailable" notice uses key `"mcp:<name>"`.
 - [ ] **Step 2: Run them, and see them fail.** `uv run pytest tests/unit/test_graph_mcp_connections.py -q`.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `uv run pytest tests/unit/test_graph_mcp_connections.py tests/unit/test_graph_gateway_mcp.py tests/unit/test_data_analyst_genie_one.py -q`. Expected: PASS.
@@ -460,14 +475,24 @@ in the owning task, as named.
       run (no user client, or the token lacks `ai-gateway`).
     - When `genie is not None`, its toolset is used.
     - When `genie is None` and there are Genie Agent tools: `AgentToolset(tools=(*agent_tools,
-      *gateway_tools), max_calls=…, budget_seconds=…)`. Take the numbers from
-      `gateway._budget_left()` when a Gateway pass exists, else `ANALYST_GATEWAY_MAX_CALLS` /
-      `ANALYST_GATEWAY_BUDGET_SECONDS` (R4).
+      *gateway_tools), max_calls=…, budget_seconds=…)`.
+      - With a Gateway pass, the numbers are `gateway._budget_left()`. If it gives 0 calls or 0
+        seconds, bind nothing, as `gateway.toolset()` does.
+      - Without one, the numbers are `turn_budget(used_calls=0, used_seconds=0.0,
+        max_calls=ANALYST_GATEWAY_MAX_CALLS, budget_seconds=ANALYST_GATEWAY_BUDGET_SECONDS,
+        turn_started_at=<state's turn_started_at>, now=time.time())`, so they are clipped to the
+        turn deadline (R4), with the same 0 → nothing rule.
     - When `genie is None` and there are no Genie Agent tools: exactly today's code paths
       (`gateway.toolset()` or none).
-    - The existing retry without Gateway tools keeps the Genie Agent tools.
+    - **The retry.** The existing retry without Gateway tools keeps the Genie Agents. It builds them
+      FRESH (new `build_genie_agent_tools` instances), just as Genie One's retry builds a fresh tool,
+      so a failed first attempt's answers and question counts are discarded.
     - **Notices:** with no Gateway pass, the run uses one local `_GatewayNotices(state, token)` for
       the consent message and the Genie Agent refusals (R8).
+      - `_GatewayNotices` gains `say_once(key: str, text: str) -> None`: say `text` as an info row
+        unless `key` was said this turn.
+      - A Genie Agent refusal uses the key `f"genie_agent:{space_id}"`, so it can never collide with
+        `consent`, a Gateway service name or an `mcp:` key.
   - **Figures:**
     - `answers = [*Genie One answers, *each Genie Agent tool's answers in tool order]`. These feed
       `_merge_answer_figures`, `analyst_rounds` (`answers: len(answers)`) and the block's deep links.
@@ -496,6 +521,8 @@ in the owning task, as named.
   - `test_the_block_header_names_every_genie_source`.
   - `test_the_block_header_is_unchanged_for_genie_one_alone`: the exact string `"Figures from Genie One (use these keys in data_references):"`.
   - `test_a_genie_agent_progress_row_names_the_agent`: the persisted row has `tool_name == "genie"` and `tool_input == {"agent": "Sales", "question": "Q"}`, and the emitted TOOL_CALL event carries the same `tool_name` / `tool_input` top-level.
+  - `test_a_genie_agent_only_toolset_is_clipped_to_the_turn_deadline`: `turn_started_at` = now − 650 s, with no Gateway pass → `budget_seconds <= 50`; at now − 701 s → no toolset is bound.
+  - `test_the_retry_builds_fresh_genie_agent_tools`: a Gateway tool makes the first model call raise; the retry's toolset holds a NEW `GenieAgentTool` instance, and the first attempt's answers are not written as figures.
   - `test_genie_agents_still_bind_when_genie_one_cannot_run`: Genie One plus a Genie Agent, token scopes `"sql dashboards.genie"` (no `ai-gateway`) → the toolset holds `genie_agent_sales`, not `genie`, and the consent message is said exactly once.
   - `test_a_genie_agent_conversation_id_is_persisted_on_the_actor_row`.
   - `test_set_genie_agent_conversation_id_rewrites_only_that_spaces_entry` (on `graph_env`, like its Genie One twin at `test_data_analyst_genie_one.py:1025`).
@@ -512,77 +539,125 @@ in the owning task, as named.
 
 ---
 
-### Task 7: The architect is told the analyst's data sources
+### Task 7: The architect is told the analyst's data sources; production-shaped eval payloads
 
 **Models:** test=sonnet impl=sonnet
 
 **Files:**
-- Modify: `src/services/graph/nodes.py` (`architect_node` payload, ~4708; new helper `_analyst_data_sources`)
-- Modify: `src/services/agent_model_payload.py:57-73`: `MODEL_PAYLOAD_KEYS["architect"]` gains `"data_sources"`. Without it, `model_payload_for` silently strips the key from every architect call, from the eval generators and from the admin workbench.
-- Modify: `tests/fixtures/model_payload_keys.py:35-50`: `ARCHITECT_MODEL_KEYS` gains `"data_sources"`.
-- Modify, only where they pin the architect's payload keys: the payload-key assertions this change moves. Edit no other assertion in them. They are:
+- Modify: `src/services/graph/nodes.py`: the `architect_node` payload (~4708), the new helper
+  `_analyst_data_sources`, and the constant `GENIE_ONE_DATA_SOURCE`.
+- Modify: `src/services/agent_model_payload.py:57-73`. `MODEL_PAYLOAD_KEYS["architect"]` gains
+  `"data_sources"`, as the LAST key.
+  - Why: `architect_node` does not call this module. But `model_payload_for` projects the eval
+    generators' and the admin workbench's architect payloads, and would strip the key from both.
+- Modify: `tests/fixtures/model_payload_keys.py:35-50`. `ARCHITECT_MODEL_KEYS` gains
+  `"data_sources"`.
+- Modify: `tests/agentic/payloads.py`. `ARCHITECT_PAYLOAD_KEYS` gains `"data_sources"`, and
+  `architect_payload()`'s defaults gain `"data_sources": []`. This is pinned by
+  `tests/unit/test_agentic_layer_is_placed_and_gated.py::test_the_architect_payload_builder_matches_architect_node`,
+  which parses the `payload = {...}` literal in `architect_node`. So the new key must be INSIDE that
+  dict literal, as its LAST entry, never assigned afterwards.
+- Modify, only where they pin the architect's payload keys: the payload-key assertions this change
+  moves. Edit no other assertion in them. They are:
   - `tests/unit/test_graph_nodes.py` (`EVERY_MODEL_CALL`);
   - `tests/unit/test_agent_model_payload.py`;
   - `tests/unit/test_graph_gateway_mcp.py` (~648, ~719);
   - `tests/unit/test_graph_image_tool.py` (~426);
   - `tests/unit/test_deck_style_payloads.py` (~158, ~339, `OLD_ARCHITECT_KEYS`);
-  - `tests/unit/test_deck_style_logos.py` (~103).
-
-  List each edited assertion in the commit message.
-- Test: `tests/unit/test_architect_data_sources.py` (new)
+  - `tests/unit/test_deck_style_logos.py` (`OLD_ARCHITECT_KEYS` at ~91 and ~785).
+- **Production-shaped eval payloads (R10).** These move here from 8a, so the suite is green at the
+  end of this task.
+  - Modify the architect case generators (`evals/packs/architect/mutations.py`,
+    `evals/packs/architect/heldout.py`, `evals/packs/architect/image_tool.py`). Every payload they
+    build carries `"data_sources": [GENIE_ONE_DATA_SOURCE]` (imported from `nodes.py`), at the same
+    key position production uses.
+  - Regenerate `cases/`, `cases_heldout/` and `cases_image_tool/`. Only `payload.json` files change,
+    and no case id changes.
+  - Modify `tests/unit/evals/test_pack_architect.py` and `tests/unit/evals/test_pack_architect_heldout.py`:
+    - `PAYLOAD_KEYS` gains `"data_sources"` at production's position, and its pinned length goes
+      from 12 to 13 (~501-502);
+    - the strip helpers `_without_slide_keys` and `_without_deck_style_context` also drop
+      `data_sources`, as was done for `deck_style_context`, so the byte-identical SHA pins (~126,
+      ~150, ~186) are NOT re-pinned;
+    - add `test_every_case_payload_carries_the_genie_one_data_source`, asserting the committed
+      value equals `[GENIE_ONE_DATA_SOURCE]`.
+  - Modify `tests/unit/evals/test_eval_architect_deck_style.py`: re-pin `EXISTING_CASE_DIGESTS`
+    (~254), naming the one reason (`data_sources` added to every payload).
+  - No recalibration. The architect judge sees only `message` and `current_deck_spec`, so the
+    verdicts on these cases cannot move.
+- List each edited assertion and pin in the commit message.
+- Test: `tests/unit/test_architect_data_sources.py` (new).
 
 **Interfaces:**
 - Produces:
-  - `GENIE_ONE_DATA_SOURCE: Final[Dict[str, str]]` in `nodes.py`, the Genie One item below as a module constant. Task 8a's eval generators import it.
-  - `_analyst_data_sources(config: Optional[AgentConfig]) -> List[Dict[str, Optional[str]]]`. It lists `{"name", "description"}` items, in this order:
-    1. Genie One, if present: `{"name": "Genie One", "description": "Databricks' general data agent: answers business questions across the user's data."}`;
+  - `GENIE_ONE_DATA_SOURCE: Final[Dict[str, str]] = {"name": "Genie One", "description": "Databricks' general data agent: answers business questions across the user's data."}`
+    in `nodes.py`.
+  - `_analyst_data_sources(config: Optional[AgentConfig]) -> List[Dict[str, Optional[str]]]`. It
+    lists `{"name", "description"}` items, in this order:
+    1. `GENIE_ONE_DATA_SOURCE`, if Genie One is present;
     2. each `GenieTool`: `{space_name, description}`;
     3. each `MCPTool` with `agent == "data_analyst"`: `{server_name, description}`;
-    4. each `GatewayMcpTool` whose enabled registry row (`enabled_by_service`) has `agent == "data_analyst"`: `{row.display_name, row.description}`.
-  - Every string passes through `neutralize_delimiters`. A registry read failure omits the Gateway items and logs a warning. `None` config → `[]`.
-  - The architect payload gains `"data_sources": _analyst_data_sources(config)`.
-  - `architect_node` holds no actor config today: it reads one inline inside `_gateway_pass(...)` (~4763), after the payload is built, and only when not describe-only.
-    - Hoist ONE `_actor_agent_config(state, consequence=...)` read to before the payload, done only when `state.get("actor_session_id")`.
-    - Pass that config to `_gateway_pass` instead of reading it again. The Gateway pass keeps its describe-only rule.
+    4. each `GatewayMcpTool` whose enabled registry row (`enabled_by_service`) has
+       `agent == "data_analyst"`: `{row.display_name, row.description}`.
+
+    Every user-authored string passes through `neutralize_delimiters`. A registry read failure omits
+    the Gateway items and logs a warning. A `None` config gives `[]`.
+  - The architect payload gains `"data_sources": _analyst_data_sources(config)` as the dict
+    literal's LAST entry.
+  - `architect_node` holds no actor config today: it reads one inline inside `_gateway_pass(...)`
+    (~4763), after the payload is built, and only when not describe-only.
+    - Hoist ONE `_actor_agent_config(state, consequence=...)` read to before the payload, done only
+      when `state.get("actor_session_id")`.
+    - Pass that config to `_gateway_pass` instead of reading it again. The Gateway pass keeps its
+      describe-only rule.
 
 - [ ] **Step 1: Write the failing tests:**
   - `test_the_payload_lists_every_analyst_source_in_order`;
   - `test_an_architect_bound_mcp_server_is_not_listed`;
   - `test_no_tools_gives_an_empty_list`;
   - `test_disabled_or_architect_gateway_rows_are_not_listed`;
-  - `test_the_payload_carries_no_identifiers`: no `space_id`, Gateway service-name, session id or user id value appears anywhere in `payload["data_sources"]`. Connection names may appear (R7);
-  - `test_the_model_receives_data_sources`: run the node with a fake runtime and assert the payload the runtime is handed (after `model_payload_for`) contains `data_sources`. Sabotage: remove the key from `MODEL_PAYLOAD_KEYS` and see this go red;
-  - `test_a_registry_failure_still_lists_the_other_sources`.
+  - `test_the_payload_carries_no_identifiers`: no `space_id`, Gateway service-name, session id or
+    user id value appears anywhere in `payload["data_sources"]`. Connection names may appear (R7);
+  - `test_the_node_hands_the_model_data_sources`: run `architect_node` with a fake runtime and
+    assert the payload it is handed contains `data_sources` equal to the expected list. Sabotage:
+    delete the dict entry → red;
+  - `test_the_payload_projection_keeps_data_sources`: `model_payload_for("architect", {...,
+    "data_sources": [...]})` keeps it. Sabotage: remove it from `MODEL_PAYLOAD_KEYS` → red;
+  - `test_a_registry_failure_still_lists_the_other_sources`;
+  - `test_the_actor_config_is_read_once_per_architect_attempt`: patch `_actor_agent_config` to
+    count calls; with a Gateway entry it is called once per node run, not twice.
 - [ ] **Step 2: Run them, and see them fail.** `uv run pytest tests/unit/test_architect_data_sources.py -q`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** it, plus the six files listed under Files, `uv run pytest tests/unit -q -k "architect or payload"`, and `tests/unit/evals`. Expected: PASS.
-- [ ] **Step 5: Commit** — `feat(architect): tell the architect which data sources the analyst has`.
+- [ ] **Step 3: Implement** the node, projection and agentic-payload changes.
+- [ ] **Step 4: Change the generators, regenerate, and update the eval-pack pins.**
+  - `git diff --stat evals/packs` shows only `payload.json` changes.
+- [ ] **Step 5: Run** the new test file and every file listed under Files, then
+  `uv run pytest tests/unit -q -k "architect or payload or agentic"` and `uv run pytest tests/unit/evals -q`.
+  Expected: PASS.
+- [ ] **Step 6: Commit** — `feat(architect): tell the architect which data sources the analyst has`.
 
 ---
 
-### Task 8a: Eval harness — production-shaped architect payloads, two new case sets, the analyst's fake data tools
+### Task 8a: Eval harness — two new case sets, the analyst's fake data tools
 
 **Models:** test=opus impl=sonnet
 
-No live model calls in this task except calibration (Step 6). Profile `tellr-dev`. Edits to
-`evals/packs/` and `evals/harness/` are allowed here: this is builder work, not an optimisation
-pass.
+No live model calls in this task except calibration of the two NEW case sets (Step 6). Profile
+`tellr-dev`. Edits to `evals/packs/` and `evals/harness/` are allowed here: this is builder work, not
+an optimisation pass. Task 7 already made the existing architect payloads production-shaped.
 
 **Files:**
-- **Production-shaped architect payloads (R10):**
-  - Modify the architect case generators (`evals/packs/architect/mutations.py`,
-    `evals/packs/architect/heldout.py`, `image_tool.py`): every payload they build carries
-    `data_sources: [GENIE_ONE_SOURCE_ITEM]`.
-  - `GENIE_ONE_SOURCE_ITEM` is the exact dict `_analyst_data_sources` writes for Genie One (Task 7).
-    Import it from `nodes.py` if Task 7 exposes it as a constant, else define it once in
-    `evals/packs/architect/mutations.py` with a test pinning it equal to production's.
-  - Then regenerate `cases/`, `cases_heldout/` and `cases_image_tool/`. Only `payload.json` files
-    (and digests derived from them) may change, and no case id changes.
 - **The architect's `data_sources` case set:**
   - Create the generator `evals/packs/architect/data_sources.py` (modelled on `image_tool.py`) and
     its output `evals/packs/architect/cases_data_sources/`.
   - Every payload goes through `model_payload_for("architect", ...)`. The generator asserts
-    `"data_sources" in payload` for every case it writes.
+    `"data_sources" in payload` for every case it writes, and takes Genie One's item from
+    `GENIE_ONE_DATA_SOURCE` in `nodes.py` (Task 7).
+  - Each case has the usual four files: `case.yaml`, `payload.json`, `reference.json` and
+    `calibration.json` (a `should_fail` output).
+  - The architect judge sees only `message` and `current_deck_spec` (`evals/harness/judge.py`
+    `_brief_or_finding`), never `data_sources`. So each reference and should_fail must make the
+    difference visible in the answer itself: the intent, plus a `message` that names what is asked
+    for or refused.
   - Four cases; `expect.intent` is an exact match:
     - `genie_agent_listed_needs_figures`: `data_sources` lists Genie One plus a "Sales" Genie Agent
       ("Regional sales by month"). The request needs regional sales figures for a new deck →
@@ -642,14 +717,17 @@ pass.
   - `test_data_tool_score_fails_on_a_sql_question_when_no_sql`.
   - `test_data_tool_score_skips_without_first_tool`.
   - `test_build_scorers_includes_data_tool`.
-  - `test_every_architect_payload_carries_data_sources`: walk `cases/`, `cases_heldout/`, `cases_image_tool/` and `cases_data_sources/`.
-  - `test_the_genie_one_source_item_equals_production`: the generator's item equals what `_analyst_data_sources` returns for a Genie One-only config.
-  - `test_data_sources_cases_have_concrete_intents`.
+  - `test_every_data_sources_case_payload_carries_data_sources`.
+  - `test_data_sources_cases_have_concrete_intents_and_four_files`.
+  - `test_every_data_tools_case_expects_success_and_a_first_tool`.
 - [ ] **Step 2: Run them, and see them fail.** `uv run pytest tests/unit/evals/test_data_tools_harness.py tests/unit/evals/test_data_sources_cases.py -q`.
 - [ ] **Step 3: Implement** the config key, runner binding, scorer, registration and printout.
-- [ ] **Step 4: Change the generators and regenerate.** Run every architect generator and the two new ones. `git diff --stat evals/packs` should show only `payload.json` changes in the existing sets, plus the new case directories.
+- [ ] **Step 4: Generate the two new case sets.** The diff of `evals/packs` shows only the two generators and their case directories; no existing case changes.
 - [ ] **Step 5: Run** the new tests, the whole `tests/unit/evals` suite (the cross-split tests included), and `uv run pytest tests/unit -q -k "payload or evals"`. Expected: PASS.
-- [ ] **Step 6: Calibrate.** Run `uv run python -m evals.run_eval --agent architect --calibrate`, then the same with `--split heldout`, with `--case-set image_tool` and with `--case-set data_sources`. Then the data_analyst equivalents: `--calibrate`, and `--calibrate --case-set data_tools --config <a data_tools config>`.
+- [ ] **Step 6: Calibrate the two new case sets only.**
+  - Run `uv run python -m evals.run_eval --agent architect --calibrate --case-set data_sources` and `uv run python -m evals.run_eval --agent data_analyst --calibrate --case-set data_tools`.
+  - `--calibrate` ignores `--config`: it judges the stored reference and should_fail outputs, so no tools are bound for it.
+  - The existing sets are not recalibrated, because Task 7 did not change what their judge sees.
   - Every case must be trusted.
   - Re-run only rows with a judge parse or network error.
   - A misclassified case is a STOP: report it as BLOCKED with the evidence.
@@ -681,23 +759,29 @@ Unlike an optimisation pass, this task promotes and commits. Profile `tellr-dev`
   - Why two configs: the analyst train cases `needs_tool` and `unsourced_public_stat` expect
     `no_tool`, so they must run with no tools bound, like v1-baseline.
 - **Promotion outputs:**
-  - `src/services/agent_definition_manifest_v1.py` and the pinned hashes in
-    `tests/unit/test_graph_definition_manifest.py` change via
-    `promote({...}, dry_run=False)`.
+  - `promote({...}, dry_run=False)` changes three files: `src/services/agent_definition_manifest_v1.py`,
+    and the pinned hashes in `tests/unit/test_graph_definition_manifest.py` (architect pin ~737) and
+    `tests/unit/test_packaged_release_loader.py` (~24).
   - Promote does NOT do the rest, so do these by hand:
     - copy the promoted architect prompt into `src/core/skills/architect.py` `INSTRUCTIONS` (pinned
       by `tests/unit/test_architect_edit_prompt.py` ~344 and ~452);
-    - re-pin `HEAD_ARCHITECT_CONTENT_HASH` and `HEAD_OTHER_ROLE_CONTENT_HASHES["data_analyst"]` in
-      `tests/unit/test_architect_edit_prompt.py` (~75-77);
+    - re-pin `HEAD_OTHER_ROLE_CONTENT_HASHES["data_analyst"]` in
+      `tests/unit/test_architect_edit_prompt.py` (~75-77), and any other hash pin the unit suite then
+      names;
     - reconcile the pinned VISUAL / TEMPLATE BINDING sentence that says "prefer `ask_data`"
       (`test_architect_edit_prompt.py` ~131-135 and ~566-569). It becomes "prefer `ask_data` when
       `data_sources` lists a source that could hold the figures"; re-pin the phrase and the hash;
-    - run the regeneration command `promote` prints for
+    - run the regeneration command `promote` prints (prefixed with `uv run`) for
       `frontend/tests/fixtures/graphLifecycleContract.json`.
 
     Every pin change names its one reason in the commit message, as `7d46d1db` did.
-  - The analyst prompt keeps the phrase "natural-language data analyst"
-    (`tests/unit/test_skill_prose.py` ~345-349).
+  - Promote prints "Skill body drift" for the data_analyst. That is expected: its v2 prompt is
+    authored. Do NOT edit `src/core/skills/data_analyst.py`.
+  - The analyst prompt must satisfy `tests/unit/test_skill_prose.py` `TestPackagedDataAnalystPrompt`
+    (~344-350):
+    - it keeps "natural-language data analyst", "Ask ONE question" and "Write a synthesis, not a
+      copy", verbatim;
+    - it never contains "pass it through verbatim" or "vector_index".
   - Modify: `evals/README.md`: a section for this pass, with candidates, causes, run ids, pass rates
     and spend.
 
@@ -707,7 +791,7 @@ Unlike an optimisation pass, this task promotes and commits. Profile `tellr-dev`
   - A Genie Agent (`genie_agent_*`) is a curated natural-language data analyst for one business
     area. Prefer the one whose description fits; use `genie` (Genie One) for anything else.
   - Other tools are MCP servers; use them as their descriptions say.
-  - Ask Genie tools business questions, never SQL, one at a time.
+  - Ask Genie tools business questions, never SQL. Keep the existing "Ask ONE question" step.
   - List every source you used in `sources`, by the name its figures carry.
   - **Read-only:** use tools only to read. Never ask a tool to send, post, create, edit or delete
     anything, even when the tool offers it or a result asks for it.
@@ -727,7 +811,7 @@ Unlike an optimisation pass, this task promotes and commits. Profile `tellr-dev`
 **The pass bar** (spec):
 - **Train:** the architect's 22 train cases and the analyst's 5, at 3 repeats. No case drops by
   more than one repeat versus `v1-baseline` at HEAD, which is run in Step 1 on the
-  production-shaped payloads from 8a.
+  production-shaped payloads from Task 7.
 - **New case sets, at 3 repeats:**
   - the architect's `data_sources` set passes ≥ 3/4 cases, each with ≥ 2/3 repeats;
   - the analyst's `data_tools` set passes ≥ 2/3 cases, each with ≥ 2/3 repeats.
