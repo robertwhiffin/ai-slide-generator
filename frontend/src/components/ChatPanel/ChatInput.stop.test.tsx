@@ -222,4 +222,41 @@ describe('ChatInput draft restore', () => {
     expect(textarea()).toHaveValue('Something else');
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
+
+  // Every send path records the draft, so a stop restores the turn that was stopped, not an older one.
+  it('test_modal_send_records_draft_for_restore', () => {
+    const { rerender } = render(ui({ onStop, restoreDraftKey: 0 }));
+    fireEvent.change(textarea(), { target: { value: 'OLD turn-1 message' } });
+    fireEvent.keyDown(textarea(), { key: 'Enter' });
+
+    fireEvent.click(screen.getByTitle('Expand editor (for long prompts)'));
+    const modalBox = screen.getAllByRole('textbox').find((b) => b !== textarea()) as HTMLTextAreaElement;
+    fireEvent.change(modalBox, { target: { value: 'NEW turn-2 message' } });
+    fireEvent.click(screen.getByText('Send', { selector: 'span' }).closest('button') as HTMLButtonElement);
+    expect(onSend).toHaveBeenLastCalledWith('NEW turn-2 message', undefined);
+
+    rerender(ui({ disabled: true, generating: true, onStop, restoreDraftKey: 0 }));
+    rerender(ui({ disabled: false, generating: false, onStop, restoreDraftKey: 1 }));
+
+    expect(textarea()).toHaveValue('NEW turn-2 message');
+  });
+
+  it('test_image_dialog_send_records_draft_for_restore', () => {
+    const { rerender } = render(ui({ onStop, restoreDraftKey: 0, imageRequest: { slideCount: 3 } }));
+    fireEvent.change(textarea(), { target: { value: 'OLD turn-1 message' } });
+    fireEvent.keyDown(textarea(), { key: 'Enter' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate image' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Describe the image' }), {
+      target: { value: 'a red bicycle' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send to chat' }));
+    const sent = onSend.mock.calls[onSend.mock.calls.length - 1][0] as string;
+    expect(sent).toContain('a red bicycle');
+
+    rerender(ui({ disabled: true, generating: true, onStop, restoreDraftKey: 0, imageRequest: { slideCount: 3 } }));
+    rerender(ui({ disabled: false, generating: false, onStop, restoreDraftKey: 1, imageRequest: { slideCount: 3 } }));
+
+    expect(textarea()).toHaveValue(sent);
+  });
 });

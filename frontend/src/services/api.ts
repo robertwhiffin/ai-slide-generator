@@ -144,6 +144,8 @@ export interface StreamEvent {
   queued?: boolean;
   /** On a 'request_accepted' event: the id of the chat request, for cancelChat. */
   request_id?: string;
+  /** On a 'cancelled' event: what the stop did to the deck. */
+  rollback?: RollbackOutcome | null;
 }
 
 export interface SessionMessage {
@@ -1208,6 +1210,7 @@ export const api = {
     }
     if (response.status === 409) {
       const body = await response.json().catch(() => ({}));
+      if (!body.outcome) throw new ApiError(409, body.detail || 'Failed to cancel chat');
       return { outcome: body.outcome, detail: body.detail };
     }
     const error = await response.json().catch(() => ({}));
@@ -1359,7 +1362,7 @@ export const api = {
               if (pollInterval) clearInterval(pollInterval);
 
               if (response.status === 'cancelled') {
-                onEvent({ type: 'cancelled' });
+                onEvent({ type: 'cancelled', rollback: response.rollback ?? null });
               } else if (response.status === 'error') {
                 onError(new ChatTurnError(response.error || 'Request failed', response.rollback ?? null));
               } else if (response.result) {
@@ -1390,7 +1393,7 @@ export const api = {
         }, POLL_INTERVAL_MS);
 
       } catch (err) {
-        onError(err instanceof Error ? err : new Error('Failed to start chat'));
+        if (!cancelled) onError(err instanceof Error ? err : new Error('Failed to start chat'));
       }
     })();
 

@@ -131,6 +131,39 @@ describe('the polling transport: request id, stop and failure signals', () => {
   });
 
   it.each([
+    ['rolled_back', 'rolled_back'],
+    ['restore_failed', 'restore_failed'],
+    ['absent', null],
+  ] as const)('test_cancelled_event_carries_rollback: %s', async (label, expected) => {
+    const answer: PollBody = { status: 'cancelled', events: [], last_message_id: 0, result: null, error: null, turn_progress: null };
+    if (label !== 'absent') answer.rollback = expected;
+    const { fetchMock } = chatServer('req-8', [answer]);
+    const { events } = start(fetchMock);
+
+    await vi.advanceTimersByTimeAsync(3_100);
+
+    expect(turnEvents(events)).toEqual([{ type: 'cancelled', rollback: expected }]);
+  });
+
+  it('test_submit_rejecting_after_local_cancel_does_not_call_onError', async () => {
+    let fail: (e: Error) => void = () => {};
+    const held = new Promise<never>((_, reject) => {
+      fail = reject;
+    });
+    vi.stubGlobal('fetch', vi.fn(() => held));
+    const onError = vi.fn();
+    const events: StreamEvent[] = [];
+    cancel = api.startPolling('sess-1', 'Build a Q3 deck', undefined, (e) => events.push(e), onError);
+
+    cancel();
+    fail(new Error('network down'));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it.each([
     ['rolled_back', 'The model endpoint timed out.', 'rolled_back'],
     ['kept_foreign_change', 'The model endpoint timed out.', 'kept_foreign_change'],
     ['restore_failed', RESTORE_PENDING, 'restore_failed'],
@@ -248,6 +281,22 @@ describe('api.cancelChat', () => {
 
     expect(result).toEqual({ outcome, detail });
     expectOneCancelPost(fetchMock, 'req-7');
+  });
+
+  it.each([
+    ['no outcome', { detail: 'odd' }],
+    ['an empty body', {}],
+  ])('test_cancelChat_409_without_outcome_rejects: %s', async (_label, body) => {
+    const fetchMock = respond(409, body);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.cancelChat('req-6')).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('test_cancelChat_409_unparseable_body_rejects', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>conflict</html>', { status: 409 })));
+
+    await expect(api.cancelChat('req-6')).rejects.toMatchObject({ status: 409 });
   });
 
   it.each([

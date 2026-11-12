@@ -155,14 +155,24 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     textarea.style.overflowY = scrollHeight > maxHeight ? 'auto' : 'hidden';
   }, [message]);
 
+  // Every send path goes through here, so a stop restores the turn that was stopped.
+  const sendRecorded = (
+    text: string,
+    imageIds: string[] | undefined,
+    draftText: string,
+    draftImages: AttachedImage[],
+  ) => {
+    lastDraftRef.current = { text: draftText, images: draftImages };
+    onSend(text, imageIds);
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = message.trim();
     if (!text && attachedImages.length === 0) return;
     if (disabled) return;
     const imageIds = attachedImages.length > 0 ? attachedImages.map((a) => a.id) : undefined;
-    lastDraftRef.current = { text: message, images: attachedImages };
-    onSend(text || 'Use these images', imageIds);
+    sendRecorded(text || 'Use these images', imageIds, message, attachedImages);
     setMessage('');
     setAttachedImages([]);
   };
@@ -319,7 +329,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onClose={() => setIsImageDialogOpen(false)}
           onSubmit={(text) => {
             setIsImageDialogOpen(false);
-            onSend(text);
+            sendRecorded(text, undefined, text, []);
           }}
         />
       )}
@@ -332,7 +342,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onCancel={() => setIsModalOpen(false)}
           onSend={(text) => {
             if (text.trim() && !disabled) {
-              onSend(text.trim(), undefined);
+              sendRecorded(text.trim(), undefined, text.trim(), attachedImages);
               setMessage('');
               setIsModalOpen(false);
             }
