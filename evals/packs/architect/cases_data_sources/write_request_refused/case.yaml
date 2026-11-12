@@ -1,0 +1,6 @@
+kind: mutation
+fault: 'a request to act in another system (post to Slack): refuse in the message,
+  change nothing in the deck'
+expect:
+  intent: discuss
+design_system_active: true

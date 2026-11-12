@@ -50,7 +50,7 @@ from typing import Any, Mapping, Optional
 
 import src.core.database  # break import cycle before src.services imports  # noqa: F401
 from evals.harness.case import MERIDIAN_DIR
-from evals.harness.config import IMAGE_TOOL_ROLES, AgentEvalConfig
+from evals.harness.config import DATA_TOOLS_ROLES, IMAGE_TOOL_ROLES, AgentEvalConfig
 from src.services.agent_runtime import (
     AgentAssemblyContext,
     AgentRuntime,
@@ -309,6 +309,131 @@ def _fake_image_toolset(record: list[dict]) -> AgentToolset:
     return AgentToolset(tools=(tool,), max_calls=calls_left, budget_seconds=seconds_left)
 
 
+def _binds_data_tools(config: AgentEvalConfig) -> bool:
+    """Whether a run gets the analyst's fake data tools: its config opted in (``data_tools``)."""
+    return config.agent_key in DATA_TOOLS_ROLES and config.data_tools
+
+
+#: What the Sales fake Genie Agent is described as (a Genie space's own description).
+FAKE_SALES_DESCRIPTION = "Regional sales by month: revenue, units and orders per region"
+FAKE_SALES_SPACE = "Sales"
+FAKE_WEB_TOOL_NAME = "you-search"
+
+
+class _FakeGenieClient:
+    """``GenieOneClient.ask`` / ``GenieAgentClient.ask``'s shape, with no network: one canned
+    answer holding one small result table, the call recorded on the run's list."""
+
+    def __init__(self, record: list[dict], lock: threading.Lock, *, tool_name: str, source: str,
+                 columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], summary: str):
+        self._record = record
+        self._lock = lock
+        self._tool_name = tool_name
+        self._source = source
+        self._columns = columns
+        self._rows = rows
+        self._summary = summary
+
+    def ask(self, question, *, conversation_id, timeout_seconds):
+        from src.services.agent_tools.genie_one import GenieOneAnswer, GenieOneQueryResult
+
+        del timeout_seconds
+        with self._lock:
+            self._record.append({"name": self._tool_name, "args": {"question": question}})
+        return GenieOneAnswer(
+            conversation_id=conversation_id or "eval-conversation",
+            response_id="eval-response",
+            status="completed",
+            final_answer=self._summary,
+            deep_link=None,
+            query_results=(GenieOneQueryResult(
+                item_id="eval-result", sql=None, columns=self._columns, rows=self._rows,
+                total_row_count=len(self._rows), truncated=False),),
+            source=self._source,
+        )
+
+
+class _FakeGatewayClient:
+    """``GatewayMcpClient.call_tool``'s shape, with no network: a canned web-search answer."""
+
+    def __init__(self, record: list[dict], lock: threading.Lock, *, tool_name: str):
+        self._record = record
+        self._lock = lock
+        self._tool_name = tool_name
+
+    def call_tool(self, name, arguments, *, timeout_seconds=None):
+        del name, timeout_seconds
+        with self._lock:
+            self._record.append({"name": self._tool_name, "args": dict(arguments)})
+        text = (
+            "Top result: Industry analysts estimate the global market for this category at "
+            "roughly 80 billion dollars in 2025 (source: example-research.test/market-report)."
+        )
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=text)], structuredContent=None, isError=False)
+
+
+def _fake_data_toolset(record: list[dict]) -> AgentToolset:
+    """The analyst's toolset over fake clients: production's ``GenieOneAgentTool`` (``genie``),
+    ``GenieAgentTool`` (``genie_agent_sales``) and one ``GatewayMcpAgentTool`` (``you-search``),
+    on the budget production gives an analyst with more than Genie One. Fresh per attempt."""
+    from src.services.agent_tools.gateway_mcp import GatewayToolSpec
+    from src.services.agent_tools.gateway_tool import GatewayMcpAgentTool, GatewayToolContext
+    from src.services.agent_tools.gateway_toolset import (
+        ANALYST_GATEWAY_BUDGET_SECONDS,
+        ANALYST_GATEWAY_MAX_CALLS,
+        GATEWAY_TURN_DEADLINE_SECONDS,
+        turn_budget,
+    )
+    from src.services.agent_tools.genie_agent import (
+        GenieAgentTool,
+        genie_agent_source,
+        genie_agent_tool_names,
+    )
+    from src.services.agent_tools.genie_one import GENIE_ONE_SOURCE
+    from src.services.agent_tools.registry import GENIE_ONE_MAX_QUESTIONS, GenieOneAgentTool
+
+    lock = threading.Lock()
+    (sales_name,) = genie_agent_tool_names([FAKE_SALES_SPACE])
+    sales_source = genie_agent_source(FAKE_SALES_SPACE)
+
+    genie = GenieOneAgentTool(
+        _FakeGenieClient(
+            record, lock, tool_name="genie", source=GENIE_ONE_SOURCE,
+            columns=("month", "tickets_opened"),
+            rows=(("2026-01", "412"), ("2026-02", "388"), ("2026-03", "451")),
+            summary="Support tickets opened per month are in the table."),
+        conversation_id=None, on_question=lambda q: None, session_id=None,
+        max_questions=GENIE_ONE_MAX_QUESTIONS)
+    sales = GenieAgentTool(
+        _FakeGenieClient(
+            record, lock, tool_name=sales_name, source=sales_source,
+            columns=("region", "revenue"),
+            rows=(("EMEA", "4200000"), ("AMER", "6100000"), ("APAC", "2900000")),
+            summary="Revenue by region is in the table."),
+        model_name=sales_name, space_id="eval-sales-space", space_name=FAKE_SALES_SPACE,
+        user_description=FAKE_SALES_DESCRIPTION, conversation_id=None,
+        on_question=lambda space, q: None, session_id=None)
+    web = GatewayMcpAgentTool(
+        GatewayToolSpec(
+            name="you-search",
+            description="Search the web and return the top results for a query.",
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}},
+                          "required": ["query"]}),
+        GatewayToolContext(
+            display_name="You.com", service_name="you-com",
+            client=_FakeGatewayClient(record, lock, tool_name=FAKE_WEB_TOOL_NAME),
+            save_image=lambda data, mime: "", on_call=lambda label: None, session_id=None),
+        model_name=FAKE_WEB_TOOL_NAME, description_prefix=None)
+
+    now = time.time()
+    calls_left, seconds_left = turn_budget(
+        used_calls=0, used_seconds=0.0, max_calls=ANALYST_GATEWAY_MAX_CALLS,
+        budget_seconds=ANALYST_GATEWAY_BUDGET_SECONDS, turn_started_at=now, now=now,
+        deadline_seconds=GATEWAY_TURN_DEADLINE_SECONDS)
+    return AgentToolset(tools=(genie, sales, web), max_calls=calls_left, budget_seconds=seconds_left)
+
+
 #: The toolset of the run in flight on this thread (brand search or image tool), or ``None``.
 _RUN_TOOLSET: ContextVar[AgentToolset | None] = ContextVar("eval_run_toolset", default=None)
 
@@ -444,6 +569,7 @@ class Runner:
         """
         binds_search = _binds_brand_search(config, payload, design_system_active)
         binds_image = _binds_image_tool(config)
+        binds_data = _binds_data_tools(config)
         obs = RunObservation()
         record: list[dict] = []
         outcome: CandidateRunOutcome | None = None
@@ -457,6 +583,7 @@ class Runner:
             toolset = (
                 _fake_brand_search_toolset(record) if binds_search
                 else _fake_image_toolset(record) if binds_image
+                else _fake_data_toolset(record) if binds_data
                 else None
             )
             obs = RunObservation()

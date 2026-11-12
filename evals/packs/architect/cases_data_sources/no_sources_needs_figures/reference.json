@@ -1,0 +1,80 @@
+{
+  "intent": "build",
+  "message": "Here is a 5-slide deck on your regional sales performance. No data source is connected, so the figures are left to fill in. Connecting a source with revenue by region and by month would help.",
+  "deck_spec": {
+    "title": "Regional Sales Performance",
+    "audience": "The sales leadership team",
+    "purpose": "Review regional sales performance and agree one action per region",
+    "argument": "Revenue differs by region and month, and seeing the differences side by side shows where to focus next quarter",
+    "call_to_action": "Agree one action per region for next quarter",
+    "narrative_arc": [
+      "Frame the question",
+      "Show revenue by region",
+      "Show the monthly pattern",
+      "Draw out what it means",
+      "Close with a clear ask"
+    ],
+    "design_contract": {
+      "design_system_id": 3,
+      "template_id": 5,
+      "slide_style_id": null
+    },
+    "resolved_data": {
+      "synthesis": "",
+      "figures": [],
+      "gaps": [
+        "No regional sales figures are connected: revenue by region and month"
+      ]
+    },
+    "slides": [
+      {
+        "position": 0,
+        "purpose": "Open the review and frame the question: where is regional sales performance strong?",
+        "content_brief": "Title slide with the deck title 'Regional Sales Performance' and a subtitle saying that revenue differs by region and the review shows where",
+        "assumes": "The audience knows its own regions",
+        "hands_off": "The regional picture builds toward one action each",
+        "data_references": [],
+        "slide_type": null
+      },
+      {
+        "position": 1,
+        "purpose": "Show revenue by region",
+        "content_brief": "A chart-plus-commentary slide comparing revenue by region, with a one-line takeaway on the strongest and weakest region. Revenue figures are to be supplied",
+        "assumes": "The audience knows its own regions",
+        "hands_off": "The regional picture builds toward one action each",
+        "data_references": [],
+        "slide_type": null
+      },
+      {
+        "position": 2,
+        "purpose": "Show how each region moves month by month",
+        "content_brief": "Three bullets on the monthly pattern per region, with a callout on the region that moves most. Monthly figures are to be supplied",
+        "assumes": "The audience knows its own regions",
+        "hands_off": "The regional picture builds toward one action each",
+        "data_references": [],
+        "slide_type": null
+      },
+      {
+        "position": 3,
+        "purpose": "Draw out what the regional differences mean",
+        "content_brief": "Three short bullets on what the differences imply for focus and investment",
+        "assumes": "The audience knows its own regions",
+        "hands_off": "The regional picture builds toward one action each",
+        "data_references": [],
+        "slide_type": null
+      },
+      {
+        "position": 4,
+        "purpose": "Close with a clear ask",
+        "content_brief": "Ask the leadership team to agree one action per region for next quarter",
+        "assumes": "The audience knows its own regions",
+        "hands_off": "The regional picture builds toward one action each",
+        "data_references": [],
+        "slide_type": null
+      }
+    ]
+  },
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

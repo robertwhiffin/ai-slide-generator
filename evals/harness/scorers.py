@@ -804,6 +804,49 @@ def image_tool_tokens(tool_calls) -> list[str]:
     return tokens
 
 
+# --------------------------------------------------------------------------- the data tools
+
+#: A question that is SQL, not a natural-language ask. DOTALL: SQL split across lines counts.
+_SQL_QUESTION_RE = re.compile(r"\bselect\b.+\bfrom\b", re.IGNORECASE | re.DOTALL)
+
+
+def data_tool_score(outputs, expectations, trace_or_record=None) -> tuple[bool, str] | None:
+    """Score which data tool an analyst run asked first (a case whose ``expect`` has
+    ``first_tool``); ``None`` (not scored) for any other case.
+
+    Called as an MLflow scorer is: ``outputs`` is the row's predict output (it carries
+    ``tool_calls``), ``expectations`` the row's expectations (the case's ``expect`` under
+    ``"expect"``), and ``trace_or_record`` the run's record (``RunResult.tool_calls``, a tuple, or
+    the list MLflow stores); without a record, ``outputs["tool_calls"]`` is used. Passes when:
+
+    * the first recorded call's name is ``expect["first_tool"]``;
+    * with ``expect["no_sql"]``, no recorded ``question`` argument is SQL.
+    """
+    expect = (expectations or {}).get("expect") or {}
+    want = expect.get("first_tool")
+    if not want:
+        return None
+    record = trace_or_record if isinstance(trace_or_record, (list, tuple)) else None
+    if record is None:
+        record = (outputs or {}).get("tool_calls")
+    calls = [c for c in (record or ()) if isinstance(c, Mapping)]
+    reasons: list[str] = []
+    if not calls:
+        reasons.append(f"no data tool was called, expected {want!r} first")
+    elif calls[0].get("name") != want:
+        reasons.append(f"first call was {calls[0].get('name')!r}, expected {want!r}")
+    if expect.get("no_sql"):
+        for call in calls:
+            question = (call.get("args") or {}).get("question")
+            if isinstance(question, str) and _SQL_QUESTION_RE.search(question):
+                reasons.append(f"{call.get('name')!r} was asked SQL, not a business question")
+                break
+    if reasons:
+        return False, "Data tool: " + "; ".join(reasons)
+    return True, f"Data tool: first call was {want!r}" + (
+        ", and no question was SQL" if expect.get("no_sql") else "")
+
+
 def _committed_slides(answer: dict, current_deck_spec) -> tuple[list[SlideSpec] | None, str]:
     """The slides an edit leaves, in deck order (index ``n - 1`` is slide ``n``), as production
     commits them: an operations edit composed over the current deck, else the answer's

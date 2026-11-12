@@ -1,0 +1,10 @@
+{
+  "outcome": "success",
+  "synthesis": "The request asks for the number of support tickets opened each month this year; it states no figures of its own.",
+  "sources": [
+    "The request"
+  ],
+  "gap": null,
+  "tried_tools": [],
+  "reason": null
+}

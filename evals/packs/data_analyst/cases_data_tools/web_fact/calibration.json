@@ -1,0 +1,10 @@
+{
+  "should_fail": {
+    "outcome": "no_tool",
+    "synthesis": null,
+    "sources": null,
+    "gap": null,
+    "tried_tools": [],
+    "reason": "No tool can fetch a public market-size estimate, and the request does not state one."
+  }
+}

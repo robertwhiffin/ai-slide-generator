@@ -41,6 +41,9 @@ NOT_COMPARABLE_INFRA_RATE = 0.10
 #: The run metric that isolates the ``image_tool`` scorer's pass rate (chat image generation).
 IMAGE_TOOL_METRIC = "image_tool_pass_rate"
 
+#: The run metric that isolates the analyst's ``data_tool`` scorer's pass rate.
+DATA_TOOL_METRIC = "data_tool_pass_rate"
+
 
 class NoCasesError(ValueError):
     """The pack (or the --cases filter) yields no cases; nothing to evaluate."""
@@ -302,6 +305,16 @@ def build_scorers(agent_key: str, *, judge_endpoint: str, image_tool: bool = Fal
             outputs.get("structured"), expect, tool_calls=outputs.get("tool_calls"),
             current_deck_spec=expectations.get("current_deck_spec")))
 
+    @scorer(name="data_tool")
+    def data_tool_scorer(inputs, outputs, expectations):
+        # Runs only for a case whose expect has first_tool (an analyst data-tools case).
+        if outputs.get("infra_error"):
+            return _skip("infra error")
+        result = det.data_tool_score(outputs, expectations, outputs.get("tool_calls"))
+        if result is None:
+            return _skip("no first_tool expectation")
+        return _fb(*result)
+
     out = [contract]
     if agent_key in DETERMINISTIC_CATEGORY_ROLES:
         out.append(expected_category)
@@ -309,6 +322,8 @@ def build_scorers(agent_key: str, *, judge_endpoint: str, image_tool: bool = Fal
         out.append(render_measures)
     if image_tool and agent_key in IMAGE_TOOL_ROLES:
         out.append(image_tool_scorer)
+    if agent_key == "data_analyst":
+        out.append(data_tool_scorer)
     out.append(judge)
     return out
 
@@ -380,6 +395,8 @@ def run_sweep(
         })
         if config.image_tool:
             mlflow.set_tag("image_tool", "true")
+        if config.data_tools:
+            mlflow.set_tag("data_tools", "true")
         if case_set is not None:
             mlflow.set_tag("case_set", case_set)
         result = mlflow.genai.evaluate(data=data, scorers=scorers, predict_fn=predict_fn)
@@ -389,6 +406,7 @@ def run_sweep(
         per_case: dict[str, list[str]] = defaultdict(list)
         outcomes: list[str] = []
         image_tool_values: list[str] = []
+        data_tool_values: list[str] = []
         latencies, in_toks, out_toks = [], [], []
         infra = judge_err = non_infra = 0
         cost = 0.0
@@ -401,6 +419,8 @@ def run_sweep(
             outcomes.append(o)
             if "image_tool" in vals:
                 image_tool_values.append(vals["image_tool"])
+            if "data_tool" in vals:
+                data_tool_values.append(vals["data_tool"])
             per_case[req["case_id"]].append(o)
             if resp.get("infra_error"):
                 infra += 1
@@ -423,6 +443,9 @@ def run_sweep(
         image_tool_rate = pass_rate(image_tool_values)
         if image_tool_rate is not None:
             mlflow.log_metric(IMAGE_TOOL_METRIC, image_tool_rate)
+        data_tool_rate = pass_rate(data_tool_values)
+        if data_tool_rate is not None:
+            mlflow.log_metric(DATA_TOOL_METRIC, data_tool_rate)
         stds = []
         for cid, outs in per_case.items():
             pr = pass_rate(outs)

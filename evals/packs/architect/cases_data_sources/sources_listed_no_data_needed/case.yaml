@@ -1,0 +1,8 @@
+kind: mutation
+fault: 'data sources are listed but the edit needs no data: retitle slide 2 (position
+  1) without asking for any'
+expect:
+  intent: edit
+  positions:
+  - 1
+design_system_active: true

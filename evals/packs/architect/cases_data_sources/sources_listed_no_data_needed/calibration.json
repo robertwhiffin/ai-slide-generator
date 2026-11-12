@@ -1,0 +1,16 @@
+{
+  "should_fail": {
+    "intent": "ask_data",
+    "message": "I need to pull some data from your sales tools before I can retitle slide 2.",
+    "deck_spec": null,
+    "data_request": {
+      "metric": "revenue",
+      "time_bound": null,
+      "grouping": null,
+      "units": null,
+      "tool_preferences": []
+    },
+    "target_positions": [],
+    "proposed_design_contract": null
+  }
+}
