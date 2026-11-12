@@ -41,6 +41,7 @@ from src.domain.deck_spec import DeckSpec, DesignContractRef
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_numbering import architect_slide_payload
 from src.services.agent_model_payload import model_payload_for
+from src.services.graph.nodes import GENIE_ONE_DATA_SOURCE
 from src.services.template_sections import section_inventory
 
 AGENT = "architect"
@@ -247,6 +248,7 @@ def _payload(cid: str) -> dict:
         "resolved_style": case.meridian_resolved_style(),
         "design_system_library": LIBRARY,
         "deck_style_context": case.meridian_deck_style_context(),
+        "data_sources": [GENIE_ONE_DATA_SOURCE],
     })
 
 

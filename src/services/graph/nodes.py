@@ -3708,6 +3708,63 @@ def _actor_agent_config(state: dict, *, consequence: str) -> Optional[AgentConfi
         return None
 
 
+GENIE_ONE_DATA_SOURCE: Final[Dict[str, str]] = {
+    "name": "Genie One",
+    "description": (
+        "A general data agent: answers business questions across the user's data."
+    ),
+}
+
+
+def _analyst_data_sources(config: Optional[AgentConfig]) -> List[Dict[str, Optional[str]]]:
+    """What the data analyst can query this turn, as ``{"name", "description"}`` items.
+
+    Order: Genie One, each Genie Agent, each UC MCP connection bound to the
+    analyst, each enabled Gateway row bound to the analyst.  Names and
+    descriptions only (no space id, service name or session/user id), with
+    user-authored text neutralised.  A registry failure omits the Gateway items.
+    """
+    if config is None:
+        return []
+
+    def item(name: str, description: Optional[str]) -> Dict[str, Optional[str]]:
+        return {
+            "name": neutralize_delimiters(name),
+            "description": neutralize_delimiters(description) if description else description,
+        }
+
+    sources: List[Dict[str, Optional[str]]] = []
+    if any(isinstance(tool, GenieOneTool) for tool in config.tools):
+        sources.append(dict(GENIE_ONE_DATA_SOURCE))
+    sources.extend(
+        item(tool.space_name, tool.description)
+        for tool in config.tools
+        if isinstance(tool, GenieTool)
+    )
+    sources.extend(
+        item(tool.server_name, tool.description)
+        for tool in config.tools
+        if isinstance(tool, MCPTool) and tool.agent == "data_analyst"
+    )
+    entries = [tool for tool in config.tools if isinstance(tool, GatewayMcpTool)]
+    if entries:
+        try:
+            with get_db_session() as db:
+                registry = enabled_by_service(db, [entry.service_name for entry in entries])
+        except Exception:
+            logger.warning(
+                "Could not read the AI Gateway MCP registry; the architect is not told "
+                "the analyst's Gateway data sources",
+                exc_info=True,
+            )
+            return sources
+        for entry in entries:
+            row = registry.get(entry.service_name)
+            if row is not None and row.agent == "data_analyst":
+                sources.append(item(row.display_name, row.description))
+    return sources
+
+
 @dataclass(frozen=True)
 class _GatewayUser:
     """The actor's Gateway entries and UC MCP connections, and the signed-in
@@ -4752,6 +4809,13 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # model alone, so it IS the architect's allowlist; ``session_id`` stays in
     # the node for the reads above and the writes below, and the trace gets the
     # root/actor pair through ``_assembly_context``.
+    # The actor's config is read once: for the data sources below and for the
+    # Gateway pass.
+    actor_config = (
+        _actor_agent_config(state, consequence="the architect runs without Gateway tools")
+        if state.get("actor_session_id")
+        else None
+    )
     payload = {
         "conversation": conversation,
         "message": state.get("architect_message"),
@@ -4785,6 +4849,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
             and inbound_contract.design_system_id is not None
             else [],
         ),
+        # What the data analyst can query this turn (names and descriptions only).
+        "data_sources": _analyst_data_sources(actor_config),
     }
 
     # ---- ask, plan, and at most once ask again (spec §5) ---------------------
@@ -4809,11 +4875,7 @@ def architect_node(state: dict) -> Dict[str, Any]:
     # and every one already in the payload (the conversation, the user's message,
     # the persisted spec) or in the committed slides.
     gateway = (
-        _gateway_pass(
-            state,
-            _actor_agent_config(state, consequence="the architect runs without Gateway tools"),
-            agent="architect",
-        )
+        _gateway_pass(state, actor_config, agent="architect")
         if state.get("actor_session_id") and not describe_only
         else None
     )

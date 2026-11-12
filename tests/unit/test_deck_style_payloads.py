@@ -336,7 +336,7 @@ def test_architect_payload_has_context_without_font_data(graph_env, deck):
         assert env.template.calls[:1] == [(7, 3)], "the inbound brand was not pinned"
     assert "deck_style_context" in payload, "the architect was not shown the context"
     assert payload["deck_style_context"] == expected
-    assert set(payload) == OLD_ARCHITECT_KEYS | {"deck_style_context"}
+    assert set(payload) == OLD_ARCHITECT_KEYS | {"deck_style_context", "data_sources"}
     rendered = json.dumps(payload)
     assert "@font-face" not in rendered
     assert "base64" not in rendered
@@ -377,7 +377,11 @@ def _filled(keys) -> Dict[str, Any]:
         (
             "architect",
             _filled(OLD_ARCHITECT_KEYS - {"previous_deck_review"})
-            | {"previous_deck_review": None, "deck_style_context": _CONTEXT},
+            | {
+                "previous_deck_review": None,
+                "deck_style_context": _CONTEXT,
+                "data_sources": [],
+            },
         ),
     ],
     ids=[

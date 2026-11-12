@@ -223,11 +223,13 @@ PAYLOAD_KEYS = [
     "conversation", "message", "current_deck_spec", "committed_slide_count",
     "slide_numbering", "slide_references",
     "previous_deck_review", "available_design_contract", "template_sections",
-    "resolved_style", "design_system_library", "deck_style_context",
+    "resolved_style", "design_system_library", "deck_style_context", "data_sources",
 ]
 # #313 (plan Task 7): the two keys src/domain/slide_numbering.architect_slide_payload builds.
 SLIDE_KEYS = ("slide_numbering", "slide_references")
 DECK_STYLE_CONTEXT_KEY = "deck_style_context"
+# Agent-mode Task 7: every payload now carries the analyst's data sources (always Genie One).
+DATA_SOURCES_KEY = "data_sources"
 DECK_SLIDES = 6
 # #313 (plan Task 7, Appendix H): every slide reference resolved in each case's message, pinned.
 SLIDE_REFERENCES = {
@@ -499,7 +501,7 @@ def test_payload_keys_are_every_production_key():
     builder's ``corrective_instruction`` is), so no case carries it."""
     assert "rejected_edit" in MODEL_PAYLOAD_KEYS[AGENT]
     assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT]) - {"rejected_edit"}
-    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 12
+    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 13
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -879,6 +881,16 @@ def test_committed_deck_style_context_is_the_production_derivation(cid):
     assert {"slide", "stat-value"} <= set(ctx["template_classes"])
 
 
+@pytest.mark.parametrize("cid", CASE_IDS)
+def test_every_case_payload_carries_the_genie_one_data_source(cid):
+    """Agent-mode Task 7 (R10): an eval payload is production-shaped, and production tells the
+    architect which data sources the analyst has.  Genie One is the one every deck gets."""
+    from src.services.graph.nodes import GENIE_ONE_DATA_SOURCE
+
+    payload = case.load_case(AGENT, cid, root=COMMITTED).payload
+    assert payload[DATA_SOURCES_KEY] == [GENIE_ONE_DATA_SOURCE]
+
+
 @pytest.mark.parametrize("cid", DECK_STYLE_BUILD_CASES)
 def test_deck_style_build_expect_names_the_payload_logos(cid):
     """A17: ``_deck_style_score`` cannot see the payload, so the generator writes the logo handles
@@ -1009,20 +1021,27 @@ def _without_slide_keys(data: bytes) -> bytes:
     obj = json.loads(data)
     assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
     return _serialised(
-        {k: v for k, v in obj.items() if k not in (*SLIDE_KEYS, DECK_STYLE_CONTEXT_KEY)}
+        {
+            k: v
+            for k, v in obj.items()
+            if k not in (*SLIDE_KEYS, DECK_STYLE_CONTEXT_KEY, DATA_SOURCES_KEY)
+        }
     )
 
 
 def _without_deck_style_context(data: bytes) -> bytes:
-    """A payload.json's bytes with only ``deck_style_context`` removed (deck-style Task 5).
+    """A payload.json's bytes with only ``deck_style_context`` and ``data_sources`` removed.
 
     The key was added to every architect payload on purpose; a payload.json digest is checked on
     the payload without it, so no case is re-pinned.  Its value is pinned instead by
-    ``test_committed_deck_style_context_is_the_production_derivation``.
+    ``test_committed_deck_style_context_is_the_production_derivation``; ``data_sources`` (agent-mode
+    Task 7) by ``test_every_case_payload_carries_the_genie_one_data_source``.
     """
     obj = json.loads(data)
     assert data == _serialised(obj), "payload.json is not in the generator's serialisation"
-    return _serialised({k: v for k, v in obj.items() if k != DECK_STYLE_CONTEXT_KEY})
+    return _serialised(
+        {k: v for k, v in obj.items() if k not in (DECK_STYLE_CONTEXT_KEY, DATA_SOURCES_KEY)}
+    )
 
 
 def test_existing_cases_are_byte_identical(generated):

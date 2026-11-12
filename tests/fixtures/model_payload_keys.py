@@ -46,6 +46,7 @@ ARCHITECT_MODEL_KEYS = frozenset(
         "resolved_style",
         "design_system_library",
         "deck_style_context",
+        "data_sources",
     }
 )
 ARCHITECT_RETRY_MODEL_KEYS = ARCHITECT_MODEL_KEYS | {"rejected_edit"}

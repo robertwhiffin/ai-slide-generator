@@ -261,5 +261,11 @@
         "filename": "logos/meridian-lockup.svg"
       }
     ]
-  }
+  },
+  "data_sources": [
+    {
+      "name": "Genie One",
+      "description": "A general data agent: answers business questions across the user's data."
+    }
+  ]
 }

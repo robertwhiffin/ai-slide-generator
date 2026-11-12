@@ -34,6 +34,7 @@ ARCHITECT_PAYLOAD_KEYS: tuple[str, ...] = (
     "resolved_style",
     "design_system_library",
     "deck_style_context",
+    "data_sources",
 )
 
 
@@ -65,6 +66,7 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
         "resolved_style": None,
         "design_system_library": [],
         "deck_style_context": {"design_tokens": {}, "template_classes": [], "logos": []},
+        "data_sources": [],
     }
     unknown = sorted(set(overrides) - set(payload))
     if unknown:
