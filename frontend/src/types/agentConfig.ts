@@ -232,3 +232,13 @@ export interface GatewayConnectionUpdate {
 export interface GatewayConnectionCreate extends GatewayConnectionUpdate {
   service_name: string;
 }
+
+export const MCP_AGENT_LABELS: Record<McpAgentName, string> = {
+  data_analyst: 'Data analyst',
+  architect: 'Architect',
+};
+
+export const MCP_AGENT_HINTS: Record<McpAgentName, string> = {
+  data_analyst: 'fetches data: figures for charts and tables',
+  architect: 'fetches other context for planning the slides: documents, pages, references',
+};

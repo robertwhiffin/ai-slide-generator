@@ -15,11 +15,12 @@ import { useAgentConfig } from '../../contexts/AgentConfigContext';
 import { useSession } from '../../contexts/SessionContext';
 import { configApi } from '../../api/config';
 import type { SlideStyle, DeckPrompt, DesignSystemSummary, DesignSystemTemplate } from '../../api/config';
-import type { AvailableTool, GenieTool, ProfileSummary, ToolEntry, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool } from '../../types/agentConfig';
-import { TOOL_TYPE_BADGE_LABELS, TOOL_TYPE_COLORS } from '../../types/agentConfig';
+import type { McpAgentName, AvailableTool, GenieTool, ProfileSummary, ToolEntry, MCPTool, VectorIndexTool, ModelEndpointTool, AgentBricksTool } from '../../types/agentConfig';
+import { TOOL_TYPE_BADGE_LABELS, TOOL_TYPE_COLORS, MCP_AGENT_LABELS } from '../../types/agentConfig';
 import { api } from '../../services/api';
 import { GatewayChipStatus } from './GatewayChipStatus';
 import { ToolPicker } from './ToolPicker';
+import { McpAgentChoice } from './McpAgentChoice';
 import GenieDetailPanel from './GenieDetailPanel';
 import ToolDetailPanel from './ToolDetailPanel';
 import type { ToolPreviewData } from './ToolDetailPanel';
@@ -38,6 +39,8 @@ const ToolChip: React.FC<{
 }> = ({ tool, onRemove, onEdit, sessionId }) => {
   const { storedDeckMode, selectedDeckMode } = useSession();
   const legacyDeck = (storedDeckMode ?? selectedDeckMode) === 'legacy';
+  const droppedOnAgentDeck = !legacyDeck
+    && (tool.type === 'vector_index' || tool.type === 'agent_bricks' || tool.type === 'model_endpoint');
   const label = tool.type === 'genie_one'
     ? 'Genie One'
     : tool.type === 'gateway_mcp'
@@ -79,7 +82,11 @@ const ToolChip: React.FC<{
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${colorClasses}`}
-      title={tool.type === 'genie_one' && legacyDeck ? 'Genie One works in agent mode only' : undefined}
+      title={
+        tool.type === 'genie_one' && legacyDeck ? 'Genie One works in agent mode only'
+          : droppedOnAgentDeck ? 'Not used in agent mode'
+          : undefined
+      }
     >
       <span className="uppercase text-[10px] font-bold opacity-70 mr-0.5">{badgeLabel}</span>
       {onEdit ? (
@@ -95,6 +102,12 @@ const ToolChip: React.FC<{
       )}
       {tool.type === 'genie_one' && legacyDeck && (
         <span className="text-gray-500 font-normal">{' · agent mode only'}</span>
+      )}
+      {tool.type === 'mcp' && (
+        <span className="text-gray-500 font-normal">{` · ${MCP_AGENT_LABELS[tool.agent ?? 'data_analyst']}`}</span>
+      )}
+      {droppedOnAgentDeck && (
+        <span className="text-gray-500 font-normal">{' · not used in agent mode'}</span>
       )}
       {tool.type === 'gateway_mcp' && (
         <GatewayChipStatus tool={tool} legacyDeck={legacyDeck} />
@@ -130,6 +143,7 @@ const ToolEditPanel: React.FC<{
   onCancel: () => void;
 }> = ({ tool, onSave, onCancel }) => {
   const [description, setDescription] = useState(tool.description ?? '');
+  const [agent, setAgent] = useState<McpAgentName>(tool.type === 'mcp' ? tool.agent ?? 'data_analyst' : 'data_analyst');
 
   // Vector Index column editing
   const [availableColumns, setAvailableColumns] = useState<Array<{ name: string; type?: string }>>([]);
@@ -183,6 +197,8 @@ const ToolEditPanel: React.FC<{
         description,
         columns: allSelected ? undefined : Array.from(selectedColumns),
       } as VectorIndexTool);
+    } else if (tool.type === 'mcp') {
+      onSave({ ...tool, description, agent });
     } else {
       onSave({ ...tool, description });
     }
@@ -234,6 +250,8 @@ const ToolEditPanel: React.FC<{
           <div className="font-mono text-sm text-gray-700">{value}</div>
         </div>
       ))}
+
+      {tool.type === 'mcp' && <McpAgentChoice value={agent} onChange={setAgent} />}
 
       {/* Vector Index: column checkboxes */}
       {tool.type === 'vector_index' && (

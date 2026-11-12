@@ -51,7 +51,7 @@ const TIPS: { lead: string; example?: string; rest?: string }[] = [
   },
   {
     lead: 'Use your data:',
-    rest: 'add a Genie space or other tool in the agent config bar above, then ask for the numbers.',
+    rest: 'add a Genie Agent or other tool in the agent config bar above, then ask for the numbers.',
   },
   { lead: 'Open Spec', rest: 'at any time to see the plan the agents are working from.' },
 ];

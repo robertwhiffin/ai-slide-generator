@@ -148,6 +148,11 @@ function renderPicker(existingTools: ToolEntry[] = []) {
 
 const labels = () => screen.getAllByRole('button').map((b) => b.textContent);
 
+beforeEach(() => {
+  sessionState.storedDeckMode = null;
+  sessionState.selectedDeckMode = 'agent';
+});
+
 afterEach(() => {
   // Not restoreAllMocks: it would strip the module mocks' implementations for later tests.
   vi.unstubAllGlobals();
@@ -165,6 +170,8 @@ describe('ToolPicker: the pill row', () => {
   });
 
   it('"Other tools" reveals the original pills in their original order, and hides them again', async () => {
+    // The original five pills belong to a legacy deck; an agent deck offers two (tests below).
+    sessionState.storedDeckMode = 'legacy';
     const mock = stubGateway(reply(200, { items: [] }));
     renderPicker();
     await settle(mock);
@@ -179,6 +186,40 @@ describe('ToolPicker: the pill row', () => {
     fireEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(labels()).toEqual(['+ Genie One', 'Other tools']);
+  });
+
+  it('on an agent deck Other tools reveals only Genie Agent and MCP Server', async () => {
+    const mock = stubGateway(reply(200, { items: [] }));
+    renderPicker();
+    await settle(mock);
+
+    fireEvent.click(screen.getByTestId('toggle-other-tools'));
+    expect(labels()).toEqual(['+ Genie One', 'Other tools', '+ Genie Agent', '+ MCP Server']);
+    for (const t of ['agent_bricks', 'vector_index', 'model_endpoint']) {
+      expect(screen.queryByTestId(`add-tool-${t}`)).toBeNull();
+    }
+  });
+
+  it('a locked agent deck wins over a legacy picker', async () => {
+    sessionState.storedDeckMode = 'agent';
+    sessionState.selectedDeckMode = 'legacy';
+    const mock = stubGateway(reply(200, { items: [] }));
+    renderPicker();
+    await settle(mock);
+
+    fireEvent.click(screen.getByTestId('toggle-other-tools'));
+    expect(labels()).toEqual(['+ Genie One', 'Other tools', '+ Genie Agent', '+ MCP Server']);
+  });
+
+  it('on a legacy deck Other tools reveals all five', async () => {
+    sessionState.storedDeckMode = null;
+    sessionState.selectedDeckMode = 'legacy';
+    const mock = stubGateway(reply(200, { items: [] }));
+    renderPicker();
+    await settle(mock);
+
+    fireEvent.click(screen.getByTestId('toggle-other-tools'));
+    expect(labels()).toEqual(['+ Genie One', 'Other tools', ...OTHER_TOOL_LABELS]);
   });
 
   it('a category pill behind "Other tools" still opens its discovery panel', async () => {
