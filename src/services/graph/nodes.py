@@ -117,7 +117,6 @@ from src.domain.slide_operations import (
     problem_sentence,
 )
 from src.services import image_service
-from src.services.generation_fence import TurnFencedError, fence_turn_write
 from src.services.agent import SAFETY_RETRY_NOTICE, UnsafeContentError
 from src.services.agent_runtime import (
     AgentAssemblyContext,
@@ -179,6 +178,7 @@ from src.services.foreman_service import (
     stalled_positions,
 )
 from src.services.gateway_mcp_registry import enabled_by_service
+from src.services.generation_fence import TurnFencedError, fence_turn_write
 from src.services.graph.event_emitter import (
     advance_slide_cursor,
     emit_event,
@@ -2803,6 +2803,8 @@ def _apply_edit_plan(
                     object_type="deck",
                 ),
             )
+        except TurnFencedError:
+            raise
         except SlideRowsChangedError:
             # Caught before Exception: it IS a RuntimeError, and a deck someone
             # changed mid-plan is not a failure — nor something a retry can fix.
@@ -5212,6 +5214,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     object_type="deck",
                 ),
             )
+        except TurnFencedError:
+            raise
         except SlideRowsChangedError:
             # Caught before Exception: it IS a RuntimeError, and a deck someone
             # changed mid-plan is a retry, not a failure.
@@ -5556,6 +5560,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
             ),
             **deck_write,
         )
+    except TurnFencedError:
+        raise
     except Exception as exc:
         logger.exception("Pre-fan-out deck-level write failed")
         updates["error_state"] = {

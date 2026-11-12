@@ -63,6 +63,7 @@ from src.utils.slide_hash import compute_slide_hash
 from tests.unit.conftest_graph import (  # noqa: F401 -- fixtures
     DEFAULT_STYLE,
     TEMPLATE_TOKEN_CSS,
+    architect_build,
     builder_out,
     graph_env,
     make_spec,
@@ -642,6 +643,57 @@ class TestAnAbandonedBranchStops:
             f"the refused deck-level write did not end the node; it raised {raised!r}"
         )
         _assert_unchanged(before, _snapshot(env.engine))
+
+    def test_abandoned_architect_stops_at_its_refused_pre_fan_out_write(
+        self, graph_env
+    ):
+        """Stop pressed while the architect plans: nothing is dispatched after.
+
+        The pre-fan-out deck-level write sat in a broad ``except Exception`` that
+        recorded ``deck_level_write_failed`` and returned the build intent, so the
+        router sent the turn to the foreman and a batch of builders started.  The
+        refused write must end the node instead; the only model call is the
+        architect's own.
+        """
+        env = graph_env
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+
+        def architect(payload):
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+            return architect_build(make_spec((0, 1)))
+
+        env.skills.set("architect", architect)
+        env.skills.set("builder", lambda payload: builder_out(payload))
+
+        raised: Optional[BaseException] = None
+        updates: Any = None
+        with _in_turn(rid):
+            try:
+                updates = nodes.architect_node(env.state())
+            except Exception as exc:  # noqa: BLE001 - asserted below
+                raised = exc
+
+        assert "tables" in at_cancel, "the architect model was never called"
+        assert isinstance(raised, TurnFencedError), (
+            f"the refused pre-fan-out write did not end the node; it raised "
+            f"{raised!r} and returned {updates!r}"
+        )
+        assert [c["name"] for c in env.skills.calls] == ["architect"]
+        # The deck tables only: the architect's chat message and the title are the
+        # message and session writers, fenced by Task 3b.
+        deck_tables = (
+            "session_slides",
+            "session_slide_decks",
+            "shared_deck_mutation_event",
+            "deck_reviews",
+        )
+        after = _snapshot(env.engine)
+        _assert_unchanged(
+            {t: at_cancel["tables"][t] for t in deck_tables},
+            {t: after[t] for t in deck_tables},
+        )
 
 
 # ---------------------------------------------------------------------------
