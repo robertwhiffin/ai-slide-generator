@@ -25,6 +25,7 @@ Conventions:
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 from pathlib import Path
 
@@ -928,6 +929,245 @@ def test_architect_slide_payload_no_deck_sends_empty_lists():
         "slide_numbering": [],
         "slide_references": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# architect_slide_payload(..., stage_slide=, slide_rows=): the Stage Slide
+# (architect stage context, plan Task 3).
+#
+# The viewer sends the slide on stage at send time as a raw snapshot
+# ``{"slide_number": N, "slide_id"?: str}`` (``slide_id`` is ``None`` when the
+# request schema's ``model_dump()`` carries no id).  The helper resolves it
+# against THIS session's committed rows and hands the model ``stage_slide``:
+# ``None`` or exactly ``{"slide_number", "position"}`` for the slide's CURRENT
+# place.  A supplied id that is absent, duplicated or foreign never falls back to
+# the number; with no id the positive number is looked up in ``slide_numbering``
+# (never ``N - 1``).  Literal oracles below; nothing is derived from the module.
+#
+# Sabotage map (each is caught by the named tests):
+# * resolve by the supplied number even when an id is given -> reorder/deleted/
+#   duplicate/foreign tests;
+# * position = slide_number - 1 -> the gapped [3, 8, 15] tests;
+# * take the first of duplicate ids -> the duplicate test;
+# * forward the raw snapshot (id included) -> the exact-shape tests;
+# * ignore describe_only -> the describe-only test;
+# * add the stage to slide_references -> the references-unchanged test.
+# ---------------------------------------------------------------------------
+
+STAGE_DECK = [3, 8, 15]
+STAGE_KEYS = {"slide_number", "position"}
+
+
+def _stage_rows(*pairs):
+    """Committed rows as ``SlideWriter.list_slides_in_position_order`` returns them.
+
+    Each pair is ``(slide_id, position)``; the extra columns are there so a helper
+    that forwards a row (or its database ``id``) is visible in the result.
+    """
+    return [
+        {
+            "id": f"db-row-{position}",
+            "session_id": "owner-session-uuid",
+            "position": position,
+            "slide_id": slide_id,
+            "html": f"<section>slide at {position}</section>",
+        }
+        for slide_id, position in pairs
+    ]
+
+
+ROWS_ABC = _stage_rows(("sid-a", 3), ("sid-b", 8), ("sid-c", 15))
+
+
+def _staged(stage, rows, positions=STAGE_DECK, *, message="Make the title bigger", **kwargs):
+    """Call the helper with the stage keywords; fail cleanly while they do not exist."""
+    params = inspect.signature(architect_slide_payload).parameters
+    missing = [name for name in ("stage_slide", "slide_rows") if name not in params]
+    if missing:
+        pytest.fail(f"architect_slide_payload has no keyword(s) {missing} yet")
+    return architect_slide_payload(
+        [_user(message)], message, positions, stage_slide=stage, slide_rows=rows, **kwargs
+    )
+
+
+def _assert_stage(payload, expected):
+    assert "stage_slide" in payload, "a stage-aware call must return the stage_slide key"
+    stage = payload["stage_slide"]
+    if expected is None:
+        assert stage is None, f"expected no stage, got {stage!r}"
+        return
+    assert type(stage) is dict, f"stage_slide must be a plain dict, got {type(stage).__name__}"
+    assert set(stage) == STAGE_KEYS, f"stage_slide must be exactly {STAGE_KEYS}, got {stage!r}"
+    assert type(stage["slide_number"]) is int and type(stage["position"]) is int
+    assert stage == expected
+    assert json.loads(json.dumps(stage)) == stage
+
+
+def test_stage_by_stable_id_maps_through_numbering_on_a_gapped_deck():
+    """Slide 2 of [3, 8, 15] is position 8 (never 2 - 1 = 1)."""
+    _assert_stage(
+        _staged({"slide_number": 2, "slide_id": "sid-b"}, ROWS_ABC),
+        {"slide_number": 2, "position": 8},
+    )
+
+
+@pytest.mark.parametrize(
+    "slide_id,expected",
+    [
+        ("sid-a", {"slide_number": 1, "position": 3}),
+        ("sid-c", {"slide_number": 3, "position": 15}),
+    ],
+)
+def test_stage_by_stable_id_every_slide(slide_id, expected):
+    stage = {"slide_number": expected["slide_number"], "slide_id": slide_id}
+    _assert_stage(_staged(stage, ROWS_ABC), expected)
+
+
+def test_stage_follows_the_identified_slide_after_a_reorder():
+    """Staged as slide 2 (sid-b); before the turn ran sid-b moved to the end.
+
+    The model gets sid-b's CURRENT number and position, not slide 2 (now sid-c).
+    """
+    reordered = _stage_rows(("sid-a", 3), ("sid-c", 8), ("sid-b", 15))
+    _assert_stage(
+        _staged({"slide_number": 2, "slide_id": "sid-b"}, reordered),
+        {"slide_number": 3, "position": 15},
+    )
+
+
+def test_a_deleted_stage_slide_never_falls_back_to_its_old_number():
+    """sid-b was deleted; slide 2 is now sid-c at 15, which must NOT be staged."""
+    after_delete = _stage_rows(("sid-a", 3), ("sid-c", 15))
+    payload = _staged({"slide_number": 2, "slide_id": "sid-b"}, after_delete, positions=[3, 15])
+    _assert_stage(payload, None)
+    assert _numbering_pairs(payload["slide_numbering"]) == [(1, 3), (2, 15)], (
+        "control: slide 2 still exists, so a number fallback would have found it"
+    )
+
+
+def test_a_duplicated_stage_id_is_ambiguous_and_resolves_to_no_stage():
+    duplicated = _stage_rows(("sid-a", 3), ("sid-b", 8), ("sid-b", 15))
+    _assert_stage(_staged({"slide_number": 2, "slide_id": "sid-b"}, duplicated), None)
+
+
+def test_a_foreign_stage_id_never_falls_back_to_the_number():
+    """An id from another deck is not in this session's rows: no stage, not slide 2."""
+    _assert_stage(_staged({"slide_number": 2, "slide_id": "sid-from-another-deck"}, ROWS_ABC), None)
+
+
+def test_a_stage_id_with_no_committed_rows_resolves_to_no_stage():
+    _assert_stage(_staged({"slide_number": 2, "slide_id": "sid-b"}, []), None)
+    _assert_stage(_staged({"slide_number": 2, "slide_id": "sid-b"}, None), None)
+
+
+def test_a_stage_id_whose_row_is_outside_the_numbering_resolves_to_no_stage():
+    """The id's row sits at a position the numbering does not list: no guess."""
+    rows = _stage_rows(("sid-a", 3), ("sid-b", 9), ("sid-c", 15))
+    _assert_stage(_staged({"slide_number": 2, "slide_id": "sid-b"}, rows), None)
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        pytest.param({"slide_number": 3}, id="no-slide_id-key"),
+        pytest.param({"slide_number": 3, "slide_id": None}, id="model_dump-slide_id-None"),
+    ],
+)
+def test_without_an_id_the_number_is_looked_up_in_numbering(stage):
+    """Older slide data has no stable id: slide 3 of [3, 8, 15] is position 15."""
+    _assert_stage(_staged(stage, ROWS_ABC), {"slide_number": 3, "position": 15})
+
+
+def test_without_an_id_the_number_lookup_needs_no_rows():
+    """A deck described but not built (no rows): the numbering alone resolves it."""
+    _assert_stage(
+        _staged({"slide_number": 1, "slide_id": None}, None), {"slide_number": 1, "position": 3}
+    )
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        pytest.param({"slide_number": 4}, id="above-the-slide-count"),
+        pytest.param({"slide_number": 0}, id="zero"),
+        pytest.param({"slide_number": -1}, id="negative"),
+        pytest.param({"slide_number": True}, id="bool"),
+        pytest.param({"slide_number": 2.0}, id="float"),
+        pytest.param({"slide_number": "2"}, id="numeric-string"),
+        pytest.param({"slide_number": None}, id="null-number"),
+        pytest.param({}, id="empty-object"),
+        pytest.param({"slide_id": "sid-b"}, id="id-without-number"),
+        pytest.param({"slide_number": 2, "slide_id": ""}, id="empty-id"),
+        pytest.param({"slide_number": 2, "slide_id": 8}, id="non-string-id"),
+        pytest.param("2", id="not-a-mapping-string"),
+        pytest.param([2, "sid-b"], id="not-a-mapping-list"),
+        pytest.param(2, id="not-a-mapping-int"),
+    ],
+)
+def test_invalid_stage_snapshots_resolve_to_no_stage(stage):
+    _assert_stage(_staged(stage, ROWS_ABC), None)
+
+
+def test_no_stage_resolves_to_no_stage():
+    _assert_stage(_staged(None, ROWS_ABC), None)
+
+
+def test_a_stage_on_an_empty_deck_resolves_to_no_stage():
+    _assert_stage(_staged({"slide_number": 1}, [], positions=[]), None)
+
+
+def test_describe_only_sends_no_stage_even_with_a_valid_identity():
+    payload = _staged({"slide_number": 2, "slide_id": "sid-b"}, ROWS_ABC, describe_only=True)
+    _assert_stage(payload, None)
+    assert payload["slide_references"] == []
+    assert payload["slide_numbering"] == slide_numbering(STAGE_DECK)
+
+
+def test_the_stage_is_exactly_number_and_position_whatever_the_snapshot_carries():
+    """No id, html, session or row identifier passes through from the snapshot or the row."""
+    stage = {
+        "slide_number": 2,
+        "slide_id": "sid-b",
+        "html": "<section>secret</section>",
+        "session_id": "owner-session-uuid",
+    }
+    payload = _staged(stage, ROWS_ABC)
+    _assert_stage(payload, {"slide_number": 2, "position": 8})
+    dumped = json.dumps(payload)
+    for leaked in ("sid-b", "db-row-8", "owner-session-uuid", "secret"):
+        assert leaked not in dumped, f"{leaked!r} reached the helper's model-facing output"
+
+
+def test_the_helper_does_not_mutate_its_inputs():
+    stage = {"slide_number": 2, "slide_id": "sid-b"}
+    rows = _stage_rows(("sid-a", 3), ("sid-b", 8), ("sid-c", 15))
+    before = (json.dumps(stage), json.dumps(rows))
+    _staged(stage, rows)
+    assert (json.dumps(stage), json.dumps(rows)) == before
+
+
+@pytest.mark.parametrize(
+    "message,expected_refs",
+    [
+        pytest.param(
+            "Make slide 3 shorter",
+            [{"text": "slide 3", "slide_numbers": [3], "positions": [15], "out_of_range": []}],
+            id="explicit-reference-elsewhere",
+        ),
+        pytest.param("Make the title bigger", [], id="no-reference"),
+        pytest.param("Make this slide punchier", [], id="deictic-is-not-a-reference"),
+    ],
+)
+def test_the_stage_never_changes_slide_references_or_numbering(message, expected_refs):
+    """Staged on slide 1 (position 3); explicit references stay the user's own."""
+    staged = _staged({"slide_number": 1, "slide_id": "sid-a"}, ROWS_ABC, message=message)
+    plain = architect_slide_payload([_user(message)], message, STAGE_DECK)
+    assert staged["slide_references"] == plain["slide_references"] == expected_refs
+    assert staged["slide_numbering"] == plain["slide_numbering"] == slide_numbering(STAGE_DECK)
+    _assert_stage(staged, {"slide_number": 1, "position": 3})
+    assert {k: v for k, v in staged.items() if k != "stage_slide"} == {
+        k: v for k, v in plain.items() if k != "stage_slide"
+    }, "the stage adds one key and changes nothing else"
 
 
 # ---------------------------------------------------------------------------

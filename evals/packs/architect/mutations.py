@@ -25,6 +25,7 @@ from src.services.spec_sync import ARC_REVIEW_MESSAGE
 from src.services.template_sections import section_inventory
 
 from evals.harness import case
+from evals.packs.architect import stage_cases as sc
 
 AGENT = "architect"
 CASES_DIR = case.PACKS_DIR / AGENT / "cases"
@@ -127,6 +128,8 @@ MESSAGES = {
         "failover to a standby, and our estimate of 30 hours to snapshot the 2 TB database."
     ),
     "restyle_deck": "Make all the code blocks dark navy with light text",
+    # The Stage Slide cases (evals/packs/architect/stage_cases.py): sent with a slide on stage.
+    **sc.messages("train"),
 }
 
 # The edit-operations cases (spec §9): their references answer in operations, not a deck_spec.
@@ -137,9 +140,10 @@ OPERATIONS_CASES = ("delete_slide", "move_slide", "replace_slide_expand", "mixed
 DESCRIBE_ONLY_CASES = ("redescribe_deck",)
 # The cases whose deck carries the deck-style fixture and a look on every slide: the deck as a
 # deck-style build leaves it.
-STYLED_DECK_CASES = ("restyle_deck",)
+STYLED_DECK_CASES = ("restyle_deck", *sc.STYLED_STAGE_CASES)
 # The cases whose payload carries the deck: the prior exchange, the gold spec and its slide count.
 HAS_DECK = (
+    *sc.STAGE_CASE_IDS,
     "edit_request", "confirm_design", "discuss",
     "edit_polite_ordinal", "edit_last_slide", "edit_multi_slide", "discuss_slide_question",
     "add_slide_anchor", "add_slide_end", "add_slide_as_number", "add_slide_and_revise",
@@ -211,6 +215,11 @@ def _payload(cid):
     slide_keys = architect_slide_payload(
         conversation, msg, [s["position"] for s in deck["slides"]] if has_deck else [],
         describe_only=describe_only,
+        # Production's shape: architect_node always sends stage_slide.  An eval deck has no
+        # committed rows, so a Stage Slide case's snapshot carries only its slide number and
+        # resolves through slide_numbering; every other case has no stage (null).
+        stage_slide=sc.stage_snapshot("train", cid),
+        slide_rows=[],
     )
     return model_payload_for(AGENT, {
         "conversation": conversation,
@@ -1321,6 +1330,10 @@ def generate(out_dir: pathlib.Path | None = None):
         _restyled(RESTYLE_MESSAGE),
         _restyled(RESTYLE_RENAMED_MESSAGE, renamed=True),
     )
+
+    # The Stage Slide cases, defined in stage_cases.py on this split's deck.
+    for c in sc.cases("train"):
+        _write(out, c.case_id, c.kind, c.fault, c.expect, c.reference, c.should_fail)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,9 @@ HELDOUT_CASE_IDS = {
         "delete_slide", "move_slide", "replace_slide_expand", "mixed_operations",
         "redescribe_deck",
         "build_technical_deck", "restyle_deck",
+        # Architect stage context (plan Task 4): six Stage Slide cases.
+        "stage_restyle_deck", "stage_explicit_other", "stage_deictic_title",
+        "stage_unqualified_title", "stage_question", "stage_move",
     },
     "data_analyst": {
         "figures_inline", "conflicting_figures", "two_sources", "needs_tool", "unsourced_public_stat",
@@ -78,9 +81,9 @@ def test_total_heldout_case_count():
     # manual-insert follow-up two, the edit-operations cases four, the sweeper's re-description
     # one, the deck-style build and restyle two), seven for the build_reviewer (two deck-style
     # cases) and eight for the builder (those two plus Addendum A's deck_style_icons):
-    # 4 x 5 + 7 + 8 + 22.
-    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 57
-    assert len(HELDOUT_CASE_IDS["architect"]) == 22
+    # 4 x 5 + 7 + 8 + 22, plus the architect's six Stage Slide cases (plan Task 4): 63.
+    assert sum(len(v) for v in HELDOUT_CASE_IDS.values()) == 63
+    assert len(HELDOUT_CASE_IDS["architect"]) == 28
     assert len(HELDOUT_CASE_IDS["builder"]) == 8
 
 

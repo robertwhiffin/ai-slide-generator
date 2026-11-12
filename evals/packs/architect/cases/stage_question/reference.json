@@ -1,0 +1,8 @@
+{
+  "intent": "discuss",
+  "message": "Slide 8 is the fifth evidence beat, collaboration: it shows that HTML slide source is plain text that lives in Git, gets reviewed through pull requests and is shared as a URL, which completes the case before the objections on slide 9. I can trim or move it if you like.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

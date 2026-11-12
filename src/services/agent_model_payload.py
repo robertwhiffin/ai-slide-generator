@@ -62,6 +62,7 @@ MODEL_PAYLOAD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "committed_slide_count",
                 "slide_numbering",
                 "slide_references",
+                "stage_slide",
                 "previous_deck_review",
                 "available_design_contract",
                 "template_sections",

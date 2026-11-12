@@ -287,10 +287,11 @@ class TestScopedVals:
         Genie One in agent mode added ``analyst_figures`` and ``analyst_rounds``;
         AI Gateway MCP connections added ``gateway_usage`` and ``gateway_images``;
         the architect's ``generate_image`` tool added ``generated_images`` and
-        ``image_tool_usage`` (both ``[]``).
+        ``image_tool_usage`` (both ``[]``); the architect stage context added
+        ``stage_slide`` (``None``).
         """
         expected = {
-            "describe_only",
+            "describe_only", "stage_slide",
             "landed_positions", "placeheld_positions", "reviewed_positions",
             "slides", "dispatched_at", "fix_map", "fixed",
             "emitted_style_blocks", "foreman_wakes",

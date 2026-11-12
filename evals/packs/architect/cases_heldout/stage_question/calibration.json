@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll rework slide 5 so the evaluation loop is clearer.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [
+      4
+    ],
+    "proposed_design_contract": null
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "intent": "edit",
+  "message": "I'll change the title of slide 6 to 'Your prompt checklist'.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 5,
+      "after_position": null,
+      "slides": [
+        {
+          "purpose": "Close with a concrete checklist and call to action the team can adopt immediately",
+          "content_brief": "Title the slide 'Your prompt checklist'. Bullet slide presenting a five-item prompt optimisation checklist (define task scope, choose patterns, write eval criteria, run test suite, document winning prompt) with a callout stating the call to action: adopt this checklist for every new LLM feature starting this sprint",
+          "assumes": "Audience has seen the techniques, evidence, and workflow",
+          "hands_off": "Start using the checklist this sprint — no new tooling required",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null,
+          "look": null
+        }
+      ]
+    }
+  ],
+  "deck_changes": null
+}

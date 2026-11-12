@@ -60,6 +60,10 @@ _Avoid_: Slide number, list index
 A phrase naming existing slides by number or ordinal ("slide 2", "slides 4-6", "the last slide"). `src/domain/slide_numbering.py` resolves it to Slide Positions before the architect runs. It does not decide the intent, and an indefinite ordinal ("a final slide") is not one.
 _Avoid_: Slide context (the monolith's UI selection)
 
+**Stage Slide**:
+The slide the viewer had on stage when the user sent an Agent-mode message, captured at send time as its Slide Number and stable slide id. It is scoped to that one turn. `src/domain/slide_numbering.py` resolves it against this deck's current slides: a supplied id must match exactly one slide, and a deleted, duplicated or foreign id is no Stage Slide (it never falls back to the number). The architect sees only the slide's current Slide Number and Slide Position, as context: "this slide" and an edit that names no slide mean it, a Slide Reference or a deck-wide request wins for the slides it names (in "move this slide after slide 5", "this slide" is still the Stage Slide and slide 5 is the anchor), and it never sets the edit's targets.
+_Avoid_: Selection, slide context
+
 **Slide Insertion**:
 An edit whose revised spec has more slides than the deck. New slides go where the user asked, later slides take a higher Slide Position and Slide Number (by the number of slides inserted before them) but keep their identity and records, and only new and revised slides are built. `architect_node` derives it from the edit's insert and replace Operations, or, for an edit with no Operations, by aligning the revised spec to the current one (`src/domain/slide_alignment.py`) and refusing when the alignment is ambiguous. It never uses the model's targets.
 _Avoid_: Add intent, build

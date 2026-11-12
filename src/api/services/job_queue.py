@@ -217,6 +217,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     # `engine_mode` key, so every MCP job runs on the monolith without
     # mcp_server.py knowing this switch exists.
     engine_mode = payload.get("engine_mode", "monolith")
+    # Graph-only snapshot of the slide on stage; absent on MCP and pre-existing jobs.
+    stage_slide = payload.get("stage_slide")
 
     chat_service = get_chat_service()
     session_manager = get_session_manager()
@@ -249,6 +251,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                     is_first_message,
                     image_ids,
                     engine_mode,
+                    stage_slide,
                 ),
             ):
                 if event.type == StreamEventType.COMPLETE:
@@ -277,6 +280,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                     is_first_message,
                     image_ids,
                     engine_mode,
+                    stage_slide,
                 ),
             ):
                 if event.type == StreamEventType.COMPLETE:
@@ -325,6 +329,7 @@ def _run_streaming_generator(
     is_first_message: bool = False,
     image_ids: Optional[list] = None,
     engine_mode: str = "monolith",
+    stage_slide: Optional[Dict[str, Any]] = None,
 ) -> list:
     """Run the streaming generator and collect events.
 
@@ -341,7 +346,11 @@ def _run_streaming_generator(
         engine_mode: ``"graph"`` or ``"monolith"`` (ws4d D2).  Every argument
             above is passed POSITIONALLY by both of ``process_chat_request``'s
             call sites — the ``if ctx:`` branch and the no-context recovery
-            fallback — so this one is appended last and defaults to monolith.
+            fallback — so this one is appended after the others and defaults to
+            monolith.
+        stage_slide: Optional graph-only snapshot of the slide on stage
+            (``{"slide_number", "slide_id"}``), appended after ``engine_mode``
+            and passed positionally by both call sites.
 
     Returns:
         List of all events from the generator
@@ -356,6 +365,7 @@ def _run_streaming_generator(
             is_first_message_override=is_first_message,
             image_ids=image_ids,
             engine_mode=engine_mode,
+            stage_slide=stage_slide,
         ):
             events.append(event)
     except PersistedRuntimeError as exc:

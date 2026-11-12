@@ -53,9 +53,26 @@ REDESCRIBE_CASES = ["redescribe_deck"]
 DECK_STYLE_BUILD_CASES = ["build_technical_deck"]
 DECK_STYLE_EDIT_CASES = ["restyle_deck"]
 DECK_STYLE_CASES = DECK_STYLE_BUILD_CASES + DECK_STYLE_EDIT_CASES
+# Architect stage context (plan Task 4): six cases sent with a slide on the viewer's stage,
+# defined by evals/packs/architect/stage_cases.py on this split's deck. Folded into
+# NEW_CASE_IDS (all mutations on the deck); tests/unit/evals/test_pack_architect_stage_cases.py
+# checks their content and scoring.
+STAGE_CASES = [
+    "stage_restyle_deck", "stage_explicit_other", "stage_deictic_title",
+    "stage_unqualified_title", "stage_question", "stage_move",
+]
+# Each Stage Slide case's model-facing stage_slide; every other case's is null.
+STAGE_SLIDE = {
+    "stage_restyle_deck": {"slide_number": 3, "position": 2},
+    "stage_explicit_other": {"slide_number": 2, "position": 1},
+    "stage_deictic_title": {"slide_number": 4, "position": 3},
+    "stage_unqualified_title": {"slide_number": 6, "position": 5},
+    "stage_question": {"slide_number": 5, "position": 4},
+    "stage_move": {"slide_number": 6, "position": 5},
+}
 NEW_CASE_IDS = (
     CASES_313 + INSERT_CASES + BLANK_CASES + OPERATIONS_CASES + REDESCRIBE_CASES
-    + DECK_STYLE_CASES
+    + DECK_STYLE_CASES + STAGE_CASES
 )
 CASE_IDS = EXISTING_CASE_IDS + NEW_CASE_IDS
 MUTATIONS = ["edit_request", "ask_data", "confirm_design"] + [
@@ -106,12 +123,31 @@ EXPECT = {
     "restyle_deck": {
         "intent": "edit", "positions": [], "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"],
     },
+    # Architect stage context (plan Task 4): each Stage Slide case's payload carries a slide on
+    # stage (STAGE_SLIDE); its expect is scored like the operations and restyle cases.
+    "stage_restyle_deck": {
+        "intent": "edit", "positions": [], "deck_style_keeps": ["dk-code", "kw", "fn", "str", "cm"],
+    },
+    "stage_explicit_other": {
+        "intent": "edit", "positions": [4], "inserted": [], "layout": list(range(6)),
+    },
+    "stage_deictic_title": {
+        "intent": "edit", "positions": [3], "inserted": [], "layout": list(range(6)),
+    },
+    "stage_unqualified_title": {
+        "intent": "edit", "positions": [5], "inserted": [], "layout": list(range(6)),
+    },
+    "stage_question": {"intent": "discuss"},
+    "stage_move": {
+        "intent": "edit", "positions": [], "inserted": [], "layout": [0, 1, 5, 2, 3, 4],
+    },
 }
 HAS_DECK = {"edit_request", "confirm_design", "discuss"} | (
     set(NEW_CASE_IDS) - set(DECK_STYLE_BUILD_CASES)
 )
 # The cases whose current deck carries the deck-style fixture and a look on every slide.
-STYLED_DECK_CASES = set(DECK_STYLE_EDIT_CASES)
+# The Stage Slide restyle is sent on the same styled deck as restyle_deck.
+STYLED_DECK_CASES = set(DECK_STYLE_EDIT_CASES) | {"stage_restyle_deck"}
 DECK_STYLE_FIXTURE = case.EVALS_DIR / "fixtures" / "deck_style_technical.json"
 EDIT_CASES = [c for c in CASE_IDS if EXPECT[c]["intent"] == "edit"]
 # #314 (D11, finding 11): this case's should_fail is right place and right targets with an
@@ -122,26 +158,28 @@ SLIPPED = ["edit_last_slide", "edit_multi_slide"]
 # D7: adding the #313 cases leaves the five existing cases byte-identical. Digests of the files at
 # 679d2f21. Task 7 adds the two SLIDE_KEYS to every payload.json on purpose and re-pins nothing: a
 # payload.json digest is checked on that payload with the two keys stripped (D11).
+# The architect stage context adds ``"stage_slide": null`` to every payload.json (production
+# shape) and re-pins only the payload.json entries of this and the two digest maps below.
 EXISTING_CASE_SHA256 = {
     "ask_data/calibration.json": "0761dfd021fbf5f9abaa73c0fe33735f16f0d3afce5be5bc46a0d9252f7fd086",
     "ask_data/case.yaml": "507b1f55e8479b02535af8ba1363b7a76bc3ef2d3310849f9af3aca51c17abe6",
-    "ask_data/payload.json": "75ffca76ebf5258295ecc8a0eef920955efa6d0e1e809dbfd25bf0e4b75c3c96",
+    "ask_data/payload.json": "86d2e810ea1e4d106743612157f38ad95b7c8214cb96069a18d4b7a845922878",
     "ask_data/reference.json": "ac10a07cfa840c55f0b001da058fcfe69788e952eb3fe9fd4b334ecb929e7f9d",
     "build_request/calibration.json": "cdb0f35e3df90091bdff95ab7abbac7648396d6cb2b3aaaa148a8c35b38a4f33",
     "build_request/case.yaml": "02e9256188dad0c24a724a740f8acfa2fe033d9ff87ba3bc8bd0c0a2af47eece",
-    "build_request/payload.json": "32cca43ea663ff1b1ded2d261a17b7d2c1e4730529e80d18404d40c085d2d020",
+    "build_request/payload.json": "fe1384b1c96337c7b0cb8f603e3d29eb518c4381cfc2825b9b3887d14fc67f6c",
     "build_request/reference.json": "0654e2384ebf821758a19de285f93835cd8671ec22c7d0e43f06a61e55478353",
     "confirm_design/calibration.json": "5ea6b080af5b98f76ee31f9b643e48c4b2f240cc22a293d633fc84e34b75797e",
     "confirm_design/case.yaml": "d927b9058811d5f15b1527bdc02317f051b9386454b5c69e3c0603bea11b643c",
-    "confirm_design/payload.json": "ff4ddcc32df99616d17eb4b8b6067e45d5c28a2a7b997eff25ac2fe18b955bf8",
+    "confirm_design/payload.json": "55db172ebe961922562e1b65c38c75a8c9e33c0505070dc14391dc81d950cb59",
     "confirm_design/reference.json": "1122933fdd9c1de6730cc223afb2e2433707c44142f096292569142430a6b561",
     "discuss/calibration.json": "e01f882c09c3384f9b4565ab26cb72142cfe4a58e1e38eb38ff8f8fe93cfe55d",
     "discuss/case.yaml": "b9ad94d1a9ae20949f243b129567a851d2fee203060316c484e4da3b90fa11ad",
-    "discuss/payload.json": "485ed0068396fba19c377fc90f079add1ef23b4c8811df1773e902ad99233777",
+    "discuss/payload.json": "f6e46488886a096ad802ff946705ab3e12993448a14fcad45fab62cba78f3f7b",
     "discuss/reference.json": "5ef4db19eed1ad91be6f450adf2ae4ec98b9718c6549508e32c24f5afcf83d1b",
     "edit_request/calibration.json": "fd4e02823ed246c61f282241df69db24d66d4d4a5bf55bfa7eb7b82fb96517e2",
     "edit_request/case.yaml": "9c7e0a4e6b67b67b46139d1780b4fd0b4fbeddafa574bae1a9c3720cf686c798",
-    "edit_request/payload.json": "b6c0c8629eb88e01fed8d07b5baffe68670b5534da20390e36af3aff05db82af",
+    "edit_request/payload.json": "8747ce5fde4bce1a2ac7db92d412b599e0fbdd076aa964dbdf38a83a654e6f92",
     "edit_request/reference.json": "0bc3d02b7cd26ed26aadabb564099fac6665e31d2be8ce7d4bae4b05f90d3112",
 }
 # #314 (Task 9): adding the insert cases leaves the four #313 cases byte-identical. Digests of the
@@ -152,7 +190,7 @@ CASES_313_SHA256 = {
     "edit_polite_ordinal/case.yaml":
         "e6da3d33b85bdb0f1a0b0db0e46c43a0307de1e31703d8b6ec8874cbb1e381a9",
     "edit_polite_ordinal/payload.json":
-        "a1950f828b06e4cee43dde042b6cd59787ba6ed6e82c9bfdcf14aad5604cd9fc",
+        "c07b2fa88329e5a66b48d39db884a1752147b8c5c2694fcabffe7b071969b5ab",
     "edit_polite_ordinal/reference.json":
         "c31c6470837a8873d1d948da6696771b59a115ae9553b566db26490526bebd9d",
     "edit_last_slide/calibration.json":
@@ -160,7 +198,7 @@ CASES_313_SHA256 = {
     "edit_last_slide/case.yaml":
         "90c4d073f77ddf57a48a675b324df49b9267e3a5fc7dc1c6846ee29535ed529f",
     "edit_last_slide/payload.json":
-        "8f7767e74e9b8fa11f3e47b7e3ed3e0d4ab87ea1ca9616a4ead1640137aefc6a",
+        "629a7ec5bc88e7ce0fbf8fe22f79857e50172c36c008bf9a967d9f77e3abf3cd",
     "edit_last_slide/reference.json":
         "a5b1e6b88963c327c752695adcaec659997c56eb715470e6f1c3c7797b5bf1ef",
     "edit_multi_slide/calibration.json":
@@ -168,7 +206,7 @@ CASES_313_SHA256 = {
     "edit_multi_slide/case.yaml":
         "ee0327f615dc9e169c991a895dd105d3615242820da9d8929fe705587e76ef48",
     "edit_multi_slide/payload.json":
-        "84f1e1d83d24e7463ec51c1e37d0fcf99a84df413c84ad7f3a5e400c6b147844",
+        "b1388561cd3394ec6a9aa09db64804780c8f39b1bb844f837fe47afebd724e64",
     "edit_multi_slide/reference.json":
         "c2ce126b4eb79eaa12fb86da27e497c85b68cbaf7b25e0cdac2a5b85fa472abc",
     "discuss_slide_question/calibration.json":
@@ -176,7 +214,7 @@ CASES_313_SHA256 = {
     "discuss_slide_question/case.yaml":
         "50267a0a10f3e92e5963581b109d02ac7740bc3e1836778880beacd8bdf994ec",
     "discuss_slide_question/payload.json":
-        "023577f9cb78f8102ececf08c7554393bf5999142fe62cbb4822c3b8d45690fa",
+        "039e2116994158fa1707e3a0584b9e42cb5bb440637891923730c6399279b0fb",
     "discuss_slide_question/reference.json":
         "374f8c4f8a8a3f7ccfb6d214b9c6f52d67d6f9d6481031d3f6ecd747b06d0c3d",
 }
@@ -188,7 +226,7 @@ INSERT_CASES_SHA256 = {
     "add_slide_anchor/case.yaml":
         "f4b06495679b5112d904f5cea3e7be730a3ebcff0cd0ecac02c8ad435e7d1359",
     "add_slide_anchor/payload.json":
-        "db4c23f719e6afa88029c2d2cedf3449e2f71ce92e1cceb13acfacdf269c8e4e",
+        "fa79a6a5a2f3cc39fe1b9bbf2c769149b4e0b862009ad93fde228f14d884fa76",
     "add_slide_anchor/reference.json":
         "55c9cb5683ee7cad3d931ea5968b82f21da34229788709b52823aa05616f3241",
     "add_slide_end/calibration.json":
@@ -196,7 +234,7 @@ INSERT_CASES_SHA256 = {
     "add_slide_end/case.yaml":
         "b58e0cb0a36a58e14bc484e6fcbc125ef185edd1c1d4f1cc6544d48d79ac9ffe",
     "add_slide_end/payload.json":
-        "f3cf7e8992b095d10195bea420368da91d780c759b8e1ebd6310952fafdf2bcf",
+        "39b5019e833e47e2e307c13b11372704a0fa7ce4abf69e5024ab25a92b64db99",
     "add_slide_end/reference.json":
         "df8fad3750213b56033740fcf22654ff495109b5c1ffb7646ec21306b1f04ae8",
     "add_slide_as_number/calibration.json":
@@ -204,7 +242,7 @@ INSERT_CASES_SHA256 = {
     "add_slide_as_number/case.yaml":
         "2f9b2c0319000fdea1e82dd007c33e602eed6cee97d34b9f36ab63b67dd78604",
     "add_slide_as_number/payload.json":
-        "0bd9b45da2a652b3863dfa6cd46ef4ade257f48cf5455ad0845ca25e0e5155d8",
+        "f50de91819fea7f685ef4472ef88a214cd30c35276420a2542956a1b2a793cf3",
     "add_slide_as_number/reference.json":
         "b3441b939e15a961720c5c49beb05e577dddea0b8456f44a11581c665db6bf24",
     "add_slide_and_revise/calibration.json":
@@ -212,7 +250,7 @@ INSERT_CASES_SHA256 = {
     "add_slide_and_revise/case.yaml":
         "5786ff54caff1fd9a9c9f2411ea6848bb6085f504269494800ce1aa72232b538",
     "add_slide_and_revise/payload.json":
-        "9fc7d624031c6be867922391fdd69a783632e3f8c7c81c12f3c421fa57aaf0ac",
+        "de86bbff95582f19eee09572fce9218b1f161bd8f5b61cfda1edf2b52d6897e7",
     "add_slide_and_revise/reference.json":
         "f4e48d4176487df3e0063d7bb64630c596c97be952c7e606fa5abc37ba384af3",
 }
@@ -221,7 +259,7 @@ PACK_DIR = case.PACKS_DIR / AGENT
 # The production architect payload keys, in architect_node's order (src/services/graph/nodes.py).
 PAYLOAD_KEYS = [
     "conversation", "message", "current_deck_spec", "committed_slide_count",
-    "slide_numbering", "slide_references",
+    "slide_numbering", "slide_references", "stage_slide",
     "previous_deck_review", "available_design_contract", "template_sections",
     "resolved_style", "design_system_library", "deck_style_context",
 ]
@@ -292,6 +330,18 @@ SLIDE_REFERENCES = {
     # Deck style: the build names no slide; the restyle names every code block, not a slide.
     "build_technical_deck": [],
     "restyle_deck": [],
+    # Stage Slide cases: references are lexical, so the stage is never one; only a slide the
+    # message names by number resolves.
+    "stage_restyle_deck": [],
+    "stage_explicit_other": [
+        {"text": "slide 5", "slide_numbers": [5], "positions": [4], "out_of_range": []},
+    ],
+    "stage_deictic_title": [],
+    "stage_unqualified_title": [],
+    "stage_question": [],
+    "stage_move": [
+        {"text": "slide 2", "slide_numbers": [2], "positions": [1], "out_of_range": []},
+    ],
 }
 LAYOUT =case.EVALS_DIR / "fixtures/meridian/bundle/templates/standard/index.html"
 
@@ -499,7 +549,7 @@ def test_payload_keys_are_every_production_key():
     builder's ``corrective_instruction`` is), so no case carries it."""
     assert "rejected_edit" in MODEL_PAYLOAD_KEYS[AGENT]
     assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT]) - {"rejected_edit"}
-    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 12
+    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 13
 
 
 @pytest.mark.parametrize("cid", CASE_IDS)
@@ -508,6 +558,8 @@ def test_payload_is_the_production_shape(cid):
     gold = case.gold_deck_spec(DECK)
     assert isinstance(p["message"], str) and p["message"]
     assert p["previous_deck_review"] is None
+    # The architect stage context: a Stage Slide case carries its stage, every other none.
+    assert p["stage_slide"] == STAGE_SLIDE.get(cid)
     assert p["available_design_contract"] == {
         "design_system_id": 3, "template_id": 5, "slide_style_id": None,
     }
@@ -718,7 +770,8 @@ def _by_position(spec):
     "cid",
     [c for c in EDIT_CASES
      if c not in INSERT_CASES and c not in BLANK_CASES and c not in OPERATIONS_CASES
-     and c not in REDESCRIBE_CASES and c not in DECK_STYLE_CASES],
+     and c not in REDESCRIBE_CASES and c not in DECK_STYLE_CASES
+     and c not in STAGE_CASES],
 )
 def test_edit_references_revise_only_their_targets(cid):
     ref = _load(cid).reference
@@ -798,7 +851,8 @@ def test_slide_references_are_pinned(cid):
 @pytest.mark.parametrize(
     "cid",
     [c for c in EDIT_CASES
-     if c not in INSERT_CASES and c not in OPERATIONS_CASES and c not in REDESCRIBE_CASES],
+     if c not in INSERT_CASES and c not in OPERATIONS_CASES and c not in REDESCRIBE_CASES
+     and c not in STAGE_CASES],
 )
 def test_resolved_references_equal_the_expected_edit_positions(cid):
     """A2's deterministic proof on the eval messages: the resolver yields every expected target."""
@@ -951,7 +1005,7 @@ def test_calibration_should_fail_is_wrong_and_valid(cid):
     "cid",
     [c for c in CASE_IDS
      if c not in ("edit_request", *SLIPPED, *INSERT_CASES, *BLANK_CASES, *OPERATIONS_CASES,
-                  *REDESCRIBE_CASES, *DECK_STYLE_CASES)],
+                  *REDESCRIBE_CASES, *DECK_STYLE_CASES, *STAGE_CASES)],
 )
 def test_calibration_has_the_wrong_intent(cid):
     assert _cal(cid)["should_fail"]["intent"] != EXPECT[cid]["intent"]
