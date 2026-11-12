@@ -52,6 +52,7 @@ from src.database.models.session import (
 )
 from src.services.agent_runtime import AgentAssemblyContext
 from tests.integration.conftest_stub_skills import CallableAgentRuntime, builder_html
+from tests.unit.conftest_graph import seed_running_request
 
 AUTHOR = "graph-caller@example.com"
 SEEDED_AUTHOR = "someone-who-came-before@example.com"
@@ -131,6 +132,8 @@ class _GraphChatEnv:
             kwargs["engine_mode"] = engine_mode
         if request_id is not None:
             kwargs["request_id"] = request_id
+            # The write fence refuses a turn whose request id has no live row.
+            seed_running_request(self._env.factory, self.session_id, request_id)
         kwargs["is_first_message_override"] = is_first_message
         return self.service.send_message_streaming(**kwargs)
 

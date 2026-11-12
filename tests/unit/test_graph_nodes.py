@@ -4452,6 +4452,7 @@ class TestFailureNoticesArePlainLanguage:
         caplog.set_level(logging.WARNING, logger=self.LOGGER)
         graph_env.skills.set("builder", self._raising("boom"))
 
+        graph_env.seed_running_request(self.REQUEST_ID)
         set_chat_request_id(self.REQUEST_ID)
         try:
             builder_node(_branch_payload(graph_env, 2, spec=make_spec((2,))))
@@ -4668,6 +4669,7 @@ class TestFailureNoticesArePlainLanguage:
         from src.services.graph.event_emitter import set_chat_request_id
 
         caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        graph_env.seed_running_request(self.REQUEST_ID)
         set_chat_request_id(self.REQUEST_ID)
         try:
             notice = self._drive_failure(site, graph_env, monkeypatch)
@@ -4882,6 +4884,7 @@ class TestDeckAdvisoryIsPlain:
 
         emitter: queue.Queue = queue.Queue()
         set_event_emitter(emitter)
+        graph_env.seed_running_request("req-316")
         set_chat_request_id("req-316")
         try:
             deck_reviewer_node(graph_env.state(turn_id=TURN))

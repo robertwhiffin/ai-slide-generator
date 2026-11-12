@@ -370,7 +370,10 @@ def invoke_graph(
     )
 
     config = {
-        "configurable": {"thread_id": session_id},
+        # chat_request_id: the checkpointer's write fence keys on it, because
+        # LangGraph calls put_writes for Send-fanned tasks outside the task's
+        # context, where the request-id ContextVar is unset.
+        "configurable": {"thread_id": session_id, "chat_request_id": request_id},
         "max_concurrency": CAP,
     }
 

@@ -32,6 +32,7 @@ from src.api.services.session_manager import (
 from src.core.database import get_db_session
 from src.database.models.session import SessionSlide, SessionSlideDeck
 from src.domain.deck_spec import DeckSpec
+from src.services.generation_fence import fence_turn_write
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
     record_shared_deck_mutation,
@@ -198,6 +199,7 @@ class SlideWriter:
         now = datetime.utcnow()
 
         with get_db_session() as db:
+            fence_turn_write(db)
             session = self.session_manager._get_session_or_raise(db, session_id)
             deck_owner = self.session_manager._get_deck_owner_session(db, session)
             deck = deck_owner.slide_deck
@@ -347,6 +349,7 @@ class SlideWriter:
             SessionNotFoundError: if session_id does not match any session.
         """
         with get_db_session() as db:
+            fence_turn_write(db)
             session = self.session_manager._get_session_or_raise(db, session_id)
             deck_owner = self.session_manager._get_deck_owner_session(db, session)
 
@@ -616,6 +619,7 @@ class SlideWriter:
         expected = [(slide_id, content_hash) for slide_id, content_hash in expected_rows]
 
         with get_db_session() as db:
+            fence_turn_write(db)
             session = self.session_manager._get_session_or_raise(db, session_id)
             deck_owner = self.session_manager._get_deck_owner_session(db, session)
             deck = deck_owner.slide_deck

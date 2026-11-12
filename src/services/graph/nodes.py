@@ -117,6 +117,7 @@ from src.domain.slide_operations import (
     problem_sentence,
 )
 from src.services import image_service
+from src.services.generation_fence import TurnFencedError, fence_turn_write
 from src.services.agent import SAFETY_RETRY_NOTICE, UnsafeContentError
 from src.services.agent_runtime import (
     AgentAssemblyContext,
@@ -1980,6 +1981,8 @@ def _placehold_failed_position(
             mutation=mutation,
         )
         row = writer.get_slide(session_id, position) or {}
+    except TurnFencedError:
+        raise
     except Exception:
         logger.exception(
             "commit_placeholder failed at position %s; the foreman will "
@@ -7123,6 +7126,8 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
             modified_by=record.get("initiated_by"),
             mutation=mutation,
         )
+    except TurnFencedError:
+        raise
     except Exception:
         logger.warning(
             "Could not commit the draft of slide %s; it will appear once reviewed",
@@ -7516,6 +7521,8 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 user_visible=not bool(scoped_vals(state, "describe_only")),
                 **deck_write,
             )
+        except TurnFencedError:
+            raise
         except Exception as exc:
             logger.exception("Post-commit deck-level write failed")
             updates["error_state"] = {
@@ -7576,6 +7583,7 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 _skill_findings(out), subject_hash=digest, slide_index=-1
             )
             with get_db_session() as db:
+                fence_turn_write(db)
                 deck_id = _resolve_deck_id(db, session_id)
                 if deck_id is None:
                     raise ValueError(
@@ -7584,6 +7592,8 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                     )
                 save_deck_review(db, deck_id, digest, findings, initiated_by)
             advisory = _advisory_text(findings)
+        except TurnFencedError:
+            raise
         except Exception as exc:
             _raise_if_persisted_runtime_failure(exc)
             logger.exception("Deck review failed; the delivered deck stands")

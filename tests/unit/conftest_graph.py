@@ -250,6 +250,35 @@ class TemplateStub:
         return (self.layout, self.style_block, self.token_css)
 
 
+def seed_running_request(factory, session_id: str, request_id: str) -> str:
+    """Give *request_id* a real ``running`` ``chat_requests`` row; return it.
+
+    The write fence (``fence_turn_write``) refuses every turn write whose bound
+    request id has no live row, so any test that binds an id (via
+    ``set_chat_request_id`` or ``request_id=``) and then lets a fenced writer run
+    must seed the row first.  Idempotent: an existing row is left alone.  Shared by
+    ``GraphEnv.seed_running_request`` and the integration graph envs.
+    """
+    from src.database.models.session import ChatRequest
+
+    db = factory()
+    try:
+        if (
+            db.query(ChatRequest).filter(ChatRequest.request_id == request_id).first()
+            is None
+        ):
+            owner = (
+                db.query(UserSession).filter(UserSession.session_id == session_id).one()
+            )
+            db.add(
+                ChatRequest(request_id=request_id, session_id=owner.id, status="running")
+            )
+            db.commit()
+    finally:
+        db.close()
+    return request_id
+
+
 # ---------------------------------------------------------------------------
 # The environment
 # ---------------------------------------------------------------------------
@@ -313,6 +342,10 @@ class GraphEnv:
             )
         finally:
             db.close()
+
+    def seed_running_request(self, request_id: str) -> str:
+        """See :func:`seed_running_request`; this env's factory and session."""
+        return seed_running_request(self.factory, self.session_id, request_id)
 
     def messages(self) -> List[dict]:
         from src.api.services.session_manager import get_session_manager

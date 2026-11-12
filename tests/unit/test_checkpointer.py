@@ -18,13 +18,18 @@ All fixture data is synthetic.
 """
 
 import os
+import re
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from typing import Annotated, Any, TypedDict
 
 import pytest
 from langgraph.checkpoint.base import CheckpointTuple, empty_checkpoint
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy import create_engine, inspect, text
+from langgraph.types import Send
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool, StaticPool
@@ -32,6 +37,9 @@ from sqlalchemy.pool import NullPool, StaticPool
 import src.core.checkpointer as checkpointer_module
 from src.core.checkpointer import SqlAlchemyCheckpointSaver, get_checkpointer
 from src.core.database import Base, _migrate_graph_checkpoints, _run_migrations
+from src.database.models.session import ChatRequest
+from src.services.generation_fence import TurnFencedError
+from src.services.graph.event_emitter import chat_request_id_var
 
 _TABLES = ("graph_checkpoints", "graph_checkpoint_writes")
 
@@ -547,6 +555,485 @@ class TestACompiledGraph:
 
         assert list(saver.list(config)) == []
         assert saver.get_tuple(config) is None
+
+
+# ---------------------------------------------------------------------------
+# Task 3a: the turn fence on put / put_writes, and the rollback's two helpers.
+#
+# A stopped turn's abandoned graph thread keeps running, and every checkpoint it
+# then tries to write must be refused. The fence's request id comes from
+# ``config["configurable"]["chat_request_id"]`` (set by invoke_graph), with the
+# ContextVar as fallback (PLAN-CORRECTIONS C5): measured, LangGraph calls
+# ``put_writes`` for a Send-fanned task from the task future's done-callback,
+# OUTSIDE the task's copied context, so the ContextVar is None there. The
+# compiled-graph test below fails against a fence that reads only the ContextVar.
+#
+# Same convention as the rest of this file: a real, file-backed SQLite engine,
+# the checkpoint tables built by the migration alone, never a mock. The
+# ``chat_requests`` table is added beside them because the fence claims its row
+# on the SAVER's own session.
+# ---------------------------------------------------------------------------
+
+_CLAIM_RE = re.compile(
+    r"^\s*UPDATE\s+chat_requests\s+SET\s+status\s*=\s*status\b", re.IGNORECASE
+)
+_WRITE_RE = re.compile(
+    r"^\s*(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM)\s+[\"`]?(\w+)",
+    re.IGNORECASE,
+)
+
+
+@pytest.fixture()
+def _no_request_id_in_context():
+    token = chat_request_id_var.set(None)
+    try:
+        yield
+    finally:
+        chat_request_id_var.reset(token)
+
+
+@pytest.fixture()
+def fenced_engine(tmp_path, _no_request_id_in_context):
+    """The migration-built checkpoint tables plus ``chat_requests``, file-backed."""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'fenced.sqlite'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+    _build_checkpoint_tables(engine)
+    ChatRequest.__table__.create(engine)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture()
+def fenced_saver(fenced_engine):
+    return SqlAlchemyCheckpointSaver(
+        session_factory=sessionmaker(bind=fenced_engine, expire_on_commit=False)
+    )
+
+
+def _seed_request(engine, status: str) -> str:
+    rid = f"req-{uuid.uuid4().hex[:16]}"
+    with engine.begin() as conn:
+        conn.execute(
+            ChatRequest.__table__.insert().values(
+                request_id=rid, session_id=1, status=status
+            )
+        )
+    return rid
+
+
+def _set_status(engine, rid: str, status: str) -> None:
+    table = ChatRequest.__table__
+    with engine.begin() as conn:
+        conn.execute(
+            table.update().where(table.c.request_id == rid).values(status=status)
+        )
+
+
+def _turn_config(
+    thread_id: str,
+    request_id: str | None,
+    checkpoint_id: str | None = None,
+    ns: str = "",
+) -> dict:
+    """A saver config as a graph turn hands it: with the request id in configurable."""
+    config = _config(thread_id, checkpoint_id, ns)
+    config["configurable"]["chat_request_id"] = request_id
+    return config
+
+
+def _table_rows(engine, table_name: str) -> list[dict]:
+    """Every row of *table_name*, every column, in key order."""
+    order = {
+        "graph_checkpoints": "thread_id, checkpoint_ns, checkpoint_id",
+        "graph_checkpoint_writes": "thread_id, checkpoint_ns, checkpoint_id, task_id, idx",
+        "chat_requests": "request_id",
+    }[table_name]
+    with engine.connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                text(f"SELECT * FROM {table_name} ORDER BY {order}")
+            ).mappings()
+        ]
+
+
+def _everything(engine) -> dict:
+    return {
+        name: _table_rows(engine, name)
+        for name in ("graph_checkpoints", "graph_checkpoint_writes", "chat_requests")
+    }
+
+
+@contextmanager
+def _transactions(engine):
+    """Every statement sent to *engine*, grouped by transaction."""
+    done: list[list[str]] = []
+    open_: dict[int, list[str]] = {}
+
+    def on_begin(conn):
+        open_[id(conn)] = []
+
+    def on_statement(conn, cursor, statement, parameters, context, executemany):
+        open_.setdefault(id(conn), []).append(statement)
+
+    def on_end(conn):
+        statements = open_.pop(id(conn), None)
+        if statements is not None:
+            done.append(statements)
+
+    listeners = (
+        ("begin", on_begin),
+        ("before_cursor_execute", on_statement),
+        ("commit", on_end),
+        ("rollback", on_end),
+    )
+    for name, fn in listeners:
+        event.listen(engine, name, fn)
+    try:
+        yield done
+    finally:
+        for name, fn in listeners:
+            event.remove(engine, name, fn)
+
+
+def _assert_claim_opens_the_write(transactions, table: str) -> None:
+    writing = [
+        t
+        for t in transactions
+        if any((m := _WRITE_RE.match(s)) and m.group(1).lower() == table for s in t)
+    ]
+    assert writing, f"no transaction wrote {table}: the write did not land"
+    for statements in writing:
+        first = next(s for s in statements if _WRITE_RE.match(s))
+        assert _CLAIM_RE.match(first), (
+            f"the transaction writing {table} did not open with the request-row "
+            f"claim; its first write was {first.strip()[:120]!r}"
+        )
+
+
+class TestTheTurnFence:
+    def test_put_refused_after_cancel(self, fenced_saver, fenced_engine):
+        """The id rides in the config; the ContextVar is unset, as on a fanned path."""
+        rid = _seed_request(fenced_engine, "cancelled")
+        before = _everything(fenced_engine)
+
+        with pytest.raises(TurnFencedError) as excinfo:
+            fenced_saver.put(
+                _turn_config("thread-fenced", rid), _checkpoint({"n": 1}), _metadata(), {}
+            )
+
+        assert excinfo.value.request_id == rid
+        assert _everything(fenced_engine) == before, "a cancelled turn wrote a checkpoint"
+
+    def test_put_writes_refused_after_cancel(self, fenced_saver, fenced_engine):
+        live = _seed_request(fenced_engine, "running")
+        checkpoint = _checkpoint({"n": 1})
+        fenced_saver.put(_turn_config("thread-fenced", live), checkpoint, _metadata(), {})
+        _set_status(fenced_engine, live, "cancelled")
+        before = _everything(fenced_engine)
+        assert len(before["graph_checkpoints"]) == 1, "the live put did not land"
+
+        with pytest.raises(TurnFencedError) as excinfo:
+            fenced_saver.put_writes(
+                _turn_config("thread-fenced", live, checkpoint["id"]),
+                [("slides", {3}), ("__error__", "x")],
+                "task-abandoned",
+            )
+
+        assert excinfo.value.request_id == live
+        assert _everything(fenced_engine) == before, (
+            "a cancelled turn wrote pending writes"
+        )
+
+    def test_the_context_var_alone_still_fences_put(self, fenced_saver, fenced_engine):
+        """Fallback: no id in the config, the turn's id in the ContextVar."""
+        rid = _seed_request(fenced_engine, "cancelled")
+        before = _everything(fenced_engine)
+
+        token = chat_request_id_var.set(rid)
+        try:
+            with pytest.raises(TurnFencedError):
+                fenced_saver.put(
+                    _config("thread-fenced"), _checkpoint({"n": 1}), _metadata(), {}
+                )
+        finally:
+            chat_request_id_var.reset(token)
+
+        assert _everything(fenced_engine) == before
+
+    def test_put_and_put_writes_land_while_live(self, fenced_saver, fenced_engine):
+        rid = _seed_request(fenced_engine, "running")
+        requests_before = _table_rows(fenced_engine, "chat_requests")
+        checkpoint = _checkpoint({"n": 1})
+
+        with _transactions(fenced_engine) as transactions:
+            fenced_saver.put(
+                _turn_config("thread-live", rid), checkpoint, _metadata(), {}
+            )
+            fenced_saver.put_writes(
+                _turn_config("thread-live", rid, checkpoint["id"]),
+                [("slides", {7})],
+                "task-live",
+            )
+
+        tup = fenced_saver.get_tuple(_config("thread-live"))
+        assert tup is not None and tup.checkpoint["id"] == checkpoint["id"]
+        assert tup.pending_writes == [("task-live", "slides", {7})]
+        _assert_claim_opens_the_write(transactions, "graph_checkpoints")
+        _assert_claim_opens_the_write(transactions, "graph_checkpoint_writes")
+        assert _table_rows(fenced_engine, "chat_requests") == requests_before
+
+    def test_the_saver_is_unfenced_without_a_request_id(
+        self, fenced_saver, fenced_engine
+    ):
+        """No id in the config or the ContextVar: writes land and no claim is sent,
+        even beside a cancelled request (a sweeper turn, a clear, a test)."""
+        _seed_request(fenced_engine, "cancelled")
+        checkpoint = _checkpoint({"n": 1})
+
+        with _transactions(fenced_engine) as transactions:
+            fenced_saver.put(_config("thread-free"), checkpoint, _metadata(), {})
+            fenced_saver.put_writes(
+                _config("thread-free", checkpoint["id"]), [("slides", {1})], "task-free"
+            )
+
+        assert fenced_saver.get_tuple(_config("thread-free")).pending_writes == [
+            ("task-free", "slides", {1})
+        ]
+        claims = [
+            s for t in transactions for s in t
+            if (m := _WRITE_RE.match(s)) and m.group(1).lower() == "chat_requests"
+        ]
+        assert claims == []
+
+    def test_fanned_put_writes_refused_after_cancel(self, fenced_saver, fenced_engine):
+        """A real compiled graph: the stop lands while Send-fanned workers run.
+
+        The id is in BOTH carriers, as invoke_graph sets them. Each worker passes
+        through one lock; the first one in cancels the request and records every
+        checkpoint row, so every worker's ``put_writes`` (made after its body
+        returns, from the future's done-callback) comes after the cancel. Against
+        a fence reading only the ContextVar those writes land: LangGraph makes
+        them outside the task's context, where the ContextVar is None.
+        """
+        rid = _seed_request(fenced_engine, "running")
+        thread_id = "thread-fanned"
+        lock = threading.Lock()
+        at_cancel: dict = {}
+        worker_calls: list[int] = []
+
+        def head(state):
+            return {"log": ["head"]}
+
+        def fan(state):
+            return [Send("worker", {"log": [n]}) for n in range(3)]
+
+        def worker(payload):
+            with lock:
+                worker_calls.append(payload["log"][0])
+                if not at_cancel:
+                    # The turn's earlier checkpoints are in flight on LangGraph's
+                    # background executor; wait for one so the entry assertion
+                    # below is about this turn, not about an empty table.
+                    deadline = time.monotonic() + 5
+                    while (
+                        _count(fenced_engine, "graph_checkpoints", thread_id) == 0
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.01)
+                    _set_status(fenced_engine, rid, "cancelled")
+                    at_cancel["checkpoints"] = _table_rows(
+                        fenced_engine, "graph_checkpoints"
+                    )
+                    at_cancel["writes"] = _table_rows(
+                        fenced_engine, "graph_checkpoint_writes"
+                    )
+            return {"log": [f"worker-{payload['log'][0]}"]}
+
+        builder = StateGraph(_GraphState)
+        builder.add_node("head", head)
+        builder.add_node("worker", worker)
+        builder.add_edge(START, "head")
+        builder.add_conditional_edges("head", fan, ["worker"])
+        builder.add_edge("worker", END)
+        graph = builder.compile(checkpointer=fenced_saver)
+
+        config = {
+            "configurable": {"thread_id": thread_id, "chat_request_id": rid},
+            "max_concurrency": 4,
+        }
+        raised = None
+        token = chat_request_id_var.set(rid)
+        try:
+            graph.invoke({"log": []}, config)
+        except Exception as exc:  # noqa: BLE001 - asserted below
+            raised = exc
+        finally:
+            chat_request_id_var.reset(token)
+
+        assert sorted(worker_calls) == [0, 1, 2], "the fan-out did not run"
+        assert at_cancel["checkpoints"], (
+            "no checkpoint landed while the turn was live; the test proves nothing"
+        )
+        writes_after = _table_rows(fenced_engine, "graph_checkpoint_writes")
+        pushed = [
+            (w["task_path"], w["channel"])
+            for w in writes_after
+            if (w["task_path"] or "").startswith("~__pregel_push")
+        ]
+        assert pushed == [], (
+            f"Send-fanned tasks' writes landed after the cancel: {pushed}"
+        )
+        assert writes_after == at_cancel["writes"], (
+            "pending writes landed after the cancel"
+        )
+        assert _table_rows(fenced_engine, "graph_checkpoints") == at_cancel["checkpoints"], (
+            "a checkpoint landed after the cancel"
+        )
+        assert isinstance(raised, TurnFencedError), (
+            f"the stopped graph run did not end on the refusal; it raised {raised!r}"
+        )
+
+
+# -- the rollback's helpers: latest_checkpoint_id, delete_checkpoints_after ----
+
+
+class TestTheRollbackHelpers:
+    """Both span EVERY ``checkpoint_ns`` of the thread (not only the default one
+    ``_SELECT_LATEST_CHECKPOINT`` filters on), and both run on the caller's
+    session without committing, like ``delete_thread(session=)``."""
+
+    @staticmethod
+    def _put(saver, thread_id, ns="", parent=None, n=0, writes=True) -> str:
+        checkpoint = _checkpoint({"n": n})
+        saver.put(_config(thread_id, parent, ns), checkpoint, _metadata(step=n), {})
+        if writes:
+            saver.put_writes(
+                _config(thread_id, checkpoint["id"], ns),
+                [("slides", {n}), ("__interrupt__", f"halt-{n}")],
+                f"task-{thread_id}-{ns or 'root'}-{n}",
+            )
+        return checkpoint["id"]
+
+    @pytest.fixture()
+    def history(self, saver):
+        """Thread ``t``: a sub-namespace checkpoint BEFORE c1, then c1 < s1 < c2 < c3
+        interleaving the default and a sub namespace, each with writes; plus one
+        checkpoint on another thread, made last."""
+        t = "thread-rollback"
+        ids = {}
+        ids["s0"] = self._put(saver, t, ns="child:abc", n=0)
+        ids["c1"] = self._put(saver, t, n=1)
+        ids["s1"] = self._put(saver, t, ns="child:abc", parent=ids["s0"], n=2)
+        ids["c2"] = self._put(saver, t, parent=ids["c1"], n=3)
+        ids["c3"] = self._put(saver, t, parent=ids["c2"], n=4)
+        ids["other"] = self._put(saver, "thread-other", n=5)
+        assert sorted(ids.values()) == [
+            ids["s0"], ids["c1"], ids["s1"], ids["c2"], ids["c3"], ids["other"]
+        ], "UUID6 ids were not minted in creation order; the fixture is wrong"
+        return t, ids
+
+    @staticmethod
+    def _rows(engine, table, thread_id=None):
+        rows = _table_rows(engine, table)
+        return [r for r in rows if thread_id is None or r["thread_id"] == thread_id]
+
+    def test_latest_checkpoint_id_is_the_newest_across_namespaces(
+        self, saver, saver_engine, history
+    ):
+        t, ids = history
+        with sessionmaker(bind=saver_engine)() as s:
+            assert saver.latest_checkpoint_id(t, session=s) == ids["c3"]
+            assert saver.latest_checkpoint_id("thread-unknown", session=s) is None
+
+        # The newest of the thread is in a NON-default namespace: the default-only
+        # query (_SELECT_LATEST_CHECKPOINT) would still answer c3.
+        newest = self._put(saver, t, ns="child:abc", parent=ids["s1"], n=9)
+        with sessionmaker(bind=saver_engine)() as s:
+            assert saver.latest_checkpoint_id(t, session=s) == newest
+
+    def test_delete_checkpoints_after_keeps_earlier(self, saver, saver_engine, history):
+        t, ids = history
+        before_cp = self._rows(saver_engine, "graph_checkpoints")
+        before_w = self._rows(saver_engine, "graph_checkpoint_writes")
+        kept_ids = {ids["s0"], ids["c1"], ids["other"]}
+
+        s = sessionmaker(bind=saver_engine)()
+        try:
+            saver.delete_checkpoints_after(t, ids["c1"], session=s)
+            s.commit()
+            assert saver.latest_checkpoint_id(t, session=s) == ids["c1"]
+        finally:
+            s.close()
+
+        # Exactly the rows at or before c1 (in every namespace), and the other
+        # thread's, survive -- byte-identical, every column.
+        assert self._rows(saver_engine, "graph_checkpoints") == [
+            r for r in before_cp if r["checkpoint_id"] in kept_ids
+        ]
+        assert self._rows(saver_engine, "graph_checkpoint_writes") == [
+            r for r in before_w if r["checkpoint_id"] in kept_ids
+        ]
+        # Entry assertion: the deleted set was not empty, and spanned both
+        # namespaces.
+        gone = {
+            (r["checkpoint_ns"], r["checkpoint_id"])
+            for r in before_cp
+            if r["checkpoint_id"] not in kept_ids
+        }
+        assert gone == {
+            ("child:abc", ids["s1"]),
+            ("", ids["c2"]),
+            ("", ids["c3"]),
+        }
+        assert saver.get_tuple(_config(t)).checkpoint["id"] == ids["c1"]
+
+    def test_delete_checkpoints_after_none_clears_thread(
+        self, saver, saver_engine, history
+    ):
+        t, ids = history
+        other_cp = self._rows(saver_engine, "graph_checkpoints", "thread-other")
+        other_w = self._rows(saver_engine, "graph_checkpoint_writes", "thread-other")
+        assert other_cp and other_w
+
+        s = sessionmaker(bind=saver_engine)()
+        try:
+            saver.delete_checkpoints_after(t, None, session=s)
+            s.commit()
+        finally:
+            s.close()
+
+        assert _count(saver_engine, "graph_checkpoints", t) == 0
+        assert _count(saver_engine, "graph_checkpoint_writes", t) == 0
+        assert self._rows(saver_engine, "graph_checkpoints", "thread-other") == other_cp
+        assert self._rows(saver_engine, "graph_checkpoint_writes", "thread-other") == other_w
+
+    def test_delete_checkpoints_after_runs_on_the_callers_transaction(
+        self, saver, saver_engine, history
+    ):
+        """No commit inside: the caller's rollback undoes it, the caller's commit
+        keeps it, and another connection sees nothing until the caller commits."""
+        t, ids = history
+        before_cp = self._rows(saver_engine, "graph_checkpoints")
+        before_w = self._rows(saver_engine, "graph_checkpoint_writes")
+
+        s = sessionmaker(bind=saver_engine)()
+        try:
+            saver.delete_checkpoints_after(t, ids["c1"], session=s)
+            # It ran on THIS session, so the rollback below is not vacuous ...
+            assert saver.latest_checkpoint_id(t, session=s) == ids["c1"]
+            # ... and committed nothing: another connection still sees c3.
+            assert self._rows(saver_engine, "graph_checkpoints") == before_cp
+            s.rollback()
+        finally:
+            s.close()
+
+        assert self._rows(saver_engine, "graph_checkpoints") == before_cp
+        assert self._rows(saver_engine, "graph_checkpoint_writes") == before_w
 
 
 # ---------------------------------------------------------------------------

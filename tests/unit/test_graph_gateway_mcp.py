@@ -455,6 +455,7 @@ def _architect(env, state: Dict[str, Any]) -> SimpleNamespace:
     before = len(sm.get_messages(state["session_id"]))
     emitter: queue.Queue = queue.Queue()
     set_event_emitter(emitter)
+    env.seed_running_request(REQUEST_ID)
     set_chat_request_id(REQUEST_ID)
     try:
         updates = architect_node(state)
@@ -2011,6 +2012,7 @@ def _branch_state(env, spec, *, gateway: Optional[str] = TURN, images: Sequence[
 def _run_builder(env, payload: Dict[str, Any], html: str) -> SimpleNamespace:
     env.skills.set("builder", lambda p: builder_out(p, html=html))
     before = len(env.messages())
+    env.seed_running_request(REQUEST_ID)
     set_chat_request_id(REQUEST_ID)
     try:
         updates = builder_node(payload)
