@@ -227,6 +227,89 @@ describe('MCP edit panel', () => {
   });
 });
 
+/**
+ * Switching to another tool while a panel is open remounts the panel (it is keyed on the tool's
+ * identity), so the second tool is shown, and saved, with its own state, never the first's.
+ * Sabotage: drop the `key` on ToolEditPanel / ToolDetailPanel in AgentConfigBar.
+ */
+describe('switching tools while a panel is open', () => {
+  it('opening chip B while chip A is being edited saves B with its own agent and description', () => {
+    configState.tools = [
+      { type: 'mcp', connection_name: 'a', server_name: 'A server', description: 'A desc', agent: 'architect' },
+      { type: 'mcp', connection_name: 'b', server_name: 'B server', description: 'B desc', agent: 'data_analyst' },
+    ];
+    render(<AgentConfigBar />);
+    fireEvent.click(screen.getByTestId('agent-config-toggle'));
+    const [chipA, chipB] = screen.getAllByTestId('tool-chip-label');
+
+    fireEvent.click(chipA);
+    expect(
+      (within(screen.getByTestId('tool-edit-panel')).getByRole('radio', { name: /^Architect/ }) as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+
+    fireEvent.click(chipB);
+    const panel = screen.getByTestId('tool-edit-panel');
+    expect(
+      (within(panel).getByRole('radio', { name: /^Data analyst/ }) as HTMLInputElement).checked,
+    ).toBe(true);
+    fireEvent.click(within(panel).getByRole('button', { name: 'Save' }));
+
+    expect(configState.updateToolEntry).toHaveBeenCalledTimes(1);
+    expect(configState.updateToolEntry.mock.calls[0][0]).toEqual({
+      type: 'mcp',
+      connection_name: 'b',
+      server_name: 'B server',
+      description: 'B desc',
+      agent: 'data_analyst',
+    });
+  });
+
+  it('previewing connection Y after choosing Architect for X shows Data analyst and Y', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: () =>
+            Promise.resolve(
+              String(url).endsWith('/api/tools/discover/mcp')
+                ? {
+                    items: [
+                      { id: 'x_conn', name: 'X server' },
+                      { id: 'y_conn', name: 'Y server' },
+                    ],
+                  }
+                : { items: [] },
+            ),
+        }),
+      ),
+    );
+    render(<AgentConfigBar />);
+    fireEvent.click(screen.getByTestId('agent-config-toggle'));
+    fireEvent.click(screen.getByTestId('toggle-other-tools'));
+
+    fireEvent.click(screen.getByTestId('add-tool-mcp'));
+    fireEvent.click(await screen.findByRole('button', { name: 'X server' }));
+    let panel = screen.getByTestId('tool-detail-panel');
+    fireEvent.click(within(panel).getByRole('radio', { name: /^Architect/ }));
+    expect(
+      (within(panel).getByRole('radio', { name: /^Architect/ }) as HTMLInputElement).checked,
+    ).toBe(true);
+
+    fireEvent.click(screen.getByTestId('add-tool-mcp'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Y server' }));
+    panel = screen.getByTestId('tool-detail-panel');
+    expect(
+      (within(panel).getByRole('radio', { name: /^Data analyst/ }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect(within(panel).getByDisplayValue('Y server')).toBeInTheDocument();
+    expect(within(panel).queryByDisplayValue('X server')).toBeNull();
+  });
+});
+
 /** The chip suffix: a span whose text is exactly `text` (leading space included). */
 const suffix = (text: string) =>
   screen.getByText((_c, el) => el?.tagName === 'SPAN' && el.textContent === text && el.children.length === 0);

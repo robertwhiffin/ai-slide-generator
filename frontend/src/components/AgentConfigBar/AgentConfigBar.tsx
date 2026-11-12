@@ -134,6 +134,21 @@ const ToolChip: React.FC<{
 };
 
 /**
+ * The identity of the tool an edit panel or add panel is showing. Each panel is keyed on it,
+ * so switching to another tool remounts the panel and re-reads its initial state (description,
+ * agent, display name). Without it a switch would save the first tool's state onto the second.
+ */
+const editPanelKey = (tool: MCPTool | VectorIndexTool | ModelEndpointTool | AgentBricksTool): string =>
+  tool.type === 'mcp' ? `mcp:${tool.connection_name}`
+    : tool.type === 'vector_index' ? `vector_index:${tool.endpoint_name}:${tool.index_name}`
+    : `${tool.type}:${tool.endpoint_name}`;
+
+const previewPanelKey = (preview: ToolPreviewData): string =>
+  preview.toolType === 'mcp' ? `mcp:${preview.connectionName}`
+    : preview.toolType === 'vector_index' ? `vector_index:${preview.endpointName}:${preview.indexName}`
+    : `${preview.toolType}:${preview.endpointName}`;
+
+/**
  * Generic edit panel for non-Genie tool types.
  * Shows read-only tool identity fields and an editable description.
  */
@@ -715,6 +730,7 @@ export const AgentConfigBar: React.FC = () => {
           )}
           {editingNonGenieTool && (
             <ToolEditPanel
+              key={editPanelKey(editingNonGenieTool)}
               tool={editingNonGenieTool}
               onSave={handleNonGenieToolSave}
               onCancel={handleDetailCancel}
@@ -722,6 +738,7 @@ export const AgentConfigBar: React.FC = () => {
           )}
           {toolPreview && (
             <ToolDetailPanel
+              key={previewPanelKey(toolPreview)}
               preview={toolPreview}
               mode="add"
               onSave={handleToolPreviewSave}

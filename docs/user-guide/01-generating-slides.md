@@ -125,7 +125,7 @@ To remove one exchange from the conversation, hover over one of your messages in
 
 ## Choosing the Agent for an MCP Server
 
-When you add or edit an MCP Server in the agent config bar, the panel asks **Which agent uses it?** Pick **Data analyst** for servers that fetch data for charts and tables. Pick **Architect** for servers that fetch other context for planning the slides, such as documents, pages or references. The chip shows the agent after the server name. On an agent-mode deck, Vector Index, Agent Bricks and Model Endpoint tools are marked "not used in agent mode", and the Tools row offers only Genie Agents and MCP Servers.
+When you add or edit an MCP Server in the agent config bar, the panel asks **Which agent uses it?** Pick **Data analyst** for servers that fetch data for charts and tables. Pick **Architect** for servers that fetch other context for planning the slides, such as documents, pages or references. The chip shows the agent after the server name. On an agent-mode deck, Vector Index, Agent Bricks and Model Endpoint tools are marked "not used in agent mode", and **Other tools** offers only Genie Agents and MCP Servers on agent decks.
 
 ## Navigating Slides
 

@@ -23,6 +23,7 @@ export function toMcpToolEntry(tool: AvailableTool): MCPTool {
     connection_name: tool.connection_name!,
     server_name: tool.server_name ?? tool.connection_name!,
     config: undefined,
+    agent: 'data_analyst',
   };
 }
 
