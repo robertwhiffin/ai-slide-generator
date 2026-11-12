@@ -10,12 +10,28 @@ Real-model runs; results are logged to MLflow.
   `v1-baseline` is the frozen manifest unchanged. YAML configs override the prompt and/or model
   settings. Each config carries a `content_hash`, logged with every run.
 - **Cases** (`evals/packs/<agent>/cases/<case_id>/`). Five per agent (eight for the builder, seven
-  for the build_reviewer, twenty-two for the architect), 57 in total across the seven
+  for the build_reviewer, twenty-eight for the architect), 63 in total across the seven
   roles (`architect`, `data_analyst`, `builder`, `build_reviewer`, `fixer`, `fix_reviewer`,
   `deck_reviewer`). Each case holds `case.yaml` (`kind` positive or mutation, `fault`, `expect`,
   `design_system_active`), `payload.json` (the agent input), `reference.json` (a known-good output)
-  and `calibration.json` (a `should_fail` output). The architect's two newest cases,
-  `fill_blank_slide` (the user names a manually inserted blank slide by its number and asks for
+  and `calibration.json` (a `should_fail` output). The architect's six `stage_*` cases per split
+  (`evals/packs/architect/stage_cases.py`) are the only payloads with a non-null `stage_slide`, the
+  slide on screen when the message was sent; every other architect payload carries
+  `"stage_slide": null`, as production does with no slide on stage.
+  - *Targeted validation 2026-11-12*, on architect content `d6e077d5…`: train 6/6
+    (run `f2eef0c9aa8e4447b83d1e4de5107384`), held-out 6/6 production contract and
+    intent/operation/layout checks (run `5b63d42f469448f4a63dd886038155e0`), with all
+    5 trusted held-out LLM judges passing. One repeat per case; no held-out per-case
+    candidate outputs or rationales were inspected. This validates the new stage cases,
+    not the full pack or a multi-repeat optimisation winner.
+  - All 6 train calibrations were trusted. On held-out, the `stage_move` judge accepted
+    its deliberately reversed move, while production's deterministic layout check rejected
+    it. For this validation only, the user explicitly approved production scoring for
+    that case and trusted LLM judging for the other 5. No reference, calibration, judge
+    prompt or scoring criterion was changed. A separate held-out judge parse error was
+    retried once and calibrated successfully.
+
+  The architect's cases `fill_blank_slide` (the user names a manually inserted blank slide by its number and asks for
   content on it: it is filled in place, with no new slide beside it) and `edit_beside_blank` (the
   user asks to change the slide after the blank: only that slide changes and the blank stays blank),
   run on a deck that holds the blank.
@@ -181,7 +197,7 @@ data_analyst prompt mentions Genie and a vector index, but neither is available 
 ## Held-out set
 
 Each agent has a second, separate set of cases (five per agent, eight for the builder, seven for
-the build_reviewer, twenty-two for the architect; 57 in total) in `evals/packs/<agent>/cases_heldout/`,
+the build_reviewer, twenty-eight for the architect; 63 in total) in `evals/packs/<agent>/cases_heldout/`,
 built from a different source deck than the train cases. It has the same four files per case and
 shares each agent's `judge_prompt.md`. Its purpose is to check that a configuration tuned on the train
 cases generalises, rather than having been fitted to them.

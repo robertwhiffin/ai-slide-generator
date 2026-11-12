@@ -163,6 +163,7 @@ OLD_ARCHITECT_KEYS = frozenset(
         "committed_slide_count",
         "slide_numbering",
         "slide_references",
+        "stage_slide",
         "previous_deck_review",
         "available_design_contract",
         "template_sections",

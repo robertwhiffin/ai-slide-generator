@@ -1,0 +1,28 @@
+{
+  "intent": "edit",
+  "message": "I'll change the title of slide 3 to 'What HTML slides are'.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 2,
+      "after_position": null,
+      "slides": [
+        {
+          "purpose": "Introduce HTML slides as the modern alternative",
+          "content_brief": "Title the slide 'What HTML slides are'. Define what HTML slides are — presentations built with HTML, CSS, and JavaScript rendered in a browser. Name leading frameworks (Reveal.js, Slidev, Marp, Impress.js). Feature the callout stat that 98% of devices have a modern browser, making every device a presentation engine",
+          "assumes": "The audience understands that websites are built with HTML/CSS/JS",
+          "hands_off": "HTML slides turn the browser into a full-featured, universally available presentation platform",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null,
+          "look": null
+        }
+      ]
+    }
+  ],
+  "deck_changes": null
+}

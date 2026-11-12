@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 're
 import { useNavigate } from 'react-router-dom';
 import { Bot, Eraser } from 'lucide-react';
 import type { Message } from '../../types/message';
-import type { ReplacementInfo, SlideDeck } from '../../types/slide';
+import type { ReplacementInfo, SlideDeck, StageSlideContext } from '../../types/slide';
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { DeckModeSelect } from './DeckModeSelect';
@@ -68,6 +68,8 @@ interface ChatPanelProps {
    *  the success path (survey trigger, "saved just now", versions reload). */
   onDeckRefetched?: (slideDeck: SlideDeck) => void;
   ensureGraphCapableRoot: () => Promise<boolean>;
+  /** Synchronous read of the slide on stage; sent with Agent turns only. */
+  getStageSlide?: () => StageSlideContext | undefined;
   disabled?: boolean;
   previewMessages?: Message[] | null;  // When provided, show these instead of live messages
   viewOnlyReason?: string;  // When provided, show why the user cannot edit
@@ -117,6 +119,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   onSlideReady,
   onDeckRefetched,
   ensureGraphCapableRoot,
+  getStageSlide,
   disabled = false,
   previewMessages = null,
   viewOnlyReason,
@@ -350,6 +353,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     if (isDeletingMessage) {
       return;
     }
+
+    // Agent turns carry the slide on stage. Snapshot (copy) it now, before the first await, so paging
+    // or mutation while the root is persisted cannot retarget the send. Legacy turns send none.
+    const staged = (storedDeckMode ?? selectedDeckMode) === 'agent' ? getStageSlide?.() : undefined;
+    const stageSlide: StageSlideContext | undefined = staged ? { ...staged } : undefined;
 
     // A browser-local root must be made graph-capable before a graph turn.
     // Failed persistence deliberately sends no chat request.
@@ -585,6 +593,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       imageIds,
       configIsForThisSession ? agentConfig : undefined,
       deckMode,
+      deckMode === 'agent' ? stageSlide : undefined,
     );
   };
 

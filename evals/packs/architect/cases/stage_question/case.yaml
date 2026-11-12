@@ -1,0 +1,6 @@
+kind: mutation
+fault: 'a question about the stage slide, slide 8 (position 7), is answered with discuss:
+  it does not edit the slide'
+expect:
+  intent: discuss
+design_system_active: true

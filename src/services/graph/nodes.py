@@ -4698,6 +4698,13 @@ def architect_node(state: dict) -> Dict[str, Any]:
         state.get("architect_message"),
         _deck_positions(committed_positions, prior_spec),
         describe_only=describe_only,
+        # The Stage Slide: read ONLY through scoped_vals (a raw or earlier
+        # turn's value is no stage) and resolved against THIS deck's committed
+        # rows, by stable id first and never falling back to the number.  The
+        # rows always go in (``[]`` included), so the payload always carries
+        # ``stage_slide``; the resolved value is ints only.
+        stage_slide=scoped_vals(state, "stage_slide"),
+        slide_rows=committed_rows,
     )
 
     # The model-facing payload is content only (#258, user decision): no
@@ -4716,6 +4723,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
         # of computing them.
         "slide_numbering": slide_payload["slide_numbering"],
         "slide_references": slide_payload["slide_references"],
+        # The slide on the viewer's stage at send time, as its CURRENT
+        # ``{"slide_number", "position"}``, or null.  Context only: it never
+        # adds to slide_references or sets this turn's targets.
+        "stage_slide": slide_payload["stage_slide"],
         "previous_deck_review": prior_review,
         "available_design_contract": (
             inbound_contract.model_dump() if inbound_contract else None

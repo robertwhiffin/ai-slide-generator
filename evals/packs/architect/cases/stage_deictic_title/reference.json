@@ -1,0 +1,28 @@
+{
+  "intent": "edit",
+  "message": "I'll retitle slide 5 'Typography that holds'.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 4,
+      "after_position": null,
+      "slides": [
+        {
+          "purpose": "Evidence beat 2 — Typography and design fidelity",
+          "content_brief": "Title the slide 'Typography that holds'. Explain that HTML slides use CSS for pixel-perfect typography: web fonts load reliably, kerning and line-height are precise, and there is no font-substitution problem. Bullet points contrasting CSS type control with PowerPoint's font embedding issues, with a callout featuring the 1,700+ Google Fonts available",
+          "assumes": "The audience has seen a PowerPoint deck where fonts broke on a different machine",
+          "hands_off": "CSS gives presenters typographic control that PowerPoint simply cannot match",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null,
+          "look": null
+        }
+      ]
+    }
+  ],
+  "deck_changes": null
+}

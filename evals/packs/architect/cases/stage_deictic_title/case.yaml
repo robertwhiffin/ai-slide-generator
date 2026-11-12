@@ -1,0 +1,20 @@
+kind: mutation
+fault: '''this slide'' is the stage slide, slide 5 at position 4; reading the 1-based
+  slide number as a position edits slide 6 instead'
+expect:
+  intent: edit
+  positions:
+  - 4
+  inserted: []
+  layout:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+design_system_active: true
