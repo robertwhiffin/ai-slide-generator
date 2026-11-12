@@ -13,6 +13,7 @@ from src.database.models.design_system import (
 from src.database.models.encryption_key import EncryptionKey
 from src.database.models.feedback import FeedbackConversation, SurveyResponse
 from src.database.models.gateway_mcp_connection import GatewayMcpConnection
+from src.database.models.generation_snapshot import GenerationSnapshot
 from src.database.models.genie_space import ConfigGenieSpace
 from src.database.models.google_global_credentials import GoogleGlobalCredentials
 from src.database.models.google_oauth_token import GoogleOAuthToken
@@ -79,6 +80,7 @@ __all__ = [
     "ExportJob",
     "FeedbackConversation",
     "GatewayMcpConnection",
+    "GenerationSnapshot",
     "GoogleGlobalCredentials",
     "GoogleOAuthToken",
     "GraphCheckpoint",
