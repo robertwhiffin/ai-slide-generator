@@ -4012,6 +4012,7 @@ class SessionManager:
 
             session.is_processing = True
             session.processing_started_at = datetime.utcnow()
+            session.processing_request_id = None
 
             logger.info(
                 "Acquired session lock",
@@ -4047,30 +4048,54 @@ class SessionManager:
             )
             return bool(updated)
 
-    def release_session_lock(self, session_id: str) -> None:
-        """Release processing lock for a session.
-
-        Args:
-            session_id: Session to unlock
-        """
+    def bind_session_lock(self, session_id: str, request_id: str) -> None:
+        """Record which request owns the held lock (only where ``is_processing``)."""
         with get_db_session() as db:
-            session = (
-                db.query(UserSession)
-                .filter(UserSession.session_id == session_id)
-                .first()
+            db.execute(
+                update(UserSession)
+                .where(
+                    UserSession.session_id == session_id,
+                    UserSession.is_processing.is_(True),
+                )
+                .values(processing_request_id=request_id)
+                .execution_options(synchronize_session=False)
             )
 
-            # If session doesn't exist, nothing to unlock
-            if not session:
-                return
+    def release_session_lock(
+        self, session_id: str, request_id: Optional[str] = None
+    ) -> bool:
+        """Release processing lock for a session.
 
-            session.is_processing = False
-            session.processing_started_at = None
+        With ``request_id`` the release is one conditional UPDATE and happens only
+        while that request still owns the lock; without it, as before.
 
+        Returns:
+            True if a lock was released.
+        """
+        with get_db_session() as db:
+            conditions = [UserSession.session_id == session_id]
+            if request_id is not None:
+                conditions.append(UserSession.processing_request_id == request_id)
+            else:
+                conditions.append(UserSession.is_processing.is_(True))
+            result = db.execute(
+                update(UserSession)
+                .where(*conditions)
+                .values(
+                    is_processing=False,
+                    processing_started_at=None,
+                    processing_request_id=None,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            released = result.rowcount == 1
+
+        if released:
             logger.info(
                 "Released session lock",
                 extra={"session_id": session_id},
             )
+        return released
 
     # Chat request operations (for polling-based streaming)
     def create_chat_request(

@@ -278,9 +278,9 @@ def env(client, factory):
     releases: List[str] = []
     real_release = SessionManager.release_session_lock
 
-    def counting_release(self, session_id):
+    def counting_release(self, session_id, request_id=None):
         releases.append(session_id)
-        return real_release(self, session_id)
+        return real_release(self, session_id, request_id)
 
     service = MagicMock()
     service.send_message_streaming.side_effect = _complete

@@ -615,7 +615,7 @@ class TestResolutionFailureFailsTheTurnClosed:
             )
         self._assert_typed_503(response)
         route_env["enqueue"].assert_not_awaited()
-        route_env["manager"].release_session_lock.assert_called_once_with(sid)
+        route_env["manager"].release_session_lock.assert_called_once_with(sid, "req-ws4d")
         route_env["manager"].create_chat_request.assert_called_once()
         route_env["manager"].add_user_message.assert_called_once()
 
@@ -638,7 +638,7 @@ class TestResolutionFailureFailsTheTurnClosed:
         assert response.status_code == 500, response.text
         assert response.json() == {"detail": "Internal server error"}
         route_env["enqueue"].assert_not_awaited()
-        route_env["manager"].release_session_lock.assert_called_once_with(sid)
+        route_env["manager"].release_session_lock.assert_called_once_with(sid, "req-ws4d")
 
 
 class TestSendMessageNeverReferencesTheGraph:

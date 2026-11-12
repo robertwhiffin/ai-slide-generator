@@ -832,12 +832,18 @@ async def submit_chat_async(
             detail="Session is already processing a request",
         )
 
+    request_id = None
     try:
         # Create request record
         request_id = await asyncio.to_thread(
             session_manager.create_chat_request,
             request.session_id,
             current_user,
+        )
+        # Record which request owns the lock, so a stale release cannot free a
+        # newer request's lock.
+        await asyncio.to_thread(
+            session_manager.bind_session_lock, request.session_id, request_id
         )
 
         # Capture first-message flag BEFORE persisting the user message,
@@ -899,7 +905,7 @@ async def submit_chat_async(
 
     except SessionNotFoundError as e:
         await asyncio.to_thread(
-            session_manager.release_session_lock, request.session_id
+            session_manager.release_session_lock, request.session_id, request_id
         )
         raise HTTPException(
             status_code=404,
@@ -907,18 +913,18 @@ async def submit_chat_async(
         ) from e
     except _EngineModeUnresolvedError as e:
         await asyncio.to_thread(
-            session_manager.release_session_lock, request.session_id
+            session_manager.release_session_lock, request.session_id, request_id
         )
         raise _engine_mode_unavailable() from e.__cause__
     except DeckModeLockedError as e:
         await asyncio.to_thread(
-            session_manager.release_session_lock, request.session_id
+            session_manager.release_session_lock, request.session_id, request_id
         )
         await _mark_chat_request_error(session_manager, request_id, DECK_MODE_LOCKED_CODE)
         raise _deck_mode_locked(e) from e
     except ActiveGraphReleaseUnavailableError as e:
         await asyncio.to_thread(
-            session_manager.release_session_lock, request.session_id
+            session_manager.release_session_lock, request.session_id, request_id
         )
         await _mark_chat_request_error(
             session_manager, request_id, "no_active_graph_release"
@@ -930,7 +936,7 @@ async def submit_chat_async(
     except Exception as e:
         # Release lock on failure
         await asyncio.to_thread(
-            session_manager.release_session_lock, request.session_id
+            session_manager.release_session_lock, request.session_id, request_id
         )
         logger.error(f"Failed to submit async chat: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

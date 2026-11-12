@@ -179,8 +179,10 @@ class FakeDeckStore:
     def acquire_session_lock(self, session_id: str, timeout_seconds: int = 300) -> bool:
         return True
 
-    def release_session_lock(self, session_id: str) -> None:
-        pass
+    def release_session_lock(
+        self, session_id: str, request_id: Optional[str] = None
+    ) -> bool:
+        return True
 
     def get_verification_map(self, session_id: str) -> Dict[str, Any]:
         return {}

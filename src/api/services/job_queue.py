@@ -310,8 +310,13 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         raise
 
     finally:
-        # Always release session lock
-        session_manager.release_session_lock(session_id)
+        # Always release session lock.  Graph requests bind the lock to their
+        # request id, so release only while this request still owns it; monolith
+        # requests (including every MCP job) never bind and release as before.
+        if payload.get("engine_mode") == "graph":
+            session_manager.release_session_lock(session_id, request_id=request_id)
+        else:
+            session_manager.release_session_lock(session_id)
         # Clean up in-memory tracking
         jobs.pop(request_id, None)
 
