@@ -108,6 +108,12 @@ git log --format='%H %s' '<merge sha>^1..<merge sha>^2' | grep -E 'Merge pull re
   are not failures.
 - A squash-merged stacked PR leaves no merge commit. If its squash subject also lost its `(#N)`,
   only the `gh` line finds it. Run both.
+- The `git` line is for PRs merged with a merge commit. A squash-merged PR (its first-parent
+  subject ends in `(#N)`) has no `^2`, so `git log` fails with `unknown revision`. Use only the
+  `gh` line for it.
+- Commits on a long feature branch often end in `(#<issue>)`, so the `git` line can print one
+  issue number many times. Read each number once. If `gh pr view <N>` says
+  `Could not resolve to a PullRequest`, N is an issue, not a PR: skip it.
 
 Read any stacked PR with `gh pr view`, and fold it into its parent's bullet.
 
@@ -380,6 +386,9 @@ or more, so run the watch in the background:
 gh pr checks <n> --watch --interval 60
 ```
 
+If it says `no checks reported` straight after `gh pr create`, CI hasn't registered yet. Wait a
+minute and run it again.
+
 Then confirm that the What's new spec ran rather than skipped. It is in shard 3 today; if the
 grep prints nothing, find its shard in the E2E matrix in `.github/workflows/test.yml`:
 
@@ -429,14 +438,17 @@ Find the merge commit and check what you are about to tag:
 gh pr view <n> --json state,mergeCommit        # state MERGED; mergeCommit.oid is <merge sha>
 git fetch origin
 git log -1 --format='%H %s' <merge sha>        # Merge pull request #<n> from robertwhiffin/release/v<version>
+git log -1 --format=%P <merge sha>             # must print: <main sha> <full head sha>
 git show <merge sha>:packages/databricks-tellr/pyproject.toml | grep '^version'
 git show <merge sha>:packages/databricks-tellr-app/pyproject.toml | grep '^version'
 git show <merge sha>:frontend/src/whatsNew/releases/<version>.json
 git ls-remote --tags origin v<version>         # must print nothing
 ```
 
-Both versions must be `<version>`, and the notes must be the approved ones. If anything is off,
-stop and tell the owner. Don't tag.
+Both versions must be `<version>`, and the notes must be the approved ones. The merge's first
+parent must be the main SHA from Step 1. `main` has no up-to-date rule, so if a peer merged
+something after your last check, GitHub still merges, and the tag would ship PRs that are not in
+the notes. If anything is off, stop and tell the owner. Don't tag.
 
 Tag and push:
 
@@ -488,7 +500,7 @@ you're done.
 | The global pre-push hook takes about 3 minutes, on both the branch push and the tag push. | It isn't hung. Give the command a 10-minute timeout, and don't interrupt it. |
 | In a worktree-isolated session, `git` and `gh` inside `$(…)` or a `for` loop are refused. | Run each command on its own, and type full SHAs literally (for example in `--match-head-commit`). |
 | PyPI's JSON API may not answer from the laptop. | The publish run's `Uploading` lines are the evidence. Don't poll pypi.org. |
-| `main` can move between drafting and merging, and a peer's `git fetch` moves your `origin/main` too. | Draft against the main SHA recorded in Step 1, typed literally. Re-check `git log --oneline <main sha>..origin/main` before branching and before merging. New commits mean new PRs to draft. |
+| `main` can move between drafting and merging, and a peer's `git fetch` moves your `origin/main` too. | Draft against the main SHA recorded in Step 1, typed literally. Re-check `git log --oneline <main sha>..origin/main` before branching and before merging, and check the merge commit's first parent before tagging. New commits mean new PRs to draft. |
 | The harness can refuse `gh pr merge` on an unreviewed PR. | Ask the owner to run the exact command as `! gh pr merge …`. |
 | The bump PR now runs the frontend suites and E2E, which bump PRs used to skip. | Wait for green. The What's new E2E spec runs for real for the first time on it. |
 | Old tags include `ds-v1-checkpoint`. | Only `vX.Y.Z` tags are releases. Filter them as in Step 1. |

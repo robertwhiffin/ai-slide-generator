@@ -47,8 +47,9 @@ service principal that does not own `devtest_app_data`, so the startup migration
 To cut a final release to PyPI, use the **`release-tellr`** skill
 (`.claude/skills/release-tellr/`). It drafts the "What's new in Tellr" popup wording from the
 PRs merged since the last tag and gets the owner's approval in the terminal before writing
-anything, then opens and merges the bump PR and pushes the `v<version>` tag. The tag push alone
-publishes — the `pypi` environment has no approval gate, and a publish cannot be undone.
+anything, then opens the bump PR. Only after a second, separate go-ahead from the owner does it
+merge that PR and push the `v<version>` tag. The tag push alone publishes — the `pypi`
+environment has no approval gate, and a publish cannot be undone.
 
 The skill **stops at the PyPI publish**. `tellr.update` on logfood and prod, the admin checks,
 any admin Adopt, and syncing the tag to the internal mirror are not part of it.
