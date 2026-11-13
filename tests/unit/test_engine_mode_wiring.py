@@ -139,6 +139,11 @@ def route_env(client, route_db_engine):
         manager.release_session_lock.return_value = None
         manager.create_chat_request.return_value = "req-ws4d"
         manager.get_session.return_value = {"message_count": 1}
+        # The async route reads the stored Deck Mode at Enter to decide whether
+        # to snapshot.  A bare MagicMock is truthy and not "legacy", so every case
+        # would enter as an Agent deck; None (no mode chosen yet) is a fresh deck,
+        # and the Legacy cases set "legacy" (C14).
+        manager.get_deck_mode.return_value = None
         route_sm.return_value = manager
 
         service = MagicMock()
@@ -279,6 +284,7 @@ class TestAsyncRoute:
             ["build me a deck", "turn 2", "turn 3"],
             deck_mode="legacy",
         )
+        route_env["manager"].get_deck_mode.return_value = "legacy"
         assert (
             self._payload(route_env, sid, _PLAIN_MESSAGE)["engine_mode"]
             == "monolith"
@@ -286,6 +292,7 @@ class TestAsyncRoute:
 
     def test_a_monolith_session_is_enqueued_as_monolith(self, route_env):
         sid = _seed_session(route_env["factory"], ["build me a deck"], deck_mode="legacy")
+        route_env["manager"].get_deck_mode.return_value = "legacy"
         payload = self._payload(route_env, sid, _PLAIN_MESSAGE)
         assert payload["engine_mode"] == "monolith"
 

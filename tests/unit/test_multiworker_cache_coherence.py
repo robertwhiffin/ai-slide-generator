@@ -171,6 +171,10 @@ class FakeDeckStore:
         record = self.decks.get(session_id)
         return record["version"] if record else None
 
+    def slide_deck_exists(self, session_id: str) -> bool:
+        """``False`` once the deck is gone (a first-generation rollback deletes it)."""
+        return session_id in self.decks
+
     # -- collaborators ChatService touches during mutations ------------------
 
     def get_session(self, session_id: str) -> Dict[str, Any]:
@@ -343,6 +347,7 @@ _STORE_COLLABORATORS = (
     "save_slide_deck",
     "get_slide_deck",
     "get_slide_deck_version",
+    "slide_deck_exists",
     "deck_mutation_context",
     "get_session",
     "acquire_session_lock",
