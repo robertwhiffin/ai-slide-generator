@@ -1,0 +1,11 @@
+{
+  "version": "0.5.7",
+  "date": "2026-11-13",
+  "items": [
+    { "title": "Native image generation in chat", "body": "Ask for things like \"make an image that represents this slide\" or \"give me an image of a monkey at a keyboard\"." },
+    { "title": "Chat cancellation", "body": "Hit Esc to cancel a generation mid-flow." },
+    { "title": "MCP tool calling in Agent mode", "body": "Add any MCP from the Gateway to your slide agent." },
+    { "title": "Genie Agents in Agent mode", "body": "Add a Genie Agent to your deck to pull figures from its data into your slides." },
+    { "title": "Edit this slide", "body": "In Agent mode, say \"make this slide shorter\" to change the slide you're looking at." }
+  ]
+}
