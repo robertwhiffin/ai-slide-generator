@@ -42,6 +42,25 @@ gh workflow run publish-dev.yml --ref <branch>            # auto-increments the 
 **Always deploy to `devloop`, never `devtest`.** A recreated `devtest` app gets a new
 service principal that does not own `devtest_app_data`, so the startup migration crashes.
 
+## Cutting a release
+
+To cut a final release to PyPI, use the **`release-tellr`** skill
+(`.claude/skills/release-tellr/`). It drafts the "What's new in Tellr" popup wording from the
+PRs merged since the last tag and gets the owner's approval in the terminal before writing
+anything, then opens and merges the bump PR and pushes the `v<version>` tag. The tag push alone
+publishes — the `pypi` environment has no approval gate, and a publish cannot be undone.
+
+The skill **stops at the PyPI publish**. `tellr.update` on logfood and prod, the admin checks,
+any admin Adopt, and syncing the tag to the internal mirror are not part of it.
+
+## PR bodies
+
+Every PR body includes a `## What's new` section in the format of
+`.github/pull_request_template.md`: one `- **Bold lead-in.** One sentence.` bullet per change a
+Tellr user would notice, written for users (no internal terms, no PR numbers), or `None`.
+`gh pr create --body` ignores the template, so this rule is what puts the section there;
+`release-tellr` drafts the popup from it.
+
 ## Agent skills
 
 ### Issue tracker
