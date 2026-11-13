@@ -9,7 +9,7 @@ waits for in-flight writers, and a writer arriving after the cancel is refused.
 
 from __future__ import annotations
 
-from sqlalchemy import text
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db_session
@@ -94,3 +94,24 @@ def turn_is_live(request_id: str) -> bool:
             {"rid": request_id},
         ).scalar()
     return status in LIVE_STATUSES
+
+
+def generation_hold_clause(owner_pk, *, live_only: bool = False):
+    """Predicate on ``generation_snapshots`` rows that hold the deck of *owner_pk*.
+
+    The ONE busy-deck rule: a snapshot on the deck whose request is live, or (unless
+    *live_only*) whose own state is ``restore_failed``.  *owner_pk* is a column or
+    value for ``user_sessions.id`` of the deck owner.  Returns ``(select, where)``:
+    the select is ``GenerationSnapshot`` outer-joined to ``ChatRequest``; callers add
+    columns / ``EXISTS`` around it.
+    """
+    from src.database.models.generation_snapshot import GenerationSnapshot
+    from src.database.models.session import ChatRequest
+
+    held = ChatRequest.status.in_(LIVE_STATUSES)
+    if not live_only:
+        held = or_(held, GenerationSnapshot.state == "restore_failed")
+    base = select(GenerationSnapshot.id).select_from(GenerationSnapshot).outerjoin(
+        ChatRequest, ChatRequest.request_id == GenerationSnapshot.request_id
+    )
+    return base, (GenerationSnapshot.owner_session_pk == owner_pk, held)

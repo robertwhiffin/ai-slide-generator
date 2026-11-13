@@ -707,22 +707,56 @@ def test_owner_chat_allowed_while_contributor_holds_idle_heartbeat_lock(api, dec
     _assert_lock(env, deck.owner, held_by=rid)
 
 
-def test_owner_gate_applies_only_where_the_route_asks_for_it(api):
-    """The 423 owner gate is opt-in: ``/chat/async`` sets it, while ``/chat`` and
-    ``/chat/stream`` call ``_check_chat_permission`` as before, so a contributor's
-    live generation does not change them.  Without the flag the owner passes."""
-    from src.api.routes import chat as chat_routes
-    from src.core.database import get_db_session
-
+@pytest.mark.parametrize(
+    "path,gated",
+    [("/api/chat", False), ("/api/chat/stream", False), ("/api/chat/async", True)],
+)
+def test_owner_gate_applies_only_to_the_async_route(api, monkeypatch, path, gated):
+    """The 423 owner gate is the deployed transport's alone: with a contributor's
+    Agent generation live, the OWNER's ``/api/chat/async`` is refused 423 while the
+    sync ``/api/chat`` and the SSE ``/api/chat/stream`` are not (their behaviour is
+    unchanged).  The chat service is stubbed, so the ungated routes just run."""
     env = api.rb
     deck = shared_deck(env)
     start_generation(env, deck.contributor, "running")
+    service = MagicMock()
+    service.send_message.return_value = {}
+    service.send_message_streaming.return_value = iter(())
+    monkeypatch.setattr("src.api.routes.chat.get_chat_service", lambda: service)
 
-    with as_user(OWNER), get_db_session() as db:
-        chat_routes._check_chat_permission(deck.owner, db)  # /chat and /chat/stream
-        with pytest.raises(HTTPException) as refused:
-            chat_routes._check_chat_permission(deck.owner, db, gate_owner_on_generation=True)
-    assert refused.value.status_code == 423
+    resp = api.client.post(path, json={"session_id": deck.owner, "message": OWNER_MESSAGE})
+
+    if gated:
+        assert resp.status_code == 423, (resp.status_code, resp.text)
+        assert resp.json() == {"detail": locked_by(CONTRIBUTOR)}
+    else:
+        assert resp.status_code != 423, (resp.status_code, resp.text)
+        assert resp.status_code in (200, 500), (resp.status_code, resp.text)
+        assert (service.send_message.called or service.send_message_streaming.called)
+
+
+@pytest.mark.parametrize(
+    "case,busy,live_busy",
+    [("none", False, False), ("live", True, True), ("restore_failed", True, False)],
+)
+def test_busy_deck_rule_is_one_rule_for_lock_and_sweeper(env, case, busy, live_busy):
+    """Divergence guard.  The lock's holder lookup and the sweeper's claim agree on
+    whether the deck is busy: a live generation and a ``restore_failed`` snapshot
+    hold it in BOTH, an idle deck in neither.  ``live_only`` (the owner's chat gate)
+    ignores ``restore_failed``."""
+    sm = get_session_manager()
+    deck = shared_deck(env)
+    if case == "live":
+        start_generation(env, deck.contributor, "running")
+    elif case == "restore_failed":
+        fail_restore(env, deck.contributor, deck.owner)
+    assert mark_dirty(deck.owner, OWNER) is True
+
+    claimed = claim_due_marker(_due())
+
+    assert (sm.live_generation_holder(deck.owner) is not None) == busy
+    assert (claimed is None) == busy
+    assert (sm.live_generation_holder(deck.owner, live_only=True) is not None) == live_busy
 
 
 # ---------------------------------------------------------------------------

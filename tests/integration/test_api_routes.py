@@ -125,7 +125,7 @@ def mock_session_manager(test_db):
         manager.acquire_session_lock.return_value = True
         manager.release_session_lock.return_value = None
         # No live generation holds the deck (the async route's owner gate asks).
-        manager._live_generation_holder.return_value = None
+        manager.live_generation_holder.return_value = None
         # Return session info where user is the creator (bypasses permission check)
         manager.get_session.return_value = {
             "id": 1,

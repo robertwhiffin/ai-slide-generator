@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
-from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
@@ -48,6 +48,7 @@ from src.services.conversation_pins import (
 from src.services.generation_fence import (
     LIVE_STATUSES,
     claim_turn_row,
+    generation_hold_clause,
     fence_turn_write,
     start_chat_request as _start_chat_request,
 )
@@ -3934,18 +3935,32 @@ class SessionManager:
         returns and ``locked_by`` stores.  A monolith turn writes no snapshot, so it
         holds nothing.
         """
-        held = ChatRequest.status.in_(LIVE_STATUSES)
-        if not live_only:
-            held = or_(held, GenerationSnapshot.state == "restore_failed")
-        return db.execute(
-            select(UserSession.created_by)
-            .select_from(GenerationSnapshot)
-            .outerjoin(ChatRequest, ChatRequest.request_id == GenerationSnapshot.request_id)
+        base, where = generation_hold_clause(deck_owner.id, live_only=live_only)
+        row = db.execute(
+            base.add_columns(UserSession.created_by)
             .join(UserSession, UserSession.id == GenerationSnapshot.actor_session_pk)
-            .where(GenerationSnapshot.owner_session_pk == deck_owner.id, held)
+            .where(*where)
             .order_by(GenerationSnapshot.id.desc())
             .limit(1)
-        ).scalar()
+        ).first()
+        return row[1] if row else None
+
+    def live_generation_holder(
+        self, session_id: str, *, live_only: bool = False
+    ) -> Optional[str]:
+        """Who holds *session_id*'s deck through a live generation, or ``None``.
+
+        Opens its own short transaction (the caller's connection stays untouched);
+        a missing session holds nothing.  See :meth:`_live_generation_holder`.
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession).filter(UserSession.session_id == session_id).first()
+            )
+            if session is None:
+                return None
+            owner = self._get_deck_owner_session(db, session)
+            return self._live_generation_holder(db, owner, live_only=live_only)
 
     def require_editing_lock(self, session_id: str) -> None:
         """Raise PermissionError if another user holds an active editing lock.

@@ -125,10 +125,9 @@ from sqlalchemy import exists, or_, select, update
 from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.user_context import get_current_user, set_current_user
-from src.database.models.generation_snapshot import GenerationSnapshot
-from src.database.models.session import ChatRequest, SessionSlideDeck, UserSession
+from src.database.models.session import SessionSlideDeck, UserSession
 from src.services.conversation_pins import ConversationPinMissingError
-from src.services.generation_fence import LIVE_STATUSES
+from src.services.generation_fence import generation_hold_clause
 
 logger = logging.getLogger(__name__)
 
@@ -414,13 +413,14 @@ def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
     in every worker.  Four loops reading the same due marker with no lease means
     one WYSIWYG session pays for up to four identical LLM arc reviews per
     window — precisely the cost :data:`DEBOUNCE_SECONDS` exists to avoid.  The
-    exclusivity comes from a **conditional UPDATE**: the ``unclaimed`` predicate
-    appears both in the candidate SELECT (which locks the deck row ``FOR UPDATE``,
-    the lock submit also takes, then re-checks "no live generation / no
-    ``restore_failed`` snapshot" as its own statement) AND in the UPDATE's own WHERE, so a
-    second worker that blocks on the row lock re-evaluates it against the
-    committed row and matches nothing.  Dropping the outer copy makes the
-    statement "claim whatever the subquery saw", which is a read-then-write race.
+    exclusivity comes from the candidate ``SELECT … FOR UPDATE``: it picks the
+    oldest due, unclaimed deck and locks its row, so a second worker queues on the
+    lock and, once the first commits, re-evaluates ``unclaimed`` against the
+    committed row and finds nothing.  The claim ``UPDATE`` repeats ``unclaimed`` and
+    targets the locked id, as belt and braces.  The same row lock is the one submit
+    takes, and the "no live generation / no ``restore_failed`` snapshot" rule is
+    re-checked as its own statement under it.  Dropping BOTH ``unclaimed`` copies
+    makes the claim a read-then-write race.
 
     Why it returns the string id and not what ``RETURNING`` hands back
     -----------------------------------------------------------------
@@ -464,20 +464,12 @@ def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
         deck_table.c.spec_dirty_claimed_at <= stale_before,
     )
 
-    # No live generation and no failed restore on the deck: the same rule as
-    # ``SessionManager._live_generation_holder``.  Part of the candidate pick so a
-    # busy deck never starves the queue; re-checked under the deck-row lock below.
-    generation_hold = exists(
-        select(GenerationSnapshot.id)
-        .outerjoin(ChatRequest, ChatRequest.request_id == GenerationSnapshot.request_id)
-        .where(
-            GenerationSnapshot.owner_session_pk == deck_table.c.session_id,
-            or_(
-                ChatRequest.status.in_(LIVE_STATUSES),
-                GenerationSnapshot.state == "restore_failed",
-            ),
-        )
-    )
+    # No live generation and no failed restore on the deck: the one busy-deck rule
+    # shared with ``SessionManager._live_generation_holder``.  Part of the
+    # candidate pick so a busy deck never starves the queue; re-checked under the
+    # deck-row lock below.
+    _hold_base, _hold_where = generation_hold_clause(deck_table.c.session_id)
+    generation_hold = exists(_hold_base.where(*_hold_where))
 
     candidate = (
         select(deck_table.c.id)

@@ -56,7 +56,6 @@ from src.core.settings_db import (
 )
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
-from src.database.models.session import UserSession
 from src.domain.conversation_engine import engine_mode_for_deck_mode
 from src.services.agent import UnsafeContentError
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
@@ -243,14 +242,7 @@ def _check_chat_permission(
             # Only a LIVE generation by someone else blocks the owner; an idle
             # contributor's heartbeat lock never does, and a failed restore falls
             # through to submit's restore-pending 409.
-            root = (
-                db.query(UserSession).filter(UserSession.session_id == session_id).first()
-            )
-            holder = (
-                session_manager._live_generation_holder(db, root, live_only=True)
-                if root is not None
-                else None
-            )
+            holder = session_manager.live_generation_holder(session_id, live_only=True)
             if holder and holder != current_user:
                 from src.services.identity_provider import resolve_display_name
 
@@ -918,7 +910,9 @@ async def submit_chat_async(
     )
 
     # Check permission before processing
-    _check_chat_permission(request.session_id, db, gate_owner_on_generation=True)
+    await asyncio.to_thread(
+        _check_chat_permission, request.session_id, db, gate_owner_on_generation=True
+    )
     _reject_if_injection(request.message)
 
     session_manager = get_session_manager()
