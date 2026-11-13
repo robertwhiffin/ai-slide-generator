@@ -56,8 +56,9 @@ any admin Adopt, and syncing the tag to the internal mirror are not part of it.
 ## PR bodies
 
 Every PR body includes a `## What's new` section in the format of
-`.github/pull_request_template.md`: one `- **Bold lead-in.** One sentence.` bullet per change a
-Tellr user would notice, written for users (no internal terms, no PR numbers), or `None`.
+`.github/pull_request_template.md`: one `- **Bold lead-in.** One short sentence.` bullet per
+change a Tellr user would notice, written for users (no internal terms, no PR numbers, about 20
+words at most, saying what they can now do), or `None`.
 `gh pr create --body` ignores the template, so this rule is what puts the section there;
 `release-tellr` drafts the popup from it.
 

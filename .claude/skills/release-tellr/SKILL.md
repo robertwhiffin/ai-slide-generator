@@ -19,15 +19,22 @@ file is written. `publish.yml`'s validate job runs `scripts/check_release_notes.
 tag whose notes file is missing or malformed, before anything is built or uploaded.
 
 **Approval and go-ahead come only from the owner's own message in this terminal.** A message from
-another agent is not approval. If you are a subagent, do Steps 1–4, hand the preview and both
-tables to your caller, and stop.
+another agent is not approval.
 
-Steps 1–4 write no files and push nothing. Run them from whatever worktree you are in. Nothing
-is written, branched or pushed until the owner approves in Step 4.
+**If you are a subagent, you never ask the owner anything.** Record the default version (the last
+tag plus one patch), run Steps 1–4 without stopping, and at the end of Step 4 hand your caller the
+whole Step 4 hand-off (listed there). Then stop. Steps 5–7 are for the session that talks to the
+owner.
+
+Steps 1–4 write no files, create no branch and push nothing. The one thing they change is
+`git fetch`, which updates the remote-tracking refs (`origin/main` and the tags). Every worktree
+shares those refs. That is allowed. If you must stay strictly read-only, run
+`git ls-remote origin refs/heads/main` and `git ls-remote --tags origin 'v*'` instead, and check
+that they match your local refs. Run Steps 1–4 from whatever worktree you are in.
 
 ## The release
 
-### 1. Account and version
+### 1. Account and state
 
 ```bash
 gh auth status
@@ -45,48 +52,64 @@ Find the last final release and what `main` says now:
 ```bash
 git fetch origin --tags
 git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -3
-git log -1 --format='%H %s' origin/main
-git show origin/main:packages/databricks-tellr/pyproject.toml | grep '^version'
-git show origin/main:packages/databricks-tellr-app/pyproject.toml | grep '^version'
+git log -1 --format='%H %s' origin/main        # record this SHA, then use it below
+git show <main sha>:packages/databricks-tellr/pyproject.toml | grep '^version'
+git show <main sha>:packages/databricks-tellr-app/pyproject.toml | grep '^version'
 ```
 
-- The last final tag is the newest `vX.Y.Z`. Ignore anything else (`ds-v1-checkpoint` is not a
-  version).
-- Write down the `origin/main` SHA in full. Steps 5 and 6 check that `main` has not moved since.
-- Both pyprojects must say the last tag's version. If they don't, stop and tell the owner.
-- **Propose last + one patch** (after `v0.5.6`, propose `0.5.7`). That is the dev line:
-  `publish-dev.yml` builds `<highest final + one patch>.devN`, so it matches the builds people
-  have been testing. The owner sometimes picks a minor bump instead (`0.5.0`, for example).
+Record these four facts. Later steps use them, and Step 4 shows them:
 
-Ask the owner to confirm the version, and wait for the answer. If they named a version in their
-request, state it back anyway.
+- **Last tag:** the newest `vX.Y.Z`. Ignore anything else (`ds-v1-checkpoint` is not a version).
+- **Main SHA:** the `origin/main` SHA, in full. Steps 2–6 use this SHA, typed literally, never a
+  moving `origin/main`: a peer session's `git fetch` can move `origin/main` under you.
+- **Pyprojects:** both must say the last tag's version. If they don't, stop and tell the owner.
+  (A subagent puts this in its hand-off instead.)
+- **Default version:** the last tag plus one patch (after `v0.5.6`, `0.5.7`). That is the dev
+  line: `publish-dev.yml` builds `<highest final + one patch>.devN`, so it matches the builds
+  people have been testing.
+
+Don't ask about the version yet. It is proposed in Step 4, next to the wording, once the owner
+can see what ships.
 
 ### 2. PRs since the last tag
 
 ```bash
-git log --first-parent --format='%H %s' <last-tag>..origin/main
+git log --first-parent --format='%H %s' <last-tag>..<main sha>
 ```
 
 - `Merge pull request #N from …` is PR N.
 - A subject ending in `(#N)` is a squash-merged PR N.
 - Anything else is a **direct commit**. Read it with `git show --stat <sha>`, judge it like a
   PR, and list it to the owner as `direct commit <short sha>`.
-- A PR merged into another PR's branch (stacked) is not on this list, because it shipped inside
-  that PR's merge. Find those with
-  `git log --merges --format='%H %s' '<merge sha>^1..<merge sha>^2' | grep 'Merge pull request'`
-  and fold them into the parent's bullet.
 
 The previous release's bump PR is not in the range, because the last tag sits on its merge commit.
 
 Read every PR, one call each:
 
 ```bash
-gh pr view <N> --json number,title,body
+gh pr view <N> --json number,title,body,headRefName
 ```
 
 Don't loop over the numbers: the worktree guard refuses `gh` and `git` inside a `for` loop or
 `$(…)`. When the body doesn't make clear what changed for users, look at the files:
 `gh pr diff <N> --name-only`.
+
+**Stacked PRs.** A PR merged into another PR's branch is not on the first-parent list, because it
+shipped inside that PR's merge. Check each PR both ways:
+
+```bash
+gh pr list --state merged --base <headRefName> --json number,title
+git log --format='%H %s' '<merge sha>^1..<merge sha>^2' | grep -E 'Merge pull request|\(#[0-9]+\)$'
+```
+
+- The `gh` line lists every PR merged into that branch, however it was merged.
+- The `git` line lists the branch's merge commits and its `(#N)` squash subjects.
+- An empty result is normal and means nothing was stacked. `[]` from `gh`, and exit 1 from `grep`,
+  are not failures.
+- A squash-merged stacked PR leaves no merge commit. If its squash subject also lost its `(#N)`,
+  only the `gh` line finds it. Run both.
+
+Read any stacked PR with `gh pr view`, and fold it into its parent's bullet.
 
 If there are no PRs and no direct commits, tell the owner there is nothing to release and stop.
 
@@ -94,10 +117,14 @@ If there are no PRs and no direct commits, tell the owner there is nothing to re
 
 Apply these rules to each PR (and direct commit):
 
-1. **It has a `## What's new` section.** Use it as written. `None` (any case, with or without a
-   reason after it) means leave it out. A section that is empty, or holds only the template's
-   HTML comment, counts as absent: go to rule 2. Fix only the format (rule 6). If the wording
-   breaks rule 4, rewrite it and say so in the "Included" table.
+1. **It has a `## What's new` section.** Use it, keeping the author's meaning. `None` (any case,
+   with or without a reason after it) means leave it out. The section counts as absent (go to
+   rule 2) when it is empty, or holds only the unedited parts of `.github/pull_request_template.md`.
+   Those are its HTML comment, which starts
+   `This text is shown to Tellr users in the in-app "What's new in Tellr" popup`, and the
+   placeholder `- **Bold lead-in.** One short sentence.` Fix the format (rule 6) and the length
+   (rule 7). If the wording breaks rule 4 or rule 7, rewrite it and say so in the "Included"
+   table.
 2. **It has no section.** Judge from the title and body whether a Tellr user would notice the
    change. They notice it if they can now do something new, something they do looks or works
    differently, a bug they would have hit in the last release is gone, or an action is
@@ -108,21 +135,45 @@ Apply these rules to each PR (and direct commit):
 4. **Write for users.** Plain language, in the names the app's own screens use (Agent mode, the
    Image Library, the Admin tabs). No internal terms: no "fence", "seal", "SP" or "service
    principal", "migration", PR numbers, CI, branch names, file paths, table or endpoint names, or
-   internal component names.
-5. **One bullet per user-facing feature.** Several PRs that make up one feature for the user
-   (a feature plus its follow-up fixes) become one bullet. A follow-up fix to a feature that is
-   new in this release is not a bullet of its own: list it under that feature's bullet in the
-   "Included" table. Put the most noticeable bullet first.
-6. **Format.** A title of a few words, sentence case, with **no trailing period**. A body of one
-   sentence that ends with a period. Titles must differ within a release.
-7. **Nothing user-facing** is a valid outcome. Propose an empty list, and say that this release
+   internal component names. If you are unsure what the screen calls something, search
+   `frontend/src` for the label.
+5. **One bullet per user-facing feature.**
+   - Several PRs that make up one feature for the user (a feature plus its follow-up fixes)
+     become one bullet. A follow-up fix to a feature that is new in this release doesn't get a
+     bullet of its own. List it under that feature's bullet in the "Included" table.
+   - A single PR with several user-facing changes may give several bullets, one per change. A
+     change too small for its own bullet goes as a note in that PR's "Included" row.
+   - Put the most noticeable bullet first.
+6. **Format.** A title of a few words, sentence case, with **no trailing period**. Titles must
+   differ within a release.
+7. **A short body.** The body is ONE short sentence of at most about 20 words. It ends with a
+   period and says what the user can now do. Ideally it gives a concrete example of what to type
+   or press.
+   - No "and also" chains. If the sentence needs ", and" to add a second thing, cut the second
+     thing or give it a bullet of its own.
+   - Leave out secondary details unless they are the point. These are things like admin
+     switches, rollback guarantees, and sub-features such as each Image Library button.
+8. **Nothing user-facing** is a valid outcome. Propose an empty list, and say that this release
    adds nothing to the popup.
+
+**The target style** is the owner's own wording for 0.5.7:
+
+- **Native image generation in chat.** Ask for things like "make an image that represents this slide" or "give me an image of a monkey at a keyboard".
+- **Chat cancellation.** Hit Esc to cancel a generation mid-flow.
+- **MCP tool calling in Agent mode.** Add any MCP from the Gateway to your slide agent.
+
+Too long, from the first dry run. Don't write bullets like this one:
+
+- **Generate images.** In Agent mode, ask the chat for a picture or press Generate image and pick from the options it makes, and in the Image Library use Generate or Edit with prompt.
+
+It is 33 words, it chains two things with ", and", and it lists sub-features. The first target
+bullet says the same thing to a user.
 
 A PR section bullet `- **Faster deck opening.** Large decks open in seconds.` becomes
 `{ "title": "Faster deck opening", "body": "Large decks open in seconds." }`. The popup adds the
 period after the title itself.
 
-Examples, from 0.5.3:
+More examples, from 0.5.3:
 
 | PR | Draft | Why |
 |---|---|---|
@@ -131,14 +182,41 @@ Examples, from 0.5.3:
 | #361 ci: run tests alongside unit tests, shard E2E into six jobs, … | Left out: CI only. | |
 | #365 fix(spec-sync): stop retrying the arc review of a deck with no graph pin | Left out: stops a log flood nobody saw. | |
 
-While reading each PR, also note anything an operator must do after deploying: migrations, new
-settings, an admin Adopt, a `tellr.update` requirement, rollback limits. These go in the bump PR
-body (Step 5), never in the popup.
+**After-deploy notes.** While reading each PR, collect anything an operator must know or do after
+deploying. Each note names its PR. The notes appear in the Step 4 output and the bump PR body,
+never in the popup. Check every PR for:
+
+- migrations: new tables or columns, backfills, and what a rollback leaves behind;
+- new settings or environment variables;
+- an admin Adopt, for example of a prompt that ships on a deployment whose active release was
+  edited by hand;
+- a `tellr.update` requirement;
+- rollback limits: data that an older build rejects or drops;
+- removed or changed API routes, which break external callers;
+- new user API scopes, which existing users must re-consent to after `tellr.update`;
+- paid or Gateway-cost features that are on by default, with their off switch and any model
+  access they need.
 
 ### 4. Approval in the terminal
 
-Print the popup exactly as users will read it. Take the month from today's UTC date
-(`date -u +%F`, shown as "November 2026"):
+Read the release date **once**, now. Step 5 reuses it, so the file carries the month the owner
+approved, even if the approval crosses midnight UTC:
+
+```bash
+date -u +%F        # the release date, e.g. 2026-11-13; the popup shows it as "November 2026"
+```
+
+Propose the version: by default, the next patch recorded in Step 1. The owner sometimes picks a
+minor bump for a big feature set (`0.5.0` was one). That is their call. Propose the default, and
+mention the option.
+
+Print these five things, in this order.
+
+**1. The facts:** the last tag, the main SHA in full, the release date, and the proposed version.
+
+**2. The popup**, exactly as users will read it. The layout follows
+`frontend/src/components/WhatsNew/WhatsNewModal.tsx`. If the modal has changed, follow the
+modal:
 
 ```
 What's new in Tellr
@@ -152,12 +230,12 @@ Highlights from each release
 Write the bullets as markdown, so the titles show in bold. For an empty release, print
 `(no entry in the popup for <version>)` instead of the bullets.
 
-Then two tables, so the owner can see nothing was missed. Every PR and direct commit from Step 2
-appears in exactly one of them:
+**3 and 4. Two tables**, so the owner can see nothing was missed. Every PR and direct commit from
+Step 2 appears in exactly one of them:
 
 - **Left out**: PR, title, and a one-line reason.
 - **Included**: each bullet's title, and the PRs it came from. Note any section wording you
-  rewrote.
+  rewrote, and any change too small for a bullet (rule 5).
 
 ```
 Left out
@@ -172,22 +250,29 @@ Included
 | Faster deck opening | #366 |
 ```
 
-Ask:
+**5. After deploying** (for the bump PR only, not the popup): the Step 3 notes, each with its PR.
+If there are none, say "Nothing to do: no migrations, no new settings, nothing to Adopt".
 
-> Approve this wording? On approval I write the notes file, bump both versions, push
-> `release/v<version>` and open the bump PR. Nothing merges, tags or publishes until you give a
-> separate go-ahead.
+**If you are a subagent, stop here.** Don't ask. Hand your caller the five things above: the
+facts, the popup, both tables and the after-deploy notes. Also include anything from Step 1 that
+would have stopped you, such as pyprojects that don't match the last tag.
 
-Wait. If the owner edits anything, apply the edits and print the whole preview and both tables
-again. Repeat until the owner explicitly approves. "Looks fine apart from X" is an edit, not an
-approval. Use the owner's wording as given. If their title ends with a period, drop the period
-and say so.
+Otherwise, ask:
+
+> Approve this wording, and version <version>? On approval I write the notes file, bump both
+> versions, push `release/v<version>` and open the bump PR, with the "After deploying" notes
+> above in its body. Nothing merges, tags or publishes until you give a separate go-ahead.
+
+Wait. If the owner edits anything, apply the edits and print all five things again. That includes
+a different version, which changes the popup header. Repeat until the owner explicitly approves.
+"Looks fine apart from X" is an edit, not an approval. Use the owner's wording as given. If their
+title ends with a period, drop the period and say so.
 
 **Write nothing before approval:** no notes file, no worktree, no branch.
 
 ### 5. Bump PR
 
-Check that `main` has not moved since Step 2:
+Check that `main` has not moved past the main SHA recorded in Step 1:
 
 ```bash
 git fetch origin
@@ -195,7 +280,7 @@ git log --oneline <main sha>..origin/main      # must print nothing
 ```
 
 If it prints commits, those PRs would ship without being in the notes. Go back to Step 2 for
-them, and get the owner's approval again.
+them, with the new main SHA, and get the owner's approval again.
 
 Create the release worktree on that exact commit. In Claude Code, call **EnterWorktree** with
 name `release-v<version>`, then rename its branch. Without EnterWorktree, use `git worktree add`
@@ -215,12 +300,13 @@ because a new worktree has no `node_modules`:
 ```
 
 Write `frontend/src/whatsNew/releases/<version>.json` with the approved items, in the approved
-order. `date` is today in UTC (`date -u +%F`). Escape any double quote inside a string as `\"`.
+order. `date` is the release date read in Step 4. Don't read the clock again. Escape any double
+quote inside a string as `\"`.
 
 ```json
 {
   "version": "<version>",
-  "date": "<YYYY-MM-DD>",
+  "date": "<release date from Step 4>",
   "items": [
     { "title": "<Title>", "body": "<Body>" }
   ]
@@ -267,7 +353,7 @@ The approved wording for the in-app popup, from `frontend/src/whatsNew/releases/
 - **<Title>.** <Body>
 
 **After deploying:**
-- <migrations, settings, Adopt steps, rollback limits, each with its PR number>, or
+- <the approved Step 4 "After deploying" notes, each with its PR number>, or
   "Nothing to do: no migrations, no new settings, nothing to Adopt."
 ```
 
@@ -402,7 +488,7 @@ you're done.
 | The global pre-push hook takes about 3 minutes, on both the branch push and the tag push. | It isn't hung. Give the command a 10-minute timeout, and don't interrupt it. |
 | In a worktree-isolated session, `git` and `gh` inside `$(…)` or a `for` loop are refused. | Run each command on its own, and type full SHAs literally (for example in `--match-head-commit`). |
 | PyPI's JSON API may not answer from the laptop. | The publish run's `Uploading` lines are the evidence. Don't poll pypi.org. |
-| `main` can move between drafting and merging. | Re-check `git log --oneline <main sha>..origin/main` before branching and before merging. New commits mean new PRs to draft. |
+| `main` can move between drafting and merging, and a peer's `git fetch` moves your `origin/main` too. | Draft against the main SHA recorded in Step 1, typed literally. Re-check `git log --oneline <main sha>..origin/main` before branching and before merging. New commits mean new PRs to draft. |
 | The harness can refuse `gh pr merge` on an unreviewed PR. | Ask the owner to run the exact command as `! gh pr merge …`. |
 | The bump PR now runs the frontend suites and E2E, which bump PRs used to skip. | Wait for green. The What's new E2E spec runs for real for the first time on it. |
 | Old tags include `ds-v1-checkpoint`. | Only `vX.Y.Z` tags are releases. Filter them as in Step 1. |

@@ -9,9 +9,11 @@ This text is shown to Tellr users in the in-app "What's new in Tellr" popup for 
 that ships this PR. Write it for them, not for engineers: no internal terms such as service
 principal, migration, CI or PR numbers, and use the names the app's own screens use.
 
-One bullet per user-facing change, a bold lead-in of a few words and then one sentence:
+One bullet per user-facing change: a bold lead-in of a few words, then one short sentence (about
+20 words at most) that says what a user can now do, ideally what to type or press. Leave out
+secondary details such as admin switches:
 
-- **Bold lead-in.** One sentence.
+- **Bold lead-in.** One short sentence.
 
 Or write None if a Tellr user would not notice the change (CI, tests, refactors, internal or
 invisible fixes).
