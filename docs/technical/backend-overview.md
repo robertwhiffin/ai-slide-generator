@@ -98,7 +98,6 @@ delete of all users' expired sessions) and `POST /api/sessions/{id}/export`
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `POST` | `/api/chat` | Generate/edit slides (synchronous) | `routes/chat.send_message` |
 | `POST` | `/api/chat/stream` | Generate/edit with SSE streaming | `routes/chat.send_message_streaming` |
 | `POST` | `/api/chat/async` | Submit for async processing (polling) | `routes/chat.submit_chat_async` |
 | `GET` | `/api/chat/poll/{request_id}` | Poll for async request status | `routes/chat.poll_chat` |
@@ -344,7 +343,7 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | `src/core/permission_context.py` | Request-scoped permission context | Provides user ID and group IDs via `ContextVar` for permission checks on profiles and decks. |
 | `src/core/lakebase.py` | Lakebase database support | Token refresh and connection management for Databricks Lakebase (Postgres). |
 | `src/core/context_utils.py` | Context utilities | Shared helpers for request-scoped context management. |
-| `src/api/routes/chat.py` | `/api/chat`, `/api/chat/stream`, `/api/chat/async`, `/api/chat/poll` | Session locking, SSE streaming, polling endpoints. |
+| `src/api/routes/chat.py` | `/api/chat/stream`, `/api/chat/async`, `/api/chat/poll` | Session locking, SSE streaming, polling endpoints. |
 | `src/api/services/job_queue.py` | Async chat processing | In-memory job queue for polling mode, with `TELLR_CHAT_JOB_CONCURRENCY` runners per uvicorn worker (default 1) on a dedicated thread pool. See [Multi-User Concurrency](multi-user-concurrency.md#chat-job-runners). |
 | `src/api/services/export_job_queue.py` | Async export processing | In-memory job queue with background worker for PPTX and Google Slides exports. |
 | `src/api/services/feedback_service.py` | Feedback orchestration | LLM chat-based feedback, structured feedback submission, surveys, and reporting. |

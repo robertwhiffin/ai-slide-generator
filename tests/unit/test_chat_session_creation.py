@@ -1,6 +1,6 @@
 """Tests for session-creation-on-first-message in chat endpoints.
 
-Verifies that POST /chat/stream, /chat/async, and /chat with no session_id
+Verifies that POST /chat/stream and /chat/async with no session_id
 automatically creates a session, and that agent_config is persisted.
 
 Run: pytest tests/unit/test_chat_session_creation.py -v
@@ -289,52 +289,6 @@ class TestChatStreamSessionCreation:
 
         assert response.status_code == 200
         mock_session_manager.create_session.assert_not_called()
-
-
-# ============================================
-# /chat Sync Endpoint Tests
-# ============================================
-
-
-class TestChatSyncSessionCreation:
-    """Tests for /chat sync endpoint creating sessions on the fly."""
-
-    def test_chat_sync_creates_session_when_missing(
-        self, client, mock_session_manager, mock_chat_service
-    ):
-        """POST /api/chat with no session_id creates a new session."""
-        mock_chat_service.send_message.return_value = {
-            "messages": [],
-            "slide_deck": None,
-            "metadata": {},
-        }
-
-        response = client.post(
-            "/api/chat",
-            json={"message": "Create slides about revenue"},
-        )
-
-        assert response.status_code == 200
-        mock_session_manager.create_session.assert_called_once()
-
-    def test_chat_sync_returns_session_id_in_response(
-        self, client, mock_session_manager, mock_chat_service
-    ):
-        """POST /api/chat with no session_id returns the new session_id."""
-        mock_chat_service.send_message.return_value = {
-            "messages": [],
-            "slide_deck": None,
-            "metadata": {},
-        }
-
-        response = client.post(
-            "/api/chat",
-            json={"message": "Hello"},
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data.get("session_id") == "new-session-abc"
 
 
 # ============================================

@@ -1,4 +1,3 @@
-import type { ChatResponse } from '../types/message';
 import type {
   ImageAsset,
   ImageListResponse,
@@ -229,15 +228,6 @@ export interface SharedPresentation {
   modified_by: string | null;
   modified_at: string | null;
   my_permission: 'CAN_VIEW' | 'CAN_EDIT' | 'CAN_MANAGE';
-}
-
-interface SendMessageParams {
-  message: string;
-  sessionId: string;
-  slideContext?: SlideContext;
-  imageIds?: string[];
-  profileId?: number;
-  profileName?: string;
 }
 
 /**
@@ -759,43 +749,6 @@ export const api = {
           ? 'This session has no slide deck to duplicate'
           : 'Failed to duplicate session';
       throw new ApiError(response.status, detail);
-    }
-
-    return response.json();
-  },
-
-  /**
-   * Send a message to the chat API
-   */
-  async sendMessage({
-    message,
-    sessionId,
-    slideContext,
-    imageIds,
-    profileId,
-    profileName,
-  }: SendMessageParams): Promise<ChatResponse> {
-    const response = await fetch(`${API_BASE_URL}/api/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        session_id: sessionId,
-        message,
-        slide_context: slideContext,
-        image_ids: imageIds,
-        profile_id: profileId,
-        profile_name: profileName,
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new ApiError(
-        response.status,
-        error.detail || 'Failed to send message'
-      );
     }
 
     return response.json();

@@ -393,7 +393,7 @@ interface SlideStyle {
      slide_htmls: [currentSlide.html],
    };
    ```
-3. `api.sendMessage` POSTs to `/api/chat`:
+3. `ChatPanel` calls `api.sendChatMessage`, which selects `POST /api/chat/stream` (SSE) locally or `POST /api/chat/async` followed by polling on Databricks Apps:
    ```json
    {
      "session_id": "abc123",
@@ -404,7 +404,7 @@ interface SlideStyle {
      }
    }
    ```
-4. Response updates `messages`, `slideDeck`, and `rawHtml`
+4. Streamed or polled events update `messages`, `slideDeck`, and `rawHtml`
 5. `SlideViewer` reflects the updated deck; `ViewerContext` clamps `currentIndex` to the new deck bounds if a slide was deleted
 
 ### Slide Navigation
@@ -463,7 +463,6 @@ The optimization prompt explicitly instructs the agent to:
 
 | Method | HTTP | Path | Request | Returns |
 |--------|------|------|---------|---------|
-| `sendMessage` | POST | `/api/chat` | `{ session_id, message, slide_context? }` | `ChatResponse` |
 | `streamChat` | POST | `/api/chat/stream` | `{ session_id, message, slide_context? }` | SSE stream |
 | `submitChatAsync` | POST | `/api/chat/async` | `{ session_id, message, slide_context? }` | `{ request_id }` |
 | `pollChat` | GET | `/api/chat/poll/{id}` | query: `after_message_id` | `PollResponse` |

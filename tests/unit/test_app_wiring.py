@@ -107,6 +107,30 @@ class TestAppRoutes:
             assert key in positions, f"{key} not registered"
             assert positions[key] < first_images_route, key
 
+    def test_chat_routes_exclude_the_sync_legacy_bypass(self):
+        """Only mode-aware transports may accept chat turns (#286)."""
+        from fastapi.routing import APIRoute
+
+        from src.api.main import app
+
+        chat_posts = {
+            route.path
+            for route in app.routes
+            if isinstance(route, APIRoute)
+            and "POST" in route.methods
+            and route.endpoint.__module__ == "src.api.routes.chat"
+        }
+        assert chat_posts == {"/api/chat/stream", "/api/chat/async"}
+
+    def test_openapi_does_not_advertise_sync_chat(self):
+        """API clients must discover the mode-aware chat endpoints, not the bypass."""
+        from src.api.main import app
+
+        paths = app.openapi()["paths"]
+        assert "/api/chat" not in paths
+        assert "post" in paths["/api/chat/stream"]
+        assert "post" in paths["/api/chat/async"]
+
     def test_health_endpoint(self):
         """Health endpoint still works."""
         from src.api.main import app

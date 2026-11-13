@@ -18,9 +18,9 @@ def test_injection_message_rejected_400():
     assert exc.value.status_code == 400
 
 
-@pytest.mark.parametrize("endpoint", ["/api/chat", "/api/chat/stream", "/api/chat/async"])
+@pytest.mark.parametrize("endpoint", ["/api/chat/stream", "/api/chat/async"])
 def test_chat_endpoints_block_injection(endpoint):
-    """Every chat entry point must run the injection guard, not just /chat.
+    """Every supported chat entry point must run the injection guard.
 
     Regression guard: /chat/async (the endpoint the UI uses behind the Apps
     proxy) previously skipped the check, so injection input reached the agent.
