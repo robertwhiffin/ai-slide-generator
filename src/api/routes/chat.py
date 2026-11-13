@@ -56,6 +56,7 @@ from src.core.settings_db import (
 )
 from src.core.user_context import get_current_user
 from src.database.models.profile_contributor import PermissionLevel
+from src.database.models.session import UserSession
 from src.domain.conversation_engine import engine_mode_for_deck_mode
 from src.services.agent import UnsafeContentError
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
@@ -203,7 +204,9 @@ def _reject_if_injection(message: str) -> None:
         )
 
 
-def _check_chat_permission(session_id: str, db: DBSession) -> None:
+def _check_chat_permission(
+    session_id: str, db: DBSession, *, gate_owner_on_generation: bool = False
+) -> None:
     """Verify user can send chat messages in this session.
 
     Conversations are always private. A user can chat only if:
@@ -220,6 +223,8 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
 
     Raises:
         HTTPException 403: If user doesn't have permission
+        HTTPException 423: ``gate_owner_on_generation`` (the async route only) and
+            another user's live generation holds the root owner's deck
     """
     session_manager = get_session_manager()
     current_user = get_current_user()
@@ -234,6 +239,25 @@ def _check_chat_permission(session_id: str, db: DBSession) -> None:
 
     # Owner of a root session can always chat
     if is_creator and not is_contributor:
+        if gate_owner_on_generation:
+            # Only a LIVE generation by someone else blocks the owner; an idle
+            # contributor's heartbeat lock never does, and a failed restore falls
+            # through to submit's restore-pending 409.
+            root = (
+                db.query(UserSession).filter(UserSession.session_id == session_id).first()
+            )
+            holder = (
+                session_manager._live_generation_holder(db, root, live_only=True)
+                if root is not None
+                else None
+            )
+            if holder and holder != current_user:
+                from src.services.identity_provider import resolve_display_name
+
+                raise HTTPException(
+                    status_code=423,
+                    detail=f"Session is locked by {resolve_display_name(holder)}",
+                )
         return
 
     # Contributor session: must be the creator AND have at least CAN_EDIT on the parent deck
@@ -894,7 +918,7 @@ async def submit_chat_async(
     )
 
     # Check permission before processing
-    _check_chat_permission(request.session_id, db)
+    _check_chat_permission(request.session_id, db, gate_owner_on_generation=True)
     _reject_if_injection(request.message)
 
     session_manager = get_session_manager()

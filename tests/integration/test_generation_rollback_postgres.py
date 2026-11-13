@@ -461,7 +461,9 @@ def test_contributor_enter_queued_during_a_failing_restore_is_refused(
     at_turn_end = env.tables()
 
     # Permission is not under test (a contributor needs CAN_EDIT and the editing lock).
-    monkeypatch.setattr(chat_routes, "_check_chat_permission", lambda session_id, db: None)
+    monkeypatch.setattr(
+        chat_routes, "_check_chat_permission", lambda session_id, db, **kwargs: None
+    )
     enqueued = AsyncMock()
     monkeypatch.setattr(chat_routes, "enqueue_job", enqueued)
 

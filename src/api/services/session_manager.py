@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
-from sqlalchemy import and_, delete, func, or_, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, joinedload
 
@@ -22,6 +22,7 @@ from src.api.schemas.agent_config import (
     sanitize_agent_config_for_persist,
 )
 from src.core.database import get_db_session
+from src.database.models.generation_snapshot import GenerationSnapshot
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import (
     ChatRequest,
@@ -3921,6 +3922,31 @@ class SessionManager:
     # ------------------------------------------------------------------
     EDITING_LOCK_TIMEOUT_SECONDS = 45  # safety net for browser crashes when heartbeat stops
 
+    def _live_generation_holder(
+        self, db: Session, deck_owner: UserSession, *, live_only: bool = False
+    ) -> Optional[str]:
+        """Who a live Agent generation holds *deck_owner*'s deck for, or ``None``.
+
+        The newest ``GenerationSnapshot`` on the deck whose request is live
+        (``pending``/``running``) or, unless *live_only*, whose own state is
+        ``restore_failed`` (a failed restore keeps the deck locked to its sender).
+        Returns the actor session's ``created_by``: the string ``get_current_user()``
+        returns and ``locked_by`` stores.  A monolith turn writes no snapshot, so it
+        holds nothing.
+        """
+        held = ChatRequest.status.in_(LIVE_STATUSES)
+        if not live_only:
+            held = or_(held, GenerationSnapshot.state == "restore_failed")
+        return db.execute(
+            select(UserSession.created_by)
+            .select_from(GenerationSnapshot)
+            .outerjoin(ChatRequest, ChatRequest.request_id == GenerationSnapshot.request_id)
+            .join(UserSession, UserSession.id == GenerationSnapshot.actor_session_pk)
+            .where(GenerationSnapshot.owner_session_pk == deck_owner.id, held)
+            .order_by(GenerationSnapshot.id.desc())
+            .limit(1)
+        ).scalar()
+
     def require_editing_lock(self, session_id: str) -> None:
         """Raise PermissionError if another user holds an active editing lock.
 
@@ -3936,6 +3962,10 @@ class SessionManager:
                 return
             deck = deck_owner.slide_deck
             current_user = get_current_user()
+            holder = self._live_generation_holder(db, deck_owner)
+            if holder and holder != current_user:
+                from src.services.identity_provider import resolve_display_name
+                raise PermissionError(f"Session is locked by {resolve_display_name(holder)}")
             if deck.locked_by and deck.locked_by != current_user and deck.locked_at:
                 age = (datetime.utcnow() - deck.locked_at).total_seconds()
                 if age < self.EDITING_LOCK_TIMEOUT_SECONDS:
@@ -3960,6 +3990,11 @@ class SessionManager:
 
             deck = deck_owner.slide_deck
             now = datetime.utcnow()
+
+            holder = self._live_generation_holder(db, deck_owner)
+            if holder and holder != user:
+                from src.services.identity_provider import resolve_display_name
+                return {"acquired": False, "locked_by": resolve_display_name(holder)}
 
             if deck.locked_by and deck.locked_by != user:
                 if deck.locked_at:
@@ -4037,6 +4072,14 @@ class SessionManager:
                 return {"locked": False, "locked_by": None, "locked_by_email": None}
 
             deck = deck_owner.slide_deck
+            holder = self._live_generation_holder(db, deck_owner)
+            if holder:
+                from src.services.identity_provider import resolve_display_name
+                return {
+                    "locked": True,
+                    "locked_by": resolve_display_name(holder),
+                    "locked_by_email": holder,
+                }
             if not deck.locked_by:
                 return {"locked": False, "locked_by": None, "locked_by_email": None}
 

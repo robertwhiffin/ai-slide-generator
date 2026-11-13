@@ -120,13 +120,15 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import exists, or_, select, update
 
 from src.api.services.session_manager import get_session_manager
 from src.core.database import get_db_session
 from src.core.user_context import get_current_user, set_current_user
-from src.database.models.session import SessionSlideDeck, UserSession
+from src.database.models.generation_snapshot import GenerationSnapshot
+from src.database.models.session import ChatRequest, SessionSlideDeck, UserSession
 from src.services.conversation_pins import ConversationPinMissingError
+from src.services.generation_fence import LIVE_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -413,7 +415,9 @@ def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
     one WYSIWYG session pays for up to four identical LLM arc reviews per
     window — precisely the cost :data:`DEBOUNCE_SECONDS` exists to avoid.  The
     exclusivity comes from a **conditional UPDATE**: the ``unclaimed`` predicate
-    appears both in the candidate subquery AND in the UPDATE's own WHERE, so a
+    appears both in the candidate SELECT (which locks the deck row ``FOR UPDATE``,
+    the lock submit also takes, then re-checks "no live generation / no
+    ``restore_failed`` snapshot" as its own statement) AND in the UPDATE's own WHERE, so a
     second worker that blocks on the row lock re-evaluates it against the
     committed row and matches nothing.  Dropping the outer copy makes the
     statement "claim whatever the subquery saw", which is a read-then-write race.
@@ -460,6 +464,21 @@ def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
         deck_table.c.spec_dirty_claimed_at <= stale_before,
     )
 
+    # No live generation and no failed restore on the deck: the same rule as
+    # ``SessionManager._live_generation_holder``.  Part of the candidate pick so a
+    # busy deck never starves the queue; re-checked under the deck-row lock below.
+    generation_hold = exists(
+        select(GenerationSnapshot.id)
+        .outerjoin(ChatRequest, ChatRequest.request_id == GenerationSnapshot.request_id)
+        .where(
+            GenerationSnapshot.owner_session_pk == deck_table.c.session_id,
+            or_(
+                ChatRequest.status.in_(LIVE_STATUSES),
+                GenerationSnapshot.state == "restore_failed",
+            ),
+        )
+    )
+
     candidate = (
         select(deck_table.c.id)
         .where(
@@ -467,17 +486,18 @@ def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
             deck_table.c.spec_dirty_at <= due_before,
             deck_table.c.spec_dirty_by.isnot(None),
             unclaimed,
+            ~generation_hold,
         )
         # Oldest marker first: the deck that has waited longest gets reviewed
         # first, so a busy deck cannot starve a quiet one.
         .order_by(deck_table.c.spec_dirty_at)
         .limit(1)
-        .scalar_subquery()
+        # The deck-row lock submit (begin_generation) also takes: the two serialise.
+        .with_for_update()
     )
 
     claim = (
         update(deck_table)
-        .where(deck_table.c.id == candidate)
         .where(unclaimed)
         .values(
             spec_dirty_claimed_at=now,
@@ -490,7 +510,17 @@ def claim_due_marker(now: datetime) -> Optional[Tuple[str, str]]:
     )
 
     with get_db_session() as db:
-        row = db.execute(claim).fetchone()
+        deck_id = db.execute(candidate).scalar()
+        if deck_id is None:
+            return None
+        # A snapshot may have committed while the lock was awaited: re-check as
+        # its own statement (a fresh READ COMMITTED snapshot), not inside the UPDATE.
+        still_free = db.execute(
+            select(deck_table.c.id).where(deck_table.c.id == deck_id, ~generation_hold)
+        ).scalar()
+        if still_free is None:
+            return None
+        row = db.execute(claim.where(deck_table.c.id == deck_id)).fetchone()
         if row is None:
             return None
 
