@@ -4120,9 +4120,26 @@ class _GatewayPass:
         :meth:`say_failures`), and the pass binds no tools again.  A call that
         carried none is not this pass's to handle: ``False``, and the caller fails
         exactly as it always has.
+
+        Nor is a transient provider fault (``is_transient_model_failure``: a rate
+        limit, a 5xx, a timeout, a dropped connection).  It says nothing about the
+        tools, and the same call again at once would double the endpoint's load
+        exactly while it is overloaded (#380): ``False``, nothing is said about the
+        connections (they did not fail), and the caller fails as a call without
+        tools would.
         """
         bound = self._bound(toolset)
         if not bound:
+            return False
+        if is_transient_model_failure(exc):
+            logger.warning(
+                "gateway_tools_kept: the %s's call with its AI Gateway MCP tools (%s) "
+                "raised a transient %s; it is not made again without them",
+                self._agent,
+                ", ".join(service for _, service in bound),
+                type(exc).__name__,
+                extra={"session_id": self._state.get("session_id")},
+            )
             return False
         self._model_call_failed = True
         logger.warning(
@@ -4399,8 +4416,21 @@ class _ImageToolPass:
         """A model call raised *exc*: ``True`` when it carried this pass's tool, so
         the caller makes the same call once more without it, and the pass binds it
         no more.  A call that carried none is not this pass's to handle: ``False``.
+
+        Nor is a transient provider fault (``is_transient_model_failure``): the
+        same call again at once would double the endpoint's load while it is
+        overloaded (#380), so ``False`` and the caller fails as a call without the
+        tool would.
         """
         if not self._mine(toolset):
+            return False
+        if is_transient_model_failure(exc):
+            logger.warning(
+                "image_tool_kept: the architect's call with its generate_image tool "
+                "raised a transient %s; it is not made again without it",
+                type(exc).__name__,
+                extra={"session_id": self._state.get("session_id")},
+            )
             return False
         self._model_call_failed = True
         logger.warning(
