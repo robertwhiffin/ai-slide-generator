@@ -68,8 +68,12 @@
  *   - useEscapeToStop without its dialog check               -> RED in useEscapeToStop.test.tsx, not here: in ChatPanel
  *     the hook's listener runs before ConfirmDialog's, and a stop while the dialog is open re-sets `open`
  *     to true, which ConfirmDialog's own Escape then closes. Nothing is visible here, so the hook tests pin it.
+ *
+ * The clock (final review F4): ChatInput ignores a stop click in the first 500 ms after Send turned into
+ * Stop, so a double-click on Send cannot stop the turn it sent. A deliberate click comes later, so
+ * `clickStop` moves `Date.now` past that window first; Escape is not delayed and is never moved.
  */
-import type { ComponentProps } from 'react';
+import { createRef, type ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -161,7 +165,7 @@ vi.mock('../../contexts/SessionContext', () => ({
 vi.mock('../../contexts/AgentConfigContext', () => ({ useAgentConfig: () => h.agentConfig }));
 vi.mock('../../contexts/GenerationContext', () => ({ useGeneration: () => h.generation }));
 
-import { ChatPanel } from './ChatPanel';
+import { ChatPanel, type ChatPanelHandle } from './ChatPanel';
 import { ApiError, ChatTurnError } from '../../services/api';
 import { stopNeedsConfirmation } from './stopGenerationCopy';
 
@@ -244,6 +248,15 @@ const onDeckRefetched = vi.fn();
 const onDeckRestored = vi.fn();
 const ensureGraphCapableRoot = async () => true;
 let turns: Turn[] = [];
+/** The panel's imperative handle: how Apply/Discuss, Optimize layout and the slide image dialog send. */
+const panelRef = createRef<ChatPanelHandle>();
+
+/** `Date.now` = the real clock + this offset (see "The clock" above). */
+const realNow = Date.now.bind(Date);
+let clockOffset = 0;
+const advanceClock = (ms: number) => { clockOffset += ms; };
+/** Past ChatInput's 500 ms stop-arm window. */
+const DELIBERATE_MS = 600;
 
 type PanelProps = ComponentProps<typeof ChatPanel>;
 function panel() {
@@ -257,7 +270,7 @@ function panel() {
   } as unknown as PanelProps;
   return (
     <MemoryRouter>
-      <ChatPanel {...props} />
+      <ChatPanel ref={panelRef} {...props} />
     </MemoryRouter>
   );
 }
@@ -301,7 +314,8 @@ const accept = (turn: Turn, requestId = 'req-1') => emit(turn, { type: 'request_
 const fail = (turn: Turn, error: Error) => act(async () => { if (!turn.cancelled) turn.onError(error); });
 const complete = (turn: Turn) => emit(turn, { type: 'complete', slides: FINISHED_DECK });
 
-const clickStop = () => act(async () => { fireEvent.click(stopButton()); });
+/** A deliberate click on the stop sign: after the stop-arm window. */
+const clickStop = () => act(async () => { advanceClock(DELIBERATE_MS); fireEvent.click(stopButton()); });
 const pressEscape = (target: Element = document.body) =>
   act(async () => { fireEvent.keyDown(target, { key: 'Escape', code: 'Escape' }); });
 
@@ -374,6 +388,8 @@ async function expectRestorePending() {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  clockOffset = 0;
+  vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffset);
   h.session.sessionId = 'sess-1';
   h.session.storedDeckMode = 'agent';
   h.session.selectedDeckMode = 'agent';
@@ -398,6 +414,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   currentView = null;
+  vi.mocked(Date.now).mockRestore();
 });
 
 // ── which stop applies ─────────────────────────────────────────────────────────
@@ -1123,5 +1140,288 @@ describe('no stop where the turn cannot be stopped', () => {
 
     h.polling = false; // the SSE transport has no request id to stop
     await expectSendKept();
+  });
+});
+
+// ── final review fixes ────────────────────────────────────────────────────────
+
+/** A turn sent from somewhere other than the chat box (Apply/Discuss, Optimize layout, the slide image
+ *  dialog: all through the panel's handle; or an image card's "Use this"). */
+async function sendNotFromInput(how: 'handle' | 'image card'): Promise<Turn> {
+  const before = turns.length;
+  if (how === 'handle') {
+    await act(async () => { panelRef.current?.sendMessage('Apply the fix for finding 7 on slide 2'); });
+  } else {
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Use this' })); });
+  }
+  expect(turns.length, 'the message was not sent').toBe(before + 1);
+  return turns[turns.length - 1];
+}
+
+/** An earlier turn, typed in the box, that completed (its draft is the one a stale restore would bring back).
+ *  With `withImages`, its reply offered generated images (the image card). */
+async function completedTypedTurn(withImages = false) {
+  await mount();
+  const first = await send('Build a deck on Q3 results');
+  await accept(first, 'req-1');
+  if (withImages) {
+    await emit(first, {
+      type: 'assistant',
+      content: 'Here are three options.',
+      metadata: { generated_images: [{ token: 'tok-1', kind: 'illustration', option: 1, slides: [] }] },
+    });
+  }
+  h.getSlides.mockResolvedValue({ session_id: 'sess-1', slide_deck: FINISHED_DECK });
+  await complete(first);
+  await waitFor(() => expect(onSlidesGenerated).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(queryStopButton()).toBeNull());
+  h.getSlides.mockResolvedValue({ session_id: 'sess-1', slide_deck: PRE_TURN_DECK });
+}
+
+describe('final review: the draft restore is only for a turn typed in the box (F1)', () => {
+  it.each<['handle' | 'image card', 'stopped' | 'failed and rolled back']>([
+    ['handle', 'stopped'],
+    ['handle', 'failed and rolled back'],
+    ['image card', 'stopped'],
+  ])('test_turn_not_from_the_input_restores_no_stale_draft (%s, %s)', async (how, end) => {
+    await completedTypedTurn(how === 'image card');
+    expect(textarea().value).toBe('');
+
+    const turn = await sendNotFromInput(how);
+    await accept(turn, 'req-2');
+    await emit(turn, progressEvent('planning'));
+    if (end === 'stopped') {
+      await clickStop();
+      await waitFor(() => expect(screen.getByText(CANCELLED)).toBeInTheDocument());
+    } else {
+      await fail(turn, new ChatTurnError('Graph turn failed', 'rolled_back'));
+      await waitFor(() => expect(screen.getByText(FAILED)).toBeInTheDocument());
+    }
+    await waitFor(() => expect(onDeckRestored).toHaveBeenCalledTimes(1));
+    await settle();
+
+    expect(textarea().value, 'a stale, earlier draft was put back in the box').toBe('');
+    expect(textarea()).not.toHaveFocus();
+    expect(textarea()).not.toBeDisabled();
+  });
+
+  it('test_turn_not_from_the_input_leaves_a_half_typed_box_as_it_is', async () => {
+    await completedTypedTurn();
+    fireEvent.change(textarea(), { target: { value: 'half-typed thought' } });
+
+    const turn = await sendNotFromInput('handle');
+    await accept(turn, 'req-2');
+    await clickStop();
+    await waitFor(() => expect(onDeckRestored).toHaveBeenCalledTimes(1));
+    await settle();
+
+    expect(textarea().value).toBe('half-typed thought');
+  });
+
+  it('test_typed_turn_after_one_from_elsewhere_still_restores_its_own_draft', async () => {
+    await completedTypedTurn();
+    const other = await sendNotFromInput('handle');
+    await accept(other, 'req-2');
+    await clickStop();
+    await waitFor(() => expect(onDeckRestored).toHaveBeenCalledTimes(1));
+
+    const typed = await send('Add a slide about otter habitats');
+    await accept(typed, 'req-3');
+    await clickStop();
+
+    await waitFor(() => expect(textarea().value).toBe('Add a slide about otter habitats'));
+    await waitFor(() => expect(textarea()).toHaveFocus());
+  });
+});
+
+describe('final review: one turn at a time (F2)', () => {
+  it('test_a_second_send_while_a_turn_runs_is_ignored_and_the_stop_still_works', async () => {
+    const turn = await runningTurn(progressEvent('planning'), 'req-1');
+    const rowsBefore = rows();
+
+    await act(async () => { panelRef.current?.sendMessage('Optimize the layout of this slide'); });
+    await settle();
+
+    expect(turns, 'a second turn started while the first was running').toHaveLength(1);
+    expect(rows()).toEqual(rowsBefore);
+    expect(stopButton()).toBeInTheDocument();
+    expect(screen.getByText(GENERATING_HINT)).toBeInTheDocument();
+
+    await clickStop();
+    expect(h.cancelChat).toHaveBeenCalledTimes(1);
+    expect(h.cancelChat).toHaveBeenCalledWith('req-1');
+    await expectRolledBack(turn);
+  });
+});
+
+describe("final review: a rolled-back failure shows the server's reason (F3)", () => {
+  it('test_failure_rolled_back_shows_the_servers_error_as_detail', async () => {
+    const turn = await runningTurn(building());
+
+    await fail(turn, new ChatTurnError('Genie space access denied (403)', 'rolled_back'));
+
+    await waitFor(() => expect(screen.getByText(FAILED)).toBeInTheDocument());
+    const detail = screen.getByText('Genie space access denied (403)');
+    expect(screen.getByRole('status')).toContainElement(detail);
+    expect(errorShown()).toBe(false);
+    // One dismiss for the whole notice.
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Dismiss notice' })); });
+    expect(screen.queryByText(FAILED)).toBeNull();
+    expect(screen.queryByText('Genie space access denied (403)')).toBeNull();
+  });
+
+  it.each<[string, string]>([
+    ['the generic fallback', 'Request failed'],
+    ['no message', ''],
+    ['the notice itself', 'Generation failed. Nothing was changed.'],
+  ])('test_failure_rolled_back_shows_no_detail_for %s', async (_kind, message) => {
+    const turn = await runningTurn(building());
+
+    await fail(turn, new ChatTurnError(message, 'rolled_back'));
+
+    await waitFor(() => expect(screen.getByText(FAILED)).toBeInTheDocument());
+    expect(screen.getByRole('status').textContent).toBe(`${FAILED}Dismiss`);
+  });
+
+  it('test_a_stop_shows_no_detail', async () => {
+    const turn = await runningTurn(progressEvent('planning'));
+    await clickStop();
+    await expectRolledBack(turn);
+    expect(screen.getByRole('status').textContent).toBe(`${CANCELLED}Dismiss`);
+  });
+});
+
+describe('final review: Stop is never the Send click (F4)', () => {
+  it('test_double_click_on_send_does_not_stop_the_turn_it_sent', async () => {
+    await mount();
+    fireEvent.change(textarea(), { target: { value: DRAFT } });
+    const send = sendButton();
+    send.focus();
+
+    // The double-click: the first click sends, the second lands where Send was.
+    await act(async () => { fireEvent.click(send); });
+    expect(turns).toHaveLength(1);
+    const stop = stopButton();
+    expect(stop, 'the stop button reused the Send button').not.toBe(send);
+    expect(stop, 'the Send click left focus on the stop button').not.toHaveFocus();
+    await act(async () => { fireEvent.click(stop); });
+    await act(async () => { fireEvent.doubleClick(stop); });
+    advanceClock(400);
+    await act(async () => { fireEvent.click(stop); });
+
+    await accept(turns[0], 'req-1');
+    await settle();
+    expect(h.cancelChat, 'the double-click stopped the turn it sent').not.toHaveBeenCalled();
+    expect(turns[0].cancel).not.toHaveBeenCalled();
+    expect(queryDialog()).toBeNull();
+    expect(stopButton()).toBeInTheDocument();
+
+    // A deliberate click, later, stops it.
+    await clickStop();
+    expect(h.cancelChat).toHaveBeenCalledTimes(1);
+    expect(h.cancelChat).toHaveBeenCalledWith('req-1');
+    await expectRolledBack(turns[0]);
+  });
+
+  it('test_escape_right_after_send_still_stops', async () => {
+    await mount();
+    const turn = await send();
+    await accept(turn, 'req-1');
+
+    await pressEscape(document.body);
+
+    expect(h.cancelChat).toHaveBeenCalledTimes(1);
+    await expectRolledBack(turn);
+  });
+});
+
+describe('final review: a stop in flight (F5)', () => {
+  it('test_confirmed_stop_in_flight_cannot_reopen_the_dialog_or_cancel_twice', async () => {
+    const answer = deferred<unknown>();
+    h.cancelChat.mockReturnValue(answer.promise);
+    const { turn, dialog } = await openConfirmation();
+
+    await act(async () => { fireEvent.click(within(dialog).getByRole('button', { name: DISCARD })); });
+    expect(h.cancelChat).toHaveBeenCalledTimes(1);
+    expect(queryDialog()).toBeNull();
+
+    // While the cancel is in flight: Esc and the stop sign do nothing.
+    await pressEscape(document.body);
+    expect(queryDialog(), 'Esc reopened the dialog while the stop was in flight').toBeNull();
+    await clickStop();
+    expect(queryDialog(), 'the stop sign reopened the dialog while the stop was in flight').toBeNull();
+    await settle();
+    expect(h.cancelChat).toHaveBeenCalledTimes(1);
+
+    await act(async () => { answer.resolve({ outcome: 'cancelled', status: 'cancelled' }); });
+    await expectRolledBack(turn);
+    expect(h.cancelChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('test_instant_stop_in_flight_is_sent_once', async () => {
+    const answer = deferred<unknown>();
+    h.cancelChat.mockReturnValue(answer.promise);
+    const turn = await runningTurn(progressEvent('planning'));
+
+    await clickStop();
+    await clickStop();
+    await pressEscape(document.body);
+    await settle();
+    expect(h.cancelChat).toHaveBeenCalledTimes(1);
+
+    await act(async () => { answer.resolve({ outcome: 'cancelled', status: 'cancelled' }); });
+    await expectRolledBack(turn);
+  });
+
+  it('test_a_stop_that_did_not_end_the_turn_can_be_pressed_again', async () => {
+    h.cancelChat.mockResolvedValueOnce({ outcome: 'refused_foreign_change', detail: REFUSED });
+    const turn = await runningTurn(progressEvent('planning'));
+
+    await clickStop();
+    await waitFor(() => expect(screen.getByText(REFUSED)).toBeInTheDocument());
+    await clickStop();
+
+    expect(h.cancelChat).toHaveBeenCalledTimes(2);
+    await expectRolledBack(turn);
+  });
+});
+
+describe('final review: notices and errors do not outlive their turn (F6)', () => {
+  it('test_notice_is_cleared_by_a_session_switch', async () => {
+    const turn = await runningTurn(progressEvent('planning'));
+    await clickStop();
+    await expectRolledBack(turn);
+    expect(screen.getByText(CANCELLED)).toBeInTheDocument();
+
+    h.session.sessionId = 'sess-2';
+    await rerenderPanel();
+    await settle();
+
+    expect(screen.queryByText(CANCELLED), "deck A's notice showed in deck B").toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('test_stop_failed_error_is_cleared_when_the_turn_completes', async () => {
+    h.cancelChat.mockRejectedValue(new ApiError(500, 'Internal server error'));
+    h.pollChat.mockResolvedValue(running());
+    const turn = await runningTurn(progressEvent('planning'));
+    await clickStop();
+    await waitFor(() => expect(screen.getByText(STOP_FAILED)).toBeInTheDocument());
+
+    await complete(turn);
+
+    await waitFor(() => expect(onSlidesGenerated).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(STOP_FAILED), 'the stop-failed error outlived the finished turn').toBeNull();
+    expect(errorShown()).toBe(false);
+  });
+
+  it('test_a_mid_turn_error_is_kept_when_the_turn_completes (guard)', async () => {
+    const turn = await runningTurn(progressEvent('building', slidesOf(3, [0], [1])));
+    await emit(turn, { type: 'error', error: 'Slide 2 could not be built.', metadata: { position: 1 } });
+
+    await complete(turn);
+
+    await waitFor(() => expect(onSlidesGenerated).toHaveBeenCalledTimes(1));
+    expect(screen.getByText('Slide 2 could not be built.')).toBeInTheDocument();
   });
 });

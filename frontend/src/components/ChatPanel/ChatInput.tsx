@@ -18,7 +18,8 @@ interface ChatInputProps {
   generating?: boolean;
   /** Stop the running turn. Absent for Legacy decks, which keep the send button. */
   onStop?: () => void;
-  /** Bump to a new non-zero value to put the last submitted message (and images) back. */
+  /** Bump to a new non-zero value to put the last message submitted HERE (and its images) back. Bump it
+   *  only for a turn this input sent: its last draft is not the text of a send from elsewhere. */
   restoreDraftKey?: number;
 }
 
@@ -30,6 +31,10 @@ interface AttachedImage {
 const MIN_ROWS = 2;
 const MAX_ROWS = 10;
 const LINE_HEIGHT = 24; // Approximate line height in pixels
+
+/** A stop click this soon after Send turned into Stop is the Send click repeated (a double-click), not a
+ *  stop: it is ignored. Escape is not delayed. */
+export const STOP_ARM_DELAY_MS = 500;
 
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSend,
@@ -155,7 +160,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     textarea.style.overflowY = scrollHeight > maxHeight ? 'auto' : 'hidden';
   }, [message]);
 
-  // Every send path goes through here, so a stop restores the turn that was stopped.
+  // Every send path of this input goes through here, so a stop restores the turn that was stopped.
   const sendRecorded = (
     text: string,
     imageIds: string[] | undefined,
@@ -187,6 +192,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   const canSend = message.trim() || attachedImages.length > 0;
   const stopMode = Boolean(generating && onStop);
+
+  // When Send turns into Stop (not when the input mounts mid-turn: nothing was clicked then), start the
+  // window in which a stop click is ignored. A layout effect, so it is set before any later click lands.
+  const stopArmedAtRef = useRef<number | null>(null);
+  const wasStopModeRef = useRef(stopMode);
+  useLayoutEffect(() => {
+    if (stopMode && !wasStopModeRef.current) stopArmedAtRef.current = Date.now();
+    if (!stopMode) stopArmedAtRef.current = null;
+    wasStopModeRef.current = stopMode;
+  }, [stopMode]);
+  const handleStopClick = () => {
+    const armedAt = stopArmedAtRef.current;
+    if (armedAt !== null && Date.now() - armedAt < STOP_ARM_DELAY_MS) return;
+    onStop?.();
+  };
 
   return (
     <>
@@ -270,12 +290,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               >
                 <Maximize2 className="h-3.5 w-3.5" />
               </Button>
+              {/* Distinct keys: the stop button is a new element, so the focus a Send click left on the
+                  Send button is not carried over to it (Space/Enter would otherwise press Stop). */}
               {stopMode ? (
                 <Button
+                  key="stop"
                   type="button"
                   size="icon"
                   variant="ghost"
-                  onClick={onStop}
+                  onClick={handleStopClick}
                   className="h-7 w-7 text-red-600"
                   title={STOP_TOOLTIP}
                   aria-label={STOP_ARIA_LABEL}
@@ -285,6 +308,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                 </Button>
               ) : (
                 <Button
+                  key="send"
                   type="submit"
                   size="icon"
                   disabled={disabled || !canSend}

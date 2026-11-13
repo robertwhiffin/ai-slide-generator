@@ -1562,7 +1562,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       {/* Share Deck Dialog */}
       {showShareDialog && sessionId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="w-full max-w-lg mx-4 rounded-lg border border-border bg-card shadow-lg max-h-[80vh] flex flex-col">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Share Deck"
+            className="w-full max-w-lg mx-4 rounded-lg border border-border bg-card shadow-lg max-h-[80vh] flex flex-col"
+          >
             <div className="flex items-center justify-between border-b border-border px-6 py-4">
               <h2 className="text-lg font-semibold text-foreground">Share Deck</h2>
               <button

@@ -131,6 +131,44 @@ describe('ChatInput stop mode', () => {
     expect(screen.queryByText(/Esc to cancel/)).toBeNull();
   });
 
+  // Final review F4: a double-click on Send, or Space/Enter after clicking it, must not stop the turn
+  // just sent. The stop button is a new element (no focus carried over), and a stop click within 500 ms
+  // of Send turning into Stop is ignored.
+  it('test_stop_is_a_new_unfocused_button_that_ignores_clicks_just_after_send', () => {
+    const realNow = Date.now.bind(Date);
+    let offset = 0;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
+    try {
+      const { rerender } = render(ui({ onStop }));
+      fireEvent.change(textarea(), { target: { value: DRAFT } });
+      const send = sendButton();
+      send.focus();
+      expect(send).toHaveFocus();
+
+      rerender(ui({ disabled: true, generating: true, onStop }));
+
+      const stop = stopButton();
+      expect(stop, 'the stop button reused the Send button').not.toBe(send);
+      expect(stop).not.toHaveFocus();
+      fireEvent.click(stop);
+      offset += 450;
+      fireEvent.click(stop);
+      expect(onStop, 'a click just after Send stopped the turn').not.toHaveBeenCalled();
+
+      offset += 100;
+      fireEvent.click(stop);
+      expect(onStop).toHaveBeenCalledTimes(1);
+
+      // The next turn: Send comes back, and the window starts again when it turns into Stop.
+      rerender(ui({ disabled: false, generating: false, onStop }));
+      rerender(ui({ disabled: true, generating: true, onStop }));
+      fireEvent.click(stopButton());
+      expect(onStop).toHaveBeenCalledTimes(1);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('test_no_stop_button_without_onStop', () => {
     // Legacy deck (or SSE): ChatPanel passes no onStop, even while a turn runs.
     render(ui({ disabled: true, generating: true }));

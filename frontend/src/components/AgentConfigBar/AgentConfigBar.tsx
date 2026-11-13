@@ -308,7 +308,7 @@ const ToolEditPanel: React.FC<{
 };
 
 /** Simple dialog for entering a profile name when saving. */
-const SaveProfileDialog: React.FC<{
+export const SaveProfileDialog: React.FC<{
   isOpen: boolean;
   onClose: () => void;
   onSave: (name: string, description?: string) => void;
@@ -322,7 +322,12 @@ const SaveProfileDialog: React.FC<{
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black bg-opacity-50" onClick={onClose} />
-      <div className="relative bg-white rounded-lg shadow-xl w-full max-w-sm mx-4 p-5">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Save as Profile"
+        className="relative bg-white rounded-lg shadow-xl w-full max-w-sm mx-4 p-5"
+      >
         <h3 className="text-sm font-semibold text-gray-900 mb-3">Save as Profile</h3>
         <input
           type="text"
@@ -361,7 +366,7 @@ const SaveProfileDialog: React.FC<{
 };
 
 /** Simple dialog for choosing a profile to load. */
-const LoadProfileDialog: React.FC<{
+export const LoadProfileDialog: React.FC<{
   isOpen: boolean;
   onClose: () => void;
   onLoad: (profileId: number) => void;
@@ -389,7 +394,12 @@ const LoadProfileDialog: React.FC<{
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black bg-opacity-50" onClick={onClose} />
-      <div className="relative bg-white rounded-lg shadow-xl w-full max-w-sm mx-4 p-5">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Load Profile"
+        className="relative bg-white rounded-lg shadow-xl w-full max-w-sm mx-4 p-5"
+      >
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-gray-900">Load Profile</h3>
           <button onClick={onClose} className="p-0.5 text-gray-400 hover:text-gray-600">

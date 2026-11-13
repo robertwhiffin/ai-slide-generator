@@ -35,6 +35,9 @@ export class ApiError extends Error {
 export type RollbackOutcome = 'rolled_back' | 'kept_foreign_change' | 'restore_failed';
 
 /** A failed chat turn; `rollback` says what happened to the deck (null: nothing to report, e.g. Legacy). */
+/** A failed turn's message when the server sent none. */
+export const CHAT_TURN_FALLBACK_ERROR = 'Request failed';
+
 export class ChatTurnError extends Error {
   rollback: RollbackOutcome | null;
 
@@ -1369,7 +1372,7 @@ export const api = {
               if (response.status === 'cancelled') {
                 onEvent({ type: 'cancelled', rollback: response.rollback ?? null });
               } else if (response.status === 'error') {
-                onError(new ChatTurnError(response.error || 'Request failed', response.rollback ?? null));
+                onError(new ChatTurnError(response.error || CHAT_TURN_FALLBACK_ERROR, response.rollback ?? null));
               } else if (response.result) {
                 // Emit session_title event if title was generated
                 if (response.result.session_title) {

@@ -512,7 +512,8 @@ const ViewerBody = forwardRef<
   // agent runs. The pre-viewer SlidePanel guarded on optimizingSlideIndex and
   // disabled its button while in flight; keep that behaviour.
   const handleOptimizeLayout = useCallback(() => {
-    if (!onSendMessage || isOptimizing) return;
+    // insertDisabled: a turn is running, and a second send would leave it unstoppable.
+    if (!onSendMessage || isOptimizing || insertDisabled) return;
     const slide = slideDeck.slides[currentIndex];
     if (!slide) return;
     // Held until the deck actually changes (see the release effect below), NOT
@@ -537,7 +538,7 @@ const ViewerBody = forwardRef<
 
       Focus on optimizing text layout, container sizing, and spacing while keeping all chart elements completely unchanged.`;
     onSendMessage(message, slideContext);
-  }, [onSendMessage, isOptimizing, currentIndex, slideDeck.slides]);
+  }, [onSendMessage, isOptimizing, insertDisabled, currentIndex, slideDeck.slides]);
 
   // Finding 2: auto-verify newly-generated slides on the viewer path.
   useAutoVerification({
@@ -668,8 +669,9 @@ const ViewerBody = forwardRef<
                     size="icon"
                     onClick={handleOptimizeLayout}
                     // Disabled for the whole run, so the user gets feedback
-                    // instead of a dead-looking button they reasonably re-click.
-                    disabled={isOptimizing}
+                    // instead of a dead-looking button they reasonably re-click;
+                    // and while any other turn runs (it sends a chat message).
+                    disabled={isOptimizing || insertDisabled}
                     className="h-7 w-7"
                     aria-label="Optimize slide layout"
                   >
@@ -761,6 +763,7 @@ const ViewerBody = forwardRef<
           findings={currentFindings}
           hasUnseen={currentFindings.some(f => f.status !== 'fixed' && !seen.has(f.id))}
           callbacks={{ ...callbacks, onDismissFinding: handleDismiss }}
+          actionsDisabled={insertDisabled}
         />
       </div>
     </div>

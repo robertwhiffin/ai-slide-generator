@@ -49,7 +49,12 @@ export const SurveyModal: React.FC<SurveyModalProps> = ({ isOpen, onClose }) => 
       className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
       data-testid="survey-modal"
     >
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4 p-6 relative">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="How's your experience with tellr?"
+        className="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4 p-6 relative"
+      >
         {/* Close button */}
         <button
           onClick={onClose}

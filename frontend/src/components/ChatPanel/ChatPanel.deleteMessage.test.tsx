@@ -770,17 +770,22 @@ describe('ChatPanel delete a message (#317)', () => {
   });
 
   it('a refused duplicate send never takes the stored send\'s id: neither copy offers delete (W1)', async () => {
-    // A double-click on a finding's Apply: AppLayout sends the same fixed text twice through the
-    // imperative handle. Send 1 is stored as row 10; send 2 is refused (409) before anything is stored.
-    // Send 2's onError read sees row 10 and is the newest read, so it lands; send 1's read is dropped
-    // (its seq is stale). The panel cannot tell which copy row 10 is, so neither may offer delete.
+    // A finding's Apply sends the same fixed text through the imperative handle. A second Apply while
+    // send 1 runs is not sent at all (interrupt generation, final review F2: one turn at a time), so the
+    // duplicate here comes after send 1 completed, while send 1's id read is still in flight. Send 1 is
+    // stored as row 10; send 2 is refused (409: another tab of this session is processing) before
+    // anything is stored. Send 2's onError read sees row 10 and is the newest read, so it lands; send 1's
+    // read lands after it and is dropped (its seq is stale). The panel cannot tell which copy row 10 is,
+    // so neither may offer delete.
     const APPLY = 'Please apply this review suggestion for slide 2: Shorten the title';
     const turns: Turn[] = [];
     sendChatMessage.mockImplementation((_s, _m, _c, onEvent, onError) => {
       turns.push({ onEvent, onError });
       return () => {};
     });
-    listMessages.mockResolvedValue(rowsRead([...FOUR, U(10, APPLY), A(11, 'Applied.')]));
+    const stored = rowsRead([...FOUR, U(10, APPLY), A(11, 'Applied.')]);
+    const firstRead = deferred<unknown>();
+    listMessages.mockReturnValueOnce(firstRead.promise).mockResolvedValue(stored);
     const ref = createRef<ChatPanelHandle>();
     mount({}, ref);
     await loaded();
@@ -789,20 +794,26 @@ describe('ChatPanel delete a message (#317)', () => {
     await settle();
     act(() => { ref.current?.sendMessage(APPLY); });
     await settle();
-    expect(sendChatMessage).toHaveBeenCalledTimes(2);
-    expect(rowsWith(APPLY)).toHaveLength(2);
+    expect(sendChatMessage, 'a second send while the first runs').toHaveBeenCalledTimes(1);
 
-    // Send 2 is refused: its read runs and lands (control: it is the read the old pairing misused).
-    await act(async () => { turns[1].onError(new Error('Session is already processing a request')); });
-    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(1));
-    await settle();
-    // Send 1 completes; its own read is dropped by the send-seq guard.
+    // Send 1 completes; its id read is slow.
     await act(async () => { turns[0].onEvent({ type: 'assistant', content: 'Applied.' }); });
     await act(async () => { turns[0].onEvent({ type: 'complete' }); });
+    await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(1));
+
+    // Apply again: send 2 is refused; its read runs and lands (control: it is the read the old pairing misused).
+    act(() => { ref.current?.sendMessage(APPLY); });
+    await settle();
+    expect(sendChatMessage).toHaveBeenCalledTimes(2);
+    expect(rowsWith(APPLY)).toHaveLength(2);
+    await act(async () => { turns[1].onError(new Error('Session is already processing a request')); });
     await waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
     await settle();
+    // Send 1's read lands last; the send-seq guard drops it.
+    await act(async () => { firstRead.resolve(stored); });
+    await settle();
 
-    expect(rowTexts()).toEqual([...FOUR_TEXTS, APPLY, APPLY, 'Applied.']);
+    expect(rowTexts()).toEqual([...FOUR_TEXTS, APPLY, 'Applied.', APPLY]);
     expect(rowsWith(APPLY).map(deleteButtonIn)).toEqual([null, null]);
     // The loaded messages still offer delete, so the read did land and nothing else changed.
     expect(deleteButtons()).toHaveLength(2);

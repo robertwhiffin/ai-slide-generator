@@ -6,7 +6,14 @@ import type { ReplacementInfo, SlideDeck, StageSlideContext } from '../../types/
 import { MessageList } from './MessageList';
 import { ChatInput } from './ChatInput';
 import { DeckModeSelect } from './DeckModeSelect';
-import { api, ChatTurnError, isPollingMode, type SessionMessage, type StreamEvent } from '../../services/api';
+import {
+  api,
+  CHAT_TURN_FALLBACK_ERROR,
+  ChatTurnError,
+  isPollingMode,
+  type SessionMessage,
+  type StreamEvent,
+} from '../../services/api';
 import { conversationApi } from '../../api/conversation';
 import { canEditConversation } from '../../utils/conversationPermissions';
 import { Button } from '@/ui/button';
@@ -120,11 +127,32 @@ const toUiMessage = (msg: SessionMessage): Message => ({
   generated_images: toGeneratedImages(msg.metadata?.generated_images),
 });
 
-/** The send a stop belongs to: where it went, and which send it was. */
+/** The send a stop belongs to: where it went, which send it was, and whether it was typed in the chat
+ *  box (only then is there a draft to put back). */
 interface TurnRef {
   sentTo: string | null;
   seq: number;
+  fromInput: boolean;
 }
+
+/** How a send reached the panel. Only the chat box's own sends (`fromInput`) have a draft to restore. */
+interface SendOptions {
+  slideContext?: SlideContext;
+  imageIds?: string[];
+  fromInput: boolean;
+}
+
+/** A neutral note under the chat; `detail` is a muted second line (a rolled-back failure's cause). */
+interface Notice {
+  text: string;
+  detail?: string;
+}
+
+/** The server's reason for a rolled-back failure, when it says more than the notice does. */
+const failureDetail = (message: string | undefined): string | undefined => {
+  const text = message?.trim();
+  return text && text !== CHAT_TURN_FALLBACK_ERROR && text !== FAILED_NOTICE ? text : undefined;
+};
 
 /** The images a reply generated, or undefined (no card) when there are none. */
 const toGeneratedImages = (value: unknown): GeneratedImageRef[] | undefined => {
@@ -186,10 +214,17 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   // Interrupt generation. `requestIdRef` is the running turn's chat request id (from `request_accepted`);
   // `pendingStopRef` is the seq of a send whose stop was pressed before that id existed.
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [restoreDraftKey, setRestoreDraftKey] = useState(0);
   const requestIdRef = useRef<string | null>(null);
   const pendingStopRef = useRef<number | null>(null);
+  // The seq of the send whose cancel request is in flight: until it is answered, a stop press or Esc
+  // does nothing (no second cancel, no dialog reopened over a stop already confirmed).
+  const stopInFlightRef = useRef<number | null>(null);
+  // Mirrors isLoading, but is set the moment a send starts (and while a new deck is persisted for it),
+  // so a second send in the same tick is refused too: one turn at a time.
+  const loadingRef = useRef(false);
+  const startingRef = useRef(false);
   const turnRef = useRef<TurnRef | null>(null);
   const finishedSeqRef = useRef(0);  // the send whose rollback outcome was already applied
   const messageIndexRef = useRef(0);
@@ -213,6 +248,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     setIsClearing(false);
     setPendingDeleteId(null);
     setIsDeletingMessage(false);
+    // A stop's or failure's notice belongs to the deck it happened on.
+    setNotice(null);
+    setStopDialogOpen(false);
   }
 
   // Show session error
@@ -234,6 +272,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         cancelStreamRef.current = null;
       }
       setIsGenerating(false);
+      loadingRef.current = false;
       setIsLoading(false);
       setLoadingMessage('');
     };
@@ -303,6 +342,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  const setLoading = (value: boolean) => {
+    loadingRef.current = value;
+    setIsLoading(value);
+  };
+
   const stopLoadingMessages = () => {
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
@@ -371,7 +415,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       cancelStreamRef.current = null;
     }
     stopLoadingMessages();
-    setIsLoading(false);
+    setLoading(false);
     setIsGenerating(false);
     setIsQueued(false);
     setTurnProgress(null);
@@ -405,15 +449,20 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   };
 
   // The server rolled the turn back (a stop, or a failed turn): "Nothing was changed." The message is
-  // gone from the server, so it comes back in the input.
-  const finishAfterRollback = (kind: 'cancelled' | 'failed', turn: TurnRef) => {
+  // gone from the server, so a message typed in the box comes back there. A send from elsewhere (a
+  // finding's Apply, Optimize layout, an image card) has no draft: the box is left as it is.
+  const finishAfterRollback = (kind: 'cancelled' | 'failed', turn: TurnRef, reason?: string) => {
     if (finishedSeqRef.current === turn.seq) return;
     finishedSeqRef.current = turn.seq;
     endTurnLocally();
     setError(null);
-    setRestoreDraftKey(key => key + 1);
+    if (turn.fromInput) setRestoreDraftKey(key => key + 1);
     refreshAfterRollback(turn.sentTo, turn.seq);
-    setNotice(kind === 'cancelled' ? CANCELLED_NOTICE : FAILED_NOTICE);
+    setNotice(
+      kind === 'cancelled'
+        ? { text: CANCELLED_NOTICE }
+        : { text: FAILED_NOTICE, detail: failureDetail(reason) },
+    );
   };
 
   // The restore after a failed generation did not finish: the server says to try again shortly. Same
@@ -422,13 +471,22 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     if (finishedSeqRef.current === turn.seq) return;
     finishedSeqRef.current = turn.seq;
     endTurnLocally();
-    setRestoreDraftKey(key => key + 1);
+    if (turn.fromInput) setRestoreDraftKey(key => key + 1);
     refreshAfterRollback(turn.sentTo, turn.seq);
     setError(message || RESTORE_PENDING_NOTICE);
   };
 
-  // Send the stop for a running turn and apply whatever the server answers.
+  // Send the stop for a running turn and apply whatever the server answers. Only one at a time per send.
   const sendStop = async (requestId: string, turn: TurnRef) => {
+    stopInFlightRef.current = turn.seq;
+    try {
+      await sendStopOnce(requestId, turn);
+    } finally {
+      if (stopInFlightRef.current === turn.seq) stopInFlightRef.current = null;
+    }
+  };
+
+  const sendStopOnce = async (requestId: string, turn: TurnRef) => {
     const current = () => sendSeqRef.current === turn.seq && currentSessionIdRef.current === turn.sentTo;
     let outcome;
     try {
@@ -464,7 +522,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         break;
       case 'refused_foreign_change':
         setStopDialogOpen(false);
-        setNotice(REFUSED_STOP_NOTICE);
+        setNotice({ text: REFUSED_STOP_NOTICE });
         break;
       default:
         setStopDialogOpen(false);
@@ -487,6 +545,9 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   };
 
   const handleStopRequest = () => {
+    // A stop already sent (or queued for the request id) for this send: nothing more to do.
+    const seq = turnRef.current?.seq;
+    if (seq != null && (stopInFlightRef.current === seq || pendingStopRef.current === seq)) return;
     if (stopNeedsConfirmation(turnProgress)) {
       setStopDialogOpen(true);
     } else {
@@ -494,19 +555,12 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     }
   };
 
-  const handleSendMessage = async (content: string, explicitSlideContextOrImageIds?: SlideContext | string[], maybeImageIds?: string[]) => {
-    // Support two calling conventions:
-    // 1. From ChatInput: (content, imageIds)
-    // 2. From imperative ref: (content, slideContext)
-    let explicitSlideContext: SlideContext | undefined;
-    let imageIds: string[] | undefined;
-
-    if (Array.isArray(explicitSlideContextOrImageIds)) {
-      imageIds = explicitSlideContextOrImageIds;
-    } else {
-      explicitSlideContext = explicitSlideContextOrImageIds;
-      imageIds = maybeImageIds;
-    }
+  // Every send: the chat box (ChatInput), the imperative handle (a finding's Apply/Discuss, Optimize
+  // layout, the slide image dialog) and an image card's Use / Regenerate.
+  const handleSendMessage = async (
+    content: string,
+    { slideContext: explicitSlideContext, imageIds, fromInput }: SendOptions,
+  ) => {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       return;
@@ -518,6 +572,11 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     if (isDeletingMessage) {
       return;
     }
+    // One turn at a time: a second send would take over the running turn's stop state and leave that
+    // turn unstoppable (its controls are disabled meanwhile; this is the backstop).
+    if (loadingRef.current || startingRef.current) {
+      return;
+    }
 
     // Agent turns carry the slide on stage. Snapshot (copy) it now, before the first await, so paging
     // or mutation while the root is persisted cannot retarget the send. Legacy turns send none.
@@ -526,8 +585,15 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
     // A browser-local root must be made graph-capable before a graph turn.
     // Failed persistence deliberately sends no chat request.
-    if (!isSessionPersisted && !await ensureGraphCapableRoot()) {
-      return;
+    if (!isSessionPersisted) {
+      startingRef.current = true;
+      let persisted = false;
+      try {
+        persisted = await ensureGraphCapableRoot();
+      } finally {
+        startingRef.current = false;
+      }
+      if (!persisted) return;
     }
     const sentTo = sessionId;
 
@@ -538,7 +604,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       setStoredDeckMode(deckMode);
     }
 
-    setIsLoading(true);
+    setLoading(true);
     setTurnProgress(null);
     setIsQueued(false);
     setNotice(null);
@@ -560,7 +626,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       },
     ]);
     const seq = ++sendSeqRef.current;
-    const turn: TurnRef = { sentTo, seq };
+    const turn: TurnRef = { sentTo, seq, fromInput };
     turnRef.current = turn;
 
     messageIndexRef.current = 0;
@@ -667,7 +733,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         case 'error':
           setError(event.error || 'An error occurred');
           stopLoadingMessages();
-          setIsLoading(false);
+          setLoading(false);
           setIsGenerating(false);
           refreshMessageIds(sentTo, seq);
           // A per-slide notice (metadata.position: one slide became a placeholder) is
@@ -681,8 +747,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
         case 'complete':
           stopLoadingMessages();
-          setIsLoading(false);
+          setLoading(false);
           setIsGenerating(false);
+          // A stop that failed said the generation is still running; now it has finished.
+          setError(prev => (prev === STOP_FAILED_ERROR ? null : prev));
 
           const nextRawHtml = event.raw_html ?? rawHtml ?? null;
 
@@ -777,7 +845,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         setStopDialogOpen(false);
         const rollback = err instanceof ChatTurnError ? err.rollback : null;
         if (rollback === 'rolled_back') {
-          finishAfterRollback('failed', turn);
+          finishAfterRollback('failed', turn, err.message);
           return;
         }
         if (rollback === 'restore_failed') {
@@ -786,7 +854,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
         }
         setError(rollback === 'kept_foreign_change' ? FAILED_KEPT_NOTICE : err.message || 'Failed to send message');
         stopLoadingMessages();
-        setIsLoading(false);
+        setLoading(false);
         setIsGenerating(false);
         refreshMessageIds(sentTo, seq);
         refetchDeckAfterError(sentTo, seq);
@@ -867,7 +935,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
   // Expose sendMessage method to parent components via ref
   useImperativeHandle(ref, () => ({
     sendMessage: (content: string, slideContext?: SlideContext) => {
-      handleSendMessage(content, slideContext);
+      void handleSendMessage(content, { slideContext, fromInput: false });
     },
   }), [handleSendMessage]);
 
@@ -950,8 +1018,10 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
           progressLabel={isQueued && !turnProgress ? QUEUED_TURN_LABEL : describeTurnProgress(turnProgress)}
           deleteAction={canDeleteMessages ? { disabled: deleteMessageDisabled, onDelete: setPendingDeleteId } : undefined}
           imageActions={{
-            onUse: (img) => { void handleSendMessage(pickImageMessage(img), [img.token]); },
-            onRegenerate: (images) => { void handleSendMessage(regenerateMessage(images)); },
+            onUse: (img) => {
+              void handleSendMessage(pickImageMessage(img), { imageIds: [img.token], fromInput: false });
+            },
+            onRegenerate: (images) => { void handleSendMessage(regenerateMessage(images), { fromInput: false }); },
             disabled: chatInputDisabled,
             hidden: previewMessages != null,
           }}
@@ -965,9 +1035,14 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       {notice && (
         <div
           role="status"
-          className="px-4 py-3 bg-muted border-t border-border flex items-center justify-between text-sm text-muted-foreground"
+          className="px-4 py-3 bg-muted border-t border-border flex items-center justify-between gap-3 text-sm text-muted-foreground"
         >
-          <span>{notice}</span>
+          <div className="min-w-0">
+            <span>{notice.text}</span>
+            {notice.detail && (
+              <p className="mt-0.5 break-words text-xs text-muted-foreground/80">{notice.detail}</p>
+            )}
+          </div>
           <button
             type="button"
             onClick={() => setNotice(null)}
@@ -982,7 +1057,7 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
       {loadingMessage && <LoadingIndicator message={loadingMessage} />}
 
       <ChatInput
-        onSend={handleSendMessage}
+        onSend={(message, imageIds) => { void handleSendMessage(message, { imageIds, fromInput: true }); }}
         disabled={chatInputDisabled}
         generating={isLoading}
         onStop={canStop ? handleStopRequest : undefined}

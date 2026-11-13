@@ -39,11 +39,17 @@
  */
 import { useState, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { useEscapeToStop } from './useEscapeToStop';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { PromptEditorModal } from './PromptEditorModal';
 import { FeedbackDrawer } from '../SlideViewer/FeedbackDrawer';
+import { LoadProfileDialog, SaveProfileDialog } from '../AgentConfigBar/AgentConfigBar';
+import { SaveAsDialog } from '../History/SaveAsDialog';
+import { RevertConfirmModal } from '../SavePoints/RevertConfirmModal';
+import { SurveyModal } from '../Feedback/SurveyModal';
+import { WelcomeModal } from '../Tour/WelcomeModal';
+import { api } from '../../services/api';
 
 vi.mock('../../contexts/ViewerContext', () => ({
   useViewer: () => ({
@@ -54,6 +60,10 @@ vi.mock('../../contexts/ViewerContext', () => ({
     activeTab: 'feedback',
     setActiveTab: () => {},
   }),
+}));
+
+vi.mock('../../contexts/TourContext', () => ({
+  useTour: () => ({ showWelcome: true, startTour: () => {}, dismissWelcome: () => {} }),
 }));
 
 function Stopper({ active, onStop, children }: { active: boolean; onStop: () => void; children?: ReactNode }) {
@@ -325,5 +335,61 @@ describe('useEscapeToStop', () => {
 
     press(screen.getByRole('button', { name: 'outside' }));
     expect(onStop).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Final review F7: an overlay on the deck page with no role="dialog" let Escape stop the generation
+// underneath it. The Agent config bar's Save/Load Profile dialogs stay reachable while a turn runs; the
+// others' triggers are disabled then, but they get the role too.
+describe('deck-page overlays count as dialogs (final review F7)', () => {
+  class MemoryStorage implements Storage {
+    private store = new Map<string, string>();
+    get length() { return this.store.size; }
+    clear() { this.store.clear(); }
+    getItem(key: string) { return this.store.has(key) ? this.store.get(key)! : null; }
+    key(i: number) { return Array.from(this.store.keys())[i] ?? null; }
+    removeItem(key: string) { this.store.delete(key); }
+    setItem(key: string, value: string) { this.store.set(key, String(value)); }
+  }
+
+  it.each<[string, () => ReactNode]>([
+    ['Save as Profile', () => <SaveProfileDialog isOpen onClose={() => {}} onSave={() => {}} saving={false} />],
+    ['Load Profile', () => <LoadProfileDialog isOpen onClose={() => {}} onLoad={() => {}} />],
+    ['Save Session', () => <SaveAsDialog isOpen currentTitle="Otters" onSave={() => {}} onCancel={() => {}} />],
+    [
+      'Revert to Previous Version',
+      () => (
+        <RevertConfirmModal
+          isOpen
+          versionNumber={2}
+          description="Generated 3 slides"
+          currentVersion={4}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      ),
+    ],
+    ["How's your experience with tellr?", () => <SurveyModal isOpen onClose={() => {}} />],
+    ['Welcome to Tellr', () => <WelcomeModal />],
+  ])('test_overlay_counts_as_a_dialog (%s)', (name, overlay) => {
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    vi.spyOn(api, 'listProfiles').mockResolvedValue([]);
+    try {
+      const onStop = vi.fn();
+      const { rerender } = render(<Stopper active onStop={onStop}>{overlay()}</Stopper>);
+
+      const dialog = screen.getByRole('dialog', { name });
+      expect(dialog).toHaveAttribute('aria-modal', 'true');
+      press(document.body);
+      press(within(dialog).getAllByRole('button')[0]);
+      expect(onStop, 'Escape under an open overlay stopped the generation').not.toHaveBeenCalled();
+
+      // Positive: with the overlay closed, Escape stops.
+      rerender(<Stopper active onStop={onStop}><button type="button">plain</button></Stopper>);
+      press(screen.getByRole('button', { name: 'plain' }));
+      expect(onStop).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

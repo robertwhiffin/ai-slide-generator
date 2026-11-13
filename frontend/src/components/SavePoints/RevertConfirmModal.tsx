@@ -30,7 +30,12 @@ export const RevertConfirmModal: React.FC<RevertConfirmModalProps> = ({
       />
       
       {/* Modal */}
-      <div className="relative bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Revert to Previous Version"
+        className="relative bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full mx-4 overflow-hidden"
+      >
         {/* Header - Indigo theme to match preview */}
         <div className="bg-indigo-50 dark:bg-indigo-900/30 px-6 py-4 border-b border-indigo-200 dark:border-indigo-700">
           <div className="flex items-center gap-3">
