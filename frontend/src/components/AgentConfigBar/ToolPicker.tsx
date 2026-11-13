@@ -8,6 +8,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
+import { useSession } from '../../contexts/SessionContext';
 import { api } from '../../services/api';
 import type { AvailableTool, GatewayItem, GenieTool, VectorIndexTool, MCPTool, ModelEndpointTool, AgentBricksTool, ToolEntry, ToolType } from '../../types/agentConfig';
 import type { ToolPreviewData } from './ToolDetailPanel';
@@ -57,6 +58,12 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
 }) => {
   const [activeCategory, setActiveCategory] = useState<ToolType | null>(null);
   const [gatewayItems, setGatewayItems] = useState<GatewayItem[]>([]);
+  const { storedDeckMode, selectedDeckMode } = useSession();
+  const legacyDeck = (storedDeckMode ?? selectedDeckMode) === 'legacy';
+  // Agent decks run only Genie Agents and MCP servers from this group.
+  const otherCategories = legacyDeck
+    ? OTHER_TOOL_CATEGORIES
+    : OTHER_TOOL_CATEGORIES.filter(c => c.type === 'genie' || c.type === 'mcp');
   const [showOtherTools, setShowOtherTools] = useState(false);
 
   useEffect(() => {
@@ -122,7 +129,7 @@ export const ToolPicker: React.FC<ToolPickerProps> = ({
         Other tools
         {showOtherTools ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
       </button>
-      {showOtherTools && OTHER_TOOL_CATEGORIES.map(({ type, label }) => (
+      {showOtherTools && otherCategories.map(({ type, label }) => (
         <button
           key={type}
           onClick={() => handleButtonClick(type)}

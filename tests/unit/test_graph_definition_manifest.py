@@ -734,8 +734,8 @@ def test_assembly_rules_for_rejects_unknown_roles():
 # The seven packaged v1 content hashes, recomputed from landed source and used
 # here as the byte-identity oracle for the grammar change.
 PACKAGED_V1_CONTENT_HASHES = {
-    "architect": "d6e077d589d5146fefe45aae5567ad91b3a550d3390543268bde599f98d83d12",
-    "data_analyst": "5bc26a1779f5e9d0da693356b2c77ed2093273912d400c8f98adad7c6b872c96",
+    "architect": "872e9a8a0376c5a4904c74c72f8e026c60c8d0b78e437c0f225ca62ea19a5938",
+    "data_analyst": "26ca3192ebf6da1ac6f9482d0579ec183a1e353e356cbf064e576f73f07a026e",
     "builder": "a0b6c836e54acdc494e0934573b45a0d1ee8a6315c4ecc819be2f7e2c4a4df38",
     "build_reviewer": "0a8f6a7c6ef13c1acd89960f44a0eaa57ea2e7b1074a1ec191654229d268461f",
     "fixer": "5b0186f54e576b885efad0cd33aa67870ca90db300aae9a3314fa7f713610f8f",
@@ -1194,11 +1194,14 @@ def test_hashing_rejects_non_string_object_keys_inside_guidance() -> None:
     # for the promoted architect deck-style prompt (deck-style-b), then for the promoted
     # brand-footer prompt (Addendum A), then for main's Genie One ask_data line
     # (genie-questions) merged into it (brand-footer-genie), then for the brief-starter
-    # deck-scale block (a five-to-eight-slide starter replaces the 14-20 default), then
-    # for the STAGE SLIDE block (architect stage context), then for its kind-of-element vs
-    # one-slide's-content clarification (whole-branch review I2).
+    # deck-scale block (a five-to-eight-slide starter replaces the 14-20 default), then for
+    # the data-sources prompt (DATA SOURCES and READ-ONLY TOOLS blocks, Task 8b), then for
+    # its READ-ONLY TOOLS block worded as the spec words it (data-sources-b, final review),
+    # then (on main) for the STAGE SLIDE block (architect stage context) and its
+    # kind-of-element vs one-slide's-content clarification (whole-branch review I2), then
+    # for the merge of the two (data-sources-stage).
     assert definition_content_hash(built({"1": "a"})) == (
-        "4a3a2cd2dd7686b23590060a47b3b232a3b5a5c04b0e3bc2989dc1377deb47b3"
+        "73456e5400375ffbfcad4588a1867724be89023ba69e099fdb6f2873714bff72"
     )
 
 

@@ -1,0 +1,10 @@
+# Main's promoted architect prompt (PR #383, architect stage context; packaged content hash
+# d6e077d5 on main), byte for byte: it has the STAGE SLIDE block, and none of this branch's DATA
+# SOURCES or READ-ONLY TOOLS blocks. The baseline for the merged prompt `data-sources-stage`: after
+# the merge `v1-baseline` IS the merged prompt, so main's prompt is run as a config on the merged
+# code and the same production-shaped payloads (every payload carries both stage_slide and
+# data_sources).
+agent_key: architect
+name: stage-context-main
+base: v1
+prompt_file: stage-context-main.md

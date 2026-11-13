@@ -1,0 +1,10 @@
+{
+  "should_fail": {
+    "outcome": "no_tool",
+    "synthesis": null,
+    "sources": null,
+    "gap": null,
+    "tried_tools": [],
+    "reason": "No tool or data source applies to a revenue question."
+  }
+}

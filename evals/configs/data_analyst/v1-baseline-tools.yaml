@@ -1,0 +1,10 @@
+# The shipped v1 data analyst (prompt and model unchanged) with the fake data tools bound:
+# Genie One (`genie`), one Genie Agent (`genie_agent_sales`) and a Gateway MCP web search
+# (`you-search`). It is the Step 1 baseline of the `data_tools` case set only (Task 8b):
+#   python -m evals.run_eval --agent data_analyst \
+#     --config evals/configs/data_analyst/v1-baseline-tools.yaml --case-set data_tools
+# `data_tools` is a harness setting, so the content_hash is v1's own.
+agent_key: data_analyst
+name: v1-baseline-tools
+base: v1
+data_tools: true

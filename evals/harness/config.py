@@ -29,11 +29,16 @@ class ConfigError(ValueError):
 _KNOWN_KEYS = frozenset({
     "agent_key", "name", "base", "prompt_text", "prompt_file",
     "endpoint_name", "temperature", "max_tokens", "top_p", "image_tool",
+    "data_tools",
 })
 
 #: The roles an eval config may bind the ``generate_image`` tool for: production binds it for the
 #: architect alone (``nodes.architect_node``).
 IMAGE_TOOL_ROLES = ("architect",)
+
+#: The roles an eval config may bind the fake data tools for (Genie One, a Genie Agent, a Gateway
+#: MCP web search): production binds data tools for the data analyst alone.
+DATA_TOOLS_ROLES = ("data_analyst",)
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,9 @@ class AgentEvalConfig:
     #: config (``runner._binds_image_tool``). A harness setting, not definition content: it leaves
     #: ``content`` and ``content_hash`` as they are.
     image_tool: bool = False
+    #: Bind the analyst's fake data tools on every run of this config (``runner._binds_data_tools``).
+    #: Also a harness setting: it leaves ``content`` and ``content_hash`` as they are.
+    data_tools: bool = False
 
 
 def v1_baseline(agent_key: str) -> AgentEvalConfig:
@@ -81,6 +89,8 @@ def load_config(path: str | Path) -> AgentEvalConfig:
     top_p          : float (optional)
     image_tool     : bool  (optional, default false): bind the architect's generate_image tool;
                      only for a role in IMAGE_TOOL_ROLES
+    data_tools     : bool  (optional, default false): bind the analyst's fake Genie One, Genie
+                     Agent and web-search tools; only for a role in DATA_TOOLS_ROLES
     """
     path = Path(path)
     with open(path) as f:
@@ -112,6 +122,13 @@ def load_config(path: str | Path) -> AgentEvalConfig:
     if image_tool and agent_key not in IMAGE_TOOL_ROLES:
         raise ConfigError(
             f"{path}: image_tool is only for {list(IMAGE_TOOL_ROLES)}; agent_key is {agent_key!r}")
+
+    data_tools = raw.get("data_tools", False)
+    if not isinstance(data_tools, bool):
+        raise ConfigError(f"{path}: data_tools must be true or false, not {data_tools!r}")
+    if data_tools and agent_key not in DATA_TOOLS_ROLES:
+        raise ConfigError(
+            f"{path}: data_tools is only for {list(DATA_TOOLS_ROLES)}; agent_key is {agent_key!r}")
 
     # Start from the v1 base definition.
     manifest_by_key = {d.agent_key: d for d in load_graph_v1_manifest().definitions}
@@ -145,6 +162,7 @@ def load_config(path: str | Path) -> AgentEvalConfig:
         content=content,
         content_hash=definition_content_hash(content),
         image_tool=image_tool,
+        data_tools=data_tools,
     )
 
 

@@ -1144,6 +1144,7 @@ def test_gateway_failure_is_a_frozen_dataclass_with_the_declared_fields():
         "kind",
         "message",
         "sign_in_url",
+        "source",
     ]
     failure = _failure("removed")
     with pytest.raises(dataclasses.FrozenInstanceError):

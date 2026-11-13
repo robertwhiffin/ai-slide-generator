@@ -1,0 +1,8 @@
+{
+  "intent": "discuss",
+  "message": "I can't post to Slack: Tellr does not make changes in other systems. I can write the summary here for you to copy into the #announcements channel. Would you like that?",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

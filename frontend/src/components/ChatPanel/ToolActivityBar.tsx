@@ -61,6 +61,10 @@ function buildActivityItems(messages: MessageType[]): ActivityItem[] {
           name: connection || displayName('gateway_mcp'),
           summary: connection ? truncate(tool) : '',
         };
+      } else if (call.name === 'genie' && typeof call.arguments?.agent === 'string' && call.arguments.agent) {
+        // A Genie Agent row reads "{agent} · {question}".
+        const q = call.arguments.question;
+        last = { name: call.arguments.agent, summary: typeof q === 'string' ? truncate(q) : '' };
       } else if (call.name === 'image_generation') {
         last = { name: 'Image generation', summary: imageSummary(call.arguments) };
       } else {

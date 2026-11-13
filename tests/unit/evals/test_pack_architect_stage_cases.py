@@ -30,6 +30,7 @@ from src.domain.deck_spec import DeckSpec, DesignContractRef
 from src.domain.skill_io import ArchitectOutput
 from src.domain.slide_numbering import architect_slide_payload, resolve_slide_references
 from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS, model_payload_for
+from src.services.graph.nodes import GENIE_ONE_DATA_SOURCE
 from src.services.template_sections import section_inventory
 
 AGENT = "architect"
@@ -43,7 +44,7 @@ PAYLOAD_KEYS = [
     "conversation", "message", "current_deck_spec", "committed_slide_count",
     "slide_numbering", "slide_references", "stage_slide",
     "previous_deck_review", "available_design_contract", "template_sections",
-    "resolved_style", "design_system_library", "deck_style_context",
+    "resolved_style", "design_system_library", "deck_style_context", "data_sources",
 ]
 RESTYLE_KEEPS = ["dk-code", "kw", "fn", "str", "cm"]
 
@@ -184,6 +185,8 @@ def _expected_payload(split, cid):
         "resolved_style": case.meridian_resolved_style(),
         "design_system_library": m.LIBRARY,
         "deck_style_context": case.meridian_deck_style_context(),
+        # Agent-mode Task 7: every train and held-out payload lists Genie One.
+        "data_sources": [GENIE_ONE_DATA_SOURCE],
     })
 
 

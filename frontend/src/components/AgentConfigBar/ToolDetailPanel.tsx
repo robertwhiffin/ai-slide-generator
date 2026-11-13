@@ -8,9 +8,11 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
+import { McpAgentChoice } from './McpAgentChoice';
 import { TOOL_TYPE_BADGE_LABELS, TOOL_TYPE_COLORS } from '../../types/agentConfig';
 import type {
   ToolType,
+  McpAgentName,
   ToolEntry,
   AgentBricksTool,
   MCPTool,
@@ -37,6 +39,7 @@ export interface MCPPreview {
   connectionName: string;
   serverName: string;
   description?: string;
+  agent?: McpAgentName;
 }
 
 export interface ModelEndpointPreview {
@@ -81,6 +84,9 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
   const [description, setDescription] = useState(preview.description ?? '');
   const [serverName, setServerName] = useState(
     preview.toolType === 'mcp' ? preview.serverName : '',
+  );
+  const [agent, setAgent] = useState<McpAgentName>(
+    preview.toolType === 'mcp' ? preview.agent ?? 'data_analyst' : 'data_analyst',
   );
   const [selectedColumns, setSelectedColumns] = useState<Set<string>>(
     preview.toolType === 'vector_index'
@@ -131,6 +137,7 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
           connection_name: preview.connectionName,
           server_name: serverName || preview.name,
           description: description || undefined,
+          agent,
         };
         tool = t;
         break;
@@ -245,6 +252,8 @@ export default function ToolDetailPanel({ preview, mode, onSave, onCancel }: Too
           />
         </div>
       )}
+
+      {preview.toolType === 'mcp' && <McpAgentChoice value={agent} onChange={setAgent} />}
 
       {/* Vector Index: column checkboxes */}
       {preview.toolType === 'vector_index' && preview.columns.length > 0 && (
