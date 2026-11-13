@@ -1,16 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { SidebarProvider } from '@/ui/sidebar';
 import { AppSidebar } from './app-sidebar';
 
 const currentUser = { username: 'u', displayName: 'u', isAdmin: false, loading: false };
+/** What the sidebar reads from useWhatsNew(). hasNotes defaults to false, as in this PR (no notes files). */
+const whatsNew = { hasNotes: false, open: vi.fn() };
+/** What the sidebar reads from useTour(). A completed tour is the default: an existing user. */
+const tour = { hasCompletedTour: true };
 
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => currentUser,
 }));
 vi.mock('@/contexts/TourContext', () => ({
-  useTour: () => ({ startTour: vi.fn() }),
+  useTour: () => ({ startTour: vi.fn(), hasCompletedTour: tour.hasCompletedTour }),
+}));
+vi.mock('@/contexts/WhatsNewContext', () => ({
+  useWhatsNew: () => whatsNew,
 }));
 vi.mock('@/components/Layout/deck-history', () => ({
   DeckHistory: () => null,
@@ -43,6 +50,12 @@ function renderSidebar() {
   );
   return { onViewChange };
 }
+
+beforeEach(() => {
+  whatsNew.hasNotes = false;
+  tour.hasCompletedTour = true;
+  whatsNew.open.mockReset();
+});
 
 describe('AppSidebar Configure section admin link', () => {
   beforeEach(() => {
@@ -80,5 +93,55 @@ describe('AppSidebar Configure section admin link', () => {
     currentUser.loading = true;
     renderSidebar();
     expect(screen.queryByText('Admin')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * What's new popup, Task 3: the footer item that reopens the popup. It is shown only when hasNotes,
+ * sits after "App Tour" in the footer, and calls useWhatsNew().open (an overlay, not a page).
+ * SABOTAGE (each measured red against a throwaway copy of the sidebar, since deleted): the item is
+ * always shown, never shown, wired to startTour, calls open twice, uses a curly apostrophe or "What's
+ * New", sits before App Tour, is a Configure nav item, or reads `releases` instead of `hasNotes`.
+ */
+describe("AppSidebar footer What's new item", () => {
+  beforeEach(() => {
+    // SidebarProvider's mobile hook reads matchMedia, which jsdom lacks.
+    window.matchMedia = vi.fn().mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }) as unknown as typeof window.matchMedia;
+  });
+
+  it("shows a What's new button in the footer, after App Tour, that opens the popup", () => {
+    whatsNew.hasNotes = true;
+    const { onViewChange } = renderSidebar();
+
+    const appTour = screen.getByRole('button', { name: 'App Tour' });
+    const footer = appTour.closest('[data-sidebar="footer"]') as HTMLElement;
+    const button = within(footer).getByRole('button', { name: "What's new" });
+    expect(appTour.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    expect(whatsNew.open).not.toHaveBeenCalled();
+    fireEvent.click(button);
+    expect(whatsNew.open).toHaveBeenCalledTimes(1);
+    expect(onViewChange).not.toHaveBeenCalled(); // it opens an overlay, not a page
+  });
+
+  it('hides it for a user who has not completed the tour (they are looking at the welcome guide)', () => {
+    whatsNew.hasNotes = true;
+    tour.hasCompletedTour = false;
+    renderSidebar();
+
+    expect(screen.getByRole('button', { name: 'App Tour' })).toBeInTheDocument(); // the footer rendered
+    expect(screen.queryByRole('button', { name: "What's new" })).not.toBeInTheDocument();
+  });
+
+  it('hides it while no release has notes', () => {
+    renderSidebar();
+
+    expect(screen.getByRole('button', { name: 'App Tour' })).toBeInTheDocument(); // the footer rendered
+    expect(screen.queryByText("What's new")).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: "What's new" })).not.toBeInTheDocument();
   });
 });

@@ -57,6 +57,7 @@ jobs:
               - '.github/actions/setup-python-env/**'
               - '.github/workflows/test.yml'
               - 'frontend/tests/**'
+              - 'scripts/check_release_notes.py'
             # `frontend` also gates E2E, so it names what E2E runs on besides
             # frontend/: this workflow and the per-spec runner. Without them a
             # change to how E2E runs would skip E2E.
@@ -739,6 +740,7 @@ jobs:
               - slide-surface-fidelity
               - template-preview-import-scan
               - turn-progress
+              - whats-new
           - shard: 4
             specs:
               - agent-insert-slide

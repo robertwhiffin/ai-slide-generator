@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { whatsNewSeenStorage } from './tests/helpers/whats-new';
 
 export default defineConfig({
   testDir: './tests',
@@ -22,7 +23,10 @@ export default defineConfig({
       cookies: [],
       origins: [{
         origin: 'http://localhost:3000',
-        localStorage: [{ name: 'tellr-app-tour-completed', value: 'true' }],
+        localStorage: [
+          { name: 'tellr-app-tour-completed', value: 'true' },
+          ...whatsNewSeenStorage(),
+        ],
       }],
     },
   },

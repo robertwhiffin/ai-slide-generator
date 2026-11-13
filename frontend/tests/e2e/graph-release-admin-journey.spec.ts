@@ -26,6 +26,7 @@ import {
 } from '../fixtures/graphLifecycleContract';
 import { sweepForbiddenActionNames } from '../fixtures/forbiddenActionHelpers';
 import { ALLOWED_ACTION_NAMES } from '../fixtures/forbiddenActionNames';
+import { whatsNewSeenStorage } from '../helpers/whats-new';
 
 const contract = loadContract();
 const ADMIN_IDS = adminExchangeIds(contract);
@@ -128,7 +129,10 @@ async function newJourneyContext(browser: Browser): Promise<BrowserContext> {
       cookies: [],
       origins: [{
         origin: 'http://localhost:3000',
-        localStorage: [{ name: 'tellr-app-tour-completed', value: 'true' }],
+        localStorage: [
+          { name: 'tellr-app-tour-completed', value: 'true' },
+          ...whatsNewSeenStorage(),
+        ],
       }],
     },
   });

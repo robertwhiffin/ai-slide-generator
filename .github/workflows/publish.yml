@@ -51,6 +51,9 @@ jobs:
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
           echo "All versions match: $TAG_VERSION"
 
+      - name: Check What's new notes
+        run: python3 scripts/check_release_notes.py "${{ steps.version.outputs.version }}"
+
   build:
     name: Build Packages
     runs-on: ubuntu-latest

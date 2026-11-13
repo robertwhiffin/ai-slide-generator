@@ -42,6 +42,7 @@ import {
 } from '../fixtures/mocks';
 import { ALLOWED_ACTION_NAMES } from '../fixtures/forbiddenActionNames';
 import { apiPath, apiPathMatching } from '../helpers/api-route';
+import { whatsNewSeenStorage } from '../helpers/whats-new';
 
 const contract = loadContract();
 
@@ -125,7 +126,10 @@ async function newConversationContext(
       origins: [
         {
           origin: 'http://localhost:3000',
-          localStorage: [{ name: 'tellr-app-tour-completed', value: 'true' }],
+          localStorage: [
+            { name: 'tellr-app-tour-completed', value: 'true' },
+            ...whatsNewSeenStorage(),
+          ],
         },
       ],
     },
