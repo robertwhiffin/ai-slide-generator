@@ -11,6 +11,7 @@ import {
   Settings,
   Shapes,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { NavMain } from "@/components/Layout/nav-main"
@@ -18,6 +19,7 @@ import { NavSecondary } from "@/components/Layout/nav-secondary"
 import { DeckHistory } from "@/components/Layout/deck-history"
 import { BrandHeader } from "@/components/Layout/brand-header"
 import { useTour } from "@/contexts/TourContext"
+import { useWhatsNew } from "@/contexts/WhatsNewContext"
 import { useCurrentUser } from "@/hooks/useCurrentUser"
 import {
   Sidebar,
@@ -104,6 +106,7 @@ export function AppSidebar({
   ...props
 }: AppSidebarProps) {
   const { startTour } = useTour()
+  const { hasNotes, open: openWhatsNew } = useWhatsNew()
   const navigate = useNavigate()
   // UX only: /admin enforces its own gate and every admin API route checks server-side.
   const { isAdmin, loading } = useCurrentUser()
@@ -159,6 +162,14 @@ export function AppSidebar({
               <span>App Tour</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          {hasNotes && (
+            <SidebarMenuItem>
+              <SidebarMenuButton onClick={openWhatsNew}>
+                <Sparkles />
+                <span>What's new</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
         </SidebarMenu>
       </SidebarFooter>
       <SidebarRail />

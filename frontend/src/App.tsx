@@ -13,6 +13,8 @@ import { ToastProvider } from './contexts/ToastContext';
 import { TourProvider } from './contexts/TourContext';
 import { AppTour } from './components/Tour/AppTour';
 import { WelcomeModal } from './components/Tour/WelcomeModal';
+import { WhatsNewModal } from './components/WhatsNew/WhatsNewModal';
+import { WhatsNewProvider } from './contexts/WhatsNewContext';
 
 /**
  * Renders the admin page only for admins; sends everyone else to "/".
@@ -122,9 +124,12 @@ function App() {
           <ToastProvider>
             <AgentConfigProvider>
               <TourProvider>
-                <AppRoutes />
-                <AppTour />
-                <WelcomeModal />
+                <WhatsNewProvider>
+                  <AppRoutes />
+                  <AppTour />
+                  <WelcomeModal />
+                  <WhatsNewModal />
+                </WhatsNewProvider>
               </TourProvider>
             </AgentConfigProvider>
           </ToastProvider>
