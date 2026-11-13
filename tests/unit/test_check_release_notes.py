@@ -282,3 +282,47 @@ def test_script_runs_on_bare_stdlib_python_and_fails_for_an_unknown_version(tmp_
     assert result.returncode == 1, (result.stdout, result.stderr)
     assert "0.0.0.json" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# JavaScript trim parity and the whole-directory check
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "accepted"),
+    [
+        # JS trim() strips U+FEFF, Python str.strip() does not: the frontend would reject it.
+        pytest.param("﻿", False, id="bom-only-title-rejected"),
+        # JS trim() does not strip U+0085 (NEL), Python str.strip() does: the frontend accepts it.
+        pytest.param("\x85", True, id="nel-only-title-accepted"),
+    ],
+)
+def test_title_whitespace_matches_javascript_trim(tmp_path, title, accepted):
+    write_notes(tmp_path, one_item(title=title, body="Ask for an image."))
+
+    problems = check_release_notes(VERSION, notes_dir=tmp_path)
+
+    if accepted:
+        assert problems == []
+    else:
+        assert_one_problem(problems, "title")
+
+
+def test_a_malformed_other_file_is_one_problem_naming_it(tmp_path):
+    """releases.ts throws at import on any bad file, so the guard checks them all."""
+    write_notes(tmp_path, VALID_NOTES)
+    write_notes(tmp_path, notes(version="0.5.6", date="2026-02-30"), version="0.5.6")
+
+    problems = check_release_notes(VERSION, notes_dir=tmp_path)
+
+    assert_one_problem(problems, "0.5.6.json")
+    assert "date" in problems[0]
+
+
+def test_other_files_are_checked_against_their_own_stem(tmp_path):
+    write_notes(tmp_path, VALID_NOTES)
+    write_notes(tmp_path, notes(version="0.5.6"), version="0.5.6")  # valid: no problem
+    write_notes(tmp_path, notes(version="0.5.5"), version="0.5.4")  # stem 0.5.4, says 0.5.5
+
+    assert_one_problem(check_release_notes(VERSION, notes_dir=tmp_path), "0.5.4.json")

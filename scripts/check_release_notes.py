@@ -65,11 +65,26 @@ def _reject_constant(token: str):
 
 
 def check_release_notes(version: str, notes_dir: Path = DEFAULT_NOTES_DIR) -> list[str]:
-    """Problems with <notes_dir>/<version>.json, one string each. An empty list means OK."""
+    """Problems with the notes files, one string each. An empty list means OK.
+
+    <version>.json must exist and be valid. Every other *.json in the directory is checked
+    too, against its own file name: releases.ts throws at import on ANY malformed file, which
+    would white-screen the app.
+    """
     name = f"{version}.json"
     path = notes_dir / name
     if not path.is_file():
         return [f"{name} is missing from {notes_dir}"]
+    problems = _check_file(path, version)
+    for other in sorted(notes_dir.glob("*.json")):
+        if other.name != name:
+            problems.extend(_check_file(other, other.stem))
+    return problems
+
+
+def _check_file(path: Path, expected_version: str) -> list[str]:
+    """Problems with one notes file, each prefixed with the file name."""
+    name = path.name
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -90,10 +105,10 @@ def check_release_notes(version: str, notes_dir: Path = DEFAULT_NOTES_DIR) -> li
     got_version = raw.get("version")
     if not isinstance(got_version, str) or not _VERSION_RE.fullmatch(got_version):
         problem(f"version must look like X.Y.Z, got {json.dumps(got_version)}")
-    elif got_version != version:
+    elif got_version != expected_version:
         problem(
             f"version {json.dumps(got_version)} does not match the file name, "
-            f"which is {version}"
+            f"which is {expected_version}"
         )
 
     raw_date = raw.get("date")
