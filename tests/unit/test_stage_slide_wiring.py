@@ -25,7 +25,7 @@ Rules pinned here:
   -- because turn state accumulates across a checkpointed thread: omitting the
   key would let a later, stage-less turn inherit an earlier turn's stage.
 * Legacy is frozen: the monolith path never enters the graph because of a
-  stage, and the Legacy-only sync route ``POST /chat`` is unchanged.
+  stage, and the retired sync route ``POST /chat`` (#382) stays gone.
 
 No live calls: the graph, the service's deck stores, settings and the session
 manager are all stubbed.  The route tests run the real FastAPI app and the real
@@ -66,6 +66,9 @@ _SETTINGS = "src.core.settings_db.get_settings"
 _SERVICE_SM = "src.api.services.chat_service.get_session_manager"
 _QUEUE_SM = "src.api.services.session_manager.get_session_manager"
 _QUEUE_SERVICE = "src.api.services.chat_service.get_chat_service"
+# Interrupt generation: a graph turn's liveness poll and commit point (seal).
+_TURN_IS_LIVE = "src.api.services.chat_service.turn_is_live"
+_SEAL = "src.services.generation_rollback.seal_generation"
 
 _MESSAGE = "make the title bigger"
 _MISSING = object()
@@ -256,11 +259,19 @@ def _service_manager() -> MagicMock:
 
 @contextlib.contextmanager
 def _service_env():
-    """Patch the service's own collaborators; yield the graph recorder."""
+    """Patch the service's own collaborators; yield the graph recorder.
+
+    A graph turn with a request id is also polled for liveness and sealed
+    before it completes (interrupt generation, ``generation_fence`` /
+    ``generation_rollback``); both read the database, so they are stubbed as
+    a live turn whose seal wins.
+    """
     graph = _GraphEntry()
     with patch(_INVOKE_GRAPH, graph), \
          patch(_SETTINGS, return_value=MagicMock()), \
-         patch(_SERVICE_SM, return_value=_service_manager()):
+         patch(_SERVICE_SM, return_value=_service_manager()), \
+         patch(_TURN_IS_LIVE, return_value=True), \
+         patch(_SEAL, return_value=True):
         yield graph
 
 
@@ -318,6 +329,13 @@ def route_env(client, route_db_engine):
         manager.release_session_lock.return_value = None
         manager.create_chat_request.return_value = "req-stage"
         manager.get_session.return_value = {"message_count": 1}
+        # The async route reads the stored Deck Mode at Enter to decide whether
+        # to take a generation snapshot (interrupt generation).  A bare MagicMock
+        # is truthy and not "legacy", so every turn would enter as an Agent deck;
+        # read the seeded session's real deck_mode instead (as on the resolver).
+        from src.api.services.session_manager import SessionManager
+
+        manager.get_deck_mode.side_effect = SessionManager().get_deck_mode
         route_sm.return_value = manager
 
         service = MagicMock()
@@ -479,20 +497,19 @@ class TestAsyncRoutePutsTheStageInThePayload:
         assert streamed == enqueued == _STAGE_WITH_ID
 
 
-class TestTheLegacySyncRouteIsUnchanged:
-    """``POST /chat`` is Legacy-only and frozen: a stage changes nothing.
+class TestTheLegacySyncRouteIsGone:
+    """``POST /chat`` was retired (#382): a staged send cannot reach the
+    synchronous ``ChatService.send_message`` by any route.
 
-    GREEN BY DESIGN (regression guard): it reddens if the stage is ever passed
-    into ``ChatService.send_message``.
+    GREEN BY DESIGN (regression guard): it reddens if the sync route returns.
     """
 
-    def test_send_message_receives_only_its_four_positional_arguments(self, route_env):
+    def test_a_staged_send_to_the_sync_route_reaches_no_service(self, route_env):
         sid = _seed_session(route_env["factory"], deck_mode="legacy")
         response = route_env["client"].post("/api/chat", json=_body(sid, _STAGE_WITH_ID))
-        assert response.status_code == 200, response.text
-        call = route_env["service"].send_message.call_args
-        assert call.args == (sid, _MESSAGE, None, None)
-        assert call.kwargs == {}
+        assert response.status_code in (404, 405), response.text
+        route_env["service"].send_message.assert_not_called()
+        route_env["service"].send_message_streaming.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +546,14 @@ def _run_worker(payload: Dict[str, Any]) -> Dict[str, Any]:
     with _worker_env() as (service, manager):
         asyncio.run(job_queue.process_chat_request("req-1", dict(payload)))
     assert service.send_message_streaming.call_count == 1
-    manager.update_chat_request_status.assert_any_call("req-1", "completed")
+    if payload.get("engine_mode") == "graph":
+        # An Agent turn starts and completes conditionally (interrupt
+        # generation): start_chat_request, then complete_chat_request.
+        manager.start_chat_request.assert_called_once_with("req-1")
+        manager.complete_chat_request.assert_called_once()
+        assert manager.complete_chat_request.call_args.args[0] == "req-1"
+    else:
+        manager.update_chat_request_status.assert_any_call("req-1", "completed")
     return service.send_message_streaming.call_args.kwargs
 
 

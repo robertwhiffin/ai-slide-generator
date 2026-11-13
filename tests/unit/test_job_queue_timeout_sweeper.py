@@ -253,14 +253,20 @@ async def test_recover_stuck_requests_uses_the_graph_limit(monkeypatch):
 
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
 
+    from src.database.models.generation_snapshot import GenerationSnapshot
     from src.database.models.session import ChatRequest, UserSession
 
+    # One shared connection: recovery reads and writes from worker threads.
     engine = create_engine(
-        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
     UserSession.__table__.create(engine)
     ChatRequest.__table__.create(engine)
+    GenerationSnapshot.__table__.create(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
 
     @contextlib.contextmanager
@@ -273,6 +279,8 @@ async def test_recover_stuck_requests_uses_the_graph_limit(monkeypatch):
             db.close()
 
     monkeypatch.setattr("src.core.database.get_db_session", fake_db)
+    # Modules that imported get_db_session by name resolve the factory at call time.
+    monkeypatch.setattr("src.core.database.get_session_local", lambda: factory)
     monkeypatch.setattr(
         "src.api.services.session_manager.get_session_manager", lambda: object()
     )

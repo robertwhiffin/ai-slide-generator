@@ -46,7 +46,12 @@ export const SaveAsDialog: React.FC<SaveAsDialogProps> = ({
         />
 
         {/* Dialog */}
-        <div className="relative w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-xl">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Save Session"
+          className="relative w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-xl"
+        >
           <h3 className="mb-4 text-lg font-semibold text-foreground">Save Session</h3>
 
           <form onSubmit={handleSubmit}>

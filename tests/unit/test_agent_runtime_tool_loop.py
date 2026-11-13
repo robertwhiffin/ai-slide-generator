@@ -836,6 +836,107 @@ def test_the_loop_stops_after_max_calls_plus_three_rounds(max_calls):
     assert toolset.calls_made == max_calls
 
 
+# ---------------------------------------------------------------------------
+# A stopped turn starts no further round (Task 8 fix round 1)
+# ---------------------------------------------------------------------------
+#
+# A read-only tool (a Gateway call that returns no image, the brand search) writes
+# nothing, so no fence refuses it: the loop itself checks the turn
+# (``raise_if_turn_ended``) before every round after the first.  The turn's status
+# is read through ``generation_fence.turn_is_live``, replaced here by a double over
+# a dict of statuses; the loop, the toolset and the check are production's.
+
+RID = "req-tool-loop"
+
+
+@pytest.fixture
+def turn_status(monkeypatch):
+    """``{request_id: status}`` the check reads, and the ids it was asked about.
+
+    The request id is bound in the graph's ContextVar for the test, as
+    ``invoke_graph`` binds it for a turn."""
+    from src.services import generation_fence
+    from src.services.graph.event_emitter import chat_request_id_var
+
+    statuses: dict[str, str] = {}
+    asked: list[str] = []
+
+    def turn_is_live(request_id: str) -> bool:
+        asked.append(request_id)
+        return statuses.get(request_id) in generation_fence.LIVE_STATUSES
+
+    monkeypatch.setattr(generation_fence, "turn_is_live", turn_is_live)
+    token = chat_request_id_var.set(RID)
+    try:
+        yield statuses, asked
+    finally:
+        chat_request_id_var.reset(token)
+
+
+def test_a_turn_stopped_during_a_tool_call_starts_no_further_round(turn_status):
+    """Stop pressed while a read-only tool runs in round 1: no round-2 model call."""
+    from src.services.generation_fence import TurnFencedError
+
+    statuses, asked = turn_status
+    statuses[RID] = "running"
+    tool = RecordingTool(
+        results=("42 rows: north=7, south=35",),
+        on_run=lambda: statuses.__setitem__(RID, "cancelled"),
+    )
+    toolset = _toolset(tool)
+    harness = _harness(_ask("sales by region", "call_1"), _final())
+
+    with pytest.raises(TurnFencedError) as raised:
+        _loop(harness, toolset)
+
+    assert raised.value.request_id == RID
+    assert len(tool.runs) == 1, "the tool did not run in round 1: the test proves nothing"
+    assert len(harness.chat.invocations) == 1, (
+        "a model round started after the turn was stopped"
+    )
+    assert asked == [RID]
+
+
+def test_a_live_turn_runs_every_round_and_is_checked_before_each_after_the_first(
+    turn_status,
+):
+    """The guard: a live turn's multi-round loop is unchanged, and round 1 is not checked."""
+    statuses, asked = turn_status
+    statuses[RID] = "running"
+    tool = RecordingTool(results=("first answer", "second answer"))
+    toolset = _toolset(tool)
+    harness = _harness(_ask("q1", "call_1"), _ask("q2", "call_2"), _final())
+
+    result = _loop(harness, toolset)
+
+    assert result == SCHEMA.model_validate(OUTPUT)
+    assert len(harness.chat.invocations) == 3
+    assert [run.args for run in tool.runs] == [LookupArgs(question="q1"), LookupArgs(question="q2")]
+    assert asked == [RID, RID], "the check must run before rounds 2 and 3 only"
+
+
+def test_no_request_id_means_the_loop_never_checks_the_turn(monkeypatch):
+    """The sweeper, the evals and the previews bind no request id: no check, no SQL."""
+    from src.services import generation_fence
+    from src.services.graph.event_emitter import chat_request_id_var
+
+    asked: list[str] = []
+    monkeypatch.setattr(
+        generation_fence, "turn_is_live", lambda request_id: asked.append(request_id) or False
+    )
+    token = chat_request_id_var.set(None)
+    try:
+        tool = RecordingTool(results=("first answer", "second answer"))
+        harness = _harness(_ask("q1", "call_1"), _ask("q2", "call_2"), _final())
+        result = _loop(harness, _toolset(tool))
+    finally:
+        chat_request_id_var.reset(token)
+
+    assert result == SCHEMA.model_validate(OUTPUT)
+    assert len(harness.chat.invocations) == 3
+    assert asked == []
+
+
 def _connection_error() -> openai.APIConnectionError:
     return openai.APIConnectionError(
         request=httpx.Request("POST", "https://example.invalid/ai-gateway/mlflow/v1")

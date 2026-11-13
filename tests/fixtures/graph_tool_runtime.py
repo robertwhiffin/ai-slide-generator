@@ -157,6 +157,7 @@ def run_architect(env, state: Dict[str, Any], *, request_id: str) -> SimpleNames
     before = len(sm.get_messages(state["session_id"]))
     emitter: queue.Queue = queue.Queue()
     set_event_emitter(emitter)
+    env.seed_running_request(request_id)
     set_chat_request_id(request_id)
     try:
         updates = nodes.architect_node(state)

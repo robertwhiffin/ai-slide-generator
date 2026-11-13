@@ -3,13 +3,15 @@
 Why this file exists
 --------------------
 ``src/services/spec_sync.py::claim_due_marker`` names its lease predicate
-(``unclaimed``) TWICE: once in the candidate subquery and once in the UPDATE's own
-WHERE.  The outer copy is the whole defence — dropping it makes the statement
-"claim whatever the subquery saw", a read-then-write race that lets four uvicorn
-workers pay for four identical LLM arc reviews of one deck.
+(``unclaimed``) TWICE: in the candidate ``SELECT … FOR UPDATE`` and in the claim
+UPDATE's own WHERE.  The candidate SELECT locks the deck row, so a second claimer
+queues on it and re-evaluates ``unclaimed`` against the committed row; the
+UPDATE's copy is belt and braces.  Dropping BOTH makes the claim a
+read-then-write race that lets four uvicorn workers pay for four identical LLM
+arc reviews of one deck.
 
 ``tests/unit/test_spec_sync_sweeper.py::TestFourConcurrentClaimers`` cannot see
-that.  Measured on this branch: dropping ONLY the outer ``.where(unclaimed)``
+that.  Measured on this branch: dropping ONLY the UPDATE's ``.where(unclaimed)``
 leaves all 87 tests of the spec_sync suite green, because SQLite has a single
 writer and the four threads serialise instead of racing — the window the
 predicate guards never opens.
@@ -21,24 +23,24 @@ The mechanism, stated because the test is worthless if it is wrong
 -----------------------------------------------------------------
 PostgreSQL READ COMMITTED, four claimers, one due marker:
 
-1. Claimer A runs its UPDATE and takes the marker row's lock.  Its transaction is
-   held OPEN (see ``_ClaimGate``) — the row is claimed but not yet committed.
-2. Claimers B, C and D then run their UPDATEs.  Each takes its own statement
-   snapshot, in which A's write is invisible, so each candidate subquery finds the
-   row unclaimed and returns its id.  Each then BLOCKS on A's row lock.
+1. Claimer A runs its candidate ``SELECT … FOR UPDATE`` and takes the marker row's
+   lock.  Its transaction is held OPEN (see ``_ClaimGate``) — the row is locked
+   but not yet claimed or committed.
+2. Claimers B, C and D then run their candidate SELECTs.  Each takes its own
+   statement snapshot, in which A's write is invisible, so each finds the row
+   unclaimed.  Each then BLOCKS on A's row lock.
 3. The test waits until it can SEE three backends waiting on a lock.  That
    observation is asserted, not assumed: without it a green "one winner" is
    equally true of four claimers that never overlapped, which is the exact
    masking failure this file was written to avoid.
-4. A commits.  B, C and D wake one at a time and PostgreSQL re-checks each
-   UPDATE's qual against A's committed tuple (EvalPlanQual).  The candidate
-   subquery is uncorrelated, so it is an InitPlan computed once before the lock
-   wait and NOT recomputed — it still yields the deck id, and ``id = <that id>``
-   still matches.  The ONLY predicate that sees A's ``spec_dirty_claimed_at`` is
-   the outer ``unclaimed``.  It fails, the UPDATE touches zero rows, and the
-   claimer correctly returns ``None``.
+4. A claims and commits.  B, C and D wake one at a time and PostgreSQL re-checks
+   each SELECT's qual against A's committed tuple (EvalPlanQual).  The predicate
+   that sees A's ``spec_dirty_claimed_at`` is ``unclaimed``.  It fails, the SELECT
+   returns no row, and the claimer correctly returns ``None``.  The claim
+   UPDATE's own ``unclaimed`` is a second line behind it.
 
-Which is why deleting the outer copy turns this test from one winner into four.
+Which is why deleting BOTH copies of ``unclaimed`` turns this test from one
+winner into four.
 
 The fixture, and the pool class
 -------------------------------
@@ -96,6 +98,21 @@ def _patched(factory, gates: Optional[Dict[str, _ClaimGate]] = None):
     fake = _thread_aware_db(factory, gates or {})
     with patch(_SPEC_SYNC_DB, fake), patch(_MANAGER_DB, fake):
         yield
+
+
+def _patch_for_every_claimer(monkeypatch, factory, gates: Dict[str, _ClaimGate]) -> None:
+    """:func:`_patched` for a fan-out, applied ONCE from the test's own thread.
+
+    ``patch`` is not thread-safe.  Entered inside each claimer thread, every
+    later claimer saves the earlier claimer's fake as "the original", and the
+    last one out restores a fake: ``session_manager`` and ``spec_sync`` were
+    left wired to this test's database, dropped at teardown, for every later
+    test on the same worker.  The fake dispatches on the thread's name anyway,
+    so one process-wide patch serves every claimer; ``monkeypatch`` undoes it.
+    """
+    fake = _thread_aware_db(factory, gates)
+    monkeypatch.setattr(_SPEC_SYNC_DB, fake)
+    monkeypatch.setattr(_MANAGER_DB, fake)
 
 
 # ---------------------------------------------------------------------------
@@ -168,11 +185,11 @@ class TestFourOverlappingClaimersOnPostgres:
         then block on that lock;
       * the test asserts it saw three backends waiting before releasing A.
 
-    Delete the outer ``.where(unclaimed)`` from ``claim_due_marker`` and this
-    reddens with four winners.  The SQLite version does not.
+    Delete BOTH ``unclaimed`` predicates (the candidate SELECT's and the claim
+    UPDATE's) from ``claim_due_marker`` and this reddens with four winners.  The SQLite version does not.
     """
 
-    def test_exactly_one_of_four_overlapping_claimers_wins(self, postgres_engine):
+    def test_exactly_one_of_four_overlapping_claimers_wins(self, postgres_engine, monkeypatch):
         factory = _make_factory(postgres_engine)
         deck = _seed_owner_deck(factory)
         now = datetime.utcnow()
@@ -183,12 +200,12 @@ class TestFourOverlappingClaimersOnPostgres:
         results: Dict[str, Optional[Tuple[str, str]]] = {}
         errors: List[BaseException] = []
         lock = threading.Lock()
+        _patch_for_every_claimer(monkeypatch, factory, gates)
 
         def claimer() -> None:
             name = threading.current_thread().name
             try:
-                with _patched(factory, gates):
-                    outcome = claim_due_marker(now)
+                outcome = claim_due_marker(now)
                 with lock:
                     results[name] = outcome
             except BaseException as exc:  # noqa: BLE001 — recorded, asserted on
@@ -259,7 +276,7 @@ class TestFourOverlappingClaimersOnPostgres:
         )
         assert row.spec_dirty_by == _AUTHOR
 
-    def test_a_lease_older_than_the_ttl_is_reclaimable(self, postgres_engine):
+    def test_a_lease_older_than_the_ttl_is_reclaimable(self, postgres_engine, monkeypatch):
         """The paired direction: the same four-way overlap DOES yield a winner
         when the existing lease has expired.
 
@@ -284,12 +301,12 @@ class TestFourOverlappingClaimersOnPostgres:
         results: Dict[str, Optional[Tuple[str, str]]] = {}
         errors: List[BaseException] = []
         lock = threading.Lock()
+        _patch_for_every_claimer(monkeypatch, factory, gates)
 
         def claimer() -> None:
             name = threading.current_thread().name
             try:
-                with _patched(factory, gates):
-                    outcome = claim_due_marker(now)
+                outcome = claim_due_marker(now)
                 with lock:
                     results[name] = outcome
             except BaseException as exc:  # noqa: BLE001

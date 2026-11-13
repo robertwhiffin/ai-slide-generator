@@ -1,9 +1,10 @@
-import React, { useState, useRef, useLayoutEffect, useCallback } from 'react';
-import { Send, Maximize2, ImagePlus, X, WandSparkles } from 'lucide-react';
+import React, { useState, useRef, useLayoutEffect, useEffect, useCallback } from 'react';
+import { Send, Ban, Maximize2, ImagePlus, X, WandSparkles } from 'lucide-react';
 import { Button } from '@/ui/button';
 import { PromptEditorModal } from './PromptEditorModal';
 import { GenerateImageRequestDialog } from './GenerateImageRequestDialog';
 import { api } from '../../services/api';
+import { GENERATING_HINT, STOP_ARIA_LABEL, STOP_TOOLTIP } from './stopGenerationCopy';
 
 interface ChatInputProps {
   onSend: (message: string, imageIds?: string[]) => void;
@@ -13,6 +14,13 @@ interface ChatInputProps {
   modeControl?: React.ReactNode;
   /** When set, the hint row offers Generate image (slideCount fills the dialog's For-slide choices). */
   imageRequest?: { slideCount: number };
+  /** A turn is running: with `onStop`, the send button becomes a stop button. */
+  generating?: boolean;
+  /** Stop the running turn. Absent for Legacy decks, which keep the send button. */
+  onStop?: () => void;
+  /** Bump to a new non-zero value to put the last message submitted HERE (and its images) back. Bump it
+   *  only for a turn this input sent: its last draft is not the text of a send from elsewhere. */
+  restoreDraftKey?: number;
 }
 
 interface AttachedImage {
@@ -24,6 +32,10 @@ const MIN_ROWS = 2;
 const MAX_ROWS = 10;
 const LINE_HEIGHT = 24; // Approximate line height in pixels
 
+/** A stop click this soon after Send turned into Stop is the Send click repeated (a double-click), not a
+ *  stop: it is ignored. Escape is not delayed. */
+export const STOP_ARM_DELAY_MS = 500;
+
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSend,
   disabled,
@@ -31,6 +43,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   badge,
   modeControl,
   imageRequest,
+  generating,
+  onStop,
+  restoreDraftKey,
 }) => {
   const [message, setMessage] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -39,6 +54,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // What was last submitted, so a stopped turn can put it back.
+  const lastDraftRef = useRef<{ text: string; images: AttachedImage[] } | null>(null);
+  const handledRestoreKeyRef = useRef(restoreDraftKey ?? 0);
+  const [focusAfterRestore, setFocusAfterRestore] = useState(false);
 
   const addUploadedImage = useCallback((id: string, previewUrl?: string) => {
     setAttachedImages((prev) => (prev.some((a) => a.id === id) ? prev : [...prev, { id, previewUrl }]));
@@ -98,6 +117,28 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     [disabled, uploading, addUploadedImage]
   );
 
+  useEffect(() => {
+    const key = restoreDraftKey ?? 0;
+    if (key === 0 || key === handledRestoreKeyRef.current) return;
+    handledRestoreKeyRef.current = key;
+    const draft = lastDraftRef.current;
+    if (!draft) return;
+    setMessage(draft.text);
+    setAttachedImages(draft.images);
+    setFocusAfterRestore(true);
+  }, [restoreDraftKey]);
+
+  // Focus the restored draft once the textarea can take focus, cursor at the end.
+  useEffect(() => {
+    if (!focusAfterRestore || disabled) return;
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    }
+    setFocusAfterRestore(false);
+  }, [focusAfterRestore, disabled, message]);
+
   // Use useLayoutEffect to avoid visual flicker and prevent infinite loops
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -119,13 +160,24 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     textarea.style.overflowY = scrollHeight > maxHeight ? 'auto' : 'hidden';
   }, [message]);
 
+  // Every send path of this input goes through here, so a stop restores the turn that was stopped.
+  const sendRecorded = (
+    text: string,
+    imageIds: string[] | undefined,
+    draftText: string,
+    draftImages: AttachedImage[],
+  ) => {
+    lastDraftRef.current = { text: draftText, images: draftImages };
+    onSend(text, imageIds);
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = message.trim();
     if (!text && attachedImages.length === 0) return;
     if (disabled) return;
     const imageIds = attachedImages.length > 0 ? attachedImages.map((a) => a.id) : undefined;
-    onSend(text || 'Use these images', imageIds);
+    sendRecorded(text || 'Use these images', imageIds, message, attachedImages);
     setMessage('');
     setAttachedImages([]);
   };
@@ -139,6 +191,22 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const charCount = message.length;
 
   const canSend = message.trim() || attachedImages.length > 0;
+  const stopMode = Boolean(generating && onStop);
+
+  // When Send turns into Stop (not when the input mounts mid-turn: nothing was clicked then), start the
+  // window in which a stop click is ignored. A layout effect, so it is set before any later click lands.
+  const stopArmedAtRef = useRef<number | null>(null);
+  const wasStopModeRef = useRef(stopMode);
+  useLayoutEffect(() => {
+    if (stopMode && !wasStopModeRef.current) stopArmedAtRef.current = Date.now();
+    if (!stopMode) stopArmedAtRef.current = null;
+    wasStopModeRef.current = stopMode;
+  }, [stopMode]);
+  const handleStopClick = () => {
+    const armedAt = stopArmedAtRef.current;
+    if (armedAt !== null && Date.now() - armedAt < STOP_ARM_DELAY_MS) return;
+    onStop?.();
+  };
 
   return (
     <>
@@ -222,22 +290,41 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               >
                 <Maximize2 className="h-3.5 w-3.5" />
               </Button>
-              <Button
-                type="submit"
-                size="icon"
-                disabled={disabled || !canSend}
-                className="h-7 w-7"
-                title="Send message (Enter)"
-                aria-label="Send"
-              >
-                <Send className="h-3.5 w-3.5" />
-              </Button>
+              {/* Distinct keys: the stop button is a new element, so the focus a Send click left on the
+                  Send button is not carried over to it (Space/Enter would otherwise press Stop). */}
+              {stopMode ? (
+                <Button
+                  key="stop"
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  onClick={handleStopClick}
+                  className="h-7 w-7 text-red-600"
+                  title={STOP_TOOLTIP}
+                  aria-label={STOP_ARIA_LABEL}
+                  data-testid="chat-stop"
+                >
+                  <Ban className="h-3.5 w-3.5" />
+                </Button>
+              ) : (
+                <Button
+                  key="send"
+                  type="submit"
+                  size="icon"
+                  disabled={disabled || !canSend}
+                  className="h-7 w-7"
+                  title="Send message (Enter)"
+                  aria-label="Send"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                </Button>
+              )}
             </div>
           </div>
         </div>
 
         <div className="mt-1.5 flex items-center justify-between text-xs text-muted-foreground">
-          <span>Enter to send · Shift+Enter new line</span>
+          <span>{stopMode ? GENERATING_HINT : 'Enter to send · Shift+Enter new line'}</span>
           <div className="flex shrink-0 items-center gap-3">
             {imageRequest && (
               <button
@@ -266,7 +353,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onClose={() => setIsImageDialogOpen(false)}
           onSubmit={(text) => {
             setIsImageDialogOpen(false);
-            onSend(text);
+            sendRecorded(text, undefined, text, []);
           }}
         />
       )}
@@ -279,7 +366,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onCancel={() => setIsModalOpen(false)}
           onSend={(text) => {
             if (text.trim() && !disabled) {
-              onSend(text.trim(), undefined);
+              sendRecorded(text.trim(), undefined, text.trim(), attachedImages);
               setMessage('');
               setIsModalOpen(false);
             }

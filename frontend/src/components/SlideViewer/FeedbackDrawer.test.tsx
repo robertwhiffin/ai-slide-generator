@@ -319,3 +319,41 @@ describe('FeedbackDrawer — plain message and details', () => {
     expect(screen.queryByTestId('finding-details-f-overflow')).toBeNull();
   });
 });
+
+// Final review F2: Apply and Discuss send a chat message, so they wait for a running turn (SlideViewer
+// passes `actionsDisabled` while one runs). Dismiss sends nothing and stays.
+describe('FeedbackDrawer — while a turn is running', () => {
+  it('Apply and Discuss are disabled; Dismiss is not', () => {
+    const onApplyFinding = vi.fn();
+    const onDiscussFinding = vi.fn();
+    const onDismissFinding = vi.fn();
+    render(
+      <ViewerProvider slideCount={1}>
+        <FeedbackDrawer
+          findings={[openFinding]}
+          callbacks={{ onApplyFinding, onDiscussFinding, onDismissFinding }}
+          hasUnseen={false}
+          actionsDisabled
+        />
+      </ViewerProvider>,
+    );
+
+    expect(screen.getByTestId('finding-apply-f-open')).toBeDisabled();
+    expect(screen.getByTestId('finding-discuss-f-open')).toBeDisabled();
+    fireEvent.click(screen.getByTestId('finding-apply-f-open'));
+    fireEvent.click(screen.getByTestId('finding-discuss-f-open'));
+    expect(onApplyFinding).not.toHaveBeenCalled();
+    expect(onDiscussFinding).not.toHaveBeenCalled();
+
+    expect(screen.getByTestId('finding-dismiss-f-open')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('finding-dismiss-f-open'));
+    expect(onDismissFinding).toHaveBeenCalledWith('f-open');
+  });
+
+  it('they are enabled by default', () => {
+    renderDrawer([openFinding]);
+
+    expect(screen.getByTestId('finding-apply-f-open')).toBeEnabled();
+    expect(screen.getByTestId('finding-discuss-f-open')).toBeEnabled();
+  });
+});

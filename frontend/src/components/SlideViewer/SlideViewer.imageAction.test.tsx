@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SlideViewer } from './SlideViewer';
 import { ToastProvider } from '../../contexts/ToastContext';
 import type { SlideDeck } from '../../types/slide';
-import type { DrawerCallbacks } from '../../types/finding';
+import type { DrawerCallbacks, SlideFinding } from '../../types/finding';
 
 vi.mock('../../services/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/api')>();
@@ -69,9 +69,18 @@ interface Props {
   readOnly?: boolean;
   withSend?: boolean;
   insertDisabled?: boolean;
+  findings?: SlideFinding[];
+  drawerCallbacks?: DrawerCallbacks;
 }
 
-function renderViewer({ imageGenerationAvailable, readOnly = false, withSend = true, insertDisabled }: Props = {}) {
+function renderViewer({
+  imageGenerationAvailable,
+  readOnly = false,
+  withSend = true,
+  insertDisabled,
+  findings = [],
+  drawerCallbacks = callbacks,
+}: Props = {}) {
   const onSendMessage = vi.fn();
   const extra = {
     ...(imageGenerationAvailable === undefined ? {} : { imageGenerationAvailable }),
@@ -82,8 +91,8 @@ function renderViewer({ imageGenerationAvailable, readOnly = false, withSend = t
       <SlideViewer
         slideDeck={deckOf(4)}
         deckKey="sess-img"
-        findings={[]}
-        callbacks={callbacks}
+        findings={findings}
+        callbacks={drawerCallbacks}
         onReorder={noop}
         onSlideChange={noop}
         onSendMessage={withSend ? onSendMessage : undefined}
@@ -215,5 +224,64 @@ describe('SlideViewer "Generate image for this slide" while a turn is running', 
     renderViewer({ imageGenerationAvailable: true, insertDisabled: false });
 
     expect(action()).toBeEnabled();
+  });
+});
+
+// Final review F2: a second send while a turn runs made the first one unstoppable. Every stage control
+// that sends a chat message waits for the running turn: Optimize layout, and the feedback drawer's
+// Apply and Discuss (Dismiss sends nothing, so it stays).
+describe('SlideViewer chat-sending controls while a turn is running (final review F2)', () => {
+  const finding: SlideFinding = {
+    id: 'f-1',
+    slideIndex: 0,
+    category: 'content',
+    criterion: 'test-criterion',
+    message: 'An open finding',
+    plainMessage: 'Something here may need a closer look. This was not fixed automatically.',
+    plainIssue: 'Something here may need a closer look.',
+    objective: true,
+    status: 'open',
+    seen: false,
+  };
+  const optimize = () => screen.getByTestId('stage-optimize-layout');
+
+  function renderWithDrawer(insertDisabled: boolean) {
+    localStorage.setItem(
+      'tellr-viewer-view-state',
+      JSON.stringify({ drawerOpen: true, drawerHeight: 180, activeTab: 'feedback' }),
+    );
+    const drawerCallbacks = { onApplyFinding: vi.fn(), onDismissFinding: vi.fn(), onDiscussFinding: vi.fn() };
+    const { onSendMessage } = renderViewer({ insertDisabled, findings: [finding], drawerCallbacks });
+    return { onSendMessage, drawerCallbacks };
+  }
+
+  it('Optimize layout, Apply and Discuss are disabled and send nothing', () => {
+    const { onSendMessage, drawerCallbacks } = renderWithDrawer(true);
+
+    expect(optimize()).toBeDisabled();
+    fireEvent.click(optimize());
+    expect(onSendMessage).not.toHaveBeenCalled();
+
+    expect(screen.getByTestId('finding-apply-f-1')).toBeDisabled();
+    expect(screen.getByTestId('finding-discuss-f-1')).toBeDisabled();
+    fireEvent.click(screen.getByTestId('finding-apply-f-1'));
+    fireEvent.click(screen.getByTestId('finding-discuss-f-1'));
+    expect(drawerCallbacks.onApplyFinding).not.toHaveBeenCalled();
+    expect(drawerCallbacks.onDiscussFinding).not.toHaveBeenCalled();
+    expect(screen.getByTestId('finding-dismiss-f-1')).toBeEnabled();
+  });
+
+  it('they are enabled and send when no turn is running', () => {
+    const { onSendMessage, drawerCallbacks } = renderWithDrawer(false);
+
+    expect(screen.getByTestId('finding-apply-f-1')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('finding-apply-f-1'));
+    expect(drawerCallbacks.onApplyFinding).toHaveBeenCalledWith('f-1');
+    fireEvent.click(screen.getByTestId('finding-discuss-f-1'));
+    expect(drawerCallbacks.onDiscussFinding).toHaveBeenCalledWith('f-1');
+
+    expect(optimize()).toBeEnabled();
+    fireEvent.click(optimize());
+    expect(onSendMessage).toHaveBeenCalledTimes(1);
   });
 });

@@ -81,7 +81,8 @@ class ChatRequest(Base):
         ForeignKey("user_sessions.id", ondelete="CASCADE"),
         nullable=False,
     )
-    status = Column(String(20), default="pending")  # pending/running/completed/error
+    # pending/running/completed/error/cancelled
+    status = Column(String(20), default="pending")
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
@@ -95,6 +96,9 @@ class ChatRequest(Base):
     # writers regressing it.  Read by GET /chat/poll as `turn_progress`.
     progress_json = Column(Text, nullable=True)
     progress_seq = Column(Integer, nullable=True)
+
+    # Outcome of rolling back a stopped generation (NULL = never stopped).
+    rollback_outcome = Column(String(32), nullable=True)
 
     # Relationship
     session = relationship("UserSession", back_populates="chat_requests")
@@ -207,6 +211,8 @@ class UserSession(Base):
     # Processing lock for concurrent request handling
     is_processing = Column(Boolean, default=False, nullable=False)
     processing_started_at = Column(DateTime, nullable=True)
+    # The chat request that currently owns the processing lock.
+    processing_request_id = Column(String(64), nullable=True)
 
     # Relationships
     messages = relationship(

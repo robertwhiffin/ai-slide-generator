@@ -82,6 +82,8 @@ def env(monkeypatch):
         patch.object(job_queue, "_run_streaming_generator", gen),
         patch("src.api.services.session_manager.get_session_manager", return_value=manager),
         patch("src.api.services.chat_service.get_chat_service", return_value=MagicMock()),
+        # No database here: a failed graph job finds no generation snapshot.
+        patch("src.services.generation_rollback.has_generation_snapshot", return_value=False),
     ):
         yield gen, manager
     for event in gen.release.values():
@@ -109,10 +111,21 @@ def _payload(session_id: str) -> dict:
     }
 
 
+#: A graph job starts, completes and fails through these conditional writes.
+_GRAPH_STATUS_WRITES = {
+    "start_chat_request": "running",
+    "complete_chat_request": "completed",
+    "fail_chat_request": "error",
+}
+
+
 def _statuses(manager) -> dict[str, list[str]]:
     seen: dict[str, list[str]] = {}
-    for call in manager.update_chat_request_status.call_args_list:
-        seen.setdefault(call.args[0], []).append(call.args[1])
+    for name, args, _kwargs in manager.mock_calls:
+        if name == "update_chat_request_status":
+            seen.setdefault(args[0], []).append(args[1])
+        elif name in _GRAPH_STATUS_WRITES:
+            seen.setdefault(args[0], []).append(_GRAPH_STATUS_WRITES[name])
     return seen
 
 

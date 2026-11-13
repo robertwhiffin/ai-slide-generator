@@ -642,7 +642,7 @@ def test_a_genie_agent_alone_gives_the_analyst_a_toolset(graph_env, monkeypatch)
     genie_one_built = _serve(monkeypatch, _Replay({}))
     runtime = _install(monkeypatch, _answer((SALES_TOOL, Q_SALES), sources=[SALES_SOURCE]))
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert isinstance(call.toolset, AgentToolset)
@@ -676,7 +676,7 @@ def test_a_genie_agent_beside_genie_one_shares_one_toolset(graph_env, monkeypatc
         _answer((GENIE_TOOL_NAME, Q1), (SALES_TOOL, Q_SALES), sources=["Genie One", SALES_SOURCE]),
     )
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.tool_names == sorted([GENIE_TOOL_NAME, SALES_TOOL])
@@ -706,7 +706,7 @@ def test_genie_agents_still_bind_when_genie_one_cannot_run(graph_env, monkeypatc
         _answer((GENIE_TOOL_NAME, Q1), (SALES_TOOL, Q_SALES), sources=[SALES_SOURCE]),
     )
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.tool_names == [SALES_TOOL]
@@ -735,8 +735,8 @@ def test_a_genie_agent_only_toolset_is_clipped_to_the_turn_deadline(
         _deck(graph_env, monkeypatch, [SALES], spaces=[sales])
     runtime = _install(monkeypatch, _success([SALES_SOURCE]))
 
-    _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 650))
-    _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 701))
+    _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 650))
+    _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 701))
 
     late, past = runtime.calls_for("data_analyst")
     assert late.tool_names == sorted([SALES_TOOL] + (["web_search"] if with_pass else []))
@@ -784,7 +784,7 @@ def test_the_retry_builds_fresh_genie_agent_tools(graph_env, monkeypatch):
 
     runtime = _install(monkeypatch, bound, retry)
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     first, second = runtime.calls_for("data_analyst")
     assert seen["first_tools"] == sorted([SALES_TOOL, "web_search"])
@@ -845,7 +845,7 @@ def test_genie_one_a_genie_agent_and_a_gateway_pass_share_one_toolset_and_retry(
 
     runtime = _install(monkeypatch, bound, retry)
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     first, second = runtime.calls_for("data_analyst")
     assert seen["first_tools"] == sorted([GENIE_TOOL_NAME, SALES_TOOL, "web_search"])
@@ -873,7 +873,7 @@ def test_genie_agents_without_a_user_client_bind_nothing(graph_env, monkeypatch)
     genie = _deck(graph_env, monkeypatch, [SALES], spaces=[sales], token=None)
     runtime = _install(monkeypatch, _answer((SALES_TOOL, Q_SALES), sources=["genie"]))
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.toolset is None
@@ -912,7 +912,7 @@ def test_a_token_without_dashboards_genie_says_consent_and_binds_no_genie_agents
         _answer((GENIE_TOOL_NAME, Q1), (SALES_TOOL, Q_SALES), sources=["Genie One"]),
     )
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.tool_names == sorted(tools)
@@ -944,7 +944,7 @@ def test_genie_agent_figures_are_code_built_with_its_source(graph_env, monkeypat
     output = AnalystOutput(outcome="success", synthesis=prose, sources=[SALES_SOURCE])
     runtime = _install(monkeypatch, _answer((SALES_TOOL, Q_SALES), output=output))
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.tool_names == [SALES_TOOL]
@@ -981,7 +981,7 @@ def test_the_block_header_names_every_genie_source(graph_env, monkeypatch):
         ),
     )
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.tool_names == sorted([GENIE_TOOL_NAME, SALES_TOOL, MARKETING_TOOL])
@@ -1012,7 +1012,7 @@ def test_the_block_header_is_unchanged_for_genie_one_alone(graph_env, monkeypatc
     _serve(monkeypatch, _Replay(q1_replies()))
     runtime = _install(monkeypatch, _answer((GENIE_TOOL_NAME, Q1), sources=["Genie One"]))
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.tool_names == sorted([GENIE_TOOL_NAME, SALES_TOOL]), "the Genie Agent is bound"
@@ -1053,7 +1053,7 @@ def test_a_genie_agent_progress_row_names_the_agent(graph_env, monkeypatch):
     _deck(graph_env, monkeypatch, [SALES], spaces=[sales])
     _install(monkeypatch, _answer((SALES_TOOL, Q_SALES), sources=[SALES_SOURCE]))
 
-    t = _run_analyst(_analyst_state(graph_env), emitter)
+    t = _run_analyst(graph_env, _analyst_state(graph_env), emitter)
 
     line = f"Asking Sales: {Q_SALES}"
     tool_input = {"agent": "Sales", "question": Q_SALES}
@@ -1113,7 +1113,7 @@ def test_a_genie_agent_conversation_id_is_persisted_on_the_actor_row(graph_env, 
 
     # Turn 1: a new conversation for the contributor.
     _install(monkeypatch, _answer((SALES_TOOL, Q_SALES), sources=[SALES_SOURCE]))
-    _run_analyst(_analyst_state(graph_env, actor=contributor))
+    _run_analyst(graph_env, _analyst_state(graph_env, actor=contributor))
 
     assert sales.asks == [{"question": Q_SALES}], (
         "the contributor's first question must not continue the owner's conversation"
@@ -1136,7 +1136,7 @@ def test_a_genie_agent_conversation_id_is_persisted_on_the_actor_row(graph_env, 
 
     # Turn 2: the stored id is continued; it did not change, so nothing is written.
     _install(monkeypatch, _answer((SALES_TOOL, Q_SALES_2), sources=[SALES_SOURCE]))
-    _run_analyst(_analyst_state(graph_env, actor=contributor, turn_id="turn-2"))
+    _run_analyst(graph_env, _analyst_state(graph_env, actor=contributor, turn_id="turn-2"))
 
     assert sales.asks[1] == {"question": Q_SALES_2, "conversation_id": f"conv-{SALES_ID}"}
     assert persisted == [(contributor, SALES_ID, f"conv-{SALES_ID}")]
@@ -1160,7 +1160,7 @@ def test_a_failed_genie_agent_conversation_write_does_not_fail_the_analyst(graph
     monkeypatch.setattr(SessionManager, "set_genie_agent_conversation_id", fails)
     _install(monkeypatch, _answer((SALES_TOOL, Q_SALES), sources=[SALES_SOURCE]))
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     assert attempts == [SALES_ID]
     assert t.updates["analyst_figures"] == scoped(TURN, _figure_dicts(SALES_FIGURES))
@@ -1281,7 +1281,7 @@ def test_a_genie_agent_access_denial_says_its_notice_once(graph_env, monkeypatch
             ],
         )
 
-    t = _run_analyst(state)
+    t = _run_analyst(graph_env, state)
 
     (call,) = runtime.calls_for("data_analyst")
     assert {SALES_TOOL, MARKETING_TOOL} <= set(call.tool_names)
@@ -1301,7 +1301,7 @@ def test_a_genie_agent_access_denial_says_its_notice_once(graph_env, monkeypatch
     (usage,) = _usage_vals(t.updates)
     assert usage["notified"] == [f"genie_agent:{SALES_ID}"]
 
-    t2 = _run_analyst(fold(state, t.updates))
+    t2 = _run_analyst(graph_env, fold(state, t.updates))
 
     _, again = runtime.calls_for("data_analyst")
     assert [(e.kind, e.tool_name) for e in again.toolset.access_errors] == [
@@ -1323,7 +1323,7 @@ def test_a_genie_agent_missing_scope_at_run_time_says_consent_once(graph_env, mo
         _answer((SALES_TOOL, Q_SALES), (MARKETING_TOOL, Q_MARKETING), output=output),
     )
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.tool_names == [MARKETING_TOOL, SALES_TOOL]
@@ -1366,7 +1366,7 @@ def test_a_deleted_genie_agent_says_its_not_found_notice_once(graph_env, monkeyp
         ),
     )
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert [(e.kind, e.tool_name) for e in call.toolset.access_errors] == [
@@ -1410,7 +1410,7 @@ def test_a_stale_genie_agent_conversation_is_restarted_and_the_new_one_persisted
     monkeypatch.setattr(SessionManager, "set_genie_agent_conversation_id", spy)
     runtime = _install(monkeypatch, _answer((SALES_TOOL, Q_SALES), sources=[SALES_SOURCE]))
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.toolset.access_errors == []
@@ -1436,7 +1436,7 @@ def test_a_genie_agent_401_says_consent_once(graph_env, monkeypatch):
         monkeypatch, _answer((SALES_TOOL, Q_SALES), (SALES_TOOL, Q_SALES_2), output=output)
     )
 
-    t = _run_analyst(_analyst_state(graph_env))
+    t = _run_analyst(graph_env, _analyst_state(graph_env))
 
     (call,) = runtime.calls_for("data_analyst")
     assert [(e.kind, e.tool_name) for e in call.toolset.access_errors] == [
@@ -1468,7 +1468,7 @@ def test_a_genie_agent_whose_start_call_timed_out_lists_no_deep_link(graph_env, 
     )
 
     try:
-        t = _run_analyst(_analyst_state(graph_env))
+        t = _run_analyst(graph_env, _analyst_state(graph_env))
     finally:
         release.set()
 

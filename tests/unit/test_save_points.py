@@ -551,6 +551,7 @@ class TestVersionRestore:
             mock_db.return_value.__exit__ = MagicMock(return_value=False)
 
             sm._get_session_or_raise = MagicMock(return_value=mock_session)
+            sm._live_generation_holder = MagicMock(return_value=None)
 
             mock_query = MagicMock()
             mock_db_session.query.return_value = mock_query
@@ -674,6 +675,7 @@ class TestVersionRestore:
             mock_db.return_value.__exit__ = MagicMock(return_value=False)
 
             sm._get_session_or_raise = MagicMock(return_value=mock_session)
+            sm._live_generation_holder = MagicMock(return_value=None)
 
             mock_query = MagicMock()
             mock_db_session.query.return_value = mock_query

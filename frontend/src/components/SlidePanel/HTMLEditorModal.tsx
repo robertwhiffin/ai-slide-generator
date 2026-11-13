@@ -60,7 +60,12 @@ export const HTMLEditorModal: React.FC<HTMLEditorModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-      <div className="bg-white rounded-lg shadow-xl w-[90%] h-[90%] flex flex-col">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit Slide"
+        className="bg-white rounded-lg shadow-xl w-[90%] h-[90%] flex flex-col"
+      >
         {/* Header */}
         <div className="px-6 py-4 border-b flex items-center justify-between">
           <div className="flex items-center gap-3">

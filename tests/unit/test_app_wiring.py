@@ -108,7 +108,11 @@ class TestAppRoutes:
             assert positions[key] < first_images_route, key
 
     def test_chat_routes_exclude_the_sync_legacy_bypass(self):
-        """Only mode-aware transports may accept chat turns (#286)."""
+        """Only mode-aware transports may accept chat turns (#286).
+
+        The third POST is the stop route, which accepts no turn: it only ends and
+        rolls back an Agent deck's async one (interrupt generation).
+        """
         from fastapi.routing import APIRoute
 
         from src.api.main import app
@@ -120,7 +124,11 @@ class TestAppRoutes:
             and "POST" in route.methods
             and route.endpoint.__module__ == "src.api.routes.chat"
         }
-        assert chat_posts == {"/api/chat/stream", "/api/chat/async"}
+        assert chat_posts == {
+            "/api/chat/stream",
+            "/api/chat/async",
+            "/api/chat/cancel/{request_id}",
+        }
 
     def test_openapi_does_not_advertise_sync_chat(self):
         """API clients must discover the mode-aware chat endpoints, not the bypass."""

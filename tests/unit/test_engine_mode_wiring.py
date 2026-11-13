@@ -73,6 +73,9 @@ from tests.unit.conftest import _make_factory, _make_fake_db
 # it so a delegating implementation would still run against THIS engine.
 _DB_SOURCE = "src.core.database.get_db_session"
 _MANAGER_DB = "src.api.services.session_manager.get_db_session"
+# The generation snapshot and fence bind their own get_db_session.
+_ROLLBACK_DB = "src.services.generation_rollback.get_db_session"
+_FENCE_DB = "src.services.generation_fence.get_db_session"
 
 _PLAIN_MESSAGE = "and now add a slide about eider ducks"
 
@@ -128,12 +131,19 @@ def route_env(client, route_db_engine):
          patch("src.api.routes.chat.get_chat_service") as get_service, \
          patch("src.api.routes.chat.enqueue_job", new_callable=AsyncMock) as enqueue, \
          patch(_DB_SOURCE, fake_db), \
-         patch(_MANAGER_DB, fake_db):
+         patch(_MANAGER_DB, fake_db), \
+         patch(_ROLLBACK_DB, fake_db), \
+         patch(_FENCE_DB, fake_db):
         manager = MagicMock()
         manager.acquire_session_lock.return_value = True
         manager.release_session_lock.return_value = None
         manager.create_chat_request.return_value = "req-ws4d"
         manager.get_session.return_value = {"message_count": 1}
+        # The async route reads the stored Deck Mode at Enter to decide whether
+        # to snapshot.  A bare MagicMock is truthy and not "legacy", so every case
+        # would enter as an Agent deck; None (no mode chosen yet) is a fresh deck,
+        # and the Legacy cases set "legacy" (C14).
+        manager.get_deck_mode.return_value = None
         route_sm.return_value = manager
 
         service = MagicMock()
@@ -274,6 +284,7 @@ class TestAsyncRoute:
             ["build me a deck", "turn 2", "turn 3"],
             deck_mode="legacy",
         )
+        route_env["manager"].get_deck_mode.return_value = "legacy"
         assert (
             self._payload(route_env, sid, _PLAIN_MESSAGE)["engine_mode"]
             == "monolith"
@@ -281,6 +292,7 @@ class TestAsyncRoute:
 
     def test_a_monolith_session_is_enqueued_as_monolith(self, route_env):
         sid = _seed_session(route_env["factory"], ["build me a deck"], deck_mode="legacy")
+        route_env["manager"].get_deck_mode.return_value = "legacy"
         payload = self._payload(route_env, sid, _PLAIN_MESSAGE)
         assert payload["engine_mode"] == "monolith"
 
@@ -615,7 +627,7 @@ class TestResolutionFailureFailsTheTurnClosed:
             )
         self._assert_typed_503(response)
         route_env["enqueue"].assert_not_awaited()
-        route_env["manager"].release_session_lock.assert_called_once_with(sid)
+        route_env["manager"].release_session_lock.assert_called_once_with(sid, "req-ws4d")
         route_env["manager"].create_chat_request.assert_called_once()
         route_env["manager"].add_user_message.assert_called_once()
 
@@ -638,7 +650,7 @@ class TestResolutionFailureFailsTheTurnClosed:
         assert response.status_code == 500, response.text
         assert response.json() == {"detail": "Internal server error"}
         route_env["enqueue"].assert_not_awaited()
-        route_env["manager"].release_session_lock.assert_called_once_with(sid)
+        route_env["manager"].release_session_lock.assert_called_once_with(sid, "req-ws4d")
 
 
 class TestSendMessageNeverReferencesTheGraph:

@@ -297,7 +297,7 @@ def _architect(env, state: Dict[str, Any]) -> SimpleNamespace:
 
 def _analyst(env, **overrides) -> SimpleNamespace:
     """Run the analyst once, on the owner's turn, 5 s in."""
-    t = _run_analyst(_analyst_state(env, turn_started_at=time.time() - 5, **overrides))
+    t = _run_analyst(env, _analyst_state(env, turn_started_at=time.time() - 5, **overrides))
     t.info = [r["content"] for r in t.rows if r["message_type"] == "info"]
     #: Every info row but the analyst's own answer: the notices.
     t.notices = [

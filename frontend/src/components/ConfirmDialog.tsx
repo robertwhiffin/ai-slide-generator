@@ -7,6 +7,8 @@ interface ConfirmDialogProps {
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: 'danger' | 'default';
+  /** Which button takes focus when the dialog opens. */
+  initialFocus?: 'confirm' | 'cancel';
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -22,19 +24,25 @@ export function ConfirmDialog({
   confirmLabel = 'Delete',
   cancelLabel = 'Cancel',
   variant = 'danger',
+  initialFocus = 'confirm',
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (open) confirmRef.current?.focus();
-  }, [open]);
+    if (open) (initialFocus === 'cancel' ? cancelRef : confirmRef).current?.focus();
+  }, [open, initialFocus]);
 
   useEffect(() => {
     if (!open) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel();
+      if (e.key === 'Escape') {
+        // Mark it handled so any other window Escape listener can see that.
+        e.preventDefault();
+        onCancel();
+      }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
@@ -61,6 +69,7 @@ export function ConfirmDialog({
         </div>
         <div className="flex items-center justify-end gap-2 px-6 py-4">
           <button
+            ref={cancelRef}
             onClick={onCancel}
             className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors focus:outline-none focus:ring-2 focus:ring-gray-300"
           >

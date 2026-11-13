@@ -663,6 +663,12 @@ def _run_migrations(engine, schema: str | None = None):
         # --- chat_requests: the graph turn's stage summary for the chat placeholder (#319) ---
         _migrate_chat_request_progress(conn, inspector, schema, _qual, is_sqlite)
 
+        # --- interrupt generation: generation_snapshots + request-owned lock columns ---
+        # ORDERING: before _reassign_new_objects_to_shared_owner (below) so the new
+        # table is re-homed onto the shared owner in the same boot.
+        _migrate_generation_snapshots(conn, schema)
+        _migrate_generation_rollback_columns(conn, inspector, schema, _qual, is_sqlite)
+
         # --- keep newly created objects owned by the shared role (prod forks) ---
         # Runs LAST so every object created above — including the partial name index
         # — is re-homed onto the shared owner.
@@ -1482,6 +1488,54 @@ def _migrate_chat_request_progress(conn, inspector, schema, _qual, is_sqlite) ->
         if col_name not in cols:
             logger.info("Migration: adding %s to chat_requests", col_name)
             conn.execute(text(f"ALTER TABLE {qualified} ADD COLUMN {col_name} {col_def}"))
+
+
+def _migrate_generation_snapshots(conn, schema: str | None = None) -> None:
+    """Ensure the ``generation_snapshots`` table exists (idempotent, dialect-safe).
+
+    Driven from the ORM metadata via ``Table.create(checkfirst=True)``, like
+    :func:`_migrate_graph_checkpoints`, so it emits no raw SQL and takes
+    ``(conn, schema)``.  On a fresh install ``create_all`` has already made the
+    table and this is a no-op; it earns its keep on databases provisioned before
+    the interrupt-generation feature.
+    """
+    from src.database.models.generation_snapshot import GenerationSnapshot
+
+    table = GenerationSnapshot.__table__
+    # Match init_db()'s schema handling (mutates the shared Table.schema, as the
+    # sibling helpers do); guarded so it stays a no-op on repeat.
+    if schema and table.schema is None:
+        table.schema = schema
+    table.create(bind=conn, checkfirst=True)
+
+    logger.info("Migration: generation_snapshots table ensured")
+
+
+def _migrate_generation_rollback_columns(
+    conn, inspector, schema, _qual, is_sqlite
+) -> None:
+    """Add ``user_sessions.processing_request_id`` and ``chat_requests.rollback_outcome``.
+
+    ``create_all`` never ALTERs an existing table, so for databases provisioned
+    before interrupt-generation this helper is the only thing that adds them.
+    Both are nullable with no default (idempotent).
+    """
+    from sqlalchemy import text
+
+    for table_name, col_name, col_def in (
+        ("user_sessions", "processing_request_id", "VARCHAR(64) NULL"),
+        ("chat_requests", "rollback_outcome", "VARCHAR(32) NULL"),
+    ):
+        try:
+            cols = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+        except Exception:
+            continue
+        if not cols or col_name in cols:
+            continue
+        logger.info("Migration: adding %s to %s", col_name, table_name)
+        conn.execute(
+            text(f"ALTER TABLE {_qual(table_name)} ADD COLUMN {col_name} {col_def}")
+        )
 
 
 #: The two retired per-profile prompt-override columns on ``config_prompts``.

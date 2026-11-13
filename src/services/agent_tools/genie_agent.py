@@ -39,6 +39,7 @@ from src.services.agent_tools.mcp_transport import http_status as _http_status
 from src.services.agent_tools.mcp_transport import run_with_timeout
 from src.services.agent_tools.mcp_transport import walk as _walk
 from src.services.agent_tools.toolset import ToolAccessError, ToolAccessKind
+from src.services.generation_fence import TurnFencedError
 from src.utils.spotlight import neutralize_delimiters, spotlight
 
 logger = logging.getLogger(__name__)
@@ -432,6 +433,10 @@ class GenieAgentTool:
         self._asked += 1
         try:
             self._on_question(self.space_name, question)
+        except TurnFencedError:
+            # The progress row was refused: the turn was stopped, so the question
+            # is never sent.
+            raise
         except Exception:  # noqa: BLE001 - a progress line never stops the question
             logger.warning("Genie Agent progress line failed (ignored)", exc_info=True)
         try:

@@ -74,6 +74,18 @@ Occasionally one slide fails while the rest of the deck is built. When that happ
 - If the message says a slide is shown without its automatic fix, the slide is still there as first built. Open the **AI feedback** drawer under the slide and choose **Apply** next to an issue to try the fix again.
 - Some messages have a collapsed **Details** line underneath. Expand it to see technical information (stage, error and request ID) to share with support.
 
+## Stopping a Generation
+
+While a request runs on an Agent deck, the **Send** button turns into a **Stop** button, and the hint under the box reads "Esc to cancel". Click **Stop** or press **Esc** to cancel the request.
+
+Stopping is all-or-nothing. Tellr puts the deck and the conversation back as they were before you sent your message: no half-built slides and no partial changes are kept. The one exception is images: any images the request generated stay in your Image Library. If you typed the message, it returns to the box so you can edit it and send it again. A note confirms "Generation cancelled. Nothing was changed."
+
+- If slides are already being built, Tellr asks "Stop generating?" first, because everything built so far is thrown away. **Keep generating** is selected by default; choose **Stop and discard** to cancel.
+- If the request fails, Tellr usually undoes it the same way and tells you "Generation failed. Nothing was changed.", with the reason underneath when there is one. A failure is not undone if someone else edited the deck in the meantime, or if it failed after the deck was already finished. The deck then stays as it is, and the chat shows the error.
+- If someone else edited the deck after you sent your message, Tellr can't roll it back without losing their edit, so it refuses to stop and the generation carries on.
+- While a request runs, the other actions that send a message to the AI, such as **Apply** or **Discuss** on a finding and **Optimize layout**, are unavailable until it finishes.
+- Stopping is not available on decks that use the Legacy engine.
+
 ## Clearing the Chat
 
 A long conversation can drift. To start the conversation over without losing your deck, click **Clear chat** at the top of the chat panel, on the right of the "AI Assistant" heading. Clear chat resets the whole conversation; to remove one exchange, see [Deleting a Message](#deleting-a-message).

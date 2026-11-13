@@ -30,9 +30,10 @@ from tests.fixtures.graph_tool_runtime import (
     turn_state,
     with_slides,
 )
-from tests.unit.conftest_graph import (  # noqa: F401 — graph_env is a fixture
+from tests.unit.conftest_graph import (  # noqa: F401 — graph_env* are fixtures
     architect_build,
     graph_env,
+    graph_env_threadsafe,
     make_spec,
 )
 from tests.unit.test_graph_gateway_mcp import CREATE, _lakedraw_deck, _usage_vals
@@ -279,9 +280,12 @@ def test_without_image_history_the_conversation_is_unchanged(
 
 
 @pytest.fixture
-def real_image_tool(monkeypatch):
+def real_image_tool(monkeypatch, graph_env_threadsafe):
     """Production's ``ImageGenerationAgentTool`` as the node builds it: only the image model
-    and the Library write are replaced.  Returns the tokens "saved", in order."""
+    and the Library write are replaced.  Returns the tokens "saved", in order.
+
+    File-backed env: the save's write fence reads the turn's request row from the image
+    pool's own threads, which an in-memory database (one per thread) cannot serve."""
     import contextlib
     import io
     import secrets
@@ -303,8 +307,15 @@ def real_image_tool(monkeypatch):
     saved: list = []
 
     @contextlib.contextmanager
-    def no_db():
-        yield None
+    def env_db():
+        # A real session: the save's write fence claims the turn's request row on it
+        # (the run seeds the row).  The Library write itself is replaced below.
+        db = graph_env_threadsafe.factory()
+        try:
+            yield db
+            db.commit()
+        finally:
+            db.close()
 
     def save(db, img, *, owner, prompt, category, tags, **kwargs):
         token = secrets.token_urlsafe(32)
@@ -312,13 +323,13 @@ def real_image_tool(monkeypatch):
         return SimpleNamespace(token=token)
 
     monkeypatch.setattr(ImageGenerator, "generate", generate)
-    monkeypatch.setattr(tool_module, "get_db_session", no_db)
+    monkeypatch.setattr(tool_module, "get_db_session", env_db)
     monkeypatch.setattr(tool_module, "save_generated_image", save)
     return saved
 
 
 def test_the_real_tool_numbers_a_retrys_options_after_the_first_attempts(
-    graph_env, monkeypatch, images_on, real_image_tool
+    graph_env_threadsafe, monkeypatch, images_on, real_image_tool
 ):
     """Attempt 1 makes 3 options and is refused with a retryable code; the retry makes 1
     more.  The reply's card numbers them 1..4, and the tool's answers are spotlighted."""
@@ -336,7 +347,7 @@ def test_the_real_tool_numbers_a_retrys_options_after_the_first_attempts(
 
     install_runtime(monkeypatch, FakeRuntime(architect=[first, second]))
 
-    t = _run(graph_env, turn_state(graph_env))
+    t = _run(graph_env_threadsafe, turn_state(graph_env_threadsafe))
 
     assert t.updates["error_state"] is None
     assert len(real_image_tool) == 4

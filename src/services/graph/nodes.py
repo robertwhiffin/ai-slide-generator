@@ -187,6 +187,11 @@ from src.services.foreman_service import (
     stalled_positions,
 )
 from src.services.gateway_mcp_registry import enabled_by_service
+from src.services.generation_fence import (
+    TurnFencedError,
+    fence_turn_write,
+    raise_if_turn_ended,
+)
 from src.services.graph.event_emitter import (
     advance_slide_cursor,
     emit_event,
@@ -501,8 +506,9 @@ def _say(
     it is read HERE rather than passed by each caller so a new caller cannot
     forget it.
 
-    Never raises: like emission, a transcript write must not be the thing that
-    fails a turn that has otherwise produced a deck.
+    Never raises, except ``TurnFencedError``: like emission, a transcript write
+    must not be the thing that fails a turn that has otherwise produced a deck,
+    but a write refused because the turn was stopped ends the node.
     """
     if bool(scoped_vals(state, "describe_only")):
         return
@@ -518,6 +524,10 @@ def _say(
             metadata=metadata,
             request_id=get_chat_request_id(),
         )
+    except TurnFencedError:
+        # The turn was stopped: the refused message ends the node, so no model
+        # call follows it.
+        raise
     except Exception:
         logger.warning(
             "Could not persist an assistant turn; the user may see silence on "
@@ -947,6 +957,9 @@ def rereview_committed_slides(
         }
         if spec.deck_style is not None:
             review_payload["deck_style"] = spec.deck_style.model_dump()
+        # The pass writes nothing, so no fence would stop a stopped turn between
+        # these serial model calls: check the turn before each one.
+        raise_if_turn_ended()
         try:
             out = get_agent_runtime().run(
                 "build_reviewer",
@@ -1989,6 +2002,8 @@ def _placehold_failed_position(
             mutation=mutation,
         )
         row = writer.get_slide(session_id, position) or {}
+    except TurnFencedError:
+        raise
     except Exception:
         logger.exception(
             "commit_placeholder failed at position %s; the foreman will "
@@ -2809,6 +2824,8 @@ def _apply_edit_plan(
                     object_type="deck",
                 ),
             )
+        except TurnFencedError:
+            raise
         except SlideRowsChangedError:
             # Caught before Exception: it IS a RuntimeError, and a deck someone
             # changed mid-plan is not a failure — nor something a retry can fix.
@@ -4949,6 +4966,10 @@ def architect_node(state: dict) -> Dict[str, Any]:
                         toolset=toolset,
                     ),
                 ).output
+            except TurnFencedError:
+                # A tool's write was refused: the turn was stopped.  Never retried
+                # without tools (another model call); it ends the node.
+                raise
             except Exception as exc:
                 if gateway is not None:
                     gateway.spent(
@@ -5334,6 +5355,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
                     object_type="deck",
                 ),
             )
+        except TurnFencedError:
+            raise
         except SlideRowsChangedError:
             # Caught before Exception: it IS a RuntimeError, and a deck someone
             # changed mid-plan is a retry, not a failure.
@@ -5678,6 +5701,8 @@ def architect_node(state: dict) -> Dict[str, Any]:
             ),
             **deck_write,
         )
+    except TurnFencedError:
+        raise
     except Exception as exc:
         logger.exception("Pre-fan-out deck-level write failed")
         updates["error_state"] = {
@@ -6090,7 +6115,9 @@ def _persist_genie_one_conversation(state: dict, run: _GenieOneRun) -> None:
 
 def _persist_genie_agent_conversations(state: dict, tools: Sequence[GenieAgentTool]) -> None:
     """Store each Genie Agent's new conversation id on the ACTOR's row, in that
-    space's entry only.  An unchanged id is not written again.  Never raises."""
+    space's entry only.  An unchanged id is not written again.  Never raises,
+    except ``TurnFencedError``: a stopped turn's first refused write ends the
+    node, so no other space's write is tried and none is logged as failed."""
     for tool in tools:
         conversation_id = tool.conversation_id
         if not conversation_id or conversation_id == tool.stored_conversation_id:
@@ -6099,6 +6126,8 @@ def _persist_genie_agent_conversations(state: dict, tools: Sequence[GenieAgentTo
             get_session_manager().set_genie_agent_conversation_id(
                 state["actor_session_id"], tool.space_id, conversation_id
             )
+        except TurnFencedError:
+            raise
         except Exception:
             logger.warning(
                 "Could not store a Genie Agent conversation id; the next turn starts "
@@ -6309,6 +6338,10 @@ def data_analyst_node(state: dict) -> Dict[str, Any]:
                     toolset=toolset,
                 ),
             ).output
+        except TurnFencedError:
+            # A tool's write was refused: the turn was stopped.  Never retried
+            # with other tools (another model call); it ends the node.
+            raise
         except Exception as exc:
             if gateway is not None:
                 # First, so a refusal the run recorded (a sign-in, say) is the
@@ -6727,6 +6760,10 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                         slide_number(position), payload.get("turn_image_sources")
                     ),
                 )
+    except TurnFencedError:
+        # The turn was stopped (its tool loop checks between rounds): not a failed
+        # build, so no ERROR and no placeholder attempt.
+        raise
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Builder failed at position %s", position)
@@ -6902,6 +6939,10 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             ),
             "reviewed_positions": scoped(turn_id, {position}),
         }
+    except TurnFencedError:
+        # The turn was stopped: its reviewed write was refused.  Not a failed
+        # review, so no ERROR and no placeholder attempt; the refusal ends the node.
+        raise
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Build review failed at position %s", position)
@@ -7000,6 +7041,8 @@ def _reconcile_stale_fixes(
                     mutation=mutation,
                 )
             )
+        except TurnFencedError:
+            raise
         except Exception:
             logger.exception(
                 "Could not land the original at position %s; the foreman will "
@@ -7149,6 +7192,10 @@ def fixer_node(state: dict) -> Dict[str, Any]:
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
         html = strip_inter_tag_escapes(html)
+    except TurnFencedError:
+        # The turn was stopped (its tool loop checks between rounds): not a failed
+        # fix, so no ERROR and no landing attempt.
+        raise
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Fixer failed at position %s; landing the original", position)
@@ -7330,6 +7377,9 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             initiated_by=initiated_by,
             mutation=mutation,
         )
+    except TurnFencedError:
+        # The turn was stopped and the row write refused: not a delivery failure.
+        raise
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         # The row could not be delivered at all — the prior findings would not
@@ -7521,6 +7571,12 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
     Best-effort: a failed draft write costs only the early preview, so it is
     logged and the slide carries on to review, which writes the row anyway.
 
+    **Either way the turn is checked here**, and ``TurnFencedError`` ends the
+    pipeline: the draft write is fenced, and a position that keeps its real slide
+    gets :func:`raise_if_turn_ended` instead.  Without that check an abandoned
+    edit (the stop's rollback puts the real slides back) went on to pay for the
+    build review, and only the reviewed write refused it.
+
     Returns whether the draft was committed — the pipeline may keep it as the
     slide's final row if review then fails transiently.
     """
@@ -7530,6 +7586,7 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
         writer = SlideWriter()
         existing = writer.get_slide(record["session_id"], position)
         if existing is not None and not _holds_placeholder(existing):
+            raise_if_turn_ended()
             return False
         writer.write_slide(
             session_id=record["session_id"],
@@ -7540,6 +7597,8 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
             modified_by=record.get("initiated_by"),
             mutation=mutation,
         )
+    except TurnFencedError:
+        raise
     except Exception:
         logger.warning(
             "Could not commit the draft of slide %s; it will appear once reviewed",
@@ -7601,7 +7660,11 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
     * a review that opens a fix hands the fixer and fix reviewer a slide-local
       state carrying only this slide's ``fix_map`` entry, so "exactly one fix
       round per slide" holds by construction and ``in_flight`` stays the
-      fixer's own guard against a re-entry.
+      fixer's own guard against a re-entry;
+    * a stopped turn ends the chain with ``TurnFencedError`` before its next
+      model call: each write is fenced, and the model calls no fenced write
+      precedes (the review of a position that keeps its real slide, the fixer,
+      the fix reviewer) are preceded by ``raise_if_turn_ended``.
 
     Only fan-in keys reach graph state; ``_PIPELINE_LOCAL_KEYS`` stay here.
     Every stage's failure path is the one its node already had (placehold on a
@@ -7669,6 +7732,10 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
             "fix_map": acc["fix_map"],
         }
         with _fix_slots():
+            # Neither the review that opened this fix nor the fixer writes a row,
+            # and the wait for a slot can outlast a stop, so the turn is checked
+            # before each of the two model calls (``raise_if_turn_ended``).
+            raise_if_turn_ended()
             try:
                 fixer_update = fixer_node(fix_state)
                 if payload.get("one_ground") and position != 0:
@@ -7679,6 +7746,7 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
                 _fold(acc, fixer_update)
                 _fold(fix_state, fixer_update)
                 if fix_state.get("fix_target") is not None:
+                    raise_if_turn_ended()
                     _fold(acc, fix_reviewer_node(fix_state))
             except PersistedRuntimeError as exc:
                 # Transient while fixing: the slide was built and reviewed, so
@@ -7933,6 +8001,8 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 user_visible=not bool(scoped_vals(state, "describe_only")),
                 **deck_write,
             )
+        except TurnFencedError:
+            raise
         except Exception as exc:
             logger.exception("Post-commit deck-level write failed")
             updates["error_state"] = {
@@ -7993,6 +8063,7 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                 _skill_findings(out), subject_hash=digest, slide_index=-1
             )
             with get_db_session() as db:
+                fence_turn_write(db)
                 deck_id = _resolve_deck_id(db, session_id)
                 if deck_id is None:
                     raise ValueError(
@@ -8001,6 +8072,8 @@ def deck_reviewer_node(state: dict) -> Dict[str, Any]:
                     )
                 save_deck_review(db, deck_id, digest, findings, initiated_by)
             advisory = _advisory_text(findings)
+        except TurnFencedError:
+            raise
         except Exception as exc:
             _raise_if_persisted_runtime_failure(exc)
             logger.exception("Deck review failed; the delivered deck stands")

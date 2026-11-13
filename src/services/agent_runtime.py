@@ -601,11 +601,21 @@ class DatabricksModelAdapter:
         ``OutputParserException``.  Only the model's own calls (construction,
         binding, each round) collapse provider failures into
         ``ModelProviderUnavailableError``; a tool's failure never does.
+
+        Every round after the first starts with ``raise_if_turn_ended``: a
+        read-only tool writes nothing, so no fence would stop a turn stopped
+        during its call, and the loop would pay for another round.  The check
+        issues no SQL without a turn's request id (the sweeper, the evals, the
+        previews).
         """
         del agent_key
         from langchain_core.exceptions import OutputParserException
         from langchain_core.messages import HumanMessage, ToolMessage
         from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        # Lazy, as in ``_answer_tool_call``: this module imports the database layer
+        # only inside functions.
+        from src.services.generation_fence import raise_if_turn_ended
 
         if not toolset.tools:
             raise ValueError("a toolset needs at least one tool")
@@ -626,7 +636,9 @@ class DatabricksModelAdapter:
         toolset.start()
         nudged = False
         budget_noticed = False
-        for _ in range(toolset.max_calls + 3):
+        for round_index in range(toolset.max_calls + 3):
+            if round_index:
+                raise_if_turn_ended()
             with _model_provider_errors_collapsed():
                 reply = bound_model.invoke(messages)
             tool_calls = list(reply.tool_calls)
@@ -685,7 +697,7 @@ class DatabricksModelAdapter:
         *,
         budget_text: str,
     ) -> str:
-        """The ``ToolMessage`` content for one tool call; it never raises an ``Exception``.
+        """The ``ToolMessage`` content for one tool call.
 
         A spent budget (calls or clock) refuses the call; an unknown name is
         answered as such.  Otherwise the args are parsed with the tool's
@@ -693,11 +705,16 @@ class DatabricksModelAdapter:
         remaining seconds.  A ``ToolAccessError`` is recorded on the toolset;
         any other failure (bad args included) is answered as a tool error.
 
+        The one exception it raises is ``TurnFencedError``: a tool's write was
+        refused because the turn was stopped, so the loop ends instead of
+        answering the model in-band and starting another round.
+
         An error's text is untrusted (it can carry a service's or a payload's
         words), so it reaches the model only inside ``spotlight``.  The tool's
         own return value is the tool's to spotlight.
         """
         from src.services.agent_tools.toolset import ToolAccessError
+        from src.services.generation_fence import TurnFencedError
         from src.utils.spotlight import spotlight
 
         if toolset.exhausted():
@@ -712,6 +729,8 @@ class DatabricksModelAdapter:
         except ToolAccessError as error:
             toolset.access_errors.append(error)
             return "Access denied: " + spotlight("tool_error", error.message)
+        except TurnFencedError:
+            raise
         except Exception as error:  # noqa: BLE001 - a tool failure is answered in-band
             return f"Tool error: {type(error).__name__}: " + spotlight(
                 "tool_error", str(error)[:300]

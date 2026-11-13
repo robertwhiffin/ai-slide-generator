@@ -93,6 +93,7 @@ from src.api.services.session_manager import (
 )
 from src.core.database import get_db_session
 from src.database.models.session import SessionSlideDeck
+from src.services.generation_fence import fence_turn_write
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
     record_shared_deck_mutation,
@@ -270,6 +271,7 @@ def write_deck_level_columns(
     }
 
     with get_db_session() as db:
+        fence_turn_write(db)
         manager = get_session_manager()
         # Reuse, do not reimplement: _get_deck_owner_session takes a UserSession
         # OBJECT and a db (session_manager.py:709, ~20 call sites), so the string

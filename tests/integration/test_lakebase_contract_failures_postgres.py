@@ -797,11 +797,13 @@ def test_the_async_route_answers_503_releases_the_lock_and_enqueues_nothing(
     assert resolver.calls == [("new-root", "raised")]
     assert enqueued == []
     assert _is_processing(stage.journey.factory, "new-root") is False
-    # C47(e): the user message and the chat_requests row were persisted BEFORE
-    # resolution and stay; the request row is left pending (no job was queued).
-    assert _chat_requests(stage.journey.factory, "new-root") == [("pending", None)]
+    # "new-root" is an Agent deck, whose async turn is all-or-nothing (interrupt
+    # generation), so C47(e) is inverted here: the user message and everything
+    # else Enter wrote are rolled back, and the request row ends "error" rather
+    # than staying "pending" (no job was queued).
+    assert _chat_requests(stage.journey.factory, "new-root") == [("error", None)]
     after = _conversation_state(stage.journey.factory, "new-root")
-    assert after == _expected_after_failed_turn(stage.driver, "new-root", stage.before)
+    assert after == stage.before
 
 
 # ---------------------------------------------------------------------------

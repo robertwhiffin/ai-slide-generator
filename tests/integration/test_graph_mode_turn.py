@@ -52,6 +52,7 @@ from src.database.models.session import (
 )
 from src.services.agent_runtime import AgentAssemblyContext
 from tests.integration.conftest_stub_skills import CallableAgentRuntime, builder_html
+from tests.unit.conftest_graph import seed_running_request
 
 AUTHOR = "graph-caller@example.com"
 SEEDED_AUTHOR = "someone-who-came-before@example.com"
@@ -131,6 +132,8 @@ class _GraphChatEnv:
             kwargs["engine_mode"] = engine_mode
         if request_id is not None:
             kwargs["request_id"] = request_id
+            # The write fence refuses a turn whose request id has no live row.
+            seed_running_request(self._env.factory, self.session_id, request_id)
         kwargs["is_first_message_override"] = is_first_message
         return self.service.send_message_streaming(**kwargs)
 
@@ -614,14 +617,15 @@ def _order_the_title_writers(env, monkeypatch, *, naming_first: bool):
     real_deck_write = nodes.write_deck_level_columns
     recorder = env.recorder
 
-    def rename_session(self, session_id, title):
+    def rename_session(self, session_id, title, **kwargs):
         if not naming_first:
             # Reversed: the architect's title write must have LANDED first.
             assert architect_wrote.wait(timeout=15), (
                 "the architect never wrote a title, so the ordering under test "
                 "was never established"
             )
-        result = real_rename(self, session_id, title)
+        # **kwargs: the title thread's request_id= and allow_completed= (its fence).
+        result = real_rename(self, session_id, title, **kwargs)
         naming_wrote.set()
         return result
 

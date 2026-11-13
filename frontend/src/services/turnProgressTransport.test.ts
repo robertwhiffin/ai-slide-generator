@@ -61,6 +61,11 @@ function buildFetchMock(responses: object[], pollUrls: string[]) {
 const stageSeqs = (events: StreamEvent[]) =>
   events.filter((e) => e.type === 'turn_progress').map((e) => e.turn_progress?.seq);
 
+/** Interrupt generation (Task 9): startPolling also announces `request_accepted`; set it aside so these sequences are unchanged. */
+const recordTurnEvents = (events: StreamEvent[]) => (e: StreamEvent) => {
+  if ((e.type as string) !== 'request_accepted') events.push(e);
+};
+
 describe('turn_progress on the polling transport', () => {
   let cancel: (() => void) | null = null;
 
@@ -75,7 +80,7 @@ describe('turn_progress on the polling transport', () => {
   /** Start polling and run exactly one interval tick per response. */
   async function runPolls(responses: object[], events: StreamEvent[], errors: Error[], pollUrls: string[] = []) {
     vi.stubGlobal('fetch', buildFetchMock(responses, pollUrls));
-    cancel = api.startPolling('session', 'msg', undefined, (e) => events.push(e), (e) => errors.push(e));
+    cancel = api.startPolling('session', 'msg', undefined, recordTurnEvents(events), (e) => errors.push(e));
     await vi.advanceTimersByTimeAsync(1);
     for (let i = 0; i < responses.length; i += 1) await vi.advanceTimersByTimeAsync(3001);
   }
@@ -247,7 +252,7 @@ describe('turn_progress on the polling transport', () => {
     const events: StreamEvent[] = [];
     const errors: Error[] = [];
     vi.stubGlobal('fetch', buildFetchMock(FULL_TURN, []));
-    cancel = api.startPolling('session', 'msg', undefined, (e) => events.push(e), (e) => errors.push(e));
+    cancel = api.startPolling('session', 'msg', undefined, recordTurnEvents(events), (e) => errors.push(e));
     await vi.advanceTimersByTimeAsync(1);
 
     const tag = (e: StreamEvent) =>

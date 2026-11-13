@@ -455,6 +455,7 @@ def _architect(env, state: Dict[str, Any]) -> SimpleNamespace:
     before = len(sm.get_messages(state["session_id"]))
     emitter: queue.Queue = queue.Queue()
     set_event_emitter(emitter)
+    env.seed_running_request(REQUEST_ID)
     set_chat_request_id(REQUEST_ID)
     try:
         updates = architect_node(state)
@@ -1557,7 +1558,7 @@ def test_analyst_with_genie_only_unchanged_budget(graph_env, monkeypatch):
     runtime = _install(monkeypatch, _Runtime(data_analyst=answer))
 
     with _sql(graph_env.engine) as statements:
-        t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+        t = _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.at_start == (3, 300.0, 0)
@@ -1662,7 +1663,7 @@ def test_analyst_with_gateway_tools_uses_6_calls(graph_env, monkeypatch):
 
     runtime = _install(monkeypatch, _Runtime(data_analyst=answer))
 
-    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+    t = _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.at_start == (6, 300.0, 0)
@@ -1707,7 +1708,7 @@ def test_analyst_gateway_only_runs_loop(graph_env, monkeypatch):
 
     runtime = _install(monkeypatch, _Runtime(data_analyst=answer))
 
-    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+    t = _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     (call,) = runtime.calls_for("data_analyst")
     assert isinstance(call.toolset, AgentToolset)
@@ -1757,7 +1758,7 @@ def test_analyst_gateway_only_budget_is_clipped_by_the_deadline(
     )
     runtime = _install(monkeypatch, _Runtime(data_analyst=_success(["Web Search"])))
 
-    _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - seconds_in))
+    _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - seconds_in))
 
     (call,) = runtime.calls_for("data_analyst")
     if seconds_in == 701:
@@ -1798,7 +1799,7 @@ def test_mixed_analyst_past_700s_keeps_genie_and_refuses_gateway_calls(graph_env
 
     runtime = _install(monkeypatch, _Runtime(data_analyst=answer))
 
-    _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 650))
+    _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 650))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.at_start == (6, 300.0, 0)
@@ -1828,7 +1829,7 @@ def test_mixed_analyst_genie_keeps_its_3_question_cap(graph_env, monkeypatch):
 
     runtime = _install(monkeypatch, _Runtime(data_analyst=answer))
 
-    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+    t = _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     (call,) = runtime.calls_for("data_analyst")
     assert call.at_start[0] == 6
@@ -1865,7 +1866,7 @@ def test_a_gateway_refusal_is_not_said_as_genie_ones(graph_env, monkeypatch):
 
     runtime = _install(monkeypatch, _Runtime(data_analyst=answer))
 
-    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+    t = _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     (call,) = runtime.calls_for("data_analyst")
     assert [(e.kind, e.tool_name) for e in call.toolset.access_errors] == [
@@ -1906,7 +1907,7 @@ def test_consent_said_once_across_genie_and_gateway(graph_env, monkeypatch, when
 
     runtime = _install(monkeypatch, _Runtime(data_analyst=answer))
 
-    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+    t = _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     (call,) = runtime.calls_for("data_analyst")
     if when == "pre-flight":
@@ -1944,7 +1945,7 @@ def test_consent_said_once_per_turn_across_architect_and_analyst(graph_env, monk
 
     t1 = _architect(graph_env, state)
     state = _fold(state, t1.updates)
-    analyst = _run_analyst(state)
+    analyst = _run_analyst(graph_env, state)
     state = _fold(state, analyst.updates)
     t2 = _architect(graph_env, state)
 
@@ -2011,6 +2012,7 @@ def _branch_state(env, spec, *, gateway: Optional[str] = TURN, images: Sequence[
 def _run_builder(env, payload: Dict[str, Any], html: str) -> SimpleNamespace:
     env.skills.set("builder", lambda p: builder_out(p, html=html))
     before = len(env.messages())
+    env.seed_running_request(REQUEST_ID)
     set_chat_request_id(REQUEST_ID)
     try:
         updates = builder_node(payload)
@@ -2545,7 +2547,7 @@ def test_mixed_analyst_falls_back_to_genie_one_alone(graph_env, monkeypatch):
 
     runtime = _install(monkeypatch, _Runtime(data_analyst=[bound, genie_only]))
 
-    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+    t = _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     first, second = runtime.calls_for("data_analyst")
     assert first.at_start == (6, 300.0, 0)
@@ -2579,7 +2581,7 @@ def test_gateway_only_analyst_falls_back_to_no_tools(graph_env, monkeypatch):
 
     runtime = _install(monkeypatch, _Runtime(data_analyst=[bound, _success(["The request"])]))
 
-    t = _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+    t = _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     first, second = runtime.calls_for("data_analyst")
     assert first.toolset is not None
@@ -2611,7 +2613,7 @@ def test_the_analyst_fallbacks_failure_propagates_as_today(graph_env, monkeypatc
     runtime = _install(monkeypatch, _Runtime(data_analyst=[bound, fallback]))
 
     with pytest.raises(RuntimeError, match="the model endpoint is down"):
-        _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+        _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     assert len(runtime.calls_for("data_analyst")) == 2
 
@@ -2630,7 +2632,7 @@ def test_genie_only_analyst_failure_is_unchanged(graph_env, monkeypatch):
     runtime = _install(monkeypatch, _Runtime(data_analyst=fails))
 
     with pytest.raises(OutputParserException):
-        _run_analyst(_analyst_state(graph_env, turn_started_at=time.time() - 5))
+        _run_analyst(graph_env, _analyst_state(graph_env, turn_started_at=time.time() - 5))
 
     assert len(runtime.calls_for("data_analyst")) == 1
 

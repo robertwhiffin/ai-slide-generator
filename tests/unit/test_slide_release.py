@@ -975,6 +975,7 @@ class TestThePollingRoute:
             "slide_revisions",
             "revision_mark",
             "turn_progress",  # #319
+            "rollback",  # interrupt generation: how a stopped/failed turn ended
         }
 
     def test_it_passes_the_client_cursor_through_to_the_release_query(

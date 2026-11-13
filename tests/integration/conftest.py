@@ -816,6 +816,8 @@ def graph_turn_env(monkeypatch, tmp_path):
         "src.api.services.session_manager.get_db_session",
         "src.api.services.deck_level_writer.get_db_session",
         "src.services.graph.nodes.get_db_session",
+        "src.services.generation_rollback.get_db_session",
+        "src.services.generation_fence.get_db_session",
     ):
         monkeypatch.setattr(target, fake_db)
     monkeypatch.setattr(

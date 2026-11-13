@@ -31,7 +31,12 @@ export const ImagePicker: React.FC<ImagePickerProps> = ({
       />
 
       {/* Modal */}
-      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[80vh] flex flex-col mx-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Select Image"
+        className="relative bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[80vh] flex flex-col mx-4"
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <h3 className="text-lg font-semibold text-gray-900">Select Image</h3>

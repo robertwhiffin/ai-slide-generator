@@ -185,6 +185,34 @@ _DELETE_THREAD_WRITES = text(
 )
 
 
+_SELECT_NEWEST_CHECKPOINT_ID = text(
+    "SELECT MAX(checkpoint_id) FROM graph_checkpoints WHERE thread_id = :thread_id"
+)
+_DELETE_WRITES_AFTER = text(
+    "DELETE FROM graph_checkpoint_writes "
+    "WHERE thread_id = :thread_id AND checkpoint_id > :checkpoint_id"
+)
+_DELETE_CHECKPOINTS_AFTER = text(
+    "DELETE FROM graph_checkpoints "
+    "WHERE thread_id = :thread_id AND checkpoint_id > :checkpoint_id"
+)
+
+
+def _fence_from_config(session: Any, config: RunnableConfig) -> None:
+    """Refuse the write unless the turn that made it is still live.
+
+    Keys on ``config["configurable"]["chat_request_id"]`` (``invoke_graph`` puts it
+    there): LangGraph calls ``put_writes`` for ``Send``-fanned tasks outside the
+    task's context, where the request-id ContextVar is unset. Falls back to the
+    ContextVar. No id at all means no turn to fence.
+    """
+    # Local import: generation_fence reaches src.services.graph, which imports
+    # this module.
+    from src.services.generation_fence import fence_turn_write
+
+    fence_turn_write(session, (config.get("configurable") or {}).get("chat_request_id"))
+
+
 def _as_bytes(value: Any) -> bytes:
     """Normalise a blob column to ``bytes``.
 
@@ -421,6 +449,7 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
             get_checkpoint_metadata(config, metadata)
         )
         with self._session() as session:
+            _fence_from_config(session, config)
             session.execute(
                 _UPSERT_CHECKPOINT,
                 {
@@ -447,6 +476,7 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
         thread_id, checkpoint_ns = self._config_key(config)
         checkpoint_id = config["configurable"]["checkpoint_id"]
         with self._session() as session:
+            _fence_from_config(session, config)
             for offset, (channel, value) in enumerate(writes):
                 idx = WRITES_IDX_MAP.get(channel, offset)
                 value_type, value_blob = self.serde.dumps_typed(value)
@@ -465,6 +495,28 @@ class SqlAlchemyCheckpointSaver(BaseCheckpointSaver[str]):
                         "task_path": task_path,
                     },
                 )
+
+    def latest_checkpoint_id(self, thread_id: str, *, session: Any) -> str | None:
+        """Newest checkpoint id of the thread across EVERY ``checkpoint_ns``."""
+        return session.execute(
+            _SELECT_NEWEST_CHECKPOINT_ID, {"thread_id": thread_id}
+        ).scalar()
+
+    def delete_checkpoints_after(
+        self, thread_id: str, checkpoint_id: str | None, *, session: Any
+    ) -> None:
+        """Roll the thread back to ``checkpoint_id``, across EVERY ``checkpoint_ns``.
+
+        ``None`` deletes the whole thread. Otherwise rows with a larger
+        ``checkpoint_id`` go from both tables (UUID6 ids sort in creation order).
+        Runs on the caller's session and does not commit, like ``delete_thread``.
+        """
+        if checkpoint_id is None:
+            self.delete_thread(thread_id, session=session)
+            return
+        params = {"thread_id": thread_id, "checkpoint_id": checkpoint_id}
+        session.execute(_DELETE_WRITES_AFTER, params)
+        session.execute(_DELETE_CHECKPOINTS_AFTER, params)
 
     def delete_thread(self, thread_id: str, *, session: Any | None = None) -> None:
         """Delete every checkpoint AND every pending write for one thread.

@@ -3967,13 +3967,14 @@ class TestSurfaceNoticeCarriesDetails:
     REQUEST_ID = "req-321"
     DETAILS = {"stage": "builder", "error": "RuntimeError", "request_id": REQUEST_ID}
 
-    def _surface(self, session_id, **kwargs):
-        """Call ``_surface_notice`` under this turn's request id, then clear it."""
+    def _surface(self, env, **kwargs):
+        """Call ``_surface_notice`` under this turn's (live) request id, then clear it."""
         from src.services.graph.event_emitter import set_chat_request_id
 
+        env.seed_running_request(self.REQUEST_ID)
         set_chat_request_id(self.REQUEST_ID)
         try:
-            return nodes._surface_notice(session_id, "x", **kwargs)
+            return nodes._surface_notice(env.session_id, "x", **kwargs)
         finally:
             set_chat_request_id(None)
 
@@ -3985,7 +3986,7 @@ class TestSurfaceNoticeCarriesDetails:
     def test_the_row_carries_the_details_and_keeps_its_invariants(self, graph_env):
         from src.database.models.session import SessionMessage
 
-        returned = self._surface(graph_env.session_id, details=dict(self.DETAILS))
+        returned = self._surface(graph_env, details=dict(self.DETAILS))
 
         assert returned is None
         polled = self._polled()
@@ -4016,7 +4017,7 @@ class TestSurfaceNoticeCarriesDetails:
         ids=["omitted", "none", "empty"],
     )
     def test_without_details_the_row_has_todays_shape(self, graph_env, kwargs):
-        returned = self._surface(graph_env.session_id, **kwargs)
+        returned = self._surface(graph_env, **kwargs)
 
         assert returned is None
         polled = self._polled()
@@ -4035,7 +4036,7 @@ class TestSurfaceNoticeCarriesDetails:
 
         monkeypatch.setattr(nodes, "get_session_manager", lambda: _Boom())
 
-        returned = self._surface(graph_env.session_id, details=dict(self.DETAILS))
+        returned = self._surface(graph_env, details=dict(self.DETAILS))
 
         assert returned is None
         # The write was really attempted (and raised) — not skipped.
@@ -4046,7 +4047,7 @@ class TestSurfaceNoticeCarriesDetails:
     def test_malformed_details_never_raise(self, graph_env, details):
         """Building the payload is part of the guarded write, not ahead of it:
         a notice that cannot be written must not be what fails the turn."""
-        assert self._surface(graph_env.session_id, details=details) is None
+        assert self._surface(graph_env, details=details) is None
 
 
 class TestFailureNoticesArePlainLanguage:
@@ -4452,6 +4453,7 @@ class TestFailureNoticesArePlainLanguage:
         caplog.set_level(logging.WARNING, logger=self.LOGGER)
         graph_env.skills.set("builder", self._raising("boom"))
 
+        graph_env.seed_running_request(self.REQUEST_ID)
         set_chat_request_id(self.REQUEST_ID)
         try:
             builder_node(_branch_payload(graph_env, 2, spec=make_spec((2,))))
@@ -4668,6 +4670,7 @@ class TestFailureNoticesArePlainLanguage:
         from src.services.graph.event_emitter import set_chat_request_id
 
         caplog.set_level(logging.WARNING, logger=self.LOGGER)
+        graph_env.seed_running_request(self.REQUEST_ID)
         set_chat_request_id(self.REQUEST_ID)
         try:
             notice = self._drive_failure(site, graph_env, monkeypatch)
@@ -4882,6 +4885,7 @@ class TestDeckAdvisoryIsPlain:
 
         emitter: queue.Queue = queue.Queue()
         set_event_emitter(emitter)
+        graph_env.seed_running_request("req-316")
         set_chat_request_id("req-316")
         try:
             deck_reviewer_node(graph_env.state(turn_id=TURN))

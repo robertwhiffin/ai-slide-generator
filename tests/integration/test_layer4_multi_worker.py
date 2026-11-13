@@ -285,23 +285,27 @@ class TestFifteenParallelSlideWrites:
         def write(position: int) -> None:
             try:
                 barrier.wait()  # all threads start together → real concurrency
-                with _patched_db(factory):
-                    writer = SlideWriter()
-                    writer.write_slide(
-                        session_id,
-                        position,
-                        f"<div>Slide {position}</div>",
-                        modified_by="builder@example.com",
-                    )
+                writer = SlideWriter()
+                writer.write_slide(
+                    session_id,
+                    position,
+                    f"<div>Slide {position}</div>",
+                    modified_by="builder@example.com",
+                )
             except Exception as exc:
                 with lock:
                     errors.append(exc)
 
         threads = [threading.Thread(target=write, args=(i,)) for i in range(15)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=60.0)
+        # ONE process-wide patch, entered from this thread.  ``patch`` is not
+        # thread-safe: entered in each writer, the last one out restores another
+        # writer's fake, leaving this (dropped) database wired into the writers'
+        # modules for every later test on the worker.
+        with _patched_db(factory):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=60.0)
 
         assert not errors, (
             f"{len(errors)} of 15 concurrent write_slide calls raised:\n"
@@ -837,7 +841,7 @@ class TestFourConcurrentSweepersOneWins:
     """
 
     def test_exactly_one_of_four_concurrent_sweepers_claims_the_marker(
-        self, postgres_engine
+        self, postgres_engine, monkeypatch
     ):
         _assert_postgres(postgres_engine)
 
@@ -846,7 +850,6 @@ class TestFourConcurrentSweepersOneWins:
         # import at the top of this file).
         from src.services.spec_sync import DEBOUNCE_SECONDS, claim_due_marker
         from datetime import datetime, timedelta
-        import contextlib
 
         factory = _make_factory(postgres_engine)
         deck = _seed_owner_deck(factory)
@@ -859,20 +862,19 @@ class TestFourConcurrentSweepersOneWins:
         errors: List[Exception] = []
         tlock = threading.Lock()
 
-        @contextlib.contextmanager
-        def patched_for_thread(factory, gates):
-            fake = _thread_aware_db(factory, gates)
-            with (
-                patch("src.services.spec_sync.get_db_session", fake),
-                patch("src.api.services.session_manager.get_db_session", fake),
-            ):
-                yield
+        # ONE process-wide patch, set from this thread (the fake dispatches on
+        # the thread's name).  ``patch`` entered in each claimer is not
+        # thread-safe: the last one out restores another claimer's fake, leaving
+        # this (dropped) database wired into spec_sync and session_manager for
+        # every later test on the worker.
+        fake = _thread_aware_db(factory, gates)
+        monkeypatch.setattr("src.services.spec_sync.get_db_session", fake)
+        monkeypatch.setattr("src.api.services.session_manager.get_db_session", fake)
 
         def claimer():
             name = threading.current_thread().name
             try:
-                with patched_for_thread(factory, gates):
-                    outcome = claim_due_marker(now)
+                outcome = claim_due_marker(now)
                 with tlock:
                     results[name] = outcome
             except BaseException as exc:

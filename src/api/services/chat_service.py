@@ -13,6 +13,7 @@ import logging
 import queue
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, Generator, List, Optional
@@ -54,6 +55,7 @@ from src.services.conversation_pins import (
     ConversationPinMissingError,
     ConversationSessionNotFoundError,
 )
+from src.services.generation_fence import TurnFencedError, TurnStopped, turn_is_live
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
     PersistedRuntimeError,
@@ -325,6 +327,27 @@ def _pinned_graph_configuration_error_event() -> StreamEvent:
         error="Pinned graph configuration is unavailable",
         metadata={"code": "pinned_graph_configuration_unavailable"},
     )
+
+
+#: The graph limb's consumer read no event within its poll interval.
+_NO_GRAPH_EVENT = object()
+
+
+def _turn_still_live(request_id: str) -> bool:
+    """:func:`turn_is_live`, where an unreadable status counts as live.
+
+    The graph limb's consumer must not abandon a turn on a database blip: the
+    fence still refuses a stopped turn's writes, and sealing re-checks.
+    """
+    try:
+        return turn_is_live(request_id)
+    except Exception:
+        logger.warning(
+            "Could not read the turn's status; still waiting on its graph",
+            exc_info=True,
+            extra={"request_id": request_id},
+        )
+        return True
 
 
 class ChatService:
@@ -1939,6 +1962,29 @@ class ChatService:
         # Capture context BEFORE starting thread to preserve user auth
         ctx = contextvars.copy_context()
 
+        def abandoned(e: Exception) -> bool:
+            """Whether the graph ended after its turn was stopped or rolled back.
+
+            Its consumer has gone (or is about to), and whoever ended the turn
+            wrote its status, so the ending is not a failure: logged at INFO,
+            with no ERROR event and no error recorded.  An unreadable status
+            counts as live, so a real failure is never hidden.
+            """
+            if isinstance(e, TurnFencedError):
+                ended = True
+            else:
+                ended = bool(request_id) and not _turn_still_live(request_id)
+            if ended:
+                logger.info(
+                    "Abandoned graph turn ended",
+                    extra={
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "error_class": type(e).__name__,
+                    },
+                )
+            return ended
+
         def run_graph():
             """Run the graph in a separate thread, pushing events to the queue."""
             try:
@@ -1953,6 +1999,8 @@ class ChatService:
                 ConversationPinMissingError,
                 ConversationSessionNotFoundError,
             ) as e:
+                if abandoned(e):
+                    return
                 graph_release_id = (
                     _pinned_graph_failure_release_id(e, session_id)
                     if isinstance(e, PersistedRuntimeError)
@@ -1979,6 +2027,8 @@ class ChatService:
                 error_container["error"] = graph_error
                 event_queue.put(_pinned_graph_configuration_error_event())
             except Exception as e:
+                if abandoned(e):
+                    return
                 # The traceback (server-side only) keeps the cause; the client
                 # gets the code-owned message, never ``str(e)``.
                 logger.error(
@@ -2016,7 +2066,17 @@ class ChatService:
                 naming_model = build_session_title_model()
                 generated_title = generate_session_title(message, naming_model)
                 if generated_title:
-                    session_manager.rename_session(session_id, generated_title)
+                    # This thread's context was copied before invoke_graph bound
+                    # the request id, so the id is passed explicitly.  A slow
+                    # title can outlive the join below and arrive after the turn
+                    # completed; it must still land then (allow_completed), but
+                    # never after a stop.
+                    session_manager.rename_session(
+                        session_id,
+                        generated_title,
+                        request_id=request_id,
+                        allow_completed=True,
+                    )
                     title_container["title"] = generated_title
                     logger.info(
                         "Auto-named graph-mode session from first message",
@@ -2025,6 +2085,12 @@ class ChatService:
                             "generated_title": generated_title,
                         },
                     )
+            except TurnFencedError:
+                # The turn was stopped: the title is dropped, not a failure.
+                logger.info(
+                    "Dropped the session title of a stopped turn",
+                    extra={"session_id": session_id, "request_id": request_id},
+                )
             except Exception:
                 logger.warning(
                     "Failed to auto-name session",
@@ -2049,12 +2115,35 @@ class ChatService:
             )
             title_thread.start()
 
-        # Yield events as they arrive
+        # Yield events as they arrive.  A turn with a request id is also checked
+        # for liveness at most once per STOP_POLL_SECONDS, whether or not events
+        # are arriving: a stop, timeout or orphan rollback (from any process)
+        # ends it in the database, and the job must free its runner then rather
+        # than wait for a graph thread that may be blocked in a model call.
+        # Sealing, below, is the final liveness check before the save point.
+        from src.api.services.job_queue import STOP_POLL_SECONDS
+
+        next_check = time.monotonic() + STOP_POLL_SECONDS
         while True:
-            event = event_queue.get()
+            wait = (
+                max(0.0, next_check - time.monotonic()) if request_id else STOP_POLL_SECONDS
+            )
+            try:
+                event = event_queue.get(timeout=wait)
+            except queue.Empty:
+                event = _NO_GRAPH_EVENT
             if event is None:
                 break
-            yield event
+            if request_id and time.monotonic() >= next_check:
+                if not _turn_still_live(request_id):
+                    logger.info(
+                        "Graph turn stopped; leaving its graph thread",
+                        extra={"session_id": session_id, "request_id": request_id},
+                    )
+                    raise TurnStopped(request_id)
+                next_check = time.monotonic() + STOP_POLL_SECONDS
+            if event is not _NO_GRAPH_EVENT:
+                yield event
 
         # Check for errors
         if "error" in error_container:
@@ -2063,6 +2152,17 @@ class ChatService:
         # The graph wrote session_slides rows behind this process's deck cache,
         # so drop the cached deck rather than serve a deck that predates the turn.
         self._invalidate_deck_cache(session_id)
+
+        # THE COMMIT POINT: seal the turn's generation snapshot now, BEFORE the
+        # save point and the title join.  A stop that wins this race rolled the
+        # turn back, so it ends here: no save point, no COMPLETE.  A stop that
+        # loses it is "already finished" and the turn completes, so a stop can
+        # never restore the deck yet leave a "Generated N slide(s)" version behind.
+        if request_id:
+            from src.services.generation_rollback import seal_generation
+
+            if not seal_generation(request_id):
+                raise TurnStopped(request_id)
 
         # ONE save point per completed turn, matching the monolith — which makes
         # one here too, at `send_message_streaming`'s own post-persist step.
@@ -2081,6 +2181,10 @@ class ChatService:
         #
         # A save-point failure must not fail the turn, exactly as on the monolith
         # path — the deck is already committed by the time this runs.
+        #
+        # This thread never has the request id bound, so it is passed explicitly.
+        # The turn is sealed, so a stop can no longer end it; the fence still
+        # refuses the save point of a turn a failure path (a timeout) ended since.
         try:
             deck_for_save_point = self._get_or_load_deck(session_id)
             if deck_for_save_point is not None:
@@ -2090,7 +2194,14 @@ class ChatService:
                         f"Generated {len(deck_for_save_point.slides)} slide(s)"
                     ),
                     deck=deck_for_save_point,
+                    request_id=request_id,
                 )
+        except TurnFencedError:
+            # The turn was stopped: no save point, and not a turn failure.
+            logger.info(
+                "Skipped the save point of a stopped turn",
+                extra={"session_id": session_id, "request_id": request_id},
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to create save point (graph): {e}",
@@ -2975,6 +3086,17 @@ class ChatService:
 
         if cached_deck is not None:
             db_version = self._get_deck_version(session_id)
+            if db_version is None and self._deck_row_confirmed_absent(session_id):
+                # Another process deleted the deck row (a first-generation
+                # rollback): the cached deck no longer exists anywhere.
+                logger.info(
+                    "Deck row gone, dropping cached deck",
+                    extra={"session_id": session_id, "cached_version": cached_version},
+                )
+                with self._cache_lock:
+                    self._deck_cache.pop(session_id, None)
+                    self._deck_versions().pop(session_id, None)
+                return None
             if db_version is None or cached_version == db_version:
                 return cached_deck
             logger.info(
@@ -3046,6 +3168,23 @@ class ChatService:
             return session_manager.get_slide_deck_version(session_id)
         except Exception:
             return None
+
+    def _deck_row_confirmed_absent(self, session_id: str) -> bool:
+        """True only when the database confirms the session has no deck row.
+
+        Asked only after :meth:`_get_deck_version` returned None, which also
+        covers a read error.  Any error here, or any answer other than a plain
+        ``False``, is "not confirmed", so the cached deck is served as before.
+        """
+        try:
+            return get_session_manager().slide_deck_exists(session_id) is False
+        except Exception:
+            logger.warning(
+                "Could not confirm whether the deck row exists; serving the cached deck",
+                extra={"session_id": session_id},
+                exc_info=True,
+            )
+            return False
 
     @staticmethod
     def _reindex_slide_ids(deck: "SlideDeck") -> None:
@@ -3167,6 +3306,8 @@ class ChatService:
         session_id: str,
         description: str,
         deck: Optional[SlideDeck] = None,
+        *,
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a save point for the current deck state.
 
@@ -3174,6 +3315,8 @@ class ChatService:
             session_id: Session to create save point for
             description: Auto-generated description of the change
             deck: Optional deck to save (uses cached deck if not provided)
+            request_id: The graph turn this save point belongs to; it is refused
+                (``TurnFencedError``) once that turn is no longer live.
 
         Returns:
             Version info dictionary
@@ -3195,6 +3338,7 @@ class ChatService:
             description=description,
             deck_dict=deck.to_dict(),
             verification_map=verification_map,
+            request_id=request_id,
         )
 
         logger.info(

@@ -9,9 +9,16 @@ interface FeedbackDrawerProps {
   findings: SlideFinding[];        // already scoped to the current slide
   callbacks: DrawerCallbacks;
   hasUnseen: boolean;
+  /** A turn is running: Apply and Discuss send a chat message, so they wait (Dismiss sends nothing). */
+  actionsDisabled?: boolean;
 }
 
-export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callbacks, hasUnseen }) => {
+export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({
+  findings,
+  callbacks,
+  hasUnseen,
+  actionsDisabled = false,
+}) => {
   const { drawerOpen, setDrawerOpen, drawerHeight, setDrawerHeight, activeTab, setActiveTab } = useViewer();
   // Captures the pointer's starting Y and the drawer's starting height at drag begin.
   const dragStart = useRef<{ y: number; h: number } | null>(null);
@@ -57,7 +64,7 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callba
   }, []);
 
   return (
-    <div data-testid="feedback-drawer" className="flex flex-col border-t border-border bg-card">
+    <div data-testid="feedback-drawer" data-escape-owner className="flex flex-col border-t border-border bg-card">
       {drawerOpen && (
         // Resize handle: visually 1px but padded to 8px tall for an ergonomic
         // grab target. aria-role and label make it accessible.
@@ -183,6 +190,7 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callba
                         size="sm"
                         variant="outline"
                         data-testid={`finding-apply-${f.id}`}
+                        disabled={actionsDisabled}
                         onClick={() => callbacks.onApplyFinding(f.id)}
                       >
                         Apply
@@ -199,6 +207,7 @@ export const FeedbackDrawer: React.FC<FeedbackDrawerProps> = ({ findings, callba
                         size="sm"
                         variant="ghost"
                         data-testid={`finding-discuss-${f.id}`}
+                        disabled={actionsDisabled}
                         onClick={() => callbacks.onDiscussFinding(f.id)}
                       >
                         Discuss

@@ -23,6 +23,7 @@ from src.api.schemas.agent_config import (
     sanitize_agent_config_for_persist,
 )
 from src.core.database import get_db_session
+from src.database.models.generation_snapshot import GenerationSnapshot
 from src.database.models.profile_contributor import PermissionLevel
 from src.database.models.session import (
     ChatRequest,
@@ -44,6 +45,13 @@ from src.services.conversation_pins import (
     get_conversation_graph_version,
     get_conversation_graph_versions,
     lock_active_graph_release,
+)
+from src.services.generation_fence import (
+    LIVE_STATUSES,
+    claim_turn_row,
+    generation_hold_clause,
+    fence_turn_write,
+    start_chat_request as _start_chat_request,
 )
 from src.services.shared_deck_attribution import (
     DeckMutationContext,
@@ -994,6 +1002,28 @@ class DeckModeLockedError(Exception):
         super().__init__(f"This deck's Deck Mode is locked to {deck_mode!r}")
 
 
+class GenerationRefusedError(Exception):
+    """An Agent deck's Enter was refused before its snapshot was taken.
+
+    Raised by ``SessionManager.begin_generation`` before anything is written.
+    ``reason`` is :attr:`RESTORE_PENDING` (a failed restore is pending on the
+    deck) or :attr:`ARC_REVIEW_IN_FLIGHT` (the arc-review sweeper holds a live
+    claim on it), which the route maps to its 409 copy; or
+    :attr:`GENERATION_IN_FLIGHT` (another request's generation is live on the
+    deck), which it answers 423 "Session is locked by" ``holder``.
+    """
+
+    RESTORE_PENDING = "restore_pending"
+    ARC_REVIEW_IN_FLIGHT = "arc_review_in_flight"
+    GENERATION_IN_FLIGHT = "generation_in_flight"
+
+    def __init__(self, reason: str, *, holder: Optional[str] = None):
+        self.reason = reason
+        #: GENERATION_IN_FLIGHT only: the live generation's sender (``created_by``).
+        self.holder = holder
+        super().__init__(f"Generation refused: {reason}")
+
+
 class MessageNotFoundError(Exception):
     """A message id is not a deletable message of the session.
 
@@ -1555,15 +1585,30 @@ class SessionManager:
             logger.info("Deleted session", extra={"session_id": session_id})
             return True
 
-    def rename_session(self, session_id: str, title: str) -> Dict[str, Any]:
+    def rename_session(
+        self,
+        session_id: str,
+        title: str,
+        *,
+        request_id: Optional[str] = None,
+        allow_completed: bool = False,
+    ) -> Dict[str, Any]:
         """Rename a session (delegates to update_session)."""
-        return self.update_session(session_id, title=title)
+        return self.update_session(
+            session_id,
+            title=title,
+            request_id=request_id,
+            allow_completed=allow_completed,
+        )
 
     def update_session(
         self,
         session_id: str,
         title: Optional[str] = None,
         slide_count: Optional[int] = None,
+        *,
+        request_id: Optional[str] = None,
+        allow_completed: bool = False,
     ) -> Dict[str, Any]:
         """Update session metadata (title and/or deck slide count).
 
@@ -1574,14 +1619,22 @@ class SessionManager:
             title: New session title (optional)
             slide_count: New slide count for the session's deck (optional).
                 Only applied if the session has a slide_deck.
+            request_id: The turn this write belongs to, for a caller outside the
+                turn's context (the graph turn's title thread).  The write is
+                refused (``TurnFencedError``) once that turn is no longer live.
+            allow_completed: Also admit a ``completed`` turn: the title thread
+                is joined only briefly, so its title can arrive after the turn
+                finished and must still land.
 
         Returns:
             Updated session info
 
         Raises:
             SessionNotFoundError: If session doesn't exist
+            TurnFencedError: If the turn this write belongs to was stopped
         """
         with get_db_session() as db:
+            fence_turn_write(db, request_id, allow_completed=allow_completed)
             session = self._get_session_or_raise(db, session_id)
             if title is not None:
                 session.title = title
@@ -1787,8 +1840,12 @@ class SessionManager:
         config is re-serialized through ``AgentConfig``, as every agent-config
         write path does.  A row with no ``genie_one`` entry (the user removed it
         mid-turn) is left alone.
+
+        Fenced (``TurnFencedError``) when called from a stopped turn; the claim
+        comes before the row lock, the lock order every turn writer keeps.
         """
         with get_db_session() as db:
+            fence_turn_write(db)
             session = (
                 db.query(UserSession)
                 .filter(UserSession.session_id == session_id)
@@ -1827,8 +1884,12 @@ class SessionManager:
         between the turn's read and this write is not lost; the config is
         re-serialized through ``AgentConfig``.  A row without that space's entry
         (the user removed it mid-turn) is left alone.
+
+        Fenced (``TurnFencedError``) when called from a stopped turn; the claim
+        comes before the row lock, the lock order every turn writer keeps.
         """
         with get_db_session() as db:
+            fence_turn_write(db)
             session = (
                 db.query(UserSession)
                 .filter(UserSession.session_id == session_id)
@@ -1975,8 +2036,15 @@ class SessionManager:
 
         Returns:
             Message info dictionary
+
+        Raises:
+            TurnFencedError: If called from a graph turn that was stopped.  The
+                fence keys on the turn's ContextVar ONLY, never on *request_id*:
+                the monolith passes *request_id* too and never binds the
+                ContextVar, and its writes behave as they always have.
         """
         with get_db_session() as db:
+            fence_turn_write(db)
             session = self._get_session_or_raise(db, session_id)
             message = self._insert_user_message(
                 db,
@@ -2663,6 +2731,29 @@ class SessionManager:
                 db.query(SessionSlideDeck.version)
                 .filter(SessionSlideDeck.session_id == deck_owner.id)
                 .scalar()
+            )
+
+    def slide_deck_exists(self, session_id: str) -> bool:
+        """Whether the session's deck row (the owner's, for a contributor) exists.
+
+        ``False`` is a confirmed answer: the session, or its deck row, is not in
+        the database (a first-generation rollback deletes the row).  A database
+        error propagates, so a caller can tell "no row" from "could not read".
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .first()
+            )
+            if session is None:
+                return False
+            deck_owner = self._get_deck_owner_session(db, session)
+            return (
+                db.query(SessionSlideDeck.id)
+                .filter(SessionSlideDeck.session_id == deck_owner.id)
+                .first()
+                is not None
             )
 
     def get_slide_deck(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -3378,6 +3469,8 @@ class SessionManager:
         deck_dict: Dict[str, Any],
         verification_map: Optional[Dict[str, Any]] = None,
         chat_history: Optional[List[Dict[str, Any]]] = None,
+        *,
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a new save point (version) for the slide deck.
 
@@ -3390,11 +3483,17 @@ class SessionManager:
             deck_dict: Complete deck snapshot
             verification_map: Verification results at time of snapshot
             chat_history: Chat messages up to this point (auto-captured if not provided)
+            request_id: The turn this save point belongs to, for a caller outside
+                the turn's context (the graph turn's end-of-turn save point).
 
         Returns:
             Version info dictionary
+
+        Raises:
+            TurnFencedError: If the turn this save point belongs to was stopped
         """
         with get_db_session() as db:
+            fence_turn_write(db, request_id)
             session = self._get_session_or_raise(db, session_id)
             deck_owner = self._get_deck_owner_session(db, session)
 
@@ -3885,6 +3984,53 @@ class SessionManager:
     # ------------------------------------------------------------------
     EDITING_LOCK_TIMEOUT_SECONDS = 45  # safety net for browser crashes when heartbeat stops
 
+    def _live_generation_holder(
+        self,
+        db: Session,
+        deck_owner: UserSession,
+        *,
+        live_only: bool = False,
+        other_than: Optional[str] = None,
+    ) -> Optional[str]:
+        """Who a live Agent generation holds *deck_owner*'s deck for, or ``None``.
+
+        The newest ``GenerationSnapshot`` on the deck whose request is live
+        (``pending``/``running``) or, unless *live_only*, whose own state is
+        ``restore_failed`` (a failed restore keeps the deck locked to its sender);
+        a snapshot of the request *other_than* does not count.  Returns the actor
+        session's ``created_by``: the string ``get_current_user()`` returns and
+        ``locked_by`` stores.  A monolith turn writes no snapshot, so it holds
+        nothing.
+        """
+        base, where = generation_hold_clause(deck_owner.id, live_only=live_only)
+        if other_than is not None:
+            where = (*where, GenerationSnapshot.request_id != other_than)
+        row = db.execute(
+            base.add_columns(UserSession.created_by)
+            .join(UserSession, UserSession.id == GenerationSnapshot.actor_session_pk)
+            .where(*where)
+            .order_by(GenerationSnapshot.id.desc())
+            .limit(1)
+        ).first()
+        return row[1] if row else None
+
+    def live_generation_holder(
+        self, session_id: str, *, live_only: bool = False
+    ) -> Optional[str]:
+        """Who holds *session_id*'s deck through a live generation, or ``None``.
+
+        Opens its own short transaction (the caller's connection stays untouched);
+        a missing session holds nothing.  See :meth:`_live_generation_holder`.
+        """
+        with get_db_session() as db:
+            session = (
+                db.query(UserSession).filter(UserSession.session_id == session_id).first()
+            )
+            if session is None:
+                return None
+            owner = self._get_deck_owner_session(db, session)
+            return self._live_generation_holder(db, owner, live_only=live_only)
+
     def require_editing_lock(self, session_id: str) -> None:
         """Raise PermissionError if another user holds an active editing lock.
 
@@ -3900,6 +4046,10 @@ class SessionManager:
                 return
             deck = deck_owner.slide_deck
             current_user = get_current_user()
+            holder = self._live_generation_holder(db, deck_owner)
+            if holder and holder != current_user:
+                from src.services.identity_provider import resolve_display_name
+                raise PermissionError(f"Session is locked by {resolve_display_name(holder)}")
             if deck.locked_by and deck.locked_by != current_user and deck.locked_at:
                 age = (datetime.utcnow() - deck.locked_at).total_seconds()
                 if age < self.EDITING_LOCK_TIMEOUT_SECONDS:
@@ -3924,6 +4074,11 @@ class SessionManager:
 
             deck = deck_owner.slide_deck
             now = datetime.utcnow()
+
+            holder = self._live_generation_holder(db, deck_owner)
+            if holder and holder != user:
+                from src.services.identity_provider import resolve_display_name
+                return {"acquired": False, "locked_by": resolve_display_name(holder)}
 
             if deck.locked_by and deck.locked_by != user:
                 if deck.locked_at:
@@ -4001,6 +4156,14 @@ class SessionManager:
                 return {"locked": False, "locked_by": None, "locked_by_email": None}
 
             deck = deck_owner.slide_deck
+            holder = self._live_generation_holder(db, deck_owner)
+            if holder:
+                from src.services.identity_provider import resolve_display_name
+                return {
+                    "locked": True,
+                    "locked_by": resolve_display_name(holder),
+                    "locked_by_email": holder,
+                }
             if not deck.locked_by:
                 return {"locked": False, "locked_by": None, "locked_by_email": None}
 
@@ -4064,6 +4227,7 @@ class SessionManager:
 
             session.is_processing = True
             session.processing_started_at = datetime.utcnow()
+            session.processing_request_id = None
 
             logger.info(
                 "Acquired session lock",
@@ -4071,7 +4235,7 @@ class SessionManager:
             )
             return True
 
-    def refresh_session_lock(self, session_id: str) -> bool:
+    def refresh_session_lock(self, session_id: str, request_id: Optional[str] = None) -> bool:
         """Keep a held processing lock live: set ``processing_started_at`` to now.
 
         A lock goes stale after ``SESSION_LOCK_TIMEOUT_SECONDS``, but a graph turn may
@@ -4080,18 +4244,22 @@ class SessionManager:
         (``job_queue.refresh_job_session_locks_once``), so a lock outlives the timeout
         only while its turn is running and not yet timed out, or queued for less than
         its hard timeout.  Only a lock still held (``is_processing``) is refreshed; a
-        released lock is never revived.
+        released lock is never revived.  With ``request_id``, only while that request
+        owns the lock (``processing_request_id``); without it, as before.
 
         Returns:
             True if a held lock was refreshed.
         """
+        conditions = [
+            UserSession.session_id == session_id,
+            UserSession.is_processing.is_(True),
+        ]
+        if request_id is not None:
+            conditions.append(UserSession.processing_request_id == request_id)
         with get_db_session() as db:
             updated = (
                 db.query(UserSession)
-                .filter(
-                    UserSession.session_id == session_id,
-                    UserSession.is_processing.is_(True),
-                )
+                .filter(*conditions)
                 .update(
                     {UserSession.processing_started_at: datetime.utcnow()},
                     synchronize_session=False,
@@ -4099,30 +4267,55 @@ class SessionManager:
             )
             return bool(updated)
 
-    def release_session_lock(self, session_id: str) -> None:
-        """Release processing lock for a session.
-
-        Args:
-            session_id: Session to unlock
-        """
+    def bind_session_lock(self, session_id: str, request_id: str) -> None:
+        """Record which request owns the held lock (only where ``is_processing``)."""
         with get_db_session() as db:
-            session = (
-                db.query(UserSession)
-                .filter(UserSession.session_id == session_id)
-                .first()
+            db.execute(
+                update(UserSession)
+                .where(
+                    UserSession.session_id == session_id,
+                    UserSession.is_processing.is_(True),
+                )
+                .values(processing_request_id=request_id)
+                .execution_options(synchronize_session=False)
             )
 
-            # If session doesn't exist, nothing to unlock
-            if not session:
-                return
+    def release_session_lock(
+        self, session_id: str, request_id: Optional[str] = None
+    ) -> bool:
+        """Release processing lock for a session.
 
-            session.is_processing = False
-            session.processing_started_at = None
+        With ``request_id`` the release is one conditional UPDATE and happens only
+        while that request still owns the lock; without it, as before.
 
+        Returns:
+            True if a lock was released.
+        """
+        with get_db_session() as db:
+            conditions = [
+                UserSession.session_id == session_id,
+                UserSession.is_processing.is_(True),
+            ]
+            if request_id is not None:
+                conditions.append(UserSession.processing_request_id == request_id)
+            result = db.execute(
+                update(UserSession)
+                .where(*conditions)
+                .values(
+                    is_processing=False,
+                    processing_started_at=None,
+                    processing_request_id=None,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            released = result.rowcount == 1
+
+        if released:
             logger.info(
                 "Released session lock",
                 extra={"session_id": session_id},
             )
+        return released
 
     # Chat request operations (for polling-based streaming)
     def create_chat_request(
@@ -4160,6 +4353,139 @@ class SessionManager:
             )
 
             return request_id
+
+    # The all-or-nothing lifecycle of an Agent deck's async turn.  generation_rollback
+    # imports this module at its top, so it is imported lazily here (no cycle).
+
+    def get_deck_mode(self, session_id: str) -> Optional[str]:
+        """The stored Deck Mode of *session_id*'s deck (NULL = not chosen yet). Read-only.
+
+        Read off the deck OWNER's row, through the same owner hop
+        ``chat_service.resolve_engine_mode`` takes: a contributor inherits it.
+
+        Raises:
+            SessionNotFoundError: the session (or its deck owner) is missing.
+        """
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            return self._get_deck_owner_session(db, session).deck_mode
+
+    def begin_generation(self, session_id: str, request_id: str) -> None:
+        """Enter on an Agent deck: refuse, or take the turn's generation snapshot.
+
+        One transaction, whose first lock is the deck owner's
+        ``session_slide_decks`` row (``FOR UPDATE``; a no-op on SQLite), as
+        ``_refuse_during_an_arc_review`` takes it.  That lock is what serialises
+        Enter against the arc-review sweeper's claim and against another Enter on
+        the deck.  A deck with no row yet (a first generation) locks the owner's
+        ``user_sessions`` row instead: there is nothing else to queue on.  Then:
+
+        - another request's live generation on the deck refuses
+          (``GenerationRefusedError.GENERATION_IN_FLIGHT``, naming its sender):
+          the route's holder checks ran before this lock, so two Enters in that
+          window (the owner's and a contributor's, each in their own session)
+          both passed them.  Only one generation per deck;
+        - a failed restore pending on the deck refuses
+          (``GenerationRefusedError.RESTORE_PENDING``): a snapshot now would
+          capture the deck the failed restore left;
+        - an arc review holding a live claim on it refuses
+          (``GenerationRefusedError.ARC_REVIEW_IN_FLIGHT``): its graph turn takes
+          no session lock;
+        - otherwise the snapshot is taken in this transaction, before the user
+          message (which locks the deck mode on a first message).
+
+        Raises:
+            GenerationRefusedError: refused; nothing was written.
+            SessionNotFoundError: the session (or its deck owner) is missing.
+        """
+        from src.services.generation_rollback import (
+            has_pending_restore,
+            take_generation_snapshot,
+        )
+        from src.services.spec_sync import review_in_flight
+
+        with get_db_session() as db:
+            session = self._get_session_or_raise(db, session_id)
+            owner = self._get_deck_owner_session(db, session)
+            deck = (
+                db.query(SessionSlideDeck)
+                .filter(SessionSlideDeck.session_id == owner.id)
+                .with_for_update()
+                .first()
+            )
+            if deck is None:
+                # Nothing to lock but the owner's row.  Only when there is no deck
+                # row: the turn writers take user_sessions BEFORE the deck row, so
+                # holding the deck row while waiting for this one could deadlock.
+                (
+                    db.query(UserSession.id)
+                    .filter(UserSession.id == owner.id)
+                    .with_for_update()
+                    .first()
+                )
+            # A fresh statement after the lock: it sees an Enter that committed
+            # its snapshot while this one queued.
+            holder = self._live_generation_holder(
+                db, owner, live_only=True, other_than=request_id
+            )
+            if holder is not None:
+                raise GenerationRefusedError(
+                    GenerationRefusedError.GENERATION_IN_FLIGHT, holder=holder
+                )
+            if has_pending_restore(session_id):
+                raise GenerationRefusedError(GenerationRefusedError.RESTORE_PENDING)
+            if deck is not None and review_in_flight(deck, datetime.utcnow()):
+                raise GenerationRefusedError(GenerationRefusedError.ARC_REVIEW_IN_FLIGHT)
+            take_generation_snapshot(db, request_id=request_id, session_id=session_id)
+
+    def discard_generation_snapshot(self, request_id: str) -> None:
+        """Delete *request_id*'s generation snapshot without restoring anything.
+
+        For an Enter whose turn will not run on the graph after all, or whose
+        user message was refused: the snapshot no longer describes this turn's
+        starting point, so restoring it could undo someone else's change.
+        """
+        from src.services.generation_rollback import discard_generation_snapshot
+
+        with get_db_session() as db:
+            discard_generation_snapshot(db, request_id)
+
+    def abandon_chat_request(self, request_id: str, error: str) -> bool:
+        """End a live request before it ran: delete its messages, mark it ``error``.
+
+        One transaction, the fence claim first.  For a turn that must not run
+        and has no snapshot to restore (the async route's engine race).  The
+        session lock is the caller's to release.
+
+        Returns:
+            False (and nothing written) when the request is no longer live.
+        """
+        with get_db_session() as db:
+            if not claim_turn_row(db, request_id):
+                db.rollback()
+                return False
+            db.execute(
+                delete(SessionMessage)
+                .where(SessionMessage.request_id == request_id)
+                .execution_options(synchronize_session=False)
+            )
+            db.execute(
+                update(ChatRequest)
+                .where(ChatRequest.request_id == request_id)
+                .values(status="error", error_message=error, completed_at=datetime.utcnow())
+                .execution_options(synchronize_session=False)
+            )
+            return True
+
+    def start_chat_request(self, request_id: str) -> bool:
+        """Move a queued request ``pending`` -> ``running``, in its own transaction.
+
+        Returns:
+            False when the request is no longer ``pending`` (it was stopped
+            while it was queued): the job must not run it.
+        """
+        with get_db_session() as db:
+            return _start_chat_request(db, request_id)
 
     def update_chat_request_status(
         self,
@@ -4212,6 +4538,59 @@ class SessionManager:
 
             chat_request.result_json = json.dumps(result) if result else None
 
+    def complete_chat_request(self, request_id: str, result: Optional[dict]) -> bool:
+        """Complete a graph turn: store *result*, mark it ``completed``, drop its snapshot.
+
+        One transaction, the fence claim first, so a stop either lands before it
+        (and this writes nothing) or after it (and finds the request finished).
+        The snapshot may be ``active`` or ``sealed``.
+
+        Returns:
+            False (and nothing written) when the request is no longer live.
+        """
+        from src.services.generation_rollback import discard_generation_snapshot
+
+        with get_db_session() as db:
+            if not claim_turn_row(db, request_id):
+                db.rollback()
+                return False
+            db.execute(
+                update(ChatRequest)
+                .where(ChatRequest.request_id == request_id)
+                .values(
+                    result_json=json.dumps(result) if result else None,
+                    status="completed",
+                    completed_at=datetime.utcnow(),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            discard_generation_snapshot(db, request_id)
+            return True
+
+    def fail_chat_request(self, request_id: str, error: Optional[str]) -> bool:
+        """:meth:`update_chat_request_status` to ``error``, only while the request is live.
+
+        One transaction, the fence claim first, so a stop (``cancelled``) or a
+        rollback is never overwritten by ``error``.
+
+        Returns:
+            False (and nothing written) when the request is no longer live.
+        """
+        values: Dict[str, Any] = {"status": "error", "completed_at": datetime.utcnow()}
+        if error:
+            values["error_message"] = error
+        with get_db_session() as db:
+            if not claim_turn_row(db, request_id):
+                db.rollback()
+                return False
+            db.execute(
+                update(ChatRequest)
+                .where(ChatRequest.request_id == request_id)
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            return True
+
     def record_chat_request_progress(
         self, request_id: str, seq: int, progress: Dict[str, Any]
     ) -> bool:
@@ -4232,12 +4611,15 @@ class SessionManager:
         (``progress._persist``) logs it and the next report carries a newer snapshot.
 
         Returns True when this snapshot was stored, False when a newer (or equal)
-        one already was or the request does not exist.
+        one already was, the request does not exist, or the turn is no longer
+        live (``pending``/``running``): a stopped turn's row keeps the stage it
+        had when it stopped.
         """
         table = ChatRequest.__table__
         statement = (
             update(table)
             .where(table.c.request_id == request_id)
+            .where(table.c.status.in_(LIVE_STATUSES))
             .where(or_(table.c.progress_seq.is_(None), table.c.progress_seq < seq))
             .values(progress_json=json.dumps(progress), progress_seq=seq)
         )
@@ -4286,6 +4668,9 @@ class SessionManager:
                     if chat_request.progress_json
                     else None
                 ),
+                # How a stopped or failed Agent-deck turn ended: "rolled_back",
+                # "kept_foreign_change", "restore_failed", or None.
+                "rollback_outcome": chat_request.rollback_outcome,
             }
 
     def get_session_id_for_request(self, request_id: str) -> Optional[str]:

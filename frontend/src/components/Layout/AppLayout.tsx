@@ -620,6 +620,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
     }
   }, [renameSession, slideDeck]);
 
+  // Interrupt generation: the server's deck after a rollback replaces whatever the viewer showed mid-turn.
+  // Forced, because it can be older than the mid-turn view. With no deck, reset the version guard as
+  // handleNewSession does, or the next first generation's version-1 deck would be rejected.
+  const handleDeckRestored = useCallback((deck: SlideDeck | null) => {
+    if (deck) {
+      setSlideDeckGated(deck, deck.version, true);
+    } else {
+      deckVersionRef.current = 0;
+      setSlideDeck(null);
+    }
+  }, [setSlideDeckGated]);
+
   const handleNewSession = useCallback(async () => {
     deckVersionRef.current = 0;
     setSlideDeck(null);
@@ -1288,6 +1300,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                         }
                       }}
                       onDeckRefetched={(deck) => setSlideDeckGated(deck, deck.version)}
+                      onDeckRestored={handleDeckRestored}
                       viewOnlyReason={viewOnlyReason}
                     />
                   </div>
@@ -1549,7 +1562,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
       {/* Share Deck Dialog */}
       {showShareDialog && sessionId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="w-full max-w-lg mx-4 rounded-lg border border-border bg-card shadow-lg max-h-[80vh] flex flex-col">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Share Deck"
+            className="w-full max-w-lg mx-4 rounded-lg border border-border bg-card shadow-lg max-h-[80vh] flex flex-col"
+          >
             <div className="flex items-center justify-between border-b border-border px-6 py-4">
               <h2 className="text-lg font-semibold text-foreground">Share Deck</h2>
               <button
