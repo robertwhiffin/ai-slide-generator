@@ -1,0 +1,30 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll switch the code listing on slide 3 to light text on a dark background.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null,
+    "operations": [
+      {
+        "op": "update",
+        "position": 2,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Introduce the core techniques: give the audience a mental model of prompt design patterns",
+            "content_brief": "Bullet slide covering the four key patterns — system-prompt framing, few-shot examples, chain-of-thought reasoning, and structured output formatting — with a callout on when to combine them",
+            "assumes": "Audience understands the problem from the previous slide",
+            "hands_off": "Four composable patterns cover the vast majority of prompt optimisation needs",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null,
+            "look": "The four patterns as bullets on the left; a short dk-code listing of a system prompt with a structured-output schema on the right; when to combine them in a dk-callout Its dk-code listing uses light text on a dark background."
+          }
+        ]
+      }
+    ],
+    "deck_changes": null
+  }
+}

@@ -8,7 +8,7 @@ import type {
   ImageGenerationOptions,
   ImageGenerationRequest,
 } from '../types/image';
-import type { SlideDeck, Slide, SlideContext, ReplacementInfo } from '../types/slide';
+import type { SlideDeck, Slide, SlideContext, StageSlideContext, ReplacementInfo } from '../types/slide';
 import type { VerificationResult } from '../types/verification';
 import type { AgentConfig, ToolEntry, AvailableTool, ProfileSummary, DiscoveryResponse, ColumnDiscoveryResponse, GatewayItem, GatewayMcpStatus, GatewayConnection, GatewayConnectionCreate, GatewayConnectionUpdate } from '../types/agentConfig';
 import type { TurnProgress } from '../types/turnProgress';
@@ -1042,6 +1042,7 @@ export const api = {
     imageIds?: string[],
     agentConfig?: AgentConfig,
     deckMode?: DeckMode,
+    stageSlide?: StageSlideContext,
   ): () => void {
     const controller = new AbortController();
 
@@ -1059,6 +1060,7 @@ export const api = {
             image_ids: imageIds,
             agent_config: agentConfig,
             deck_mode: deckMode,
+            stage_slide: stageSlide,
           }),
           signal: controller.signal,
         });
@@ -1139,6 +1141,7 @@ export const api = {
     imageIds?: string[],
     agentConfig?: AgentConfig,
     deckMode?: DeckMode,
+    stageSlide?: StageSlideContext,
   ): Promise<{ request_id: string }> {
     const response = await fetch(`${API_BASE_URL}/api/chat/async`, {
       method: 'POST',
@@ -1150,6 +1153,7 @@ export const api = {
         image_ids: imageIds,
         agent_config: agentConfig,
         deck_mode: deckMode,
+        stage_slide: stageSlide,
       }),
     });
 
@@ -1236,13 +1240,14 @@ export const api = {
     imageIds?: string[],
     agentConfig?: AgentConfig,
     deckMode?: DeckMode,
+    stageSlide?: StageSlideContext,
   ): () => void {
     let cancelled = false;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     (async () => {
       try {
-        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig, deckMode);
+        const { request_id } = await this.submitChatAsync(sessionId, message, slideContext, imageIds, agentConfig, deckMode, stageSlide);
 
         if (cancelled) return;
         onEvent({ type: 'request_accepted', request_id });
@@ -1427,11 +1432,12 @@ export const api = {
     imageIds?: string[],
     agentConfig?: AgentConfig,
     deckMode?: DeckMode,
+    stageSlide?: StageSlideContext,
   ): () => void {
     if (isPollingMode()) {
-      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig, deckMode);
+      return this.startPolling(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig, deckMode, stageSlide);
     } else {
-      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig, deckMode);
+      return this.streamChat(sessionId, message, slideContext, onEvent, onError, imageIds, agentConfig, deckMode, stageSlide);
     }
   },
 

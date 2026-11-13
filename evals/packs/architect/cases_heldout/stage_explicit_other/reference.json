@@ -1,0 +1,28 @@
+{
+  "intent": "edit",
+  "message": "I'll number each step of the evaluation loop on slide 5.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 4,
+      "after_position": null,
+      "slides": [
+        {
+          "purpose": "Provide the workflow: show how to evaluate and iterate on prompts systematically",
+          "content_brief": "Two-column slide with a numbered prompt evaluation loop (1. define criteria → 2. build test set → 3. score outputs → 4. refine prompt → 5. repeat) on one side and commentary bullets on the other explaining why each step matters",
+          "assumes": "Audience is convinced of the value and wants to know how to operationalise it",
+          "hands_off": "A repeatable evaluate-and-iterate loop is the engine of prompt quality",
+          "data_references": [],
+          "slide_type": null,
+          "template_section_index": null,
+          "look": null
+        }
+      ]
+    }
+  ],
+  "deck_changes": null
+}

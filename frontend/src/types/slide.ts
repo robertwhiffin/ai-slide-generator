@@ -150,6 +150,12 @@ export interface SlideDeck {
   deck_spec?: DeckSpec | null;
 }
 
+/** The slide on stage when a chat turn is sent: 1-based number plus the displayed slide's stable id. */
+export interface StageSlideContext {
+  slide_number: number;
+  slide_id?: string;
+}
+
 export interface SlideContext {
   indices: number[];
   slide_htmls: string[];

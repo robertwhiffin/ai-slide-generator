@@ -61,6 +61,8 @@ _EMPTY_FOR: dict[str, Any] = {
     # turn with no flag reads must be the SAFE-TO-BUILD one, and it must be a
     # bool so `if scoped_vals(...)` cannot be accidentally truthy.
     "describe_only":        False,
+    # None, not {}: "no slide on stage" — the raw viewer snapshot or nothing.
+    "stage_slide":          None,
     "landed_positions":     set(),
     "placeheld_positions":  set(),
     "reviewed_positions":   set(),
@@ -292,6 +294,18 @@ class GraphState(TypedDict, total=False):
     #
     # JSON-native throughout ({"turn": str, "vals": bool}), per Ruling W-8(b).
     describe_only: Optional[dict]
+
+    # The Stage Slide: the slide the viewer had on stage when the user sent this
+    # turn's message, as the raw snapshot ``{"slide_number": N, "slide_id"?: str}``
+    # (or ``None``).  Written by invoke_graph on EVERY invocation — omission
+    # included, as ``scoped(turn_id, None)`` — and read only through scoped_vals
+    # by architect_node, which resolves it against this deck's committed rows
+    # before the model sees it (``{"slide_number", "position"}`` or null).
+    # Turn-scoped for the reason describe_only is: turn state accumulates across
+    # the thread, so a stage left from turn 1 must never read on turn 2.  The
+    # architect retry and the analyst loop run inside the same turn and so keep
+    # it.  Single-writer, no reducer; JSON-native ({"turn": str, "vals": dict|None}).
+    stage_slide: Optional[dict]
 
     # When this turn started, in epoch seconds: ``time.time()``, never a
     # monotonic clock, because it crosses the checkpointer and the nodes compare

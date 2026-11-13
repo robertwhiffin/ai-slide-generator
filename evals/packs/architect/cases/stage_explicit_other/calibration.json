@@ -1,0 +1,32 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll cut the callout on slide 2 down to bloated file sizes and font substitution.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null,
+    "operations": [
+      {
+        "op": "update",
+        "position": 3,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Evidence beat 1 — Responsive design and device flexibility",
+            "content_brief": "Show that HTML slides adapt fluidly to any screen size — laptop, tablet, phone, or conference-room projector — while PowerPoint locks content to a fixed canvas. Use a chart-plus-commentary layout with a conceptual visual comparison of responsive rendering vs. cropped/stretched .pptx output across device sizes Add a callout on the two worst PowerPoint pain points: bloated file sizes (8–15 MB average) and font substitution.",
+            "assumes": "The audience knows responsive web design exists but may not have connected it to presentations",
+            "hands_off": "HTML slides look perfect on every screen without manual resizing",
+            "data_references": [
+              "device_render_comparison"
+            ],
+            "slide_type": null,
+            "template_section_index": null,
+            "look": null
+          }
+        ]
+      }
+    ],
+    "deck_changes": null
+  }
+}

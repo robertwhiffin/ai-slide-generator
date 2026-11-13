@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import type { SlideDeck, Slide } from '../../types/slide';
+import type { SlideDeck, Slide, StageSlideContext } from '../../types/slide';
 import { ChatPanel, type ChatPanelHandle } from '../ChatPanel/ChatPanel';
 import { SlideViewer, type SlideViewerHandle } from '../SlideViewer/SlideViewer';
 import { syntheticSlideId } from '../SlideViewer/newSlides';
@@ -1050,11 +1050,17 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
   //     change unmounts both the ChatPanel and the SlideViewer.  That is the
   //     hazard the chat-panel comment further down already warns about; adding
   //     'spec' to the union walks straight into it.
-  //   - Not persisted (unlike `collapsed`), and never sent anywhere.  The view is
-  //     a HINT, never a mode: intent comes from language, so "tighten the arc"
-  //     edits the spec and "make slide 5 bolder" edits the slide whichever panel
-  //     is open.  Nothing about this flag may reach a request body.
+  //   - Not persisted (unlike `collapsed`), and the flag itself is never sent.
+  //     The view is a HINT, never a mode: intent comes from language, so "tighten
+  //     the arc" edits the spec and "make slide 5 bolder" edits the slide whichever
+  //     panel is open.  Its one effect on a request is indirect: while Spec is
+  //     shown no slide is on stage, so getStageSlide below omits `stage_slide`.
   const [showSpec, setShowSpec] = useState(false);
+
+  // The slide on stage for the architect. Nothing is staged while the slides pane is hidden behind Spec
+  // or the viewer shows a historical save-point preview.
+  const getStageSlide = (): StageSlideContext | undefined =>
+    showSpec || previewVersion != null ? undefined : slideViewerRef.current?.getStageSlide();
 
   // App tour bridge: switch the main panel between Slides and Spec.
   useEffect(() => {
@@ -1262,6 +1268,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ initialView = 'help', view
                       key="chat-panel"
                       ref={chatPanelRef}
                       rawHtml={rawHtml}
+                      getStageSlide={getStageSlide}
                       disabled={isReadOnly}
                       hasDeckSpec={!!slideDeck?.deck_spec}
                       slideCount={slideDeck?.slides.length ?? 0}

@@ -64,6 +64,12 @@ REDESCRIBE_CASE_IDS = ("redescribe_deck",)
 # The deck-style restyle (Task 7b): an edit case whose reference is already an operations answer
 # (deck_changes alone) and whose scoring tests/unit/evals/test_eval_architect_deck_style.py checks.
 DECK_STYLE_EDIT_CASE_IDS = ("restyle_deck",)
+# The Stage Slide cases (plan Task 4): their references are already operations answers, scored
+# and checked by tests/unit/evals/test_pack_architect_stage_cases.py.
+STAGE_CASE_IDS = (
+    "stage_restyle_deck", "stage_explicit_other", "stage_deictic_title",
+    "stage_unqualified_title", "stage_question", "stage_move",
+)
 FILES =("case.yaml", "payload.json", "reference.json", "calibration.json")
 FIVE_DECK_LEVEL_FIELDS = ("audience", "purpose", "argument", "call_to_action", "narrative_arc")
 
@@ -398,7 +404,7 @@ def test_existing_insert_cases_pass_with_operations_answers(split):
     """
     discovered = (
         _edit_case_ids(split) - set(NEW_CASE_IDS) - set(REDESCRIBE_CASE_IDS)
-        - set(DECK_STYLE_EDIT_CASE_IDS)
+        - set(DECK_STYLE_EDIT_CASE_IDS) - set(STAGE_CASE_IDS)
     )
     table = EXISTING_EDIT_OPERATIONS[split]
     assert discovered == set(table), (

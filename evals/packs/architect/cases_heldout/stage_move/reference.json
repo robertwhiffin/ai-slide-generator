@@ -1,0 +1,17 @@
+{
+  "intent": "edit",
+  "message": "I'll move slide 6, the checklist, up to just after slide 2: it becomes slide 3, and slides 3 to 5 move down one place.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "move",
+      "position": 5,
+      "after_position": 1,
+      "slides": null
+    }
+  ],
+  "deck_changes": null
+}

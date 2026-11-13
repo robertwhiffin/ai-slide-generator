@@ -1,0 +1,32 @@
+{
+  "intent": "edit",
+  "message": "I'll retitle slide 4 'What structured prompting saves'.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null,
+  "operations": [
+    {
+      "op": "update",
+      "position": 3,
+      "after_position": null,
+      "slides": [
+        {
+          "purpose": "Quantify the impact: prove that structured prompting delivers measurable gains",
+          "content_brief": "Title the slide 'What structured prompting saves'. Three-stat card slide showing token cost reduction (30-50%), output consistency improvement (up to 40%), and typical iteration cycles to production quality (3-5 rounds)",
+          "assumes": "Audience now knows the techniques and wants evidence they work",
+          "hands_off": "The gains from structured prompting are large and well-documented",
+          "data_references": [
+            "token_cost_reduction",
+            "consistency_gain",
+            "iteration_cycles"
+          ],
+          "slide_type": null,
+          "template_section_index": null,
+          "look": null
+        }
+      ]
+    }
+  ],
+  "deck_changes": null
+}

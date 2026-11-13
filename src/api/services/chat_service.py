@@ -1108,6 +1108,7 @@ class ChatService:
         is_first_message_override: Optional[bool] = None,
         engine_mode: str = "monolith",
         user_message_persisted: bool = False,
+        stage_slide: Optional[Dict[str, Any]] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Send a message and yield streaming events.
 
@@ -1133,6 +1134,10 @@ class ChatService:
                 payload with no ``engine_mode`` key.
             user_message_persisted: True when the caller (``POST /chat/stream``)
                 already saved the user message, so it is not saved again here.
+            stage_slide: Optional ``{"slide_number", "slide_id"}`` snapshot of
+                the slide on stage when the message was sent.  Graph-only: it
+                is handed to the graph limb and seeded on the graph's initial
+                state; the monolith path ignores it.
 
         Yields:
             StreamEvent objects for real-time display
@@ -1214,6 +1219,7 @@ class ChatService:
                 message,
                 is_first_message=is_first_message,
                 request_id=request_id,
+                stage_slide=stage_slide,
             )
             return
 
@@ -1879,6 +1885,7 @@ class ChatService:
         *,
         is_first_message: bool = False,
         request_id: Optional[str] = None,
+        stage_slide: Optional[Dict[str, Any]] = None,
     ) -> Generator[StreamEvent, None, None]:
         """Run one turn on the LangGraph engine, yielding events as they arrive.
 
@@ -1919,10 +1926,10 @@ class ChatService:
         Args:
             session_id: Session whose deck this turn builds.  Also the
                 checkpointer's ``thread_id``.
-            message: The user's request, seeded onto ``architect_message`` — the
-                ONLY key this path puts in the initial state.  ``GraphState`` is
-                an exhaustive contract: an undeclared key would be discarded
-                silently, and nothing brand-related is resolved here because
+            message: The user's request, seeded onto ``architect_message``.
+                With ``stage_slide`` these are the ONLY keys this path puts in
+                the initial state.  ``GraphState`` is an exhaustive contract:
+                an undeclared key would be discarded silently, and nothing brand-related is resolved here because
                 ``architect_node`` is the sole resolver of the design contract
                 and the template bytes.
             is_first_message: Whether to generate a session title this turn.
@@ -1934,6 +1941,11 @@ class ChatService:
                 can see it — and polling is the transport the deployed app uses.
                 ``None`` on the SSE path, which persists no request row: that
                 client is reading the yielded events instead.
+            stage_slide: The raw ``{"slide_number", "slide_id"}`` snapshot of
+                the slide on stage, or ``None``.  It is ALWAYS seeded -- ``None``
+                included -- because turn state accumulates across a
+                checkpointed thread: omitting the key would let a stage-less
+                turn inherit an earlier turn's stage.
 
         Yields:
             Every ``StreamEvent`` the graph emits, then ``COMPLETE`` carrying
@@ -1978,7 +1990,7 @@ class ChatService:
             try:
                 invoke_graph(
                     session_id,
-                    {"architect_message": message},
+                    {"architect_message": message, "stage_slide": stage_slide},
                     emitter=event_queue,
                     request_id=request_id,
                 )

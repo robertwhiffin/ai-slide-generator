@@ -39,7 +39,13 @@ def _brief_or_finding(case: Case):
     if role in ("fixer", "fix_reviewer"):
         return p.get("finding")
     if role == "architect":
-        return {"message": p.get("message"), "current_deck_spec": p.get("current_deck_spec")}
+        brief = {"message": p.get("message"), "current_deck_spec": p.get("current_deck_spec")}
+        # A Stage Slide case's right answer depends on the slide on stage ("change the title"
+        # means its title); like the builder's deck_style, shown only when there is one, so a
+        # case without a stage keeps exactly its old brief.
+        if p.get("stage_slide") is not None:
+            brief["stage_slide"] = p["stage_slide"]
+        return brief
     if role == "data_analyst":
         return p.get("data_request")
     if role == "deck_reviewer":

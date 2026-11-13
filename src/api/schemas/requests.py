@@ -50,6 +50,27 @@ class SlideContext(BaseModel):
         return self
 
 
+class StageSlideContext(BaseModel):
+    """The slide that was on stage when the user pressed send (Agent mode only).
+
+    ``slide_number`` is the 1-based number shown to the user; ``slide_id`` is the
+    slide's stable identity when the browser has one (older slide data has none).
+    """
+
+    slide_number: int = Field(
+        ...,
+        strict=True,
+        gt=0,
+        description="1-based number of the slide on stage",
+    )
+    slide_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Stable identity of the slide on stage, when known",
+    )
+
+
 class ChatRequest(BaseModel):
     """Request model for chat endpoint.
 
@@ -57,6 +78,7 @@ class ChatRequest(BaseModel):
         session_id: Optional session ID. If not provided, a new session is created.
         message: User's natural language message
         slide_context: Optional context for slide editing
+        stage_slide: Optional snapshot of the slide on stage (Agent mode only)
         agent_config: Optional agent configuration for session creation
     """
 
@@ -73,6 +95,13 @@ class ChatRequest(BaseModel):
     slide_context: Optional[SlideContext] = Field(
         default=None,
         description="Optional context containing the slides to edit",
+    )
+    stage_slide: Optional[StageSlideContext] = Field(
+        default=None,
+        description=(
+            "The slide on stage when the message was sent. Forwarded to the "
+            "graph engine only; Legacy turns ignore it."
+        ),
     )
     image_ids: Optional[list[str]] = Field(
         default=None,

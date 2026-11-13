@@ -1,0 +1,8 @@
+{
+  "intent": "discuss",
+  "message": "Slide 5 gives the team the workflow: a prompt evaluation loop, from defining criteria and building a test set to scoring outputs and refining the prompt, with commentary on why each step matters, so the techniques and numbers before it become a repeatable practice. I can change it if you like.",
+  "deck_spec": null,
+  "data_request": null,
+  "target_positions": [],
+  "proposed_design_contract": null
+}

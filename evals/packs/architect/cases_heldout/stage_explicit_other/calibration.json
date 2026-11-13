@@ -1,0 +1,30 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I'll number each step of the evaluation loop on slide 5.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [],
+    "proposed_design_contract": null,
+    "operations": [
+      {
+        "op": "update",
+        "position": 1,
+        "after_position": null,
+        "slides": [
+          {
+            "purpose": "Define the problem: show the tangible costs of ad-hoc prompting",
+            "content_brief": "Bullet slide listing the three pain points of unoptimised prompts — inconsistent outputs, wasted tokens/cost, and slow iteration — with a callout summarising the opportunity cost Number each item, 1 to 3.",
+            "assumes": "Audience has experienced frustrating or inconsistent LLM outputs first-hand",
+            "hands_off": "Ad-hoc prompting has real, measurable costs that compound over time",
+            "data_references": [],
+            "slide_type": null,
+            "template_section_index": null,
+            "look": null
+          }
+        ]
+      }
+    ],
+    "deck_changes": null
+  }
+}

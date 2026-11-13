@@ -763,6 +763,14 @@ async def send_message_streaming(
         )
         raise _engine_mode_unavailable() from e
 
+    # Graph-only: the stage snapshot is forwarded only on the graph engine; a
+    # Legacy (monolith) turn gets None even if a caller supplied one.
+    stage_slide = (
+        request.stage_slide.model_dump()
+        if request.stage_slide and engine_mode == "graph"
+        else None
+    )
+
     async def generate_events() -> AsyncGenerator[str, None]:
         """Generate SSE events from the chat service."""
         import queue
@@ -796,6 +804,8 @@ async def send_message_streaming(
                     engine_mode=engine_mode,
                     is_first_message_override=is_first_message,
                     user_message_persisted=True,
+                    # Graph-only: a Legacy turn forwards no stage.
+                    stage_slide=stage_slide,
                 ):
                     event_queue.put(event)
             except Exception as e:
@@ -1063,6 +1073,12 @@ async def submit_chat_async(
                     # generate/edit flag in this same payload (mcp_server.py), whose
                     # values are neither "graph" nor "monolith".
                     "engine_mode": engine_mode,
+                    # Graph-only: None on a Legacy turn, even if one was supplied.
+                    "stage_slide": (
+                        request.stage_slide.model_dump()
+                        if request.stage_slide and engine_mode == "graph"
+                        else None
+                    ),
                 },
             )
         except DeckModeLockedError:
