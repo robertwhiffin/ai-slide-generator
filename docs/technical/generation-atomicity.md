@@ -13,7 +13,7 @@ Line numbers below were checked at the commit that last changed this page. If th
 | `POST /api/chat/async` on an Agent deck (`engine_mode == "graph"`) | Yes | The only path this page covers. |
 | Legacy decks (`deck_mode = "legacy"`, engine `"monolith"`) | No | Unchanged. The monolith takes its old code path, apart from the accepted deltas in §11.6. |
 | MCP jobs | No | Their payload has no `engine_mode` key, so they run on the monolith (`job_queue.process_chat_request`). |
-| `POST /api/chat/stream` (SSE, dev only) and `POST /api/chat` | No | No request row, no snapshot, no fence. |
+| `POST /api/chat/stream` (SSE, dev only) | No | No request row, no snapshot, no fence. The synchronous `POST /api/chat` was retired (#382); `test_app_wiring` pins that it stays gone. |
 | The arc-review sweeper's own graph turns (`spec_sync.run_arc_review`) | No | No request id is bound, so the fence issues no SQL. |
 
 Every rule below keys on `payload["engine_mode"] == "graph"` or on the presence of a snapshot, never on "a request id exists".
@@ -48,7 +48,7 @@ Table `generation_snapshots` (`src/database/models/generation_snapshot.py`) hold
 | `actor_session_pk`, `owner_session_pk` | The sender's session, and the deck owner's (the same row unless a contributor sends) |
 | `deck_present`, `deck_columns_json` | Whether the owner had a deck row, and its `DECK_CONTENT_COLUMNS`: `title`, `html_content`, `scripts_content`, `slide_count`, `deck_json`, `verification_map`, `deck_spec_json`, `css`, `external_scripts_json`, `head_meta_json`, `modified_by` |
 | `slide_rows_json` | Every `session_slides` row of the owner, every column |
-| `session_fields_json` | Owner: `deck_mode`, `graph_release_id`, `title`. Actor: `title`, plus the Genie One entry's `conversation_id` |
+| `session_fields_json` | Owner: `deck_mode`, `graph_release_id`, `title`. Actor: `title`, plus the Genie One entry's `conversation_id` and each Genie Agent (`genie`) entry's `conversation_id`, by `space_id`. The restore writes back only those ids, and only on entries that still exist |
 | `checkpoint_id` | The actor thread's newest LangGraph checkpoint |
 | `mutation_watermark` | `max(shared_deck_mutation_event.id)` for the deck: the line that detects someone else's change |
 | `state` | `active`, `sealed` or `restore_failed` |
@@ -180,7 +180,7 @@ A stop and a completion race on the same claim: `seal_generation`, `complete_cha
 - The deck owner gets a 423 when **another** user's **live** generation holds the deck (`live_generation_holder(..., live_only=True)`).
 - An idle contributor's heartbeat lock never blocks the owner.
 - A pending failed restore falls through to submit's restore-pending 409.
-- `/api/chat` and `/api/chat/stream` are unchanged (`test_owner_gate_applies_only_to_the_async_route`).
+- `/api/chat/stream` is unchanged (`test_owner_gate_applies_only_to_the_async_route`). The synchronous `/api/chat` no longer exists (#382).
 
 ### 7.4 Enter refusals and the arc-review sweeper
 
@@ -220,32 +220,34 @@ Only Postgres shows any of this. SQLite ignores `FOR UPDATE`, and the app's SQLi
 1. **Fence it.** Open the write's transaction with `with get_db_session() as db:` and call `fence_turn_write(db)` as its first lock-taking statement. Pass `request_id=` explicitly when the code runs outside the graph thread's context: a thread started before `invoke_graph`, a plain `ThreadPoolExecutor`, or a LangGraph callback. A new pool must copy the context (`contextvars.copy_context().run`) or pass the id.
 2. **Let the refusal out.** Wherever the call sits inside a broad `except Exception`, add `except TurnFencedError: raise` ahead of it, in nodes and in tools alike. Otherwise an abandoned branch logs a false ERROR, tries another write, or starts another model call. A broad catch around a model call that runs tools needs it too, because the tool loop raises `TurnFencedError` between rounds. The existing sites:
    - `nodes.py`:
-     - `:518` `_say`
-     - `:1996` placeholder
-     - `:2818` edit layout
-     - `:4855` architect tool loop
-     - `:5244` insert shift
-     - `:5590` architect deck-level write
-     - `:5951` data analyst
-     - `:6353` builder
-     - `:6532` build reviewer
-     - `:6634` stale-fix reconcile
-     - `:6785` fixer
-     - `:6970` fix reviewer
-     - `:7190` draft
-     - `:7594` and `:7665` deck reviewer
+     - `:527` `_say`
+     - `:2005` placeholder
+     - `:2827` edit layout
+     - `:4969` architect tool loop
+     - `:5358` insert shift
+     - `:5704` architect deck-level write
+     - `:6129` `_persist_genie_agent_conversations` (one write per Genie Agent, so the first refusal ends it)
+     - `:6341` data analyst
+     - `:6763` builder
+     - `:6942` build reviewer
+     - `:7044` stale-fix reconcile
+     - `:7195` fixer
+     - `:7380` fix reviewer
+     - `:7600` draft
+     - `:8004` and `:8075` deck reviewer
    - `agent_runtime.py:732` `_answer_tool_call`
-   - `agent_tools/registry.py:154` (Genie One)
-   - `agent_tools/gateway_tool.py:166` and `:382`
+   - `agent_tools/registry.py:160` (Genie One's progress row)
+   - `agent_tools/genie_agent.py:436` (a Genie Agent's progress row)
+   - `agent_tools/gateway_tool.py:166` and `:382` (Gateway services and UC MCP connections: both run as `GatewayMcpAgentTool`)
    - `agent_tools/image_generation_tool.py:271` and `:325`
    - `chat_service.py:2088` (title) and `:2199` (save point)
 3. **Check before an unfenced model call.** If the new code can start a model call with no fenced write before it, call `raise_if_turn_ended()` first. The existing sites, all in `nodes.py`:
-   - `_write_draft_row` when the position keeps a real slide (`:7179`)
-   - the fix round, after its slot is taken (`:7328`)
-   - before the fix review (`:7339`)
-   - before each serial deck-level re-review call (`:953`)
+   - `_write_draft_row` when the position keeps a real slide (`:7589`)
+   - the fix round, after its slot is taken (`:7738`)
+   - before the fix review (`:7749`)
+   - before each serial deck-level re-review call (`:962`)
 
-   And in `agent_runtime.py`, `invoke_with_tools` checks before every round after the first (`:641`). That covers every tool loop: the architect's, the data analyst's, and the builder's and fixer's brand search.
+   And in `agent_runtime.py`, `invoke_with_tools` checks before every round after the first (`:641`). That covers every tool loop: the architect's (Gateway services, its UC MCP connections, the image tool), the data analyst's (Genie One, Genie Agents, its Gateway services and UC MCP connections), and the builder's and fixer's brand search.
 4. **Undo it, or say why it stays.** If the rollback must undo the write, either tag the row with `request_id` (as messages are) and delete it in `_restore_turn`, or add the state to `take_generation_snapshot` and restore it in `_restore_turn`. Otherwise add it to §11 with the reason.
 5. **Test it** the way `tests/unit/test_generation_fence_writers.py` does:
    - one test where the write is refused after a cancel, and every row of every table is unchanged
@@ -262,13 +264,13 @@ This is every DB write a graph turn makes, with its fence. Confirmed with `grep 
 
 | Writer (fence) | What it writes | Graph call sites |
 |---|---|---|
-| `slide_repository.py:147` `SlideWriter.write_slide` (fence `:202`) | `session_slides` upsert; creates the deck row when given a `mutation` and none exists; mutation event | `nodes.py:1788` `_write_reviewed_row` (from `build_reviewer_node:6494`, `_land_original:6572`, `fix_reviewer_node:6959`); `nodes.py:7181` `_write_draft_row` |
-| `slide_repository.py:387` `commit_placeholder` → `write_slide` | a placeholder `session_slides` row, plus a mutation event | `nodes.py:1989` `_placehold_failed_position` (from `builder_node:6360`, `build_reviewer_node:6539`, `fix_reviewer_node:7005`, `placeholder_node:7430`) |
-| `slide_repository.py:557` `apply_slide_layout` (fence `:622`) | `session_slides` move/delete/insert; `deck_spec_json`, `version`; `user_sessions.last_activity`; mutation event | `nodes.py:2802` `_apply_edit_plan` (architect) |
-| `slide_repository.py:441` `insert_pending_slides` → `apply_slide_layout` | as above | `nodes.py:5228` (architect) |
+| `slide_repository.py:147` `SlideWriter.write_slide` (fence `:202`) | `session_slides` upsert; creates the deck row when given a `mutation` and none exists; mutation event | `nodes.py:1797` `_write_reviewed_row` (from `build_reviewer_node:6904`, `_land_original:6982`, `fix_reviewer_node:7369`); `nodes.py:7591` `_write_draft_row` |
+| `slide_repository.py:387` `commit_placeholder` → `write_slide` | a placeholder `session_slides` row, plus a mutation event | `nodes.py:1998` `_placehold_failed_position` (from `builder_node:6770`, `build_reviewer_node:6949`, `fix_reviewer_node:7415`, `placeholder_node:7840`) |
+| `slide_repository.py:557` `apply_slide_layout` (fence `:622`) | `session_slides` move/delete/insert; `deck_spec_json`, `version`; `user_sessions.last_activity`; mutation event | `nodes.py:2811` `_apply_edit_plan` (architect) |
+| `slide_repository.py:441` `insert_pending_slides` → `apply_slide_layout` | as above | `nodes.py:5342` (architect) |
 | `slide_repository.py:340` `delete_slide` (fence `:352`) | one `session_slides` row, plus a mutation event | no graph caller; fenced for any future one |
-| `deck_level_writer.py:154` `write_deck_level_columns` (fence `:274`) | `session_slide_decks` columns, `version`, `modified_by`; creates the deck row; `user_sessions.title`, `last_activity`; mutation event | `nodes.py:5580` (architect, pre-fan-out); `nodes.py:7571` (deck reviewer) |
-| `nodes.py:7655` deck-review save (fence `:7656`) → `deck_review_store.save_deck_review` (`db.add` `:200`) | a `deck_reviews` row (kept on rollback, §3) | `deck_reviewer_node` |
+| `deck_level_writer.py:154` `write_deck_level_columns` (fence `:274`) | `session_slide_decks` columns, `version`, `modified_by`; creates the deck row; `user_sessions.title`, `last_activity`; mutation event | `nodes.py:5694` (architect, pre-fan-out); `nodes.py:7981` (deck reviewer) |
+| `nodes.py:8065` deck-review save (fence `:8066`) → `deck_review_store.save_deck_review` (`db.add` `:200`) | a `deck_reviews` row (kept on rollback, §3) | `deck_reviewer_node` |
 | `checkpointer.py:413` `put` (fence `_fence_from_config` `:201`, first in its session) | `graph_checkpoints` upsert | the LangGraph loop |
 | `checkpointer.py:468` `put_writes` (same) | `graph_checkpoint_writes` inserts | `PregelRunner.commit` (fanned tasks too, through `configurable`) |
 
@@ -276,31 +278,33 @@ This is every DB write a graph turn makes, with its fence. Confirmed with `grep 
 
 | Writer (fence) | What it writes | Call sites |
 |---|---|---|
-| `session_manager.py:1962` `add_message` (fence `:1991`) | a `session_messages` row tagged with the request id | `nodes.py:510` `_say`; `nodes.py:1848` `_surface_notice` |
-| `session_manager.py:4538` `record_chat_request_progress` | `chat_requests.progress_json`. Not claimed: the UPDATE is itself conditional on `status IN LIVE_STATUSES` (`:4566`), so a stopped turn's progress is a no-op | `graph/progress.py:247` `_persist` |
-| `session_manager.py:1832` `set_genie_one_conversation_id` (fence `:1847`) | `user_sessions.agent_config` (restored: the Genie One `conversation_id`) | `nodes.py:5801` |
-| `session_manager.py:1587/1603` `rename_session` / `update_session` (fence `:1636`, explicit `request_id`, `allow_completed=True`) | `user_sessions.title` (and the deck row's `title`) | `chat_service.py:2074` title thread |
-| `session_manager.py:3409` `create_version` (fence `:3440`, explicit `request_id`) | a `slide_deck_versions` row | `chat_service.py:2191` save point, after the seal |
+| `session_manager.py:2018` `add_message` (fence `:2047`) | a `session_messages` row tagged with the request id | `nodes.py:519` `_say`; `nodes.py:1857` `_surface_notice` |
+| `session_manager.py:4594` `record_chat_request_progress` | `chat_requests.progress_json`. Not claimed: the UPDATE is itself conditional on `status IN LIVE_STATUSES` (`:4622`), so a stopped turn's progress is a no-op | `graph/progress.py:247` `_persist` |
+| `session_manager.py:1833` `set_genie_one_conversation_id` (fence `:1848`) | `user_sessions.agent_config` (restored: the Genie One `conversation_id`) | `nodes.py:6105` |
+| `session_manager.py:1875` `set_genie_agent_conversation_id` (fence `:1892`) | `user_sessions.agent_config`, one `genie` entry, matched on `space_id` (restored: that entry's `conversation_id`) | `nodes.py:6126` `_persist_genie_agent_conversations`, once per Genie Agent whose conversation id changed |
+| `session_manager.py:1588/1604` `rename_session` / `update_session` (fence `:1637`, explicit `request_id`, `allow_completed=True`) | `user_sessions.title` (and the deck row's `title`) | `chat_service.py:2074` title thread |
+| `session_manager.py:3465` `create_version` (fence `:3496`, explicit `request_id`) | a `slide_deck_versions` row | `chat_service.py:2191` save point, after the seal |
 | `image_generation_tool.py:137` `save_to_library` (fence `:145`) → `image_generation.save_generated_image` → `image_service.upload_image` (`db.add` `:97`, `commit` `:98`) | an `image_assets` row (kept on rollback) | `_POOL` job (`:301`, context copied) |
-| `gateway_tool.py:306` `make_image_saver.save` (fence `:311`) → `image_service.upload_image` | an `image_assets` row (kept on rollback) | `GatewayMcpAgentTool.run`, in the node's thread |
+| `gateway_tool.py:306` `make_image_saver.save` (fence `:311`) → `image_service.upload_image` | an `image_assets` row (kept on rollback) | `GatewayMcpAgentTool.run`, in the node's thread (a Gateway service or a UC MCP connection) |
 
 ### 10.3 Turn lifecycle (each one conditional on the turn being live)
 
-`start_chat_request` (a conditional `pending` → `running`) and, claiming first, `complete_chat_request` (`session_manager.py:4485`), `fail_chat_request` (`:4514`), `abandon_chat_request`, `seal_generation` and `roll_back_generation`. The Enter-time writes (`create_chat_request`, `bind_session_lock`, the snapshot, `add_user_message`) run in the route before the turn starts. The user message carries the request id, so the rollback deletes it.
+`start_chat_request` (a conditional `pending` → `running`) and, claiming first, `complete_chat_request` (`session_manager.py:4541`), `fail_chat_request` (`:4570`), `abandon_chat_request`, `seal_generation` and `roll_back_generation`. The Enter-time writes (`create_chat_request`, `bind_session_lock`, the snapshot, `add_user_message`) run in the route before the turn starts. The user message carries the request id, so the rollback deletes it.
 
 ### 10.4 Read-only DB access in a turn
 
 - `nodes.py`:
-  - `:1040` `_design_system_library`
-  - `:1107` `_design_system_logos`
-  - `:3926` the Gateway registry read (`enabled_by_service`)
-  - `:4145` `_image_generation_available`
-  - `:4664` the prior deck-review read (`get_deck_review`)
+  - `:1049` `_design_system_library`
+  - `:1116` `_design_system_logos`
+  - `:3773` `_analyst_data_sources`: the Gateway registry read behind the architect's `data_sources` payload key
+  - `:4026` the Gateway registry read (`enabled_by_service`), skipped on a deck with UC MCP connections only
+  - `:4257` `_image_generation_available`
+  - `:4772` the prior deck-review read (`get_deck_review`)
 - `_session_contract`, `_conversation`, `list_slides_in_position_order`, `get_slide`, `read_deck_spec` (`deck_level_writer.py:387`), `resolve_streamed_ds_assets`
 - `builder.load_collaboration_root`, `load_conversation_pin`, the persisted-release loader
 - `agent_resolution`'s slide-style and deck-prompt reads, `ds_asset_tool`, `image_tools.search_images`
 - `turn_is_live` / `raise_if_turn_ended` (a SELECT on `chat_requests`)
-- The `mcp_transport`, Genie One and Gateway MCP calls are network only.
+- The `mcp_transport`, Genie One, Genie Agent (`genie_agent.GenieAgentClient`), Gateway MCP and UC MCP connection (`gateway_mcp.ConnectionMcpClient`) calls are network only. So is the connection listing, which runs on a plain `ThreadPoolExecutor` (`gateway_toolset.build_gateway_tools`) and needs no request id for that reason.
 
 ---
 
@@ -312,7 +316,7 @@ These writes are global, idempotent caches with no deck, session or turn state. 
 
 - **`agent_resolution.py:144`:** `ensure_compiled_style_content_current` recompiles a stale `design_systems.compiled_style_content` in place. `get_db_session` commits it on exit.
 - **`materialize_templates`** (`design_system_templates.py:682`), reached through `template_sections.resolve_template_bytes` (`:566`, its session at `:618`) and `get_template_for_generation`, self-heals `design_system_templates` rows.
-- **`session_manager.get_slide_deck`'s blob backfill** (`deck.deck_json = …`, `:2912`) runs only for a deck with no `session_slides` rows. That never happens mid-turn on an Agent deck, so it is treated as read-only.
+- **`session_manager.get_slide_deck`'s blob backfill** (`deck.deck_json = …`, `:2968`) runs only for a deck with no `session_slides` rows. That never happens mid-turn on an Agent deck, so it is treated as read-only.
 
 ### 11.2 The SVG thumbnail commit (Task 3b)
 
@@ -331,9 +335,11 @@ These writes are global, idempotent caches with no deck, session or turn state. 
 
 These sites swallow a refusal without ending the node. Each refused write lands nothing, and none of them starts another model call.
 
-- `_surface_notice` (`nodes.py:1805`) logs a WARNING.
-- `_persist_genie_one_conversation` (`nodes.py:5795`) logs a WARNING.
+- `_surface_notice` (`nodes.py:1814`) logs a WARNING.
+- `_persist_genie_one_conversation` (`nodes.py:6099`) logs a WARNING.
 - The progress writer (§10.2) is a no-op.
+
+Its Genie Agent twin, `_persist_genie_agent_conversations` (`nodes.py:6116`), lets the refusal out instead (§9). It writes once per Genie Agent, so a swallowed refusal would try every other space's write and log each as a failure.
 
 One broad catch has no re-raise because no refusal can reach it today: `fix_reviewer_node`'s inner model-call catch. The fix reviewer binds no tools, so its call never enters the tool loop, and the tool loop is where a turn is checked between rounds. Binding a tool to the fix reviewer means adding the re-raise there (§9).
 
@@ -345,13 +351,13 @@ Neither the fence nor `raise_if_turn_ended` can cancel a call that is already ru
 - the next fenced write
 - the next `raise_if_turn_ended`
 
-So after a stop, a turn normally pays only for the calls already in flight. On a mid-build stop that is one per running slide pipeline. In a tool loop it is the round under way, plus the tool call it asks for. Gateway, Genie One and image tools write a progress row first, so a stopped turn's call to one is refused before it reaches the service. The brand search is a database read.
+So after a stop, a turn normally pays only for the calls already in flight. On a mid-build stop that is one per running slide pipeline. In a tool loop it is the round under way, plus the tool call it asks for. Gateway services, UC MCP connections, Genie One, Genie Agents and image tools write a progress row first, so a stopped turn's call to one is refused before it reaches the service. A Genie call that is already polling when the stop lands runs to its answer or its deadline (an answer can take minutes). The brand search is a database read.
 
 One exception: a retry that follows an in-flight call starts without a check, so it can cost one more model call. That covers:
 - a parse retry (builder, build reviewer, fixer)
 - a safety-gate regeneration
 - the architect's retry without tools, or with a rejected edit
-- the analyst's retry without tools
+- the analyst's retry without its Gateway tools (Genie One and the Genie Agents are rebuilt for it)
 
 ### 11.6 Legacy-path deltas, accepted
 
@@ -362,7 +368,7 @@ The monolith (Legacy decks, MCP) takes its old code path, with these deltas. Eac
 - **The startup stuck-request release** (`job_queue._fail_stuck_request`) frees the session lock only while it is unbound or bound to that request. It used to free it unconditionally, which could free a newer request's lock; that is visible only after a double crash.
 - **503, not 500, when the database is down at Enter.** The read-only `get_deck_mode` that decides the engine fails closed into the engine-unavailable 503.
 - **The deck cache** drops a deck whose row is confirmed absent (§11.3, with its two Legacy deltas).
-- **Contributors on `/api/chat` and `/api/chat/stream`** get 423 while someone else's Agent generation is live on the deck, because `require_editing_lock` consults the live holder (§7.2). By ruling.
+- **Contributors on `/api/chat/stream`** get 423 while someone else's Agent generation is live on the deck, because `require_editing_lock` consults the live holder (§7.2). By ruling.
 - **One extra read each:** `_check_chat_permission` now runs in a thread (`asyncio.to_thread`) and the owner's async gate adds a holder query; `require_editing_lock`, `acquire_editing_lock` and `get_editing_lock_status` add a `generation_snapshots` query, which never matches on a Legacy deck.
 - **`spec_sync.claim_due_marker`** now selects its candidate `FOR UPDATE`, re-checks it, then claims. Exclusivity is preserved on both backends.
 
@@ -374,11 +380,11 @@ The monolith (Legacy decks, MCP) takes its old code path, with these deltas. Eac
 |---|---|
 | `tests/unit/test_generation_fence.py` | the claim, `fence_turn_write`, `allow_completed`, `turn_is_live`, `raise_if_turn_ended` |
 | `tests/unit/test_generation_fence_writers.py` | every deck writer's refusal and claim-first placement; `TestAnAbandonedBranchStops` (every re-raise and check in §9) |
-| `tests/unit/test_generation_fence_session_writers.py` | messages, progress, the Genie One id, title, save point, image saves; a refused tool write, or a stop during a read-only tool call, ends the tool loop |
+| `tests/unit/test_generation_fence_session_writers.py` | messages, progress, the Genie One and Genie Agent ids, title, save point, image saves; a refused tool write (including a Genie Agent's progress row), or a stop during a read-only tool call, ends the tool loop; a refused Genie Agent id write ends the analyst |
 | `tests/unit/test_agent_runtime_tool_loop.py` | the loop's check before every round after the first, and no check without a request id |
 | `tests/unit/test_checkpointer.py` | the checkpointer fence via `configurable` |
 | `tests/unit/test_generation_snapshot_schema.py` | the table and its migration |
-| `tests/unit/test_generation_rollback.py` | the snapshot and every rollback outcome |
+| `tests/unit/test_generation_rollback.py` | the snapshot and every rollback outcome, including the Genie One and Genie Agent conversation ids |
 | `tests/unit/test_job_queue_rollback.py`, `test_generation_runner_release.py`, `test_generation_recovery.py` | failure, stop, timeout and orphan triggers; the runner freed on stop; retries |
 | `tests/unit/test_generation_holds_editing_lock.py`, `test_session_lock_ownership.py`, `test_job_queue_lock_release.py` | the lock rules in §7, including Enter's refusal of a second generation on the deck (service-level, and the race staged through the real route) |
 | `tests/integration/test_generation_stop_routes.py` | the cancel and poll routes |
