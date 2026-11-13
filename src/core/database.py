@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from typing import Generator, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, event, URL
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -158,7 +158,7 @@ async def _refresh_token_background() -> None:
 
 async def start_token_refresh() -> None:
     """Start the background token refresh task.
-    
+
     Should be called during FastAPI lifespan startup when running
     in a Lakebase environment.
     """
@@ -181,7 +181,7 @@ async def start_token_refresh() -> None:
 
 async def stop_token_refresh() -> None:
     """Stop the background token refresh task.
-    
+
     Should be called during FastAPI lifespan shutdown.
     """
     global _token_refresh_task
@@ -291,7 +291,7 @@ def _create_engine():
     import traceback
     database_url = _get_database_url()
     sql_echo = os.getenv("SQL_ECHO", "false").lower() == "true"
-    
+
     # Debug: Log when engine is created and by whom
     pytest_test = os.getenv("PYTEST_CURRENT_TEST")
     logger.warning(
@@ -332,7 +332,7 @@ def _create_engine():
         def provide_token(dialect, conn_rec, cargs, cparams):
             """Inject current OAuth token for new database connections."""
             global _postgres_token
-            
+
             # Get token (generates if not yet available)
             token = _postgres_token if _postgres_token else _get_lakebase_token()
             cparams["password"] = token
@@ -417,23 +417,23 @@ def init_db():
 
     engine = get_engine()
     schema = os.getenv("LAKEBASE_SCHEMA")
-    
+
     if schema:
         # For Lakebase: set schema on all tables that don't have one
         # This ensures CREATE TABLE uses the correct schema
         logger.info(f"Setting schema '{schema}' for table creation")
-        
+
         # Execute SET search_path before creating tables
         from sqlalchemy import text
         with engine.connect() as conn:
             conn.execute(text(f'SET search_path TO "{schema}"'))
             conn.commit()
-        
+
         # Also set schema on metadata for table creation
         for table in Base.metadata.tables.values():
             if table.schema is None:
                 table.schema = schema
-    
+
     Base.metadata.create_all(bind=engine)
 
     # Run migrations for columns that create_all() won't add to existing tables
@@ -453,7 +453,9 @@ def _run_migrations(engine, schema: str | None = None):
     from sqlalchemy import inspect, text
 
     is_sqlite = engine.dialect.name == "sqlite"
-    _qual = lambda t: f'"{schema}"."{t}"' if schema else f'"{t}"'
+
+    def _qual(table_name: str) -> str:
+        return f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
 
     # --- config_profiles: add is_deleted, deleted_at ---
     table_name = "config_profiles"
@@ -467,9 +469,12 @@ def _run_migrations(engine, schema: str | None = None):
             return
         if "is_deleted" not in columns:
             logger.info(f"Migration: adding is_deleted column to {table_name}")
-            conn.execute(text(
-                f"ALTER TABLE {qualified_table} ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE NOT NULL"
-            ))
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified_table} "
+                    "ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE NOT NULL"
+                )
+            )
         if "deleted_at" not in columns:
             logger.info(f"Migration: adding deleted_at column to {table_name}")
             conn.execute(text(
@@ -506,10 +511,13 @@ def _run_migrations(engine, schema: str | None = None):
             )
         # --- config_profiles: migrate is_global bool to global_permission ---
         if "is_global" in columns:
-            logger.info(f"Migration: migrating is_global to global_permission")
-            conn.execute(text(
-                f"UPDATE {qualified_table} SET global_permission = 'CAN_VIEW' WHERE is_global = TRUE AND global_permission IS NULL"
-            ))
+            logger.info("Migration: migrating is_global to global_permission")
+            conn.execute(
+                text(
+                    f"UPDATE {qualified_table} SET global_permission = 'CAN_VIEW' "
+                    "WHERE is_global = TRUE AND global_permission IS NULL"
+                )
+            )
 
         # --- Migrate google_credentials_encrypted to google_global_credentials ---
         _migrate_google_credentials_to_global(conn, inspector, schema, _qual, is_sqlite)
@@ -2983,7 +2991,9 @@ def _migrate_permissions_columns(conn, inspector, schema, _qual, is_sqlite):
 
     # --- session_slide_decks: locked_by, locked_at, version ---
     try:
-        decks_cols = {c["name"] for c in inspector.get_columns("session_slide_decks", schema=schema)}
+        decks_cols = {
+            c["name"] for c in inspector.get_columns("session_slide_decks", schema=schema)
+        }
     except Exception:
         decks_cols = set()
 
@@ -3058,7 +3068,10 @@ def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
             try:
                 conn.execute(text(f"ALTER TABLE {qualified_sessions} DROP COLUMN profile_id"))
             except Exception:
-                logger.warning("Migration: could not drop profile_id (SQLite version may not support DROP COLUMN)")
+                logger.warning(
+                    "Migration: could not drop profile_id "
+                    "(SQLite version may not support DROP COLUMN)"
+                )
         else:
             conn.execute(text(f"ALTER TABLE {qualified_sessions} DROP COLUMN profile_id"))
 
@@ -3068,13 +3081,19 @@ def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
             try:
                 conn.execute(text(f"ALTER TABLE {qualified_sessions} DROP COLUMN profile_name"))
             except Exception:
-                logger.warning("Migration: could not drop profile_name (SQLite version may not support DROP COLUMN)")
+                logger.warning(
+                    "Migration: could not drop profile_name "
+                    "(SQLite version may not support DROP COLUMN)"
+                )
         else:
             conn.execute(text(f"ALTER TABLE {qualified_sessions} DROP COLUMN profile_name"))
 
     # --- Migrate CAN_VIEW → CAN_USE in config_profile_contributors ---
     try:
-        contrib_cols = {c["name"] for c in inspector.get_columns("config_profile_contributors", schema=schema)}
+        contrib_cols = {
+            c["name"]
+            for c in inspector.get_columns("config_profile_contributors", schema=schema)
+        }
     except Exception:
         contrib_cols = set()
 
@@ -3100,17 +3119,21 @@ def _migrate_deck_permissions_model(conn, inspector, schema, _qual, is_sqlite):
 
     # --- Grant CAN_MANAGE to deck creators who don't have a DeckContributor row ---
     qualified_deck_contribs = _qual("deck_contributors")
-    conn.execute(text(
-        f"INSERT INTO {qualified_deck_contribs} "
-        "(user_session_id, identity_type, identity_id, identity_name, permission_level, created_by, created_at, updated_at) "
-        f"SELECT s.id, 'USER', s.created_by, s.created_by, 'CAN_MANAGE', 'migration', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
-        f"FROM {qualified_sessions} s "
-        f"WHERE s.created_by IS NOT NULL "
-        f"AND NOT EXISTS ("
-        f"  SELECT 1 FROM {qualified_deck_contribs} dc "
-        f"  WHERE dc.user_session_id = s.id AND dc.identity_id = s.created_by"
-        f")"
-    ))
+    conn.execute(
+        text(
+            f"INSERT INTO {qualified_deck_contribs} "
+            "(user_session_id, identity_type, identity_id, identity_name, "
+            "permission_level, created_by, created_at, updated_at) "
+            f"SELECT s.id, 'USER', s.created_by, s.created_by, 'CAN_MANAGE', "
+            "'migration', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP "
+            f"FROM {qualified_sessions} s "
+            "WHERE s.created_by IS NOT NULL "
+            "AND NOT EXISTS ("
+            f"  SELECT 1 FROM {qualified_deck_contribs} dc "
+            "  WHERE dc.user_session_id = s.id AND dc.identity_id = s.created_by"
+            ")"
+        )
+    )
     logger.info("Migration: granted CAN_MANAGE to existing deck creators")
 
     logger.info("Migration: deck permissions model migration complete")
