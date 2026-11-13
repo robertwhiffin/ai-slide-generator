@@ -42,6 +42,8 @@ never answered to the model in-band, and the architect makes no tool-less fallba
 call after it.  Any other tool error is still answered in-band, as today.
 ``TestARefusedWriteEndsTheAnalystLoop`` pins the same for the data analyst (Genie
 One's progress row, a Gateway tool's progress row, no fallback call).
+``TestAStoppedToolLoopStartsNoFurtherRound`` pins the runtime loop's own check: a
+stop during a read-only tool call (no write to refuse) starts no further round.
 
 Real SQLite schema throughout (``conftest_graph``); only the models, the brand
 resolvers, the image generator and the title model are stubbed.
@@ -123,6 +125,7 @@ from tests.unit.test_generation_fence_writers import (
     _writes,
 )
 from tests.unit.test_graph_gateway_mcp import (
+    CREATE,
     EXPORT,
     LAKEDRAW,
     LAKEDRAW_ROW,
@@ -1350,6 +1353,105 @@ class TestARefusedWriteEndsTheAnalystLoop:
         assert web.calls == [], "the Gateway service was called after the turn was stopped"
         _assert_the_loop_ended(runtime, raised, updates, agent="data_analyst")
         _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+
+def _create_call() -> AIMessage:
+    """LakeDraw's create tool: its answer is text, so nothing is saved (read-only)."""
+    return _tool_call(CREATE, {"diagram_data": {"nodes": [], "edges": []}})
+
+
+class TestAStoppedToolLoopStartsNoFurtherRound:
+    """Task 8 fix round 1: a read-only tool call (a Gateway answer with no image, the
+    brand search) writes nothing, so no fence refuses it.  Stop pressed during one,
+    the loop used to answer the model and pay for its next round; the runtime's tool
+    loop now checks the turn before every round after the first."""
+
+    def test_stop_during_a_read_only_gateway_call_ends_the_architect_loop(
+        self, env, monkeypatch
+    ):
+        rid = _request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+
+        def stop_during_the_call(name, arguments):
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+
+        lakedraw = _Service(LAKEDRAW, LAKEDRAW_TOOLS, on_call=stop_during_the_call)
+        _gateway_deck(
+            env,
+            monkeypatch,
+            entries=[_entry(LAKEDRAW, "LakeDraw")],
+            rows=[LAKEDRAW_ROW],
+            services=[lakedraw],
+        )
+        runtime = install_runtime(
+            monkeypatch, _LoopRuntime(_CountingModel(_create_call(), _final()))
+        )
+
+        raised, updates = _run_architect_turn(env, rid)
+
+        assert [name for name, _ in lakedraw.calls] == [CREATE], (
+            f"the read-only Gateway tool was not called once: {lakedraw.calls}"
+        )
+        _assert_the_loop_ended(runtime, raised, updates)
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_stop_during_a_web_search_ends_the_analyst_loop(self, env, monkeypatch):
+        rid = _request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+
+        def stop_during_the_search(name, arguments):
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+
+        web = _Service(
+            WEB,
+            _web_tools(),
+            results={"web_search": _web_result()},
+            on_call=stop_during_the_search,
+        )
+        _gateway_deck(
+            env,
+            monkeypatch,
+            entries=[_entry(WEB, "Web Search")],
+            rows=[WEB_ANALYST_ROW],
+            services=[web],
+        )
+        search = _tool_call("web_search", {"query": "Databricks AI Gateway MCP services"})
+        runtime = install_runtime(
+            monkeypatch, _LoopRuntime(_CountingModel(search, _analyst_final()))
+        )
+
+        raised, updates = _run_analyst_turn(env, rid)
+
+        assert [name for name, _ in web.calls] == ["web_search"], (
+            f"the web search was not called once: {web.calls}"
+        )
+        _assert_the_loop_ended(runtime, raised, updates, agent="data_analyst")
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_a_live_architect_loop_runs_every_round(self, env, monkeypatch):
+        """The guard: the same read-only call on a live turn, and the loop goes on."""
+        rid = _request(env, "running")
+        lakedraw = _Service(LAKEDRAW, LAKEDRAW_TOOLS)
+        _gateway_deck(
+            env,
+            monkeypatch,
+            entries=[_entry(LAKEDRAW, "LakeDraw")],
+            rows=[LAKEDRAW_ROW],
+            services=[lakedraw],
+        )
+        runtime = install_runtime(
+            monkeypatch, _LoopRuntime(_CountingModel(_create_call(), _final()))
+        )
+
+        raised, updates = _run_architect_turn(env, rid)
+
+        assert raised is None, raised
+        assert runtime.model.rounds == ["architect", "architect"]
+        assert [name for name, _ in lakedraw.calls] == [CREATE]
+        assert updates["architect_intent"] == "discuss"
+        assert _request_row(env, rid)["status"] == "running"
 
 
 class _LookupArgs(BaseModel):

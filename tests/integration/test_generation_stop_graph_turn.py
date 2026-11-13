@@ -1270,20 +1270,36 @@ def test_complete_and_cancel_race_has_one_winner(stop_env, monkeypatch):
             # Every graph write is done: this is the turn's end state.
             race["at_turn_end"] = _tables(stop.env.engine)
             race["sealed_by"] = threading.current_thread().name
-        return real_seal(request_id)
+        sealed = real_seal(request_id)
+        if request_id == race.get("rid") and race.get("forced"):
+            # The forced order: the seal has committed; hold the job here, before
+            # it completes, until the stop's claim has returned.
+            race["sealed"].set()
+            race["held"] = race["stop_claimed"].wait(WAIT)
+        return sealed
 
     def claim_turn_row(db, request_id):
         with race_lock:
             arrive = request_id == race.get("rid") and race["arrivals"] < 2
             if arrive:
                 race["arrivals"] += 1
-        if arrive:
+        forced_stop = (
+            arrive
+            and race.get("forced")
+            and threading.current_thread().name != race.get("sealed_by")
+        )
+        if forced_stop:
+            # The forced order: the stop claims only once the seal has returned.
+            race["waited_for_seal"] = race["sealed"].wait(WAIT)
+        elif arrive and not race.get("forced"):
             race["barrier"].wait()
         claimed = real_claim(db, request_id)
         if arrive:
             side = "seal" if threading.current_thread().name == race.get("sealed_by") else "stop"
             with race_lock:
                 race["claims"].append((side, claimed))
+        if forced_stop:
+            race["stop_claimed"].set()
         return claimed
 
     # Both are reached through generation_rollback's module globals (the graph
@@ -1291,6 +1307,49 @@ def test_complete_and_cancel_race_has_one_winner(stop_env, monkeypatch):
     # claim_turn_row), and by nothing else a turn runs.
     monkeypatch.setattr(generation_rollback, "seal_generation", seal_generation)
     monkeypatch.setattr(generation_rollback, "claim_turn_row", claim_turn_row)
+
+    # One FORCED run first: the seal commits, then the job is held right after it
+    # until the stop's claim has returned.  The stop so claims a turn that is still
+    # running but sealed, which it must leave alone.  The barrier runs below let the
+    # seal win this way only by chance; here it is every run, so a seal that left
+    # its snapshot active (and let this stop roll a finished turn back) is red every
+    # time.
+    sid = stop.new_session()
+    stop.seed_earlier_deck(sid)
+    stop.models.architect = edit_answer()
+    race.clear()
+    race.update(
+        forced=True,
+        arrivals=0,
+        claims=[],
+        sealed=threading.Event(),
+        stop_claimed=threading.Event(),
+    )
+    rid = stop.submit(STOPPED_MESSAGE, sid)
+    race["rid"] = rid
+    resp = stop.cancel(rid)
+    assert stop.turns.wait_job(rid), "the forced job never finished"
+    assert stop.turns.wait_graph(rid)
+    assert stop.turns.job_raised[rid] is None, stop.turns.job_raised[rid]
+    assert race.get("waited_for_seal") is True, "the forced stop never saw the seal return"
+    assert race.get("held") is True, "the forced job was not held until the stop had claimed"
+    assert sorted(race["claims"]) == [("seal", True), ("stop", True)], race["claims"]
+    assert resp.status_code == 200, (resp.status_code, resp.text)
+    body = resp.json()
+    assert body["outcome"] == "already_finished", (
+        f"a stop that claimed a SEALED turn changed it: {body}"
+    )
+    assert body["status"] in ("running", "completed"), body
+    row = stop.rb.request_row(rid)
+    assert (row["status"], row["error_message"], row["rollback_outcome"]) == (
+        "completed", None, None
+    )
+    after = stop.tables()
+    assert after["generation_snapshots"] == []
+    assert _deck_view(after, sid) == completed_view
+    assert stop.rb.slide_htmls(sid) == EDITED_HTMLS
+    assert stop.rollbacks.calls == [], "the job rolled the forced turn back itself"
+    _assert_lock(stop.rb, sid, held_by=None)
 
     outcomes: List[str] = []
     for _ in range(RACE_ITERATIONS):

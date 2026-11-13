@@ -2,7 +2,7 @@
 
 An Agent-deck turn is all-or-nothing. The sender can stop it, and a stop, a failure, a timeout or a lost process puts the deck, the Spec, the chat and the session fields back as they were when Enter was pressed. This page explains the snapshot that makes that possible, the fence that stops an abandoned turn's writes, the rollback, and the locks that keep other people out while a turn runs.
 
-Line numbers below are as of commit `d7f42563`. If they drift, find the code by function name.
+Line numbers below were checked at the commit that last changed this page. If they drift, find the code by function name.
 
 ---
 
@@ -89,13 +89,13 @@ turn_is_live(request_id) -> bool                                  # read-only, o
 - **`raise_if_turn_ended`** is the fence's read-only twin. It goes before a **model call that no fenced write precedes**, so an abandoned turn stops before paying for that call.
   - It takes no lock. A stop that lands just after it is still refused by the next fenced write.
   - An unreadable status counts as live, for the same reason.
-  - Its call sites are in §8.
+  - Its call sites are listed in §9. One of them is the runtime's tool loop, which checks before every round after the first: a read-only tool (a Gateway answer with no image, the brand search) writes nothing, so without the check a stop during its call would still pay for the next round.
 - **Two exceptions, two sides:**
   - `TurnFencedError` is raised on the graph side, by a writer or a check.
   - `TurnStopped` is raised on the job side, by the consumer loop or a seal that lost.
   - The abandoned graph thread never sees `TurnStopped`. When it ends on `TurnFencedError`, or on any error once its turn is no longer live, it is logged at INFO as "Abandoned graph turn ended" (`chat_service.py`, `abandoned()`), with no error recorded and no ERROR event.
 
-**What the fence does not stop:** a model call that is already in flight when the stop lands. It finishes, and its answer is refused at the next fenced write or `raise_if_turn_ended`.
+**What the fence does not stop:** a model call, or a tool call, that is already in flight when the stop lands. It finishes, and the model call is paid for. The turn then ends at whichever comes first: the tool loop's next round, the next fenced write, or the next `raise_if_turn_ended`.
 
 ---
 
@@ -217,7 +217,7 @@ Only Postgres shows any of this: SQLite has one writer and ignores `FOR UPDATE`.
 ## 9. How to add a new turn writer
 
 1. **Fence it.** Open the write's transaction with `with get_db_session() as db:` and call `fence_turn_write(db)` as its first lock-taking statement. Pass `request_id=` explicitly when the code runs outside the graph thread's context: a thread started before `invoke_graph`, a plain `ThreadPoolExecutor`, or a LangGraph callback. A new pool must copy the context (`contextvars.copy_context().run`) or pass the id.
-2. **Let the refusal out.** Wherever the call sits inside a broad `except Exception`, add `except TurnFencedError: raise` ahead of it, in nodes and in tools alike. Otherwise an abandoned branch logs a false ERROR, tries another write, or starts another model call. The existing sites:
+2. **Let the refusal out.** Wherever the call sits inside a broad `except Exception`, add `except TurnFencedError: raise` ahead of it, in nodes and in tools alike. Otherwise an abandoned branch logs a false ERROR, tries another write, or starts another model call. A broad catch around a model call that runs tools needs it too, because the tool loop raises `TurnFencedError` between rounds. The existing sites:
    - `nodes.py`:
      - `:518` `_say`
      - `:1996` placeholder
@@ -226,21 +226,25 @@ Only Postgres shows any of this: SQLite has one writer and ignores `FOR UPDATE`.
      - `:5233` insert shift
      - `:5579` architect deck-level write
      - `:5940` data analyst
-     - `:6517` build reviewer
-     - `:6619` stale-fix reconcile
-     - `:6951` fix reviewer
-     - `:7171` draft
-     - `:7575` and `:7646` deck reviewer
-   - `agent_runtime.py:720` `_answer_tool_call`
+     - `:6342` builder
+     - `:6521` build reviewer
+     - `:6623` stale-fix reconcile
+     - `:6774` fixer
+     - `:6959` fix reviewer
+     - `:7179` draft
+     - `:7583` and `:7654` deck reviewer
+   - `agent_runtime.py:732` `_answer_tool_call`
    - `agent_tools/registry.py:154` (Genie One)
    - `agent_tools/gateway_tool.py:166` and `:382`
    - `agent_tools/image_generation_tool.py:271` and `:325`
    - `chat_service.py:2076` (title) and `:2187` (save point)
 3. **Check before an unfenced model call.** If the new code can start a model call with no fenced write before it, call `raise_if_turn_ended()` first. The existing sites, all in `nodes.py`:
-   - `_write_draft_row` when the position keeps a real slide (`:7160`)
-   - the fix round, after its slot is taken (`:7309`)
-   - before the fix review (`:7320`)
+   - `_write_draft_row` when the position keeps a real slide (`:7168`)
+   - the fix round, after its slot is taken (`:7317`)
+   - before the fix review (`:7328`)
    - before each serial deck-level re-review call (`:953`)
+
+   And in `agent_runtime.py`, `invoke_with_tools` checks before every round after the first (`:641`). That covers every tool loop: the architect's, the data analyst's, and the builder's and fixer's brand search.
 4. **Undo it, or say why it stays.** If the rollback must undo the write, either tag the row with `request_id` (as messages are) and delete it in `_restore_turn`, or add the state to `take_generation_snapshot` and restore it in `_restore_turn`. Otherwise add it to §11 with the reason.
 5. **Test it** the way `tests/unit/test_generation_fence_writers.py` does:
    - one test where the write is refused after a cancel, and every row of every table is unchanged
@@ -257,13 +261,13 @@ This is every DB write a graph turn makes, with its fence. Confirmed with `grep 
 
 | Writer (fence) | What it writes | Graph call sites |
 |---|---|---|
-| `slide_repository.py:147` `SlideWriter.write_slide` (fence `:202`) | `session_slides` upsert; creates the deck row when given a `mutation` and none exists; mutation event | `nodes.py:1788` `_write_reviewed_row` (from `build_reviewer_node:6479`, `_land_original:6557`, `fix_reviewer_node:6940`); `nodes.py:7162` `_write_draft_row` |
-| `slide_repository.py:387` `commit_placeholder` → `write_slide` | a placeholder `session_slides` row, plus a mutation event | `nodes.py:1989` `_placehold_failed_position` (from `builder_node:6345`, `build_reviewer_node:6524`, `fix_reviewer_node:6986`, `placeholder_node:7411`) |
+| `slide_repository.py:147` `SlideWriter.write_slide` (fence `:202`) | `session_slides` upsert; creates the deck row when given a `mutation` and none exists; mutation event | `nodes.py:1788` `_write_reviewed_row` (from `build_reviewer_node:6483`, `_land_original:6561`, `fix_reviewer_node:6948`); `nodes.py:7170` `_write_draft_row` |
+| `slide_repository.py:387` `commit_placeholder` → `write_slide` | a placeholder `session_slides` row, plus a mutation event | `nodes.py:1989` `_placehold_failed_position` (from `builder_node:6349`, `build_reviewer_node:6528`, `fix_reviewer_node:6994`, `placeholder_node:7419`) |
 | `slide_repository.py:557` `apply_slide_layout` (fence `:622`) | `session_slides` move/delete/insert; `deck_spec_json`, `version`; `user_sessions.last_activity`; mutation event | `nodes.py:2802` `_apply_edit_plan` (architect) |
 | `slide_repository.py:441` `insert_pending_slides` → `apply_slide_layout` | as above | `nodes.py:5217` (architect) |
 | `slide_repository.py:340` `delete_slide` (fence `:352`) | one `session_slides` row, plus a mutation event | no graph caller; fenced for any future one |
-| `deck_level_writer.py:154` `write_deck_level_columns` (fence `:274`) | `session_slide_decks` columns, `version`, `modified_by`; creates the deck row; `user_sessions.title`, `last_activity`; mutation event | `nodes.py:5569` (architect, pre-fan-out); `nodes.py:7552` (deck reviewer) |
-| `nodes.py:7636` deck-review save (fence `:7637`) → `deck_review_store.save_deck_review` (`db.add` `:200`) | a `deck_reviews` row (kept on rollback, §3) | `deck_reviewer_node` |
+| `deck_level_writer.py:154` `write_deck_level_columns` (fence `:274`) | `session_slide_decks` columns, `version`, `modified_by`; creates the deck row; `user_sessions.title`, `last_activity`; mutation event | `nodes.py:5569` (architect, pre-fan-out); `nodes.py:7560` (deck reviewer) |
+| `nodes.py:7644` deck-review save (fence `:7645`) → `deck_review_store.save_deck_review` (`db.add` `:200`) | a `deck_reviews` row (kept on rollback, §3) | `deck_reviewer_node` |
 | `checkpointer.py:413` `put` (fence `_fence_from_config` `:201`, first in its session) | `graph_checkpoints` upsert | the LangGraph loop |
 | `checkpointer.py:468` `put_writes` (same) | `graph_checkpoint_writes` inserts | `PregelRunner.commit` (fanned tasks too, through `configurable`) |
 
@@ -330,11 +334,23 @@ These sites swallow a refusal without ending the node. Each refused write lands 
 - `_persist_genie_one_conversation` (`nodes.py:5784`) logs a WARNING.
 - The progress writer (§10.2) is a no-op.
 
-Two broad catches have no re-raise because no refusal can reach them today: `fixer_node`'s outer catch and `fix_reviewer_node`'s inner model-call catch. Each wraps only a model call, and neither role binds a writing tool (the fixer's only tool is the read-only brand search). Binding a writing tool to either role means adding the re-raise there (§9).
+One broad catch has no re-raise because no refusal can reach it today: `fix_reviewer_node`'s inner model-call catch. The fix reviewer binds no tools, so its call never enters the tool loop, and the tool loop is where a turn is checked between rounds. Binding a tool to the fix reviewer means adding the re-raise there (§9).
 
 ### 11.5 Model calls in flight
 
-The fence and `raise_if_turn_ended` stop a turn at its next write or check. They cannot cancel a model call that is already running. That call finishes (and is paid for), and its result is refused.
+Neither the fence nor `raise_if_turn_ended` can cancel a call that is already running. A model call in flight when the stop lands finishes and is paid for, and so does a tool call. The turn then ends at whichever comes first:
+
+- the tool loop's next round, which checks the turn before it starts
+- the next fenced write
+- the next `raise_if_turn_ended`
+
+So after a stop, a turn normally pays only for the calls already in flight. On a mid-build stop that is one per running slide pipeline. In a tool loop it is the round under way, plus the tool call it asks for. Gateway, Genie One and image tools write a progress row first, so a stopped turn's call to one is refused before it reaches the service. The brand search is a database read.
+
+One exception: a retry that follows an in-flight call starts without a check, so it can cost one more model call. That covers:
+- a parse retry (builder, build reviewer, fixer)
+- a safety-gate regeneration
+- the architect's retry without tools, or with a rejected edit
+- the analyst's retry without tools
 
 ---
 
@@ -344,14 +360,15 @@ The fence and `raise_if_turn_ended` stop a turn at its next write or check. They
 |---|---|
 | `tests/unit/test_generation_fence.py` | the claim, `fence_turn_write`, `allow_completed`, `turn_is_live`, `raise_if_turn_ended` |
 | `tests/unit/test_generation_fence_writers.py` | every deck writer's refusal and claim-first placement; `TestAnAbandonedBranchStops` (every re-raise and check in §9) |
-| `tests/unit/test_generation_fence_session_writers.py` | messages, progress, the Genie One id, title, save point, image saves; a refused tool write ends the tool loop |
+| `tests/unit/test_generation_fence_session_writers.py` | messages, progress, the Genie One id, title, save point, image saves; a refused tool write, or a stop during a read-only tool call, ends the tool loop |
+| `tests/unit/test_agent_runtime_tool_loop.py` | the loop's check before every round after the first, and no check without a request id |
 | `tests/unit/test_checkpointer.py` | the checkpointer fence via `configurable` |
 | `tests/unit/test_generation_snapshot_schema.py` | the table and its migration |
 | `tests/unit/test_generation_rollback.py` | the snapshot and every rollback outcome |
 | `tests/unit/test_job_queue_rollback.py`, `test_generation_runner_release.py`, `test_generation_recovery.py` | failure, stop, timeout and orphan triggers; the runner freed on stop; retries |
 | `tests/unit/test_generation_holds_editing_lock.py`, `test_session_lock_ownership.py`, `test_job_queue_lock_release.py` | the lock rules in §7 |
 | `tests/integration/test_generation_stop_routes.py` | the cancel and poll routes |
-| `tests/integration/test_generation_stop_graph_turn.py` | acceptance through real graph turns: stop in planning, after layout, mid-build; late writes; resend; forced failure; placeholder; the complete/cancel race; timeout and restart |
+| `tests/integration/test_generation_stop_graph_turn.py` | acceptance through real graph turns: stop in planning, after layout, mid-build; late writes; resend; forced failure; placeholder; the complete/cancel race (one forced seal-first run, then 20 barrier runs); timeout and restart |
 | `tests/integration/test_generation_{fence,rollback,lock}_postgres.py` | row locks and ordering on real Postgres |
 
 ---

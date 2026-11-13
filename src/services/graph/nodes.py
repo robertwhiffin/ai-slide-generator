@@ -6339,6 +6339,10 @@ def builder_node(payload: dict) -> Dict[str, Any]:
                         slide_number(position), payload.get("turn_image_sources")
                     ),
                 )
+    except TurnFencedError:
+        # The turn was stopped (its tool loop checks between rounds): not a failed
+        # build, so no ERROR and no placeholder attempt.
+        raise
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Builder failed at position %s", position)
@@ -6767,6 +6771,10 @@ def fixer_node(state: dict) -> Dict[str, Any]:
             out.html, _regenerate, session_id, on_retry=_on_retry
         )
         html = strip_inter_tag_escapes(html)
+    except TurnFencedError:
+        # The turn was stopped (its tool loop checks between rounds): not a failed
+        # fix, so no ERROR and no landing attempt.
+        raise
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Fixer failed at position %s; landing the original", position)

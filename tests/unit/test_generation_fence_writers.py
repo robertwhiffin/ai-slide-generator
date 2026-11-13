@@ -1,3 +1,4 @@
+# ruff: noqa: F811 — the conftest_graph fixtures are imported, then requested by name.
 """Task 3a: a stopped turn's deck, deck-level and deck-review writes never land.
 
 Once a turn's ``chat_requests`` row is terminal, every deck writer the graph uses
@@ -785,6 +786,58 @@ class TestAnAbandonedBranchStops:
             "builder", "build_reviewer", "fixer", "fix_reviewer",
         ]
         assert self._errors(caplog) == [], "a refused write was logged as a failed fix review"
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    # The runtime's tool loop checks the turn before every round after the first,
+    # so a stop during the builder's or fixer's brand search reaches the node as
+    # ``TurnFencedError`` from its model call (``test_agent_runtime_tool_loop.py``
+    # pins the loop).  The doubles below raise it from the model call, as the loop
+    # does once the request is cancelled.
+
+    @staticmethod
+    def _stopped_in_its_tool_loop(env, rid: str, at_cancel: Dict[str, Any]):
+        def handler(payload):
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+            raise TurnFencedError(rid)
+
+        return handler
+
+    def test_a_builder_stopped_in_its_tool_loop_ends_the_branch_quietly(
+        self, graph_env, caplog
+    ):
+        """``builder_node``'s broad ``except`` logged "Builder failed" at ERROR and
+        tried to placehold the position before that write's refusal ended it."""
+        env = graph_env
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set("builder", self._stopped_in_its_tool_loop(env, rid, at_cancel))
+
+        raised = self._pipeline(env, rid, caplog)
+
+        assert "tables" in at_cancel, "the builder model was never called"
+        assert isinstance(raised, TurnFencedError), raised
+        assert [c["name"] for c in env.skills.calls] == ["builder"]
+        assert self._errors(caplog) == [], "a stopped turn was logged as a failed build"
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_a_fixer_stopped_in_its_tool_loop_ends_the_fix_quietly(self, graph_env, caplog):
+        """``fixer_node``'s broad ``except`` logged "Fixer failed" at ERROR and tried
+        to land the original before that write's refusal ended it."""
+        env = graph_env
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set("builder", builder_out)
+        env.skills.set("build_reviewer", self._flagged)
+        env.skills.set("fixer", self._stopped_in_its_tool_loop(env, rid, at_cancel))
+        env.skills.set("fix_reviewer", lambda payload: review_out(payload["position"]))
+
+        raised = self._pipeline(env, rid, caplog)
+
+        assert "tables" in at_cancel, "the fixer was never called"
+        assert isinstance(raised, TurnFencedError), raised
+        assert [c["name"] for c in env.skills.calls] == ["builder", "build_reviewer", "fixer"]
+        assert self._errors(caplog) == [], "a stopped turn was logged as a failed fix"
         _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
 
     def test_refused_stale_fix_landing_ends_the_fixer(self, graph_env, caplog):

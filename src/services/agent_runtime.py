@@ -601,11 +601,21 @@ class DatabricksModelAdapter:
         ``OutputParserException``.  Only the model's own calls (construction,
         binding, each round) collapse provider failures into
         ``ModelProviderUnavailableError``; a tool's failure never does.
+
+        Every round after the first starts with ``raise_if_turn_ended``: a
+        read-only tool writes nothing, so no fence would stop a turn stopped
+        during its call, and the loop would pay for another round.  The check
+        issues no SQL without a turn's request id (the sweeper, the evals, the
+        previews).
         """
         del agent_key
         from langchain_core.exceptions import OutputParserException
         from langchain_core.messages import HumanMessage, ToolMessage
         from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        # Lazy, as in ``_answer_tool_call``: this module imports the database layer
+        # only inside functions.
+        from src.services.generation_fence import raise_if_turn_ended
 
         if not toolset.tools:
             raise ValueError("a toolset needs at least one tool")
@@ -626,7 +636,9 @@ class DatabricksModelAdapter:
         toolset.start()
         nudged = False
         budget_noticed = False
-        for _ in range(toolset.max_calls + 3):
+        for round_index in range(toolset.max_calls + 3):
+            if round_index:
+                raise_if_turn_ended()
             with _model_provider_errors_collapsed():
                 reply = bound_model.invoke(messages)
             tool_calls = list(reply.tool_calls)
