@@ -48,21 +48,28 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, delete, select, update
 
 import src.database.models  # noqa: F401 -- registers every ORM model on Base
 from src.api.services import job_queue
 from src.api.services.session_manager import (
+    SESSION_LOCK_TIMEOUT_SECONDS,
     GenerationRefusedError,
     SessionManager,
     get_session_manager,
 )
 from src.core.database import Base, _run_migrations, get_db_session
-from src.database.models.session import ChatRequest, SharedDeckMutationEvent, UserSession
+from src.database.models.session import (
+    ChatRequest,
+    SessionMessage,
+    SharedDeckMutationEvent,
+    UserSession,
+)
 from src.services import generation_rollback
 from src.services.generation_fence import TurnFencedError
 from src.services.generation_rollback import RollbackResult
@@ -1070,4 +1077,368 @@ def test_generation_refused_restore_pending_maps_to_the_409_copy():
     assert (
         chat_routes._GENERATION_REFUSED_DETAILS[GenerationRefusedError.RESTORE_PENDING]
         == RESTORE_PENDING
+    )
+
+
+# ===========================================================================
+# Fix round 1
+# ===========================================================================
+
+#: Past the orphan threshold.
+ORPHAN_AGE = 181
+
+
+def _deck_accepts_a_new_enter(session_id: str) -> None:
+    """An Agent Enter on *session_id*'s deck is accepted (no restore-pending 409)."""
+    sm = get_session_manager()
+    assert sm.acquire_session_lock(session_id)
+    rid = sm.create_chat_request(session_id)
+    sm.bind_session_lock(session_id, rid)
+    sm.begin_generation(session_id, rid)
+    table = generation_rollback.GenerationSnapshot.__table__
+    with get_db_session() as db:
+        states = list(db.execute(select(table.c.state).where(table.c.request_id == rid)).scalars())
+    assert states == ["active"]
+
+
+def _apply_postgres_delete_effects(session_pk: int) -> None:
+    """What PostgreSQL's foreign keys do when a session row is deleted, and SQLite
+    (no foreign-key enforcement here) does not: its requests and messages go
+    (``ON DELETE CASCADE``) and its mutation evidence loses its actor
+    (``actor_session_id ON DELETE SET NULL``)."""
+    table = SharedDeckMutationEvent.__table__
+    with get_db_session() as db:
+        db.execute(delete(ChatRequest).where(ChatRequest.session_id == session_pk))
+        db.execute(delete(SessionMessage).where(SessionMessage.session_id == session_pk))
+        db.execute(
+            update(table)
+            .where(table.c.actor_session_id == session_pk)
+            .values(actor_session_id=None)
+        )
+
+
+# --- 1. a failed restore whose session was deleted --------------------------
+
+
+def test_failed_restore_of_a_deleted_deck_is_dropped(env, caplog):
+    """The deck owner's session was deleted (on PostgreSQL its contributors and
+    requests go with it) while its failed restore was pending.  Snapshots carry no
+    foreign key, so the snapshot stayed.  The retry has nothing to restore: it
+    drops the snapshot, without an error, and touches nothing else."""
+    sid = env.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    seed_earlier_turn(env, sid)
+    rid = press_enter(env, sid)
+    edit_turn(env, sid, sid, rid)
+    fail_restore(env, rid, "error", "Model call failed: 403", False)
+    get_session_manager().delete_session(sid)
+    before = env.tables()
+    assert [s["state"] for s in env.snapshot_rows(rid)] == ["restore_failed"]
+    caplog.set_level(logging.ERROR)
+    caplog.clear()
+
+    assert recover() == 1
+
+    after = env.tables()
+    _assert_tables_equal(before, after, exclude=("generation_snapshots",))
+    assert after["generation_snapshots"] == [
+        r for r in before["generation_snapshots"] if r["request_id"] != rid
+    ]
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [], f"the retry of a deleted deck's restore logged errors: {errors}"
+    assert recover() == 0
+    _assert_tables_equal(after, env.tables())
+
+
+def test_failed_restore_of_a_deleted_contributor_restores_the_owners_deck(env, caplog):
+    """A contributor's turn on a shared deck failed and its restore failed; then the
+    contributor's session was deleted (its evidence keeping its actor id, as on
+    SQLite).  The deck stays the owner's: the retry restores the owner's deck and
+    owner fields as at Enter (the contributor's own fields went with its session),
+    records no restore evidence (there is no actor to attribute it to), settles
+    the request and drops the snapshot.  It releases nothing.  The deck takes
+    Agent Enters again -- not the restore-pending 409 for ever."""
+    owner = env.new_session(created_by=OWNER, title="MK-OWNER-TITLE")
+    seed_earlier_turn(env, owner)
+    contrib = env.contributor(owner)
+    before = env.tables()
+    rid = press_enter(env, contrib)
+    edit_turn(env, contrib, owner, rid)
+    at_turn_end = env.tables()
+    fail_restore(env, rid, "error", "Model call failed: 403", False)
+    get_session_manager().delete_session(contrib)
+    assert generation_rollback.has_pending_restore(owner) is True
+    gone = env.tables()
+    caplog.set_level(logging.ERROR)
+    caplog.clear()
+
+    assert recover() == 1
+
+    after = env.tables()
+    assert after["session_slides"] == before["session_slides"]
+    deck_id = _one(before["session_slide_decks"], session_id=env.pk(owner))["id"]
+    turn_version = _one(at_turn_end["session_slide_decks"], session_id=env.pk(owner))["version"]
+    _assert_decks_restored(before, after, restored_deck_id=deck_id, version=turn_version + 1)
+    owner_after = _one(after["user_sessions"], session_id=owner)
+    assert _without(owner_after, ("last_activity",)) == _without(
+        _one(before["user_sessions"], session_id=owner), ("last_activity",)
+    )
+    assert after["user_sessions"] == [
+        owner_after if r["session_id"] == owner else r for r in gone["user_sessions"]
+    ], "a session row other than the owner's changed"
+    assert after["shared_deck_mutation_event"] == gone["shared_deck_mutation_event"]
+    assert _messages_tagged(after, rid) == []
+    row = _one(after["chat_requests"], request_id=rid)
+    assert (row["status"], row["error_message"], row["rollback_outcome"]) == (
+        "error",
+        None,
+        "rolled_back",
+    )
+    assert env.snapshot_rows(rid) == []
+    assert generation_rollback.has_pending_restore(owner) is False
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [], errors
+    _deck_accepts_a_new_enter(owner)
+
+
+def test_failed_restore_of_a_deleted_contributor_on_postgres_keeps_the_deck(env):
+    """The same, with what PostgreSQL's foreign keys do on the delete: the
+    contributor's request and messages are gone, and its mutation evidence has a
+    NULL actor -- which is somebody else's change (C11).  The retry keeps the deck
+    as it stands, drops the snapshot and frees the deck for new Enters."""
+    owner = env.new_session(created_by=OWNER, title="MK-OWNER-TITLE")
+    seed_earlier_turn(env, owner)
+    contrib = env.contributor(owner)
+    rid = press_enter(env, contrib)
+    edit_turn(env, contrib, owner, rid)
+    fail_restore(env, rid, "error", "Model call failed: 403", False)
+    contrib_pk = env.pk(contrib)
+    get_session_manager().delete_session(contrib)
+    _apply_postgres_delete_effects(contrib_pk)
+    assert generation_rollback.has_pending_restore(owner) is True
+    gone = env.tables()
+
+    assert recover() == 1
+
+    after = env.tables()
+    _assert_tables_equal(gone, after, exclude=("generation_snapshots",))
+    assert after["generation_snapshots"] == [
+        r for r in gone["generation_snapshots"] if r["request_id"] != rid
+    ]
+    assert generation_rollback.has_pending_restore(owner) is False
+    _deck_accepts_a_new_enter(owner)
+
+
+# --- 2. an Enter whose rollback could not run -------------------------------
+
+
+def test_enter_whose_rollback_raises_keeps_the_deck_locked_until_the_sweep(api, monkeypatch):
+    """The enqueue failed after the Enter committed its snapshot and user message,
+    and the rollback itself raised (nothing recorded).  The request is still
+    ``pending`` with an ``active`` snapshot, so the lock must stay bound to it: a
+    quick re-send is refused, rather than starting a turn the orphan sweep would
+    later "restore" the Enter under.  The sweep then rolls the Enter back once the
+    lock has gone unrefreshed for 180 s, and frees the deck."""
+    from src.api.routes import chat as chat_routes
+
+    sid = api.rb.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    seed_earlier_turn(api.rb, sid)
+    before = api.tables()
+    api.enqueued.side_effect = RuntimeError("MK-INJECTED the queue is gone")
+
+    def rollback_raises(*args, **kwargs):
+        raise RuntimeError("MK-INJECTED the rollback could not run")
+
+    monkeypatch.setattr(chat_routes, "roll_back_generation", rollback_raises)
+
+    resp = api.submit(sid)
+
+    assert (resp.status_code, resp.json()) == (500, {"detail": INTERNAL_ERROR})
+    rid = _newest_request(api, sid)
+    row = api.rb.request_row(rid)
+    assert (row["status"], row["rollback_outcome"]) == ("pending", None)
+    assert [s["state"] for s in api.rb.snapshot_rows(rid)] == ["active"]
+    _assert_lock(api.rb, sid, held_by=rid)
+
+    resend = api.submit(sid, "MK-USER again")
+    assert (resend.status_code, resend.json()) == (
+        409,
+        {"detail": "Session is already processing a request"},
+    )
+    assert _newest_request(api, sid) == rid
+
+    monkeypatch.setattr(
+        chat_routes, "roll_back_generation", generation_rollback.roll_back_generation
+    )
+    age_lock(sid, ORPHAN_AGE)
+    entered = api.tables()
+
+    assert recover() == 1
+
+    after = api.tables()
+    _assert_tables_equal(
+        before,
+        after,
+        exclude=(
+            "chat_requests",
+            "user_sessions",
+            "session_slide_decks",
+            "shared_deck_mutation_event",
+        ),
+    )
+    _assert_sessions_equal(before, after, touched=(sid,))
+    deck_id = _one(before["session_slide_decks"], session_id=api.rb.pk(sid))["id"]
+    enter_version = _one(entered["session_slide_decks"], session_id=api.rb.pk(sid))["version"]
+    _assert_decks_restored(before, after, restored_deck_id=deck_id, version=enter_version + 1)
+    _assert_events(
+        entered,
+        after,
+        restore_event=_expected_restore_event(after, owner_sid=sid, actor_sid=sid),
+    )
+    assert _messages_tagged(after, rid) == []
+    row = api.rb.request_row(rid)
+    assert (row["status"], row["error_message"], row["rollback_outcome"]) == (
+        "error",
+        INTERRUPTED,
+        "rolled_back",
+    )
+    _assert_lock(api.rb, sid, held_by=None)
+
+
+# --- 3. never restore over a newer live turn ---------------------------------
+
+
+@pytest.mark.parametrize("newer_state", ["running", "pending"])
+def test_orphan_never_restores_over_a_newer_live_turn(env, caplog, newer_state):
+    """The turn's process died, its lock went stale, and the sender's next Enter
+    took the lock: that newer turn is live and started from the deck the dead turn
+    left.  Restoring the dead turn's Enter would wipe the newer turn's starting
+    point (and anything it has written) with no way back.  The sweep ends the dead
+    turn ``error`` / ``Generation interrupted`` with no rollback outcome, drops its
+    snapshot, logs at ERROR, and changes nothing else -- the deck, the newer turn
+    and its lock stay exactly as they are."""
+    sid = env.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    seed_earlier_turn(env, sid)
+    rid1 = press_enter(env, sid)
+    edit_turn(env, sid, sid, rid1)
+    age_lock(sid, SESSION_LOCK_TIMEOUT_SECONDS + 10)
+    rid2 = press_enter(env, sid, "MK-USER second try", start=newer_state == "running")
+    before = env.tables()
+    assert _lock(_one(before["user_sessions"], session_id=sid))[2] == rid2
+    caplog.set_level(logging.ERROR)
+    caplog.clear()
+
+    assert recover() == 1
+
+    after = env.tables()
+    _assert_tables_equal(before, after, exclude=("chat_requests", "generation_snapshots"))
+    _assert_request(
+        env.request_row(rid1),
+        _one(before["chat_requests"], request_id=rid1),
+        status="error",
+        error_message=INTERRUPTED,
+        rollback_outcome=None,
+        completed=True,
+    )
+    assert [r for r in after["chat_requests"] if r["request_id"] != rid1] == [
+        r for r in before["chat_requests"] if r["request_id"] != rid1
+    ]
+    assert after["generation_snapshots"] == [
+        r for r in before["generation_snapshots"] if r["request_id"] != rid1
+    ]
+    _assert_lock(env, sid, held_by=rid2)
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR], "nothing logged at ERROR"
+    # The newer turn is not an orphan, and a later sweep leaves it alone.
+    assert recover() == 0
+    _assert_tables_equal(after, env.tables())
+
+
+# --- 4. one bad entry never stops a sweep -------------------------------------
+
+
+def _claim_raises_for(monkeypatch, failing_rid: str) -> None:
+    """The rollback's fence claim raises for *failing_rid* only (a broken row, a
+    lost connection): ``roll_back_generation`` itself raises for that request."""
+    real = generation_rollback.claim_turn_row
+
+    def claim(db, request_id):
+        if request_id == failing_rid:
+            raise RuntimeError("MK-INJECTED the claim failed")
+        return real(db, request_id)
+
+    monkeypatch.setattr(generation_rollback, "claim_turn_row", claim)
+
+
+def test_one_orphan_that_cannot_be_rolled_back_does_not_stop_the_sweep(env, monkeypatch):
+    """Two orphans; rolling back the first raises.  The second is still rolled back,
+    and the first is left exactly as it was for the next sweep."""
+    first = env.new_session(created_by=OWNER, title="MK-FIRST")
+    seed_earlier_turn(env, first)
+    rid1 = press_enter(env, first)
+    edit_turn(env, first, first, rid1)
+    age_lock(first, ORPHAN_AGE)
+    second = env.new_session(created_by=OWNER, title="MK-SECOND")
+    seed_earlier_turn(env, second)
+    before = env.tables()
+    rid2 = press_enter(env, second)
+    edit_turn(env, second, second, rid2)
+    age_lock(second, ORPHAN_AGE)
+    at_turn_end = env.tables()
+    assert env.snapshot_rows(rid1)[0]["id"] < env.snapshot_rows(rid2)[0]["id"]
+    _claim_raises_for(monkeypatch, rid1)
+
+    assert recover() == 1
+
+    _assert_rolled_back_to_enter(
+        env,
+        before,
+        at_turn_end,
+        env.tables(),
+        rid=rid2,
+        actor_sid=second,
+        owner_sid=second,
+        terminal_status="error",
+        error_message=INTERRUPTED,
+        deck_existed=True,
+    )
+    assert env.request_row(rid1) == _one(at_turn_end["chat_requests"], request_id=rid1)
+    assert env.snapshot_rows(rid1) == [
+        _one(at_turn_end["generation_snapshots"], request_id=rid1)
+    ]
+
+
+def test_one_stuck_request_that_cannot_be_recovered_does_not_stop_the_others(env, monkeypatch):
+    """Startup: two stuck requests -- an Agent turn (its lock its own and fresh, so
+    not an orphan) whose rollback raises, then a Legacy one.  The Legacy one is
+    still recovered; the Agent turn is left as it was."""
+    agent = env.new_session(created_by=OWNER, title="MK-AGENT")
+    seed_earlier_turn(env, agent)
+    rid1 = press_enter(env, agent)
+    edit_turn(env, agent, agent, rid1)
+    age_request(rid1, 1300)
+    age_lock(agent, 30)
+    legacy, rid2 = _monolith_request(JobEnv(env, None), "explicit")
+    get_session_manager().update_chat_request_status(rid2, "running")
+    age_request(rid2, 1300)
+    age_lock(legacy, 1300)
+    before = env.tables()
+    assert env.request_row(rid1)["id"] < env.request_row(rid2)["id"]
+    _claim_raises_for(monkeypatch, rid1)
+
+    assert run_startup_recovery() == 1
+
+    after = env.tables()
+    _assert_request(
+        env.request_row(rid2),
+        _one(before["chat_requests"], request_id=rid2),
+        status="error",
+        error_message=CRASH_RECOVERY,
+        rollback_outcome=None,
+        completed=True,
+    )
+    assert _lock(env.session_row(legacy)) == (False, None, None)
+    assert env.request_row(rid1) == _one(before["chat_requests"], request_id=rid1)
+    assert env.snapshot_rows(rid1) == [_one(before["generation_snapshots"], request_id=rid1)]
+    _assert_tables_equal(before, after, exclude=("chat_requests", "user_sessions"))
+    assert _one(after["user_sessions"], session_id=agent) == _one(
+        before["user_sessions"], session_id=agent
     )

@@ -947,3 +947,43 @@ def test_timeout_loop_runs_orphan_recovery_off_the_event_loop_each_sweep(monkeyp
     assert all(t is not loop_thread[0] for t in ran_on), (
         "recover_orphaned_generations ran on the event loop's thread"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: an unreadable status is not a stop
+# ---------------------------------------------------------------------------
+
+
+def test_unreadable_turn_status_keeps_the_consumer_waiting(env, monkeypatch):
+    """Fail-open: every liveness read raises (a database blip).  That is not a stop:
+    the consumer keeps waiting on the graph (no ``TurnStopped``) and the turn
+    completes when the graph does.  The fence and the seal still guard a turn that
+    really was stopped."""
+    reads: List[str] = []
+
+    def unreadable(request_id):
+        reads.append(threading.current_thread().name)
+        raise RuntimeError("MK-INJECTED the status read failed")
+
+    monkeypatch.setattr(generation_fence, "turn_is_live", unreadable)
+    monkeypatch.setattr(chat_service_module, "turn_is_live", unreadable, raising=False)
+    sid = env.rb.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    seed_earlier_turn(env.rb, sid)
+    rid = press_enter(env.rb, sid)
+    graph = env.graph
+
+    def body(g: BlockingGraph, s: str, r: str) -> None:
+        # Long enough for the consumer to read the status (and fail) twice.
+        g.release.wait(2.5 * stop_poll_seconds())
+
+    graph.body = body
+    consumer = ConsumerThread(ChatService(), sid, rid)
+    consumer.start()
+    assert consumer.ended.wait(THREAD_WAIT), "the consumer never ended"
+
+    assert consumer.raised is None, f"an unreadable status ended the turn: {consumer.raised!r}"
+    assert StreamEventType.COMPLETE in [e.type for e in consumer.events]
+    consumer_reads = reads.count("consumer")
+    assert consumer_reads >= 2, f"the consumer read the status {consumer_reads} times"
+    assert env.rb.request_row(rid)["status"] == "running"
+    assert [s["state"] for s in env.rb.snapshot_rows(rid)] == ["sealed"]

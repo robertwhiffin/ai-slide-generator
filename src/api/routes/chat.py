@@ -927,8 +927,9 @@ async def submit_chat_async(
     # True from the moment an Agent deck's Enter committed its generation
     # snapshot until it is discarded: a failure in between rolls the turn back.
     snapshot_taken = False
-    # A rollback whose restore failed keeps the deck locked to this request until
-    # a retry restores it, so the exits below must not release the lock.
+    # A rollback whose restore failed (or that could not run) keeps the deck
+    # locked to this request until the orphan sweep restores it, so the exits
+    # below must not release the lock.
     keep_lock = False
 
     async def release_lock() -> None:
@@ -1057,7 +1058,11 @@ async def submit_chat_async(
         except Exception:
             if snapshot_taken:
                 outcome = await _roll_back_failed_enter(request_id)
-                keep_lock = outcome is RollbackResult.RESTORE_FAILED
+                # A failed restore keeps the deck locked for its retry.  So does a
+                # rollback that could not run at all (None): the request is still
+                # pending with its active snapshot, and the lock stays bound to it
+                # so no new turn starts before the orphan sweep rolls it back.
+                keep_lock = outcome is None or outcome is RollbackResult.RESTORE_FAILED
             raise
 
         result = {"request_id": request_id, "status": "pending"}

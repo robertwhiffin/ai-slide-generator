@@ -111,6 +111,12 @@ class RollbackResult(str, Enum):
     NO_SNAPSHOT = "no_snapshot"
     RESTORE_FAILED = "restore_failed"
     SEALED_KEPT = "sealed_kept"
+    # Recovery only, never stored as a request's rollback_outcome:
+    #: an orphan ended without a restore, because a newer live turn holds its
+    #: sender's lock and started from the deck as it stands
+    KEPT_NEWER_TURN = "kept_newer_turn"
+    #: a failed restore dropped because its deck owner's session was deleted
+    DECK_GONE = "deck_gone"
 
 
 # ---------------------------------------------------------------------------
@@ -372,12 +378,17 @@ def _foreign_change_since(db: Session, snapshot: GenerationSnapshot) -> bool:
     )
 
 
-def _restore_session_fields(owner: UserSession, actor: UserSession, fields: Dict[str, Any]) -> None:
+def _restore_session_fields(
+    owner: UserSession, actor: Optional[UserSession], fields: Dict[str, Any]
+) -> None:
+    """The owner's fields, then the actor's (skipped when the actor's session is gone)."""
     owner_fields = fields["owner"]
     owner.deck_mode = owner_fields["deck_mode"]
     owner.graph_release_id = owner_fields["graph_release_id"]
     owner.title = owner_fields["title"]
 
+    if actor is None:
+        return
     actor_fields = fields["actor"]
     actor.title = actor_fields["title"]
     # Only the entry's conversation id, and only while the entry still exists:
@@ -396,10 +407,15 @@ def _restore_deck(
     snapshot: GenerationSnapshot,
     *,
     owner: UserSession,
-    actor: UserSession,
+    actor: Optional[UserSession],
     deck: Optional[SessionSlideDeck],
 ) -> None:
-    """Put the owner's deck row and slide rows back as the snapshot holds them."""
+    """Put the owner's deck row and slide rows back as the snapshot holds them.
+
+    The restore is recorded as the actor's ``restore_version``; with the actor's
+    session gone there is no one to attribute it to, so nothing is recorded (the
+    version bump still makes open clients and other processes reload).
+    """
     slide_table = SessionSlide.__table__
     db.execute(delete(slide_table).where(slide_table.c.session_id == owner.id))
 
@@ -427,6 +443,8 @@ def _restore_deck(
         db.execute(insert(slide_table), rows)
     db.flush()
 
+    if actor is None:
+        return
     # One restore_version/deck event, as restore_version records it.
     record_shared_deck_mutation(
         db,
@@ -448,20 +466,21 @@ class _Outcome:
         self.invalidate = invalidate
 
 
-def _sessions_touched(actor: UserSession, owner: UserSession) -> tuple[str, ...]:
+def _sessions_touched(actor: Optional[UserSession], owner: UserSession) -> tuple[str, ...]:
     """The session ids whose cached decks a restore makes stale."""
-    if owner.session_id == actor.session_id:
-        return (actor.session_id,)
+    if actor is None or owner.session_id == actor.session_id:
+        return (owner.session_id,)
     return (actor.session_id, owner.session_id)
 
 
 def _lock_deck(
     db: Session, snapshot: GenerationSnapshot
-) -> tuple[UserSession, UserSession, Optional[SessionSlideDeck]]:
+) -> tuple[Optional[UserSession], Optional[UserSession], Optional[SessionSlideDeck]]:
     """Lock the actor and owner session rows, then the owner's deck row.
 
     The order every deck writer's flush takes them (``user_sessions`` before
-    ``session_slide_decks``).  Returns ``(actor, owner, deck)``.
+    ``session_slide_decks``).  Returns ``(actor, owner, deck)``; a session that
+    no longer exists is None (a snapshot has no foreign key to them).
     """
     sessions = {
         row.id: row
@@ -472,11 +491,15 @@ def _lock_deck(
             .with_for_update()
         ).scalars()
     }
-    actor = sessions[snapshot.actor_session_pk]
-    owner = sessions[snapshot.owner_session_pk]
-    deck = db.execute(
-        select(SessionSlideDeck).where(SessionSlideDeck.session_id == owner.id).with_for_update()
-    ).scalar_one_or_none()
+    actor = sessions.get(snapshot.actor_session_pk)
+    owner = sessions.get(snapshot.owner_session_pk)
+    deck = None
+    if owner is not None:
+        deck = db.execute(
+            select(SessionSlideDeck)
+            .where(SessionSlideDeck.session_id == owner.id)
+            .with_for_update()
+        ).scalar_one_or_none()
     return actor, owner, deck
 
 
@@ -484,20 +507,40 @@ def _restore_turn(
     db: Session,
     snapshot: GenerationSnapshot,
     *,
-    actor: UserSession,
+    actor: Optional[UserSession],
     owner: UserSession,
     deck: Optional[SessionSlideDeck],
 ) -> None:
     """Put back everything the turn changed: session fields, deck, slides,
-    messages and checkpoints.  In the caller's transaction (no commit)."""
+    messages and checkpoints.  In the caller's transaction (no commit).
+
+    With the actor's session gone (a deleted contributor) only the owner's side
+    is restored: its own fields and its graph thread went with it.
+    """
     _restore_session_fields(owner, actor, json.loads(snapshot.session_fields_json))
     db.flush()
     _restore_deck(db, snapshot, owner=owner, actor=actor, deck=deck)
     db.execute(delete(SessionMessage).where(SessionMessage.request_id == snapshot.request_id))
-    get_checkpointer().delete_checkpoints_after(
-        actor.session_id, snapshot.checkpoint_id, session=db
-    )
+    if actor is not None:
+        get_checkpointer().delete_checkpoints_after(
+            actor.session_id, snapshot.checkpoint_id, session=db
+        )
     db.flush()
+
+
+def _newer_live_turn(db: Session, actor: UserSession, request_id: str) -> Optional[str]:
+    """The id of a different, live request the actor's lock is bound to, or None.
+
+    Read under the actor row's ``FOR UPDATE`` (:func:`_lock_deck`), so no bind or
+    Enter on the session can slip in before the caller commits.
+    """
+    bound = actor.processing_request_id
+    if bound is None or bound == request_id:
+        return None
+    status = db.execute(
+        select(ChatRequest.status).where(ChatRequest.request_id == bound)
+    ).scalar_one_or_none()
+    return bound if status in LIVE_STATUSES else None
 
 
 def _end_without_restore(
@@ -602,8 +645,15 @@ def _roll_back_claimed(
     terminal_status: str,
     error_message: Optional[str],
     refuse_on_foreign_change: bool,
+    spare_newer_turn: bool = False,
 ) -> _Outcome:
-    """Steps 2-5 of the rollback, after the claim matched, in the claim's transaction."""
+    """Steps 2-5 of the rollback, after the claim matched, in the claim's transaction.
+
+    With ``spare_newer_turn`` (the orphan sweep), a turn whose sender's lock is
+    now bound to a different live request is ended without a restore: that newer
+    turn started from the deck as it stands, and restoring under it would wipe
+    its starting point.
+    """
     snapshot = db.execute(
         select(GenerationSnapshot).where(GenerationSnapshot.request_id == request_id)
     ).scalar_one_or_none()
@@ -615,6 +665,27 @@ def _roll_back_claimed(
         return ended
 
     actor, owner, deck = _lock_deck(db, snapshot)
+    if actor is None or owner is None:
+        # A live request's own session is gone (its rows cascade with it on
+        # PostgreSQL): nothing coherent to restore into.
+        raise RuntimeError(f"generation snapshot {request_id} names a session that is gone")
+
+    newer = _newer_live_turn(db, actor, request_id) if spare_newer_turn else None
+    if newer is not None:
+        logger.error(
+            "Orphaned generation NOT rolled back: a newer turn on its session is live",
+            extra={
+                "request_id": request_id,
+                "newer_request_id": newer,
+                "session_id": actor.session_id,
+                "deck_owner_session_id": owner.session_id,
+            },
+        )
+        _end_request(
+            db, request_id, status="error", error_message=error_message, rollback_outcome=None
+        )
+        discard_generation_snapshot(db, request_id)
+        return _Outcome(RollbackResult.KEPT_NEWER_TURN)
 
     if _foreign_change_since(db, snapshot):
         if refuse_on_foreign_change:
@@ -711,6 +782,23 @@ def roll_back_generation(
     propagates: the turn is then still live, so a later stop, timeout or orphan
     sweep ends it.
     """
+    return _roll_back(
+        request_id,
+        terminal_status=terminal_status,
+        error_message=error_message,
+        refuse_on_foreign_change=refuse_on_foreign_change,
+    )
+
+
+def _roll_back(
+    request_id: str,
+    *,
+    terminal_status: str,
+    error_message: Optional[str],
+    refuse_on_foreign_change: bool,
+    spare_newer_turn: bool = False,
+) -> RollbackResult:
+    """:func:`roll_back_generation`; the orphan sweep also passes ``spare_newer_turn``."""
     if terminal_status not in _TERMINAL_STATUSES:
         raise ValueError(f"terminal_status must be one of {_TERMINAL_STATUSES}")
 
@@ -724,6 +812,7 @@ def roll_back_generation(
             terminal_status=terminal_status,
             error_message=error_message,
             refuse_on_foreign_change=refuse_on_foreign_change,
+            spare_newer_turn=spare_newer_turn,
         )
 
     if outcome.invalidate:
@@ -803,9 +892,17 @@ def _retry_restore(snapshot_id: int) -> Optional[RollbackResult]:
     restore that raises rolls everything back, the claim included, and is retried
     by the next sweep.
 
+    Snapshots carry no foreign key, so a session may be gone (deleted):
+
+    - the deck owner's: there is no deck to restore; the snapshot is dropped
+      (``DECK_GONE``).  Its requests went with it.
+    - only the actor's (a deleted contributor): the owner's deck and fields are
+      restored (or kept, on a foreign change) and the snapshot dropped; there is
+      no actor field, thread or lock left to touch.
+
     Returns:
-        ``ROLLED_BACK`` or ``KEPT_FOREIGN_CHANGE``; None when another sweep holds
-        (or has handled) the snapshot.
+        ``ROLLED_BACK``, ``KEPT_FOREIGN_CHANGE`` or ``DECK_GONE``; None when
+        another sweep holds (or has handled) the snapshot.
     """
     with get_db_session() as db:
         claimed = db.execute(
@@ -825,27 +922,35 @@ def _retry_restore(snapshot_id: int) -> Optional[RollbackResult]:
         ).scalar_one()
         request_id = snapshot.request_id
         actor, owner, deck = _lock_deck(db, snapshot)
+        invalidate: tuple[str, ...] = ()
 
-        if _foreign_change_since(db, snapshot):
+        if owner is None:
+            logger.warning(
+                "Dropped a failed generation restore: its deck's session was deleted",
+                extra={"request_id": request_id, "owner_session_pk": snapshot.owner_session_pk},
+            )
+            result = RollbackResult.DECK_GONE
+        elif _foreign_change_since(db, snapshot):
             logger.error(
                 "A failed generation restore was NOT retried: someone else changed the "
                 "deck since Enter",
                 extra={
                     "request_id": request_id,
-                    "session_id": actor.session_id,
+                    "session_id": actor.session_id if actor is not None else None,
                     "deck_owner_session_id": owner.session_id,
                 },
             )
             result = RollbackResult.KEPT_FOREIGN_CHANGE
-            invalidate: tuple[str, ...] = ()
         else:
             _restore_turn(db, snapshot, actor=actor, owner=owner, deck=deck)
             result = RollbackResult.ROLLED_BACK
             invalidate = _sessions_touched(actor, owner)
 
-        _settle_retried_request(db, request_id, result)
+        if owner is not None:
+            _settle_retried_request(db, request_id, result)
         discard_generation_snapshot(db, request_id)
-        _release_session_lock(db, snapshot.actor_session_pk, request_id)
+        if actor is not None:
+            _release_session_lock(db, snapshot.actor_session_pk, request_id)
 
     if invalidate:
         _invalidate_local_deck_cache(invalidate)
@@ -864,8 +969,12 @@ def recover_orphaned_generations(now: datetime | None = None) -> int:
     refreshed for :data:`ORPHAN_AFTER_SECONDS` (a restart, a dead process).  It is
     rolled back as a failure (``error``, ``"Generation interrupted"``, never
     refused on a foreign change); a sealed one keeps its finished deck
-    (``SEALED_KEPT``).  Then every ``restore_failed`` snapshot is retried
-    (:func:`_retry_restore`).  One entry's error is logged and the sweep goes on.
+    (``SEALED_KEPT``).  It is never restored over a NEWER live turn: when its
+    sender's lock is bound to a different request that is live, it is ended
+    (``error``, no rollback outcome) and its snapshot dropped, the deck kept as it
+    stands (``KEPT_NEWER_TURN``).  Then every ``restore_failed`` snapshot is
+    retried (:func:`_retry_restore`).  One entry's error is logged and the sweep
+    goes on.
 
     Blocking (it restores decks): run it in a worker thread, never on the event loop.
 
@@ -880,11 +989,12 @@ def recover_orphaned_generations(now: datetime | None = None) -> int:
 
     for request_id in _orphaned_request_ids(now):
         try:
-            result = roll_back_generation(
+            result = _roll_back(
                 request_id,
                 terminal_status="error",
                 error_message=GENERATION_INTERRUPTED_MESSAGE,
                 refuse_on_foreign_change=False,
+                spare_newer_turn=True,
             )
         except Exception:
             logger.exception(
