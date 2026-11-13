@@ -178,7 +178,11 @@ from src.services.foreman_service import (
     stalled_positions,
 )
 from src.services.gateway_mcp_registry import enabled_by_service
-from src.services.generation_fence import TurnFencedError, fence_turn_write
+from src.services.generation_fence import (
+    TurnFencedError,
+    fence_turn_write,
+    raise_if_turn_ended,
+)
 from src.services.graph.event_emitter import (
     advance_slide_cursor,
     emit_event,
@@ -944,6 +948,9 @@ def rereview_committed_slides(
         }
         if spec.deck_style is not None:
             review_payload["deck_style"] = spec.deck_style.model_dump()
+        # The pass writes nothing, so no fence would stop a stopped turn between
+        # these serial model calls: check the turn before each one.
+        raise_if_turn_ended()
         try:
             out = get_agent_runtime().run(
                 "build_reviewer",
@@ -6507,6 +6514,10 @@ def build_reviewer_node(payload: dict) -> Dict[str, Any]:
             ),
             "reviewed_positions": scoped(turn_id, {position}),
         }
+    except TurnFencedError:
+        # The turn was stopped: its reviewed write was refused.  Not a failed
+        # review, so no ERROR and no placeholder attempt; the refusal ends the node.
+        raise
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         logger.exception("Build review failed at position %s", position)
@@ -6605,6 +6616,8 @@ def _reconcile_stale_fixes(
                     mutation=mutation,
                 )
             )
+        except TurnFencedError:
+            raise
         except Exception:
             logger.exception(
                 "Could not land the original at position %s; the foreman will "
@@ -6935,6 +6948,9 @@ def fix_reviewer_node(state: dict) -> Dict[str, Any]:
             initiated_by=initiated_by,
             mutation=mutation,
         )
+    except TurnFencedError:
+        # The turn was stopped and the row write refused: not a delivery failure.
+        raise
     except Exception as exc:
         _raise_if_persisted_runtime_failure(exc)
         # The row could not be delivered at all — the prior findings would not
@@ -7126,6 +7142,12 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
     Best-effort: a failed draft write costs only the early preview, so it is
     logged and the slide carries on to review, which writes the row anyway.
 
+    **Either way the turn is checked here**, and ``TurnFencedError`` ends the
+    pipeline: the draft write is fenced, and a position that keeps its real slide
+    gets :func:`raise_if_turn_ended` instead.  Without that check an abandoned
+    edit (the stop's rollback puts the real slides back) went on to pay for the
+    build review, and only the reviewed write refused it.
+
     Returns whether the draft was committed — the pipeline may keep it as the
     slide's final row if review then fails transiently.
     """
@@ -7135,6 +7157,7 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
         writer = SlideWriter()
         existing = writer.get_slide(record["session_id"], position)
         if existing is not None and not _holds_placeholder(existing):
+            raise_if_turn_ended()
             return False
         writer.write_slide(
             session_id=record["session_id"],
@@ -7208,7 +7231,11 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
     * a review that opens a fix hands the fixer and fix reviewer a slide-local
       state carrying only this slide's ``fix_map`` entry, so "exactly one fix
       round per slide" holds by construction and ``in_flight`` stays the
-      fixer's own guard against a re-entry.
+      fixer's own guard against a re-entry;
+    * a stopped turn ends the chain with ``TurnFencedError`` before its next
+      model call: each write is fenced, and the model calls no fenced write
+      precedes (the review of a position that keeps its real slide, the fixer,
+      the fix reviewer) are preceded by ``raise_if_turn_ended``.
 
     Only fan-in keys reach graph state; ``_PIPELINE_LOCAL_KEYS`` stay here.
     Every stage's failure path is the one its node already had (placehold on a
@@ -7276,6 +7303,10 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
             "fix_map": acc["fix_map"],
         }
         with _fix_slots():
+            # Neither the review that opened this fix nor the fixer writes a row,
+            # and the wait for a slot can outlast a stop, so the turn is checked
+            # before each of the two model calls (``raise_if_turn_ended``).
+            raise_if_turn_ended()
             try:
                 fixer_update = fixer_node(fix_state)
                 if payload.get("one_ground") and position != 0:
@@ -7286,6 +7317,7 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
                 _fold(acc, fixer_update)
                 _fold(fix_state, fixer_update)
                 if fix_state.get("fix_target") is not None:
+                    raise_if_turn_ended()
                     _fold(acc, fix_reviewer_node(fix_state))
             except PersistedRuntimeError as exc:
                 # Transient while fixing: the slide was built and reviewed, so

@@ -450,6 +450,8 @@ def _build_env(monkeypatch, url: str):
         "src.api.services.session_manager.get_db_session",
         "src.api.services.deck_level_writer.get_db_session",
         "src.services.graph.nodes.get_db_session",
+        # turn_is_live / raise_if_turn_ended read the turn in a session of their own.
+        "src.services.generation_fence.get_db_session",
     ):
         monkeypatch.setattr(target, fake)
 

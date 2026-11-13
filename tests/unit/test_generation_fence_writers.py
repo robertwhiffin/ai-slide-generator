@@ -41,6 +41,7 @@ brand resolvers are stubbed.
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import uuid
 from typing import Any, Dict, Iterator, List, Optional
@@ -58,6 +59,7 @@ from src.services.generation_fence import TurnFencedError
 from src.services.graph import builder as builder_module
 from src.services.graph import nodes
 from src.services.graph.event_emitter import chat_request_id_var, set_event_emitter
+from src.services.graph.state import scoped
 from src.services.shared_deck_attribution import DeckMutationContext, MutationActor
 from src.utils.slide_hash import compute_slide_hash
 from tests.unit.conftest_graph import (  # noqa: F401 -- fixtures
@@ -65,6 +67,8 @@ from tests.unit.conftest_graph import (  # noqa: F401 -- fixtures
     TEMPLATE_TOKEN_CSS,
     architect_build,
     builder_out,
+    finding,
+    fixer_out,
     graph_env,
     make_spec,
     review_out,
@@ -612,6 +616,263 @@ class TestAnAbandonedBranchStops:
             f"the refused placeholder did not end the branch; it raised {raised!r}"
         )
         assert [c["name"] for c in env.skills.calls] == ["builder"]
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    # -- Task 8 (D1): a stopped pipeline stops at its first check -----------
+    #
+    # Every write is fenced; the model calls that NO fenced write precedes are
+    # preceded by ``raise_if_turn_ended``, and the broad catches around the
+    # reviewed writes let the refusal out without an ERROR.  Each test cancels
+    # the request inside one model call and pins the next call never starts.
+
+    @staticmethod
+    def _pipeline(env, rid: str, caplog) -> Optional[BaseException]:
+        caplog.set_level(logging.INFO)
+        caplog.clear()
+        with _in_turn(rid):
+            try:
+                nodes.slide_pipeline_node(_branch_payload(env, 0))
+            except Exception as exc:  # noqa: BLE001 - asserted by the caller
+                return exc
+        return None
+
+    @staticmethod
+    def _errors(caplog) -> List[str]:
+        return [
+            f"{r.name}: {r.getMessage()}" for r in caplog.records if r.levelno >= logging.ERROR
+        ]
+
+    @staticmethod
+    def _cancelling(env, rid: str, at_cancel: Dict[str, Any], answer):
+        def handler(payload):
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+            return answer(payload)
+
+        return handler
+
+    @staticmethod
+    def _flagged(payload):
+        return review_out(
+            payload["position"], [finding("overflow", slide_index=payload["position"])]
+        )
+
+    def test_abandoned_edit_stops_before_reviewing_a_slide_it_keeps(
+        self, graph_env, caplog
+    ):
+        """Stop pressed while an edit rebuilds slide 1, which holds a real slide.
+
+        No draft is written over a real slide, so no fenced write stood between
+        the builder's answer and the build reviewer's model call
+        (``_write_draft_row``'s early return): the abandoned edit paid for the
+        review and then logged a false "Build review failed" ERROR.
+        """
+        env = graph_env
+        env.seed_slides(list(_THREE))
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set("builder", self._cancelling(env, rid, at_cancel, builder_out))
+        env.skills.set("build_reviewer", lambda payload: review_out(payload["position"]))
+
+        raised = self._pipeline(env, rid, caplog)
+
+        assert "tables" in at_cancel, "the builder model was never called"
+        assert [c["name"] for c in env.skills.calls] == ["builder"], (
+            "a model call started after the stop, on a position that keeps its slide"
+        )
+        assert isinstance(raised, TurnFencedError), (
+            f"the branch did not end at the check; it raised {raised!r}"
+        )
+        assert self._errors(caplog) == []
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_refused_reviewed_write_ends_the_build_review_quietly(
+        self, graph_env, caplog
+    ):
+        """Stop pressed during the build review: its refused row write ends the node.
+
+        The write sits in ``build_reviewer_node``'s broad ``except``, which logged
+        "Build review failed" at ERROR and tried to placehold the position before
+        the placeholder's own refusal ended the branch.
+        """
+        env = graph_env
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set("builder", builder_out)
+        env.skills.set(
+            "build_reviewer",
+            self._cancelling(env, rid, at_cancel, lambda p: review_out(p["position"])),
+        )
+
+        raised = self._pipeline(env, rid, caplog)
+
+        assert "tables" in at_cancel, "the build reviewer was never called"
+        assert isinstance(raised, TurnFencedError), raised
+        assert [c["name"] for c in env.skills.calls] == ["builder", "build_reviewer"]
+        assert self._errors(caplog) == [], "a refused write was logged as a failed review"
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_abandoned_pipeline_stops_before_the_fixer(self, graph_env, caplog):
+        """Stop pressed during a review that opens a fix: the fixer never starts.
+
+        A review that opens a fix writes no row, so nothing was fenced between it
+        and the fixer's model call (and the wait for a fix slot can be long).
+        """
+        env = graph_env
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set("builder", builder_out)
+        env.skills.set("build_reviewer", self._cancelling(env, rid, at_cancel, self._flagged))
+        env.skills.set("fixer", fixer_out)
+        env.skills.set("fix_reviewer", lambda payload: review_out(payload["position"]))
+
+        raised = self._pipeline(env, rid, caplog)
+
+        assert "tables" in at_cancel, "the build reviewer was never called"
+        assert [c["name"] for c in env.skills.calls] == ["builder", "build_reviewer"], (
+            "a fix round's model call started after the stop"
+        )
+        assert isinstance(raised, TurnFencedError), raised
+        assert self._errors(caplog) == []
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_abandoned_pipeline_stops_before_the_fix_review(self, graph_env, caplog):
+        """Stop pressed while the fixer runs: the fix reviewer never starts.
+
+        The fixer writes no row either, so its answer went straight on to the fix
+        reviewer's model call.
+        """
+        env = graph_env
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set("builder", builder_out)
+        env.skills.set("build_reviewer", self._flagged)
+        env.skills.set("fixer", self._cancelling(env, rid, at_cancel, fixer_out))
+        env.skills.set("fix_reviewer", lambda payload: review_out(payload["position"]))
+
+        raised = self._pipeline(env, rid, caplog)
+
+        assert "tables" in at_cancel, "the fixer was never called"
+        assert [c["name"] for c in env.skills.calls] == [
+            "builder", "build_reviewer", "fixer",
+        ], "the fix reviewer's model call started after the stop"
+        assert isinstance(raised, TurnFencedError), raised
+        assert self._errors(caplog) == []
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_refused_fix_review_write_ends_the_fix_quietly(self, graph_env, caplog):
+        """Stop pressed during the fix review: its refused row write ends the node.
+
+        The write sits in ``fix_reviewer_node``'s broad ``except``, which logged
+        "Fix review could not deliver a row" at ERROR and tried to placehold.
+        """
+        env = graph_env
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set("builder", builder_out)
+        env.skills.set("build_reviewer", self._flagged)
+        env.skills.set("fixer", fixer_out)
+        env.skills.set(
+            "fix_reviewer",
+            self._cancelling(env, rid, at_cancel, lambda p: review_out(p["position"])),
+        )
+
+        raised = self._pipeline(env, rid, caplog)
+
+        assert "tables" in at_cancel, "the fix reviewer was never called"
+        assert isinstance(raised, TurnFencedError), raised
+        assert [c["name"] for c in env.skills.calls] == [
+            "builder", "build_reviewer", "fixer", "fix_reviewer",
+        ]
+        assert self._errors(caplog) == [], "a refused write was logged as a failed fix review"
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_refused_stale_fix_landing_ends_the_fixer(self, graph_env, caplog):
+        """The fixer's stale in-flight reconcile lets a refused landing out.
+
+        ``_reconcile_stale_fixes`` wraps each ``_land_original`` write in a broad
+        ``except`` that logged ERROR and carried on.  Unreachable from the slide
+        pipeline today; pinned because it is a fenced write in a broad catch.
+        """
+        env = graph_env
+        env.seed_slides(list(_THREE))
+        rid = _seed_request(env, "cancelled")
+        state = {
+            "turn_id": TURN,
+            "session_id": env.session_id,
+            "graph_release_id": _owner(env).graph_release_id,
+            "initiated_by": USER,
+            "fix_map": scoped(
+                TURN,
+                {
+                    0: {
+                        "original_html": "<div class='slide'><h1>MK-ORIGINAL</h1></div>",
+                        "original_scripts": "",
+                        "findings": [],
+                        "payload": _branch_payload(env, 0),
+                        "in_flight": True,
+                    }
+                },
+            ),
+        }
+        before = _snapshot(env.engine)
+        caplog.set_level(logging.INFO)
+
+        raised: Optional[BaseException] = None
+        updates: Any = None
+        with _in_turn(rid):
+            try:
+                updates = nodes.fixer_node(state)
+            except Exception as exc:  # noqa: BLE001 - asserted below
+                raised = exc
+
+        assert isinstance(raised, TurnFencedError), (
+            f"the refused landing did not end the fixer; it returned {updates!r}"
+        )
+        assert env.skills.calls == []
+        assert self._errors(caplog) == []
+        _assert_unchanged(before, _snapshot(env.engine))
+
+    def test_abandoned_rereview_stops_before_its_next_model_call(self, graph_env):
+        """Stop pressed during the deck-level re-review: no further slide is scored.
+
+        The pass makes one serial model call per committed slide and writes
+        nothing, so no fence stopped it between them.
+        """
+        env = graph_env
+        env.seed_slides(list(_THREE))
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set(
+            "build_reviewer",
+            self._cancelling(env, rid, at_cancel, lambda p: review_out(p["position"])),
+        )
+        brand = {
+            "resolved_style": DEFAULT_STYLE,
+            "deterministic_css": TEMPLATE_TOKEN_CSS,
+            "design_system_active": False,
+            "template_layout_html": "",
+        }
+
+        raised: Optional[BaseException] = None
+        with _in_turn(rid):
+            try:
+                nodes.rereview_committed_slides(
+                    env.session_id,
+                    make_spec((0, 1, 2)),
+                    brand,
+                    _owner(env).graph_release_id,
+                    env.session_id,
+                    env.session_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - asserted below
+                raised = exc
+
+        assert "tables" in at_cancel, "the re-review never called the model"
+        assert len(env.skills.calls_for("build_reviewer")) == 1, (
+            "the re-review scored another slide after the stop"
+        )
+        assert isinstance(raised, TurnFencedError), raised
         _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
 
     def test_abandoned_deck_review_stops_at_its_refused_deck_level_write(

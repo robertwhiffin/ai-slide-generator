@@ -19,7 +19,10 @@ What is proven here, on a real SQLite schema built the production way
   passed, and an explicit id wins over it;
 * ``allow_completed=True`` (the title thread) refuses only ``cancelled``/``error``;
 * ``start_chat_request`` moves a row ``pending -> running`` exactly once;
-* ``turn_is_live`` reads committed status and writes nothing.
+* ``turn_is_live`` reads committed status and writes nothing;
+* ``raise_if_turn_ended`` (the check before a model call that no fenced write
+  precedes) refuses a turn that is not live, reads only, issues no SQL without a
+  request id, and lets an unreadable status through.
 
 Every test seeds a live *neighbour* request alongside its target and compares the
 WHOLE ``chat_requests`` table before and after.  A claim or start that lost its
@@ -50,6 +53,7 @@ from src.services.generation_fence import (
     TurnStopped,
     claim_turn_row,
     fence_turn_write,
+    raise_if_turn_ended,
     start_chat_request,
     turn_is_live,
 )
@@ -443,3 +447,96 @@ def test_turn_is_live_follows_a_committed_cancel(db):
 
 def test_turn_is_live_without_a_row_is_false(db):
     assert turn_is_live("req-missing") is False
+
+
+# ---------------------------------------------------------------------------
+# raise_if_turn_ended: the read-only check before a model call
+# ---------------------------------------------------------------------------
+
+
+def _check(rid: Optional[str] = None) -> Optional[TurnFencedError]:
+    """Run the check; return the refusal, or None if it passed."""
+    try:
+        result = raise_if_turn_ended() if rid is None else raise_if_turn_ended(rid)
+    except TurnFencedError as exc:
+        return exc
+    assert result is None, f"raise_if_turn_ended returned {result!r}, not None"
+    return None
+
+
+def test_raise_if_turn_ended_is_silent_without_request_id(db, monkeypatch):
+    """No argument and no ContextVar: no lookup and no SQL, even beside a cancelled row."""
+    fenced = db.seed("cancelled")
+    before = db.table()
+
+    def _lookup_must_not_run(*args, **kwargs):
+        raise AssertionError("turn_is_live was called with no request id in play")
+
+    monkeypatch.setattr(generation_fence, "turn_is_live", _lookup_must_not_run)
+    assert get_chat_request_id() is None
+
+    with _capture_sql(db.engine) as sql:
+        assert _check() is None
+        assert raise_if_turn_ended(None) is None
+
+    assert sql == [], f"the check issued SQL with no request id: {sql}"
+    assert db.table() == before
+    assert before[fenced]["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("status", _ALL_STATUSES)
+def test_raise_if_turn_ended_refuses_once_not_live_and_writes_nothing(db, status):
+    """Live passes, terminal raises; it reads (no claim, no lock) and moves nothing."""
+    rid = db.seed(status)
+    before = db.table()
+
+    with _capture_sql(db.engine) as sql:
+        refusal = _check(rid)
+
+    if status in LIVE_STATUSES:
+        assert refusal is None, f"a {status} turn was refused"
+    else:
+        assert refusal is not None, f"a {status} turn was let through"
+        assert refusal.request_id == rid
+    assert sql, "the check answered without reading the database"
+    writes = [s for s in sql if _WRITE_SQL.match(s)]
+    assert writes == [], f"the check wrote (it must be read-only): {writes}"
+    assert db.table() == before
+
+
+def test_raise_if_turn_ended_without_a_row_refuses(db):
+    refusal = _check("req-that-was-never-created")
+    assert refusal is not None and refusal.request_id == "req-that-was-never-created"
+
+
+def test_raise_if_turn_ended_reads_context_var_and_an_explicit_id_wins(db):
+    cancelled = db.seed("cancelled")
+    live = db.seed("running")
+
+    set_chat_request_id(cancelled)
+    refusal = _check()
+    assert refusal is not None and refusal.request_id == cancelled
+    assert _check(live) is None, "the ContextVar overrode the explicit request id"
+
+    set_chat_request_id(live)
+    assert _check() is None
+    refusal = _check(cancelled)
+    assert refusal is not None and refusal.request_id == cancelled
+
+
+def test_raise_if_turn_ended_carries_on_when_the_status_is_unreadable(
+    db, monkeypatch, caplog
+):
+    """A database blip is not a stop: the next fenced write still decides."""
+    rid = db.seed("cancelled")
+
+    def _unreadable(request_id):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(generation_fence, "turn_is_live", _unreadable)
+    with caplog.at_level("WARNING", logger="src.services.generation_fence"):
+        assert _check(rid) is None
+    assert any(
+        r.levelname == "WARNING" and r.name == "src.services.generation_fence"
+        for r in caplog.records
+    ), "the unreadable status was not logged"

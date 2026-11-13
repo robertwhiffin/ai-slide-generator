@@ -9,11 +9,15 @@ waits for in-flight writers, and a writer arriving after the cancel is refused.
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db_session
 from src.services.graph.event_emitter import get_chat_request_id
+
+logger = logging.getLogger(__name__)
 
 LIVE_STATUSES: tuple[str, ...] = ("pending", "running")
 
@@ -94,6 +98,31 @@ def turn_is_live(request_id: str) -> bool:
             {"rid": request_id},
         ).scalar()
     return status in LIVE_STATUSES
+
+
+def raise_if_turn_ended(request_id: str | None = None) -> None:
+    """Raise ``TurnFencedError`` if the turn is no longer live. Read-only; no lock.
+
+    For a turn path that is about to start a model call with no fenced write before
+    it, so an abandoned turn stops here instead of paying for that call.  It is a
+    check, not a fence: a stop that lands just after it is still refused by the
+    turn's next fenced write.  An unreadable status counts as live, for the same
+    reason.  No request id (explicit or from the ContextVar) means no turn: no SQL.
+    """
+    rid = request_id or get_chat_request_id()
+    if rid is None:
+        return
+    try:
+        live = turn_is_live(rid)
+    except Exception:
+        logger.warning(
+            "Could not read the turn's status; carrying on",
+            exc_info=True,
+            extra={"request_id": rid},
+        )
+        return
+    if not live:
+        raise TurnFencedError(rid)
 
 
 def generation_hold_clause(owner_pk, *, live_only: bool = False):
