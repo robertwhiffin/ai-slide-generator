@@ -1108,6 +1108,15 @@ async def submit_chat_async(
         # Refused before the snapshot: nothing else was written.
         await release_lock()
         await _mark_chat_request_error(session_manager, request_id, e.reason)
+        if e.reason == GenerationRefusedError.GENERATION_IN_FLIGHT:
+            # Another Enter on this deck won the deck lock: the same answer as
+            # the holder gate this one passed just before that Enter committed.
+            from src.services.identity_provider import resolve_display_name
+
+            name = await asyncio.to_thread(resolve_display_name, e.holder)
+            raise HTTPException(
+                status_code=423, detail=f"Session is locked by {name}"
+            ) from e
         raise HTTPException(
             status_code=409, detail=_GENERATION_REFUSED_DETAILS[e.reason]
         ) from e

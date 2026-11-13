@@ -29,6 +29,7 @@ is ordered by sleeping.  Self-skips when no PostgreSQL is reachable
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 import threading
 from datetime import datetime, timedelta
@@ -50,7 +51,13 @@ from tests.integration.test_generation_rollback_postgres import (
     _Runner,
     _until,
 )
+from tests.unit.test_generation_holds_editing_lock import (
+    _display_name,
+    grant_contributor_edit,
+    locked_by,
+)
 from tests.unit.test_generation_rollback import (
+    CONTRIBUTOR,
     OWNER,
     RollbackEnv,
     _assert_lock,
@@ -217,3 +224,120 @@ def test_submit_and_sweeper_claim_serialise(pg_env, postgres_engine, monkeypatch
         # The marker is kept, unclaimed, for after the generation.
         assert env.deck_row(sid) == deck_before
         _assert_lock(env, sid, held_by=rid)
+
+
+def _submit_as(session_id: str, user: str, message: str) -> Dict[str, Any]:
+    """``POST /api/chat/async`` as *user*: the real route function and its real
+    ``_check_chat_permission`` (the owner's holder gate, the contributor's editing
+    lock).  ``db`` is only the contributor's permission lookup, which is stubbed."""
+    from src.api.routes import chat as chat_routes
+
+    async def call():
+        set_current_user(user)
+        return await chat_routes.submit_chat_async(
+            ChatRequestBody(session_id=session_id, message=message), db=None
+        )
+
+    return asyncio.run(call())
+
+
+@pytest.mark.parametrize("start", ["edit", "first_generation"])
+@pytest.mark.parametrize("first", ["owner", "contributor"])
+def test_two_enters_on_one_deck_only_one_generates(
+    pg_env, postgres_engine, monkeypatch, first, start
+):
+    """Final review B1: only one generation per deck.  The owner and a contributor
+    press Enter on the same deck at once.  Both pass the route's holder checks (no
+    snapshot is committed yet).  The first is parked inside ``begin_generation`` at
+    its snapshot INSERT, holding the deck lock (the deck row, or on a first
+    generation the owner's session row); the second is OBSERVED waiting on it, or
+    finished, and once the first commits, the second is refused 423 naming the
+    first's sender.  Exactly one snapshot exists; the refused request is ``error``
+    and its session lock given back."""
+    env = pg_env
+    from src.api.routes import chat as chat_routes
+
+    enqueued = AsyncMock()
+    monkeypatch.setattr(chat_routes, "enqueue_job", enqueued)
+    # A cached callable: the integration conftest clears this cache at teardown.
+    monkeypatch.setattr(
+        "src.services.identity_provider._resolve_cached", functools.lru_cache(None)(_display_name)
+    )
+    grant_contributor_edit(monkeypatch)
+
+    owner = env.new_session(created_by=OWNER, title="MK-OWNER-TITLE")
+    if start == "edit":
+        seed_earlier_turn(env, owner)
+    contrib = env.contributor(owner)
+    assert env.tables()["generation_snapshots"] == []
+    earlier = {r["request_id"] for r in env.tables()["chat_requests"]}
+    parties = {
+        "owner": (owner, OWNER, "MK-OWNER add a slide"),
+        "contributor": (contrib, CONTRIBUTOR, "MK-CONTRIB add a slide"),
+    }
+    second = "contributor" if first == "owner" else "owner"
+    lead_sid, lead_user, _ = parties[first]
+    follow_sid = parties[second][0]
+
+    observer = _observer(postgres_engine)
+    parked = threading.Event()
+    release = threading.Event()
+    holder: Dict[str, int] = {}
+
+    def hook(conn, cursor, statement, parameters, context, executemany):
+        # The leader starts alone and parks at the first snapshot INSERT; after
+        # that, nothing else is held up.
+        if parked.is_set() or not _SNAPSHOT_INSERT.match(statement):
+            return
+        holder["pid"] = cursor.connection.get_backend_pid()
+        parked.set()
+        if not release.wait(_WAIT_SECONDS):
+            raise AssertionError("the parked transaction was never released")
+
+    leader = _Runner(first, lambda: _submit_as(*parties[first]))
+    follower = _Runner(second, lambda: _submit_as(*parties[second]))
+
+    event.listen(postgres_engine, "after_cursor_execute", hook)
+    try:
+        leader.start()
+        _until(lambda: parked.is_set() or leader.done.is_set())
+        assert parked.is_set(), (
+            f"the {first}'s Enter never reached its snapshot: "
+            f"result={leader.result!r} error={leader.error!r}"
+        )
+        follower.start()
+        overlapped = _until(
+            lambda: follower.done.is_set() or _anyone_waiting_on(observer, holder["pid"])
+        )
+        assert overlapped, f"the {second}'s Enter neither waited on the {first}'s nor finished"
+        assert not leader.done.is_set(), f"the {first}'s Enter was not still in its transaction"
+    finally:
+        release.set()
+        for runner in (leader, follower):
+            if runner.ident is not None:
+                runner.join(_WAIT_SECONDS)
+        event.remove(postgres_engine, "after_cursor_execute", hook)
+        observer.dispose()
+
+    assert not leader.is_alive() and not follower.is_alive(), "an Enter never finished"
+    assert leader.error is None, f"the {first}'s Enter was refused: {leader.error!r}"
+    after = env.tables()
+    snapshots = [(s["request_id"], s["state"]) for s in after["generation_snapshots"]]
+    assert snapshots == [(leader.result["request_id"], "active")], (
+        f"two generations started on one deck: {snapshots} "
+        f"({first}: {leader.result!r}, {second}: {follower.result!r})"
+    )
+    assert isinstance(follower.error, HTTPException), (
+        f"the {second}'s Enter was accepted: {follower.result!r}"
+    )
+    assert (follower.error.status_code, follower.error.detail) == (423, locked_by(lead_user))
+    assert enqueued.await_count == 1
+    assert enqueued.await_args.args[0] == leader.result["request_id"]
+    refused = [
+        r
+        for r in after["chat_requests"]
+        if r["session_id"] == env.pk(follow_sid) and r["request_id"] not in earlier
+    ]
+    assert [(r["status"], r["rollback_outcome"]) for r in refused] == [("error", None)]
+    _assert_lock(env, follow_sid, held_by=None)
+    _assert_lock(env, lead_sid, held_by=leader.result["request_id"])

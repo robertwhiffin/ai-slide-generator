@@ -840,3 +840,122 @@ def test_sweeper_skips_deck_with_restore_failed_snapshot(env, actor):
     assert claim_due_marker(due) == (quiet, STRANGER)
     assert claim_due_marker(due) is None, "the deck with a failed restore was claimed"
     assert env.deck_row(failed.owner) == failed_before
+
+
+# ---------------------------------------------------------------------------
+# One generation per deck, checked under the deck lock (final review B1)
+# ---------------------------------------------------------------------------
+
+#: ``begin_generation``'s refusal reason for "another generation is live on this deck".
+GENERATION_IN_FLIGHT = "generation_in_flight"
+
+
+def _deck_for(env: RollbackEnv, start: str) -> SharedDeck:
+    """A shared Agent deck: with an earlier turn's deck row (``edit``), or none yet
+    (``first_generation``: nothing to lock but the owner's session row)."""
+    if start == "edit":
+        return shared_deck(env)
+    owner = env.new_session(created_by=OWNER, title="MK-OWNER-TITLE")
+    return SharedDeck(owner, env.contributor(owner))
+
+
+def grant_contributor_edit(monkeypatch) -> None:
+    """The contributor holds CAN_EDIT on the deck (permission is not under test; the
+    route's editing-lock check still runs for real)."""
+    from src.core.permission_context import PermissionContext
+    from src.database.models.profile_contributor import PermissionLevel
+
+    monkeypatch.setattr(
+        "src.api.routes.chat.get_permission_context",
+        lambda: PermissionContext(user_id="contributor-id", user_name=CONTRIBUTOR),
+    )
+    service = MagicMock()
+    service.get_deck_permission.return_value = PermissionLevel.CAN_EDIT
+    monkeypatch.setattr("src.api.routes.chat.get_permission_service", lambda: service)
+
+
+@pytest.mark.parametrize("start", ["edit", "first_generation"])
+@pytest.mark.parametrize("first", ["owner", "contributor"])
+def test_begin_generation_refuses_while_another_generation_is_live(env, first, start):
+    """Two people pressed Enter on one deck inside the window before either
+    snapshot existed, so both passed the route's holder checks.  Under the deck
+    lock, ``begin_generation`` refuses the second Enter -- naming the first's
+    sender -- and writes nothing.  Once the first generation has ended, the same
+    Enter is accepted."""
+    from src.api.services.session_manager import GenerationRefusedError
+
+    deck = _deck_for(env, start)
+    sm = get_session_manager()
+    a_sid, a_user = deck.of(first)
+    b_sid, _ = deck.other(first)
+    rid_a = press_enter(env, a_sid)
+    assert sm.acquire_session_lock(b_sid)
+    rid_b = sm.create_chat_request(b_sid)
+    sm.bind_session_lock(b_sid, rid_b)
+    before = env.tables()
+
+    with pytest.raises(GenerationRefusedError) as refused:
+        sm.begin_generation(b_sid, rid_b)
+
+    assert refused.value.reason == GENERATION_IN_FLIGHT
+    assert refused.value.holder == a_user
+    _assert_tables_equal(before, env.tables())
+    assert env.snapshot_rows(rid_b) == []
+    assert [s["state"] for s in env.snapshot_rows(rid_a)] == ["active"]
+
+    end_generation(env, rid_a, a_sid, "completed")
+    sm.begin_generation(b_sid, rid_b)
+    assert [s["state"] for s in env.snapshot_rows(rid_b)] == ["active"]
+
+
+@pytest.mark.parametrize("start", ["edit", "first_generation"])
+@pytest.mark.parametrize("first", ["owner", "contributor"])
+def test_enter_raced_past_the_route_check_is_refused_423(api, monkeypatch, first, start):
+    """The race, through the real route: B's ``POST /api/chat/async`` passes its
+    holder check (no snapshot yet), and A's Enter commits its snapshot before B's
+    reaches ``begin_generation``.  B is answered 423 ``Session is locked by <A>``,
+    B's request is ended ``error`` and B's session lock given back; nothing of B's
+    is snapshotted, saved or queued, and A's generation is untouched."""
+    env = api.rb
+    deck = _deck_for(env, start)
+    grant_contributor_edit(monkeypatch)
+    sm = get_session_manager()
+    a_sid, a_user = deck.of(first)
+    b_sid, b_user = deck.other(first)
+    raced: Dict[str, str] = {}
+    real_get_deck_mode = sm.get_deck_mode
+    earlier = {r["request_id"] for r in env.tables()["chat_requests"]}
+
+    def get_deck_mode_after_a_entered(session_id: str):
+        # The route reads the deck mode after its holder check and right before
+        # begin_generation: A's Enter lands exactly in that window.
+        if session_id == b_sid and not raced:
+            with as_user(a_user):
+                raced["rid"] = press_enter(env, a_sid)
+        return real_get_deck_mode(session_id)
+
+    monkeypatch.setattr(sm, "get_deck_mode", get_deck_mode_after_a_entered)
+    api.sign_in(b_user)
+
+    resp = api.submit(b_sid)
+
+    assert raced, "the route never read the deck mode; the race was not staged"
+    assert resp.status_code == 423, (resp.status_code, resp.text)
+    assert resp.json() == {"detail": locked_by(a_user)}
+    api.enqueued.assert_not_awaited()
+    after = env.tables()
+    b_requests = [
+        r
+        for r in after["chat_requests"]
+        if r["session_id"] == env.pk(b_sid) and r["request_id"] not in earlier
+    ]
+    assert len(b_requests) == 1
+    refused = b_requests[0]
+    assert (refused["status"], refused["rollback_outcome"]) == ("error", None)
+    assert env.snapshot_rows(refused["request_id"]) == []
+    assert [
+        m for m in after["session_messages"] if m["request_id"] == refused["request_id"]
+    ] == [], "the refused Enter saved its user message"
+    _assert_lock(env, b_sid, held_by=None)
+    assert [s["state"] for s in env.snapshot_rows(raced["rid"])] == ["active"]
+    _assert_lock(env, a_sid, held_by=raced["rid"])

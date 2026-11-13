@@ -1007,14 +1007,19 @@ class GenerationRefusedError(Exception):
     Raised by ``SessionManager.begin_generation`` before anything is written.
     ``reason`` is :attr:`RESTORE_PENDING` (a failed restore is pending on the
     deck) or :attr:`ARC_REVIEW_IN_FLIGHT` (the arc-review sweeper holds a live
-    claim on it); the route maps it to its 409 copy.
+    claim on it), which the route maps to its 409 copy; or
+    :attr:`GENERATION_IN_FLIGHT` (another request's generation is live on the
+    deck), which it answers 423 "Session is locked by" ``holder``.
     """
 
     RESTORE_PENDING = "restore_pending"
     ARC_REVIEW_IN_FLIGHT = "arc_review_in_flight"
+    GENERATION_IN_FLIGHT = "generation_in_flight"
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, *, holder: Optional[str] = None):
         self.reason = reason
+        #: GENERATION_IN_FLIGHT only: the live generation's sender (``created_by``).
+        self.holder = holder
         super().__init__(f"Generation refused: {reason}")
 
 
@@ -3924,18 +3929,26 @@ class SessionManager:
     EDITING_LOCK_TIMEOUT_SECONDS = 45  # safety net for browser crashes when heartbeat stops
 
     def _live_generation_holder(
-        self, db: Session, deck_owner: UserSession, *, live_only: bool = False
+        self,
+        db: Session,
+        deck_owner: UserSession,
+        *,
+        live_only: bool = False,
+        other_than: Optional[str] = None,
     ) -> Optional[str]:
         """Who a live Agent generation holds *deck_owner*'s deck for, or ``None``.
 
         The newest ``GenerationSnapshot`` on the deck whose request is live
         (``pending``/``running``) or, unless *live_only*, whose own state is
-        ``restore_failed`` (a failed restore keeps the deck locked to its sender).
-        Returns the actor session's ``created_by``: the string ``get_current_user()``
-        returns and ``locked_by`` stores.  A monolith turn writes no snapshot, so it
-        holds nothing.
+        ``restore_failed`` (a failed restore keeps the deck locked to its sender);
+        a snapshot of the request *other_than* does not count.  Returns the actor
+        session's ``created_by``: the string ``get_current_user()`` returns and
+        ``locked_by`` stores.  A monolith turn writes no snapshot, so it holds
+        nothing.
         """
         base, where = generation_hold_clause(deck_owner.id, live_only=live_only)
+        if other_than is not None:
+            where = (*where, GenerationSnapshot.request_id != other_than)
         row = db.execute(
             base.add_columns(UserSession.created_by)
             .join(UserSession, UserSession.id == GenerationSnapshot.actor_session_pk)
@@ -4305,10 +4318,17 @@ class SessionManager:
         """Enter on an Agent deck: refuse, or take the turn's generation snapshot.
 
         One transaction, whose first lock is the deck owner's
-        ``session_slide_decks`` row (``FOR UPDATE``, when the deck has one; a
-        no-op on SQLite), as ``_refuse_during_an_arc_review`` takes it.  That lock
-        is what serialises Enter against the arc-review sweeper's claim.  Then:
+        ``session_slide_decks`` row (``FOR UPDATE``; a no-op on SQLite), as
+        ``_refuse_during_an_arc_review`` takes it.  That lock is what serialises
+        Enter against the arc-review sweeper's claim and against another Enter on
+        the deck.  A deck with no row yet (a first generation) locks the owner's
+        ``user_sessions`` row instead: there is nothing else to queue on.  Then:
 
+        - another request's live generation on the deck refuses
+          (``GenerationRefusedError.GENERATION_IN_FLIGHT``, naming its sender):
+          the route's holder checks ran before this lock, so two Enters in that
+          window (the owner's and a contributor's, each in their own session)
+          both passed them.  Only one generation per deck;
         - a failed restore pending on the deck refuses
           (``GenerationRefusedError.RESTORE_PENDING``): a snapshot now would
           capture the deck the failed restore left;
@@ -4337,6 +4357,25 @@ class SessionManager:
                 .with_for_update()
                 .first()
             )
+            if deck is None:
+                # Nothing to lock but the owner's row.  Only when there is no deck
+                # row: the turn writers take user_sessions BEFORE the deck row, so
+                # holding the deck row while waiting for this one could deadlock.
+                (
+                    db.query(UserSession.id)
+                    .filter(UserSession.id == owner.id)
+                    .with_for_update()
+                    .first()
+                )
+            # A fresh statement after the lock: it sees an Enter that committed
+            # its snapshot while this one queued.
+            holder = self._live_generation_holder(
+                db, owner, live_only=True, other_than=request_id
+            )
+            if holder is not None:
+                raise GenerationRefusedError(
+                    GenerationRefusedError.GENERATION_IN_FLIGHT, holder=holder
+                )
             if has_pending_restore(session_id):
                 raise GenerationRefusedError(GenerationRefusedError.RESTORE_PENDING)
             if deck is not None and review_in_flight(deck, datetime.utcnow()):
