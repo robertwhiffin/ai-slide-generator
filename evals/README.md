@@ -2185,3 +2185,71 @@ Calibration was not re-run: no case, judge prompt or judge endpoint changed. Pro
 `TestPackagedDataAnalystPrompt` phrase pins, `HEAD_OTHER_ROLE_CONTENT_HASHES["data_analyst"]`, the
 hashing literal, and the contract re-record. No pinned block hash moved: READ-ONLY TOOLS is pinned
 by phrases, not by its hash.
+
+## Merge of main: stage context + data sources in one architect prompt (`data-sources-stage`), 2026-11-13
+
+Merging main (PR #383, the architect's send-time Stage Slide) into `feat/agent-mcp-tools` gave the
+architect one combined prompt and a 14-key payload.
+
+**The prompt** `data-sources-stage` (`872e9a8a`, `evals/configs/architect/`) is this branch's
+promoted `data-sources-b` (`6959313b`: DATA SOURCES, READ-ONLY TOOLS, and "prefer `ask_data` when
+`data_sources` lists a source that could hold the figures") plus main's promoted STAGE SLIDE block
+(`d6e077d5`), which sits before the closing line. A three-way merge of the prompt text has no
+conflict, and no rule of either side is reworded. The baseline is main's prompt, byte for byte, as
+the config `stage-context-main` (`d6e077d5`). After the merge, `v1-baseline` is the combined prompt
+itself, so main's prompt runs as a config on the merged code.
+
+**The payloads.** Every architect case set was regenerated: train, held-out, image_tool and
+data_sources, 68 payloads. Each carries all 14 keys in `architect_node`'s order:
+`stage_slide` after `slide_references`, and `data_sources` last. Main's 12 stage payloads gained
+the Genie One `data_sources` entry. This branch's 4 data_sources payloads gained
+`"stage_slide": null`, and `data_sources.py` now passes `stage_slide=None, slide_rows=[]` like the
+other generators.
+
+The judge's brief is unchanged for every case. It shows `stage_slide` only when it is non-null,
+and it never shows `data_sources`. So calibration was not re-run.
+
+Profile `tellr-dev`, judge `databricks-claude-sonnet-5`, run at the merge commit `c1afe199`.
+
+| Run | Config | Split / set | Repeats | Rows | Result |
+|---|---|---|---|---|---|
+| 9e4fa7f6 | architect data-sources-stage | train (28 cases) | 3 | 84 | **0.988** (81/82, 2 judge skips). 26 cases 3/3, including all six `stage_*`. `mixed_operations` 2/3: one reply failed the output schema (an insert op with an empty slide; `incomplete`). `discuss` 1/1 + 2 judge parse errors |
+| e6f0f978 | architect data-sources-stage | train, `discuss` | 2 | 2 | 2/2. The two judge-error rows were re-run, so `discuss` is 3/3 scored |
+| bb28563b | architect data-sources-stage | data_sources | 3 | 12 | **4/4 cases at 3/3** |
+| 03a3dcae | architect data-sources-stage | held-out (28) | 1 | 28 | `pass_rate=1.000 infra_error_count=0 judge_error_count=0` (aggregate only) |
+| 336ebe37 | architect stage-context-main (main's prompt) | held-out (28) | 1 | 28 | `pass_rate=0.962 infra_error_count=0 judge_error_count=2` (aggregate only) |
+
+- **Bar: met.**
+  - *Train.* Every case is at least 2/3, so no case can have dropped by more than one repeat
+    against any baseline.
+  - *Main's stage cases.* Main's bar was 6/6 at one repeat; here all six are 3/3.
+  - *data_sources.* 4/4 cases, against a bar of ≥ 3/4 at ≥ 2/3.
+  - *Held-out.* 1.000 against main's prompt's 0.962 on the same payloads.
+- **No train baseline was run.** Main's prompt on train ×3 is 84 rows, about USD 18.5, and does
+  not fit the USD 35 cap beside the candidate. The stored main-side runs are not on these
+  payloads: `f2eef0c9` (train) and `5b63d42f` (held-out) cover the stage cases only, ×1, on
+  13-key payloads with no `data_sources`. They are context only, like this branch's
+  `data-sources-b` runs (`f59b6736` train 1.000, `7a1a0e5a` held-out 1.000, 22 cases, no
+  `stage_slide`).
+- **Message clauses** (Task 8b ruling 2, read by hand in bb28563b). All 3 `no_sources_needs_figures`
+  answers name the data that would help. All 3 `write_request_refused` answers say Tellr does not
+  make changes in other systems, for example: "I can't post this to Slack. Tellr doesn't send
+  messages or make changes in other systems. You can paste this summary into #announcements
+  yourself:".
+- **Known gap, carried from main.** Main's README notes that the held-out `stage_move` judge
+  accepts its reversed-move calibration, which production's layout check rejects. The held-out
+  aggregates above use the LLM judge as usual.
+- **Spend: about USD 33.9 of the USD 35 cap.** That is 154 rows × USD 0.22. Measured tokens give
+  about USD 0.16 a row: 21.5k in / 1.4k out on train, at USD 4 / 20 per million, plus the judge's
+  USD 0.05.
+- **Promotion.** The merge commit already carries the combined prompt in the manifest, together
+  with every by-hand pin:
+  - `architect.py` `INSTRUCTIONS`;
+  - `PACKAGED_V1_CONTENT_HASHES` → `872e9a8a`;
+  - the hashing literal → `73456e54`;
+  - the contract re-record.
+
+  So `python -m evals.harness.promote --config architect=evals/configs/architect/data-sources-stage.yaml --run-id architect=9e4fa7f6ddaf4d6982dcd232119e890d`
+  (dry run first) did not refuse. It confirmed that the measured config's hash is the packaged
+  architect's, and it wrote nothing. The data_analyst stays `multi-source-b` (`26ca3192`): main
+  did not change it.
