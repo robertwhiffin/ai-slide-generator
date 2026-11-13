@@ -8,6 +8,7 @@ import src.core.database  # noqa: F401  (break import cycle before src.services.
 from src.domain.deck_spec import DesignContractRef
 from src.domain.slide_numbering import architect_slide_payload
 from src.services.agent_model_payload import model_payload_for
+from src.services.graph.nodes import GENIE_ONE_DATA_SOURCE
 from src.services.spec_sync import ARC_REVIEW_MESSAGE
 from src.services.template_sections import section_inventory
 
@@ -158,6 +159,7 @@ def _payload(cid):
         "resolved_style": case.meridian_resolved_style(),
         "design_system_library": m.LIBRARY,
         "deck_style_context": case.meridian_deck_style_context(),
+        "data_sources": [GENIE_ONE_DATA_SOURCE],
     })
 
 

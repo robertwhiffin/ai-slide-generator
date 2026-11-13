@@ -57,7 +57,7 @@ def mock_chat_service():
 
 ### 3.1 Chat Endpoint Tests
 
-**Goal:** Validate `/api/chat` endpoints for sync, async, and polling operations.
+**Goal:** Validate the async and polling chat endpoints. SSE coverage lives in the streaming test suites. The unused synchronous `POST /api/chat` endpoint was removed (#286); `tests/unit/test_app_wiring.py` checks that it is absent from routing and OpenAPI.
 
 ```
 tests/integration/test_api_routes.py::TestChatEndpoints
@@ -65,17 +65,10 @@ tests/integration/test_api_routes.py::TestChatEndpoints
 
 | Test | Endpoint | Scenario | Expected |
 |------|----------|----------|----------|
-| `test_chat_without_session_id_creates_session` | POST `/api/chat` | Missing session_id | 200 (session auto-created) |
-| `test_chat_requires_message` | POST `/api/chat` | Missing message | 422 |
-| `test_chat_empty_message_rejected` | POST `/api/chat` | Empty message | 422 |
-| `test_chat_empty_session_id_creates_session` | POST `/api/chat` | Empty string session_id | 200 (session auto-created) |
-| `test_chat_session_not_found` | POST `/api/chat` | Invalid session_id | 404 |
-| `test_chat_session_busy` | POST `/api/chat` | Session locked | 409 |
-| `test_chat_success` | POST `/api/chat` | Valid request | 200 |
-| `test_chat_with_slide_context` | POST `/api/chat` | With slide selection | 200 |
-| `test_chat_invalid_slide_context_non_contiguous` | POST `/api/chat` | Non-contiguous indices | 422 |
-| `test_chat_invalid_slide_context_mismatch_length` | POST `/api/chat` | Indices/htmls length mismatch | 422 |
-| `test_chat_internal_error` | POST `/api/chat` | Service throws | 500 |
+| `test_chat_requires_message` | POST `/api/chat/async` | Missing message | 422 |
+| `test_chat_empty_message_rejected` | POST `/api/chat/async` | Empty message | 422 |
+| `test_chat_invalid_slide_context_non_contiguous` | POST `/api/chat/async` | Non-contiguous indices | 422 |
+| `test_chat_invalid_slide_context_mismatch_length` | POST `/api/chat/async` | Indices/htmls length mismatch | 422 |
 | `test_health_check` | GET `/api/health` | Health check | 200 (`{"status": "healthy"}`) |
 | `test_chat_async_submit` | POST `/api/chat/async` | Async job creation | 200 + request_id |
 | `test_chat_async_session_busy` | POST `/api/chat/async` | Session locked | 409 |

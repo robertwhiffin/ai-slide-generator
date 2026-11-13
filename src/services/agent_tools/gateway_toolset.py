@@ -18,9 +18,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
-from src.api.schemas.agent_config import GatewayMcpTool
+from src.api.schemas.agent_config import GatewayMcpTool, MCPTool
 from src.core.scope_errors import consent_message, oauth_scopes_from_token, scopes_grant
 from src.services.agent_tools.gateway_mcp import (
+    ConnectionMcpClient,
     GatewayMcpClient,
     GatewayMcpError,
     GatewayToolSpec,
@@ -46,6 +47,8 @@ _MAX_NAME_LEN: Final = 64
 #: Names the model already sees: Genie One's tool and the output-schema tools the
 #: runtime loop binds beside the others.
 _RESERVED_NAMES: Final = frozenset({"genie", "ArchitectOutput", "AnalystOutput", "generate_image"})
+#: Genie Agent tools are named ``genie_agent_*``; no Gateway or connection tool may take that space.
+_RESERVED_PREFIX: Final = "genie_agent_"
 _UNSAFE_RE: Final = re.compile(r"[^A-Za-z0-9_-]")
 
 FailureKind = Literal[
@@ -60,6 +63,7 @@ class GatewayFailure:
     kind: FailureKind
     message: str | None
     sign_in_url: str | None
+    source: Literal["gateway", "connection"] = "gateway"
 
 
 @dataclass
@@ -68,6 +72,8 @@ class GatewayToolsetBuild:
     failures: tuple[GatewayFailure, ...]
     #: model tool name -> (display_name, service_name)
     owners: dict[str, tuple[str, str]] = field(default_factory=dict, repr=False)
+    #: keys (connection names) of the UC connection sources
+    connection_keys: frozenset[str] = frozenset()
 
     def saved_tokens(self) -> list[str]:
         """Every image token the tools saved, each once."""
@@ -90,6 +96,7 @@ class GatewayToolsetBuild:
                 kind=err.kind,
                 message=err.message,
                 sign_in_url=err.sign_in_url,
+                source="connection" if owner[1] in self.connection_keys else "gateway",
             )
         return list(out.values())
 
@@ -133,7 +140,11 @@ def model_tool_names(specs_by_service: Mapping[str, Sequence[str]]) -> dict[tupl
         for tool in tools:
             if (service, tool) in names:
                 continue
-            clash = counts[tool] > 1 or tool in _RESERVED_NAMES
+            clash = (
+                counts[tool] > 1
+                or tool in _RESERVED_NAMES
+                or _sanitise(tool).startswith(_RESERVED_PREFIX)
+            )
             base = _sanitise(f"{slugs[service]}__{tool}" if clash else tool)[:_MAX_NAME_LEN]
             name, n = base, 1
             while name in taken:
@@ -150,9 +161,27 @@ def model_tool_names(specs_by_service: Mapping[str, Sequence[str]]) -> dict[tupl
 # ---------------------------------------------------------------------------
 
 
-def _failure_from_error(row: GatewayConnection, err: GatewayMcpError) -> GatewayFailure:
-    kind: FailureKind = "unavailable" if err.kind == "timeout" else err.kind
-    return GatewayFailure(row.display_name, row.service_name, kind, err.message, err.sign_in_url)
+@dataclass(frozen=True)
+class _Source:
+    """One thing to list tools from: a Gateway registry row or a UC connection."""
+
+    key: str
+    display_name: str
+    instructions: str | None
+    allowlist: tuple[str, ...] | None
+    is_connection: bool
+
+    def failure(
+        self, kind: FailureKind, message: str | None, sign_in_url: str | None = None
+    ) -> GatewayFailure:
+        return GatewayFailure(
+            self.display_name,
+            self.key,
+            kind,
+            message,
+            sign_in_url,
+            "connection" if self.is_connection else "gateway",
+        )
 
 
 def build_gateway_tools(
@@ -167,12 +196,17 @@ def build_gateway_tools(
     session_id: str | None,
     client_factory: Callable[..., GatewayMcpClient] = GatewayMcpClient,
     deadline_at: float | None = None,
+    connections: Sequence[MCPTool] = (),
+    connection_client_factory: Callable[..., GatewayMcpClient] = ConnectionMcpClient,
 ) -> GatewayToolsetBuild:
     """The Gateway tools of *agent* for a deck's *entries*, plus what could not be bound.
 
     An entry whose registry row is missing is ``removed`` (reported by the
     architect pass only, so the user is told once); a disabled row is ``removed``
     for its own agent only; a row for the other agent is skipped silently.
+
+    *connections* are UC MCP connection entries; those of *agent* are bound beside the
+    Gateway services (the ``ai-gateway`` scope pre-flight applies to Gateway rows only).
     """
     slots: list[GatewayFailure | GatewayConnection] = []
     seen: set[str] = set()
@@ -195,43 +229,70 @@ def build_gateway_tools(
         slots.append(row)
 
     scopes = oauth_scopes_from_token(token)
-    if scopes is not None and not scopes_grant(scopes, _GATEWAY_SCOPE):
-        return GatewayToolsetBuild(
-            tools=(),
-            failures=tuple(
-                slot
-                if isinstance(slot, GatewayFailure)
-                else GatewayFailure(
+    lacks_gateway = scopes is not None and not scopes_grant(scopes, _GATEWAY_SCOPE)
+
+    # A failure, or a source to list.  A Gateway row of a token without ai-gateway
+    # fails here; connections never do.
+    final_slots: list[GatewayFailure | _Source] = []
+    for slot in slots:
+        if isinstance(slot, GatewayFailure):
+            final_slots.append(slot)
+        elif lacks_gateway:
+            final_slots.append(
+                GatewayFailure(
                     slot.display_name,
                     slot.service_name,
                     "missing_scope",
                     "The sign-in token lacks the ai-gateway scope.",
                     None,
                 )
-                for slot in slots
-            ),
+            )
+        else:
+            final_slots.append(
+                _Source(
+                    slot.service_name,
+                    slot.display_name,
+                    slot.instructions,
+                    slot.tool_allowlist,
+                    False,
+                )
+            )
+
+    service_names = {entry.service_name for entry in entries}
+    seen_connections: set[str] = set()
+    for conn in connections:
+        if conn.agent != agent or conn.connection_name in seen_connections:
+            continue
+        seen_connections.add(conn.connection_name)
+        if conn.connection_name in service_names:
+            logger.warning(
+                "Skipping MCP connection %s: its name is also an AI Gateway service",
+                conn.connection_name,
+            )
+            continue
+        final_slots.append(
+            _Source(conn.connection_name, conn.server_name, conn.description, None, True)
         )
 
-    rows = [slot for slot in slots if isinstance(slot, GatewayConnection)]
-    clients = {
-        row.service_name: client_factory(
-            host=host, token=token, service_name=row.service_name, token_scopes=scopes
+    sources = [slot for slot in final_slots if isinstance(slot, _Source)]
+    clients: dict[str, GatewayMcpClient] = {
+        src.key: (connection_client_factory if src.is_connection else client_factory)(
+            host=host, token=token, service_name=src.key, token_scopes=scopes
         )
-        for row in rows
+        for src in sources
     }
 
-    def list_one(row: GatewayConnection) -> list[GatewayToolSpec] | GatewayFailure:
+    def list_one(src: _Source) -> list[GatewayToolSpec] | GatewayFailure:
         try:
-            specs = clients[row.service_name].list_tools()
+            specs = clients[src.key].list_tools()
         except GatewayMcpError as err:
-            return _failure_from_error(row, err)
+            kind: FailureKind = "unavailable" if err.kind == "timeout" else err.kind
+            return src.failure(kind, err.message, err.sign_in_url)
         except Exception as exc:  # noqa: BLE001 - one connection must not stop the others
-            logger.warning("Listing %s failed", row.service_name, exc_info=True)
-            return GatewayFailure(
-                row.display_name, row.service_name, "unavailable", str(exc) or None, None
-            )
-        if row.tool_allowlist is not None:
-            allowed = set(row.tool_allowlist)
+            logger.warning("Listing %s failed", src.key, exc_info=True)
+            return src.failure("unavailable", str(exc) or None)
+        if src.allowlist is not None:
+            allowed = set(src.allowlist)
             specs = [spec for spec in specs if spec.name in allowed]
         # Two tools of one name make the provider reject the whole model call, so a
         # name the service lists twice is bound once (its first listing).
@@ -241,45 +302,48 @@ def build_gateway_tools(
         return list(unique.values())
 
     results: dict[str, list[GatewayToolSpec] | GatewayFailure] = {}
-    if rows:
-        with ThreadPoolExecutor(max_workers=len(rows)) as pool:
-            futures = {row.service_name: pool.submit(list_one, row) for row in rows}
-            results = {service: future.result() for service, future in futures.items()}
+    if sources:
+        with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+            futures = {src.key: pool.submit(list_one, src) for src in sources}
+            results = {key: future.result() for key, future in futures.items()}
 
     failures: list[GatewayFailure] = []
-    bound: dict[str, tuple[GatewayConnection, list[GatewayToolSpec]]] = {}
-    for slot in slots:
+    bound: dict[str, tuple[_Source, list[GatewayToolSpec]]] = {}
+    for slot in final_slots:
         if isinstance(slot, GatewayFailure):
             failures.append(slot)
             continue
-        result = results[slot.service_name]
+        result = results[slot.key]
         if isinstance(result, GatewayFailure):
             failures.append(result)
         else:
-            bound[slot.service_name] = (slot, result)
+            bound[slot.key] = (slot, result)
 
     names = model_tool_names({s: [spec.name for spec in specs] for s, (_, specs) in bound.items()})
     tools: list[GatewayMcpAgentTool] = []
     owners: dict[str, tuple[str, str]] = {}
-    for service, (row, specs) in bound.items():
+    for key, (src, specs) in bound.items():
         ctx = GatewayToolContext(
-            display_name=row.display_name,
-            service_name=service,
-            client=clients[service],
-            save_image=make_image_saver(
-                user=user, service_name=service, display_name=row.display_name
-            ),
+            display_name=src.display_name,
+            service_name=key,
+            client=clients[key],
+            save_image=make_image_saver(user=user, service_name=key, display_name=src.display_name),
             on_call=on_call,
             session_id=session_id,
             deadline_at=deadline_at,
         )
         for spec in specs:
-            name = names[(service, spec.name)]
+            name = names[(key, spec.name)]
             tools.append(
-                GatewayMcpAgentTool(spec, ctx, model_name=name, description_prefix=row.instructions)
+                GatewayMcpAgentTool(spec, ctx, model_name=name, description_prefix=src.instructions)
             )
-            owners[name] = (row.display_name, service)
-    return GatewayToolsetBuild(tools=tuple(tools), failures=tuple(failures), owners=owners)
+            owners[name] = (src.display_name, key)
+    return GatewayToolsetBuild(
+        tools=tuple(tools),
+        failures=tuple(failures),
+        owners=owners,
+        connection_keys=frozenset(src.key for src in sources if src.is_connection),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +382,16 @@ def failure_notice(failure: GatewayFailure, *, oauth_client_id: str | None) -> s
         return f"To use {name}, sign in to {service} — then ask again."
     if failure.kind == "missing_scope":
         return consent_message(oauth_client_id=oauth_client_id)
+    if failure.source == "connection" and failure.kind == "access_denied":
+        return (
+            f"You don't have access to {name} ({service}). "
+            "Ask the connection's owner to grant you USE CONNECTION on it."
+        )
+    if failure.source == "connection" and failure.kind == "not_found":
+        return (
+            f"{name} ({service}) was not found on this workspace. "
+            "Check the connection in Catalog Explorer."
+        )
     if failure.kind == "access_denied":
         return f"You don't have access to {name} ({service}). Ask an admin to grant EXECUTE on it."
     if failure.kind == "removed":

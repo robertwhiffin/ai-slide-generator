@@ -6,14 +6,14 @@ This guide walks you through creating AI-generated presentations using Databrick
 
 The slide generation workflow allows you to:
 - Create presentations from natural language prompts
-- Pull live data from connected Genie rooms
+- Pull live data from connected Genie Agents
 - Iteratively refine slides through conversation
 - Export to PowerPoint, PDF, or HTML
 
 ## Prerequisites
 
 - Access to the Databricks Tellr application
-- A Genie room with relevant data (optional, for data-driven slides)
+- A Genie Agent with relevant data (optional, for data-driven slides)
 
 ## Step-by-Step Instructions
 
@@ -133,7 +133,11 @@ To remove one exchange from the conversation, hover over one of your messages in
 **Things to know:**
 - **It cannot be undone.** The deleted messages do not come back to the chat, and no placeholder is left in their place.
 - **Save points keep the chat they were saved with.** Previewing an older save point still shows an exchange you deleted later. Restoring a save point never brings a deleted exchange back to the chat.
-- **Genie spaces keep their own history.** Questions the assistant already put to a Genie space stay in that space's own conversation. Deleting a message does not remove them.
+- **Genie Agents keep their own history.** Questions the assistant already put to a Genie Agent stay in that agent's own conversation. Deleting a message does not remove them.
+
+## Choosing the Agent for an MCP Server
+
+When you add or edit an MCP Server in the agent config bar, the panel asks **Which agent uses it?** Pick **Data analyst** for servers that fetch data for charts and tables. Pick **Architect** for servers that fetch other context for planning the slides, such as documents, pages or references. The chip shows the agent after the server name. On an agent-mode deck, Vector Index, Agent Bricks and Model Endpoint tools are marked "not used in agent mode", and **Other tools** offers only Genie Agents and MCP Servers on agent decks.
 
 ## Navigating Slides
 

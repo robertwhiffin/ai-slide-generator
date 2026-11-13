@@ -103,6 +103,7 @@ OLD_ARCHITECT_KEYS = frozenset(
         "resolved_style",
         "design_system_library",
         "deck_style_context",
+        "data_sources",
     }
 )
 

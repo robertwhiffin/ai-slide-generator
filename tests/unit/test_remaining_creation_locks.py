@@ -356,7 +356,7 @@ def test_legacy_duplicate_stays_unpinned_and_never_locks(factory):
         ) is None
 
 
-@pytest.mark.parametrize("route_name", ["send_message", "send_message_streaming", "submit_chat_async"])
+@pytest.mark.parametrize("route_name", ["send_message_streaming", "submit_chat_async"])
 def test_chat_creation_unavailability_maps_to_exact_503(route_name):
     """A missing active release at a chat creator must not leak or become a generic 500."""
     from src.api.routes import chat

@@ -709,18 +709,18 @@ def test_owner_chat_allowed_while_contributor_holds_idle_heartbeat_lock(api, dec
 
 @pytest.mark.parametrize(
     "path,gated",
-    [("/api/chat", False), ("/api/chat/stream", False), ("/api/chat/async", True)],
+    [("/api/chat/stream", False), ("/api/chat/async", True)],
 )
 def test_owner_gate_applies_only_to_the_async_route(api, monkeypatch, path, gated):
     """The 423 owner gate is the deployed transport's alone: with a contributor's
     Agent generation live, the OWNER's ``/api/chat/async`` is refused 423 while the
-    sync ``/api/chat`` and the SSE ``/api/chat/stream`` are not (their behaviour is
-    unchanged).  The chat service is stubbed, so the ungated routes just run."""
+    SSE ``/api/chat/stream`` is not (its behaviour is unchanged).  The chat service
+    is stubbed, so the ungated route just runs.  (The synchronous ``POST /api/chat``
+    was retired by #382; ``test_app_wiring`` pins that it stays gone.)"""
     env = api.rb
     deck = shared_deck(env)
     start_generation(env, deck.contributor, "running")
     service = MagicMock()
-    service.send_message.return_value = {}
     service.send_message_streaming.return_value = iter(())
     monkeypatch.setattr("src.api.routes.chat.get_chat_service", lambda: service)
 
@@ -732,7 +732,7 @@ def test_owner_gate_applies_only_to_the_async_route(api, monkeypatch, path, gate
     else:
         assert resp.status_code != 423, (resp.status_code, resp.text)
         assert resp.status_code in (200, 500), (resp.status_code, resp.text)
-        assert (service.send_message.called or service.send_message_streaming.called)
+        assert service.send_message_streaming.called
 
 
 @pytest.mark.parametrize(

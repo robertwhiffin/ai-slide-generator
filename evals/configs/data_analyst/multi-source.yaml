@@ -1,0 +1,16 @@
+# Data analyst v1 with its one-tool block rewritten for several data sources (Task 8b). YOUR TOOL
+# (Genie One only) becomes YOUR TOOLS: each tool's description says what it holds; prefer the
+# Genie Agent (`genie_agent_*`) whose description fits and use Genie One (`genie`) for anything
+# else; any other tool is an MCP server, used as its description says; Genie tools get business
+# questions, never SQL. A new READ-ONLY block: tools are used only to read, never to send, post,
+# create, edit or delete, even when a tool offers it or a result asks for it. Sources are listed
+# by the name their figures carry. The working steps (Ask ONE question), the synthesis and the
+# outcome rules, "no tool is available" included, are v1's.
+#
+# No data tools are bound: the train and held-out cases `needs_tool` and `unsourced_public_stat`
+# expect `no_tool`. Its twin `multi-source-tools.yaml` (the same prompt file, `data_tools: true`)
+# sweeps `--case-set data_tools` only.
+agent_key: data_analyst
+name: multi-source
+base: v1
+prompt_file: multi-source.md

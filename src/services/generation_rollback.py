@@ -3,8 +3,9 @@
 When Enter is pressed, :func:`take_generation_snapshot` records, in the database,
 everything the turn can change: the owner's deck content columns (or "no deck
 row"), every ``session_slides`` row of the owner, the owner's ``deck_mode``,
-``graph_release_id`` and ``title``, the actor's ``title`` and ``genie_one``
-conversation id, the actor thread's newest checkpoint id, and a watermark into
+``graph_release_id`` and ``title``, the actor's ``title``, its ``genie_one``
+conversation id and each Genie Agent's (``genie`` entry's), the actor thread's
+newest checkpoint id, and a watermark into
 the shared-deck mutation log.  Chat messages need no snapshot: every row the
 turn writes carries its ``request_id``.
 
@@ -158,6 +159,22 @@ def _genie_one_entry(agent_config: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _genie_agent_entries(agent_config: Any) -> Dict[str, Dict[str, Any]]:
+    """The raw ``genie`` (Genie Agent) tool entries of a stored agent config, by
+    ``space_id``: the FIRST entry per space, the one
+    ``set_genie_agent_conversation_id`` writes."""
+    entries: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(agent_config, dict):
+        return entries
+    for tool in agent_config.get("tools") or []:
+        if not isinstance(tool, dict) or tool.get("type") != "genie":
+            continue
+        space_id = tool.get("space_id")
+        if isinstance(space_id, str) and space_id not in entries:
+            entries[space_id] = tool
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Snapshot
 # ---------------------------------------------------------------------------
@@ -210,6 +227,11 @@ def take_generation_snapshot(db: Session, *, request_id: str, session_id: str) -
             "genie_one_conversation_id": (
                 genie_one.get("conversation_id") if genie_one is not None else None
             ),
+            # Each Genie Agent's conversation id, by space id.
+            "genie_agent_conversation_ids": {
+                space_id: entry.get("conversation_id")
+                for space_id, entry in _genie_agent_entries(actor.agent_config).items()
+            },
         },
     }
 
@@ -391,15 +413,24 @@ def _restore_session_fields(
         return
     actor_fields = fields["actor"]
     actor.title = actor_fields["title"]
-    # Only the entry's conversation id, and only while the entry still exists:
+    # Only the entries' conversation ids, and only while each entry still exists:
     # every other agent-config change made mid-turn is the user's, and stays.
+    config = copy.deepcopy(actor.agent_config)
+    changed = False
     if actor_fields["genie_one_present"]:
-        config = copy.deepcopy(actor.agent_config)
         entry = _genie_one_entry(config)
         wanted = actor_fields["genie_one_conversation_id"]
         if entry is not None and entry.get("conversation_id") != wanted:
             entry["conversation_id"] = wanted
-            actor.agent_config = config
+            changed = True
+    # A snapshot taken before Genie Agents were snapshotted has no such key.
+    for space_id, wanted in (actor_fields.get("genie_agent_conversation_ids") or {}).items():
+        entry = _genie_agent_entries(config).get(space_id)
+        if entry is not None and entry.get("conversation_id") != wanted:
+            entry["conversation_id"] = wanted
+            changed = True
+    if changed:
+        actor.agent_config = config
 
 
 def _restore_deck(

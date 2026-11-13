@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from src.api.schemas.agent_config import (
     GenieOneTool,
+    GenieTool,
     normalize_agent_config_dict,
     resolve_agent_config,
     sanitize_agent_config_for_persist,
@@ -1869,6 +1870,61 @@ class SessionManager:
             logger.info(
                 "Updated Genie One conversation ID",
                 extra={"session_id": session_id, "conversation_id": conversation_id},
+            )
+
+    def set_genie_agent_conversation_id(
+        self, session_id: str, space_id: str, conversation_id: str
+    ) -> None:
+        """Store *conversation_id* on this row's ``genie`` entry for *space_id*.
+
+        :meth:`set_genie_one_conversation_id`'s twin, for a Genie Agent (a curated
+        Genie space).  Per user per deck: *session_id* is the ACTOR's row, and only
+        the ``genie`` entry whose ``space_id`` matches changes.  A targeted
+        read-modify-write in one transaction, the row locked, so a config saved
+        between the turn's read and this write is not lost; the config is
+        re-serialized through ``AgentConfig``.  A row without that space's entry
+        (the user removed it mid-turn) is left alone.
+
+        Fenced (``TurnFencedError``) when called from a stopped turn; the claim
+        comes before the row lock, the lock order every turn writer keeps.
+        """
+        with get_db_session() as db:
+            fence_turn_write(db)
+            session = (
+                db.query(UserSession)
+                .filter(UserSession.session_id == session_id)
+                .with_for_update()
+                .first()
+            )
+            if session is None:
+                raise SessionNotFoundError(f"Session not found: {session_id}")
+            config = resolve_agent_config(session.agent_config)
+            entry = next(
+                (
+                    t
+                    for t in config.tools
+                    if isinstance(t, GenieTool) and t.space_id == space_id
+                ),
+                None,
+            )
+            if entry is None:
+                logger.info(
+                    "No Genie Agent entry to store a conversation ID on",
+                    extra={"session_id": session_id, "space_id": space_id},
+                )
+                return
+            if entry.conversation_id == conversation_id:
+                return
+            entry.conversation_id = conversation_id
+            session.agent_config = config.model_dump()
+
+            logger.info(
+                "Updated Genie Agent conversation ID",
+                extra={
+                    "session_id": session_id,
+                    "space_id": space_id,
+                    "conversation_id": conversation_id,
+                },
             )
 
     def set_google_slides_info(

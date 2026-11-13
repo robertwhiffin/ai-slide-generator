@@ -102,8 +102,9 @@ def _image_tool_summary(agent_key: str, run_id: str) -> str:
         value = metrics.get(key)
         return f"{value:.3f}" if value is not None else "n/a"
 
-    return (f"{agent_key}: run_id={run_id} pass_rate={rate('pass_rate')} "
-            f"{mlflow_run.IMAGE_TOOL_METRIC}={rate(mlflow_run.IMAGE_TOOL_METRIC)}")
+    metric = (mlflow_run.DATA_TOOL_METRIC if agent_key == "data_analyst"
+              else mlflow_run.IMAGE_TOOL_METRIC)
+    return f"{agent_key}: run_id={run_id} pass_rate={rate('pass_rate')} {metric}={rate(metric)}"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -186,7 +187,7 @@ def main(argv: list[str] | None = None) -> None:
             print(f"{a}: skipped - {e}")
             continue
         ran += 1
-        if args.split == "train" and (cfg.image_tool or args.case_set is not None):
+        if args.split == "train" and (cfg.image_tool or cfg.data_tools or args.case_set is not None):
             print(_image_tool_summary(a, run_id))
         elif args.split == "train":
             print(f"{a}: run_id={run_id}")

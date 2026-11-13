@@ -253,12 +253,13 @@ def test_a_generated_case_loads_like_the_committed_one(tmp_path):
 
 #: The production architect payload keys, in architect_node's order (whole-branch review I1):
 #: architect_node always sends ``stage_slide`` (null with no slide on stage), so an eval payload
-#: without it tests a prompt shape the architect never sees.
+#: without it tests a prompt shape the architect never sees.  ``data_sources`` (agent-mode Task 7)
+#: is always last.
 PAYLOAD_KEYS = [
     "conversation", "message", "current_deck_spec", "committed_slide_count",
     "slide_numbering", "slide_references", "stage_slide",
     "previous_deck_review", "available_design_contract", "template_sections",
-    "resolved_style", "design_system_library", "deck_style_context",
+    "resolved_style", "design_system_library", "deck_style_context", "data_sources",
 ]
 
 
@@ -266,7 +267,7 @@ def test_payload_keys_are_every_production_key():
     from src.services.agent_model_payload import MODEL_PAYLOAD_KEYS
 
     assert set(PAYLOAD_KEYS) == set(MODEL_PAYLOAD_KEYS[AGENT]) - {"rejected_edit"}
-    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 13
+    assert len(PAYLOAD_KEYS) == len(set(PAYLOAD_KEYS)) == 14
 
 
 @pytest.mark.parametrize("cid", sorted(CASE_IDS))

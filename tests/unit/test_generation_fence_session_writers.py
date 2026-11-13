@@ -13,6 +13,8 @@ title thread and the image pool change nothing:
 * ``SessionManager.record_chat_request_progress`` -- its conditional ``UPDATE``
   matches only a live row: ``False`` and ``progress_json`` unchanged after a stop.
 * ``SessionManager.set_genie_one_conversation_id`` -- fenced before its row lock.
+* ``SessionManager.set_genie_agent_conversation_id`` -- its twin for a Genie Agent
+  (a ``genie`` entry), the same.
 * ``SessionManager.rename_session`` / ``update_session`` -- ``request_id=`` and
   ``allow_completed=`` (the title thread can outlive the 10 s join, so a title
   arriving after ``completed`` must still land).
@@ -41,7 +43,8 @@ image save, a Gateway image save, either tool's progress row) ENDS the turn.  It
 never answered to the model in-band, and the architect makes no tool-less fallback
 call after it.  Any other tool error is still answered in-band, as today.
 ``TestARefusedWriteEndsTheAnalystLoop`` pins the same for the data analyst (Genie
-One's progress row, a Gateway tool's progress row, no fallback call).
+One's progress row, a Genie Agent's progress row, a Gateway tool's progress row, no
+fallback call; a refused Genie Agent conversation write ends the node).
 ``TestAStoppedToolLoopStartsNoFurtherRound`` pins the runtime loop's own check: a
 stop during a read-only tool call (no write to refuse) starts no further round.
 
@@ -100,6 +103,23 @@ from tests.unit.conftest_graph import (  # noqa: F401 -- fixtures
     graph_env_threadsafe,
     make_spec,
     review_out,
+)
+from tests.unit.test_data_analyst_genie_agents import (
+    LEADS,
+    MARKETING,
+    MARKETING_ID,
+    MARKETING_ROWS,
+    MARKETING_TOOL,
+    Q_MARKETING,
+    Q_SALES,
+    REVENUE,
+    SALES,
+    SALES_ID,
+    SALES_ROWS,
+    SALES_TOOL,
+    TOKEN_ALL,
+    _Genie,
+    _Space,
 )
 from tests.unit.test_data_analyst_genie_one import (
     GENIE_ONE_ONLY,
@@ -289,6 +309,35 @@ def _set_genie_one(env, conversation_id: str) -> None:
         db.close()
 
 
+def _set_genie_agents(env, conversations: Dict[str, Optional[str]]) -> None:
+    """The owner's config: one ``genie`` entry (a Genie Agent) per space id."""
+    db = env.factory()
+    try:
+        owner = db.query(UserSession).filter(UserSession.session_id == env.session_id).one()
+        owner.agent_config = {
+            "tools": [
+                {
+                    "type": "genie",
+                    "space_id": space_id,
+                    "space_name": f"MK {space_id}",
+                    "conversation_id": conversation_id,
+                }
+                for space_id, conversation_id in conversations.items()
+            ]
+        }
+        db.commit()
+    finally:
+        db.close()
+
+
+def _genie_agent_conversations(env) -> Dict[str, Optional[str]]:
+    return {
+        tool["space_id"]: tool.get("conversation_id")
+        for tool in _session_row(env)["agent_config"]["tools"]
+        if tool.get("type") == "genie"
+    }
+
+
 # -- the writers, each called the way its turn caller calls it ----------------
 
 
@@ -454,6 +503,60 @@ def test_set_genie_one_conversation_id_lands_while_live(env):
     ]
     _assert_claim_opens_the_write(transactions, "user_sessions")
     _assert_claim_precedes_the_row_lock(transactions)
+
+
+# ---------------------------------------------------------------------------
+# set_genie_agent_conversation_id (agent-mode MCP: a Genie Agent's conversation)
+# ---------------------------------------------------------------------------
+
+
+def test_set_genie_agent_conversation_id_refused_after_cancel(env):
+    _set_genie_agents(env, {"sp-sales": "conv-before-stop", "sp-marketing": None})
+    rid = _request(env, "cancelled")
+    before = _snapshot(env.engine)
+
+    with _in_turn(rid):
+        with pytest.raises(TurnFencedError) as excinfo:
+            get_session_manager().set_genie_agent_conversation_id(
+                env.session_id, "sp-sales", "conv-late"
+            )
+
+    assert excinfo.value.request_id == rid
+    _assert_unchanged(before, _snapshot(env.engine))
+
+
+def test_set_genie_agent_conversation_id_lands_while_live(env):
+    _set_genie_agents(env, {"sp-sales": "conv-before", "sp-marketing": "conv-marketing"})
+    rid = _request(env, "running")
+
+    with _in_turn(rid), _transactions(env.engine) as transactions:
+        get_session_manager().set_genie_agent_conversation_id(
+            env.session_id, "sp-sales", "conv-live"
+        )
+
+    assert _genie_agent_conversations(env) == {
+        "sp-sales": "conv-live",
+        "sp-marketing": "conv-marketing",
+    }
+    _assert_claim_opens_the_write(transactions, "user_sessions")
+    _assert_claim_precedes_the_row_lock(transactions)
+
+
+def test_set_genie_agent_conversation_id_unfenced_outside_a_turn(env):
+    """No request id (a manual call, the monolith): no fence SQL, even beside a
+    cancelled request of this session.  GREEN BY DESIGN (guard)."""
+    _set_genie_agents(env, {"sp-sales": "conv-before"})
+    _request(env, "cancelled")
+
+    with _transactions(env.engine) as transactions:
+        get_session_manager().set_genie_agent_conversation_id(
+            env.session_id, "sp-sales", "conv-manual"
+        )
+
+    assert _genie_agent_conversations(env) == {"sp-sales": "conv-manual"}
+    assert _fence_sql(transactions) == [], (
+        f"a writer outside a turn issued fence SQL: {_fence_sql(transactions)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1352,6 +1455,95 @@ class TestARefusedWriteEndsTheAnalystLoop:
 
         assert web.calls == [], "the Gateway service was called after the turn was stopped"
         _assert_the_loop_ended(runtime, raised, updates, agent="data_analyst")
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_refused_genie_agent_progress_row_ends_the_loop_before_asking(
+        self, env, monkeypatch
+    ):
+        """A Genie Agent's progress row ("Asking Sales: ...") is refused: the tool
+        must let the refusal out, so the space is never asked (an answer takes
+        minutes) and no second model round reads an answer."""
+        rid = _request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        _set_agent_config(env, env.session_id, {"tools": [dict(SALES)]})
+        _sign_in(TOKEN_ALL)
+        sales = _Space(SALES_ID, [(REVENUE, SALES_ROWS)])
+        _Genie(sales).install(monkeypatch)
+
+        def stop_then_ask():
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+            return _tool_call(SALES_TOOL, {"question": Q_SALES})
+
+        runtime = install_runtime(
+            monkeypatch, _LoopRuntime(_CountingModel(stop_then_ask, _analyst_final()))
+        )
+
+        raised, updates = _run_analyst_turn(env, rid)
+
+        assert sales.asks == [], (
+            f"the Genie Agent was asked after the turn was stopped: {sales.asks}"
+        )
+        _assert_the_loop_ended(runtime, raised, updates, agent="data_analyst")
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    def test_refused_genie_agent_conversation_write_ends_the_analyst(
+        self, env, monkeypatch, caplog
+    ):
+        """Two Genie Agents answer while the turn is live; the stop lands as the
+        model writes its answer.  The first refused conversation write ends the
+        node: it is not logged as a failed write, and the other space's write is
+        never tried (one refused claim, not one per space)."""
+        rid = _request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        _set_agent_config(env, env.session_id, {"tools": [dict(SALES), dict(MARKETING)]})
+        _sign_in(TOKEN_ALL)
+        sales = _Space(SALES_ID, [(REVENUE, SALES_ROWS)])
+        marketing = _Space(MARKETING_ID, [(LEADS, MARKETING_ROWS)])
+        _Genie(sales, marketing).install(monkeypatch)
+
+        def stop_then_answer():
+            _set_status(env, rid, "cancelled")
+            at_cancel["tables"] = _snapshot(env.engine)
+            return _analyst_final()
+
+        install_runtime(
+            monkeypatch,
+            _LoopRuntime(
+                _CountingModel(
+                    _tool_call(SALES_TOOL, {"question": Q_SALES}),
+                    _tool_call(MARKETING_TOOL, {"question": Q_MARKETING}),
+                    stop_then_answer,
+                )
+            ),
+        )
+        tried: List[str] = []
+        real_set = SessionManager.set_genie_agent_conversation_id
+
+        def spy(self, session_id, space_id, conversation_id):
+            tried.append(space_id)
+            return real_set(self, session_id, space_id, conversation_id)
+
+        monkeypatch.setattr(SessionManager, "set_genie_agent_conversation_id", spy)
+
+        with caplog.at_level(logging.WARNING):
+            raised, updates = _run_analyst_turn(env, rid)
+
+        assert [a["question"] for a in sales.asks] == [Q_SALES]
+        assert [a["question"] for a in marketing.asks] == [Q_MARKETING]
+        assert "tables" in at_cancel, "the analyst's final round never ran"
+        assert isinstance(raised, TurnFencedError), (
+            f"the refused write did not end the node; it raised {raised!r} and "
+            f"returned {updates!r}"
+        )
+        assert tried == [SALES_ID], (
+            f"another Genie Agent's write was tried after the first was refused: {tried}"
+        )
+        stored = [
+            r.getMessage() for r in caplog.records
+            if "Could not store a Genie Agent conversation id" in r.getMessage()
+        ]
+        assert stored == [], f"a refused write was logged as a failed one: {stored}"
         _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
 
 

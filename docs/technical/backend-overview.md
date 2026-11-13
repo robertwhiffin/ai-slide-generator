@@ -98,7 +98,6 @@ delete of all users' expired sessions) and `POST /api/sessions/{id}/export`
 
 | Method | Path | Purpose | Backend handler |
 | --- | --- | --- | --- |
-| `POST` | `/api/chat` | Generate/edit slides (synchronous) | `routes/chat.send_message` |
 | `POST` | `/api/chat/stream` | Generate/edit with SSE streaming | `routes/chat.send_message_streaming` |
 | `POST` | `/api/chat/async` | Submit for async processing (polling) | `routes/chat.submit_chat_async` |
 | `GET` | `/api/chat/poll/{request_id}` | Poll for async request status | `routes/chat.poll_chat` |
@@ -344,7 +343,7 @@ Mutation endpoints return **409 Conflict** if the session is already processing 
 | `src/core/permission_context.py` | Request-scoped permission context | Provides user ID and group IDs via `ContextVar` for permission checks on profiles and decks. |
 | `src/core/lakebase.py` | Lakebase database support | Token refresh and connection management for Databricks Lakebase (Postgres). |
 | `src/core/context_utils.py` | Context utilities | Shared helpers for request-scoped context management. |
-| `src/api/routes/chat.py` | `/api/chat`, `/api/chat/stream`, `/api/chat/async`, `/api/chat/poll` | Session locking, SSE streaming, polling endpoints. |
+| `src/api/routes/chat.py` | `/api/chat/stream`, `/api/chat/async`, `/api/chat/poll` | Session locking, SSE streaming, polling endpoints. |
 | `src/api/services/job_queue.py` | Async chat processing | In-memory job queue for polling mode, with `TELLR_CHAT_JOB_CONCURRENCY` runners per uvicorn worker (default 1) on a dedicated thread pool. See [Multi-User Concurrency](multi-user-concurrency.md#chat-job-runners). |
 | `src/api/services/export_job_queue.py` | Async export processing | In-memory job queue with background worker for PPTX and Google Slides exports. |
 | `src/api/services/feedback_service.py` | Feedback orchestration | LLM chat-based feedback, structured feedback submission, surveys, and reporting. |
@@ -436,6 +435,28 @@ Breaking these invariants (e.g., submitting non-contiguous indices, missing `.sl
     - Delete/remove -> "Use the trash icon in the slide panel on the right"
     - Reorder/move -> "Drag and drop in the slide panel on the right"
     - Duplicate/copy -> "Select the slide and ask 'create an exact copy'"
+
+### Agent-mode tools (graph path)
+
+The list above is the legacy agent's. On an agent-mode deck the graph's nodes bind tools from the ACTOR's own `agent_config` row (a contributor's row starts with no tools), as the signed-in user: the user's host and token are captured in the node thread (`get_user_client()`) and fixed on every client. With no user client nothing is bound and the call is the plain one; no tool call ever runs as the service principal. Everything a tool returns reaches a model inside `spotlight(...)`, and a tool failure never fails the turn.
+
+**What the data analyst can bind** (`data_analyst_node` in `src/services/graph/nodes.py`):
+
+- **Genie One** (a `genie_one` entry): the tool `genie`. Needs the `ai-gateway` scope.
+- **Genie Agents** (each `genie` entry, a curated Genie space): one tool per space, `genie_agent_<slug>` in config order (`build_genie_agent_tools`, `src/services/agent_tools/genie_agent.py`). Needs the `dashboards.genie` scope. Each space keeps its own conversation per user per deck, stored on the actor's row in that space's entry (`SessionManager.set_genie_agent_conversation_id`).
+- **AI Gateway MCP services** registered for the data analyst (`gateway_mcp` entries) and **UC MCP connections** whose `agent` is `data_analyst` (`mcp` entries): see [AI Gateway MCP connections](gateway-mcp-connections.md).
+
+**What the architect can bind** (`architect_node`): the Gateway services registered for the architect, the UC MCP connections whose `agent` is `architect`, and `generate_image` while image generation is available. Genie is the analyst's only.
+
+**Budgets.** Genie One alone keeps its own 3 questions / 300 s. With anything more, the analyst has ONE toolset of 6 calls / 300 s (`ANALYST_GATEWAY_MAX_CALLS` / `ANALYST_GATEWAY_BUDGET_SECONDS`), and each Genie tool (One or Agent) still asks at most 3 questions. Beside Genie One that is Genie One's toolset. When Genie One does not run (no entry, or it cannot: no `ai-gateway` scope), the Genie Agents get their own toolset: the Gateway pass's budget left, or without a pass the same 6 / 300 clipped to the 700 s turn deadline; with nothing left nothing is bound. The architect's Gateway budget is 12 calls / 360 s per turn, shared by every architect pass.
+
+**Figures are code-owned.** Figures are built by code from Genie result rows (`figures_from_answer`), never from the model's prose. Genie One's carry the source `Genie One`; a Genie Agent's carry `Genie Agent · <space name>`. The run's answers are Genie One's, then each Genie Agent's in tool order; they are written on `analyst_figures` and listed for the architect in one spotlighted block whose header names every figure source ("Figures from Genie One, Genie Agent · Sales (use these keys in data_references):"). The architect owns no figure whose source `is_genie_source` (exactly `Genie One`, or the `Genie Agent · ` prefix): its own typed ones are replaced by the code's, and a later turn re-applies the persisted spec's verbatim. Ownership hinges on that code prefix, never on a user-chosen name, so a figure the architect sourced "Sales" stays the architect's.
+
+**Notices.** A token whose known scopes lack Genie One's scope (`ai-gateway`) or the Genie Agents' (`dashboards.genie`) binds none of those tools and says the consent message; so does a refusal for a missing scope at run time. A refused Genie Agent says "`<space name>` refused the request. You may need access to that Genie Agent; ask its owner to share it with you." Each notice is said once: per turn when the run has a Gateway pass (its `notified` keys ride on `gateway_usage`: `consent`, a service name, `mcp:<connection>`, `genie_agent:<space_id>`), per analyst run without one. A Genie Agent's progress row is "Asking `<space name>`: `<question>`", with `tool_name` `genie` and `tool_input` `{"agent", "question"}` on the row and top-level on the SSE event.
+
+**The no-tools retry.** A model call that carried Gateway or connection tools and raised is made once more without them. Genie One and the Genie Agents stay, built afresh, so the failed attempt's answers and question counts are discarded.
+
+**Legacy entries.** A `genie` entry saved on a legacy deck becomes a Genie Agent once the deck runs in agent mode, and an `mcp` entry becomes a UC MCP connection for its agent (the data analyst by default).
 
 ### Per-Session MLflow Experiments
 

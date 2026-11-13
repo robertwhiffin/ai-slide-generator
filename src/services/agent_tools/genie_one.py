@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 GENIE_ONE_SERVICE_PATH: Final = "/ai-gateway/mcp-services/system.ai.genie_one_mcp"
 GENIE_ONE_SOURCE: Final = "Genie One"
+#: Every Genie Agent source starts with this (``genie_agent.genie_agent_source``).
+GENIE_AGENT_SOURCE_PREFIX: Final = "Genie Agent · "
 #: The OAuth scope the AI Gateway requires of the user's token.
 GENIE_ONE_SCOPE: Final = "ai-gateway"
 
@@ -52,10 +54,15 @@ class GenieOneError(Exception):
     """A Genie One call failed."""
 
 
-class GenieOneAccessError(GenieOneError):
-    """The user cannot use Genie One (missing OAuth scope or no access)."""
+#: ``not_found`` is a Genie Agent's only (a deleted space, or one not shared with the
+#: user: ``genie_agent._map_exception``); Genie One never raises it.
+GenieAccessKind = Literal["missing_scope", "access_denied", "not_found"]
 
-    def __init__(self, message: str, *, kind: Literal["missing_scope", "access_denied"]) -> None:
+
+class GenieOneAccessError(GenieOneError):
+    """The user cannot use Genie One (missing OAuth scope or no access), or a Genie Agent."""
+
+    def __init__(self, message: str, *, kind: GenieAccessKind) -> None:
         super().__init__(message)
         self.kind = kind
 
@@ -78,6 +85,12 @@ class GenieOneAnswer:
     final_answer: str | None
     deep_link: str | None
     query_results: tuple[GenieOneQueryResult, ...]
+    source: str = GENIE_ONE_SOURCE
+
+
+def is_genie_source(source: str) -> bool:
+    """True for the Genie One source or a Genie Agent source (code-built, never model text)."""
+    return source == GENIE_ONE_SOURCE or source.startswith(GENIE_AGENT_SOURCE_PREFIX)
 
 
 class CallTool(Protocol):
@@ -363,7 +376,7 @@ def figures_from_answer(answer: GenieOneAnswer, *, max_figures: int = 60) -> lis
             taken.add(key)
             figures.append(
                 ResolvedFigure(
-                    key=key, value=neutralize_delimiters(_cell(cell)), source=GENIE_ONE_SOURCE
+                    key=key, value=neutralize_delimiters(_cell(cell)), source=answer.source
                 )
             )
     return figures

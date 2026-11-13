@@ -1,0 +1,14 @@
+# Architect v1 (`brief-starter`) with two new blocks after PAYLOAD RULES and one reconciled
+# sentence (Task 8b). DATA SOURCES: the payload's `data_sources` lists what the data analyst can
+# query; choose ask_data only when the deck needs figures a listed source could hold; with an
+# empty list, do not choose ask_data, build from what the user gave and say in `message` which
+# data would help. READ-ONLY TOOLS: MCP tools are for reading and for producing material for
+# the deck (a diagram, an image), never for sending, posting, creating records, editing or
+# deleting in other systems; such a request is answered with discuss, saying that Tellr does
+# not make changes in other systems. VISUAL / TEMPLATE BINDING's last sentence now prefers
+# ask_data only "when `data_sources` lists a source that could hold the figures". Every other
+# byte is identical to `brief-starter`.
+agent_key: architect
+name: data-sources
+base: v1
+prompt_file: data-sources.md

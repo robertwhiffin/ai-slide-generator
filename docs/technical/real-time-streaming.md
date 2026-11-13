@@ -261,7 +261,7 @@ def _hydrate_chat_history(self, session_id, chat_history):
 |--------|------|---------|
 | `POST` | `/api/chat/stream` | SSE streaming chat |
 
-**Request:** Same as `/api/chat`
+**Request:** `ChatRequest`, also used by `POST /api/chat/async`.
 ```json
 {
   "session_id": "abc123",

@@ -70,6 +70,7 @@ MODEL_PAYLOAD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "design_system_library",
                 "deck_style_context",
                 "rejected_edit",
+                "data_sources",
             }
         ),
         "data_analyst": frozenset({"data_request", "deck_purpose"}),

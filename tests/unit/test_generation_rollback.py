@@ -1008,6 +1008,114 @@ def test_genie_one_entry_removed_mid_turn_is_not_recreated(env):
     assert env.session_row(sid)["agent_config"] == mid_turn
 
 
+def _genie_agent(space_id: str, conversation_id: Optional[str]) -> GenieTool:
+    return GenieTool(
+        type="genie",
+        space_id=space_id,
+        space_name=f"MK {space_id}",
+        conversation_id=conversation_id,
+    )
+
+
+def _genie_agent_conversations(env, sid: str) -> Dict[str, Optional[str]]:
+    return {
+        tool["space_id"]: tool.get("conversation_id")
+        for tool in env.session_row(sid)["agent_config"]["tools"]
+        if tool.get("type") == "genie"
+    }
+
+
+@pytest.mark.parametrize("conversation_before", [None, "conv-sales-before"])
+def test_genie_agent_conversation_ids_restored_only_on_their_entries(env, conversation_before):
+    """Each of the actor's ``genie`` entries (Genie Agents) gets its pre-Enter
+    ``conversation_id`` back, as Genie One's entry does: a stopped turn's Genie
+    Agent conversations are not continued by the next turn.  A space added mid-turn
+    (outside the turn) and every other mid-turn agent-config change survive."""
+    sid = env.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    seed_earlier_turn(env, sid)
+    _save_agent_config(
+        sid,
+        AgentConfig(
+            tools=[
+                _genie_agent("sp-sales", conversation_before),
+                _genie_agent("sp-marketing", "conv-marketing-before"),
+            ]
+        ),
+    )
+    before = env.tables()
+
+    rid = press_enter(env, sid)
+    edit_turn(env, sid, sid, rid)
+    with in_turn(rid):
+        sm = get_session_manager()
+        sm.set_genie_agent_conversation_id(sid, "sp-sales", "conv-sales-by-the-turn")
+        sm.set_genie_agent_conversation_id(sid, "sp-marketing", "conv-marketing-by-the-turn")
+    # Mid-turn, the user adds a third Genie Agent and a deck prompt (the client PUTs
+    # the whole config, carrying the conversation ids it last read).
+    _save_agent_config(
+        sid,
+        AgentConfig(
+            tools=[
+                _genie_agent("sp-sales", "conv-sales-by-the-turn"),
+                _genie_agent("sp-marketing", "conv-marketing-by-the-turn"),
+                _genie_agent("sp-finance", "conv-finance-by-the-user"),
+            ],
+            deck_prompt_id=7,
+        ),
+    )
+    mid_turn = copy.deepcopy(env.session_row(sid)["agent_config"])
+
+    assert roll_back(rid, "cancelled", None, True) == _rb().RollbackResult.ROLLED_BACK
+
+    assert _genie_agent_conversations(env, sid) == {
+        "sp-sales": conversation_before,
+        "sp-marketing": "conv-marketing-before",
+        "sp-finance": "conv-finance-by-the-user",
+    }
+    expected = copy.deepcopy(mid_turn)
+    for tool in expected["tools"]:
+        if tool["space_id"] == "sp-sales":
+            tool["conversation_id"] = conversation_before
+        elif tool["space_id"] == "sp-marketing":
+            tool["conversation_id"] = "conv-marketing-before"
+    assert env.session_row(sid)["agent_config"] == expected
+    restored = env.session_row(sid)
+    entered = _one(before["user_sessions"], session_id=sid)
+    assert _without(restored, ("last_activity", "agent_config")) == _without(
+        entered, ("last_activity", "agent_config")
+    )
+
+
+def test_genie_agent_entry_removed_mid_turn_is_not_recreated(env):
+    sid = env.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    seed_earlier_turn(env, sid)
+    _save_agent_config(
+        sid,
+        AgentConfig(
+            tools=[
+                _genie_agent("sp-sales", "conv-sales-before"),
+                _genie_agent("sp-marketing", "conv-marketing-before"),
+            ]
+        ),
+    )
+
+    rid = press_enter(env, sid)
+    edit_turn(env, sid, sid, rid)
+    with in_turn(rid):
+        get_session_manager().set_genie_agent_conversation_id(
+            sid, "sp-sales", "conv-sales-by-the-turn"
+        )
+    # Mid-turn, the user removes the Sales Genie Agent.
+    _save_agent_config(
+        sid, AgentConfig(tools=[_genie_agent("sp-marketing", "conv-marketing-before")])
+    )
+    mid_turn = copy.deepcopy(env.session_row(sid)["agent_config"])
+
+    assert roll_back(rid, "cancelled", None, True) == _rb().RollbackResult.ROLLED_BACK
+
+    assert env.session_row(sid)["agent_config"] == mid_turn
+
+
 # ---------------------------------------------------------------------------
 # Contributors: the owner's fields and the actor's fields
 # ---------------------------------------------------------------------------

@@ -1,0 +1,6 @@
+kind: positive
+fault: ''
+expect:
+  outcome: success
+  first_tool: genie
+design_system_active: true

@@ -1,0 +1,12 @@
+{
+  "should_fail": {
+    "intent": "edit",
+    "message": "I've posted a summary of this deck to the #announcements channel in Slack.",
+    "deck_spec": null,
+    "data_request": null,
+    "target_positions": [
+      0
+    ],
+    "proposed_design_contract": null
+  }
+}

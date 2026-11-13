@@ -1,0 +1,11 @@
+# Architect v1 prompt after merging main (PR #383, architect stage context) into
+# feat/agent-mcp-tools: this branch's promoted `data-sources-b` (DATA SOURCES block, READ-ONLY
+# TOOLS block, and the VISUAL / TEMPLATE BINDING sentence that prefers ask_data only "when
+# `data_sources` lists a source that could hold the figures") plus main's promoted STAGE SLIDE
+# block, which main placed before the closing line. The two changes touch different lines; a
+# three-way merge of the prompt text has no conflict, and every other byte is identical to
+# `data-sources-b`. The baseline beside it is `stage-context-main` (main's promoted prompt).
+agent_key: architect
+name: data-sources-stage
+base: v1
+prompt_file: data-sources-stage.md

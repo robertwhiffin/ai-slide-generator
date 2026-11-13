@@ -454,7 +454,7 @@ User Browser
     │
     ├─ GET /             → index.html (React SPA)
     ├─ GET /assets/*     → Static JS/CSS/images
-    ├─ POST /api/chat    → Chat processing (agent)
+    ├─ POST /api/chat/async → Submit a chat turn; poll /api/chat/poll/{request_id}
     ├─ GET /api/sessions → Session management
     └─ GET /api/health   → Health check
 ```

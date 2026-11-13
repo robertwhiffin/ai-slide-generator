@@ -35,6 +35,7 @@ ARCHITECT_PAYLOAD_KEYS: tuple[str, ...] = (
     "resolved_style",
     "design_system_library",
     "deck_style_context",
+    "data_sources",
 )
 
 
@@ -42,7 +43,7 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
     """The architect's payload, with every production key present.
 
     Absent keys are as significant as present ones: ``architect_node`` always
-    sends all thirteen, so a builder that omitted ``template_sections`` would be
+    sends all fourteen, so a builder that omitted ``template_sections`` would be
     testing a prompt shape the architect never sees.
 
     Args:
@@ -67,6 +68,7 @@ def architect_payload(message: str, **overrides: Any) -> dict[str, Any]:
         "resolved_style": None,
         "design_system_library": [],
         "deck_style_context": {"design_tokens": {}, "template_classes": [], "logos": []},
+        "data_sources": [],
     }
     unknown = sorted(set(overrides) - set(payload))
     if unknown:

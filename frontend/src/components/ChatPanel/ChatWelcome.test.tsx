@@ -43,6 +43,16 @@ describe('ChatWelcome in the empty chat', () => {
     expect(screen.getByText(/agent config bar/i)).toBeInTheDocument();
   });
 
+  it('names a Genie Agent as the way to use your data', () => {
+    render(<MessageList messages={[]} isLoading={false} />);
+    expect(
+      screen.getByText(
+        'add a Genie Agent or other tool in the agent config bar above, then ask for the numbers.',
+        { exact: false },
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('is gone once the conversation has a message', () => {
     render(<MessageList messages={oneMessage} isLoading={false} />);
     expect(screen.queryByRole('heading', GUIDE)).not.toBeInTheDocument();

@@ -54,15 +54,11 @@ Sessions are isolated per user using the `created_by` column. Authentication mid
 All FastAPI endpoints are `async def`. Blocking operations (LLM calls, database queries) are wrapped with `asyncio.to_thread()` so the event loop remains responsive:
 
 ```python
-# src/api/routes/chat.py
-@router.post("/chat")
-async def send_message(request: ChatRequest):
-    result = await asyncio.to_thread(
-        chat_service.send_message,
-        request.session_id,
-        request.message,
-        ...
-    )
+# src/api/routes/chat.py — excerpt from submit_chat_async
+locked = await asyncio.to_thread(
+    session_manager.acquire_session_lock, request.session_id
+)
+# The queued turn runs on a dedicated thread pool, not on the event loop.
 ```
 
 This allows one worker to handle multiple in-flight requests concurrently.
@@ -189,11 +185,12 @@ class ChatService:
 
 ## Endpoints Requiring Session ID
 
-All slide manipulation and chat endpoints require `session_id`:
+Slide manipulation endpoints require `session_id`. Chat endpoints accept it in the body and create a session when it is omitted:
 
 | Endpoint | Method | Session ID Location |
 |----------|--------|---------------------|
-| `/api/chat` | POST | Request body (`session_id`) |
+| `/api/chat/stream` | POST | Request body (`session_id`, optional) |
+| `/api/chat/async` | POST | Request body (`session_id`, optional) |
 | `/api/slides` | GET | Query param (`?session_id=...`) |
 | `/api/slides/reorder` | PUT | Request body (`session_id`) |
 | `/api/slides/{index}` | PATCH | Request body (`session_id`) |

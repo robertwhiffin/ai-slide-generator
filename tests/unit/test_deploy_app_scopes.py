@@ -19,6 +19,7 @@ EXPECTED_SCOPES = [
     "serving.serving-endpoints",
     "ai-gateway",
     "catalog.connections",
+    "mcp.external",
 ]
 
 

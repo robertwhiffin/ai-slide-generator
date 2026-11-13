@@ -25,7 +25,7 @@ Rules pinned here:
   -- because turn state accumulates across a checkpointed thread: omitting the
   key would let a later, stage-less turn inherit an earlier turn's stage.
 * Legacy is frozen: the monolith path never enters the graph because of a
-  stage, and the Legacy-only sync route ``POST /chat`` is unchanged.
+  stage, and the retired sync route ``POST /chat`` (#382) stays gone.
 
 No live calls: the graph, the service's deck stores, settings and the session
 manager are all stubbed.  The route tests run the real FastAPI app and the real
@@ -497,20 +497,19 @@ class TestAsyncRoutePutsTheStageInThePayload:
         assert streamed == enqueued == _STAGE_WITH_ID
 
 
-class TestTheLegacySyncRouteIsUnchanged:
-    """``POST /chat`` is Legacy-only and frozen: a stage changes nothing.
+class TestTheLegacySyncRouteIsGone:
+    """``POST /chat`` was retired (#382): a staged send cannot reach the
+    synchronous ``ChatService.send_message`` by any route.
 
-    GREEN BY DESIGN (regression guard): it reddens if the stage is ever passed
-    into ``ChatService.send_message``.
+    GREEN BY DESIGN (regression guard): it reddens if the sync route returns.
     """
 
-    def test_send_message_receives_only_its_four_positional_arguments(self, route_env):
+    def test_a_staged_send_to_the_sync_route_reaches_no_service(self, route_env):
         sid = _seed_session(route_env["factory"], deck_mode="legacy")
         response = route_env["client"].post("/api/chat", json=_body(sid, _STAGE_WITH_ID))
-        assert response.status_code == 200, response.text
-        call = route_env["service"].send_message.call_args
-        assert call.args == (sid, _MESSAGE, None, None)
-        assert call.kwargs == {}
+        assert response.status_code in (404, 405), response.text
+        route_env["service"].send_message.assert_not_called()
+        route_env["service"].send_message_streaming.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

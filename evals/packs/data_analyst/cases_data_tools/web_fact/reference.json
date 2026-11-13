@@ -1,0 +1,10 @@
+{
+  "outcome": "success",
+  "synthesis": "The request asks for an estimate of the global CRM software market size; it states no figures of its own.",
+  "sources": [
+    "The request"
+  ],
+  "gap": null,
+  "tried_tools": [],
+  "reason": null
+}

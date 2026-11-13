@@ -672,11 +672,3 @@ class TestSendMessageNeverReferencesTheGraph:
 
     def test_send_message_takes_no_engine_mode_parameter(self):
         assert "engine_mode" not in inspect.signature(ChatService.send_message).parameters
-
-    def test_the_sync_chat_route_never_resolves_a_mode(self):
-        """POST /chat (the non-streaming route) is out of scope."""
-        from src.api.routes import chat as chat_routes
-
-        source = inspect.getsource(chat_routes.send_message)
-        assert "resolve_engine_mode" not in source
-        assert "engine_mode" not in source

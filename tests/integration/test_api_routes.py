@@ -150,134 +150,23 @@ def mock_session_manager(test_db):
 class TestChatEndpoints:
     """Tests for /api/chat endpoints."""
 
-    def test_chat_without_session_id_creates_session(self, client, mock_chat_service, mock_session_manager):
-        """POST /api/chat without session_id creates a session on the fly."""
-        mock_session_manager.create_session.return_value = {
-            "session_id": "auto-created-session",
-            "user_id": None,
-            "created_by": "test-user",
-            "title": "Session 2026-03-18 12:00",
-            "created_at": "2026-03-18T12:00:00",
-        }
-        mock_chat_service.send_message.return_value = {
-            "messages": [],
-            "slide_deck": None,
-            "metadata": {},
-        }
-        response = client.post("/api/chat", json={"message": "Hello"})
-        assert response.status_code == 200
-        mock_session_manager.create_session.assert_called_once()
-
     def test_chat_requires_message(self, client):
-        """POST /api/chat returns 422 without message."""
-        response = client.post("/api/chat", json={"session_id": "test-123"})
+        """POST /api/chat/async returns 422 without message."""
+        response = client.post("/api/chat/async", json={"session_id": "test-123"})
         assert response.status_code == 422
         assert "detail" in response.json()
 
     def test_chat_empty_message_rejected(self, client):
-        """POST /api/chat returns 422 with empty message."""
-        response = client.post("/api/chat", json={
+        """POST /api/chat/async returns 422 with empty message."""
+        response = client.post("/api/chat/async", json={
             "session_id": "test-123",
             "message": ""
         })
         assert response.status_code == 422
 
-    def test_chat_empty_session_id_creates_session(self, client, mock_chat_service, mock_session_manager):
-        """POST /api/chat with empty session_id creates a session on the fly."""
-        mock_session_manager.create_session.return_value = {
-            "session_id": "auto-created-session",
-            "user_id": None,
-            "created_by": "test-user",
-            "title": "Session 2026-03-18 12:00",
-            "created_at": "2026-03-18T12:00:00",
-        }
-        mock_chat_service.send_message.return_value = {
-            "messages": [],
-            "slide_deck": None,
-            "metadata": {},
-        }
-        response = client.post("/api/chat", json={
-            "session_id": "",
-            "message": "Hello"
-        })
-        assert response.status_code == 200
-        mock_session_manager.create_session.assert_called_once()
-
-    def test_chat_session_not_found(self, client, mock_chat_service, mock_session_manager):
-        """POST /api/chat returns 404 for nonexistent session."""
-        from src.api.services.session_manager import SessionNotFoundError
-
-        # Mock the send_message to raise SessionNotFoundError
-        mock_chat_service.send_message.side_effect = SessionNotFoundError("test-123")
-
-        response = client.post("/api/chat", json={
-            "session_id": "test-123",
-            "message": "Hello"
-        })
-        assert response.status_code == 404
-        assert "Session not found" in response.json()["detail"]
-
-    def test_chat_session_busy(self, client, mock_session_manager):
-        """POST /api/chat returns 409 when session is locked."""
-        mock_session_manager.acquire_session_lock.return_value = False
-
-        response = client.post("/api/chat", json={
-            "session_id": "test-123",
-            "message": "Hello"
-        })
-        assert response.status_code == 409
-        assert "processing" in response.json()["detail"].lower()
-
-    def test_chat_success(self, client, mock_chat_service, mock_session_manager):
-        """POST /api/chat returns 200 with valid response."""
-        mock_chat_service.send_message.return_value = {
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "Hello!",
-                    "timestamp": "2024-01-01T12:00:00Z"
-                }
-            ],
-            "slide_deck": None,
-            "metadata": {"latency_seconds": 1.0}
-        }
-
-        response = client.post("/api/chat", json={
-            "session_id": "test-123",
-            "message": "Hello"
-        })
-        assert response.status_code == 200
-        data = response.json()
-        assert "messages" in data
-        assert "metadata" in data
-
-    def test_chat_with_slide_context(self, client, mock_chat_service, mock_session_manager):
-        """POST /api/chat accepts slide_context parameter."""
-        mock_chat_service.send_message.return_value = {
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "Editing slides...",
-                    "timestamp": "2024-01-01T12:00:00Z"
-                }
-            ],
-            "slide_deck": None,
-            "metadata": {}
-        }
-
-        response = client.post("/api/chat", json={
-            "session_id": "test-123",
-            "message": "Edit slide",
-            "slide_context": {
-                "indices": [0, 1],
-                "slide_htmls": ["<div>Slide 1</div>", "<div>Slide 2</div>"]
-            }
-        })
-        assert response.status_code == 200
-
     def test_chat_invalid_slide_context_non_contiguous(self, client):
-        """POST /api/chat returns 422 with non-contiguous indices."""
-        response = client.post("/api/chat", json={
+        """POST /api/chat/async returns 422 with non-contiguous indices."""
+        response = client.post("/api/chat/async", json={
             "session_id": "test-123",
             "message": "Edit slides",
             "slide_context": {
@@ -288,8 +177,8 @@ class TestChatEndpoints:
         assert response.status_code == 422
 
     def test_chat_invalid_slide_context_mismatch_length(self, client):
-        """POST /api/chat returns 422 when indices and htmls lengths mismatch."""
-        response = client.post("/api/chat", json={
+        """POST /api/chat/async returns 422 when indices and htmls lengths mismatch."""
+        response = client.post("/api/chat/async", json={
             "session_id": "test-123",
             "message": "Edit slides",
             "slide_context": {
@@ -298,17 +187,6 @@ class TestChatEndpoints:
             }
         })
         assert response.status_code == 422
-
-    def test_chat_internal_error(self, client, mock_chat_service, mock_session_manager):
-        """POST /api/chat returns 500 on service error."""
-        mock_chat_service.send_message.side_effect = Exception("LLM connection failed")
-
-        response = client.post("/api/chat", json={
-            "session_id": "test-123",
-            "message": "Hello"
-        })
-        assert response.status_code == 500
-        assert "detail" in response.json()
 
     def test_health_check(self, client):
         """GET /api/health returns 200."""
@@ -1321,13 +1199,13 @@ class TestErrorResponses:
 
     def test_422_validation_errors_include_detail(self, client):
         """422 responses include validation error details."""
-        response = client.post("/api/chat", json={})
+        response = client.post("/api/chat/async", json={})
         assert response.status_code == 422
         assert "detail" in response.json()
 
     def test_422_validation_errors_are_structured(self, client):
         """422 validation errors have structured format."""
-        response = client.post("/api/chat", json={})
+        response = client.post("/api/chat/async", json={})
         assert response.status_code == 422
         errors = response.json()["detail"]
         assert isinstance(errors, list)
@@ -1335,24 +1213,28 @@ class TestErrorResponses:
         for error in errors:
             assert "loc" in error or "msg" in error
 
-    def test_500_hides_internal_details(self, client, mock_chat_service, mock_session_manager):
-        """500 responses don't leak stack traces."""
-        mock_chat_service.send_message.side_effect = Exception("DB connection failed: password=secret123")
+    @pytest.mark.usefixtures("engine_mode_resolves_to_monolith")
+    def test_500_hides_internal_details(self, client, mock_session_manager):
+        """Async submission errors must not expose exception text or secrets."""
+        mock_session_manager.create_chat_request.return_value = "req-failed"
+        mock_session_manager.get_session.return_value["message_count"] = 1
+        error = RuntimeError("DB connection failed: password=secret123")
+        with patch("src.api.routes.chat.enqueue_job", new_callable=AsyncMock) as enqueue:
+            enqueue.side_effect = error
+            response = client.post("/api/chat/async", json={
+                "session_id": "test-123",
+                "message": "Hello"
+            })
 
-        response = client.post("/api/chat", json={
-            "session_id": "test-123",
-            "message": "Hello"
-        })
+        enqueue.assert_awaited_once()
         assert response.status_code == 500
-        detail = response.json().get("detail", "")
-        # Should not contain full traceback
-        assert "Traceback" not in detail
+        assert response.json() == {"detail": "Internal server error"}
 
     def test_409_conflict_message(self, client, mock_session_manager):
         """409 responses include meaningful conflict message."""
         mock_session_manager.acquire_session_lock.return_value = False
 
-        response = client.post("/api/chat", json={
+        response = client.post("/api/chat/async", json={
             "session_id": "test-123",
             "message": "Hello"
         })
@@ -1362,13 +1244,13 @@ class TestErrorResponses:
 
     def test_method_not_allowed(self, client):
         """Unsupported HTTP methods return 405."""
-        response = client.put("/api/chat", json={})
+        response = client.put("/api/chat/async", json={})
         assert response.status_code == 405
 
     def test_invalid_json_body(self, client):
         """Invalid JSON body returns 422."""
         response = client.post(
-            "/api/chat",
+            "/api/chat/async",
             content="not valid json",
             headers={"Content-Type": "application/json"}
         )
