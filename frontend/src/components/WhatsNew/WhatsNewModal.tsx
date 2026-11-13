@@ -73,7 +73,7 @@ export function WhatsNewModal() {
                     {release.version}
                   </h3>
                   {isNew && (
-                    <span className="px-2 py-0.5 text-xs font-medium text-blue-700 bg-blue-50 rounded-full">
+                    <span className="px-2 py-0.5 text-xs font-medium text-white bg-blue-600 rounded-full">
                       New
                     </span>
                   )}
@@ -84,8 +84,8 @@ export function WhatsNewModal() {
                     isNew ? 'text-gray-700' : 'text-gray-500'
                   }`}
                 >
-                  {release.items.map((item) => (
-                    <li key={item.title}>
+                  {release.items.map((item, itemIndex) => (
+                    <li key={itemIndex}>
                       <strong>{item.title}.</strong> {item.body}
                     </li>
                   ))}

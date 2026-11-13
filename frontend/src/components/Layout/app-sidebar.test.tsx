@@ -7,12 +7,14 @@ import { AppSidebar } from './app-sidebar';
 const currentUser = { username: 'u', displayName: 'u', isAdmin: false, loading: false };
 /** What the sidebar reads from useWhatsNew(). hasNotes defaults to false, as in this PR (no notes files). */
 const whatsNew = { hasNotes: false, open: vi.fn() };
+/** What the sidebar reads from useTour(). A completed tour is the default: an existing user. */
+const tour = { hasCompletedTour: true };
 
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => currentUser,
 }));
 vi.mock('@/contexts/TourContext', () => ({
-  useTour: () => ({ startTour: vi.fn() }),
+  useTour: () => ({ startTour: vi.fn(), hasCompletedTour: tour.hasCompletedTour }),
 }));
 vi.mock('@/contexts/WhatsNewContext', () => ({
   useWhatsNew: () => whatsNew,
@@ -51,6 +53,7 @@ function renderSidebar() {
 
 beforeEach(() => {
   whatsNew.hasNotes = false;
+  tour.hasCompletedTour = true;
   whatsNew.open.mockReset();
 });
 
@@ -123,6 +126,15 @@ describe("AppSidebar footer What's new item", () => {
     fireEvent.click(button);
     expect(whatsNew.open).toHaveBeenCalledTimes(1);
     expect(onViewChange).not.toHaveBeenCalled(); // it opens an overlay, not a page
+  });
+
+  it('hides it for a user who has not completed the tour (they are looking at the welcome guide)', () => {
+    whatsNew.hasNotes = true;
+    tour.hasCompletedTour = false;
+    renderSidebar();
+
+    expect(screen.getByRole('button', { name: 'App Tour' })).toBeInTheDocument(); // the footer rendered
+    expect(screen.queryByRole('button', { name: "What's new" })).not.toBeInTheDocument();
   });
 
   it('hides it while no release has notes', () => {

@@ -415,6 +415,68 @@ describe('manual open and the release list', () => {
   });
 });
 
+describe('final review fixes', () => {
+  it('a manual open() and close() before the auto-open timer fires leave it closed (the timer is cancelled)', () => {
+    existingUser();
+    mount([R('0.5.7', 1)]);
+
+    advance(300);
+    click('open');
+    expect(isOpen()).toBe('true');
+    click('close');
+    expect(isOpen()).toBe('false');
+
+    advance(1000); // well past 800 ms
+    expect(isOpen()).toBe('false');
+    expect(stored()).toBe('0.5.7');
+  });
+
+  it('close() never lowers the stored version (a rollback to an older bundle)', () => {
+    existingUser();
+    localStorage.setItem(WHATS_NEW_STORAGE_KEY, '0.5.8');
+    mount([R('0.5.6', 1), R('0.5.7', 1)]);
+
+    click('open');
+    click('close');
+    expect(stored()).toBe('0.5.8');
+    expect(unseen()).toEqual([]);
+  });
+
+  it('close() still raises a lower stored version, and replaces garbage', () => {
+    existingUser();
+    localStorage.setItem(WHATS_NEW_STORAGE_KEY, 'abc');
+    mount([R('0.5.7', 1)]);
+    advance(800);
+    click('close');
+    expect(stored()).toBe('0.5.7');
+  });
+
+  it('open() does nothing while the welcome guide is showing', () => {
+    existingUser();
+    mount([R('0.5.7', 1)], { autoOpenDelayMs: 5000 });
+    click('resetTour'); // the real TourProvider shows the guide 800 ms later
+    advance(800);
+    expect(welcome()).toBe('true');
+
+    click('open');
+    expect(isOpen()).toBe('false');
+  });
+
+  it('open() does nothing while the tour is active, and works again after it ends', () => {
+    existingUser();
+    mount([R('0.5.7', 1)], { autoOpenDelayMs: 5000 });
+    click('startTour');
+    expect(tourActive()).toBe('true');
+
+    click('open');
+    expect(isOpen()).toBe('false');
+
+    click('endTour');
+    click('open');
+    expect(isOpen()).toBe('true');
+  });
+});
+
 describe('useWhatsNew', () => {
   it('throws outside the provider', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});

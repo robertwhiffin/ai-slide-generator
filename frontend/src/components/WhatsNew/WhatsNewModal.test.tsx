@@ -192,6 +192,35 @@ describe('WhatsNewModal: what it shows', () => {
     expect(within(dialog).getAllByText('New')).toHaveLength(1);
   });
 
+  it('styles the "New" badge as the solid blue pill from the owner-approved mockup', () => {
+    const { dialog } = mountOpen();
+
+    const badge = within(section(dialog, '0.5.7')).getByText('New');
+    expect(badge).toHaveClass('text-white', 'bg-blue-600');
+    expect(badge).not.toHaveClass('bg-blue-50');
+  });
+
+  it('renders two items that share a title without a duplicate-key warning', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const twin: ReleaseNoteItem = { title: 'Faster loading', body: 'Decks open sooner.' };
+    render(
+      <TourProvider>
+        <WhatsNewProvider releases={[R('0.5.7', '2026-11-14', [twin, { ...twin, body: 'Chat opens sooner.' }])]} autoOpenDelayMs={0}>
+          <WhatsNewModal />
+        </WhatsNewProvider>
+      </TourProvider>,
+    );
+    runTimers();
+
+    const dialog = screen.getByRole('dialog', { name: TITLE });
+    expect(itemTexts(section(dialog, '0.5.7'))).toEqual([
+      'Faster loading. Decks open sooner.',
+      'Faster loading. Chat opens sooner.',
+    ]);
+    expect(errors.mock.calls.flat().join(' ')).not.toContain('same key');
+    errors.mockRestore();
+  });
+
   it('renders each item as a list entry, "<strong>Title.</strong> Body", and each release its own month', () => {
     const { dialog } = mountOpen();
     const s57 = section(dialog, '0.5.7');

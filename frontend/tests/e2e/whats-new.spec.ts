@@ -6,7 +6,7 @@
  * a release bump PR.  Nothing here is hard-coded to a version: the newest notes
  * file with items is read from disk, so the spec keeps passing as releases land.
  *
- * Every describe sets its own storageState.  The suite-wide one (playwright.config.ts)
+ * Every describe but the last sets its own storageState.  The suite-wide one (playwright.config.ts)
  * marks the tour completed AND every release seen, which would hide the popup.
  *
  * Pins Review Focus 4: a brand-new user who finishes the welcome guide never gets
@@ -16,7 +16,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import type { Locator, Page } from '@playwright/test';
 import { test, expect } from '../fixtures/base-test';
 import { setupMocks } from '../helpers/setup-mocks';
-import { hasReleaseNotesWithItems } from '../helpers/whats-new';
+import { hasReleaseNotesWithItems, newestReleaseNotesVersion } from '../helpers/whats-new';
 import {
   WHATS_NEW_STORAGE_KEY,
   compareVersions,
@@ -144,7 +144,8 @@ test.describe("What's new: a brand-new user", () => {
     await page.goto('/');
 
     await expect(welcome(page)).toBeVisible({ timeout: 10_000 });
-    await waitPastAutoOpen(page);
+    // The sidebar entry is hidden while the welcome guide is up, so wait on the clock instead.
+    await page.waitForTimeout(PAST_AUTO_OPEN_MS);
     await expect(whatsNew(page)).toHaveCount(0);
     await expect(welcome(page)).toBeVisible();
 
@@ -162,5 +163,20 @@ test.describe("What's new: a brand-new user", () => {
     await waitPastAutoOpen(page);
     await expect(whatsNew(page)).toHaveCount(0);
     await expect(welcome(page)).toHaveCount(0);
+  });
+});
+
+// ── the suite-wide storageState ───────────────────────────────────────────────
+
+test.describe("What's new: the suite-wide storageState", () => {
+  // No test.use here: this runs under the global storageState from playwright.config.ts.
+  // Every other E2E spec relies on it marking all bundled releases as seen, so the popup
+  // never covers their pages.  This pins that seeding.
+  test('marks every bundled release as seen, so the popup never opens', async ({ page }) => {
+    await page.goto('/');
+
+    await expect.poll(() => lastSeen(page)).toBe(newestReleaseNotesVersion());
+    await waitPastAutoOpen(page);
+    await expect(whatsNew(page)).toHaveCount(0);
   });
 });

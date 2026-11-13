@@ -105,7 +105,7 @@ export function AppSidebar({
   sessionsRefreshKey,
   ...props
 }: AppSidebarProps) {
-  const { startTour } = useTour()
+  const { startTour, hasCompletedTour } = useTour()
   const { hasNotes, open: openWhatsNew } = useWhatsNew()
   const navigate = useNavigate()
   // UX only: /admin enforces its own gate and every admin API route checks server-side.
@@ -162,7 +162,7 @@ export function AppSidebar({
               <span>App Tour</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
-          {hasNotes && (
+          {hasNotes && hasCompletedTour && (
             <SidebarMenuItem>
               <SidebarMenuButton onClick={openWhatsNew}>
                 <Sparkles />

@@ -3,6 +3,8 @@ import { useTour } from './TourContext';
 import { RELEASES } from '../whatsNew/releases';
 import {
   WHATS_NEW_STORAGE_KEY,
+  compareVersions,
+  isReleaseVersion,
   newestVersion,
   sortNewestFirst,
   unseenVersions,
@@ -41,11 +43,24 @@ export function WhatsNewProvider({
   tourRef.current = { isTourActive, showWelcome };
   const mountRef = useRef({ hasCompletedTour, lastSeen, allReleases, autoOpenDelayMs });
 
+  // The pending auto-open timer, so a manual open() or a close() can cancel it.
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelAutoOpen = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
   const record = useCallback((all: ReleaseNotes[]) => {
     const newest = newestVersion(all);
     if (newest === null) return;
-    setLastSeen(newest);
-    localStorage.setItem(WHATS_NEW_STORAGE_KEY, newest);
+    // Never lower the stored version: after a rollback the bundle can be older than it.
+    const stored = localStorage.getItem(WHATS_NEW_STORAGE_KEY);
+    const target =
+      stored !== null && isReleaseVersion(stored) && compareVersions(stored, newest) > 0 ? stored : newest;
+    setLastSeen(target);
+    localStorage.setItem(WHATS_NEW_STORAGE_KEY, target);
   }, []);
 
   // Auto-open is decided once, at mount.
@@ -53,12 +68,13 @@ export function WhatsNewProvider({
     const m = mountRef.current;
     if (!m.hasCompletedTour) return;
     if (unseenVersions(m.allReleases, m.lastSeen).size === 0) return;
-    const timer = setTimeout(() => {
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
       const { isTourActive: active, showWelcome: welcome } = tourRef.current;
       if (!active && !welcome) setIsOpen(true);
     }, m.autoOpenDelayMs);
-    return () => clearTimeout(timer);
-  }, []);
+    return cancelAutoOpen;
+  }, [cancelAutoOpen]);
 
   // A brand-new user finishing the welcome guide or tour has seen everything; never open for it.
   const prevCompleted = useRef(hasCompletedTour);
@@ -73,11 +89,18 @@ export function WhatsNewProvider({
   );
   const unseen = useMemo(() => unseenVersions(allReleases, lastSeen), [allReleases, lastSeen]);
 
-  const open = useCallback(() => setIsOpen(true), []);
+  const open = useCallback(() => {
+    // Never stack on the welcome guide or the tour.
+    const { isTourActive: active, showWelcome: welcome } = tourRef.current;
+    if (active || welcome) return;
+    cancelAutoOpen();
+    setIsOpen(true);
+  }, [cancelAutoOpen]);
   const close = useCallback(() => {
+    cancelAutoOpen();
     record(allReleases);
     setIsOpen(false);
-  }, [allReleases, record]);
+  }, [allReleases, record, cancelAutoOpen]);
 
   return (
     <WhatsNewContext.Provider value={{ isOpen, releases, unseen, hasNotes: releases.length > 0, open, close }}>
