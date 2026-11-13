@@ -216,6 +216,17 @@ Propose the version: by default, the next patch recorded in Step 1. The owner so
 minor bump for a big feature set (`0.5.0` was one). That is their call. Propose the default, and
 mention the option.
 
+Once the version is proposed, check that its notes file is not already on the recorded main
+SHA (Step 1). This is the first point where the version is known:
+
+```bash
+git ls-tree <main sha> frontend/src/whatsNew/releases/
+```
+
+If `<proposed version>.json` is in the listing, stop and tell the owner. Something put it on
+`main` already, for example a throwaway preview branch merged by mistake, and the bump PR
+would overwrite it instead of adding it.
+
 Print these five things, in this order.
 
 **1. The facts:** the last tag, the main SHA in full, the release date, and the proposed version.
