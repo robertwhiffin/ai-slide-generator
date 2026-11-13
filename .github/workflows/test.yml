@@ -739,6 +739,7 @@ jobs:
               - slide-surface-fidelity
               - template-preview-import-scan
               - turn-progress
+              - whats-new
           - shard: 4
             specs:
               - agent-insert-slide
