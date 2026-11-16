@@ -116,7 +116,7 @@ cause hits PowerPoint and Google Slides alike.
 | Fill transparency | Yes | Keep fill transparency |
 | `ellipse` preset | Yes | Use it for circles |
 | Superscript run | Yes | Use superscript and subscript run options |
-| Native table (`a:tbl`) | Yes: geometry, fills, margins, weights and alignment exact; some per-cell borders lost | Use native tables and write all four borders on every cell |
+| Native table (`a:tbl`) | Yes: geometry, fills, margins, weights and alignment exact. Two borders were missing in the probe, but those were cells the probe itself gave no top border: a neighbour's `noFill` edge contradicted the line | Use native tables; resolve shared edges the way CSS collapses borders and write the winner on **both** cells (re-verified through Drive in plan Task 10) |
 
 ## Prior art: huashu-design upstream
 
