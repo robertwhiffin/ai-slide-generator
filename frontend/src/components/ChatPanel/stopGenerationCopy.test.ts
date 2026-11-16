@@ -25,7 +25,7 @@ const DIALOG_TAIL =
 const COPY = [
   'Stop generating (Esc)',
   'Stop generating',
-  'Esc to cancel · Enter to send · Shift+Enter new line',
+  'Esc to cancel · Send when this finishes · Shift+Enter new line',
   'Stop generating?',
   'Keep generating',
   'Stop and discard',
