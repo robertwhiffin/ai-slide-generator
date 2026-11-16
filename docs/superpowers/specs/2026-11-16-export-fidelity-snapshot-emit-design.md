@@ -144,28 +144,56 @@ What the author says, and what we take from it:
 - **Reading rendered coordinates is the right path** for existing visual HTML. That is the
   principle of this design, and it is what the author built for his own users two months
   ago.
-- **His documented pitfalls are adopted** (each lands in *Design §3*):
-  - collapse whitespace the way the browser does;
-  - base metrics on the largest run, not the container's inherited size;
-  - count lines by overlapping y-ranges;
-  - start a new paragraph where line size changes, because spacing is per paragraph;
-  - no-wrap plus slack for single-line text;
-  - no exact spacing on single lines;
-  - centred and right-aligned text keeps its container's width;
-  - walk child *nodes*, so bare text beside a block child is kept (issue #56).
-- **Charts and SVG become pictures**: *hundreds of rectangles are less editable than one
-  image*. Claude's own Slides export documents the same choice.
-- **Verify the verifier.** Renderers disagree. His Quick Look thumbnails passed four
-  overlap bugs, and LibreOffice cannot load fonts it does not have. The harness therefore
-  uses PowerPoint and Google Slides. It also checks text loss against the browser's
-  rendered `innerText`, an oracle independent of the extractor.
-- **Where we go further.** His exporter writes exact point line spacing, records hidden
-  SVG/canvas by index, and screenshots charts together with anything overlapping them. It
-  also targets PowerPoint and Keynote, not Drive. This design writes percentage spacing,
-  addresses capture targets by marker attribute, captures each graphic in isolation, and
-  maps every construct onto what Drive's importer keeps.
-- **Not adopted:** building on a client `.pptx` master (python-pptx). It needs the brand's
-  master in the design system and a different emitter, and it does not change fidelity.
+- **Everything in his rendered-coordinates exporter that applies to Tellr is adopted**,
+  item by item below. Where Tellr needs more (native tables, Google Slides, CSS-drawn
+  visuals, hostile slide script), the design extends it. Each item lands in *Design* and
+  is covered by a fixture or test.
+
+#### Upstream item by item
+
+| Upstream technique or fix (source) | In this design | Where |
+|---|---|---|
+| Read the browser's rendered rects, not the source (`pptx_from_rendered.py`) | **Adopted**, the core of approach B | §3 |
+| Collapse source whitespace as the browser does; drop empty runs (pitfall 1) | **Adopted**, `white-space`-aware | §3 Text |
+| Apply `text-transform` to run text | **Adopted** | §3 Text |
+| Run style: size, bold ≥ 600, italic, underline, colour, letter spacing as `spc` | **Adopted and extended**: real 100–900 weights via typeface names, strike-through, super/subscript, per-run family | §3, §5 |
+| Base metrics on the largest run (pitfall 2) | **Adopted** | §3 Text |
+| Count lines by overlapping y-ranges (pitfall 3) | **Adopted** | §3 Text |
+| Mixed sizes: one box per `<br>` segment so spacing cannot collide (pitfall 4) | **Adopted, refined**: a new paragraph inside one box on size change, giving the same spacing guarantee with fewer boxes to edit | §3 Text |
+| Single-line text gets no-wrap plus padding (pitfall 5) | **Adopted and extended**: also explicit width slack, because Drive ignores no-wrap; multi-line text keeps the UI's breaks | §3 Text |
+| No exact spacing on single lines (pitfall 6) | **Adopted** | §3 Text |
+| Multi-line spacing as exact points from the measured line box | **Replaced** by percentage spacing, because Drive mis-scales exact points (RC6). PowerPoint honours both | §3, §5 |
+| Centred and right-aligned text uses the container width; bare text uses its own bounds | **Adopted** | §3 Text |
+| Walk child nodes so bare text beside an `<svg>` or block child is kept (issue #56) | **Adopted**, plus a fixture built from his repro | §3, fixture 17 |
+| Opacity multiplied down the ancestor chain, written as alpha | **Adopted and extended**: fills keep transparency; text colour is pre-blended, because Drive drops text alpha | §3, §5 |
+| Shapes: background, uniform border, radius as `min(0.5, r / min(w, h))`, opacity | **Adopted and extended**: per-side borders, dashed and dotted, `ellipse` for circles, outer shadow | §3, §5 |
+| Empty inline decorations (highlight bars, strikes) as their own shapes | **Adopted and extended** to pills and chips, per line fragment | §3 Text |
+| Rotation of decorative shapes from the transform matrix | **Adopted**, also for text (unrotated box plus angle) | §3 |
+| Picture corners baked into PNG alpha | **Adopted**: isolated capture bakes radius and clipping in | §4 |
+| `box-shadow: 0 0 0 Npx` drawn as a picture border | **Adopted** for pictures and shapes: a spread-only shadow becomes an outline | §3 Boxes |
+| SVG and canvas as screenshots, not hundreds of shapes | **Adopted and improved**: isolation (nothing overlapping is baked in), device scale 2, transparent background | §4 |
+| SVG and canvas indices tracked separately; hidden SVG regression (PR #61) | **Bug class removed**: targets are addressed by marker attribute, not index. His regression cases are fixtures | §3, fixture 17 |
+| Text-loss check against rendered `innerText`, SVG and canvas excluded (#56) | **Adopted** in the harness and as an in-pipeline log line | §6, harness |
+| Missing slides count as missing text (PR #59) | **Adopted**: an expected slide that is absent reports all its text as missing | §6, harness |
+| Trusted renderers only: PowerPoint, Keynote or WPS yes; Quick Look no; LibreOffice drops fonts | **Adopted**: PowerPoint for Mac and Google Slides are the truth | §8 |
+| Delivery font ≠ layout font; write the East Asian (`a:ea`) and complex-script (`a:cs`) typefaces too | **Adopted**: the CSS family goes into latin, ea and cs, so CJK and RTL text keep the face | §5 |
+| Single-weight fonts (e.g. Impact) are never bolded (clean-room `html2pptx.js`) | **Adopted** | §5 |
+| Build on a client `.pptx` master: strip sample slides, unblock the layout, skip the logo (`--template`) | **Not adopted**: needs a brand master per design system and a python-pptx emitter, and does not change 1:1 fidelity | Non-goals |
+| `data-pptx-merge` hint (clean-room path) | **Not applicable**: an authoring hint for hand-written HTML. Tellr's HTML is generated, and §3's block grouping already gives one box per text block | — |
+| Four-rule validations (overflow, bottom margin) | **Kept as today**: warnings under `bypassValidation` | §6 |
+
+#### What this design adds beyond upstream
+
+- **Google Slides:** percentage spacing, typeface-encoded weights, pre-blended text colour,
+  and width slack. Upstream has no Google Slides export.
+- **Native, editable tables:** upstream emits loose text boxes.
+- **CSS-drawn visuals:** `::before`/`::after`, and gradients, conic gradients, filters and
+  blend modes captured as box-only pictures.
+- **Layout fidelity:** CSS stacking order; clipped and visually-hidden content skipped;
+  list markers as the browser numbers them.
+- **Kept from Tellr's hardening:** the hostile-realm protections, `data:`-only images, the
+  slide-root background, per-slide failure reporting and stderr diagnostics. Upstream
+  needs none of these.
 
 **Code provenance.** Tellr's `services/pptx-emit-huashu/html2pptx.js` is the pre-rewrite
 file that upstream removed as based on Anthropic's pptx skill. It carries no licence
