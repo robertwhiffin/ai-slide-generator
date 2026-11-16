@@ -18,6 +18,9 @@ Usage (from the repo root)::
     uv run --with pymupdf --with pillow python scripts/export_fidelity/run.py \
         tests/fixtures/export_fidelity --out /tmp/fidelity --lo --gslides
 
+``--engine snapshot`` exports with the snapshot engine (``render_slide.cjs``)
+instead of the legacy converter, through ``TELLR_EXPORT_ENGINE``.
+
 The Google Slides path uses gcloud application-default credentials and the
 quota project in ``GOOGLE_QUOTA_PROJECT``. Converted presentations are left in
 Drive (named ``tellr-export-fidelity <timestamp>``) so they can be opened
@@ -78,8 +81,10 @@ def render_truth(documents: list[Path], out_dir: Path) -> None:
     )
 
 
-def export_pptx(deck: dict, documents: list[Path], out_dir: Path) -> Path:
+def export_pptx(deck: dict, documents: list[Path], out_dir: Path, engine: str = "legacy") -> Path:
     os.environ["HUASHU_PIPELINE_ENABLED"] = "1"
+    # build_pptx_huashu reads the engine from the environment and sends it to the sidecar.
+    os.environ["TELLR_EXPORT_ENGINE"] = engine
     slides_payload = [{"html": path.read_text(encoding="utf-8"), "notes": path.stem} for path in documents]
     pptx_bytes, failures = pptx_from_html_huashu.build_pptx_huashu(
         deck.get("title", "slides"), slides_payload, bypass_validation=True
@@ -275,6 +280,12 @@ def main() -> int:
     parser.add_argument("--lo", action="store_true", help="render the .pptx with LibreOffice (smoke check only)")
     parser.add_argument("--gslides", action="store_true", help="convert through Google Drive")
     parser.add_argument("--only", nargs="*", help="slide name prefixes to include")
+    parser.add_argument(
+        "--engine",
+        choices=("legacy", "snapshot"),
+        default="legacy",
+        help="the sidecar's per-slide converter (sets TELLR_EXPORT_ENGINE)",
+    )
     args = parser.parse_args()
 
     deck, slides = load_fixture_deck(args.fixture_dir)
@@ -284,7 +295,7 @@ def main() -> int:
     names = [name for name, _ in slides]
     documents = build_documents(deck, slides, args.out)
     render_truth(documents, args.out)
-    pptx_path = export_pptx(deck, documents, args.out)
+    pptx_path = export_pptx(deck, documents, args.out, engine=args.engine)
     lost = check_text_loss(pptx_path, names, args.out)
     print("Text missing from the export:", json.dumps(lost, indent=2, ensure_ascii=False) if lost else "none")
     if args.powerpoint:

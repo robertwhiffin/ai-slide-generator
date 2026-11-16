@@ -6,7 +6,13 @@
 // every slide, write a single editable .pptx to argv[2].
 //
 // stdin payload (UTF-8 JSON, no schema validation here — wrapper enforces):
-//   { title?: string, slides: [{ html: string, notes?: string }] }
+//   { title?: string, slides: [{ html: string, notes?: string }],
+//     bypassValidation?: boolean, engine?: 'legacy' | 'snapshot' }
+//
+// engine selects the per-slide converter: 'legacy' (the default) is
+// html2pptx.js after the DOM-mutating PREPROCESS_SOURCE; 'snapshot' is
+// render_slide.cjs, which runs only the layout-neutral BG_TRANSFER_SOURCE and
+// then reads the page as rendered. Notes and failure handling are the same.
 //
 // argv:  emit_deck.mjs <out.pptx>
 //
@@ -26,7 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { PREPROCESS_SOURCE } from './preprocess.mjs';
+import { BG_TRANSFER_SOURCE, PREPROCESS_SOURCE } from './preprocess.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -62,14 +68,20 @@ async function main() {
     process.exit(3);
   }
 
-  // Lazily resolve html2pptx.js (CommonJS, sibling file). If playwright/
+  const engine = payload.engine === 'snapshot' ? 'snapshot' : 'legacy';
+  if (payload.engine !== undefined && payload.engine !== 'snapshot' && payload.engine !== 'legacy') {
+    console.error(`[huashu] unknown engine ${JSON.stringify(payload.engine)}; using legacy`);
+  }
+
+  // Lazily resolve the converter (CommonJS, sibling file). If playwright/
   // chromium isn't installed yet, the require itself succeeds but the
   // first call throws. We surface that as a single "setup" failure.
-  let html2pptx;
+  const converterFile = engine === 'snapshot' ? 'render_slide.cjs' : 'html2pptx.js';
+  let converter;
   try {
-    html2pptx = require(path.join(__dirname, 'html2pptx.js'));
+    converter = require(path.join(__dirname, converterFile));
   } catch (e) {
-    console.error('[huashu] failed to load html2pptx.js:', e.message);
+    console.error(`[huashu] failed to load ${converterFile}:`, e.message);
     console.error('[huashu] hint: cd services/pptx-emit-huashu && npm install && npx playwright install chromium');
     process.exit(4);
   }
@@ -77,6 +89,18 @@ async function main() {
   const pres = new pptxgen();
   pres.layout = 'LAYOUT_WIDE';  // 13.333" × 7.5", matches our 1280×720 px @ 96 dpi
   pres.title = payload.title || 'slides';
+
+  // Both converters return { slide } for the notes below and throw for a slide
+  // they reject.
+  const convertSlide = engine === 'snapshot'
+    ? (htmlFile) => converter.renderSlide(htmlFile, pres, {
+      preProcessSource: BG_TRANSFER_SOURCE,
+      bypassValidation,
+    })
+    : (htmlFile) => converter(htmlFile, pres, {
+      preProcessSource: PREPROCESS_SOURCE,
+      bypassValidation,
+    });
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'huashu-deck-'));
   const failed = [];
@@ -91,18 +115,15 @@ async function main() {
     const tmpHtml = path.join(tmpDir, `slide-${String(i).padStart(3, '0')}.html`);
     try {
       await fs.writeFile(tmpHtml, slide.html, 'utf-8');
-      const result = await html2pptx(tmpHtml, pres, {
-        preProcessSource: PREPROCESS_SOURCE,
-        bypassValidation,
-      });
+      const result = await convertSlide(tmpHtml);
       if (slide.notes && result.slide && typeof result.slide.addNotes === 'function') {
         result.slide.addNotes(slide.notes);
       }
       succeeded += 1;
       console.error(`[huashu] [${i + 1}/${slides.length}] OK`);
     } catch (e) {
-      // html2pptx prefixes its message with the htmlFile path; strip the
-      // tmp prefix so the user sees a clean message.
+      // Both converters prefix their message with the htmlFile path; strip
+      // the tmp prefix so the user sees a clean message.
       const msg = String(e.message || e).replace(tmpHtml + ': ', '');
       failed.push({ slide_index: i, error: msg });
       console.error(`[huashu] [${i + 1}/${slides.length}] FAIL: ${msg.split('\n')[0]}`);

@@ -193,6 +193,10 @@ def build_pptx_huashu(
         "title": title,
         "slides": slides_html,
         "bypassValidation": bypass_validation,
+        # The sidecar's per-slide converter: "legacy" (html2pptx.js) or
+        # "snapshot" (render_slide.cjs). Read here and sent in the payload, so the
+        # sidecar env allowlist stays as it is.
+        "engine": os.environ.get("TELLR_EXPORT_ENGINE", "legacy"),
     }).encode("utf-8")
 
     with tempfile.TemporaryDirectory() as td:
