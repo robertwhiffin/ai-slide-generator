@@ -4,7 +4,7 @@ import type { TurnProgress } from '../../types/turnProgress';
 
 export const STOP_TOOLTIP = 'Stop generating (Esc)';
 export const STOP_ARIA_LABEL = 'Stop generating';
-export const GENERATING_HINT = 'Esc to cancel · Enter to send · Shift+Enter new line';
+export const GENERATING_HINT = 'Esc to cancel · Send when this finishes · Shift+Enter new line';
 export const STOP_DIALOG_TITLE = 'Stop generating?';
 export const STOP_KEEP_LABEL = 'Keep generating';
 export const STOP_CONFIRM_LABEL = 'Stop and discard';

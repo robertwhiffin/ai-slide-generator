@@ -9,8 +9,8 @@
  *   - calls `onStop` only for `key === 'Escape'`, and only when ALL hold:
  *       !e.defaultPrevented;
  *       document.querySelector('[role="dialog"]') is null;
- *       the target is not an input, textarea, select or [contenteditable], and is not inside a
- *       [data-escape-owner] element.
+ *       the target is not an input, textarea, select or [contenteditable] (unless it carries
+ *       `data-escape-stops`, as the chat box does), and is not inside a [data-escape-owner] element.
  *   - FeedbackDrawer's root carries `data-escape-owner`; PromptEditorModal (the expanded prompt
  *     editor, the one overlay with no role at all) gains `role="dialog"`.
  *
@@ -31,6 +31,7 @@
  *   - no text-input exclusion (any one of the four)          -> that case of test_ignores_escape_in_text_input RED.
  *   - contenteditable via `isContentEditable` (jsdom: undefined) -> the contenteditable case RED.
  *   - `matches` instead of `closest` for data-escape-owner   -> test_ignores_escape_inside_escape_owner RED.
+ *   - no data-escape-stops exception                         -> test_escape_in_a_text_field_marked_data_escape_stops_stops RED.
  *   - listener kept while inactive / added while inactive    -> test_ignores_when_inactive RED.
  *   - `[active, onStop]` deps (re-registered on every render) or a stale onStop
  *                                                            -> test_reads_latest_onStop_and_registers_once_per_active_change RED.
@@ -192,6 +193,23 @@ describe('useEscapeToStop', () => {
 
     // Positive: the same press from a button stops.
     press(screen.getByRole('button', { name: 'plain' }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  // The chat box takes typing while a turn runs, so the cursor is in it after Enter: Escape there still stops.
+  it('test_escape_in_a_text_field_marked_data_escape_stops_stops', () => {
+    const onStop = vi.fn();
+    render(
+      <Stopper active onStop={onStop}>
+        <textarea data-testid="other-box" defaultValue="x" />
+        <textarea data-testid="chat-box" data-escape-stops="" defaultValue="x" />
+      </Stopper>,
+    );
+
+    press(screen.getByTestId('other-box'));
+    expect(onStop).not.toHaveBeenCalled();
+
+    press(screen.getByTestId('chat-box'));
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 

@@ -8,7 +8,7 @@
  *       - the send button is replaced by a `type="button"` stop button: lucide `Ban`, `text-red-600`,
  *         aria-label `Stop generating`, title `Stop generating (Esc)`, `data-testid="chat-stop"`;
  *       - the stop button is enabled even though the textarea is disabled;
- *       - the hint reads `Esc to cancel · Enter to send · Shift+Enter new line`.
+ *       - the hint reads `Esc to cancel · Send when this finishes · Shift+Enter new line` (type while running).
  *   - No `onStop` (a Legacy deck, or the SSE transport): today's send button and hint, even while
  *     generating.
  *   - When `restoreDraftKey` changes to a new non-zero value: restore the last submitted text AND
@@ -43,7 +43,7 @@ vi.mock('../../services/api', async (importOriginal) => {
 });
 
 const HINT = 'Enter to send · Shift+Enter new line';
-const GENERATING_HINT = 'Esc to cancel · Enter to send · Shift+Enter new line';
+const GENERATING_HINT = 'Esc to cancel · Send when this finishes · Shift+Enter new line';
 const STOP_NAME = 'Stop generating';
 const STOP_TITLE = 'Stop generating (Esc)';
 const THUMB = 'data:image/png;base64,iVBORw0KGgo=';
@@ -106,7 +106,7 @@ describe('ChatInput stop mode', () => {
   });
 
   it('test_stop_button_enabled_while_input_disabled', () => {
-    // As ChatPanel renders it mid-turn: input disabled, nothing typed.
+    // Locked for another reason mid-turn (ChatPanel no longer locks the box for the turn itself).
     render(ui({ disabled: true, generating: true, onStop }));
 
     expect(textarea()).toBeDisabled();
@@ -122,7 +122,7 @@ describe('ChatInput stop mode', () => {
     const { rerender } = render(ui({ disabled: true, generating: true, onStop }));
 
     expect(screen.getByText(GENERATING_HINT, { exact: true })).toBeInTheDocument();
-    expect(screen.getByText('Esc to cancel · Enter to send · Shift+Enter new line')).toBeInTheDocument();
+    expect(screen.getByText('Esc to cancel · Send when this finishes · Shift+Enter new line')).toBeInTheDocument();
     expect(screen.queryByText(HINT, { exact: true })).toBeNull();
 
     rerender(ui({ disabled: false, generating: false, onStop }));

@@ -183,7 +183,7 @@ const FAILED_KEPT =
 const RESTORE_PENDING = 'This deck is still being restored after a failed generation. Try again in a minute.';
 const STOP_FAILED = "Couldn't stop the generation. It is still running.";
 const HINT = 'Enter to send · Shift+Enter new line';
-const GENERATING_HINT = 'Esc to cancel · Enter to send · Shift+Enter new line';
+const GENERATING_HINT = 'Esc to cancel · Send when this finishes · Shift+Enter new line';
 const dialogMessage = (done: number, total: number) =>
   `Your slides are being built (${done} of ${total} done). If you stop now, every slide built so far is thrown away and the deck goes back to how it was before you sent this message.`;
 
@@ -1108,6 +1108,8 @@ describe('no stop where the turn cannot be stopped', () => {
 
     expect(queryStopButton()).toBeNull();
     expect(sendButton()).toBeDisabled();
+    // Typing while a turn runs is Agent-only: here the box stays locked.
+    expect(textarea()).toBeDisabled();
     expect(screen.getByText(HINT)).toBeInTheDocument();
     expect(screen.queryByText(GENERATING_HINT)).toBeNull();
     expect(progressPlaceholder()).not.toBeNull(); // the turn is running
@@ -1140,6 +1142,69 @@ describe('no stop where the turn cannot be stopped', () => {
 
     h.polling = false; // the SSE transport has no request id to stop
     await expectSendKept();
+  });
+});
+
+// ── typing while a turn runs ──────────────────────────────────────────────────
+
+describe('typing while a turn runs (Agent deck)', () => {
+  const NEXT = 'Then a slide on otter habitats';
+
+  it('test_box_takes_the_next_message_while_a_turn_runs_and_sends_it_after', async () => {
+    const turn = await runningTurn(progressEvent('planning'));
+
+    expect(textarea()).not.toBeDisabled();
+    expect(screen.getByTitle('Attach image')).toBeEnabled();
+    expect(screen.getByTitle('Expand editor (for long prompts)')).toBeEnabled();
+    fireEvent.change(textarea(), { target: { value: NEXT } });
+    await act(async () => { fireEvent.keyDown(textarea(), { key: 'Enter' }); });
+    await settle();
+    expect(turns, 'a second turn started while the first was running').toHaveLength(1);
+    expect(textarea().value).toBe(NEXT);
+
+    h.getSlides.mockResolvedValue({ session_id: 'sess-1', slide_deck: FINISHED_DECK });
+    await complete(turn);
+    await waitFor(() => expect(onSlidesGenerated).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(queryStopButton()).toBeNull());
+    expect(textarea().value).toBe(NEXT);
+
+    await act(async () => { fireEvent.keyDown(textarea(), { key: 'Enter' }); });
+    expect(turns).toHaveLength(2);
+    expect(turns[1].message).toBe(NEXT);
+  });
+
+  // After Enter the cursor stays in the box, so that is where Escape is pressed.
+  it('test_escape_in_the_box_stops_the_turn', async () => {
+    const turn = await runningTurn(progressEvent('planning'));
+
+    await pressEscape(textarea());
+
+    expect(h.cancelChat).toHaveBeenCalledTimes(1);
+    expect(h.cancelChat).toHaveBeenCalledWith('req-1');
+    await expectRolledBack(turn);
+  });
+
+  it('test_escape_in_the_box_opens_the_stop_dialog_while_slides_are_built', async () => {
+    await runningTurn(building());
+
+    await pressEscape(textarea());
+    await settle();
+
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(DIALOG_TITLE)).toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: KEEP })).toHaveFocus());
+    expect(h.cancelChat).not.toHaveBeenCalled();
+  });
+
+  it('test_stop_puts_the_sent_message_back_over_a_newer_draft', async () => {
+    await runningTurn(progressEvent('planning'));
+    expect(textarea()).not.toBeDisabled();
+    fireEvent.change(textarea(), { target: { value: NEXT } });
+
+    await clickStop();
+
+    await waitFor(() => expect(textarea().value).toBe(DRAFT));
+    await waitFor(() => expect(textarea()).toHaveFocus());
   });
 });
 

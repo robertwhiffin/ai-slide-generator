@@ -14,7 +14,8 @@ interface ChatInputProps {
   modeControl?: React.ReactNode;
   /** When set, the hint row offers Generate image (slideCount fills the dialog's For-slide choices). */
   imageRequest?: { slideCount: number };
-  /** A turn is running: with `onStop`, the send button becomes a stop button. */
+  /** A turn is running: nothing is sent until it ends (the box still takes typing unless `disabled`).
+   *  With `onStop`, the send button becomes a stop button. */
   generating?: boolean;
   /** Stop the running turn. Absent for Legacy decks, which keep the send button. */
   onStop?: () => void;
@@ -175,7 +176,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     e.preventDefault();
     const text = message.trim();
     if (!text && attachedImages.length === 0) return;
-    if (disabled) return;
+    if (disabled || generating) return;
     const imageIds = attachedImages.length > 0 ? attachedImages.map((a) => a.id) : undefined;
     sendRecorded(text || 'Use these images', imageIds, message, attachedImages);
     setMessage('');
@@ -252,6 +253,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               placeholder={placeholder ?? 'Ask me to create slides...'}
               disabled={disabled}
               data-testid="chat-input"
+              data-escape-stops
               className="w-full px-3 py-2 pr-20 border border-input bg-background rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-0 resize-none transition-all duration-150 text-sm"
               style={{
                 minHeight: `${MIN_ROWS * LINE_HEIGHT}px`,
@@ -329,7 +331,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             {imageRequest && (
               <button
                 type="button"
-                disabled={disabled}
+                disabled={disabled || generating}
                 onClick={() => setIsImageDialogOpen(true)}
                 className="flex shrink-0 items-center gap-1 whitespace-nowrap hover:text-foreground disabled:opacity-50 disabled:hover:text-muted-foreground"
               >
@@ -365,13 +367,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onSave={handleModalSave}
           onCancel={() => setIsModalOpen(false)}
           onSend={(text) => {
-            if (text.trim() && !disabled) {
+            if (text.trim() && !disabled && !generating) {
               sendRecorded(text.trim(), undefined, text.trim(), attachedImages);
               setMessage('');
               setIsModalOpen(false);
             }
           }}
           disabled={disabled}
+          sendDisabled={generating}
         />
       )}
     </>
