@@ -917,8 +917,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
     }
   };
 
-  const chatInputDisabled =
-    isLoading || isInitializing || !sessionId || disabled || isClearing || isDeletingMessage;
+  const chatBoxLocked = isInitializing || !sessionId || disabled || isClearing || isDeletingMessage;
+  const chatInputDisabled = isLoading || chatBoxLocked;
   const effectiveDeckMode = storedDeckMode ?? selectedDeckMode;
   // A stop needs the request id the polling transport reports, and an Agent deck's server-side rollback.
   const stoppable = effectiveDeckMode !== 'legacy' && isPollingMode();
@@ -1058,7 +1058,8 @@ export const ChatPanel = forwardRef<ChatPanelHandle, ChatPanelProps>(({
 
       <ChatInput
         onSend={(message, imageIds) => { void handleSendMessage(message, { imageIds, fromInput: true }); }}
-        disabled={chatInputDisabled}
+        // A turn that can be stopped leaves the box open for the next message; ChatInput holds the send.
+        disabled={canStop ? chatBoxLocked : chatInputDisabled}
         generating={isLoading}
         onStop={canStop ? handleStopRequest : undefined}
         restoreDraftKey={restoreDraftKey}
