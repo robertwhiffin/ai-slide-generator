@@ -1,0 +1,13 @@
+<div class="slide">
+  <p class="dk-eyebrow">Method</p>
+  <h2 class="dk-title">Margins are computed <span class="dk-gradtext">from the ledger</span>, not estimated</h2>
+  <div style="display:flex; gap:36px; margin-top:20px;">
+    <div class="dk-code" style="width:640px;"><div><span class="kw">SELECT</span> segment,</div><div>&nbsp;&nbsp;SUM(revenue) <span class="kw">AS</span> rev,</div><div>&nbsp;&nbsp;SUM(op_income) / SUM(revenue) <span class="kw">AS</span> margin</div><div><span class="kw">FROM</span> finance.gl_fy2024</div><div><span class="kw">GROUP BY</span> segment;</div></div>
+    <div style="flex:1; font-size:17px; line-height:1.5;"><p style="margin:0 0 12px;">Every figure in this deck traces to one governed table.</p><p style="margin:0; opacity:0.6;">Restated FY23 figures use the same query.</p></div>
+  </div>
+  <div style="position:absolute; right:40px; top:300px; transform:rotate(-90deg); transform-origin:right top; font-size:12px; letter-spacing:0.2em; color:var(--ink-2); text-transform:uppercase;">Governed data</div>
+  <div class="dk-footer">
+    <div class="brand"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNTAiIGhlaWdodD0iMzAiIHZpZXdCb3g9IjAgMCAxNTAgMzAiPjxwYXRoIGQ9Ik0yIDkgTDEzIDMgTDI0IDkgTDEzIDE1IFoiIGZpbGw9IiNGRjM2MjEiLz48cGF0aCBkPSJNMiAxNSBMMTMgMjEgTDI0IDE1IiBmaWxsPSJub25lIiBzdHJva2U9IiNGRjM2MjEiIHN0cm9rZS13aWR0aD0iMi40Ii8+PHBhdGggZD0iTTIgMjEgTDEzIDI3IEwyNCAyMSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkYzNjIxIiBzdHJva2Utd2lkdGg9IjIuNCIvPjx0ZXh0IHg9IjMxIiB5PSIyMiIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjIwIiBmb250LXdlaWdodD0iNzAwIiBmaWxsPSIjMUIzMTM5Ij5kYXRhYnJpY2tzPC90ZXh0Pjwvc3ZnPg==" alt="databricks"><span>Meridian Components · FY2024 review</span></div>
+    <span class="pg">13 / 16</span>
+  </div>
+</div>

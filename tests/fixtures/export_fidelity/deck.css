@@ -1,0 +1,78 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&display=swap');
+:root {
+  --ink: #1B3139;
+  --ink-2: #5A6F77;
+  --accent: #FF5F46;
+  --accent-2: #FF3621;
+  --paper: #F9F7F4;
+  --rule: #DCE0E2;
+  --good: #00A972;
+  --good-bg: #CDEDE1;
+  --bad: #D0302A;
+  --bad-bg: #F8D3D0;
+  --mono: 'DM Mono', ui-monospace, monospace;
+}
+.slide { width: 1280px; height: 720px; position: relative; overflow: hidden; background: var(--paper); color: var(--ink); font-family: 'DM Sans', sans-serif; box-sizing: border-box; padding: 72px 88px 0 88px; }
+.slide.dark { background: var(--ink); color: #fff; }
+.dk-eyebrow { font-size: 13px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent); margin: 0 0 14px; }
+.dk-title { font-size: 42px; font-weight: 600; line-height: 1.08; letter-spacing: -0.01em; margin: 0 0 12px; max-width: 1040px; }
+.dk-sub { font-size: 22px; color: var(--ink-2); margin: 0 0 24px; }
+.dk-footer { position: absolute; left: 88px; right: 88px; bottom: 40px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--ink-2); }
+.dk-footer .brand { display: flex; align-items: center; gap: 10px; }
+.dk-footer img { height: 22px; }
+.dk-footer .pg { font-family: var(--mono); letter-spacing: 0.08em; }
+.dk-source { font-size: 12px; font-style: italic; color: var(--ink-2); margin-top: 10px; }
+.dk-card { background: #fff; border: 1px solid var(--rule); border-radius: 12px; padding: 20px 22px; box-shadow: 0 2px 8px rgba(27, 49, 57, 0.08); }
+.dk-callout { background: var(--ink); color: #fff; border-radius: 16px; padding: 26px 30px; }
+.dk-callout .lbl { font-size: 13px; letter-spacing: 0.14em; font-weight: 700; color: var(--accent); text-transform: uppercase; }
+.dk-callout p { font-size: 20px; font-weight: 600; line-height: 1.3; margin: 12px 0 0; }
+.dk-table { width: 100%; border-collapse: collapse; font-size: 16px; }
+.dk-table th { text-align: left; font-weight: 600; font-size: 15px; padding: 14px 16px; border-bottom: 2px solid var(--ink); }
+.dk-table td { padding: 16px 16px; border-bottom: 1px solid var(--rule); }
+.dk-table td:first-child { font-weight: 600; }
+.dk-table .num { text-align: right; font-family: var(--mono); }
+.dk-table .hl { background: rgba(255, 95, 70, 0.10); }
+.dk-harvey { display: inline-block; width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--ink); background: conic-gradient(var(--ink) calc(var(--p) * 1%), transparent 0); vertical-align: middle; }
+.dk-pill { display: inline-block; font-family: var(--mono); font-size: 12px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.dk-pill.up { background: var(--good-bg); color: #0B5D43; }
+.dk-pill.down { background: var(--bad-bg); color: #7A1714; }
+.dk-bs { width: 100%; border-collapse: collapse; font-size: 14px; }
+.dk-bs th { background: var(--accent); color: #fff; font-weight: 600; text-align: left; padding: 7px 10px; }
+.dk-bs th.num, .dk-bs td.num { text-align: right; font-family: var(--mono); }
+.dk-bs td { padding: 5px 10px; border-bottom: 1px solid var(--rule); }
+.dk-bs tr.section td { font-size: 11px; color: var(--ink-2); background: #EEEDE9; padding: 4px 10px; }
+.dk-bs tr.indent td:first-child { padding-left: 26px; }
+.dk-bs tr.total td { font-weight: 700; border-top: 1px solid var(--ink); }
+.dk-bs tr.grand td { background: var(--ink); color: #fff; font-weight: 700; }
+.dk-list { list-style: none; padding: 0; margin: 0; }
+.dk-list li { position: relative; padding-left: 28px; font-size: 20px; line-height: 1.45; margin-bottom: 14px; }
+.dk-list li::before { content: ''; position: absolute; left: 0; top: 11px; width: 12px; height: 12px; border-radius: 3px; background: var(--accent); }
+.dk-accent-bar { position: relative; padding-left: 22px; }
+.dk-accent-bar::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 5px; background: var(--accent); border-radius: 3px; }
+.dk-quote { font-size: 30px; font-weight: 500; line-height: 1.3; border-left: 6px solid var(--accent); padding: 6px 0 6px 28px; }
+.dk-kpi .v { font-size: 46px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+.dk-kpi .k { font-size: 16px; font-weight: 600; color: var(--ink-2); }
+.dk-kpi .d { font-size: 13px; font-weight: 600; color: var(--good); }
+.dk-kpi .d.neg { color: var(--bad); }
+.dk-grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.dk-grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+.dk-dot { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); }
+.dk-date { font-family: var(--mono); font-size: 14px; letter-spacing: 0.06em; color: var(--accent); margin: 14px 0 6px; }
+.dk-mtitle { font-size: 20px; font-weight: 600; line-height: 1.25; margin: 0 0 8px; }
+.dk-mbody { font-size: 15px; line-height: 1.45; color: var(--ink-2); margin: 0; }
+.dk-bar-track { height: 12px; border-radius: 6px; background: #E6E3DE; overflow: hidden; }
+.dk-bar-fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+.dk-code { background: #10242B; color: #E8EEF0; border-radius: 10px; padding: 18px 22px; font-family: var(--mono); font-size: 15px; line-height: 1.55; }
+.dk-code .kw { color: #FF8A73; }
+.dk-chip { background: #EEEDE9; border-radius: 4px; padding: 1px 6px; font-family: var(--mono); font-size: 0.9em; }
+.dk-gradtext { background: linear-gradient(90deg, var(--accent-2), #FFB347); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.chart-svg .bar { fill: #F0664D; }
+.chart-svg .bar.hi { fill: var(--accent-2); }
+.chart-svg .grid { stroke: var(--rule); stroke-width: 1; }
+.chart-svg .line { fill: none; stroke: var(--ink); stroke-width: 2.5; }
+.chart-svg .pt { fill: var(--ink); }
+.chart-svg text { font-family: var(--mono); font-size: 13px; fill: var(--ink); }
+.chart-svg text.axis { fill: var(--ink-2); }
+.dk-legend { display: flex; gap: 22px; font-size: 15px; margin-top: 8px; }
+.dk-legend span.sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; background: #F0664D; vertical-align: -2px; margin-right: 8px; }
