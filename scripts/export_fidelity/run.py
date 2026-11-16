@@ -107,6 +107,78 @@ def render_with_libreoffice(pptx_path: Path, names: list[str], out_dir: Path) ->
         page.get_pixmap(matrix=fitz.Matrix(zoom, zoom)).save(str(lo_dir / f"{names[index]}.png"))
 
 
+POWERPOINT_STAGING_DIR = (
+    Path.home() / "Library" / "Containers" / "com.microsoft.Powerpoint" / "Data" / "tellr-export-fidelity"
+)
+
+
+def render_with_powerpoint(pptx_path: Path, names: list[str], out_dir: Path) -> None:
+    """Render the .pptx with Microsoft PowerPoint for Mac (the PPTX ground truth).
+
+    PowerPoint is sandboxed: opening or saving outside its container raises a
+    "grant access" dialog, so the file is staged inside the container first.
+    Needs the deck's fonts installed locally (DM Sans / DM Mono for the corpora).
+    """
+    import fitz  # pymupdf
+
+    POWERPOINT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    staged_pptx = POWERPOINT_STAGING_DIR / "export.pptx"
+    staged_pdf = POWERPOINT_STAGING_DIR / "export.pdf"
+    shutil.copyfile(pptx_path, staged_pptx)
+    staged_pdf.unlink(missing_ok=True)
+    script = f'''
+with timeout of 600 seconds
+tell application "Microsoft PowerPoint"
+  open POSIX file "{staged_pptx}"
+  delay 3
+  set exported to active presentation
+  save exported in POSIX file "{staged_pdf}" as save as PDF
+  close exported saving no
+end tell
+end timeout
+'''
+    subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
+    powerpoint_dir = out_dir / "powerpoint"
+    powerpoint_dir.mkdir(parents=True, exist_ok=True)
+    pdf = fitz.open(staged_pdf)
+    for index, page in enumerate(pdf):
+        zoom = SLIDE_WIDTH_PX / page.rect.width
+        page.get_pixmap(matrix=fitz.Matrix(zoom, zoom)).save(str(powerpoint_dir / f"{names[index]}.png"))
+
+
+def _normalise_text(text: str) -> str:
+    return "".join(text.split()).lower()
+
+
+def check_text_loss(pptx_path: Path, names: list[str], out_dir: Path) -> dict[str, list[str]]:
+    """Words the browser renders that are absent from the exported slide.
+
+    The reference is the browser's own rendered text (render_truth.cjs writes
+    it), which no extraction code touches, so text the exporter drops shows up
+    here. SVG and canvas text is excluded: it travels inside the picture.
+    """
+    from pptx import Presentation
+
+    presentation = Presentation(str(pptx_path))
+    slides = list(presentation.slides)
+    missing: dict[str, list[str]] = {}
+    for index, name in enumerate(names):
+        reference = (out_dir / "truth" / f"{name}.txt").read_text(encoding="utf-8")
+        exported = ""
+        if index < len(slides):
+            for shape in slides[index].shapes:
+                if shape.has_text_frame:
+                    exported += shape.text_frame.text
+                if shape.has_table:
+                    exported += "".join(cell.text for row in shape.table.rows for cell in row.cells)
+        exported_normalised = _normalise_text(exported)
+        lost = [word for word in reference.split() if _normalise_text(word) not in exported_normalised]
+        if lost:
+            missing[name] = lost
+    (out_dir / "text_loss.json").write_text(json.dumps(missing, indent=2, ensure_ascii=False), encoding="utf-8")
+    return missing
+
+
 def _google_token() -> str:
     return subprocess.run(
         ["gcloud", "auth", "application-default", "print-access-token"],
@@ -169,7 +241,7 @@ def render_with_google_slides(pptx_path: Path, names: list[str], out_dir: Path) 
 def compare(names: list[str], out_dir: Path) -> dict:
     from PIL import Image, ImageChops, ImageDraw, ImageStat
 
-    renders = [kind for kind in ("gslides", "libreoffice") if (out_dir / kind).exists()]
+    renders = [kind for kind in ("powerpoint", "gslides", "libreoffice") if (out_dir / kind).exists()]
     compare_dir = out_dir / "compare"
     compare_dir.mkdir(parents=True, exist_ok=True)
     scores: dict[str, dict[str, float]] = {}
@@ -199,7 +271,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("fixture_dir", type=Path)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--lo", action="store_true", help="render the .pptx with LibreOffice")
+    parser.add_argument("--powerpoint", action="store_true", help="render the .pptx with Microsoft PowerPoint (macOS)")
+    parser.add_argument("--lo", action="store_true", help="render the .pptx with LibreOffice (smoke check only)")
     parser.add_argument("--gslides", action="store_true", help="convert through Google Drive")
     parser.add_argument("--only", nargs="*", help="slide name prefixes to include")
     args = parser.parse_args()
@@ -212,6 +285,10 @@ def main() -> int:
     documents = build_documents(deck, slides, args.out)
     render_truth(documents, args.out)
     pptx_path = export_pptx(deck, documents, args.out)
+    lost = check_text_loss(pptx_path, names, args.out)
+    print("Text missing from the export:", json.dumps(lost, indent=2, ensure_ascii=False) if lost else "none")
+    if args.powerpoint:
+        render_with_powerpoint(pptx_path, names, args.out)
     if args.lo:
         render_with_libreoffice(pptx_path, names, args.out)
     if args.gslides:

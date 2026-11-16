@@ -1,392 +1,488 @@
-# Export fidelity: snapshot-then-emit for PPTX and Google Slides
+# Exports that match the UI: snapshot-then-emit for PPTX and Google Slides — design
 
-**Branch:** `export-enhance` · **Status:** design, awaiting owner review
+Date: 2026-11-16. Status: draft for owner review. Branch: `export-enhance`.
 
-## 1. Goal
+Decisions are marked **(decided)** when the owner made them and **(my call)** when the
+designer made them and the owner has not yet confirmed them. Unmarked text describes the
+code as it stands or what was measured.
 
-What a user sees on a slide in the Tellr UI is what they get in the exported PowerPoint
-file and in Google Slides: same positions, same line breaks, same typography, same
-shapes, nothing overlapping that does not overlap on screen, nothing missing, nothing
-extra. Everything stays **editable**: text is real text, shapes are real shapes, tables
-are real tables. Pixels are used only for what PowerPoint and Slides cannot represent
-natively (SVG charts, canvases, unusual gradients, filters).
+## Intent
 
-### What the owner said, and what is assumed
+Users export a deck to PowerPoint or Google Slides and get something that does not look
+like what they built. Text overlaps, items swap order, charts turn black, footers collide,
+table captions jump, and visual pieces vanish. The owner's bar: **what I see in the Tellr
+UI is what I get in the export, 1:1, and everything stays editable.** That is real text
+boxes, real shapes and real tables. It is not a picture of the slide.
 
-| Said by the owner | Assumed (open to correction) |
-|---|---|
-| Exports must be 1:1 with the UI, for PPTX and Google Slides | "1:1" is judged visually at slide scale, not pixel-identical antialiasing |
-| Everything must be editable after export | A chart may stay a picture; its title, legend and surrounding text are editable |
-| Cover every broken pattern, not only the reported examples | The design-system templates and a finance corpus are a representative sample |
-| huashu is the live engine; work only on `export-enhance`; no PR to `main` until asked | The records fallback (`/from-records`, used only when huashu is unavailable) is unchanged |
-| Deploy a dev build to the FEVM dev workspace via the repo's dev skill and keep it ≥ 1 week | — |
+This rebuilds the converter core of the huashu export path so that it reads the slide the
+browser rendered, instead of rewriting the HTML and measuring the rewrite. It also maps
+the result onto the PowerPoint and Google Slides constructs that survive, and adds a harness
+that measures fidelity against PowerPoint and Google Slides themselves.
 
-### Success criteria
+## How export works today
 
-1. Every defect class in §3 has a fixture slide in `tests/fixtures/export_fidelity/` and a
-   test that fails on today's code and passes after the change.
-2. On the two harness corpora (16 finance slides in-repo; 27 design-system templates
-   locally), the Google Slides render shows none of the §3 defects on visual review, and
-   the per-slide difference score (`scripts/export_fidelity/run.py`) does not regress on
-   any slide versus the baseline.
-3. The existing 134 sidecar tests pass, except where a test pins an internal that this
-   design deliberately removes; each such test is ported to assert the same user-visible
-   contract (listed in §8).
-4. A real deck generated on the dev app exports to PPTX and Google Slides with the §3
-   defects absent, verified by the owner by hand.
+- **PDF** is built in the browser: each slide is rendered in a sandboxed frame, captured as
+  an image, and placed on a PDF page. It is pictures only, and it is not part of this work.
+- **PowerPoint** is built on the server by the huashu path,
+  `POST /api/export/pptx/editable/huashu/from-html`:
+  - `build_slide_html` makes one HTML document per slide, and `build_pptx_huashu` pipes
+    them to `services/pptx-emit-huashu/emit_deck.mjs`;
+  - per slide, `html2pptx.js` opens the page in Chromium, runs `preprocess.mjs` (a chain of
+    DOM **mutations**), walks the mutated DOM, and writes pptxgenjs shapes;
+  - if huashu is unavailable, the frontend falls back to the records path
+    (`/from-records`).
+- **Google Slides**, `POST /api/export/google-slides/from-huashu`, builds that same `.pptx`
+  and uploads it to the user's Drive with conversion to Google Slides. Drive's importer
+  turns it into a native Slides deck, and Tellr returns the link. Every Google Slides
+  defect is therefore either a defect in our `.pptx` or a quirk of Drive's importer, and
+  this design has to handle both.
+- **Fonts arrive** because Chromium loads the deck's webfonts while rendering, the family
+  name is written into the file, and Google Slides hosts DM Sans and DM Mono. PowerPoint
+  shows them when they are installed on the viewer's machine.
 
-## 2. How export works today
+## Goals
 
-`POST /api/export/pptx/editable/huashu/from-html` and `/google-slides/from-huashu` build
-one HTML document per slide (`build_slide_html`), and `build_pptx_huashu` pipes them to
-`services/pptx-emit-huashu/emit_deck.mjs`. Per slide, `html2pptx.js` (vendored from
-huashu-design) opens the page in Playwright Chromium, runs `preprocess.mjs` (a series of
-DOM **mutations**: wrap inline text in `<p>`, flatten tables into absolute `<div>`s,
-rasterize SVGs, pull badges out of text, …), then walks the **mutated** DOM
-(`extractSlideData`) and emits pptxgenjs shapes. Google Slides is that same `.pptx`
-uploaded to Drive and converted.
+1. The exported PowerPoint file and the Google Slides deck look like the UI: same
+   positions, same line breaks, same typography (weight, tracking, line spacing,
+   opacity), same shapes and stacking. Nothing overlaps that does not overlap on screen;
+   nothing is missing; nothing extra appears. **(decided)**
+2. Everything with a native equivalent stays native and editable: text, boxes, borders,
+   circles, lines, tables, list markers, CSS-drawn bullets and dots. Only what has no
+   native equivalent becomes a picture: SVG and Chart.js charts, canvases, conic and
+   radial gradients, filters. **(decided)**
+3. Every defect class found in the investigation has a fixture slide and a test that
+   fails on today's code and passes after the change.
+4. Fidelity is measured against **PowerPoint for Mac** and **Google Slides**, the
+   applications users open. Neither is approximated by another renderer.
+5. Silent text loss becomes visible, in the harness and in the app log.
 
-## 3. Root causes (measured)
+## Non-goals
 
-Evidence comes from the owner's 15-slide export, from `scripts/export_fidelity/run.py` on
-both corpora (browser truth vs. Google Slides vs. LibreOffice), and from probe decks
-converted through Drive.
+- The inline editor revamp. **(decided: separate session, own spec)**
+- PDF export.
+- The records fallback (`/from-records`, `exportWalkerSource.ts`), which only runs when
+  huashu is unavailable.
+- Inheriting a brand's `.pptx` master and layouts (see *Prior art*).
+- Fonts Google Slides does not host. They fall back in Slides exactly as they do today.
 
-| # | Root cause | Where | Observed symptoms |
+## Anti-goals (a failure even if it technically works)
+
+- A slide that looks right but is one picture, or whose text is not editable.
+- A fix that makes one corpus slide right and moves another; every harness run is
+  compared slide by slide against the baseline.
+- Text that disappears without a log line saying so.
+- Weakening the existing hardening: hostile slide script must still neither hang the
+  export nor blind it, images stay `data:`-only, and the sidecar keeps its env allowlist.
+
+## Root causes (measured)
+
+Evidence came from four sources:
+
+- the owner's 15-slide export (Google Slides JSON and thumbnails);
+- `scripts/export_fidelity/run.py` on two corpora: 17 in-repo finance slides and the 27
+  design-system templates (local only), each rendered as browser truth and as the real
+  export opened in PowerPoint and in Google Slides;
+- probe decks converted through Drive;
+- a reading of the code.
+
+| # | Root cause | Where | What the user sees |
 |---|---|---|---|
-| RC1 | **Measure-after-mutate.** Preprocess passes change layout (`display:none` on tables, new `<p>`s, inline-block wrappers, block `<img>`s), then later passes and the walker read the reflowed layout, not what the user saw | `preprocess.mjs` (all passes), walker | Table caption jumps above the table; two side-by-side tables stacked on one another; a `flex:1` callout balloons over the table beside it |
-| RC2 | **Flex/grid items merged into one paragraph.** `wrapInlineRunsIn` wraps every contiguous inline child of a `div` in one `<p>`, but each flex/grid child is its own box | `preprocess.mjs::wrapInlineRunsIn` | Footer logo drawn over text and page number glued on ("review12 / 15"); legends, agenda "01The lakehouse", KPI/stat labels, Gantt "Q1Q2Q3Q4", progress "automation80%" run together |
-| RC3 | **Case-sensitive tag check.** `svg.tagName` is lowercase `svg`, so `BLOCK_TAGS.has('SVG')` misses; the SVG is wrapped in a `<p>` and the walker emits its `<text>` content with raw source whitespace | `preprocess.mjs::isInlineNode` | Stray "905 968 1,042…" text columns on every SVG chart |
-| RC4 | **SVG raster loses document CSS.** Inline SVGs are serialized standalone, so class/var-based `fill`/`stroke`/`font-*` and webfonts do not apply; CSS `filter` on `<img>` is ignored | `rasterizeInlineSvgs`, image emit | Black bars, filled black polylines, serif chart labels, missing gridlines and legend swatches; white-on-navy logos turn dark |
-| RC5 | **Text boxes sized to the exact browser width**, and Drive ignores `wrap="none"` (probe: still wraps). Weight 600 is emitted as `bold` (700, wider). `valign: middle` makes an extra wrapped line grow upward | walker + `addElements` | "Q1 / 2025", "Start growth / capex", "Thank / you", titles colliding with eyebrows, chip text on two lines |
-| RC6 | **Exact line spacing** (`spcPts`) is converted by Drive to a percentage of the font's natural line height (probe: 22.5 pt on 13.5 pt → 166%, i.e. ≈2.0× font size instead of 1.67×) | `addElements` (`lineSpacing`) | Every multi-line title/paragraph taller in Slides, pushing into the content below |
-| RC7 | **Typography dropped.** No `charSpacing`; weights collapsed to bold/not; element-level bold/italic lost whenever the element contains any inline tag; run-level `font-family` not emitted; `<sup>/<sub>/<code>/<a>/<small>/<mark>` text dropped or unstyled; text opacity/alpha ignored (Drive drops text transparency — probe); `background-clip:text` text invisible | `parseInlineFormatting`, walker | Eyebrow tracking lost everywhere; `<br>` titles render regular weight; mono numerals turn sans; footnote markers vanish; faded text full-strength; gradient headline words invisible |
-| RC8 | **Visuals the walker cannot see.** `::before/::after` content; gradients on non-root elements; conic gradients; empty inline swatches; `border-radius:50%` emitted as a 1-inch rounded rect; table radius/shadow; `blockquote` borders; `list-style:none` ignored; `<ol>` rendered as bullets | walker (DIV-only shapes, list handler) | Square bullets, accent bars, timeline/journey dots gone; progress fills empty; Harvey balls gone (finance deck and the DS comparison template); circles become squircles |
-| RC9 | **Table flattening copies only some cell styles** (no weight, italic, letter-spacing, line-height, vertical-align) and appends cell `div`s at the end of `body` | `flattenTables` | Bold headers and row labels lost; cells paint above later content |
-| RC10 | **Visibility not honoured.** Walker ignores `visibility`, `opacity:0`, `clip`/visually-hidden patterns | walker | Screen-reader-only tables exported as visible text |
-| RC11 | **Paint order = DOM order**, not CSS stacking order (z-index, positioned elements) | walker | Flattened cells and pills drawn over callouts; decorative layers in front of text |
-| RC12 | **Rotated text** box comes from the rotated rect with wrapping on | walker | Vertical "GOVERNED DATA" wraps letter by letter |
-| RC13 | **Inline badges pulled out of their sentence** and re-centred in the ancestor | `emitInlineBackgrounds` | Code chip jumps above its line leaving a gap ("with  now 31%") |
+| RC1 | **Measure-after-mutate.** Preprocess passes change layout (`display:none` on tables, new `<p>`s, inline-block wrappers, block `<img>`s). Later passes and the walker then read the reflowed layout, not what the user saw | `preprocess.mjs` (all passes), walker | Table caption jumps above the table; two side-by-side tables stacked on one another; a `flex:1` callout balloons over the table beside it |
+| RC2 | **Flex and grid items merged into one paragraph.** `wrapInlineRunsIn` wraps every run of inline children of a `div` in one `<p>`, but each flex or grid child is its own box | `preprocess.mjs::wrapInlineRunsIn` | Footer logo drawn over the text and page number glued on ("review12 / 15"); legends, agenda "01The lakehouse", KPI and stat labels, Gantt "Q1Q2Q3Q4" and progress "automation80%" run together |
+| RC3 | **Case-sensitive tag check.** `svg.tagName` is lowercase, so `BLOCK_TAGS.has('SVG')` misses it. The SVG is wrapped in a `<p>`, and its `<text>` content is emitted with raw source whitespace | `preprocess.mjs::isInlineNode` | Stray "905 968 1,042…" text columns on every SVG chart |
+| RC4 | **SVG raster loses document CSS.** SVGs are serialized standalone, so class- and variable-based `fill`, `stroke`, `font-*` and webfonts are lost. A CSS `filter` on `<img>` is ignored | `rasterizeInlineSvgs`, image emit | Black bars, filled black polylines, serif chart labels, missing gridlines and swatches; white-on-navy logos turn dark |
+| RC5 | **Text boxes sized to the exact browser width.** Drive ignores `wrap="none"` (probe). Weight 600 is written as bold (700, wider). `valign: middle` grows an extra wrapped line upward | walker + `addElements` | "Q1 / 2025", "Start growth / capex", "Thank / you", titles colliding with eyebrows, two-line chips; the same titles wrap in PowerPoint too |
+| RC6 | **Exact line spacing.** Drive converts `spcPts` to a percentage of the font's natural line height (probe: 22.5 pt on 13.5 pt becomes 166%, about 2.0× the font size instead of 1.67×) | `addElements` | Multi-line titles and paragraphs taller in Slides, pushing into content below |
+| RC7 | **Typography dropped.** No letter spacing; weights collapsed to bold or not; element-level bold and italic lost when the element contains any inline tag; run-level font family not written; `<sup>`, `<sub>`, `<code>`, `<a>`, `<small>`, `<mark>` text dropped or unstyled; opacity on text ignored (and Drive drops text alpha, probe); `background-clip:text` text invisible | `parseInlineFormatting`, walker | Eyebrow tracking lost everywhere; `<br>` titles in regular weight; mono numerals turn sans; footnote markers vanish (caught by the text-loss check); faded text at full strength in both apps; gradient headline words invisible |
+| RC8 | **Visuals the walker cannot see.** `::before` and `::after` content; gradients on non-root elements; conic gradients; empty inline swatches; `border-radius:50%` written as a 1-inch rounded rectangle; table radius and shadow; `blockquote` borders; `list-style:none` ignored; `<ol>` turned into bullets; canvases drawn by slide script | walker (shapes from `div` only, list handler), `rasterizeCanvases` | Square bullets, accent bars, timeline and journey dots gone; progress fills empty; Harvey balls gone (finance deck and the design system's own comparison template); circles become squircles; a script-drawn canvas missing |
+| RC9 | **Table flattening copies only some cell styles** (no weight, italic, letter spacing, line height or vertical alignment) and appends cell `div`s at the end of `body` | `flattenTables` | Bold headers and row labels lost; cells paint above later content |
+| RC10 | **Visibility not honoured.** `visibility`, `opacity:0`, `clip` and the visually-hidden pattern are ignored | walker | Screen-reader-only tables exported as visible text |
+| RC11 | **Paint order follows the DOM,** not CSS stacking (z-index, positioned elements) | walker | Cells and pills drawn over callouts; decorative layers in front of text |
+| RC12 | **Rotated text** gets its box from the rotated rect with wrapping on | walker | Vertical "GOVERNED DATA" wraps letter by letter |
+| RC13 | **Inline badges pulled out of their sentence** and re-centred in the ancestor | `emitInlineBackgrounds` | A code chip jumps above its line and leaves a gap ("with  now 31%"); icons float above their labels |
 
-RC5 (wrap), RC6 and the transparency half of RC7 are specific to Google's PPTX import;
-every other cause hits both PPTX and Google Slides.
+RC5's wrapping, RC6, and the text-alpha half of RC7 come from Drive's importer. Every other
+cause hits PowerPoint and Google Slides alike.
 
-### Google import constraints (probe decks, 2026-11-16)
+### What Drive's importer keeps (probe decks, 2026-11-16)
 
-| Construct | Survives Drive import? | Consequence for the emitter |
+| Construct | Kept? | Consequence |
 |---|---|---|
-| `wrap="none"` | **No** — text still wraps | Keep browser line breaks explicitly and give boxes width slack |
-| Typeface `DM Sans SemiBold` / `DM Sans Medium` | **Yes** → weight 600 / 500 | Encode non-400/700 weights in the typeface name |
-| `spc` (letter spacing) | Yes | Emit `charSpacing` |
-| Exact line spacing `spcPts` | Converted to % of natural line height | Emit percentage spacing relative to the font's natural line height |
-| Text `alpha` | **No** | Pre-blend text colour against its backdrop |
+| `wrap="none"` | **No**, text still wraps | Keep browser line breaks explicitly and give boxes width slack |
+| Typeface `DM Sans SemiBold` / `DM Sans Medium` | **Yes**, as weight 600 / 500 | Write non-400/700 weights into the typeface name. The static DM Sans fonts carry these legacy family names (name ID 1), so PowerPoint resolves them too |
+| `spc` (letter spacing) | Yes | Write `charSpacing` |
+| Exact line spacing (`spcPts`) | Converted to % of the natural line height | Write percentage spacing relative to the font's natural line height |
+| Text alpha | **No** | Pre-blend text colour against its backdrop |
 | Fill transparency | Yes | Keep fill transparency |
-| `ellipse` preset | Yes | Use for circles |
-| Superscript run | Yes | Use `superscript`/`subscript` run options |
-| Native `<a:tbl>` | Yes: geometry, fills, margins, weights, alignment exact; per-cell borders partly lost | Use native tables; emit borders per cell explicitly and verify (§5.5) |
+| `ellipse` preset | Yes | Use it for circles |
+| Superscript run | Yes | Use superscript and subscript run options |
+| Native table (`a:tbl`) | Yes: geometry, fills, margins, weights and alignment exact; some per-cell borders lost | Use native tables and write all four borders on every cell |
 
-## 4. Approaches considered
+## Prior art: huashu-design upstream
+
+Tellr's export path vendors `alchaincyf/huashu-design` (MIT, about 29.6k stars; see
+https://github.com/alchaincyf/huashu-design). The commit history and issues show the
+author met the same problems and moved on from the code Tellr vendored:
+
+| Date | Upstream change | Link |
+|---|---|---|
+| 2026-04-19 | v1.0 with `scripts/html2pptx.js` (the four-rule path) | commit `7d7bab4a82` |
+| 2026-04-24 | Community PR: element bold/italic lost when a title contains `<br>`. This is our RC7; it was closed unmerged during a cleanup | https://github.com/alchaincyf/huashu-design/pull/10 |
+| 2026-05-08 | **Tellr vendors `html2pptx.js`** (commit `d8b612c6` here) | — |
+| 2026-09-15 | New third path: `scripts/pptx_from_rendered.py` and `references/pptx-from-rendered-html.md`. It reads the browser's rendered coordinates, so visual HTML needs no rewriting | https://github.com/alchaincyf/huashu-design/commit/c4b83675d1 |
+| 2026-09-22 | `html2pptx.js` removed ("based on Anthropic pptx skill") and replaced by a clean-room rewrite | https://github.com/alchaincyf/huashu-design/commit/65942f7d50, https://github.com/alchaincyf/huashu-design/commit/3112c47123 |
+| 2026-09-30 | Issue: bare text beside an `<svg>` or block child silently dropped; the text check missed it | https://github.com/alchaincyf/huashu-design/issues/56 |
+| 2026-10-30 | Text verification also covers missing slides (v3.1.0) | https://github.com/alchaincyf/huashu-design/pull/59 |
+| 2026-11-10 | SVG and canvas indices tracked separately; hidden SVG regression tests (v3.3.0, the latest) | https://github.com/alchaincyf/huashu-design/pull/61, https://github.com/alchaincyf/huashu-design/releases/tag/v3.3.0 |
+
+What the author says, and what we take from it:
+
+- **The four-rule path is the wrong tool for Tellr's HTML.** `references/editable-pptx.md`
+  says: *never run html2pptx on freely-written visual HTML — measured pass rate < 30%.*
+  Tellr's slides are free-form model output. The preprocess passes were an attempt to force
+  them into the four rules, and RC1–RC3 and RC13 are that attempt's side effects.
+- **Reading rendered coordinates is the right path** for existing visual HTML. That is the
+  principle of this design, and it is what the author built for his own users two months
+  ago.
+- **His documented pitfalls are adopted** (each lands in *Design §3*):
+  - collapse whitespace the way the browser does;
+  - base metrics on the largest run, not the container's inherited size;
+  - count lines by overlapping y-ranges;
+  - start a new paragraph where line size changes, because spacing is per paragraph;
+  - no-wrap plus slack for single-line text;
+  - no exact spacing on single lines;
+  - centred and right-aligned text keeps its container's width;
+  - walk child *nodes*, so bare text beside a block child is kept (issue #56).
+- **Charts and SVG become pictures**: *hundreds of rectangles are less editable than one
+  image*. Claude's own Slides export documents the same choice.
+- **Verify the verifier.** Renderers disagree. His Quick Look thumbnails passed four
+  overlap bugs, and LibreOffice cannot load fonts it does not have. The harness therefore
+  uses PowerPoint and Google Slides. It also checks text loss against the browser's
+  rendered `innerText`, an oracle independent of the extractor.
+- **Where we go further.** His exporter writes exact point line spacing, records hidden
+  SVG/canvas by index, and screenshots charts together with anything overlapping them. It
+  also targets PowerPoint and Keynote, not Drive. This design writes percentage spacing,
+  addresses capture targets by marker attribute, captures each graphic in isolation, and
+  maps every construct onto what Drive's importer keeps.
+- **Not adopted:** building on a client `.pptx` master (python-pptx). It needs the brand's
+  master in the design system and a different emitter, and it does not change fidelity.
+
+**Code provenance.** Tellr's `services/pptx-emit-huashu/html2pptx.js` is the pre-rewrite
+file that upstream removed as based on Anthropic's pptx skill. It carries no licence
+header and ships in this public repo and the PyPI wheel. This design deletes it: the
+extraction, emission and validation code is replaced, and the remaining orchestration is
+rewritten. No vendored code is carried over, and no upstream code is copied; techniques
+are reimplemented and credited in comments. Whether a historical clean-up is needed is
+the owner's call and outside this spec.
+
+## Approaches considered
 
 - **A. Patch each defect in place.** Fastest first fixes, but RC1, RC2 and RC11 are
-  structural: every mutating pass would need its own layout-invariance guarantee. The
-  repo history already holds ~20 targeted export fixes on this pipeline.
-- **B. Snapshot-then-emit (chosen).** Read the untouched rendered page once, produce a
-  geometry-exact slide model, emit it with Google-safe choices. Removes RC1/RC2/RC11 as
-  a class and gives every other cause a single place to be fixed.
-- **C. Slide image with a text overlay.** Visually exact but shapes are not editable and
-  files are large. Rejected: the owner requires editability.
+  structural: every mutating pass would need its own layout guarantee. The repo history
+  already holds about 20 targeted fixes on this pipeline.
+- **B. Snapshot-then-emit.** Read the untouched rendered page once, produce a
+  geometry-exact slide model, and write it with constructs PowerPoint and Drive both keep.
+  This removes RC1, RC2 and RC11 as a class and gives every other cause one place to be
+  fixed. **(decided)**
+- **C. A picture of each slide with a text layer.** Visually exact, but shapes are not
+  editable and files are large. Rejected on editability. **(decided)**
 
-### 4.1 Prior art: upstream huashu-design (the "Claude Design path")
+## Decisions made with the owner
 
-The pipeline Tellr vendors is `alchaincyf/huashu-design`'s `html2pptx.js`. Its own
-`references/editable-pptx.md` says it must only run on HTML written to its four hard
-rules, and it warns: *never run html2pptx on freely-written visual HTML — measured pass
-rate < 30%*. Tellr's slides are free-form LLM output, so today's export runs that path
-outside its design envelope. The preprocess passes were an attempt to force arbitrary
-HTML into the four rules, and RC1–RC3 and RC13 are that attempt's side effects.
+- Approach B. **(decided)**
+- Everything that can be native stays native and editable; only what PowerPoint and Slides
+  cannot represent becomes a picture. **(decided)**
+- Charts are high-resolution pictures taken from the slide, with their titles, legends and
+  labels as editable text. **(decided)**
+- All work happens on `export-enhance`: commits and pushes there, nothing on `main`, and no
+  PR until the owner asks. **(decided)**
+- The owner reviews this spec and then the plan before implementation. After that, the work
+  runs autonomously through implementation, tests and the dev deploy. **(decided)**
+- The dev build is deployed with the repo's `deploy-tellr-dev` skill to a `devloop`
+  instance on the FEVM dev workspace, and kept for at least a week. **(decided)**
+- DM Sans and DM Mono are installed on the dev Mac, and the harness may drive PowerPoint.
+  **(decided)**
 
-Upstream's answer for existing visual HTML is a separate exporter,
-`references/pptx-from-rendered-html.md` / `scripts/pptx_from_rendered.py`. It reads the
-browser's **rendered coordinates** instead of the source, which is the principle of
-approach B. Its documented pitfalls are adopted here:
+## Design
 
-| Upstream lesson | Where it lands in this design |
-|---|---|
-| Collapse source whitespace exactly as the browser does; drop runs that are empty after collapse | §5.3 Text |
-| A container's font-size is often inherited; base metrics on the largest run in the block | §5.3 Text |
-| Count lines by clustering rects whose y-ranges overlap, never by de-duplicating `top` | §5.3 Text |
-| PowerPoint line spacing is per paragraph: lines of different size in one box overlap | §5.3 Text (new paragraph on size change) |
-| Flex shrink-wrapped boxes have zero slack and lose their last word: single-line text gets no-wrap | §5.3 Text (no-wrap **and** slack, because Drive ignores no-wrap) |
-| Single-line paragraphs must not get exact spacing | §5.3 Text |
-| Charts and SVG become pictures: hundreds of rectangles are less editable than one image | §5.4, §6.3 |
-| Verify the verifier: `qlmanage` hid four overlap bugs; LibreOffice drops fonts it cannot find; check text loss against `innerText`, an oracle independent of the extractor | §8 |
-| Delivery font name ≠ layout font: keep the deck's CSS family names in the file | §5.5 |
-
-Not adopted: upstream's template inheritance (building on a client `.pptx` master with
-python-pptx). It needs the brand's `.pptx` master in the design system and a python-pptx
-emitter. It does not change 1:1 fidelity, so it is outside this spec.
-
-## 5. Design
-
-### 5.1 Pipeline
+### 1. Pipeline
 
 ```
-build_slide_html ─▶ emit_deck.mjs ─▶ html2pptx.js (per slide)
-                                       1. load + settle (unchanged: networkidle, fonts, canvas wait)
-                                       2. preprocess.mjs  — layout-neutral only (5.2)
-                                       3. snapshot.mjs    — read-only extraction → SlideModel (5.3)
-                                       4. raster capture  — element-isolated screenshots (5.4)
-                                       5. emit_model.cjs  — SlideModel → pptxgenjs (5.5)
+build_slide_html ─▶ emit_deck.mjs ─▶ render_slide.cjs (per slide)
+                                       1. load + settle (networkidle, fonts.ready, canvas wait)
+                                       2. preprocess.mjs   layout-neutral only (§2)
+                                       3. snapshot.mjs     read-only extraction → slide model (§3)
+                                       4. capture          element-isolated screenshots (§4)
+                                       5. emit_model.cjs   slide model → pptxgenjs (§5)
+                                       6. checks           text-loss + summary line (§6)
 ```
 
-Interfaces that stay exactly as they are: the routes, `build_slide_html`,
-`build_pptx_huashu` and its `(bytes, failures)` contract, the stdin/stderr protocol of
-`emit_deck.mjs` (`__HUASHU_RESULT__`), `bypassValidation`, `[preprocess]`/`[html2pptx]`
-stderr routing, and the SDR-4437 rules (images embedded from `data:` only; sidecar env
-allowlist).
+`render_slide.cjs` replaces `html2pptx.js`. Interfaces that stay exactly as they are:
 
-### 5.2 Preprocess becomes layout-neutral
+- the routes, `build_slide_html`, and `build_pptx_huashu` with its `(bytes, failures)`
+  contract;
+- `emit_deck.mjs`'s stdin and stderr protocol (`__HUASHU_RESULT__`) and `bypassValidation`;
+- `[preprocess]` and `[html2pptx]` lines routed to stderr;
+- the SDR-4437 rules: images embedded from `data:` only, and the sidecar env allowlist.
 
-Kept: `transferSlideRootBackground` and its `bgTransferred` result contract (pinned by the
-slide-root tests), with the pristine-realm accessors and bounded iteration unchanged.
+### 2. Preprocess becomes layout-neutral
 
-Added: **pseudo-element materialization.** Every `::before`/`::after` whose `content` is
-not `none` is replaced by a real `<span data-tellr-pseudo>` carrying the pseudo-element's
-full computed style, and the original pseudo is suppressed by one injected rule scoped to
-a marker attribute. Because the span has the same computed style in the same position,
-layout is unchanged; this is **verified, not assumed**: rects of every element are
-recorded before and compared after, and any element that moved by more than 0.5 px
-reverts the materialization for that slide and logs `[preprocess] pseudo materialization
-moved layout; reverted`.
+Kept: `transferSlideRootBackground` and its `bgTransferred` result, the pristine-realm
+accessors, and bounded iteration. All of these are pinned by the slide-root and
+hostile-realm tests.
 
-Removed: `flattenMonospaceCodeBlocks`, `wrapBareTextInDivs`, `replaceBackgroundImageWithImg`,
-`rasterizeSvgDataUriImages`, `rasterizeInlineSvgs`, `peelBackgroundsOffTextTags`,
-`flattenTables`, `rasterizeCanvases`, `emitInlineBackgrounds`. Their jobs move into the
-snapshot (read-only) and raster capture.
+Added: **pseudo-element materialization.**
+- Every `::before` or `::after` whose `content` is not `none` becomes a real
+  `<span data-tellr-pseudo>` with the pseudo-element's full computed style.
+- The pseudo itself is switched off by one injected rule scoped to a marker attribute.
+- The span has the same computed style in the same place, so layout should not move. This
+  is **checked, not assumed**: every element's rect is recorded before and compared after.
+  If anything moved by more than 0.5 px, the materialization is reverted for that slide and
+  `[preprocess] pseudo materialization moved layout; reverted` is logged.
 
-### 5.3 Snapshot: read-only extraction (`snapshot.mjs`)
+Removed:
+- `flattenMonospaceCodeBlocks`, `wrapBareTextInDivs`, `replaceBackgroundImageWithImg`;
+- `rasterizeSvgDataUriImages`, `rasterizeInlineSvgs`, `rasterizeCanvases`;
+- `peelBackgroundsOffTextTags`, `flattenTables`, `emitInlineBackgrounds`.
 
-Runs as one `page.evaluate`, reads the DOM through the same pristine-realm accessors and
-bounded collections as today (hostile slide script must still neither hang nor blind the
-export). It mutates nothing except `data-tellr-*` marker attributes used to address
-raster targets.
+Their jobs move to the snapshot and the capture.
 
-**Visibility.** An element is skipped when `display:none`, `visibility:hidden`,
-cumulative opacity 0, zero area, entirely outside the slide, or clipped to under 2 px by
-`clip`/`clip-path`/an `overflow` ancestor (the visually-hidden pattern).
+### 3. Snapshot: read-only extraction (`snapshot.mjs`)
 
-**Paint order.** Items are ordered by CSS painting order: per stacking context, the
-context's own background, negative z-index children, in-flow blocks, floats, inline
-content, positioned `z-index:auto/0` in DOM order, then positive z-index. Every item
-carries its resolved order key, so emission order equals screen stacking.
+One `page.evaluate`, reading the DOM through the same pristine-realm accessors and
+bounded collections as today. It changes nothing except `data-tellr-*` marker attributes,
+which address capture targets.
 
-**Boxes.** For each painted element: background colour (alpha kept as fill
-transparency), each border side (uniform → shape outline; non-uniform → one line per
-side, preserving `dashed`/`dotted`), border radius (all four corners; a circle/ellipse
-when radius ≥ 50% → `ellipse`), outer box-shadow, and cumulative opacity. Linear
-gradients, conic/radial gradients, background images, `filter`, `mix-blend-mode`,
-`clip-path` and masks are routed to raster capture as a **box-only** raster (text is
-captured separately and stays editable).
+**Visibility.** An element is skipped when any of these holds:
+- `display:none` or `visibility:hidden`;
+- cumulative opacity 0;
+- zero area, or entirely outside the slide;
+- clipped to under 2 px by `clip`, `clip-path` or an `overflow` ancestor (the
+  visually-hidden pattern).
 
-**Text.** Text is grouped into *text blocks*: the nearest block container, flex item,
-grid item, table cell or list item. Each block becomes one text box.
-- Geometry comes from `Range.getClientRects()` of its text, not the element box, so a
-  logo or an inline image beside the text can never overlap it.
-- **Visual lines** are found by clustering fragment rects whose vertical ranges overlap,
-  never by de-duplicating `top`, because mixed-size runs on one line return rects with
-  different tops.
-- Source whitespace is collapsed the way the browser collapses it (`white-space`-aware),
-  and runs that are empty after collapse are dropped.
-- **Line breaks are the browser's.** Lines of the same size end in a soft break inside one
+**Paint order.** Items follow CSS painting order. Within each stacking context the order
+is:
+1. the context's own background;
+2. negative z-index children;
+3. in-flow blocks;
+4. floats;
+5. inline content;
+6. positioned `z-index:auto` or `0` elements, in DOM order;
+7. positive z-index.
+
+Every item carries its order key, so the emitted stacking matches the screen.
+
+**Boxes.** For each painted element, the snapshot records:
+- background colour, with alpha kept as fill transparency;
+- each border side: a uniform border becomes the shape outline, otherwise one line per
+  side, keeping `dashed` and `dotted`;
+- all four corner radii;
+- outer `box-shadow`;
+- cumulative opacity.
+
+Gradients of any kind, background images, `filter`, `mix-blend-mode`, `clip-path` and
+masks go to capture as a box-only picture; the box's text stays separate and editable.
+
+**Text.** Text is grouped into *text blocks*: the nearest block container, flex item, grid
+item, table cell or list item. Bare text between block children forms its own anonymous
+block (upstream issue #56). Each block becomes one text box.
+- **Position.** Geometry comes from `Range.getClientRects()` of the block's text, not the
+  element box, so a logo or icon beside the text can never overlap it.
+  - Left-aligned text uses its text bounds.
+  - Centred and right-aligned text uses the container's content width, so the alignment
+    survives a slightly different font rendering.
+- **Lines.**
+  - Visual lines are found by clustering fragment rects whose vertical ranges overlap,
+    never by de-duplicating `top`.
+  - Whitespace is collapsed the way the browser collapses it, honouring `white-space`, and
+    runs left empty are dropped.
+- **Line breaks are the browser's.** Lines of one size end in a soft break inside one
   paragraph. A line whose largest run differs in size or line-height starts a new
-  paragraph with its own spacing, because PowerPoint spacing is per paragraph. Slides and
-  PowerPoint therefore show exactly the UI's lines (owner decision, §6.1).
-- Block metrics (line spacing, slack, first-line offset) use the **largest** run in the
+  paragraph with its own spacing, because PowerPoint spacing is per paragraph. **(my call,
+  see *Calls made without the owner*)**
+- **Metrics.** Line spacing, slack and the first-line offset use the largest run in the
   block, never the container's inherited font-size.
-- A block that is a single line in the browser gets `wrap="none"` (honoured by
-  PowerPoint) and natural line spacing.
-- Every box gets width slack: 6% + 4 px, extended in the direction its alignment allows.
-  Drive ignores `wrap="none"`, so the slack is what stops a slightly wider substitute
-  rendering from wrapping a line again.
-- Runs carry: family (first face in the stack the document actually loaded), weight,
-  italic, size, colour pre-blended against the resolved backdrop for any alpha/opacity,
-  letter-spacing, text-transform, underline/strike, super/subscript, and white-space
-  (pre/nbsp preserved).
-- `background-clip:text` falls back to the gradient's mid stop as solid text colour.
-- Vertical anchor is `top`, with the first line placed from its measured line box.
-- Multi-line spacing is a multiple of the font's natural line height, which is measured
-  in-page with a `line-height: normal` probe. A percentage is the form both PowerPoint and
-  Drive honour; exact points are mis-scaled by Drive (RC6).
-- The first-line offset for each spacing value is calibrated against PowerPoint and
-  Google Slides renders of a probe deck during implementation, and pinned by a test.
-- Inline elements with background, border or padding (pills, chips, `<mark>`, `<kbd>`)
-  emit a shape at each of their per-line fragment rects, painted under the text box.
-  The text stays in the sentence, so it does not jump.
-- Inline atomic boxes (inline images or SVGs, `inline-block`s) that sit inside a line
-  split the block into per-line segments, so the text after them keeps its exact x.
+- **Wrapping.** A block that is one line in the browser gets `wrap="none"`, which
+  PowerPoint honours, and natural spacing. Every box also gets width slack, because Drive
+  ignores `wrap="none"`. The slack is 6% plus 4 px, extended in the direction its
+  alignment allows.
+- **Spacing.** Multi-line spacing is a percentage of the font's natural line height,
+  measured in-page with a `line-height: normal` probe. Vertical anchor is `top`. The
+  first-line offset for each spacing value is calibrated against PowerPoint and Google
+  Slides renders of a probe deck and pinned by a test.
+- **Runs** carry:
+  - font: family (the first face in the stack the document loaded), weight, italic, size;
+  - colour, pre-blended against the resolved backdrop for any alpha or opacity;
+  - letter spacing, `text-transform`, underline and strike-through;
+  - superscript and subscript, and preserved `white-space`.
 
-**Lists.** `list-style-type` other than `none` emits its marker (`•`, `1.`, `a.` …) as
-its own text item, right-aligned to the marker position. `list-style:none` emits none.
+  `background-clip:text` falls back to the gradient's middle stop as a solid colour.
+- **Inline decorations.** Inline elements with a background, border or padding (pills,
+  chips, `<mark>`, `<kbd>`) emit a shape at each of their per-line fragment rects, under
+  the text. The text stays in its sentence.
+- **Inline boxes.** Inline atomic boxes (inline images, inline SVGs, `inline-block`s) split
+  the line into segments, so the text after them keeps its exact x position.
 
-**Rotated text.** Text under a rotation emits the unrotated box (from `offsetWidth/Height`)
-plus the angle, with browser line breaks, so it does not re-wrap letter by letter.
+**Lists.**
+- `list-style-type` other than `none` emits its marker (`•`, `1.`, `a.` and so on) as its
+  own text item at the marker's position.
+- `list-style:none` emits none.
+- `<ol>` numbering, including `start` and `reversed`, follows the browser.
 
-**Replaced and graphic content.** `<img>` (data: only), `<canvas>`, `<video>` posters
-and inline `<svg>` become raster targets. An `<img>` with no filter, no clipping and a
-raster `data:` source is embedded directly; everything else is captured.
+**Rotated text.** Text under a rotation emits the unrotated box (from
+`offsetWidth/Height`), the angle, and browser line breaks.
 
-**Tables.** A `<table>` whose cells hold only text (any inline formatting) becomes a
-native table item. It carries:
-- exact column widths and row heights from the rendered cells, and `colspan`/`rowspan`;
-- per-cell padding as margins, fill (cell over row over table), per-side borders,
-  vertical alignment, and runs with the same rules as text blocks;
+**Pictures.** These become capture targets:
+- `<img>` (`data:` only), `<canvas>`, `<video>` posters and inline `<svg>`;
+- elements whose painting cannot be native.
+
+An `<img>` with a raster `data:` source and no filter, radius or clipping is embedded
+directly. Everything else is captured, which also bakes in rounded corners, because
+PowerPoint pictures have no radius.
+
+**Tables.** A `<table>` whose cells hold text, with any inline formatting, becomes a
+**native table**. It carries:
+- exact column widths and row heights from the rendered cells;
+- `colspan` and `rowspan`;
+- per-cell padding as margins;
+- fill (cell over row over table);
+- all four borders on every cell;
+- vertical alignment;
+- runs under the same rules as text blocks;
 - table radius and shadow, as a shape under the table.
 
-A cell holding non-text content (an image, SVG, Harvey ball, nested table or block
-layout) keeps the native table. Only that content is overlaid as its own items at its
-measured rect. Exception: a table with a nested table becomes positioned items, for
-exactness.
+A cell holding an image, SVG, Harvey ball or block layout keeps the native table, and that
+content is overlaid as its own items at its measured rect. A table containing a nested
+table is emitted as positioned items. **(my call)**
 
-### 5.4 Raster capture (element-isolated screenshots)
+### 4. Capture: element-isolated screenshots
 
-Every raster target is captured from the **original, untouched page**: Playwright
-temporarily applies an isolation stylesheet that makes every element `visibility:hidden`
-except the target subtree. Visibility does not affect layout. It screenshots the
-target's rect at device scale 2 with a transparent background. Box-only rasters also set
-the target's text to transparent.
+Each capture target is taken from the **original, untouched page**:
+1. An isolation stylesheet makes every element `visibility:hidden` except the target
+   subtree. Visibility does not change layout.
+2. The target's rect is screenshotted at device scale 2 with a transparent background.
+   Box-only captures also make the target's text transparent.
+3. The stylesheet is removed.
 
-This captures exactly what the browser paints, with the deck's CSS, webfonts, CSS
-variables, filters and clipping applied. It fixes RC4 and the conic/radial/gradient and
-filter cases of RC8, and works for tainted canvases too. The isolation stylesheet is
-removed after each capture. Capture failure for one target logs and skips that target;
-it never drops the slide.
+This captures exactly what the browser paints, including the deck's CSS, webfonts, CSS
+variables, filters and clipping, and nothing that merely overlaps the target. It fixes
+RC4, the gradient and filter cases of RC8, and script-drawn and tainted canvases. A failed
+capture logs and skips that target; it never drops the slide.
 
-### 5.5 Emitter (`emit_model.cjs`)
+### 5. Emitter (`emit_model.cjs`)
 
-Maps the model to pptxgenjs with the choices that survive both PowerPoint and Drive:
-- **Weights:** 400 → `Family`, 700 → `Family` + bold, other weights → `Family <Weight
-  name>` (`Medium`, `SemiBold`, `ExtraBold`, `Light`, …).
-- **Text spacing:** `charSpacing` in points; `lineSpacingMultiple`; zero insets; soft
-  breaks per browser line; `valign: top`.
-- **Shapes:** `ellipse` for circles, `roundRect` with per-shape radius, per-side lines,
-  fill transparency, outer shadow.
-- **Tables:** `addTable` with explicit `colW`/`rowH`, margins and per-cell borders, all
-  four sides written on every cell, so adjacent cells agree and Drive keeps them.
-- **Images:** placed with the stacking order preserved.
-- **Font names:** the deck's CSS family names are written into the file, not the
-  browser's fallback. Machines and Slides that have the brand font render it.
+Writes the model with pptxgenjs, choosing constructs that both PowerPoint and Drive keep:
+- **Weights:** 400 is `Family`, 700 is `Family` plus bold, and every other weight is
+  `Family <Weight name>` (`Light`, `Medium`, `SemiBold`, `ExtraBold` and so on).
+- **Font names:** the deck's CSS family is written, not the browser's fallback.
+- **Text:** `charSpacing` in points; percentage line spacing; zero insets; browser line
+  breaks; `valign: top`.
+- **Shapes:**
+  - `ellipse` for circles;
+  - rounded rectangles with the radius converted to the preset's adjustment, relative to
+    the short side (`min(0.5, r / min(w, h))`);
+  - per-side lines, fill transparency and outer shadow.
+- **Tables:** `addTable` with explicit `colW` and `rowH`, margins, and all four borders on
+  every cell.
+- **Pictures:** placed at their rect, in stacking order.
 
-The old `addElements`/`extractSlideData` code in `html2pptx.js` is deleted, not left
-beside the new path.
+### 6. Checks and diagnostics
 
-### 5.6 Validation and diagnostics
+- Validation keeps today's behaviour under `bypassValidation`: warn instead of throw.
+- **Text-loss check per slide.** The slide's rendered `innerText`, without SVG and canvas,
+  is compared with the emitted text. Anything missing is logged as
+  `[html2pptx] text missing: …` on stderr, so text loss is visible in the app log.
+- One `[html2pptx]` summary line per slide on stderr: item counts per kind, captures taken
+  and failed, and whether pseudo materialization reverted.
 
-The huashu design-rule validations keep their current behaviour under
-`bypassValidation` (warn instead of throw). Each slide logs one `[html2pptx]` summary
-line on stderr: item counts per kind, rasters captured, rasters failed, and whether the
-pseudo materialization reverted. A slide can then be explained from the app log alone.
+### 7. Error handling
 
-## 6. Decisions
-
-### 6.1 Line breaks: keep the UI's lines
-
-Every browser line ends where the UI ends it: a soft break between lines of one size, a
-new paragraph where the size changes (§5.3). The export therefore shows the UI's lines
-exactly. The trade-off is that editing a paragraph afterwards keeps those breaks;
-PowerPoint and Slides will not re-flow it until the user removes them. The alternative (no breaks, wider boxes)
-reflows naturally but cannot guarantee the same lines, because Drive's text measurement
-differs slightly. **Default chosen: keep UI lines** — the owner's priority is 1:1. Owner
-may overturn this at spec review.
-
-### 6.2 Tables: native, editable tables
-
-Native tables are editable as tables in both apps and the probe showed Drive keeps their
-geometry exactly (§3). Cell graphics overlay the table rather than forcing the whole table
-into loose boxes.
-
-### 6.3 Charts: high-resolution pictures; the text around them stays editable
-
-SVG and Chart.js charts are exported as 2x pictures captured from the page itself. This
-is the only way they look exactly as they do in the UI. It is also the choice upstream
-huashu-design and Claude's own Slides export make. A chart's title, legend, source line
-and callouts are HTML, so they stay editable text.
-
-The alternative is rebuilding Chart.js charts as **native** PowerPoint charts, with data
-editable through "Edit Data". That is possible because the chart config is in the deck
-script, but PowerPoint's and Slides' chart engines draw axes, labels and spacing
-differently from Chart.js. Native charts would therefore not be 1:1. Hand-written SVG
-charts carry no recoverable data, so they cannot become native at all. **Default chosen:
-pictures.** The owner may ask for native Chart.js charts at spec review, accepting that
-they will not match the UI exactly.
-
-### 6.4 Out of scope
-
-- The inline editor revamp (separate session, own spec).
-- The records fallback path (`/from-records`, `exportWalkerSource.ts`), which only runs
-  when huashu is unavailable.
-- Fonts that Google Slides does not host: they fall back in Slides exactly as they do
-  today. DM Sans and DM Mono are hosted.
-
-## 7. Error handling
-
-- A raster target fails: log `[html2pptx] raster failed: <selector-ish> <reason>`, omit
-  it, and keep the slide.
-- The pseudo-materialization layout check fails: revert it, log, and continue. Pseudo
-  content is then missing on that slide, and the log names it.
-- The snapshot throws: the slide is reported in `failures` with the message. This is the
-  same contract as today, so the partial-export toast still names it.
-- Hostile slide script: termination is guaranteed by the bounded collection and walk
+- **A capture fails.** Log `[html2pptx] capture failed: <marker> <reason>`, omit the
+  item, keep the slide.
+- **The pseudo-materialization check fails.** Revert, log, continue. The pseudo content
+  is then missing on that slide, and the log says so.
+- **The snapshot throws.** The slide is reported in `failures`, as today, so the
+  partial-export toast names it.
+- **Hostile slide script.** Termination is guaranteed by the bounded collections and walk
   limits carried over from today's code, and correctness by the pristine accessors.
 
-## 8. Testing
+### 8. Documentation
 
-- **Fixtures:** `tests/fixtures/export_fidelity/` (16 slides, one or more defect classes
-  each) is committed. The 27 design-system templates stay local because they are brand
-  assets and the repo is public.
-- **Unit tests (pytest, real Chromium, gated like today's sidecar tests).** One test file
-  per concern asserts on the emitted slide XML:
-  - text boxes: line count, soft breaks, typeface names for weights, `spc`, percentage
-    line spacing, blended colour;
-  - shapes: `ellipse`, per-side lines, pseudo-element shapes;
-  - paint order;
-  - native table: `a:tbl`, `gridCol` widths, merged cells;
-  - absence of hidden text;
-  - raster targets: PNGs present, correct aspect, non-blank, chart colours sampled from
-    the PNG.
+- `docs/technical/export-features.md`: replace the table-fidelity paragraph and the
+  known-limitations list, and describe the new stages.
+- New `docs/technical/export-fidelity-harness.md`: how to run the harness, which renderers
+  to trust and why, and how to read its output.
+- `.claude/skills/tellr-code-review/SKILL.md`: its huashu bundling checklist names the
+  sidecar files; update it to the new file set.
 
-  Every new test is first run against today's code and must fail (sabotage check), per
-  `executing-plans-tellr`.
-- **Existing suite:** all 134 sidecar tests stay green. These tests pin internals this
-  design removes; each is ported to assert the same user-visible contract:
-  - `test_export_svg_raster` golden PNG manifests: regenerated, with each changed entry
-    justified;
-  - `test_export_collection_iteration_hostile_realm` "same counts as benign twin": counts
-    now come from the snapshot summary;
-  - `test_export_csp` comment references to `flattenTables`: updated.
-- **Harness:** `scripts/export_fidelity/run.py` is re-run on both corpora after each task
-  group. The visual review and per-slide scores are recorded in the plan's progress notes.
-- **Trusted renderers only.** Upstream measured that renderers disagree.
-  - Google Slides thumbnails are the truth for Slides.
-  - **Microsoft PowerPoint for Mac**, driven by AppleScript to export a PDF, is the truth
-    for PPTX. It is installed on the dev Mac and needs DM Sans and DM Mono installed
-    locally (from the design system's own `fonts/`).
-  - LibreOffice is a fast smoke check only; it cannot load the brand fonts.
-  - `qlmanage` thumbnails are never used.
-- **Text-loss oracle independent of the extractor.** The harness and a unit test compare
-  each slide's rendered `innerText` with the text in the `.pptx`, ignoring whitespace and
-  case, with SVG/canvas text excluded because it travels in the picture. The sidecar also
-  runs this check per slide and logs `[html2pptx] text missing: …` on stderr, so silent
-  text loss is visible in the app log.
-- **Count check.** Pictures, shapes, tables and text boxes per slide are reported by the
-  harness, so a regression that drops a class of item shows up as a number.
-- **Dev deploy:** publish a `.devN` from `export-enhance` and deploy to a dedicated
-  `devloop` instance on the FEVM dev workspace. Generate fresh decks there (balance sheet,
-  scorecards, charts, timelines, architecture), export both formats, and compare. The app
-  is not deleted, so the owner can test by hand for at least a week.
+## Constraints
 
-## 9. Documentation
+- **No new npm dependencies.** The sidecar ships as committed `node_modules.tar.gz` and
+  `sys-libs-bullseye.tar.gz`, which CI cannot rebuild (see the bundling chain in
+  `.claude/skills/tellr-code-review/SKILL.md`). The design uses only the Playwright and
+  pptxgenjs already in `package.json`, so the tarballs stay valid and are not regenerated.
+- **Packaging.** `setup.py` copies the whole `services/pptx-emit-huashu/` directory into
+  the wheel, so new files ship without packaging changes. The publish workflows'
+  post-build check is extended to assert that the new sidecar files are in the wheel, so a
+  build missing them fails rather than shipping a broken export.
+- **Python environment.** Commands run through the per-worktree uv `.venv` (`uv sync
+  --extra dev`, `uv run`), per `CLAUDE.md`. Harness-only libraries (pymupdf, Pillow) are
+  passed with `uv run --with`, and the app's dependencies are not changed.
+- **Sidecar time budget.** `SIDECAR_TIMEOUT_SECONDS` (180 s) covers the whole deck.
+  Capture adds one screenshot per graphic. The harness records per-slide time, and the plan
+  keeps a 20-slide chart-heavy deck well inside the budget.
 
-- Update `docs/technical/export-features.md`: replace the "table fidelity" paragraph and
-  the known-limitations list.
-- Add a short `docs/technical/export-fidelity-harness.md` covering how to run the harness
-  and read its output.
+## How we'll know it works
+
+- **Fixtures.** `tests/fixtures/export_fidelity/` holds 17 slides covering every root cause
+  and upstream's own regression cases: bare text beside an SVG, bare text after a block
+  child, a hidden SVG before a visible one, mixed SVG and canvas, fractional opacity and
+  `text-transform`. The 27 design-system templates stay local: they are brand assets and
+  the repo is public.
+- **Tests.** One pytest file per concern, using real Chromium and gated like today's
+  sidecar tests. They assert on the emitted slide XML:
+  - typeface names for weights, `spc`, percentage spacing, line breaks and blended colour;
+  - `ellipse`, per-side lines and pseudo-element shapes;
+  - stacking order;
+  - `a:tbl` with `gridCol` widths and merged cells;
+  - no hidden text;
+  - captured pictures present and correctly sized, with chart colours sampled from the PNG;
+  - text-loss check output.
+
+  Each new test is first run against today's code and must fail. This is the
+  `executing-plans-tellr` sabotage check.
+- **The existing 134 sidecar tests** pass. Tests that pin an internal this design removes
+  are ported to assert the same user-visible contract:
+  - the SVG raster golden manifests are regenerated, with each changed entry justified;
+  - "same counts as the benign twin" now uses the snapshot summary;
+  - the `flattenTables` references in `test_export_csp` are updated.
+- **Harness.** `scripts/export_fidelity/run.py --powerpoint --gslides` runs on both corpora
+  after each task group. The plan's progress notes record:
+  - side-by-side images (UI | PowerPoint | Google Slides);
+  - per-slide difference scores, with none worse than the baseline;
+  - text-loss results;
+  - a visual check of every root cause.
+- **Dev deploy.** A `.devN` built from `export-enhance` is published to PyPI and deployed to
+  a dedicated `devloop` instance. There, fresh decks (balance sheet, scorecards, charts,
+  timelines, architecture) are generated and exported to both formats, then checked by the
+  owner by hand. The app is kept for at least a week.
+
+## Left to the builder
+
+- How the slide model is split into modules within the sidecar, as long as each file has
+  one job.
+- Exact slack and offset constants, set by calibration against PowerPoint and Google Slides
+  and pinned by tests.
+- Whether capture runs once per target or batches targets that do not overlap.
+
+## Calls made without the owner (review these)
+
+1. **Keep the UI's line breaks.** Exports match the UI line for line. The trade-off is that
+   an edited paragraph keeps those breaks until the user removes them. The alternative,
+   letting PowerPoint and Slides re-wrap, edits more naturally but cannot guarantee the same
+   lines.
+2. **Native tables** for text tables, with cell graphics overlaid. A table containing a
+   nested table becomes positioned items.
+3. **Harvey balls, progress fills and other gradient or conic visuals** become pictures,
+   while their text stays editable.
+4. **The records fallback is left as it is.** It only runs when huashu is unavailable.

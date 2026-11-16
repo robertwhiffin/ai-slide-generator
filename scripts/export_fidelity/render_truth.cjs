@@ -7,8 +7,9 @@
 // truth image and the exported slide come from one identical layout.
 //
 // usage: node render_truth.cjs <out_dir> <slide.html>...
-// writes <out_dir>/<basename>.png for every input.
+// writes <out_dir>/<basename>.png and <out_dir>/<basename>.txt (rendered text) for every input.
 
+const fs = require('fs');
 const path = require('path');
 
 const SIDECAR_DIR = path.resolve(__dirname, '..', '..', 'services', 'pptx-emit-huashu');
@@ -33,6 +34,14 @@ async function renderOne(browser, htmlPath, outDir) {
   }
   const outPath = path.join(outDir, path.basename(htmlPath, '.html') + '.png');
   await page.screenshot({ path: outPath, clip: { x: 0, y: 0, width: 1280, height: 720 } });
+  // The text-loss reference: what the browser itself renders as text. SVG and
+  // canvas text travels inside a picture in the export, so it is excluded.
+  // Hiding them happens after the screenshot, so it cannot affect the truth image.
+  const renderedText = await page.evaluate(() => {
+    for (const graphic of document.querySelectorAll('svg, canvas')) graphic.style.display = 'none';
+    return document.body.innerText;
+  });
+  fs.writeFileSync(outPath.replace(/\.png$/, '.txt'), renderedText, 'utf-8');
   await page.close();
   return outPath;
 }

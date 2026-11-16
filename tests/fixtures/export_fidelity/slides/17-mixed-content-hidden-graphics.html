@@ -1,0 +1,19 @@
+<div class="slide">
+  <p class="dk-eyebrow">Mixed content</p>
+  <h2 class="dk-title">Icons beside bare text, hidden graphics and faded copy</h2>
+  <div style="display:flex; gap:18px; margin-top:18px;">
+    <div style="display:inline-flex; align-items:center; gap:8px; font-size:20px; font-weight:600;"><svg width="22" height="22" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="#FF3621"/></svg>Open source</div>
+    <div style="display:inline-flex; align-items:center; gap:8px; font-size:20px; color:#00A972;"><svg width="22" height="22" viewBox="0 0 10 10"><path d="M5 2L8 7H2Z" fill="#00A972"/></svg>+7.5 vs baseline</div>
+  </div>
+  <div style="margin-top:26px; font-size:18px; line-height:1.5; max-width:900px;"><div style="font-weight:700;">Block child first</div>Then bare text that follows a block child inside the same container, which must not be dropped.</div>
+  <div style="display:flex; gap:30px; margin-top:26px; align-items:center;">
+    <svg width="40" height="40" style="display:none"><rect width="40" height="40" fill="#000"/></svg>
+    <svg width="60" height="60" viewBox="0 0 60 60"><rect x="5" y="5" width="50" height="50" rx="10" fill="#1B3139"/></svg>
+    <canvas id="mixCanvas" width="120" height="60" style="width:120px;height:60px;"></canvas>
+    <svg width="60" height="60" viewBox="0 0 60 60"><circle cx="30" cy="30" r="25" fill="#FF5F46"/></svg>
+  </div>
+  <p style="font-size:18px; margin-top:24px; opacity:0.5;">Half-opacity paragraph that must stay faded in the export.</p>
+  <p style="font-size:14px; letter-spacing:0.12em; text-transform:uppercase; color:var(--ink-2);">transformed and tracked label</p>
+  <script>(function(){var c=document.getElementById('mixCanvas');var x=c.getContext('2d');x.fillStyle='#00A972';x.fillRect(0,0,120,60);x.fillStyle='#fff';x.font='20px sans-serif';x.fillText('canvas',22,38);})();</script>
+  <div class="dk-footer"><div class="brand"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNTAiIGhlaWdodD0iMzAiIHZpZXdCb3g9IjAgMCAxNTAgMzAiPjxwYXRoIGQ9Ik0yIDkgTDEzIDMgTDI0IDkgTDEzIDE1IFoiIGZpbGw9IiNGRjM2MjEiLz48cGF0aCBkPSJNMiAxNSBMMTMgMjEgTDI0IDE1IiBmaWxsPSJub25lIiBzdHJva2U9IiNGRjM2MjEiIHN0cm9rZS13aWR0aD0iMi40Ii8+PHBhdGggZD0iTTIgMjEgTDEzIDI3IEwyNCAyMSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjRkYzNjIxIiBzdHJva2Utd2lkdGg9IjIuNCIvPjx0ZXh0IHg9IjMxIiB5PSIyMiIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjIwIiBmb250LXdlaWdodD0iNzAwIiBmaWxsPSIjMUIzMTM5Ij5kYXRhYnJpY2tzPC90ZXh0Pjwvc3ZnPg==" alt="databricks"><span>Meridian Components · FY2024 review</span></div><span class="pg">17 / 17</span></div>
+</div>
