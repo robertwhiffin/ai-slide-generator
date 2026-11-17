@@ -153,6 +153,64 @@ KEY_SENTENCE_BODY = (
 # the browser's x (coordinator ruling on Task 5 concern 1).
 PADDED_INLINE_X_TOLERANCE_PX = 1.0
 
+# Insets with text on one side only on their line (Task 5 fix round 1). Under
+# box-decoration-break: slice an inline element's start inset is on the line of
+# its first fragment, before the text after it, and its end inset on the line of
+# its last, after the text before it.
+STATUS_DOT_STYLE = "background: #00A972; padding: 0 6px; border-radius: 6px; margin-right: 10px;"
+# A status dot leading a paragraph that wraps: only its first line is pushed right.
+DOT_LED_WRAPPED_BODY = (
+    '<div class="slide">'
+    '<p id="status" style="width: 320px; font-size: 18px;">'
+    f'<span id="status-dot" style="{STATUS_DOT_STYLE}"></span>'
+    "Plant automation is on schedule and tracking well ahead of the plan for the year</p>"
+    "</div>"
+)
+# A padded highlight over a whole wrapped paragraph: its start padding pushes only
+# its first line right, its end padding follows only its last.
+HIGHLIGHT_SPANNING_BODY = (
+    '<div class="slide">'
+    '<p id="spanning" style="width: 320px; font-size: 18px;">'
+    '<mark id="spanning-mark" style="background: #FFE08A; padding: 0 8px;">'
+    "The highlight runs across every line of this wrapped paragraph to its very end</mark></p>"
+    "</div>"
+)
+# A centred line led by the dot: the browser centres the dot and the text together,
+# so the text sits right of the paragraph's centre.
+DOT_LED_CENTRED_BODY = (
+    '<div class="slide">'
+    '<p id="centred" style="text-align: center; font-size: 18px;">'
+    f'<span id="centred-dot" style="{STATUS_DOT_STYLE}"></span>Plant automation on track</p>'
+    "</div>"
+)
+# The same line ended by a dot (its gap on its left): the text sits left of the
+# centre, and the inset is on the line's end, after the text's last token.
+TRAILING_DOT_STYLE = "background: #D0302A; padding: 0 6px; border-radius: 6px; margin-left: 10px;"
+DOT_ENDED_CENTRED_BODY = (
+    '<div class="slide">'
+    '<p id="centred" style="text-align: center; font-size: 18px;">'
+    f'ERP upgrade at risk<span id="centred-dot" style="{TRAILING_DOT_STYLE}"></span></p>'
+    "</div>"
+)
+# Each centred case: its body, and the side of the paragraph's centre its text sits on.
+CENTRED_DOT_LINES = {
+    "led-by-the-dot": (DOT_LED_CENTRED_BODY, 1),
+    "ended-by-the-dot": (DOT_ENDED_CENTRED_BODY, -1),
+}
+# A right-to-left sentence led by a padded chip that wraps: the chip's start (right)
+# padding is on its first line, which holds nothing else.
+RTL_CHIP_BODY = (
+    '<div class="slide">'
+    '<p id="rtl" dir="rtl" style="width: 300px; font-size: 20px; line-height: 1.45;">'
+    '<code id="rtl-chip" class="dk-chip">מכלול המסבים המשופר של הקו החדש במפעל הצפוני</code> '
+    '<span id="rtl-after">לפני סוף הרבעון</span></p>'
+    "</div>"
+)
+# Fix round 1's tolerances: a left edge within 0.5 px, a centre or right edge within 1 px.
+LINE_EDGE_TOLERANCE_PX = 0.5
+LINE_CENTRE_TOLERANCE_PX = 1.0
+RTL_EDGE_TOLERANCE_PX = 1.0
+
 # Page script that replaces Element.prototype.getClientRects with one that
 # reports a trillion rects and holds none, then publishes on document.title what
 # it replaced and whether a reader of the realm now sees the lie, so the
@@ -1105,6 +1163,158 @@ class TestSnapshotPaddedInlines:
         assert emitted == painted, (
             f"the cut lost or doubled text: missing {dict(painted - emitted)}, extra "
             f"{dict(emitted - painted)}\n{_describe(shapes)}"
+        )
+
+
+def _item_holding_line(shapes: list[Shape], line: dict) -> Shape:
+    """The one text item one of whose lines reads the browser line ``line``."""
+    holding = [
+        shape
+        for shape in shapes
+        if shape.kind == "text"
+        and line["text"] in [_normalised(part) for part in shape.text.split("\n")]
+    ]
+    assert len(holding) == 1, (
+        f"expected exactly one text item holding the line {line['text']!r}, got "
+        f"{len(holding)}:\n{_describe(shapes)}"
+    )
+    return holding[0]
+
+
+def _assert_each_line_at_its_edge(
+    shapes: list[Shape], lines: list[dict], edge: str, tolerance: float, what: str
+) -> None:
+    """Every browser line starts where the browser drew it, on the side its text grows from.
+
+    PowerPoint and Google Slides start every line of a text item at the item's
+    start edge: its left for left-aligned text, its right for right-aligned
+    (right-to-left) text. So the item holding each of the browser's ``lines``
+    must have that edge (``'left'`` or ``'right'``) at the line's own browser
+    edge within ``tolerance``: a line an inset pushes in from its neighbours
+    cannot share their item.
+    """
+    for line in lines:
+        item = _item_holding_line(shapes, line)
+        emitted = item.x if edge == "left" else item.x + item.w
+        browser = line["x"] if edge == "left" else line["x"] + line["w"]
+        assert abs(emitted - browser) <= tolerance, (
+            f"{what}: the line {line['text']!r} is drawn from {edge} edge {emitted:.2f} "
+            f"(item {_box(item)}); the browser draws it from {browser:.2f}"
+        )
+
+
+def _text_centre(shape: Shape) -> float:
+    """Where the renderers centre a one-line text item's text, from its box and alignment.
+
+    A left-aligned box is its text plus the width slack on its right (spec §3
+    Wrapping), so its text is ``(w - SLACK_PX) / (1 + SLACK_FRACTION)`` wide
+    from its left edge; a centred box centres its text in it.
+    """
+    align = shape.paras[0].align if shape.paras else "left"
+    text_width = (shape.w - SLACK_PX) / (1 + SLACK_FRACTION)
+    if align == "center":
+        return shape.x + shape.w / 2
+    if align == "right":
+        return shape.x + shape.w - text_width / 2
+    return shape.x + text_width / 2
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotInsetsAtLineEnds:
+    """Task 5 fix round 1: an inset with text on only one side of it on its line.
+
+    An inline element's start inset (``box-decoration-break: slice``) sits on
+    the line of its first fragment, before the text that follows it there, and
+    its end inset on the line of its last fragment, after the text before it.
+    A line whose text is all on one side of the inset still has the inset on
+    it, so it is cut like any line with an inset: it is its own text item.
+    """
+
+    def test_a_dot_led_wrapped_paragraph_starts_its_first_line_at_its_x(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) A status dot leads a 320 px paragraph that wraps: only its first line starts
+        right of the dot. Each line starts at its browser x within 0.5 px."""
+        document = _document(DOT_LED_WRAPPED_BODY)
+        lines = browser_line_boxes(document, "#status")
+        assert len(lines) >= 2 and lines[0]["x"] > lines[1]["x"] + 10, (
+            f"fixture drift: the dot does not push only the first line in: {lines}"
+        )
+        shapes = slide_shapes(_export_one(DOT_LED_WRAPPED_BODY, monkeypatch))
+
+        _assert_each_line_at_its_edge(
+            shapes, lines, "left", LINE_EDGE_TOLERANCE_PX, "the dot-led paragraph"
+        )
+
+    def test_a_padded_highlight_spanning_lines_keeps_each_line_x(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(b) A highlight with 8 px side padding covers a whole wrapped paragraph: its first
+        line starts 8 px in, the others at the paragraph's left. Each line starts at its
+        browser x within 0.5 px."""
+        document = _document(HIGHLIGHT_SPANNING_BODY)
+        lines = browser_line_boxes(document, "#spanning")
+        fragments = _painted_fragments(document, "#spanning-mark")
+        assert len(lines) >= 3 and len(fragments) == len(lines), (
+            f"fixture drift: the highlight does not span the paragraph's lines: {lines}, "
+            f"fragments {fragments}"
+        )
+        assert lines[0]["x"] > lines[1]["x"] + 4, (
+            f"fixture drift: the highlight's start padding does not push its first line: {lines}"
+        )
+        shapes = slide_shapes(_export_one(HIGHLIGHT_SPANNING_BODY, monkeypatch))
+
+        _assert_each_line_at_its_edge(
+            shapes, lines, "left", LINE_EDGE_TOLERANCE_PX, "the highlighted paragraph"
+        )
+
+    @pytest.mark.parametrize("case", tuple(CENTRED_DOT_LINES))
+    def test_a_centred_dot_led_line_keeps_its_centre(
+        self, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        """(c) A centred one-line paragraph with a dot: the browser centres the dot and the
+        text together, so the text sits off the paragraph's centre, right of it when the
+        dot leads the line (the inset after an opening edge) and left of it when the dot
+        ends it (the inset before a closing edge). The text's centre is the browser's
+        within 1 px."""
+        body, side = CENTRED_DOT_LINES[case]
+        document = _document(body)
+        line = _single_line(document, "#centred")
+        paragraph = browser_rect(document, "#centred")
+        browser_centre = line["x"] + line["w"] / 2
+        assert side * (browser_centre - (paragraph["x"] + paragraph["w"] / 2)) > 5, (
+            f"fixture drift: the dot does not move the centred text: {line} in {paragraph}"
+        )
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        _, item = _text_box(shapes, line["text"])
+        _assert_one_unwrapped_line(item, "the centred line")
+        assert abs(_text_centre(item) - browser_centre) <= LINE_CENTRE_TOLERANCE_PX, (
+            f"the centred line's text is centred at {_text_centre(item):.2f} (item {_box(item)}, "
+            f"aligned {item.paras[0].align}); the browser centres it at {browser_centre:.2f}"
+        )
+
+    def test_an_rtl_chip_spanning_lines_keeps_each_right_edge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(d) A right-to-left sentence led by a padded chip that wraps: the chip's first
+        line ends 6 px short of the paragraph's right edge, where its start padding is.
+        Every piece of every line ends at its browser right edge within 1 px."""
+        document = _document(RTL_CHIP_BODY)
+        chip_lines = browser_line_boxes(document, "#rtl-chip")
+        after_lines = browser_line_boxes(document, "#rtl-after")
+        paragraph = browser_rect(document, "#rtl")
+        paragraph_right = paragraph["x"] + paragraph["w"]
+        assert len(chip_lines) >= 2, f"fixture drift: the chip does not wrap: {chip_lines}"
+        assert chip_lines[0]["x"] + chip_lines[0]["w"] < paragraph_right - 4, (
+            f"fixture drift: the chip's start padding does not hold its first line in from "
+            f"{paragraph_right}: {chip_lines}"
+        )
+        shapes = slide_shapes(_export_one(RTL_CHIP_BODY, monkeypatch))
+
+        _assert_each_line_at_its_edge(
+            shapes, chip_lines + after_lines, "right", RTL_EDGE_TOLERANCE_PX, "the RTL sentence"
         )
 
 

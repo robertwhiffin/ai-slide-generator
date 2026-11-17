@@ -148,7 +148,8 @@ function createTextLayout(env) {
   // add up to more than this moves the text after it by more than a renderer's
   // own rounding, so the element is a cut in its line (collectRuns).
   const INLINE_EDGE_PX = 0.5;
-  const EDGE = { kind: 'edge' };
+  const OPENING_EDGE = { kind: 'edge', opens: true };
+  const CLOSING_EDGE = { kind: 'edge', opens: false };
   // Chrome's default tab-size; a computed length instead of a count falls back to it.
   const DEFAULT_TAB_SIZE = 8;
   // A generic family keyword or a system alias names no face an importer can
@@ -289,10 +290,11 @@ function createTextLayout(env) {
   //                                 at its cumulative opacity, before the
   //                                 pieces it holds. It keeps a run with no
   //                                 text (an empty status dot) a run;
-  //   {kind:'edge'}                 either end of an inline element with
-  //                                 edges (hasInlineEdges): one before the
-  //                                 pieces it holds and one after, so its line
-  //                                 is cut there, as at an atomic inline.
+  //   {kind:'edge', opens}          either end of an inline element with
+  //                                 edges (hasInlineEdges): an opening one
+  //                                 before the pieces it holds and a closing
+  //                                 one after, so its lines are cut there, as
+  //                                 at an atomic inline.
   // display:contents children are transparent: no box, so no opacity,
   // background or decoration of their own. display:none ones are skipped.
   // `walk` is the container's {opacity, backdrop, decoration} from the
@@ -352,14 +354,14 @@ function createTextLayout(env) {
         // Its edges take their space even where nothing of it shows, so they
         // cut the line whatever its opacity or visibility.
         const edged = hasInlineEdges(cs);
-        if (edged) run.push(EDGE);
+        if (edged) run.push(OPENING_EDGE);
         if (context.opacity > 0) {
           if (cs.visibility === 'visible' && env.paintsBox(cs, context.opacity)) {
             run.push({ kind: 'decoration', element: node, style: cs, opacity: context.opacity });
           }
-          if (openChildren(stack, node, context, frame.depth + 1, edged ? EDGE : null)) continue;
+          if (openChildren(stack, node, context, frame.depth + 1, edged ? CLOSING_EDGE : null)) continue;
         }
-        if (edged) run.push(EDGE);
+        if (edged) run.push(CLOSING_EDGE);
       }
       // An out-of-flow child (a float, an absolute box) leaves the line where it
       // is: it is a block of its own and does not split the text around it.
@@ -987,17 +989,46 @@ function createTextLayout(env) {
     return segments;
   }
 
-  // Whether a line is cut: it holds an atomic inline, or text on both sides of
-  // an inline edge (its tokens' segments differ).
+  // Whether a line is cut: it holds an atomic inline, text on both sides of an
+  // inline edge (its tokens' segments differ), or an inset with text on one
+  // side of it only. Under box-decoration-break: slice an element's start inset
+  // is on the line of the text after its opening edge, and its end inset on
+  // the line of the text before its closing edge (markEdges), so a line that
+  // starts with the one or ends with the other holds an inset too: a dot that
+  // leads a paragraph pushes in its first line alone.
   function isCut(line) {
+    const tokens = line.tokens;
+    if (tokens.length && (tokens[0].afterOpening || tokens[tokens.length - 1].beforeClosing)) return true;
     let segment = null;
-    for (let index = 0; index < line.tokens.length; index++) {
-      const token = line.tokens[index];
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
       if (token.kind === 'atomic') return true;
       if (segment !== null && token.segment !== segment) return true;
       segment = token.segment;
     }
     return false;
+  }
+
+  // Marks the text tokens an inline edge sits against: after an opening edge,
+  // the first text token that follows (from `from`, the tokens a text node
+  // just added) is `afterOpening`; at a closing edge, the last text token so
+  // far is `beforeClosing`. A break between them ends the line the inset is
+  // on, so neither mark crosses one. `edges` carries the opening edge not yet
+  // met by a text token: {opening}.
+  function markAfterOpening(tokens, from, edges) {
+    for (let index = from; edges.opening && index < tokens.length; index++) {
+      if (tokens[index].kind === 'break') edges.opening = false;
+      else if (tokens[index].kind === 'text') {
+        tokens[index].afterOpening = true;
+        edges.opening = false;
+      }
+    }
+  }
+
+  // At a closing edge: the last token so far, when it is text, is `beforeClosing`.
+  function markBeforeClosing(tokens) {
+    const last = tokens.length ? tokens[tokens.length - 1] : null;
+    if (last && last.kind === 'text') last.beforeClosing = true;
   }
 
   // A line that paints nothing: a blank line (only breaks make those). A cut
@@ -1022,19 +1053,25 @@ function createTextLayout(env) {
     const range = document.createRange();
     const tokens = [];
     const words = { previous: '', segment: 0 };
+    const edges = { opening: false };
     for (let index = 0; index < nodes.length; index++) {
       const piece = nodes[index];
       if (piece.kind === 'text') {
+        const from = tokens.length;
         readTokens(piece, scale, range, tokens, words);
+        markAfterOpening(tokens, from, edges);
         continue;
       }
       // An inline element's box and its edges are no word boundary in its text.
       if (piece.kind === 'decoration') continue;
       if (piece.kind === 'edge') {
         words.segment++;
+        if (piece.opens) edges.opening = true;
+        else markBeforeClosing(tokens);
         continue;
       }
       if (piece.kind === 'break') {
+        edges.opening = false;
         tokens.push(BREAK);
       } else if (piece.kind === 'atomic') {
         const rect = atomicRect(piece.element);
