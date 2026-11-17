@@ -299,7 +299,13 @@ new values are code defaults.
     (`agent_runtime.py:1315`), and only Legacy turns trace into an experiment.
   - What does work: the app log records every Gateway HTTP call with its status (httpx
     INFO lines), and the OpenAI SDK logs each of its retries. A one-hour capture of the
-    logfood log during weekday traffic is being parsed
-    (`~/tellr-loop/concurrency-runners/parse_log.py`). Its result goes here.
+    logfood log during weekday traffic was parsed
+    (`~/tellr-loop/concurrency-runners/parse_log.py`).
+  - **Result: inconclusive.** The capture covered 14:30–15:33 UTC on 2026-11-17, a quiet
+    hour. Only 10 turns ran: 9 Agent turns averaging 12 s, and 1 Legacy turn. All
+    completed, so there were no failures to attribute. Every one of the 31 Gateway calls
+    returned 200 (25 `chat.completions`, 3 image `responses`, 3 others), and the OpenAI
+    SDK logged no retries.
 
-  Otherwise the fault-kind column answers it after release.
+  The fault-kind column (section 5) answers it after release, and the devloop load test
+  shows how retries behave under a burst.
