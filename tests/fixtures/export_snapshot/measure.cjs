@@ -218,7 +218,7 @@ async function measureLines(page, selector, index) {
 // typography tests guard their fixtures with (the backdrop and gradient text).
 const STYLE_PROPERTIES = [
   'fontFamily', 'fontWeight', 'fontStyle', 'fontSize', 'letterSpacing', 'textTransform',
-  'textDecorationLine', 'verticalAlign', 'direction', 'color', 'opacity',
+  'textDecorationLine', 'verticalAlign', 'direction', 'color', 'webkitTextFillColor', 'opacity',
   'backgroundColor', 'backgroundImage', 'backgroundClip', 'webkitBackgroundClip',
 ];
 

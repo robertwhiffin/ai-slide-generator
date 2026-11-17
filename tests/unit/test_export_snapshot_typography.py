@@ -54,10 +54,12 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from lxml import etree
 
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
@@ -254,6 +256,57 @@ GROUPS_SLIDE = (
     "</div>"
 )
 
+# Gradient text whose stops sit at lengths, not percentages. Chrome computes
+# both the px and the em form to px ("rgb(255, 54, 33) 0px"). A length's place
+# on the gradient line is not known, so the stops are spaced evenly and the
+# middle is the mix of the two, the same colour as .dk-gradtext's.
+# (element id, background, text)
+LENGTH_STOP_CASES = (
+    ("px-stops", "linear-gradient(90deg, #FF3621 0px, #FFB347 300px)", "Pixel stop headline"),
+    ("em-stops", "linear-gradient(90deg, #FF3621 0em, #FFB347 20em)", "Em stop headline"),
+)
+LENGTH_STOPS_SLIDE = (
+    '<div class="slide">'
+    + "".join(
+        f'<h2 id="{element_id}" style="font-size: 40px; font-weight: 600; background: {gradient}; '
+        f'-webkit-background-clip: text; background-clip: text; color: transparent;">{text}</h2>'
+        for element_id, gradient, text in LENGTH_STOP_CASES
+    )
+    + "</div>"
+)
+
+# text-transform: capitalize at the browser's word boundaries: a letter after
+# anything but a letter, a digit or an apostrophe starts a word. The second
+# paragraph is too narrow for "x-ray", so the browser breaks it after the hyphen.
+CAPITALIZE_SOURCE = "well-known (hello) 1st o’neil x-ray e.g. foo"
+CAPITALIZE_RENDERED = "Well-Known (Hello) 1st O’neil X-Ray E.G. Foo"
+CAPITALIZE_WRAPPED_SOURCE = "x-ray"
+CAPITALIZE_WRAPPED_RENDERED = "X-Ray"
+CAPITALIZE_SLIDE = (
+    '<div class="slide">'
+    '<p id="capitalized" style="font-size: 24px; text-transform: capitalize;">'
+    f"{CAPITALIZE_SOURCE}</p>"
+    '<p id="capitalized-wrap" style="font-size: 24px; text-transform: capitalize; width: 1.6em;">'
+    f"{CAPITALIZE_WRAPPED_SOURCE}</p>"
+    "</div>"
+)
+
+# The common gradient-text idiom: the glyphs are cleared with
+# -webkit-text-fill-color while `color` stays the opaque ink, and a
+# background-color sits under the gradient as a fallback. Both background
+# layers are clipped to the glyphs.
+FILL_IDIOM_TEXT = "Fill colour headline"
+FILL_IDIOM_FALLBACK = "FF3621"
+FILL_IDIOM_SLIDE = (
+    '<div class="slide">'
+    '<h2 id="fill-idiom" style="font-size: 40px; font-weight: 600; color: #1B3139; '
+    f"background-color: #{FILL_IDIOM_FALLBACK}; "
+    "background-image: linear-gradient(90deg, #FF3621, #00A972, #FFB347); "
+    "-webkit-background-clip: text; background-clip: text; "
+    f'-webkit-text-fill-color: transparent;">{FILL_IDIOM_TEXT}</h2>'
+    "</div>"
+)
+
 SLIDES = {
     "weights": WEIGHTS_SLIDE,
     "families": FAMILIES_SLIDE,
@@ -263,6 +316,9 @@ SLIDES = {
     "gradient": GRADIENT_SLIDE,
     "scripts": SCRIPTS_SLIDE,
     "groups": GROUPS_SLIDE,
+    "length-stops": LENGTH_STOPS_SLIDE,
+    "capitalize": CAPITALIZE_SLIDE,
+    "fill-idiom": FILL_IDIOM_SLIDE,
 }
 
 # ---------------------------------------------------------------------------
@@ -738,6 +794,50 @@ class TestSnapshotRunStyle:
         lower = [_describe_run(run) for run in _runs(box) if run.text != run.text.upper()]
         assert not lower, "runs are not upper-case:\n  " + "\n  ".join(lower)
 
+    def test_capitalize_follows_the_browsers_word_boundaries(self, typography_pptx: bytes) -> None:
+        """``text-transform: capitalize`` on "well-known (hello) 1st o’neil x-ray e.g. foo".
+
+        The browser upper-cases a letter that follows anything other than a
+        letter, a digit or an apostrophe, so it renders "Well-Known (Hello) 1st
+        O’neil X-Ray E.G. Foo" (``innerText``). The box reads exactly that.
+        Upper-casing only a letter after a space gives "Well-known … X-ray E.g.".
+        """
+        document = _document("capitalize")
+        _guard_style(document, "#capitalized", textTransform="capitalize")
+        rendered = browser_text(document, "#capitalized")
+        assert rendered == CAPITALIZE_RENDERED, f"fixture drift: the paragraph renders {rendered!r}"
+        box = _box(_shapes(typography_pptx, "capitalize"), "1st")
+
+        assert box.text == rendered, f"the box reads {box.text!r}; the browser {rendered!r}"
+
+    def test_capitalize_carries_across_a_wrapped_word(self, typography_pptx: bytes) -> None:
+        """ "x-ray" under ``capitalize`` in a box too narrow for it.
+
+        The browser breaks the word after its hyphen, so the word's range
+        paints on two lines and the snapshot measures it code point by code
+        point. The "r" after the hyphen still follows a non-letter: the box
+        reads "X-Ray" across its two lines, as ``innerText`` does. Deciding each
+        code point on its own upper-cases only the first and gives "X-ray".
+        """
+        document = _document("capitalize")
+        lines = browser_lines(document, "#capitalized-wrap")
+        assert len(lines) == 2, f"fixture drift: the word renders on the lines {lines}"
+        rendered = browser_text(document, "#capitalized-wrap")
+        assert rendered == CAPITALIZE_WRAPPED_RENDERED, (
+            f"fixture drift: the word renders {rendered!r}"
+        )
+        shapes = _shapes(typography_pptx, "capitalize")
+        boxes = [
+            shape
+            for shape in text_shapes(shapes, "")
+            if shape.text.replace("\n", "").casefold() == CAPITALIZE_WRAPPED_SOURCE
+        ]
+        assert len(boxes) == 1, f"expected one box reading the wrapped word:\n{_describe(shapes)}"
+
+        assert boxes[0].text.replace("\n", "") == rendered, (
+            f"the wrapped word's box reads {boxes[0].text!r}; the browser {rendered!r}"
+        )
+
     def test_footnote_marker_is_a_superscript_run(self, corpus_pptx: bytes) -> None:
         """Fixture 09: "gross profit<sup>1</sup>".
 
@@ -1160,6 +1260,112 @@ class TestSnapshotRunColour:
             + "\n  ".join(wrong)
         )
 
+    @pytest.mark.parametrize(
+        ("element_id", "gradient", "text"),
+        [pytest.param(*case, id=case[0]) for case in LENGTH_STOP_CASES],
+    )
+    def test_gradient_text_with_length_stops_is_visible(
+        self, typography_pptx: bytes, element_id: str, gradient: str, text: str
+    ) -> None:
+        """Gradient text whose stops sit at lengths: ``#FF3621 0px, #FFB347 300px``, and in em.
+
+        Chrome computes both to px stops ("rgb(255, 54, 33) 0px"). The run still
+        shows the gradient: solid, never the paper the transparent text would
+        otherwise take from its backdrop, and within one unit per channel of the
+        gradient's middle with its two stops spaced evenly (about ``FF7534``).
+        """
+        style = _guard_style(
+            _document("length-stops"),
+            f"#{element_id}",
+            backgroundClip="text",
+            color="rgba(0, 0, 0, 0)",
+        )
+        assert re.search(r"\) [\d.]+px,", style["backgroundImage"]), (
+            f"fixture drift: {gradient} computes to {style['backgroundImage']}, "
+            "not stops placed in px"
+        )
+        middle = _gradient_midpoint(GRADTEXT_STOPS)
+        box = _box(_shapes(typography_pptx, "length-stops"), text)
+
+        invisible = [_describe_run(run) for run in _runs(box) if run.color == PAPER]
+        assert not invisible, (
+            f"the length-stop gradient text is the paper {PAPER}, so it is invisible:\n  "
+            + "\n  ".join(invisible)
+        )
+        wrong = [
+            _describe_run(run)
+            for run in _runs(box)
+            if run.color is None
+            or run.color_alpha is not None
+            or _channel_distance(run.color, middle) > CHANNEL_TOLERANCE
+        ]
+        assert not wrong, (
+            f"every run must be the gradient's middle "
+            f"({', '.join(f'{channel:g}' for channel in middle)}), solid; these are not:\n  "
+            + "\n  ".join(wrong)
+        )
+
+    def test_text_fill_colour_idiom_shows_the_gradient(self, typography_pptx: bytes) -> None:
+        """``-webkit-text-fill-color: transparent`` over an opaque ink ``color``.
+
+        The headline has a ``background-color`` fallback under its gradient, and
+        both are clipped to the glyphs. The glyphs paint with the fill colour,
+        not ``color``, so the gradient shows through them. Every run is the
+        gradient's middle stop ``00A972`` (it covers the fallback), solid, and
+        never the ink that ``color`` alone would give.
+        """
+        _guard_style(
+            _document("fill-idiom"),
+            "#fill-idiom",
+            color="rgb(27, 49, 57)",
+            webkitTextFillColor="rgba(0, 0, 0, 0)",
+            backgroundColor="rgb(255, 54, 33)",
+            backgroundImage=THREE_STOP_GRADIENT,
+            backgroundClip="text",
+        )
+        middle = _gradient_midpoint(THREE_STOPS)
+        box = _box(_shapes(typography_pptx, "fill-idiom"), FILL_IDIOM_TEXT)
+
+        inked = [_describe_run(run) for run in _runs(box) if run.color == INK]
+        assert not inked, (
+            "the headline is painted in its `color` ink, not its transparent fill:\n  "
+            + "\n  ".join(inked)
+        )
+        wrong = [
+            _describe_run(run)
+            for run in _runs(box)
+            if run.color is None
+            or run.color_alpha is not None
+            or _channel_distance(run.color, middle) > CHANNEL_TOLERANCE
+        ]
+        assert not wrong, (
+            f"every run must be the gradient's middle stop {THREE_STOPS[1]}, solid; these are "
+            "not:\n  " + "\n  ".join(wrong)
+        )
+
+    def test_text_clipped_background_paints_no_box(self, typography_pptx: bytes) -> None:
+        """The same headline's ``background-color`` (``FF3621``) is clipped to its glyphs.
+
+        ``background-clip: text`` paints the background inside the letters
+        only, where the run's colour already carries it. So no shape is drawn
+        behind the headline: a solid box there would hide the gradient text, and
+        the browser paints none.
+        """
+        shapes = _shapes(typography_pptx, "fill-idiom")
+        box = _box(shapes, FILL_IDIOM_TEXT)
+
+        behind = [
+            f"{shape.geometry} fill={shape.fill} at ({shape.x:.0f}, {shape.y:.0f}) "
+            f"{shape.w:.0f}x{shape.h:.0f}"
+            for shape in shapes
+            if shape.kind == "shape"
+            and min(shape.x + shape.w, box.x + box.w) > max(shape.x, box.x)
+            and min(shape.y + shape.h, box.y + box.h) > max(shape.y, box.y)
+        ]
+        assert not behind, "a shape is drawn behind the text-clipped headline:\n  " + "\n  ".join(
+            behind
+        )
+
 
 # ---------------------------------------------------------------------------
 # CJK, emoji and right-to-left text (Review Focus 4)
@@ -1297,6 +1503,78 @@ class TestTypographyModule:
         assert isinstance(result, dict), f"typefaceFor returned {result!r}"
         assert {key: result.get(key) for key in expected} == expected, (
             f"typefaceFor('DM Sans', {weight}, all weights) is {result}, expected {expected}"
+        )
+
+    @pytest.mark.parametrize(
+        ("weight", "expected"),
+        [
+            pytest.param(600, {"fontFace": "DM Sans", "bold": True}, id="600-paints-700"),
+            pytest.param(800, {"fontFace": "DM Sans", "bold": True}, id="800-paints-700"),
+            pytest.param(300, {"fontFace": "DM Sans", "bold": False}, id="300-paints-400"),
+        ],
+    )
+    def test_typeface_for_an_unloaded_weight_is_the_face_the_browser_paints(
+        self, weight: int, expected: dict
+    ) -> None:
+        """DM Sans with only 400 and 700 loaded, asked for a weight the page did not load.
+
+        CSS font matching (CSS Fonts 4 §5.2) paints 600 and 800 with the 700
+        face and 300 with the 400 face, so the typeface is the matched face's:
+        ``DM Sans`` plus bold, or ``DM Sans``. Naming the requested weight
+        instead ("DM Sans SemiBold", "DM Sans ExtraBold", "DM Sans Light")
+        writes a weight the slide never showed.
+        """
+        result = _typeface_for("DM Sans", weight, [400, 700])
+
+        assert isinstance(result, dict), f"typefaceFor returned {result!r}"
+        assert {key: result.get(key) for key in expected} == expected, (
+            f"typefaceFor('DM Sans', {weight}, [400, 700]) is {result}, expected {expected}"
+        )
+
+    def test_typeface_for_arial_black_is_never_bold(self) -> None:
+        """Arial Black ships one weight, so a bold flag would only smear it.
+
+        At 900, a weight the browser paints with that one face, the typeface is
+        ``Arial Black`` and not bold, like Impact.
+        """
+        result = _typeface_for("Arial Black", 900, [])
+
+        assert result == {"fontFace": "Arial Black", "bold": False}, (
+            f"typefaceFor('Arial Black', 900, []) is {result}"
+        )
+
+    def test_run_options_escape_the_typeface_for_xml(self) -> None:
+        """A CSS family named with ``&``, ``"`` and ``<``.
+
+        pptxgenjs writes the typeface into ``typeface="…"`` as is, so
+        ``runOptions`` escapes it. Written that way, the attribute parses as XML
+        and reads back the family exactly. Unescaped, the slide part would not
+        parse.
+        """
+        family = 'Ben & "Jerry" <Sans>'
+        run = {
+            "text": "x",
+            "family": family,
+            "weight": 400,
+            "italic": False,
+            "sizePx": 20,
+            "color": INK,
+            "letterSpacingPx": 0,
+            "underline": False,
+            "strike": False,
+            "baseline": None,
+        }
+
+        result = _typography(f"typography.runOptions({json.dumps(run)}, {{}})")
+
+        assert isinstance(result, dict), f"runOptions returned {result!r}"
+        attribute = f'<latin typeface="{result["fontFace"]}"/>'
+        try:
+            parsed = etree.fromstring(attribute)
+        except etree.XMLSyntaxError as error:
+            pytest.fail(f"the typeface as pptxgenjs writes it, {attribute}, is not XML: {error}")
+        assert parsed.get("typeface") == family, (
+            f"the typeface reads back {parsed.get('typeface')!r}, not {family!r}"
         )
 
     @pytest.mark.parametrize(

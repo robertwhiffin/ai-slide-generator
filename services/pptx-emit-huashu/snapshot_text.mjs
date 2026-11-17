@@ -116,6 +116,10 @@ function createTextLayout(env) {
   const HEAVIEST_WEIGHT = 900;
   const WEIGHT_STEP = 100;
   const NO_DECORATION = { underline: false, strike: false };
+  // What continues a word for capitalize: the browser upper-cases a lowercase
+  // letter after any other character.
+  const INSIDE_A_WORD = /[\p{L}\p{N}\p{M}'’]/u;
+  const LOWERCASE_LETTER = /^\p{Ll}$/u;
 
   const dom = domAccess();
   // Text layout is bounded on its own: every child node listed and every rect
@@ -347,17 +351,33 @@ function createTextLayout(env) {
     };
   }
 
-  // A word's text as text-transform paints it. capitalize upper-cases the first
-  // letter of a word, after any leading punctuation, so it needs to know whether
-  // the word starts one: after a space, a break or an atomic inline, or first in
-  // the run.
-  function casedText(text, transform, wordStart) {
+  // A word's text as text-transform paints it. `previous` is the character just
+  // before it in the inline content, '' at a start, after a break or after an
+  // atomic inline. capitalize upper-cases each lowercase letter that follows
+  // anything but a letter, a digit, a combining mark or an apostrophe, which
+  // are the browser's word boundaries: "well-known (hello) 1st o’neil e.g." is
+  // "Well-Known (Hello) 1st O’neil E.G.".
+  function casedText(text, transform, previous) {
     if (transform === 'uppercase') return text.toUpperCase();
     if (transform === 'lowercase') return text.toLowerCase();
-    if (transform === 'capitalize' && wordStart) {
-      return text.replace(/^(\p{P}*)(\p{Ll})/u, (match, lead, letter) => lead + letter.toUpperCase());
+    if (transform !== 'capitalize') return text;
+    let result = '';
+    let before = previous;
+    let index = 0;
+    while (index < text.length) {
+      const character = text.slice(index, index + codePointLength(text, index));
+      index += character.length;
+      result += LOWERCASE_LETTER.test(character) && !INSIDE_A_WORD.test(before) ? character.toUpperCase() : character;
+      before = character;
     }
-    return text;
+    return result;
+  }
+
+  // The last code point of data[start, end), the character the next token follows.
+  function lastCodePoint(data, start, end) {
+    const pairStart = end - 2;
+    if (pairStart >= start && codePointLength(data, pairStart) === 2) return data.slice(pairStart, end);
+    return data.slice(end - 1, end);
   }
 
   // ─── webfonts ────────────────────────────────────────────────────────
@@ -508,16 +528,20 @@ function createTextLayout(env) {
   // at a hyphen, CJK text that breaks anywhere) or a direction change. It is
   // split into code points, each measured on its own; a code point that paints
   // nothing (a joiner, a combining mark) travels with its neighbour, so no
-  // character is lost.
-  //   source  one text node's {node, data, mode, style, tabSize, transform}.
-  function splitToken(source, start, end, space, wordStart, range, tokens) {
+  // character is lost. Each code point is cased after the one before it, so a
+  // word that wraps at its hyphen capitalises as it would on one line.
+  //   source    one text node's {node, data, mode, style, tabSize, transform};
+  //   previous  the character before the token (casedText).
+  function splitToken(source, start, end, space, previous, range, tokens) {
     const pieces = [];
     let pending = '';
+    let before = previous;
     let index = start;
     while (index < end) {
       const length = codePointLength(source.data, index);
       const raw = source.data.slice(index, index + length);
-      const text = space ? preservedSpaces(raw) : casedText(raw, source.transform, wordStart && index === start);
+      const text = space ? preservedSpaces(raw) : casedText(raw, source.transform, before);
+      before = raw;
       range.setStart(source.node, index);
       range.setEnd(source.node, index + length);
       index += length;
@@ -536,24 +560,25 @@ function createTextLayout(env) {
     return pieces.length > 0;
   }
 
-  function measureToken(source, start, end, space, wordStart, range, tokens) {
+  function measureToken(source, start, end, space, previous, range, tokens) {
     range.setStart(source.node, start);
     range.setEnd(source.node, end);
     const rects = paintedRects(range, space);
     if (!rects.length) return;
     const collapsible = space && !source.mode.spaces;
     const raw = source.data.slice(start, end);
-    const text = !space ? casedText(raw, source.transform, wordStart) : collapsible ? ' ' : preservedSpaces(raw);
+    const text = !space ? casedText(raw, source.transform, previous) : collapsible ? ' ' : preservedSpaces(raw);
     if (rects.length > 1 && !collapsible &&
-        splitToken(source, start, end, space, wordStart, range, tokens)) {
+        splitToken(source, start, end, space, previous, range, tokens)) {
       return;
     }
     tokens.push({ kind: 'text', text, rect: rects[0], style: source.style, collapsible, tabSize: source.tabSize });
   }
 
   // Word and space tokens of one text node, plus a break for each preserved
-  // newline. `words.start` says whether the next word starts one (casedText);
-  // it carries over from one text node to the next.
+  // newline. `words.previous` is the character the next token follows
+  // (casedText); it carries over from one text node to the next, hidden ones
+  // included, because they are still in the text.
   function readTokens(piece, scale, range, tokens, words) {
     const ps = piece.context.style;
     // A hidden text node keeps its place in the layout, line breaks included,
@@ -577,13 +602,13 @@ function createTextLayout(env) {
       let end = start + 1;
       if (kind === 'break') {
         tokens.push(BREAK);
-        words.start = true;
+        words.previous = '';
         start = end;
         continue;
       }
       while (end < length && characterKind(data.charCodeAt(end), mode) === kind) end++;
-      if (!hidden) measureToken(source, start, end, kind === 'space', words.start, range, tokens);
-      words.start = kind === 'space';
+      if (!hidden) measureToken(source, start, end, kind === 'space', words.previous, range, tokens);
+      words.previous = kind === 'space' ? ' ' : lastCodePoint(data, start, end);
       start = end;
     }
   }
@@ -709,7 +734,7 @@ function createTextLayout(env) {
     const rtl = s.direction === 'rtl';
     const range = document.createRange();
     const tokens = [];
-    const words = { start: true };
+    const words = { previous: '' };
     for (let index = 0; index < nodes.length; index++) {
       const piece = nodes[index];
       if (piece.kind === 'text') {
@@ -718,7 +743,7 @@ function createTextLayout(env) {
       }
       if (piece.kind === 'break') tokens.push(BREAK);
       // A break or an atomic inline ends the word before it.
-      words.start = true;
+      words.previous = '';
     }
     const clustered = clusterLines(tokens, rtl);
     const lines = [];

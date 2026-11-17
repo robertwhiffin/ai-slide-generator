@@ -154,8 +154,9 @@ async function snapshotPage(config) {
   // parseColour gives a colour, or null for none. Halfway along a linear
   // gradient's line its stops are interpolated there (premultiplied, as CSS
   // interpolates legacy colours), so a three-stop gradient gives its middle
-  // stop and a two-stop one the mix of both. A gradient the stop parser
-  // (GRADIENT_SOURCE) does not read, a radial or conic one, gives its first colour.
+  // stop and a two-stop one the mix of both, whether its stops are placed in
+  // percentages or lengths. A gradient the stop parser (GRADIENT_SOURCE) does
+  // not read, a radial or conic one, gives its first colour.
   const gradientCache = new Map();
   const COLOUR_IN_GRADIENT = /(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^)]*\)|#[0-9a-f]{3,8}\b/i;
 
@@ -181,21 +182,36 @@ async function snapshotPage(config) {
     return colourFrom(channel(from.r, to.r), channel(from.g, to.g), channel(from.b, to.b), alpha);
   }
 
+  // The stop parser strips only a trailing percentage, so a stop placed at a
+  // length still carries it: Chrome computes "#FF3621 0px" and "#FF3621 2em"
+  // alike to "rgb(255, 54, 33) 0px". So do the two positions of a two-position stop.
+  const TRAILING_STOP_LENGTHS = /(?:\s+-?[\d.]+(?:e[-+]?\d+)?[a-z%]*){1,2}\s*$/i;
+
+  function firstColourIn(layer) {
+    const first = COLOUR_IN_GRADIENT.exec(layer);
+    return first ? parseColour(first[0]) : null;
+  }
+
+  // A stop's colour, its positions stripped. A stop with no percentage keeps
+  // the parser's position, its index spread evenly over the line: where a
+  // length falls on the gradient line depends on a box the parser never sees.
+  function stopColour(text) {
+    return parseColour(text) || parseColour(String(text).replace(TRAILING_STOP_LENGTHS, '').trim());
+  }
+
   function gradientLayerMiddle(layer) {
     const parsed = /^(repeating-)?linear-gradient\(/i.test(layer) ? parseLinearGradient(layer) : null;
-    if (!parsed) {
-      const first = COLOUR_IN_GRADIENT.exec(layer);
-      return first ? parseColour(first[0]) : null;
-    }
+    if (!parsed) return firstColourIn(layer);
     // Stops in order: CSS moves a stop placed before the one ahead of it up to it.
     const stops = [];
     for (let index = 0; index < parsed.stops.length; index++) {
-      const colour = parseColour(parsed.stops[index].color);
+      const colour = stopColour(parsed.stops[index].color);
       if (!colour) continue;
       const floor = stops.length ? stops[stops.length - 1].pos : -Infinity;
       stops.push({ colour, pos: Math.max(parsed.stops[index].pos, floor) });
     }
-    return stops.length ? colourAt(stops, 0.5) : null;
+    // Stops none of which reads still name colours: text clipped to them must not vanish.
+    return stops.length ? colourAt(stops, 0.5) : firstColourIn(layer);
   }
 
   function gradientMiddle(value) {
