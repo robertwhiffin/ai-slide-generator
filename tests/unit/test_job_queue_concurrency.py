@@ -54,6 +54,7 @@ class _BlockingGenerator:
         image_ids=None,
         engine_mode="monolith",
         stage_slide=None,
+        turn_deadline=None,
     ):
         with self.lock:
             self.started.append(request_id)

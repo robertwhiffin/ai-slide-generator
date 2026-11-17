@@ -12,12 +12,14 @@ import logging
 import os
 import queue
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.services.generation_fence import TurnStopped
+from src.services.model_calls import set_turn_deadline
 from src.services.persisted_graph_release import PersistedRuntimeError
 
 logger = logging.getLogger(__name__)
@@ -292,6 +294,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                     image_ids,
                     engine_mode,
                     stage_slide,
+                    _turn_deadline(request_id, engine_mode),
                 ),
             ):
                 if event.type == StreamEventType.COMPLETE:
@@ -321,6 +324,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
                     image_ids,
                     engine_mode,
                     stage_slide,
+                    _turn_deadline(request_id, engine_mode),
                 ),
             ):
                 if event.type == StreamEventType.COMPLETE:
@@ -428,6 +432,17 @@ def _snapshot_survives(request_id: str) -> bool:
         return True
 
 
+def _turn_deadline(request_id: str, engine_mode: str | None) -> float:
+    """The ``time.monotonic()`` deadline of this turn's hard timeout.
+
+    Same clock as ``mark_timed_out_jobs_once``: the entry's ``started_at``
+    (``datetime.utcnow()``) plus ``job_hard_timeout_seconds(engine_mode)``.
+    """
+    started_at = jobs.get(request_id, {}).get("started_at")
+    elapsed = (datetime.utcnow() - started_at).total_seconds() if started_at else 0
+    return time.monotonic() + job_hard_timeout_seconds(engine_mode) - elapsed
+
+
 def _run_streaming_generator(
     chat_service,
     session_id: str,
@@ -438,6 +453,7 @@ def _run_streaming_generator(
     image_ids: Optional[list] = None,
     engine_mode: str = "monolith",
     stage_slide: Optional[Dict[str, Any]] = None,
+    turn_deadline: Optional[float] = None,
 ) -> list:
     """Run the streaming generator and collect events.
 
@@ -459,10 +475,15 @@ def _run_streaming_generator(
         stage_slide: Optional graph-only snapshot of the slide on stage
             (``{"slide_number", "slide_id"}``), appended after ``engine_mode``
             and passed positionally by both call sites.
+        turn_deadline: ``time.monotonic()`` value past which the turn's model
+            calls never start a retry wait (the job's hard timeout, from
+            ``_turn_deadline``), appended last and passed positionally by both
+            call sites.  Installed first, inside the job's context.
 
     Returns:
         List of all events from the generator
     """
+    set_turn_deadline(turn_deadline)
     events = []
     try:
         for event in chat_service.send_message_streaming(
