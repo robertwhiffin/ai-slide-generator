@@ -1103,6 +1103,7 @@ REPORT_COLUMNS = [
     "share",
     "parked commits",
     "share after final review",
+    "merged",
 ]
 ISO_Z = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
 UTC_PLUS_1 = timezone(timedelta(hours=1))
@@ -1295,7 +1296,9 @@ def number(cell: str) -> float | None:
     return value / 100 if match.group(2) else value
 
 
-def report_row(pr, mode, time_h, cost_total, commits, lines, share, parked, after_review) -> dict:
+def report_row(
+    pr, mode, time_h, cost_total, commits, lines, share, parked, after_review, merged=True
+) -> dict:
     return {
         "pr": pr,
         "mode": mode,
@@ -1306,6 +1309,7 @@ def report_row(pr, mode, time_h, cost_total, commits, lines, share, parked, afte
         "share": share,
         "parked_commits": parked,
         "share_after_final_review": after_review,
+        "merged": merged,
     }
 
 
@@ -1494,6 +1498,7 @@ def test_report_rows_compute_time_cost_and_edits():
             "share": pytest.approx(15 / 100),
             "parked_commits": 1,
             "share_after_final_review": None,
+            "merged": True,
         },
         {
             "pr": 412,
@@ -1505,6 +1510,7 @@ def test_report_rows_compute_time_cost_and_edits():
             "share": pytest.approx(30 / 140),
             "parked_commits": 0,
             "share_after_final_review": None,
+            "merged": True,
         },
     ]
 
@@ -1561,7 +1567,7 @@ def test_render_report_has_median_row_per_mode():
     chained = [
         report_row(401, "chained", 2.0, 30.0, 5, 60, 0.10, 0, 0.40),
         report_row(402, "chained", 9.0, 10.0, 2, 0, 0.30, 1, 0.05),
-        report_row(403, "chained", 4.0, 80.0, 0, 20, 0.0, 0, 0.15),
+        report_row(403, "chained", 4.0, 80.0, 0, 20, 0.0, 0, 0.15, merged=False),
     ]
     single = [
         report_row(359, "single-session", 8.0, 48.0, 0, 0, 0.0, 0, None),
@@ -1598,6 +1604,7 @@ def test_render_report_has_median_row_per_mode():
             assert number(cells[8]) is None, cells
         else:
             assert number(cells[8]) == pytest.approx(row["share_after_final_review"], abs=0.0051)
+        assert cells[9] == ("yes" if row["merged"] else "no"), cells
 
     # Then one median row per mode, each over that mode's rows only.
     by_mode = {}
@@ -1988,3 +1995,41 @@ def test_build_record_clips_final_review_to_handover(tmp_path):
 
     assert rec.final_review_at == at(1200)
     assert rec.handover_at == at(1200)
+
+
+def test_report_marks_unmerged_prs():
+    # Two builds with the same edits after handover; only one PR is merged. The open PR's
+    # edits can still grow, and the report says so.
+    def build(number: int, merged_at: datetime | None):
+        record = bm.BuildRecord(
+            pr=number,
+            mode="chained",
+            plan=PLAN,
+            sessions=(f"s{number}",),
+            first_task_at=H - 2 * HOUR,
+            handover_at=H,
+            final_review_at=None,
+            cost_usd={"opus": 9.0},
+        )
+        pull = bm.PullRequest(
+            number=number,
+            created_at=H - HOUR,
+            merged_at=merged_at,
+            body="",
+            commits=brief_commits(),
+        )
+        return record, pull
+
+    merged, still_open = build(601, H + 4 * HOUR), build(602, None)
+
+    rows = bm.report_rows([merged[0], still_open[0]], {601: merged[1], 602: still_open[1]})
+
+    assert {row["pr"]: row["merged"] for row in rows} == {601: True, 602: False}
+    table = table_cells(bm.render_report(rows))
+    assert table[0][-1] == "merged"
+    by_pr = {cells[0]: cells for cells in table[2:] if cells[0].startswith("#")}
+    assert by_pr["#601"][-1] == "yes"
+    assert by_pr["#602"][-1] == "no"
+    # The other columns keep their places.
+    assert table[0][:-1] == REPORT_COLUMNS[:-1]
+    assert number(by_pr["#602"][6]) == pytest.approx(30 / 140, abs=0.0051)

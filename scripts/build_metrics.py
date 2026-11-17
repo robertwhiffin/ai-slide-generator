@@ -538,6 +538,8 @@ def report_rows(records: Sequence[BuildRecord], prs: Mapping[int, PullRequest]) 
                 "share": edits.share,
                 "parked_commits": edits.parked_commits,
                 "share_after_final_review": after_review,
+                # An open PR's edits after handover are still growing.
+                "merged": pull.merged_at is not None,
             }
         )
     return rows
@@ -553,6 +555,7 @@ REPORT_HEADER = [
     "share",
     "parked commits",
     "share after final review",
+    "merged",
 ]
 
 
@@ -587,6 +590,7 @@ def render_report(rows: list[dict]) -> str:
                     _pct(r["share"]),
                     str(r["parked_commits"]),
                     _pct(r["share_after_final_review"]),
+                    "yes" if r["merged"] else "no",
                 ]
             )
         )
@@ -604,6 +608,7 @@ def render_report(rows: list[dict]) -> str:
                     _pct(_median(r["share"] for r in group)),
                     _count(_median(r["parked_commits"] for r in group)),
                     _pct(_median(r["share_after_final_review"] for r in group)),
+                    "",
                 ]
             )
         )

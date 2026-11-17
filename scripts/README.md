@@ -104,6 +104,7 @@ it keeps only sessions that dispatched a `Task <n> supervisor` or the `Final age
 starts the clock at the earliest `Task <n> supervisor` dispatch whose prompt contains the
 `--find` string, falling back to the first dispatch naming a task. `--first-task <ISO>`
 sets the clock by hand, and `--handover <ISO>` the end (default: now). It prints the
-sessions and the first task it chose on stderr.
+sessions and the first task it chose on stderr. The report's last column, `merged`, says
+whether each PR is merged yet: an open PR's edits after handover can still grow.
 
 The user reads the report and decides; no thresholds, and nothing is reverted automatically.
