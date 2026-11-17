@@ -10,7 +10,10 @@ starting from the slide rect and narrowed by the padding box of every
 
 * a shape is cut to that clip, so a box spilling out of an ``overflow: hidden``
   card is drawn only where the card shows it, and a decoration hanging past the
-  slide's right edge stops at the edge;
+  slide's right edge stops at the edge. A cut plain rect stays a preset rect;
+  a cut shape a rect cannot draw (a disc, a rounded or bordered card) is a
+  custom-geometry path, the part of it the clip shows, with its border drawn
+  only where its own edge remains;
 * a text token whose rect meets the clip by less than 2 px is dropped, so a
   screen-reader-only table and the lines a card cuts off are not slide text;
 * content cut to nothing, or lying wholly off the slide, produces no shape, no
@@ -43,14 +46,18 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 
 import pytest
+from lxml import etree
 
 from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
+    EMU_PER_PX,
+    NAMESPACES,
     Shape,
     browser_hit_id,
     browser_line_boxes,
@@ -62,6 +69,7 @@ from tests.fixtures.export_snapshot_support import (
     export_slides,
     requires_huashu_sidecar,
     slide_document,
+    slide_shape_elements,
     slide_shapes,
     text_loss,
 )
@@ -333,6 +341,39 @@ OFFSTAGE_CASES = {
     },
 }
 
+# A disc hanging 80 px past the slide's right edge (fixture 12's decorative circle).
+DISC_FILL = "00A975"
+DISC = (
+    '<div class="slide">' + LEAD + '<div id="disc" style="position: absolute; right: -80px; '
+    f'top: 220px; width: 240px; height: 240px; border-radius: 50%; background: #{DISC_FILL};">'
+    "</div></div>"
+)
+
+# A bordered, rounded card spilling out of the bottom of an overflow: hidden window.
+CARD_FILL = "F2E8D5"
+CARD_LINE = "5A2D82"
+CARD_BORDER_PX = 4.0
+CUT_CARD = (
+    '<div class="slide">'
+    '<div id="window" style="position: absolute; left: 120px; top: 140px; width: 420px; '
+    'height: 220px; overflow: hidden;">'
+    '<div id="card" style="width: 300px; height: 260px; margin: 20px 0 0 30px; '
+    f"border: {CARD_BORDER_PX:g}px solid #{CARD_LINE}; border-radius: 16px; "
+    f'background: #{CARD_FILL};"></div>'
+    "</div></div>"
+)
+
+# Plain unbordered rects a clip cuts: the spill out of an overflow: hidden frame,
+# and the decoration past the right edge of a slide root that does not clip.
+CUT_PLAIN_RECTS = {
+    "spill-out-of-a-frame": (PARTIAL_CLIP.format(overflow="hidden"), "#spill", SPILL_FILL),
+    "past-the-slide-edge": (
+        OFF_EDGE_DECORATION.format(root_style=SLIDE_ROOTS["root-overflow-visible"]),
+        "#decoration",
+        DECORATION_FILL,
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -530,6 +571,52 @@ def _text_item_containing(shapes: list[Shape], fragment: str) -> Shape:
         f"{_describe(shapes)}"
     )
     return matches[0]
+
+
+def _filled_with_xml(
+    pptx: bytes, fill: str, what: str
+) -> tuple[Shape, list[Shape], etree._Element]:
+    """The one non-text shape filled ``fill``, every shape, and the shape's spTree XML."""
+    shapes = slide_shapes(pptx)
+    shape = _filled(shapes, fill, what)
+    return shape, shapes, slide_shape_elements(pptx)[shapes.index(shape)]
+
+
+def _custom_path(element: etree._Element, what: str) -> etree._Element:
+    """The single ``a:path`` of a shape's ``a:custGeom``, its path drawn in the shape's frame."""
+    paths = element.findall("p:spPr/a:custGeom/a:pathLst/a:path", NAMESPACES)
+    assert len(paths) == 1, f"{what}: expected one a:custGeom path, got {len(paths)}"
+    return paths[0]
+
+
+def _assert_path_fills_its_frame(element: etree._Element, what: str) -> etree._Element:
+    """The custGeom path's coordinate space is the shape's extent, so its points are EMU from
+    the shape's top left and no renderer rescales the path inside its box."""
+    path = _custom_path(element, what)
+    extent = element.find("p:spPr/a:xfrm/a:ext", NAMESPACES)
+    assert extent is not None, f"{what}: the shape has no a:xfrm/a:ext"
+    assert (path.get("w"), path.get("h")) == (extent.get("cx"), extent.get("cy")), (
+        f"{what}: the path's w/h ({path.get('w')}, {path.get('h')}) differ from the shape's "
+        f"extent ({extent.get('cx')}, {extent.get('cy')})"
+    )
+    return path
+
+
+def _path_points(path: etree._Element, shape: Shape) -> list[tuple[float, float]]:
+    """Every point of ``path``, in order, in slide px (its path space is the shape's EMU)."""
+    return [
+        (shape.x + int(point.get("x")) / EMU_PER_PX, shape.y + int(point.get("y")) / EMU_PER_PX)
+        for point in path.iterfind(".//a:pt", NAMESPACES)
+    ]
+
+
+def _inset(rect: dict, by: float) -> dict:
+    return {
+        "x": rect["x"] + by,
+        "y": rect["y"] + by,
+        "w": rect["w"] - 2 * by,
+        "h": rect["h"] - 2 * by,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1029,3 +1116,178 @@ class TestSnapshotOffSlide:
         _assert_no_words(shapes, OFFSTAGE_WORDS, case)
         _assert_no_pictures(shapes, case)
         _assert_lead_kept(shapes)
+
+
+# ---------------------------------------------------------------------------
+# The geometry of a cut shape
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotClippedShapeGeometry:
+    def test_a_disc_past_the_slide_edge_is_cut_not_squashed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 240 px ``border-radius: 50%`` disc (fill ``00A975``) hanging 80 px past the right edge.
+
+        The browser shows the disc up to the slide edge: a circle with its
+        right part cut off by a straight line. A preset ellipse in the visible
+        box would be a squashed oval, and one in the whole box would hang off
+        the slide, so the disc is one ``a:custGeom`` shape:
+
+        * its box (``a:xfrm``) is the disc's browser rect cut to the slide rect,
+          within 0.5 px;
+        * its ``a:path`` coordinate space is the box's own extent (``w``/``h``
+          equal ``a:ext`` ``cx``/``cy``), so no renderer rescales the path;
+        * every point of the path lies on the disc's circle or on the slide's
+          right edge, within 0.5 px, and the path reaches that edge.
+        """
+        document = _document(DISC)
+        disc = browser_rect(document, "#disc")
+        visible = _intersection(disc, SLIDE_RECT)
+        assert visible is not None and disc["x"] + disc["w"] > SLIDE_RECT["w"], (
+            f"fixture drift: the disc {disc} does not straddle the right edge"
+        )
+        assert abs(disc["w"] - disc["h"]) < 0.01, f"fixture drift: the disc {disc} is not round"
+        assert browser_hit_id(document, *_centre(visible)) == "disc", (
+            "fixture drift: the browser does not show the disc on the slide"
+        )
+
+        shape, shapes, element = _filled_with_xml(
+            _export_one(DISC, monkeypatch), DISC_FILL, "the disc"
+        )
+        assert shape.geometry == "custGeom", (
+            f"the disc the slide edge cuts must be a custom-geometry path, got {shape.geometry} "
+            f"at {_box(shape)}\n{_describe(shapes)}"
+        )
+        _assert_at(shape, visible, "the disc cut to the slide")
+        path = _assert_path_fills_its_frame(element, "the disc")
+        centre_x, centre_y = _centre(disc)
+        radius = disc["w"] / 2
+        points = _path_points(path, shape)
+        stray = [
+            (round(x, 3), round(y, 3))
+            for x, y in points
+            if abs(math.hypot(x - centre_x, y - centre_y) - radius) > RECT_TOLERANCE_PX
+            and abs(x - SLIDE_RECT["w"]) > RECT_TOLERANCE_PX
+        ]
+        assert points and stray == [], (
+            f"the disc's path strays from its circle (centre {centre_x}, {centre_y}, radius "
+            f"{radius}) and the slide edge at {stray[:8]} ({len(stray)} of {len(points)} points)"
+        )
+        assert any(abs(x - SLIDE_RECT["w"]) <= RECT_TOLERANCE_PX for x, _ in points), (
+            "the disc's path never reaches the slide edge that cuts it"
+        )
+
+    def test_a_cut_bordered_card_keeps_its_border_off_the_cut(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rounded card (fill ``F2E8D5``, 4 px border ``5A2D82``) spilling out of the bottom
+        of an ``overflow: hidden`` window.
+
+        The browser draws the card down to the window's padding box and no
+        border along that cut: the card's own bottom edge, border and corners
+        are clipped away. A preset roundRect cannot draw that, so the card is
+        two ``a:custGeom`` paths, the outline painted over the fill:
+
+        * the fill: a closed path (``a:close``) filled ``F2E8D5`` with no line,
+          whose box is the card's outline box (its browser rect inset by half
+          the border, where a shape's outline runs) cut to the window's padding
+          box, within 0.5 px;
+        * the outline: a path with ``a:noFill``, stroked ``5A2D82``, that is
+          open (no ``a:close``) and has no segment along the cut, whose box is
+          the outline box from its top down to the cut.
+        """
+        document = _document(CUT_CARD)
+        card = browser_rect(document, "#card")
+        window = browser_padding_box(document, "#window")
+        assert _contains(window, {**card, "h": window["y"] + window["h"] - card["y"]}), (
+            f"fixture drift: the card {card} must start inside the window {window}"
+        )
+        assert card["y"] + card["h"] > window["y"] + window["h"] + CARD_BORDER_PX, (
+            f"fixture drift: the card {card} must spill below the window {window}"
+        )
+        cut = window["y"] + window["h"]
+        assert browser_hit_id(document, *_centre(_intersection(card, window))) == "card", (
+            "fixture drift: the browser does not show the card inside the window"
+        )
+        assert browser_hit_id(document, card["x"] + card["w"] / 2, cut + 10) != "card", (
+            "fixture drift: the browser shows the card below the window that clips it"
+        )
+
+        pptx = _export_one(CUT_CARD, monkeypatch)
+        fill, shapes, fill_element = _filled_with_xml(pptx, CARD_FILL, "the card's fill")
+        outline_box = _inset(card, CARD_BORDER_PX / 2)
+        assert fill.geometry == "custGeom", (
+            f"the cut card's fill must be a custom-geometry path, got {fill.geometry} "
+            f"at {_box(fill)}\n{_describe(shapes)}"
+        )
+        assert fill.line is None, f"the cut card's fill path is stroked {fill.line}"
+        _assert_at(fill, _intersection(outline_box, window), "the cut card's fill")
+        fill_path = _assert_path_fills_its_frame(fill_element, "the card's fill")
+        assert fill_path.find("a:close", NAMESPACES) is not None, (
+            "the cut card's fill path is not closed"
+        )
+
+        outlines = [index for index, shape in enumerate(shapes) if shape.line == CARD_LINE]
+        assert len(outlines) == 1, (
+            f"expected one shape stroked {CARD_LINE}, got {len(outlines)}:\n{_describe(shapes)}"
+        )
+        outline = shapes[outlines[0]]
+        outline_element = slide_shape_elements(pptx)[outlines[0]]
+        assert outline.geometry == "custGeom", (
+            f"the cut card's outline must be a custom-geometry path, got {outline.geometry}"
+        )
+        assert outline_element.find("p:spPr/a:noFill", NAMESPACES) is not None, (
+            f"the cut card's outline path is filled {outline.fill}: it must be a:noFill"
+        )
+        assert outlines[0] > shapes.index(fill), "the card's outline paints under its fill"
+        _assert_at(
+            outline,
+            {**outline_box, "h": cut - outline_box["y"]},
+            "the cut card's outline, from its top down to the cut",
+        )
+        outline_path = _assert_path_fills_its_frame(outline_element, "the card's outline")
+        assert outline_path.find("a:close", NAMESPACES) is None, (
+            "the cut card's outline path is closed, so it runs along the cut"
+        )
+        points = _path_points(outline_path, outline)
+        along_the_cut = [
+            (round(start[0], 3), round(end[0], 3))
+            for start, end in zip(points, points[1:])
+            if abs(start[1] - cut) <= RECT_TOLERANCE_PX and abs(end[1] - cut) <= RECT_TOLERANCE_PX
+        ]
+        assert along_the_cut == [], (
+            f"the cut card's outline runs along the cut at y={cut:.2f} over x {along_the_cut}"
+        )
+
+    @pytest.mark.parametrize("case", sorted(CUT_PLAIN_RECTS))
+    def test_a_cut_plain_rect_stays_a_preset_rect(
+        self, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        """Guard: a plain unbordered rect that a clip cuts is still a preset ``rect``.
+
+        The part of it the clip shows is a rect too, so it stays the shape
+        PowerPoint and Google Slides edit as a rectangle (``a:prstGeom
+        prst="rect"``), at its browser rect cut to the clip within 0.5 px.
+        Only a shape a rect cannot draw becomes a custom-geometry path. Cases:
+        the box spilling out of an ``overflow: hidden`` frame, and the
+        decoration past the right edge of a slide root that does not clip.
+        """
+        body, selector, fill = CUT_PLAIN_RECTS[case]
+        document = _document(body)
+        rect = browser_rect(document, selector)
+        clip = browser_padding_box(document, "#frame") if selector == "#spill" else SLIDE_RECT
+        visible = _intersection(rect, clip)
+        assert visible is not None and (visible["w"] < rect["w"] or visible["h"] < rect["h"]), (
+            f"fixture drift: the clip {clip} does not cut {selector} {rect}"
+        )
+
+        shape, shapes, element = _filled_with_xml(_export_one(body, monkeypatch), fill, case)
+        preset = element.find("p:spPr/a:prstGeom", NAMESPACES)
+        assert shape.geometry == "rect" and preset is not None, (
+            f"{case}: the cut plain rect must stay a preset rect, got {shape.geometry}"
+            f"\n{_describe(shapes)}"
+        )
+        _assert_at(shape, visible, f"{case}: the cut plain rect")
