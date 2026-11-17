@@ -473,7 +473,10 @@ class TestSnapshotTextLines:
         blank line at its 18 pt default and every later line shifts down. The
         blank line is therefore a run of its own, sized like the line before
         it: in a 13 px paragraph every run, the blank line's included, is
-        ``sz="975"`` (13 x 0.75 pt), and none is at the default.
+        ``sz="975"`` (13 x 0.75 pt), and none is at the default. The run starts
+        its line: after a soft break, or, where the block's leading is looser
+        than the renderers' single spacing and every line is a paragraph of its
+        own (Task 4, ruling R2), as the first run of a paragraph after the first.
         """
         body = (
             '<div class="slide">'
@@ -491,7 +494,13 @@ class TestSnapshotTextLines:
 
         _, box = _text_box_containing(shapes, "First line")
         runs = [run for para in box.paras for run in para.runs]
-        blank = [run for run in runs if run.soft_break_before and not run.text.strip()]
+        line_starts = [
+            run
+            for position, para in enumerate(box.paras)
+            for index, run in enumerate(para.runs)
+            if run.soft_break_before or (index == 0 and position > 0)
+        ]
+        blank = [run for run in line_starts if not run.text.strip()]
         assert len(blank) == 1, (
             f"expected one run for the blank line, got {len(blank)}: "
             f"{[(run.text, run.size_pt) for run in runs]}"

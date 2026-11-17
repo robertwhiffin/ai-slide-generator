@@ -6,8 +6,11 @@
 // same settle sequence (networkidle, then a canvas readiness wait), so the
 // truth image and the exported slide come from one identical layout.
 //
-// usage: node render_truth.cjs <out_dir> <slide.html>...
+// usage: node render_truth.cjs [--scale=<n>] <out_dir> <slide.html>...
 // writes <out_dir>/<basename>.png and <out_dir>/<basename>.txt (rendered text) for every input.
+// --scale is the device scale factor (default 1): the layout is the same
+// 1280x720, and the screenshot is n times as many pixels each way. The text
+// calibration (calibrate_text.py) takes it at 2, the sidecar's own scale.
 
 const fs = require('fs');
 const path = require('path');
@@ -15,8 +18,8 @@ const path = require('path');
 const SIDECAR_DIR = path.resolve(__dirname, '..', '..', 'services', 'pptx-emit-huashu');
 const { chromium } = require(path.join(SIDECAR_DIR, 'node_modules', 'playwright'));
 
-async function renderOne(browser, htmlPath, outDir) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+async function renderOne(browser, htmlPath, outDir, scale) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: scale });
   await page.goto('file://' + path.resolve(htmlPath));
   try {
     await page.waitForLoadState('networkidle', { timeout: 4000 });
@@ -47,9 +50,14 @@ async function renderOne(browser, htmlPath, outDir) {
 }
 
 async function main() {
-  const [outDir, ...htmlPaths] = process.argv.slice(2);
-  if (!outDir || htmlPaths.length === 0) {
-    console.error('usage: node render_truth.cjs <out_dir> <slide.html>...');
+  const argv = process.argv.slice(2);
+  let scale = 1;
+  if (argv.length && argv[0].startsWith('--scale=')) {
+    scale = Number(argv.shift().slice('--scale='.length));
+  }
+  const [outDir, ...htmlPaths] = argv;
+  if (!outDir || htmlPaths.length === 0 || !(scale > 0)) {
+    console.error('usage: node render_truth.cjs [--scale=<n>] <out_dir> <slide.html>...');
     process.exit(1);
   }
   const launchOptions = process.platform === 'darwin'
@@ -58,7 +66,7 @@ async function main() {
   const browser = await chromium.launch(launchOptions);
   try {
     for (const htmlPath of htmlPaths) {
-      console.log(await renderOne(browser, htmlPath, outDir));
+      console.log(await renderOne(browser, htmlPath, outDir, scale));
     }
   } finally {
     await browser.close();

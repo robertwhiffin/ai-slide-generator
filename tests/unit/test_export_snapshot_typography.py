@@ -15,7 +15,8 @@ the browser's typography (RC7):
   (a DM Mono chip in a DM Sans sentence).
 * **Element style reaches every run**: a heading's weight survives its
   ``<br>`` and its inline children.
-* **Letter spacing** as ``spc``; ``text-transform`` applied to the run text;
+* **Letter spacing** as ``spc``, plus at title sizes Task 4's optical-size
+  delta (task-4-addendum A1); ``text-transform`` applied to the run text;
   super- and subscript as a baseline offset; italic, underline and
   strike-through.
 * **Colour is solid and pre-blended**, because Drive drops text alpha: the
@@ -66,8 +67,10 @@ from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
     Run,
     Shape,
+    browser_line_boxes,
     browser_lines,
     browser_loaded_weights,
+    browser_probes,
     browser_style,
     browser_text,
     corpus_document,
@@ -91,6 +94,11 @@ HUNDREDTHS = 100
 SUPERSCRIPT_BASELINE = 30000
 # The brief: spc = round(size x em x 0.75 x 100) +/- 1.
 SPC_TOLERANCE_HUNDREDTHS = 1.0
+# task-4-addendum A1: a run whose width at the browser's automatic optical size
+# and at the static opsz-14 cut (what PowerPoint and Google Slides draw) differ
+# by more than 0.5% carries an optical-size delta on top of its CSS tracking.
+OPTICAL_SIZE_THRESHOLD = 0.005
+EXPORT_CUT_OPTICAL_SIZE = 14
 # A colour blended twice, or a gradient's midpoint, may round its exact value
 # either way; one unit per channel allows for that and nothing more.
 CHANNEL_TOLERANCE = 1.0
@@ -533,6 +541,28 @@ def _guard_style(document: str, selector: str, **expected: str) -> dict[str, str
     return style
 
 
+def _tracked_cut_widths(
+    document: str, style: dict[str, str], texts: list[str]
+) -> list[tuple[float, float]]:
+    """(browser cut, export cut) widths of each text in the element's face, with its tracking.
+
+    Read with offscreen probes in the same page (``browser_probes``): the
+    browser cut at the face's automatic optical size, as the page draws it; the
+    export cut at ``font-variation-settings: 'opsz' 14``, the static cut
+    PowerPoint and Google Slides draw (task-4-addendum A1). Both carry the
+    element's own letter-spacing.
+    """
+    face = (
+        f"font: {style['fontStyle']} {style['fontWeight']} {style['fontSize']} "
+        f"{style['fontFamily']}; letter-spacing: {style['letterSpacing']}"
+    )
+    export_cut = f"{face}; font-variation-settings: 'opsz' {EXPORT_CUT_OPTICAL_SIZE}"
+    sizes = browser_probes(document, [(text, css) for text in texts for css in (face, export_cut)])
+    return [
+        (sizes[position]["w"], sizes[position + 1]["w"]) for position in range(0, len(sizes), 2)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Weights (spec §5 Weights, Review Focus 3)
 # ---------------------------------------------------------------------------
@@ -736,37 +766,88 @@ class TestSnapshotRunInheritance:
 @requires_huashu_sidecar
 class TestSnapshotRunStyle:
     @pytest.mark.parametrize(
-        ("selector", "text", "size_px", "em"),
+        ("selector", "text", "size_px", "em", "optical_size_delta"),
         [
-            pytest.param(EYEBROW, EYEBROW_SOURCE_TEXT, 13, 0.16, id="eyebrow"),
-            pytest.param(CORPUS_TITLE, CORPUS_TITLE_TEXT, 42, -0.01, id="title"),
+            pytest.param(EYEBROW, EYEBROW_SOURCE_TEXT, 13, 0.16, False, id="eyebrow"),
+            pytest.param(CORPUS_TITLE, CORPUS_TITLE_TEXT, 42, -0.01, True, id="title"),
         ],
     )
     def test_letter_spacing_is_spc(
-        self, corpus_pptx: bytes, selector: str, text: str, size_px: float, em: float
+        self,
+        corpus_pptx: bytes,
+        selector: str,
+        text: str,
+        size_px: float,
+        em: float,
+        optical_size_delta: bool,
     ) -> None:
         """Fixture 09: ``letter-spacing`` as ``spc``, in hundredths of a point.
 
         * the ``.dk-eyebrow`` (13 px, ``.16em``) has ``spc`` = round(13 x 0.16 x
-          0.75 x 100) = 156, within 1;
-        * the ``.dk-title`` (42 px, ``-.01em``) is tracked tighter, ``spc`` =
-          42 x -0.01 x 0.75 x 100 = -31.5, within 1.
+          0.75 x 100) = 156, within 1. At 13 px the browser's automatic
+          optical size is next to the export cut's 14, so the two widths agree
+          within 0.5% (guarded here) and no optical-size delta applies;
+        * the ``.dk-title`` (42 px, ``-.01em``) is drawn at the large optical
+          size, and the static opsz-14 cut PowerPoint and Google Slides draw is
+          about 10% wider (guarded here). So its ``spc`` is its CSS tracking plus
+          the optical-size delta of task-4-addendum A1: (letterSpacingPx +
+          (renderedWidth - exportCutWidth) / n) x 0.75 x 100, within 1, about
+          -170. renderedWidth is the browser's width of the run, exportCutWidth
+          the run's text at ``'opsz' 14`` with its own letter-spacing (a probe
+          in the same page), and n its characters.
 
         Every run of the block carries it; a run without ``spc`` is untracked
         in PowerPoint (eyebrow tracking was lost everywhere, RC7).
         """
-        style = _guard_style(corpus_document("09"), selector, fontSize=f"{size_px}px")
+        document = corpus_document("09")
+        style = _guard_style(document, selector, fontSize=f"{size_px}px")
         tracking_px = float(style["letterSpacing"].removesuffix("px"))
         assert math.isclose(tracking_px, size_px * em, abs_tol=0.005), (
             f"fixture drift: {selector}'s letter-spacing is {style['letterSpacing']}, expected "
             f"{size_px * em:.2f}px"
         )
-        expected = size_px * em * PT_PER_PX * HUNDREDTHS
         box = _box(_corpus_shapes(corpus_pptx, "09"), text)
+        runs = _runs(box)
+        widths = _tracked_cut_widths(document, style, [run.text for run in runs])
+        differences = [
+            (run.text, browser_cut, export_cut, abs(export_cut - browser_cut) / browser_cut)
+            for run, (browser_cut, export_cut) in zip(runs, widths)
+        ]
+        if not optical_size_delta:
+            expected = size_px * em * PT_PER_PX * HUNDREDTHS
+            differ = [entry for entry in differences if entry[3] > OPTICAL_SIZE_THRESHOLD]
+            assert not differ, (
+                f"fixture drift: {selector}'s two optical-size cuts must agree within "
+                f"{OPTICAL_SIZE_THRESHOLD:.1%}, so no delta applies; these do not (text, "
+                f"browser px, export px, difference): {differ}"
+            )
+        else:
+            agree = [entry for entry in differences if entry[3] <= OPTICAL_SIZE_THRESHOLD]
+            assert not agree, (
+                f"environment: {selector} is drawn at its automatic optical size, so the "
+                f"opsz-{EXPORT_CUT_OPTICAL_SIZE} cut must be more than "
+                f"{OPTICAL_SIZE_THRESHOLD:.1%} wider; these are not (text, browser px, export "
+                f"px, difference): {agree}. Did the deck's Google Fonts import (DM Sans with "
+                "its opsz axis) load?"
+            )
+            lines = browser_line_boxes(document, selector)
+            assert [line["text"] for line in lines] == [text] and len(runs) == 1, (
+                f"fixture drift: the title must render as one line and export as one run, so "
+                f"the run's rendered width is the line's; it renders {lines} and exports "
+                f"{[run.text for run in runs]}"
+            )
+            assert runs[0].text.isascii(), (
+                "fixture drift: the title is no longer ASCII, so its characters are not its "
+                "graphemes"
+            )
+            rendered = lines[0]["w"]
+            export_cut = widths[0][1]
+            delta_px = (rendered - export_cut) / len(runs[0].text)
+            expected = (tracking_px + delta_px) * PT_PER_PX * HUNDREDTHS
 
         wrong = [
             _describe_run(run)
-            for run in _runs(box)
+            for run in runs
             if abs(run.spc_pt * HUNDREDTHS - expected) > SPC_TOLERANCE_HUNDREDTHS
         ]
         assert not wrong, (

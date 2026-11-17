@@ -19,8 +19,23 @@
 // Every option lives on the run. pptxgenjs copies a shape option onto any run
 // whose own value is falsy (bold: false, charSpacing: 0), so the text box
 // carries geometry only (Global Constraints).
+//
+// Tracking is the run's CSS letter-spacing plus its optical-size tracking: the
+// browser draws a variable font with an opsz axis (DM Sans) at the automatic
+// optical size, PowerPoint and Google Slides the static opsz-14 cut, about 9%
+// wider at title sizes, so the snapshot measured what restores the browser's
+// width (snapshot_text.mjs applyMetrics).
+//
+// Super- and subscript size. PowerPoint and Google Slides draw a run with a
+// baseline shift at a fraction of its size, on top of the size the browser
+// already reduced it to (font-size: smaller). So the run is written at the
+// browser's size over that fraction, and the renderer's shrink brings it back
+// to the size the browser drew.
 
 const PT_PER_PX = 0.75;
+// The fraction of a superscript or subscript run's size the renderers draw it at,
+// calibrated against PowerPoint and Google Slides (scripts/export_fidelity/CALIBRATION.md).
+const SUPERSCRIPT_SIZE_FACTOR = 0.646;
 const LIGHTEST_WEIGHT = 100;
 const HEAVIEST_WEIGHT = 900;
 const WEIGHT_STEP = 100;
@@ -120,19 +135,27 @@ function xmlAttribute(value) {
   return xmlText(value).replace(/[&<>"]/g, (character) => XML_ATTRIBUTE_ESCAPES[character]);
 }
 
+// The size a run is written at, in pt: the browser's, over the renderers'
+// shrink for a superscript or subscript run.
+function fontSizePt(run) {
+  const size = (Number(run.sizePx) || 0) * PT_PER_PX;
+  return run.baseline === 'super' || run.baseline === 'sub' ? size / SUPERSCRIPT_SIZE_FACTOR : size;
+}
+
 // runOptions(run, fonts) -> the pptxgenjs options of one run.
 //   fonts  model.fonts: family -> the webfont weights the page loaded.
 // The colour is the run's own: the snapshot wrote it pre-blended and solid,
 // because Drive drops text alpha.
 function runOptions(run, fonts) {
   const face = typefaceFor(run.family, run.weight, loadedWeightsOf(fonts, run.family));
+  const trackingPx = (Number(run.letterSpacingPx) || 0) + (Number(run.opticalTrackingPx) || 0);
   return {
     fontFace: xmlAttribute(face.fontFace),
     bold: face.bold,
     italic: Boolean(run.italic),
-    fontSize: (Number(run.sizePx) || 0) * PT_PER_PX,
+    fontSize: fontSizePt(run),
     color: run.color,
-    charSpacing: (Number(run.letterSpacingPx) || 0) * PT_PER_PX,
+    charSpacing: trackingPx * PT_PER_PX,
     underline: run.underline ? { style: 'sng' } : undefined,
     strike: run.strike ? 'sngStrike' : undefined,
     superscript: run.baseline === 'super',

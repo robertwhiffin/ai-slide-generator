@@ -10,6 +10,7 @@
 //
 // usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines|style|text]
 //        node measure.cjs <document.html> --mode=fonts
+//        node measure.cjs <document.html> <probes-json> --mode=probe
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
 // nothing matches.
 //   --mode=rect  (the default) prints {"x":…,"y":…,"w":…,"h":…}, the element's
@@ -24,10 +25,15 @@
 //   --mode=fonts prints [{"family","weight","style","status"}, …], every face in
 //                document.fonts. It reads the whole document, so it takes no
 //                selector.
+//   --mode=probe takes, in place of the selector, a JSON array of probes
+//                [{"text":…, "css":…, "baseline":bool}, …] and prints
+//                [{"w":…,"h":…}, …], the size of each probe's text set in the
+//                document with that inline CSS, plus "ascent" for a baseline
+//                probe. See measureProbes.
 //
 // Called from tests/fixtures/export_snapshot_support.py (browser_rect,
 // browser_line_boxes, browser_lines, browser_style, browser_text,
-// browser_loaded_weights).
+// browser_loaded_weights, browser_probes).
 
 const path = require('path');
 
@@ -215,11 +221,14 @@ async function measureLines(page, selector, index) {
 }
 
 // The computed properties a run's style is read from, plus the ones the
-// typography tests guard their fixtures with (the backdrop and gradient text).
+// typography tests guard their fixtures with (the backdrop and gradient text)
+// and the line-spacing tests with (the line height, the optical size the
+// browser draws a variable font at, and the alignment).
 const STYLE_PROPERTIES = [
   'fontFamily', 'fontWeight', 'fontStyle', 'fontSize', 'letterSpacing', 'textTransform',
   'textDecorationLine', 'verticalAlign', 'direction', 'color', 'webkitTextFillColor', 'opacity',
   'backgroundColor', 'backgroundImage', 'backgroundClip', 'webkitBackgroundClip',
+  'lineHeight', 'fontOpticalSizing', 'fontVariationSettings', 'textAlign',
 ];
 
 async function measureStyle(page, selector, index) {
@@ -268,6 +277,74 @@ async function measureFonts(page) {
   });
 }
 
+// Text set in the document's own fonts, outside its layout. Each probe is a
+// <div> appended to documentElement, absolutely positioned offscreen and
+// hidden, so it moves nothing else on the page, with white-space: pre so it
+// never wraps and no margin, padding or border. Its `css` is appended to that
+// inline style and sets the font, for example
+//   "font: 600 64px 'DM Sans'; line-height: normal"
+//   "font: 600 64px 'DM Sans'; letter-spacing: 0; font-variation-settings: 'opsz' 14".
+// The probe's size is its border box: its width is the advance width of its
+// text, and with line-height: normal its height is the font's natural line
+// height. A probe with "baseline": true also reports "ascent": the distance
+// from its text's top (a Range over the text, the glyph top the engine reads)
+// down to its baseline, found with a zero-size inline-block placed on the
+// baseline ahead of the text. Every probe is appended first, then
+// document.fonts.ready is awaited again (a probe may ask for a face the page
+// has not used yet), then each is read and removed.
+async function measureProbes(page, probesArgument) {
+  let probes;
+  try {
+    probes = JSON.parse(probesArgument);
+  } catch (error) {
+    return { error: `the probes are not JSON: ${error.message}` };
+  }
+  if (!Array.isArray(probes)) {
+    return { error: 'the probes must be a JSON array of {"text", "css"}' };
+  }
+  return page.evaluate(async ({ probes, timeoutMs }) => {
+    const PROBE_STYLE = 'position:absolute;left:-10000px;top:0;visibility:hidden;' +
+      'white-space:pre;margin:0;padding:0;border:0;';
+    const MARKER_STYLE = 'display:inline-block;width:0;height:0;vertical-align:baseline;' +
+      'margin:0;padding:0;border:0;';
+    const elements = [];
+    for (let index = 0; index < probes.length; index++) {
+      const element = document.createElement('div');
+      element.setAttribute('style', PROBE_STYLE + String(probes[index].css || ''));
+      let marker = null;
+      if (probes[index].baseline) {
+        marker = document.createElement('span');
+        marker.setAttribute('style', MARKER_STYLE);
+        element.appendChild(marker);
+      }
+      const text = document.createTextNode(String(probes[index].text || ''));
+      element.appendChild(text);
+      document.documentElement.appendChild(element);
+      elements.push({ element, marker, text });
+    }
+    let timer;
+    await Promise.race([
+      document.fonts.ready,
+      new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    const sizes = [];
+    for (let index = 0; index < elements.length; index++) {
+      const { element, marker, text } = elements[index];
+      const rect = element.getBoundingClientRect();
+      const size = { w: rect.width, h: rect.height };
+      if (marker) {
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        size.ascent = marker.getBoundingClientRect().top - range.getBoundingClientRect().top;
+      }
+      sizes.push(size);
+      element.remove();
+    }
+    return { sizes };
+  }, { probes, timeoutMs: FONTS_READY_TIMEOUT_MS });
+}
+
 const MODES = {
   rect: measureRect,
   lines: async (page, selector, index) => {
@@ -277,6 +354,10 @@ const MODES = {
   style: measureStyle,
   text: measureText,
   fonts: measureFonts,
+  probe: async (page, probesArgument) => {
+    const measured = await measureProbes(page, probesArgument);
+    return measured.error ? measured : measured.sizes;
+  },
 };
 // Modes that read the whole document rather than one element.
 const DOCUMENT_MODES = new Set(['fonts']);
@@ -300,7 +381,8 @@ async function main() {
   if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
     console.error(
       'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines|style|text]\n' +
-      '       node measure.cjs <document.html> --mode=fonts',
+      '       node measure.cjs <document.html> --mode=fonts\n' +
+      '       node measure.cjs <document.html> <probes-json> --mode=probe',
     );
     process.exit(1);
   }

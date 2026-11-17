@@ -33,21 +33,41 @@
 // The weights of the webfonts the page loaded go to the slide model as
 // model.fonts (loadedFonts), so the emitter can name a weight's face.
 //
+// Metrics (spec §3 Text, Spacing and Metrics) are read with offscreen probes
+// in the page's own fonts, after the walk (applyMetrics):
+// * a paragraph's line height in px (line-height: normal resolved to the
+//   face's natural line height) and its largest run's ascent, from which the
+//   emitter writes the renderers' line spacing and first-line offset;
+// * a run whose width at the export cut (the static opsz-14 face PowerPoint and
+//   Google Slides draw) differs from the width the browser drew by more than
+//   0.5% carries the difference per character as tracking (task-4 A1).
+//
 // /**
-//  * TextBlock = {order, x,y,w,h, rotate:null, wrap, align:'left'|'center'|'right'|'justify', rtl,
-//  *              paragraphs:[{lineSpacingPct:number|null, lines:[{runs:Run[]}]}],
+//  * TextBlock = {order, x,y,w,h, rotate:null, wrap, align:'left'|'center'|'right', rtl,
+//  *              paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
+//  *                           lines:[{runs:Run[]}]}],
 //  *              follows:Element|null}   (page-side only; never in the slide model)
 //  * Run = {text, family, weight, italic, sizePx, color:'RRGGBB', letterSpacingPx,
-//  *        underline, strike, baseline:null|'super'|'sub'}
+//  *        underline, strike, baseline:null|'super'|'sub', opticalTrackingPx}
 //  *
 //  * A line after the first in its paragraph is a soft break; a line with no runs
 //  * is a blank line (two <br>s, an empty pre line). Sizes are CSS px on the slide.
+//  * y        the top of the first line's glyphs (its text's rects); the emitter
+//  *          places the box above it by the calibrated first-line offset;
+//  * align    a justified block is 'left' ('right' when right-to-left): see textBlock;
+//  * sizePx   the size of the paragraph's largest run;
+//  * lineHeightPx  the paragraph's CSS line height, the natural one for
+//  *          line-height: normal; null when unread;
+//  * ascentPx the largest run's ascent: its glyph top to its baseline; null when unread;
 //  * text     as painted: text-transform applied;
 //  * family   the first face in the stack that is not a generic or a system alias;
 //  *          a stack of generics alone is Arial, Times New Roman or Courier New;
 //  * weight   100..900, the computed weight to the nearest hundred;
 //  * color    solid, pre-blended: what the browser paints the glyphs with, composited
-//  *          layer by layer over the backdrop (Drive drops text alpha).
+//  *          layer by layer over the backdrop (Drive drops text alpha);
+//  * opticalTrackingPx    tracking added to letterSpacingPx after every character,
+//  *          so the run is as wide at the export cut as the browser drew it; 0
+//  *          when the two widths agree within 0.5%.
 //  */
 
 // Runs in the page, inside the snapshot IIFE, after DOM_ACCESS_SOURCE: domAccess,
@@ -67,9 +87,25 @@ function createTextLayout(env) {
   // Spec §3 Text, Wrapping: width slack, because Google's importer ignores wrap="none".
   const SLACK_FRACTION = 0.06;
   const SLACK_PX = 4;
-  // How far the box's top sits above the first line's glyph top. Zero until it
-  // is calibrated against PowerPoint and Google Slides renders.
-  const FIRST_LINE_OFFSET_PX = 0;
+  // Metric probes: a <div> on documentElement, offscreen and hidden, so it
+  // moves nothing in body's layout; white-space: pre so it never wraps, and no
+  // box edges, so its border box is its text.
+  const PROBE_STYLE = 'position:absolute;left:-10000px;top:0;visibility:hidden;white-space:pre;' +
+    'margin:0;padding:0;border:0;text-indent:0;text-transform:none;';
+  // Under line-height: normal the probe's height is the face's natural line height.
+  const LINE_PROBE_TEXT = 'Hg';
+  // An empty inline-block sits with its bottom on the baseline; at zero height
+  // its top is the baseline too.
+  const BASELINE_MARKER_STYLE = 'display:inline-block;width:0;height:0;vertical-align:baseline;' +
+    'margin:0;padding:0;border:0;';
+  // The optical size of the static cut PowerPoint and Google Slides draw (DM Sans
+  // ships it as its text cut), and how far a run's width there may differ from
+  // the browser's before it is compensated (task-4 A1).
+  const EXPORT_CUT_OPTICAL_SIZE = 14;
+  const OPTICAL_SIZE_THRESHOLD = 0.005;
+  // Characters a renderer spaces as one with the character before them: combining
+  // marks, the zero-width joiners and the variation selectors.
+  const JOINS_PREVIOUS = /^[\p{M}‌‍︀-️\u{E0100}-\u{E01EF}]$/u;
   // A token is on a new line only when its vertical overlap with the line is at
   // most this fraction of the smaller height. Not "any overlap": glyph rects are
   // the font's ascent plus descent, so under a line-height below about 1.3 (the
@@ -128,6 +164,13 @@ function createTextLayout(env) {
   // announced; the text past it is missing from the slide.
   let budget = COLLECTION_ITEM_LIMIT;
   let truncated = false;
+  // What applyMetrics reads once the walk is done, so no probe is in the page
+  // while the walk reads its Range rects:
+  //   paragraphs  {paragraph, face, lineHeight}
+  //   runs        {run, face, width: the browser's px | null (a justified line,
+  //                whose drawn width includes the stretch)}
+  const pendingParagraphs = [];
+  const pendingRuns = [];
 
   function spend(count) {
     if (budget <= 0 || count > budget) {
@@ -351,6 +394,31 @@ function createTextLayout(env) {
     };
   }
 
+  // The face a run is set in, as CSS for the metric probes (applyMetrics):
+  //   font         style, weight, size, stretch and family. The family is the
+  //                run's own first, then the element's stack: the run's family is
+  //                what the export names and the renderers draw, and where the
+  //                page has no such face the probe falls back as the text did;
+  //   typesetting  what else sets the width: tracking, word spacing, kerning,
+  //                features and variants;
+  //   variation    the element's font-variation-settings;
+  //   optical      its font-optical-sizing;
+  //   scale        the block's transform scale: probes are set at the computed,
+  //                unscaled size, and their widths and heights scale with it.
+  function probeFaceOf(ps, family, scale) {
+    const quoted = '"' + String(family).replace(/[\u0000-\u001F]/g, '').replace(/["\\]/g, '\\$&') + '"';
+    return {
+      font: 'font-style:' + ps.fontStyle + ';font-weight:' + ps.fontWeight + ';font-size:' + ps.fontSize +
+        ';font-stretch:' + ps.fontStretch + ';font-family:' + quoted + ',' + ps.fontFamily + ';',
+      typesetting: 'letter-spacing:' + ps.letterSpacing + ';word-spacing:' + ps.wordSpacing +
+        ';font-kerning:' + ps.fontKerning + ';font-feature-settings:' + ps.fontFeatureSettings +
+        ';font-variant:' + ps.fontVariant + ';',
+      variation: String(ps.fontVariationSettings || 'normal'),
+      optical: String(ps.fontOpticalSizing || 'auto'),
+      scale,
+    };
+  }
+
   // A word's text as text-transform paints it. `previous` is the character just
   // before it in the inline content, '' at a start, after a break or after an
   // atomic inline. capitalize upper-cases each lowercase letter that follows
@@ -552,7 +620,7 @@ function createTextLayout(env) {
         continue;
       }
       pieces.push({
-        kind: 'text', text: pending + text, rect: rects[0], style: source.style, collapsible: false, tabSize: source.tabSize,
+        kind: 'text', text: pending + text, rect: rects[0], style: source.style, face: source.face, collapsible: false, tabSize: source.tabSize,
       });
       pending = '';
     }
@@ -572,7 +640,7 @@ function createTextLayout(env) {
         splitToken(source, start, end, space, previous, range, tokens)) {
       return;
     }
-    tokens.push({ kind: 'text', text, rect: rects[0], style: source.style, collapsible, tabSize: source.tabSize });
+    tokens.push({ kind: 'text', text, rect: rects[0], style: source.style, face: source.face, collapsible, tabSize: source.tabSize });
   }
 
   // Word and space tokens of one text node, plus a break for each preserved
@@ -588,11 +656,13 @@ function createTextLayout(env) {
     const length = Math.min(data.length, COLLECTION_ITEM_LIMIT);
     if (!length) return;
     const mode = whiteSpaceOf(ps);
+    const style = runStyle(piece.context, scale);
     const source = {
       node: piece.node,
       data,
       mode,
-      style: runStyle(piece.context, scale),
+      style,
+      face: probeFaceOf(ps, style.family, scale),
       tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
       transform: String(ps.textTransform || 'none'),
     };
@@ -684,6 +754,8 @@ function createTextLayout(env) {
   // (the browser paints none there); preserved spaces are kept as written.
   // Null for a line that held only collapsible spaces: it shows nothing, so it
   // is no blank line (only breaks make those).
+  // `extents[i]` is runs[i]'s probe face and the left and right of its tokens'
+  // rects, the width the browser drew it at.
   function assembleLine(line, lineHeight) {
     const tokens = line.tokens;
     let first = 0;
@@ -691,6 +763,7 @@ function createTextLayout(env) {
     while (first <= last && tokens[first].collapsible) first++;
     while (last >= first && tokens[last].collapsible) last--;
     const runs = [];
+    const extents = [];
     let rect = null;
     let column = 0;
     let previousCollapsible = false;
@@ -701,16 +774,21 @@ function createTextLayout(env) {
       const text = token.text.indexOf('\t') >= 0 ? expandTabs(token.text, column, token.tabSize) : token.text;
       column += text.length;
       const run = runs.length ? runs[runs.length - 1] : null;
+      const bounds = token.rect;
       if (run && sameStyle(run, token.style)) {
         run.text += text;
+        const extent = extents[extents.length - 1];
+        extent.left = Math.min(extent.left, bounds.left);
+        extent.right = Math.max(extent.right, bounds.right);
       } else {
         const created = { text };
         for (let field = 0; field < RUN_STYLE_FIELDS.length; field++) {
           created[RUN_STYLE_FIELDS[field]] = token.style[RUN_STYLE_FIELDS[field]];
         }
+        created.opticalTrackingPx = 0;
         runs.push(created);
+        extents.push({ face: token.face, left: bounds.left, right: bounds.right });
       }
-      const bounds = token.rect;
       if (!rect) {
         rect = { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom };
       } else {
@@ -721,10 +799,10 @@ function createTextLayout(env) {
       }
     }
     if (tokens.length && !runs.length) return null;
-    return { runs, rect, lineHeight };
+    return { runs, extents, rect, lineHeight };
   }
 
-  // layoutInlineRun(nodes, s, scale) -> {lines:[{runs, rect, lineHeight}], rtl} | null
+  // layoutInlineRun(nodes, s, scale) -> {lines:[{runs, extents, rect, lineHeight}], rtl} | null
   //   nodes  one run's pieces, as collectRuns gathers them;
   //   s      the computed style of the block that holds the run;
   //   scale  the block's cumulative transform scale (font sizes and tracking scale with it).
@@ -764,6 +842,9 @@ function createTextLayout(env) {
   // run differs in size, or whose line-height differs, starts a paragraph of its
   // own, because PowerPoint spacing is per paragraph. A blank line stays in the
   // paragraph before it.
+  // Spacing and the first-line offset use the paragraph's largest run (spec §3
+  // Metrics), so each paragraph is queued for applyMetrics with that run's
+  // face, the first run at that size.
   function paragraphsOf(lines) {
     const paragraphs = [];
     let paragraph = null;
@@ -772,17 +853,43 @@ function createTextLayout(env) {
       const line = lines[index];
       if (line.runs.length) {
         let largest = 0;
-        for (let run = 0; run < line.runs.length; run++) largest = Math.max(largest, line.runs[run].sizePx);
+        let face = null;
+        for (let run = 0; run < line.runs.length; run++) {
+          if (face === null || line.runs[run].sizePx > largest) {
+            largest = line.runs[run].sizePx;
+            face = line.extents[run].face;
+          }
+        }
         const lineKey = largest + '|' + line.lineHeight;
         if (!paragraph || lineKey !== key) {
-          paragraph = { lineSpacingPct: null, lines: [] };
+          paragraph = { sizePx: largest, lineHeightPx: null, ascentPx: null, lines: [] };
           paragraphs.push(paragraph);
+          pendingParagraphs.push({ paragraph, face, lineHeight: line.lineHeight });
           key = lineKey;
         }
       }
       paragraph.lines.push({ runs: line.runs });
     }
     return paragraphs;
+  }
+
+  // Queues every run of the block for the optical-size comparison. Text under a
+  // rotation is skipped: its rects bound the turned glyphs, not their advance.
+  // A justified line is drawn stretched, so its natural width at the browser's
+  // own cut is probed instead (width null).
+  function queueRuns(lines, align, frame) {
+    if (frame && frame.angle) return;
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      for (let run = 0; run < line.runs.length; run++) {
+        const extent = line.extents[run];
+        pendingRuns.push({
+          run: line.runs[run],
+          face: extent.face,
+          width: align === 'justify' ? null : extent.right - extent.left,
+        });
+      }
+    }
   }
 
   function alignmentOf(s, rtl) {
@@ -805,6 +912,13 @@ function createTextLayout(env) {
   // * Vertically it spans its lines: from the first line's top to the last
   //   line's bottom in normal flow. Taken as the union, so lines that run
   //   another way (text under a rotation runs bottom to top) still get a box.
+  //   Its top is the first line's glyph top; the emitter (emit_text.cjs)
+  //   raises the box by the first-line offset calibrated against PowerPoint
+  //   and Google Slides.
+  // * Justified text is written aligned to the edge its lines start from, with
+  //   the browser's line breaks: PowerPoint and Google Slides justify a line
+  //   to the full box, slack included, so every justified line ran about 35 px
+  //   past the browser's (scripts/export_fidelity/CALIBRATION.md, A3).
   function textBlock(layout, element, s, order, frame, anonymous) {
     const lines = layout.lines;
     let left = Infinity;
@@ -831,20 +945,172 @@ function createTextLayout(env) {
         w = Math.max(area.x + area.w, right) - x;
       }
     }
+    const written = align === 'justify' ? (layout.rtl ? 'right' : 'left') : align;
     const extra = w * SLACK_FRACTION + SLACK_PX;
-    const shift = align === 'center' ? extra / 2 : align === 'right' ? extra : 0;
+    const shift = written === 'center' ? extra / 2 : written === 'right' ? extra : 0;
+    queueRuns(lines, align, frame);
     return {
       order,
       x: x - shift,
-      y: top - FIRST_LINE_OFFSET_PX,
+      y: top,
       w: w + extra,
       h: bottom - top,
       rotate: null,
       wrap: lines.length > 1,
-      align,
+      align: written,
       rtl: layout.rtl,
       paragraphs: paragraphsOf(lines),
     };
+  }
+
+  // ─── metrics ─────────────────────────────────────────────────────────
+  // The characters a renderer spaces after: code points, less the ones that
+  // join the character before them.
+  function characterCount(text) {
+    let count = 0;
+    let index = 0;
+    while (index < text.length) {
+      const length = codePointLength(text, index);
+      if (!JOINS_PREVIOUS.test(text.slice(index, index + length))) count++;
+      index += length;
+    }
+    return count;
+  }
+
+  // The size of each {css, text, baseline} probe, in order: one <div> per probe
+  // on documentElement (PROBE_STYLE plus its css), all appended first so one
+  // layout serves every read, then each read and removed. A baseline probe
+  // also holds, before its text, a zero-size inline-block on the baseline, and
+  // reports `ascent`: from its text's top (the glyph top the walk reads with a
+  // Range) down to that baseline. Null when the page would not take them,
+  // which is announced: the slide then exports without line spacing and
+  // optical-size tracking. The text goes in as a text node: page script can
+  // take away the textContent setter (hostile_text_nodes).
+  function measureProbes(probes) {
+    const elements = [];
+    const parts = [];
+    let sizes = [];
+    try {
+      const root = document.documentElement;
+      for (let index = 0; index < probes.length; index++) {
+        const element = document.createElement('div');
+        element.setAttribute('style', PROBE_STYLE + probes[index].css);
+        let marker = null;
+        if (probes[index].baseline) {
+          marker = document.createElement('span');
+          marker.setAttribute('style', BASELINE_MARKER_STYLE);
+          element.appendChild(marker);
+        }
+        const text = document.createTextNode(probes[index].text);
+        element.appendChild(text);
+        root.appendChild(element);
+        elements.push(element);
+        parts.push({ marker, text });
+      }
+      const range = document.createRange();
+      for (let index = 0; index < elements.length; index++) {
+        const rect = elements[index].getBoundingClientRect();
+        const size = { w: Number(rect.width), h: Number(rect.height) };
+        if (parts[index].marker) {
+          range.setStart(parts[index].text, 0);
+          range.setEnd(parts[index].text, probes[index].text.length);
+          size.ascent = Number(parts[index].marker.getBoundingClientRect().top) -
+            Number(range.getBoundingClientRect().top);
+        }
+        sizes.push(size);
+      }
+    } catch (e) {
+      console.warn('[html2pptx] the text metric probes could not be read (' + (e && e.message) +
+        '); this slide exports without line spacing and optical-size tracking');
+      sizes = null;
+    } finally {
+      for (let index = 0; index < elements.length; index++) {
+        try { elements[index].remove(); } catch (e) { /* already detached: nothing to undo */ }
+      }
+    }
+    return sizes;
+  }
+
+  // A face's line, as line-height: normal sets it: its height is the natural
+  // line height, its baseline probe the ascent.
+  function lineProbeCss(face) {
+    return face.font + 'font-optical-sizing:' + face.optical + ';font-variation-settings:' + face.variation +
+      ';line-height:normal;letter-spacing:0;';
+  }
+
+  // The width the browser draws a run at: its face as the element sets it.
+  function browserCutCss(face) {
+    return face.font + face.typesetting + 'font-optical-sizing:' + face.optical +
+      ';font-variation-settings:' + face.variation + ';';
+  }
+
+  // The width PowerPoint and Google Slides draw it at: the same face at the
+  // export cut's optical size. A repeated axis takes its last value, so the
+  // element's own settings keep every other axis.
+  function exportCutCss(face) {
+    const own = face.variation === 'normal' ? '' : face.variation + ',';
+    return face.font + face.typesetting + 'font-optical-sizing:auto;font-variation-settings:' + own +
+      '"opsz" ' + EXPORT_CUT_OPTICAL_SIZE + ';';
+  }
+
+  // applyMetrics() fills in what the walk queued, in place on the blocks it
+  // returned (they are the slide model's items by then):
+  // * every paragraph's lineHeightPx, its CSS line height (line-height: normal
+  //   is the natural one, from the probe), and ascentPx, its largest run's
+  //   distance from glyph top to baseline. The emitter turns them into the
+  //   renderers' spacing and the first-line offset (emit_text.cjs);
+  // * every run's opticalTrackingPx, where the export cut and the browser's
+  //   width differ by more than OPTICAL_SIZE_THRESHOLD: the browser's width
+  //   less the export cut's, per character. Both widths carry the run's CSS
+  //   tracking, which the emitter writes on top, so it is not counted twice.
+  // Each distinct probe is measured once.
+  function applyMetrics() {
+    const probes = [];
+    const probeIndex = Object.create(null);
+    function probe(css, text, baseline) {
+      const key = (baseline ? 'b' : 'w') + css + '\u0000' + text;
+      if (probeIndex[key] === undefined) {
+        probeIndex[key] = probes.length;
+        probes.push({ css, text, baseline });
+      }
+      return probeIndex[key];
+    }
+    const paragraphProbes = [];
+    for (let index = 0; index < pendingParagraphs.length; index++) {
+      const face = pendingParagraphs[index].face;
+      paragraphProbes.push(face ? probe(lineProbeCss(face), LINE_PROBE_TEXT, true) : -1);
+    }
+    const runProbes = [];
+    for (let index = 0; index < pendingRuns.length; index++) {
+      const pending = pendingRuns[index];
+      runProbes.push({
+        exportCut: probe(exportCutCss(pending.face), pending.run.text, false),
+        browserCut: pending.width === null ? probe(browserCutCss(pending.face), pending.run.text, false) : -1,
+      });
+    }
+    const sizes = probes.length ? measureProbes(probes) : [];
+    if (!sizes) return;
+
+    for (let index = 0; index < pendingParagraphs.length; index++) {
+      const pending = pendingParagraphs[index];
+      if (paragraphProbes[index] < 0) continue;
+      const line = sizes[paragraphProbes[index]];
+      if (!(line.h > 0)) continue;
+      const lineHeight = /px$/.test(pending.lineHeight) ? parseFloat(pending.lineHeight) : line.h;
+      if (lineHeight > 0) pending.paragraph.lineHeightPx = lineHeight * pending.face.scale;
+      if (line.ascent > 0) pending.paragraph.ascentPx = line.ascent * pending.face.scale;
+    }
+
+    for (let index = 0; index < pendingRuns.length; index++) {
+      const pending = pendingRuns[index];
+      const scale = pending.face.scale;
+      const drawn = pending.width === null ? sizes[runProbes[index].browserCut].w * scale : pending.width;
+      const exportCut = sizes[runProbes[index].exportCut].w * scale;
+      if (!(drawn > 0 && exportCut > 0)) continue;
+      if (Math.abs(exportCut - drawn) / drawn <= OPTICAL_SIZE_THRESHOLD) continue;
+      const characters = characterCount(pending.run.text);
+      if (characters > 0) pending.run.opticalTrackingPx = (drawn - exportCut) / characters;
+    }
   }
 
   // collectTextBlocks(el, s, paint, seq, walk) -> TextBlock[]
@@ -881,6 +1147,7 @@ function createTextLayout(env) {
   }
 
   return {
+    applyMetrics,
     collectTextBlocks,
     decorationOf,
     layoutInlineRun,

@@ -117,20 +117,29 @@ POWERPOINT_STAGING_DIR = (
 )
 
 
-def render_with_powerpoint(pptx_path: Path, names: list[str], out_dir: Path) -> None:
+POWERPOINT_QUIT = 'tell application "Microsoft PowerPoint" to quit saving no'
+
+
+def render_with_powerpoint(pptx_path: Path, names: list[str], out_dir: Path) -> Path:
     """Render the .pptx with Microsoft PowerPoint for Mac (the PPTX ground truth).
 
     PowerPoint is sandboxed: opening or saving outside its container raises a
     "grant access" dialog, so the file is staged inside the container first.
     Needs the deck's fonts installed locally (DM Sans / DM Mono for the corpora).
+
+    PowerPoint is quit first and every run stages under a name of its own:
+    ``open`` on a file whose name is still open re-activates the old
+    presentation, and its PDF would hold the wrong slides. Returns the PDF
+    PowerPoint saved.
     """
     import fitz  # pymupdf
 
+    subprocess.run(["osascript", "-e", POWERPOINT_QUIT], check=False, capture_output=True)
     POWERPOINT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-    staged_pptx = POWERPOINT_STAGING_DIR / "export.pptx"
-    staged_pdf = POWERPOINT_STAGING_DIR / "export.pdf"
+    stamp = f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{os.getpid()}"
+    staged_pptx = POWERPOINT_STAGING_DIR / f"export-{stamp}.pptx"
+    staged_pdf = POWERPOINT_STAGING_DIR / f"export-{stamp}.pdf"
     shutil.copyfile(pptx_path, staged_pptx)
-    staged_pdf.unlink(missing_ok=True)
     script = f'''
 with timeout of 600 seconds
 tell application "Microsoft PowerPoint"
@@ -142,13 +151,17 @@ tell application "Microsoft PowerPoint"
 end tell
 end timeout
 '''
-    subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
+    try:
+        subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
+    finally:
+        staged_pptx.unlink(missing_ok=True)
     powerpoint_dir = out_dir / "powerpoint"
     powerpoint_dir.mkdir(parents=True, exist_ok=True)
     pdf = fitz.open(staged_pdf)
     for index, page in enumerate(pdf):
         zoom = SLIDE_WIDTH_PX / page.rect.width
         page.get_pixmap(matrix=fitz.Matrix(zoom, zoom)).save(str(powerpoint_dir / f"{names[index]}.png"))
+    return staged_pdf
 
 
 def _normalise_text(text: str) -> str:

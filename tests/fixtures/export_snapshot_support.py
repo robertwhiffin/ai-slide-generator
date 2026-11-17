@@ -10,7 +10,9 @@ what the browser itself laid out for the same document.
   (``build_slide_html`` then ``build_pptx_huashu``) with the engine selected
   through ``TELLR_EXPORT_ENGINE``.
 * ``slide_shapes`` parses one slide's ``spTree`` with lxml into ``Shape``
-  records, in z-order, with geometry in CSS px (``EMU / 9525``).
+  records, in z-order, with geometry in CSS px (``EMU / 9525``);
+  ``slide_xml`` is the slide part itself and ``slide_shape_elements`` each
+  record's own XML, for what the records do not model.
 * ``browser_rect`` measures an element in the same browser build and channel
   the sidecar uses, through ``tests/fixtures/export_snapshot/measure.cjs``
   (Python has no Playwright in this repo, so measurement goes through Node).
@@ -18,6 +20,8 @@ what the browser itself laid out for the same document.
   lines from the same page, with a ``Range`` per character. ``browser_style``
   reads its computed typography, ``browser_text`` its rendered ``innerText``
   and ``browser_loaded_weights`` the webfont weights the page loaded.
+  ``browser_probes`` sets text offscreen in the page's own fonts and reads its
+  size; ``browser_natural_line_height`` is the ``line-height: normal`` probe.
 * ``text_loss`` runs the export fidelity harness's text-loss oracle
   (``scripts/export_fidelity/run.py::check_text_loss``) on an exported deck.
 * ``node_json`` evaluates a script in the sidecar directory with ``node -e``,
@@ -366,6 +370,52 @@ def browser_loaded_weights(document_html: str) -> dict[str, list[int]]:
         family = face["family"].strip().strip("\"'")
         loaded.setdefault(family, set()).update(_face_weights(face["weight"]))
     return {family: sorted(weights) for family, weights in sorted(loaded.items())}
+
+
+def browser_probes(document_html: str, probes: list[tuple[str, str]]) -> list[dict]:
+    """The size of each ``(text, css)`` probe, set offscreen in the document's own fonts.
+
+    ``measure.cjs --mode=probe`` appends one hidden, absolutely positioned
+    ``<div>`` per probe to ``documentElement`` (``white-space: pre``, no margin,
+    padding or border) with ``css`` as its inline style, waits for
+    ``document.fonts.ready``, and reads each border box. Returns one
+    ``{"w", "h"}`` per probe, in CSS px and in order: ``w`` is the advance width
+    of the text, and under ``line-height: normal`` ``h`` is the font's natural
+    line height. The page is the settled page ``browser_rect`` reads, so its
+    webfonts are the ones the export saw.
+    """
+    payload = json.dumps([{"text": text, "css": css} for text, css in probes])
+    sizes = json.loads(_run_measure(document_html, payload, "--mode=probe"))
+    return [{key: float(size[key]) for key in ("w", "h")} for size in sizes]
+
+
+def browser_natural_line_height(
+    document_html: str, family: str, weight: int, size_px: float, style: str = "normal"
+) -> float:
+    """The browser's ``line-height: normal`` for one face and size, in CSS px.
+
+    The snapshot's own probe, read independently: "Hg" set in
+    ``font: <style> <weight> <size>px '<family>'; line-height: normal``
+    (``browser_probes``), whose height is the natural line height.
+    """
+    css = f"font: {style} {weight} {size_px}px '{family}'; line-height: normal"
+    return browser_probes(document_html, [("Hg", css)])[0]["h"]
+
+
+def browser_ascent(
+    document_html: str, family: str, weight: int, size_px: float, style: str = "normal"
+) -> float:
+    """The browser's ascent for one face and size: its glyph top down to its baseline, in CSS px.
+
+    "Hg" set in ``font: <style> <weight> <size>px '<family>'; line-height:
+    normal`` behind a zero-size inline-block on the baseline (``measure.cjs
+    --mode=probe`` with ``"baseline": true``): the marker's top less the top of
+    a Range over the text, the glyph top a text box's ``y`` is read from.
+    """
+    css = f"font: {style} {weight} {size_px}px '{family}'; line-height: normal"
+    payload = json.dumps([{"text": "Hg", "css": css, "baseline": True}])
+    sizes = json.loads(_run_measure(document_html, payload, "--mode=probe"))
+    return float(sizes[0]["ascent"])
 
 
 # ---------------------------------------------------------------------------
@@ -876,6 +926,31 @@ def slide_shapes(pptx: bytes, index: int = 0) -> list[Shape]:
             for child in tree
             if isinstance(child.tag, str) and _local_name(child) not in SHAPE_TREE_PROPERTIES
         ]
+
+
+def slide_xml(pptx: bytes, index: int = 0) -> etree._Element:
+    """The parsed XML of slide ``index`` (0-based, presentation order).
+
+    For assertions about the whole slide part that ``slide_shapes`` does not
+    model, such as an element that must appear nowhere in it.
+    """
+    with _open_pptx(pptx) as archive:
+        return _read_xml(archive, _slide_part(archive, index))
+
+
+def slide_shape_elements(pptx: bytes, index: int = 0) -> list[etree._Element]:
+    """The spTree children ``slide_shapes`` reads, in the same order.
+
+    ``slide_shape_elements(pptx, i)[n]`` is the XML of ``slide_shapes(pptx, i)[n]``,
+    for assertions about markup the ``Shape`` record does not model.
+    """
+    tree = slide_xml(pptx, index).find("p:cSld/p:spTree", NAMESPACES)
+    assert tree is not None, f"slide {index} has no p:spTree"
+    return [
+        child
+        for child in tree
+        if isinstance(child.tag, str) and _local_name(child) not in SHAPE_TREE_PROPERTIES
+    ]
 
 
 def slide_background(pptx: bytes, index: int = 0) -> str | None:

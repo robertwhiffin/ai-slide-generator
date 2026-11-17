@@ -29,9 +29,10 @@
 //  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate}
 //  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
-//  *  {kind:'text', x,y,w,h, rotate:null, wrap:boolean, align:'left'|'center'|'right'|'justify',
-//  *   rtl:boolean, paragraphs:[{lineSpacingPct:number|null, lines:[{runs:Run[]}]}]}
-//  *   (one text block; snapshot_text.mjs documents Run, lines and the geometry)
+//  *  {kind:'text', x,y,w,h, rotate:null, wrap:boolean, align:'left'|'center'|'right',
+//  *   rtl:boolean, paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
+//  *   lines:[{runs:Run[]}]}]}
+//  *   (one text block; snapshot_text.mjs documents Run, lines, the metrics and the geometry)
 //  *
 //  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]'}
 //  *
@@ -851,6 +852,9 @@ async function snapshotPage(config) {
   closeSubtrees(0, seq);
   // Text after a child the walk never reached (it was cut short) still paints, last.
   for (let index = 0; index < waitingInOrder.length; index++) releaseText(waitingInOrder[index], seq);
+  // Line spacing and optical-size tracking, from offscreen probes read once the
+  // walk has read every rect (snapshot_text.mjs applyMetrics).
+  textLayout.applyMetrics();
   const fonts = textLayout.loadedFonts();
   if (textLayout.truncated()) stats.truncated = true;
 
