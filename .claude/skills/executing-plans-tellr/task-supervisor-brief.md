@@ -22,7 +22,8 @@ return a four-line verdict. The top-level reads only that verdict. In the skill'
 - Corrections: `{{CORRECTIONS}}`. They override the plan. Read all of them, including
   `## Depends on` and any `## Addendum`.
 - Ledger: `{{LEDGER}}`. Read all of it.
-- Worktree: `{{WORKTREE}}`, branch `{{BRANCH}}`. Run everything there.
+- Worktree: `{{WORKTREE}}`, branch `{{BRANCH}}`. Run everything there, per §10 "Commands
+  in the stages".
 
 A value written `(ledger header)` means the matching line of the ledger's header
 (`Plan:`, `Worktree:`, `Branch:`). Use that value wherever it appears below.
@@ -32,7 +33,8 @@ A value written `(ledger header)` means the matching line of the ledger's header
 1. **Start.** If the ledger has a `## Task {{TASK}} supervisor` entry with no `NEXT:`, a
    previous attempt died. Salvage first (§5): check `git status`, the diff, leftover
    sabotage markers and the tests, and carry good work forward. Then append your heading
-   and `Start:`, and record `BASE=$(git rev-parse HEAD)`.
+   and `Start:`, and `Review base: <sha>`, the output of `git -C <worktree> rev-parse HEAD`
+   (after a salvage, the dead entry's `Review base:`). That SHA is `<base>` below.
 2. **Tiers.** The task's tag reads `Models: test=<t> impl=<i>`.
    - The reviewer is impl + 1, capped at Opus: haiku → sonnet → opus.
    - Escalations and rewrites are Opus.
@@ -70,7 +72,7 @@ A value written `(ledger header)` means the matching line of the ledger's header
    Put the output, briefly, in your entry.
 7. **Review** (`Task {{TASK}} review`, model impl + 1). Use `task-reviewer-prompt.md`, with
    the brief, the report, and the package printed by
-   `bash <sdd>/scripts/review-package {{PLAN}} $BASE HEAD`. Add §1's sabotage step. Name
+   `bash <sdd>/scripts/review-package {{PLAN}} <base> HEAD`. Add §1's sabotage step. Name
    the targets you already ran, and require different ones. It ends with one §9 verdict:
    - `approved`: go on.
    - `localised`: it applies and commits its listed fixes. Re-run the task's tests.

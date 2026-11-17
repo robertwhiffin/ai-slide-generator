@@ -20,7 +20,8 @@ A plan also carries an `Execution: chained` or `Execution: single-session` line.
 line means the skill's default, which is chained (§10): a thin top-level session dispatches
 a pre-pass, one supervisor per task and a final agent that opens the PR, and the state
 lives in a ledger under `~/tellr-loop/<build>/`. To resume a chained build from a fresh
-session, say "continue the build in `<ledger>`".
+session, say "continue the build in `<ledger>`". In chained mode the top-level loads only
+this skill; each stage loads `superpowers:subagent-driven-development` itself.
 `uv run python -m scripts.build_metrics report` compares chained builds with the
 single-session baseline. The user reads it and decides which mode stays.
 

@@ -235,9 +235,9 @@ After the user approves the plan, the top-level runs the chain and does nothing 
    `task-<n>` → `Task <n> supervisor`, `final` → `Final agent`. When a verdict has
    `next=done` or `status=failed`, give the user that verdict and stop. `status=parked`
    is not a stop.
-2. To dispatch a stage, Read its brief template, replace every `{{…}}`, and send the result
-   as the prompt, with the exact description and model `opus`. Use a fresh agent, never a
-   fork: a fork inherits your context.
+2. To dispatch a stage, Read its brief template (once: reuse it for later dispatches),
+   replace every `{{…}}`, and send the result as the prompt, with the exact description and
+   model `opus`. Use a fresh agent, never a fork: a fork inherits your context.
 3. Dispatch exactly one stage at a time, and do nothing else until its verdict arrives: no
    other dispatch, no other tool call, no polling, no `sleep`, no reading its output file.
    If the user asks, say which stage is running. To wait:
@@ -252,8 +252,12 @@ After the user approves the plan, the top-level runs the chain and does nothing 
      stage without a verdict.
 4. Read only verdicts. Never run tests, git or deploys, and never read diffs, transcripts,
    the plan or the ledger. The one exception is a resume's
-   `grep '^NEXT:' <ledger> | tail -1`. Leave the Setup and Task Loop of
-   `superpowers:subagent-driven-development` to the stages.
+   `grep '^NEXT:' <ledger> | tail -1`. Your only tools are Agent, Read of this file and
+   the brief templates, and that grep. Load no other skill: each stage loads
+   `superpowers:subagent-driven-development` itself. If it is already loaded, leave its
+   Setup, Task Loop and waiting rules to the stages. Don't read the plan for its
+   `Execution:` line either: the pre-pass checks it, and fails a `single-session` plan
+   with a summary that says so.
 5. A report with no `VERDICT` line means the stage stopped early. Dispatch a fresh agent
    for the same stage.
 
@@ -262,10 +266,10 @@ Fill paths absolute with `~` expanded, except `{{PLAN}}`:
 | Placeholder | Value |
 |---|---|
 | `{{SKILL_DIR}}` | this file's directory |
-| `{{PLAN}}` | the plan's path, repo-relative when it is inside the worktree. The final agent passes the same string to `record`, which finds the build's sessions by searching transcripts for it. |
+| `{{PLAN}}` | the plan's path: relative to the worktree root when the plan is inside the worktree you are in, else absolute. The final agent passes the same string to `record`, which finds the build's sessions by searching transcripts for it. |
 | `{{LEDGER}}` | the ledger the user names, else `~/tellr-loop/<build>/LEDGER.md`, where `<build>` is the plan's file name without `.md` |
 | `{{CORRECTIONS}}` | `PLAN-CORRECTIONS.md` in the ledger's directory |
-| `{{WORKTREE}}`, `{{BRANCH}}` | the worktree the build runs in, and its branch |
+| `{{WORKTREE}}`, `{{BRANCH}}` | the git worktree that holds the plan, and its branch: your own directory and branch when the plan is inside it. Otherwise `(ledger header)`, and the pre-pass works them out from the plan's directory. Never give your own directory for a plan outside it. |
 | `{{TASK}}` | the `<n>` of `next=task-<n>` |
 | `{{PUBLISH}}` | `yes`. `no` for a smoke run: the final agent does §7 and its fixes, writes the handover to the ledger, and neither pushes nor opens a PR. |
 
@@ -277,6 +281,7 @@ gave it. Never run a command or read a file to find a value.
 
 When the user says "continue the build in `<ledger>`", run
 `grep '^NEXT:' <ledger> | tail -1`, dispatch the stage it names, and carry on as above.
+If the shell refuses the pipe, run `grep '^NEXT:' <ledger>` and take its last line.
 
 - `NEXT: done`: the build is over. Say so.
 - No `NEXT:` line: the pre-pass did not finish. Dispatch `Pre-pass`.
@@ -324,6 +329,21 @@ Other lines go between `Start:` and `End:`: baseline causes, sabotage output,
 starts no other line. **The last `NEXT:` line in the ledger is the chain's state.** Never
 edit an earlier entry. A correction is a new line in your own (§8). Times come from
 `date -u +%Y-%m-%dT%H:%M:%SZ`.
+
+### Commands in the stages
+
+A stage runs every command in `{{WORKTREE}}`, but its shell may start somewhere else on
+every call, and some sessions refuse commands with `$VAR`, `$(…)`, heredocs or pipes.
+
+- Run plain commands. Give git `-C <worktree>`, and use absolute paths. Keep a value such
+  as a SHA in your entry, not in a shell variable.
+- The SDD scripts (`sdd-workspace`, `task-brief`, `review-package`) act on the repo of the
+  current directory. If the shell does not start in the worktree, run
+  `cd <worktree> && bash <script> …`. If that is refused, build the review package
+  yourself: `git -C <worktree> log --oneline`, `diff --stat` and `diff -U10` over the
+  range, redirected to one file in `<ws>`.
+- Write the ledger and the corrections with the Write and Edit tools. Commit with
+  `git -C <worktree> commit -m <subject> -m <trailer>`, not a heredoc.
 
 ### The stages
 

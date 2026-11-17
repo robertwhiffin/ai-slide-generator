@@ -21,7 +21,8 @@ Publish is `{{PUBLISH}}`:
   - Don't run `superpowers:finishing-a-development-branch`: this brief is the finish.
 - Plan: `{{PLAN}}`, and the spec it names, which is the binding authority.
 - Corrections: `{{CORRECTIONS}}`. Ledger: `{{LEDGER}}`. Read both.
-- Worktree: `{{WORKTREE}}`, branch `{{BRANCH}}`. Run everything there.
+- Worktree: `{{WORKTREE}}`, branch `{{BRANCH}}`. Run everything there, per §10 "Commands
+  in the stages".
 - PR rules: `CLAUDE.md` "PR bodies", and `.github/pull_request_template.md`.
 
 A value written `(ledger header)` means the matching line of the ledger's header
@@ -40,8 +41,8 @@ A value written `(ledger header)` means the matching line of the ledger's header
    ledger's baseline.
 3. **Review (§7).** Package the branch with
    `bash <sdd>/scripts/review-package {{PLAN}} <base> HEAD`. `<base>` is
-   `git merge-base origin/main HEAD`, or the header's `Base:` when there is no
-   `origin/main`.
+   `git -C <worktree> merge-base origin/main HEAD`, or the header's `Base:` when the
+   worktree has no `origin/main`. Check the package's commits are this branch's.
 
    Dispatch `Final branch review` on Opus with `code-reviewer.md`. Give it the package,
    the spec, the corrections, and the ledger's `minor (deferred)` and `PARKED:` lines. For

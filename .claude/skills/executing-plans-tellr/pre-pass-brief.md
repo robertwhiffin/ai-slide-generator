@@ -11,8 +11,8 @@ reads only that verdict. In the skill's §1–§9, "controller" and "I" mean you
 - Plan: `{{PLAN}}`, and the spec it names, which is the binding authority.
 - Corrections: `{{CORRECTIONS}}`. You write it.
 - Ledger: `{{LEDGER}}`. You create it.
-- Worktree: `{{WORKTREE}}`, branch `{{BRANCH}}`. Run everything there. Relative paths are
-  relative to it.
+- Worktree: `{{WORKTREE}}`, branch `{{BRANCH}}`. Run everything there, per §10 "Commands
+  in the stages". Relative paths are relative to it.
 - Publish: `{{PUBLISH}}`.
 
 A value written `(ledger header)` means the matching line of the ledger's header, if a
@@ -27,8 +27,8 @@ given above. The final agent passes that string to `record`.
    Write nothing, and return `status=failed`. If it has a `## Pre-pass` entry with no
    `NEXT:`, a previous attempt died. Salvage what it verified (§5) and carry on.
    Otherwise create the ledger, and its directory if needed, with the header from §10
-   "The ledger" and `Base: $(git rev-parse --short HEAD)`. Then append your heading and
-   `Start:`.
+   "The ledger". `Base:` is the output of `git -C <worktree> rev-parse --short HEAD`.
+   Then append your heading and `Start:`.
 2. **`Execution:`.** A missing line, or `Execution: chained`, passes. Anything else →
    `status=failed`, quoting the line.
 3. **`Models:` (§9).** Every task needs a tag, with test ≥ impl (`test=n/a` passes).
@@ -56,8 +56,10 @@ given above. The final agent passes that string to `record`.
    Rule on each finding, with the spec binding.
 6. **Dependencies**, in `{{CORRECTIONS}}` under `## Depends on`, one line per task:
    `- Task <n> — Depends on: <Task <m>, … | none>`. Take them from the plan's order and
-   parallelism section, and from what each task consumes. Add `— outside the chain` to
-   a task that needs a deploy, a browser or the open PR.
+   parallelism section, and from what each task consumes. A task depends on another only
+   when it uses what that task produces: code, an interface, a file it creates. Sharing a
+   file is not a dependency, because the chain already runs one task at a time (§6). Add
+   `— outside the chain` to a task that needs a deploy, a browser or the open PR.
 7. **Baseline (§3).** Run the suites the plan's steps run, using the plan's commands. In
    this repo that means `uv run …`, never `pip install`. Record each failing test's
    cause, not the count, in your entry.
