@@ -15,8 +15,9 @@ what the browser itself laid out for the same document.
   record's own XML, for what the records do not model.
 * ``browser_rect`` measures an element in the same browser build and channel
   the sidecar uses, through ``tests/fixtures/export_snapshot/measure.cjs``
-  (Python has no Playwright in this repo, so measurement goes through Node).
-  ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
+  (Python has no Playwright in this repo, so measurement goes through Node);
+  ``browser_client_rects`` reads its box fragments, one per line an inline
+  element spans. ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
   lines from the same page, with a ``Range`` per character. ``browser_style``
   reads its computed typography, ``browser_text`` its rendered ``innerText``
   and ``browser_loaded_weights`` the webfont weights the page loaded.
@@ -278,6 +279,20 @@ def browser_rect(document_html: str, selector: str, index: int = 0) -> dict:
     """
     rect = json.loads(_run_measure(document_html, selector, str(index)))
     return {key: float(rect[key]) for key in ("x", "y", "w", "h")}
+
+
+def browser_client_rects(document_html: str, selector: str, index: int = 0) -> list[dict]:
+    """``getClientRects()`` of the ``index``-th match of ``selector``: its box fragments, in CSS px.
+
+    One ``{"x", "y", "w", "h"}`` border-box rect per fragment, in the order the
+    browser lists them, measured on the same settled page as ``browser_rect``.
+    An inline element that wraps has one fragment per line it lies on; under
+    the default ``box-decoration-break: slice`` its start padding is on the
+    first fragment only and its end padding on the last. Zero-width rects are
+    reported too.
+    """
+    rects = json.loads(_run_measure(document_html, selector, str(index), "--mode=rects"))
+    return [{key: float(rect[key]) for key in ("x", "y", "w", "h")} for rect in rects]
 
 
 def browser_line_boxes(document_html: str, selector: str, index: int = 0) -> list[dict]:

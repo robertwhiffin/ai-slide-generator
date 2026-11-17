@@ -8,13 +8,17 @@
 // cancelled when it has no end). So the rect it reports comes from the layout the
 // export itself reads.
 //
-// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines|style|text]
+// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|lines|style|text]
 //        node measure.cjs <document.html> --mode=fonts
 //        node measure.cjs <document.html> <probes-json> --mode=probe
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
 // nothing matches.
 //   --mode=rect  (the default) prints {"x":…,"y":…,"w":…,"h":…}, the element's
 //                getBoundingClientRect().
+//   --mode=rects prints [{"x":…,"y":…,"w":…,"h":…}, …], the element's
+//                getClientRects(): one border-box rect per box fragment, which
+//                for an inline element is one per line it spans. See
+//                measureClientRects.
 //   --mode=lines prints [{"text":…,"x":…,"y":…,"w":…,"h":…}, …], the element's
 //                rendered text lines in reading order, each with the union of its
 //                character rects. See measureLines for how lines are found.
@@ -32,8 +36,8 @@
 //                probe. See measureProbes.
 //
 // Called from tests/fixtures/export_snapshot_support.py (browser_rect,
-// browser_line_boxes, browser_lines, browser_style, browser_text,
-// browser_loaded_weights, browser_probes).
+// browser_client_rects, browser_line_boxes, browser_lines, browser_style,
+// browser_text, browser_loaded_weights, browser_probes).
 
 const path = require('path');
 
@@ -119,6 +123,34 @@ async function measureRect(page, selector, index) {
     const rect = matches[index].getBoundingClientRect();
     return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
   }, { selector, index });
+}
+
+// More rects than any real slide element has fragments: a document reporting
+// more is lying about its rects, and is reported rather than read.
+const CLIENT_RECT_LIMIT = 10000;
+
+// The element's box fragments, getClientRects() in the order the browser lists
+// them. An inline element that wraps has one border-box rect per line box it
+// lies on; under the default box-decoration-break: slice its start padding and
+// border are on the first fragment only and its end ones on the last. Every
+// rect is reported, zero-width ones included, so a test decides which count.
+async function measureClientRects(page, selector, index) {
+  return page.evaluate(({ selector, index, limit }) => {
+    const matches = document.querySelectorAll(selector);
+    if (index >= matches.length) {
+      return { error: `selector ${selector} matched ${matches.length} element(s); index ${index} is out of range` };
+    }
+    const rects = matches[index].getClientRects();
+    if (!(rects.length <= limit)) {
+      return { error: `selector ${selector} reported ${rects.length} client rects; more than ${limit} is not a real layout` };
+    }
+    const result = [];
+    for (let rectIndex = 0; rectIndex < rects.length; rectIndex++) {
+      const rect = rects[rectIndex];
+      result.push({ x: rect.x, y: rect.y, w: rect.width, h: rect.height });
+    }
+    return { rects: result };
+  }, { selector, index, limit: CLIENT_RECT_LIMIT });
 }
 
 // The element's rendered text, line by line, read character by character with a
@@ -347,6 +379,10 @@ async function measureProbes(page, probesArgument) {
 
 const MODES = {
   rect: measureRect,
+  rects: async (page, selector, index) => {
+    const measured = await measureClientRects(page, selector, index);
+    return measured.error ? measured : measured.rects;
+  },
   lines: async (page, selector, index) => {
     const measured = await measureLines(page, selector, index);
     return measured.error ? measured : measured.lines;
@@ -380,7 +416,7 @@ async function main() {
   const { documentPath, selector, indexArgument, mode } = parseArguments(process.argv.slice(2));
   if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
     console.error(
-      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines|style|text]\n' +
+      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|lines|style|text]\n' +
       '       node measure.cjs <document.html> --mode=fonts\n' +
       '       node measure.cjs <document.html> <probes-json> --mode=probe',
     );

@@ -1,0 +1,951 @@
+"""Snapshot engine: inline decorations and atomic inline boxes.
+
+The snapshot engine (``TELLR_EXPORT_ENGINE=snapshot``) keeps a sentence's text
+in its sentence and draws what sits inside the line around it (spec §3 Text,
+*Inline decorations* and *Inline boxes*):
+
+* an inline element with a background, a border or padding (a pill, a code
+  chip, ``<mark>``, ``<kbd>``) is one shape per box fragment the browser lays
+  out (``getClientRects()``), so a chip that wraps is two shapes, one on each
+  line, and never one box over both lines;
+* an inline element with no text at all (an empty swatch or status dot) still
+  paints, so it is still a shape (RC8);
+* the decorations of a block paint under that block's own text and over every
+  block background of their stacking context, as CSS paints inline content
+  (CSS 2.1 Appendix E, step 7 after step 4): order key
+  ``paint + [4, 0, blockSeq, 0, elSeq]`` for a decoration and
+  ``paint + [4, 0, blockSeq, 1]`` for its block's text;
+* an atomic inline (an inline ``<svg>`` icon, an ``inline-block`` pill or
+  track) splits the line it sits on: the text on each side of it is its own
+  single-line text item at its own browser x, so the text after an icon keeps
+  its position instead of sliding left into the icon's gap (RC13);
+* a page that lies about an element's client rects cannot hang the export or
+  lose the decoration silently: it is read correctly or the loss is announced.
+
+Several checks pin layouts the engine must keep while it does this: every delta
+pill is exactly one rounded shape under a one-line text box (fixture 06), the
+code chip stays on its line inside one sentence box (fixture 09, RC13), the
+empty legend swatches are filled shapes (fixture 03, RC8), and each icon
+badge's label and value are separate items clear of the icon (fixture 12).
+
+Every assertion reads the emitted slide XML (``slide_shapes``) and holds it
+against the browser's own layout of the very same document: ``browser_rect``,
+``browser_client_rects`` (one rect per box fragment) and
+``browser_line_boxes``. Corpus slides are loaded from
+``tests/fixtures/export_fidelity`` by prefix (PLAN-CORRECTIONS C4).
+
+An inline ``<svg>`` icon is a capture target (spec §3 Pictures). Its picture
+item is pinned with the captures, so here the icon is located by its browser
+rect, which is where that picture sits.
+
+Gating matches the sibling export suites: needs node, the extracted sidecar
+``node_modules`` and a local Chrome/Chromium (skipped otherwise).
+"""
+
+from __future__ import annotations
+
+import json
+from collections import Counter
+from collections.abc import Iterator
+from dataclasses import dataclass
+
+import pytest
+
+from src.services import pptx_from_html_huashu
+from tests.fixtures.export_snapshot_support import (
+    DECK_CSS,
+    Shape,
+    browser_client_rects,
+    browser_line_boxes,
+    browser_rect,
+    browser_style,
+    browser_text,
+    corpus_document,
+    corpus_slide,
+    export_corpus,
+    export_slides,
+    requires_huashu_sidecar,
+    slide_document,
+    slide_shapes,
+)
+from tests.unit.test_export_collection_iteration_hostile_realm import (
+    HOSTILE_EXPORT_TIMEOUT_SECONDS,
+)
+from tests.unit.test_export_snapshot_hostile_realm import COLLECTION_LOSS_LINE
+
+# Tolerances from the plan's Task 5 Step 1: a decoration's rect matches the
+# browser's within 0.5 px, and a chip's top lies within 2 px of its line's
+# text top.
+DECORATION_RECT_TOLERANCE_PX = 0.5
+LINE_TOP_TOLERANCE_PX = 2.0
+# Task 2's placement of left-aligned text: x is the browser's text left within this.
+TEXT_LEFT_TOLERANCE_PX = 0.5
+# EMU rounding moves an emitted edge by at most 1/19050 px.
+EMU_ROUNDING_PX = 0.01
+# Spec §3 Text, Wrapping: every text box gets 6 % plus 4 px of width slack.
+SLACK_FRACTION = 0.06
+SLACK_PX = 4.0
+# A fully round pill: the roundRect corner is half the short side (adj is the
+# radius over the short side, in 1/100000), within one point of the side.
+PILL_CORNER_ADJ = 50000
+PILL_CORNER_ADJ_TOLERANCE = 1000
+
+# The corpus slides this module reads, exported once in this order.
+CORPUS_PREFIXES = ("03", "06", "09", "12")
+
+# Fixture 06: the "Change" column's delta pills (inline-block .dk-pill), in
+# document order. The up pills are the brief's "▲ 0.30x" pills, filled
+# --good-bg (CDEDE1); the one down pill is filled --bad-bg.
+DELTA_PILLS = ("▲ 0.30x", "▲ 0.32x", "▼ 0.17x", "▲ 2.7x")
+DELTA_PILL = ".dk-pill"
+UP_PILL_FILL = "CDEDE1"
+
+# Fixture 09: the second list item holds an inline code chip (display: inline,
+# background #EEEDE9, padding 1px 6px) on its first line.
+CHIP_ITEM = ".dk-list li"
+CHIP_ITEM_INDEX = 1
+CHIP = ".dk-chip"
+CHIP_LINE_START = "Mix shift toward"
+CHIP_SENTENCE = "with SKU-7 now 31% of revenue"
+
+# Fixture 03: the legend's empty inline-block swatches. The third legend marker
+# is an inline <svg> line, a picture rather than a swatch.
+LEGEND_SWATCH = ".dk-legend span.sw"
+LEGEND_SWATCH_COUNT = 2
+
+# Fixture 12: each row's badge is a flex span holding an <svg> icon then its
+# label; the value is a sibling flex item. Rows in document order.
+BADGE = ".slide span:has(> svg)"
+BADGE_ICON = ".slide span:has(> svg) > svg"
+BADGE_ROWS = (
+    ("Plant automation", "80%"),
+    ("ERP upgrade", "55%"),
+    ("New tooling line", "62%"),
+    ("Warehouse expansion", "35%"),
+)
+
+# A chip long enough to wrap inside a 300 px paragraph, so it has two box
+# fragments: the first ends the first line, the second starts the next one.
+WRAPPING_CHIP_BODY = (
+    '<div class="slide">'
+    '<p id="note" style="width: 300px; font-size: 20px; line-height: 1.45;">'
+    'Ship the <code id="chip" class="dk-chip">premium bearing assembly</code> '
+    "before the quarter ends</p>"
+    "</div>"
+)
+
+# Page script that replaces Element.prototype.getClientRects with one that
+# reports a trillion rects and holds none, then publishes on document.title what
+# it replaced and whether a reader of the realm now sees the lie, so the
+# poisoning is proven rather than assumed.
+HOSTILE_ELEMENT_RECTS_SCRIPT = (
+    "<script>(function () {"
+    "var report = { configurable: {}, bites: {}, redefineResult: 'ok' };"
+    "var descriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'getClientRects');"
+    "report.configurable['Element.getClientRects'] = !!(descriptor && descriptor.configurable);"
+    "try {"
+    " Object.defineProperty(Element.prototype, 'getClientRects', {"
+    "  configurable: true, writable: true,"
+    "  value: function () { return { length: 1e12 }; } });"
+    "} catch (error) { report.redefineResult = 'refused getClientRects: ' + error.message; }"
+    "report.bites = {"
+    " getClientRects: document.documentElement.getClientRects().length === 1e12 };"
+    "document.title = JSON.stringify(report);"
+    "})();</script>"
+)
+
+
+def _slack(width: float) -> float:
+    return width * SLACK_FRACTION + SLACK_PX
+
+
+def _export_one(body: str, monkeypatch: pytest.MonkeyPatch) -> bytes:
+    pptx, failures = export_slides([body], css=DECK_CSS, engine="snapshot", monkeypatch=monkeypatch)
+    assert failures == [], f"the export rejected the slide: {failures}"
+    assert pptx, "the export produced no .pptx bytes"
+    return pptx
+
+
+def _document(body: str) -> str:
+    """The document ``_export_one`` exported (``export_slides`` names slide 1 ``snapshot-1``)."""
+    return slide_document(body, css=DECK_CSS, slide_id="snapshot-1")
+
+
+@pytest.fixture(scope="module")
+def corpus_pptx() -> Iterator[bytes]:
+    """Corpus slides 03, 06, 09 and 12, exported once through the snapshot engine."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx, failures = export_corpus(
+            list(CORPUS_PREFIXES), monkeypatch=monkeypatch, engine="snapshot"
+        )
+    assert failures == [], f"the export rejected a corpus slide: {failures}"
+    yield pptx
+
+
+def _corpus_shapes(pptx: bytes, prefix: str) -> list[Shape]:
+    return slide_shapes(pptx, CORPUS_PREFIXES.index(prefix))
+
+
+def _normalised(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _box(shape: Shape) -> dict:
+    return {
+        "x": round(shape.x, 3),
+        "y": round(shape.y, 3),
+        "w": round(shape.w, 3),
+        "h": round(shape.h, 3),
+    }
+
+
+def _describe(shapes: list[Shape]) -> str:
+    lines = []
+    for position, shape in enumerate(shapes):
+        if shape.kind == "text":
+            detail = f"wrap={shape.wrap} paras={len(shape.paras)} text={shape.text[:60]!r}"
+        else:
+            detail = f"{shape.geometry} fill={shape.fill} line={shape.line} adj={shape.adj}"
+        lines.append(f"  [{position}] {shape.kind} box={_box(shape)} {detail}")
+    return "\n".join(lines) or "  (no shapes)"
+
+
+def _hex(css_colour: str) -> str:
+    """'RRGGBB' of an opaque ``rgb(r, g, b)`` computed colour (a fixture guard)."""
+    assert css_colour.startswith("rgb(") and css_colour.endswith(")"), (
+        f"fixture drift: expected an opaque rgb() colour, got {css_colour!r}"
+    )
+    channels = [int(part.strip()) for part in css_colour[4:-1].split(",")]
+    return "".join(f"{channel:02X}" for channel in channels)
+
+
+def _text_box(shapes: list[Shape], text: str) -> tuple[int, Shape]:
+    """(spTree index, shape) of the one text box whose whitespace-normalised text is ``text``."""
+    matches = [
+        (position, shape)
+        for position, shape in enumerate(shapes)
+        if shape.kind == "text" and _normalised(shape.text) == text
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one text box reading {text!r}, got {len(matches)}:\n{_describe(shapes)}"
+    )
+    return matches[0]
+
+
+def _text_box_containing(shapes: list[Shape], fragment: str) -> tuple[int, Shape]:
+    """(spTree index, shape) of the one text box whose normalised text contains ``fragment``."""
+    matches = [
+        (position, shape)
+        for position, shape in enumerate(shapes)
+        if shape.kind == "text" and fragment in _normalised(shape.text)
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one text box containing {fragment!r}, got {len(matches)}:\n"
+        f"{_describe(shapes)}"
+    )
+    return matches[0]
+
+
+def _filled(shapes: list[Shape], fill: str) -> list[tuple[int, Shape]]:
+    """(spTree index, shape) of every non-text element filled ``fill``, in spTree order."""
+    return [
+        (position, shape)
+        for position, shape in enumerate(shapes)
+        if shape.kind != "text" and shape.fill == fill
+    ]
+
+
+def _one_filled(shapes: list[Shape], fill: str, what: str) -> tuple[int, Shape]:
+    matches = _filled(shapes, fill)
+    assert len(matches) == 1, (
+        f"{what}: expected exactly one shape filled {fill}, got {len(matches)}:\n"
+        f"{_describe(shapes)}"
+    )
+    return matches[0]
+
+
+def _off_by(shape: Shape, rect: dict) -> dict:
+    return {
+        "x": round(shape.x - rect["x"], 3),
+        "y": round(shape.y - rect["y"], 3),
+        "w": round(shape.w - rect["w"], 3),
+        "h": round(shape.h - rect["h"], 3),
+    }
+
+
+def _matches(shape: Shape, rect: dict, tolerance: float) -> bool:
+    return all(abs(delta) <= tolerance for delta in _off_by(shape, rect).values())
+
+
+def _assert_at(shape: Shape, rect: dict, what: str) -> None:
+    assert _matches(shape, rect, DECORATION_RECT_TOLERANCE_PX), (
+        f"{what}: the emitted shape {_box(shape)} differs from the browser rect {rect} by "
+        f"{_off_by(shape, rect)} (tolerance {DECORATION_RECT_TOLERANCE_PX} px)"
+    )
+
+
+def _shapes_at(shapes: list[Shape], rect: dict) -> list[tuple[int, Shape]]:
+    """(spTree index, shape) of every non-text element whose box is ``rect`` within tolerance."""
+    return [
+        (position, shape)
+        for position, shape in enumerate(shapes)
+        if shape.kind != "text" and _matches(shape, rect, DECORATION_RECT_TOLERANCE_PX)
+    ]
+
+
+def _inset(rect: dict, by: float) -> dict:
+    """``rect`` shrunk by ``by`` on every side: where a bordered shape's outline centre runs."""
+    return {
+        "x": rect["x"] + by,
+        "y": rect["y"] + by,
+        "w": rect["w"] - 2 * by,
+        "h": rect["h"] - 2 * by,
+    }
+
+
+def _painted_fragments(document: str, selector: str) -> list[dict]:
+    """The element's box fragments that have area, top to bottom."""
+    rects = [
+        rect for rect in browser_client_rects(document, selector) if rect["w"] > 0 and rect["h"] > 0
+    ]
+    return sorted(rects, key=lambda rect: (rect["y"], rect["x"]))
+
+
+def _single_line(document: str, selector: str, index: int = 0) -> dict:
+    """The one rendered line of the ``index``-th match of ``selector`` (a fixture guard)."""
+    lines = browser_line_boxes(document, selector, index)
+    assert len(lines) == 1, (
+        f"fixture drift: {selector} [{index}] renders {len(lines)} lines: {lines}"
+    )
+    return lines[0]
+
+
+def _vertical_overlap(a: dict, b: dict) -> float:
+    return min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+
+
+def _assert_back_to_front(shapes: list[Shape], expected: list[tuple[str, int]], rule: str) -> None:
+    """The ``(label, spTree index)`` pairs appear in spTree in the listed order."""
+    emitted = [label for label, _ in sorted(expected, key=lambda pair: pair[1])]
+    assert emitted == [label for label, _ in expected], (
+        f"{rule}: expected back-to-front {[label for label, _ in expected]}, emitted {emitted} "
+        f"(spTree indices {dict(expected)}):\n{_describe(shapes)}"
+    )
+
+
+def _assert_one_unwrapped_line(box: Shape, what: str) -> None:
+    soft_breaks = [run.text for para in box.paras for run in para.runs if run.soft_break_before]
+    assert len(box.paras) == 1 and not soft_breaks and "\n" not in box.text, (
+        f"{what}: expected one line in one paragraph, got {len(box.paras)} paragraph(s) and "
+        f"soft breaks before {soft_breaks}: {box.text!r}"
+    )
+    assert box.wrap == "none", f"{what}: a one-line text item must not wrap, got wrap={box.wrap!r}"
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotInlineDecorations:
+    def test_delta_pills_are_one_round_shape_each_under_a_one_line_text_box(
+        self, corpus_pptx: bytes
+    ) -> None:
+        """Fixture 06's delta pills (``inline-block``, ``border-radius: 999px``) in the table.
+
+        For every pill:
+
+        * exactly one shape lies at the pill's browser rect, within 0.5 px: a
+          ``roundRect`` whose corners are fully round, filled the pill's
+          colour (the up pills ``CDEDE1``), so no pill is drawn twice;
+        * its text is one text box, reading the browser's one line: the arrow
+          and the number share that line, in one paragraph with no soft break,
+          and the box is unwrapped (``wrap="none"``);
+        * that text box lies inside the pill rect, plus the box's width slack
+          on the side left-aligned text grows;
+        * the pill's shape precedes its text box in the spTree, so the pill
+          paints under its text.
+        """
+        document = corpus_document("06")
+        shapes = _corpus_shapes(corpus_pptx, "06")
+
+        for index, label in enumerate(DELTA_PILLS):
+            pill = browser_rect(document, DELTA_PILL, index)
+            line = _single_line(document, DELTA_PILL, index)
+            assert line["text"] == label, (
+                f"fixture drift: pill {index} reads {line['text']!r}, expected {label!r}"
+            )
+            fill = _hex(browser_style(document, DELTA_PILL, index)["backgroundColor"])
+            if label.startswith("▲"):
+                assert fill == UP_PILL_FILL, (
+                    f"fixture drift: the up pill {label!r} is filled {fill}, not {UP_PILL_FILL}"
+                )
+
+            at_pill = _shapes_at(shapes, pill)
+            assert len(at_pill) == 1, (
+                f"pill {label!r}: expected exactly one shape at its browser rect {pill}, got "
+                f"{len(at_pill)}:\n{_describe(shapes)}"
+            )
+            shape_index, shape = at_pill[0]
+            assert shape.fill == fill and shape.geometry == "roundRect", (
+                f"pill {label!r}: the shape at its rect is {shape.geometry} filled {shape.fill}; "
+                f"expected a roundRect filled {fill}"
+            )
+            assert shape.adj is not None and abs(shape.adj - PILL_CORNER_ADJ) <= (
+                PILL_CORNER_ADJ_TOLERANCE
+            ), (
+                f"pill {label!r}: corner adj {shape.adj}; a fully round pill is "
+                f"{PILL_CORNER_ADJ} (half its short side)"
+            )
+
+            text_index, text = _text_box(shapes, label)
+            _assert_one_unwrapped_line(text, f"pill {label!r}")
+            right_limit = pill["x"] + pill["w"] + _slack(line["w"])
+            inside = (
+                text.x >= pill["x"] - TEXT_LEFT_TOLERANCE_PX
+                and text.y >= pill["y"] - TEXT_LEFT_TOLERANCE_PX
+                and text.y + text.h <= pill["y"] + pill["h"] + TEXT_LEFT_TOLERANCE_PX
+                and text.x + text.w <= right_limit + EMU_ROUNDING_PX
+            )
+            assert inside, (
+                f"pill {label!r}: its text box {_box(text)} is not inside the pill {pill} plus "
+                f"slack (right edge limit {right_limit:.2f})"
+            )
+            _assert_back_to_front(
+                shapes,
+                [(f"pill {label!r} shape", shape_index), (f"pill {label!r} text", text_index)],
+                "a pill paints under its own text",
+            )
+
+    def test_code_chip_stays_on_its_line_inside_one_sentence_box(self, corpus_pptx: bytes) -> None:
+        """RC13, fixture 09: the inline code chip "SKU-7" in a list item's sentence.
+
+        * The chip is one shape filled ``EEEDE9`` at its browser fragment rect,
+          within 0.5 px. It sits on the sentence's first line, "Mix shift
+          toward…": its top is within 2 px of that line's text top and its
+          vertical middle lies inside that line.
+        * The sentence is one text box with the browser's lines, reading "with
+          SKU-7 now 31% of revenue" across its break with single spaces: the
+          chip was not pulled out of it, so no gap of two spaces is left
+          ("with  now").
+        * The chip's shape precedes the sentence's text box in the spTree.
+        """
+        document = corpus_document("09")
+        fragments = _painted_fragments(document, CHIP)
+        assert len(fragments) == 1, f"fixture drift: the chip has fragments {fragments}"
+        chip_rect = fragments[0]
+        lines = browser_line_boxes(document, CHIP_ITEM, CHIP_ITEM_INDEX)
+        assert len(lines) == 2 and lines[0]["text"].startswith(CHIP_LINE_START), (
+            f"fixture drift: the chip's list item renders {lines}"
+        )
+        first_line = lines[0]
+        fill = _hex(browser_style(document, CHIP)["backgroundColor"])
+        shapes = _corpus_shapes(corpus_pptx, "09")
+
+        chip_index, chip = _one_filled(shapes, fill, "the code chip")
+        _assert_at(chip, chip_rect, "the code chip")
+        assert abs(chip.y - first_line["y"]) <= LINE_TOP_TOLERANCE_PX, (
+            f"the chip's top {chip.y:.2f} is not within {LINE_TOP_TOLERANCE_PX} px of its line's "
+            f"text top {first_line['y']:.2f}"
+        )
+        middle = chip.y + chip.h / 2
+        assert first_line["y"] <= middle <= first_line["y"] + first_line["h"], (
+            f"the chip {_box(chip)} is not on the line {first_line}"
+        )
+
+        sentence_index, sentence = _text_box_containing(shapes, CHIP_LINE_START)
+        assert sentence.text.split("\n") == [line["text"] for line in lines], (
+            f"the sentence box reads {sentence.text.split(chr(10))}; the browser's lines are "
+            f"{[line['text'] for line in lines]}"
+        )
+        assert CHIP_SENTENCE in sentence.text.replace("\n", " "), (
+            f"the sentence box does not read {CHIP_SENTENCE!r} with single spaces: "
+            f"{sentence.text!r}"
+        )
+        _assert_back_to_front(
+            shapes,
+            [("the chip", chip_index), ("its sentence", sentence_index)],
+            "a chip paints under the text of its own sentence",
+        )
+
+    def test_a_chip_that_wraps_is_one_shape_per_line_fragment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``.dk-chip`` long enough to wrap inside a 300 px paragraph has two box fragments.
+
+        * It gives exactly two shapes, filled the chip's colour, each at one of
+          the browser's fragment rects (``getClientRects()``) within 0.5 px: the
+          first ends line 1, the second starts line 2. One shape at the chip's
+          bounding rect would paint the chip's colour over both whole lines,
+          under "Ship the" and "before the quarter" too.
+        * Both shapes precede the sentence's text box in the spTree.
+        * The chip's text stays in its sentence: one text box with the
+          browser's lines.
+        """
+        document = _document(WRAPPING_CHIP_BODY)
+        fragments = _painted_fragments(document, "#chip")
+        assert len(fragments) == 2, f"fixture drift: the chip has fragments {fragments}"
+        assert _vertical_overlap(fragments[0], fragments[1]) < fragments[0]["h"] / 2, (
+            f"fixture drift: the chip's fragments {fragments} are not on two lines"
+        )
+        lines = [line["text"] for line in browser_line_boxes(document, "#note")]
+        fill = _hex(browser_style(document, "#chip")["backgroundColor"])
+        shapes = slide_shapes(_export_one(WRAPPING_CHIP_BODY, monkeypatch))
+
+        chips = _filled(shapes, fill)
+        assert len(chips) == 2, (
+            f"expected one shape filled {fill} per chip fragment ({len(fragments)}: "
+            f"{fragments}), got {len(chips)}:\n{_describe(shapes)}"
+        )
+        chips_top_down = sorted(chips, key=lambda pair: (pair[1].y, pair[1].x))
+        for line_number, ((_, chip), fragment) in enumerate(
+            zip(chips_top_down, fragments), start=1
+        ):
+            _assert_at(chip, fragment, f"the chip's line-{line_number} fragment")
+
+        sentence_index, sentence = _text_box_containing(shapes, "Ship the")
+        assert sentence.text.split("\n") == lines, (
+            f"the sentence box reads {sentence.text.split(chr(10))}; the browser's lines are "
+            f"{lines}"
+        )
+        for line_number, (chip_index, _) in enumerate(chips_top_down, start=1):
+            _assert_back_to_front(
+                shapes,
+                [(f"chip fragment {line_number}", chip_index), ("the sentence", sentence_index)],
+                "every chip fragment paints under the text of its sentence",
+            )
+
+    def test_inline_decorations_paint_under_their_own_text_and_over_block_backgrounds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CSS paints inline content after every block background of its stacking context
+        (CSS 2.1 Appendix E, step 7 after step 4), one block's line boxes at a time.
+
+        Two paragraphs, a ``<mark>`` in the first and a bordered ``<kbd>`` in the
+        second, then a band (a later block with a background) pulled up under
+        the second paragraph by a negative margin, so it overlaps the key. The
+        back-to-front order is:
+
+        1. the band's background (step 4, every block background first);
+        2. the mark, then the first paragraph's text;
+        3. the key, then the second paragraph's text.
+
+        A decoration ordered as a block box in tree order paints under the band
+        it should cover, and every decoration before the first paragraph's text.
+
+        Each decoration sits at its browser fragment rect within 0.5 px; the key,
+        whose 1 px border is its outline, is inset by half that border, where
+        the outline's centre runs.
+        """
+        key_border_px = 1.0
+        body = (
+            '<div class="slide">'
+            '<p id="first" style="font-size: 20px;">Alpha with a '
+            '<mark id="mark" style="background: #FFE08A;">highlight</mark> inside</p>'
+            '<p id="second" style="font-size: 20px;">Press '
+            '<kbd id="key" style="font-family: var(--mono); background: #F9F7F4; '
+            f'border: {key_border_px:g}px solid #5A6F77; border-radius: 4px; padding: 1px 5px;">'
+            "Ctrl</kbd> to continue</p>"
+            '<div id="band" style="height: 30px; margin-top: -40px; background: #DCE0E2;"></div>'
+            "</div>"
+        )
+        document = _document(body)
+        mark_fragments = _painted_fragments(document, "#mark")
+        key_fragments = _painted_fragments(document, "#key")
+        assert len(mark_fragments) == 1 and len(key_fragments) == 1, (
+            f"fixture drift: the mark has fragments {mark_fragments}, the key {key_fragments}"
+        )
+        band = browser_rect(document, "#band")
+        key_rect = key_fragments[0]
+        assert _vertical_overlap(band, key_rect) > 0 and band["x"] <= key_rect["x"], (
+            f"fixture drift: the band {band} does not overlap the key {key_rect}"
+        )
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        mark_index, mark = _one_filled(shapes, "FFE08A", "the mark")
+        key_index, key = _one_filled(shapes, "F9F7F4", "the key")
+        band_index, _ = _one_filled(shapes, "DCE0E2", "the band")
+        _assert_at(mark, mark_fragments[0], "the mark")
+        _assert_at(key, _inset(key_rect, key_border_px / 2), "the key (outline centre)")
+        assert key.line == "5A6F77", f"the key's outline is {key.line}, not its border 5A6F77"
+        first_index, _ = _text_box(shapes, "Alpha with a highlight inside")
+        second_index, _ = _text_box(shapes, "Press Ctrl to continue")
+
+        _assert_back_to_front(
+            shapes,
+            [
+                ("the band's background", band_index),
+                ("the mark", mark_index),
+                ("the first paragraph's text", first_index),
+                ("the key", key_index),
+                ("the second paragraph's text", second_index),
+            ],
+            "inline decorations paint over block backgrounds, each under its own block's text",
+        )
+
+    def test_empty_inline_dots_are_shapes_painted_with_their_own_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An inline element with no text but a background and padding (a status dot) paints.
+
+        Each row is a paragraph led by an empty ``<span>`` dot. Each dot is one
+        shape filled its colour at its browser fragment rect, within 0.5 px, and
+        paints with its own row: the first dot, the first row's text, the second
+        dot, the second row's text.
+        """
+        dot = "padding: 0 6px; border-radius: 6px; margin-right: 10px;"
+        body = (
+            '<div class="slide">'
+            '<p id="row-1" style="font-size: 18px;">'
+            f'<span id="dot-1" style="background: #00A972; {dot}"></span>'
+            "Plant automation on track</p>"
+            '<p id="row-2" style="font-size: 18px;">'
+            f'<span id="dot-2" style="background: #D0302A; {dot}"></span>'
+            "ERP upgrade at risk</p>"
+            "</div>"
+        )
+        document = _document(body)
+        dots = {}
+        for name in ("dot-1", "dot-2"):
+            assert browser_text(document, f"#{name}") == "", f"fixture drift: #{name} has text"
+            fragments = _painted_fragments(document, f"#{name}")
+            assert len(fragments) == 1, f"fixture drift: #{name} has fragments {fragments}"
+            dots[name] = fragments[0]
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        first_dot_index, first_dot = _one_filled(shapes, "00A972", "the first dot")
+        second_dot_index, second_dot = _one_filled(shapes, "D0302A", "the second dot")
+        _assert_at(first_dot, dots["dot-1"], "the first dot")
+        _assert_at(second_dot, dots["dot-2"], "the second dot")
+        first_row_index, _ = _text_box(shapes, "Plant automation on track")
+        second_row_index, _ = _text_box(shapes, "ERP upgrade at risk")
+
+        _assert_back_to_front(
+            shapes,
+            [
+                ("the first dot", first_dot_index),
+                ("the first row's text", first_row_index),
+                ("the second dot", second_dot_index),
+                ("the second row's text", second_row_index),
+            ],
+            "an empty inline decoration paints with its own block's text",
+        )
+
+    def test_empty_legend_swatches_are_filled_shapes(self, corpus_pptx: bytes) -> None:
+        """RC8, fixture 03: the legend's empty ``span.sw`` swatches (``inline-block``, 14x14).
+
+        Each swatch has no text and is exactly one shape at its browser rect,
+        within 0.5 px, filled the colour the browser paints it. The legend's
+        third marker is an inline ``<svg>`` line, a picture rather than a swatch.
+        """
+        assert corpus_slide("03").count('class="sw"') == LEGEND_SWATCH_COUNT, (
+            f"fixture drift: fixture 03 no longer has {LEGEND_SWATCH_COUNT} legend swatches"
+        )
+        document = corpus_document("03")
+        shapes = _corpus_shapes(corpus_pptx, "03")
+
+        for index in range(LEGEND_SWATCH_COUNT):
+            assert browser_text(document, LEGEND_SWATCH, index) == "", (
+                f"fixture drift: swatch {index} has text"
+            )
+            swatch = browser_rect(document, LEGEND_SWATCH, index)
+            fill = _hex(browser_style(document, LEGEND_SWATCH, index)["backgroundColor"])
+            at_swatch = _shapes_at(shapes, swatch)
+            assert len(at_swatch) == 1, (
+                f"swatch {index}: expected exactly one shape at its browser rect {swatch}, got "
+                f"{len(at_swatch)}:\n{_describe(shapes)}"
+            )
+            assert at_swatch[0][1].fill == fill, (
+                f"swatch {index}: the shape at its rect is filled {at_swatch[0][1].fill}, "
+                f"the browser paints {fill}"
+            )
+
+
+@dataclass(frozen=True)
+class InlineGraphicLine:
+    """A line that an atomic inline splits, and the browser selectors that locate its parts."""
+
+    body: str
+    paragraph: str  # the block holding the line
+    before: str  # the text just left of the splitting graphic (an unstyled span)
+    before_text: str
+    graphic: str  # the atomic inline that splits the line
+    after: str  # the text just right of it
+    after_text: str
+    leading_graphic: str | None = None  # a graphic the line starts with, left of `before`
+
+
+ICON_PATH = '<circle cx="12" cy="12" r="9"/>'
+
+INLINE_GRAPHIC_LINES = {
+    # Fixture 12's badge row in inline flow: an icon, the label, a progress
+    # track (an empty inline-block), then the value, all on one line.
+    "icon-badge-inline": InlineGraphicLine(
+        body=(
+            '<div class="slide">'
+            '<p id="row" style="font-size: 18px; font-weight: 600;">'
+            '<svg id="icon" width="22" height="22" viewBox="0 0 24 24" fill="none" '
+            'stroke="currentColor" stroke-width="2.2" '
+            'style="vertical-align: middle; margin-right: 10px; color: var(--accent);">'
+            f"{ICON_PATH}</svg>"
+            '<span id="label">Plant automation</span>'
+            '<span id="track" style="display: inline-block; width: 200px; height: 8px; '
+            'margin: 0 16px; border-radius: 4px; background: #E6E3DE; vertical-align: middle;">'
+            "</span>"
+            '<span id="value" style="font-family: var(--mono); font-size: 16px; font-weight: 400;">'
+            "80%</span>"
+            "</p>"
+            "</div>"
+        ),
+        paragraph="#row",
+        before="#label",
+        before_text="Plant automation",
+        graphic="#track",
+        after="#value",
+        after_text="80%",
+        leading_graphic="#icon",
+    ),
+    # A delta pill in the middle of a sentence.
+    "pill-in-a-sentence": InlineGraphicLine(
+        body=(
+            '<div class="slide">'
+            '<p id="sentence" style="font-size: 20px;">'
+            '<span id="before">Revenue grew</span> '
+            '<span id="pill" class="dk-pill up">▲ 4.2%</span> '
+            '<span id="after">year on year</span>'
+            "</p>"
+            "</div>"
+        ),
+        paragraph="#sentence",
+        before="#before",
+        before_text="Revenue grew",
+        graphic="#pill",
+        after="#after",
+        after_text="year on year",
+    ),
+    # A wrapped paragraph whose second line holds an icon between two words.
+    "icon-on-a-wrapped-line": InlineGraphicLine(
+        body=(
+            '<div class="slide">'
+            '<p id="wrapped" style="width: 320px; font-size: 18px;">'
+            "Plant automation is on schedule and "
+            '<span id="before">tracking at</span>'
+            '<svg id="icon" width="20" height="20" viewBox="0 0 24 24" fill="none" '
+            'stroke="#FF5F46" stroke-width="2.2" style="vertical-align: middle; margin: 0 8px;">'
+            f"{ICON_PATH}</svg>"
+            '<span id="after">80%</span>'
+            "</p>"
+            "</div>"
+        ),
+        paragraph="#wrapped",
+        before="#before",
+        before_text="tracking at",
+        graphic="#icon",
+        after="#after",
+        after_text="80%",
+    ),
+}
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotAtomicInlines:
+    def test_icon_badge_label_and_value_are_separate_items_clear_of_the_icon(
+        self, corpus_pptx: bytes
+    ) -> None:
+        """Fixture 12's icon badges: in each row an ``<svg>`` icon, its label, then the value.
+
+        * No text item holds both the label and the value; each is one
+          unwrapped text item of its own.
+        * The label's box starts at the label's browser text left, within
+          0.5 px, which is right of the icon's browser rect: the label never
+          overlaps its icon.
+        """
+        document = corpus_document("12")
+        shapes = _corpus_shapes(corpus_pptx, "12")
+
+        for row, (label, value) in enumerate(BADGE_ROWS):
+            label_line = _single_line(document, BADGE, row)
+            assert label_line["text"] == label, (
+                f"fixture drift: badge {row} reads {label_line['text']!r}, not {label!r}"
+            )
+            icon = browser_rect(document, BADGE_ICON, row)
+            icon_right = icon["x"] + icon["w"]
+            assert label_line["x"] >= icon_right, (
+                f"fixture drift: badge {row}'s label {label_line} starts left of its icon {icon}"
+            )
+            merged = [
+                shape.text
+                for shape in shapes
+                if shape.kind == "text" and label in shape.text and value in shape.text
+            ]
+            assert merged == [], f"row {row}: the label and the value share a text item: {merged}"
+            _, label_box = _text_box(shapes, label)
+            _, value_box = _text_box(shapes, value)
+            _assert_one_unwrapped_line(label_box, f"the {label!r} label")
+            _assert_one_unwrapped_line(value_box, f"the {value!r} value")
+            assert abs(label_box.x - label_line["x"]) <= TEXT_LEFT_TOLERANCE_PX, (
+                f"the {label!r} box {_box(label_box)} starts at {label_box.x:.2f}; the browser's "
+                f"label starts at {label_line['x']:.2f}"
+            )
+            assert label_box.x >= icon_right - EMU_ROUNDING_PX, (
+                f"the {label!r} box {_box(label_box)} starts left of its icon's right edge "
+                f"{icon_right:.2f} (icon {icon})"
+            )
+
+    @pytest.mark.parametrize("case", tuple(INLINE_GRAPHIC_LINES))
+    def test_an_inline_graphic_splits_its_line_and_the_text_after_it_keeps_its_x(
+        self, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        """An atomic inline (an inline ``<svg>``, an ``inline-block`` pill or track) on a line.
+
+        The tokens on each side of it are separate single-line text items at
+        their own bounds, so in PowerPoint and Google Slides the text after the
+        graphic is drawn where the browser drew it, not slid left into the
+        graphic's gap:
+
+        * no text item holds both the text before the graphic and the text after it;
+        * each of the two is one unwrapped text item (``wrap="none"``) whose x
+          is its browser text left within 0.5 px;
+        * the text after the graphic starts right of the graphic's browser rect;
+          with ``leading_graphic``, the text before it starts right of that one;
+        * no character is lost or doubled by the split: the slide's text items
+          hold exactly the characters the browser paints in the paragraph.
+
+        Cases: fixture 12's badge row set in inline flow (``icon-badge-inline``),
+        a delta pill inside a sentence, and an icon on the second line of a
+        wrapped paragraph.
+        """
+        line = INLINE_GRAPHIC_LINES[case]
+        document = _document(line.body)
+        before = _single_line(document, line.before)
+        after = _single_line(document, line.after)
+        assert before["text"] == line.before_text and after["text"] == line.after_text, (
+            f"fixture drift: the line reads {before['text']!r} | {after['text']!r}"
+        )
+        assert _vertical_overlap(before, after) > min(before["h"], after["h"]) / 2, (
+            f"fixture drift: {before} and {after} are not on one line"
+        )
+        graphic = browser_rect(document, line.graphic)
+        graphic_right = graphic["x"] + graphic["w"]
+        assert before["x"] + before["w"] <= graphic["x"] and after["x"] >= graphic_right, (
+            f"fixture drift: the graphic {graphic} does not sit between {before} and {after}"
+        )
+        painted = Counter(
+            character
+            for entry in browser_line_boxes(document, line.paragraph)
+            for character in entry["text"]
+            if not character.isspace()
+        )
+        shapes = slide_shapes(_export_one(line.body, monkeypatch))
+
+        merged = [
+            shape.text
+            for shape in shapes
+            if shape.kind == "text"
+            and line.before_text in _normalised(shape.text)
+            and line.after_text in _normalised(shape.text)
+        ]
+        assert merged == [], (
+            f"the text either side of the graphic shares a text item: {merged}\n{_describe(shapes)}"
+        )
+        _, before_box = _text_box(shapes, line.before_text)
+        _, after_box = _text_box(shapes, line.after_text)
+        for what, box, browser in (
+            ("before the graphic", before_box, before),
+            ("after the graphic", after_box, after),
+        ):
+            _assert_one_unwrapped_line(box, f"the text {what}")
+            assert abs(box.x - browser["x"]) <= TEXT_LEFT_TOLERANCE_PX, (
+                f"the text {what} {_box(box)} starts at {box.x:.2f}; the browser draws it at "
+                f"{browser['x']:.2f}"
+            )
+        assert after_box.x >= graphic_right - TEXT_LEFT_TOLERANCE_PX, (
+            f"the text after the graphic {_box(after_box)} starts left of the graphic's right "
+            f"edge {graphic_right:.2f} (graphic {graphic})"
+        )
+        if line.leading_graphic is not None:
+            leading = browser_rect(document, line.leading_graphic)
+            leading_right = leading["x"] + leading["w"]
+            assert before_box.x >= leading_right - TEXT_LEFT_TOLERANCE_PX, (
+                f"the text before the graphic {_box(before_box)} starts left of the leading "
+                f"graphic's right edge {leading_right:.2f} (graphic {leading})"
+            )
+        emitted = Counter(
+            character
+            for shape in shapes
+            if shape.kind == "text"
+            for character in shape.text
+            if not character.isspace()
+        )
+        assert emitted == painted, (
+            f"the split lost or doubled text: missing {dict(painted - emitted)}, extra "
+            f"{dict(emitted - painted)}\n{_describe(shapes)}"
+        )
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestSnapshotInlineDecorationsInAHostileRealm:
+    def test_element_rects_that_lie_are_read_correctly_or_announced(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Page script replaces ``Element.prototype.getClientRects`` with one reporting a
+        trillion rects and holding none (``SLIDE_CSP`` allows inline script).
+
+        The wrapping chip's decoration reads its fragments from that method, so:
+
+        * the export returns within ``HOSTILE_EXPORT_TIMEOUT_SECONDS`` with no
+          failures: the read is bounded;
+        * the chip is either exported exactly as in the benign document (one
+          shape per true fragment, read through the pristine realm) or the loss
+          is announced with the ``[html2pptx] collection`` line, never dropped
+          or approximated in silence;
+        * the sentence's text, measured with ``Range`` rects the script leaves
+          alone, is still exported with the browser's lines.
+
+        The script publishes on ``document.title`` that it replaced the method
+        and that a reader of the realm sees the lie, so the poisoning is proven.
+        """
+        hostile_body = WRAPPING_CHIP_BODY.replace(
+            "</div>", f"{HOSTILE_ELEMENT_RECTS_SCRIPT}</div>", 1
+        )
+        assert hostile_body != WRAPPING_CHIP_BODY, "the hostile script was not inserted"
+        report = json.loads(browser_text(_document(hostile_body), "title"))
+        assert report["redefineResult"] == "ok", f"the poisoning was refused: {report}"
+        assert report["configurable"].get("Element.getClientRects") is True, (
+            f"Element.getClientRects was not configurable: {report}"
+        )
+        assert report["bites"].get("getClientRects") is True, (
+            f"the replacement did not take effect for a reader of the realm: {report}"
+        )
+        benign = _document(WRAPPING_CHIP_BODY)
+        fragments = _painted_fragments(benign, "#chip")
+        assert len(fragments) == 2, f"fixture drift: the chip has fragments {fragments}"
+        lines = [line["text"] for line in browser_line_boxes(benign, "#note")]
+        fill = _hex(browser_style(benign, "#chip")["backgroundColor"])
+
+        monkeypatch.setattr(
+            pptx_from_html_huashu, "SIDECAR_TIMEOUT_SECONDS", HOSTILE_EXPORT_TIMEOUT_SECONDS
+        )
+        capsys.readouterr()
+        pptx, failures = export_slides(
+            [hostile_body], css=DECK_CSS, engine="snapshot", monkeypatch=monkeypatch
+        )
+        assert pptx and failures == [], f"the export did not complete: {failures}"
+        stderr = capsys.readouterr().err
+        shapes = slide_shapes(pptx)
+
+        chips = sorted((shape for _, shape in _filled(shapes, fill)), key=lambda s: (s.y, s.x))
+        read_correctly = len(chips) == len(fragments) and all(
+            _matches(chip, fragment, DECORATION_RECT_TOLERANCE_PX)
+            for chip, fragment in zip(chips, fragments)
+        )
+        announced = COLLECTION_LOSS_LINE in stderr
+        assert read_correctly or announced, (
+            f"the lying getClientRects cost the chip silently: emitted {[_box(c) for c in chips]} "
+            f"for the true fragments {fragments}, and no {COLLECTION_LOSS_LINE!r} line on "
+            f"stderr:\n{stderr}"
+        )
+        _, sentence = _text_box_containing(shapes, "Ship the")
+        assert sentence.text.split("\n") == lines, (
+            f"the sentence box reads {sentence.text.split(chr(10))}; the browser's lines are "
+            f"{lines}"
+        )

@@ -74,7 +74,6 @@ TRUTH_SCALE = 2
 POWERPOINT_SCALE = 4
 # PowerPoint opens, exports and closes the deck within this, or it is held by a dialog.
 POWERPOINT_TIMEOUT_SECONDS = 240
-POWERPOINT_QUIT = 'tell application "Microsoft PowerPoint" to quit saving no'
 # A refused Google API call (the thumbnail endpoint's per-minute limit) is retried after a pause.
 GOOGLE_ATTEMPTS = 3
 GOOGLE_RETRY_SECONDS = 45
@@ -384,11 +383,14 @@ def render_truth(documents: list[Path], out_dir: Path) -> None:
 def render_powerpoint(harness, pptx_path: Path, names: list[str], out_dir: Path) -> dict:
     """PowerPoint's render, or how it failed: a repair prompt holds the AppleScript ``open``.
 
-    The harness renders through AppleScript (open, save as PDF, close). A
-    watchdog quits PowerPoint without saving when that does not finish within
-    POWERPOINT_TIMEOUT_SECONDS: a dialog (a repair prompt) is holding it. The
-    PDF it saved (the harness returns its path) is re-rasterised at
-    POWERPOINT_SCALE for sub-pixel edges.
+    The harness renders through AppleScript (open, save as PDF, close). When
+    that does not finish within POWERPOINT_TIMEOUT_SECONDS a dialog (a repair
+    prompt) is holding it, and a watchdog closes the harness's own staged
+    presentation (run.close_harness_presentations). PowerPoint is never quit:
+    the owner's other documents stay open, unsaved work included, and the
+    dialog is left for the owner to dismiss. The PDF the harness copied into
+    ``out_dir`` (it returns its path) is re-rasterised at POWERPOINT_SCALE for
+    sub-pixel edges.
     """
     import fitz  # pymupdf
 
@@ -409,15 +411,18 @@ def render_powerpoint(harness, pptx_path: Path, names: list[str], out_dir: Path)
     worker.join(POWERPOINT_TIMEOUT_SECONDS)
     seconds = round(time.monotonic() - started, 1)
     if worker.is_alive():
-        subprocess.run(
-            ["osascript", "-e", POWERPOINT_QUIT], check=False, capture_output=True, timeout=60
+        closed = harness.close_harness_presentations()
+        worker.join(harness.POWERPOINT_CLOSE_TIMEOUT_SECONDS)
+        outcome_of_close = (
+            "the harness's own presentation was closed"
+            if closed
+            else "PowerPoint did not answer, so its dialog needs dismissing by hand"
         )
-        worker.join(60)
         return {
             "opened": False,
             "seconds": seconds,
             "detail": f"no PDF within {POWERPOINT_TIMEOUT_SECONDS} s: PowerPoint was held, "
-            "a dialog such as a repair prompt; it was quit without saving",
+            f"a dialog such as a repair prompt; {outcome_of_close} (PowerPoint was not quit)",
         }
     if not outcome.get("finished"):
         return {"opened": False, "seconds": seconds, "detail": outcome.get("error", "failed")}

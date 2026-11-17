@@ -117,7 +117,55 @@ POWERPOINT_STAGING_DIR = (
 )
 
 
-POWERPOINT_QUIT = 'tell application "Microsoft PowerPoint" to quit saving no'
+# The harness's own presentations: every copy it stages is POWERPOINT_STAGING_DIR/export-*.pptx.
+POWERPOINT_STAGED_PREFIX = "export-"
+# How long closing the harness's presentations may take before it is given up.
+POWERPOINT_CLOSE_TIMEOUT_SECONDS = 60
+
+
+def _applescript_string(text: str) -> str:
+    """``text`` as an AppleScript string literal."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def close_harness_presentations(timeout_seconds: float = POWERPOINT_CLOSE_TIMEOUT_SECONDS) -> bool:
+    """Close, without saving, the presentations the harness staged, and nothing else.
+
+    A presentation is the harness's when PowerPoint opened it from
+    POWERPOINT_STAGING_DIR and its name starts with POWERPOINT_STAGED_PREFIX.
+    Every other document stays open as the owner left it: PowerPoint is never
+    quit "saving no", which would discard the owner's unsaved work. Nothing
+    happens when PowerPoint is not running. Presentations are read by index,
+    because a ``repeat with … in presentations`` reference loop hangs
+    PowerPoint's AppleScript. Returns whether PowerPoint answered within
+    ``timeout_seconds``; a modal dialog can hold it.
+    """
+    staging_dir = _applescript_string(str(POWERPOINT_STAGING_DIR))
+    prefix = _applescript_string(POWERPOINT_STAGED_PREFIX)
+    script = f"""
+if application "Microsoft PowerPoint" is running then
+  with timeout of {int(timeout_seconds)} seconds
+    tell application "Microsoft PowerPoint"
+      repeat with position from (count of presentations) to 1 by -1
+        set candidate to presentation position
+        if (path of candidate) is {staging_dir} and (name of candidate) starts with {prefix} then
+          close candidate saving no
+        end if
+      end repeat
+    end tell
+  end timeout
+end if
+"""
+    try:
+        completed = subprocess.run(
+            ["osascript", "-e", script],
+            check=False,
+            capture_output=True,
+            timeout=timeout_seconds + 10,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return completed.returncode == 0
 
 
 def render_with_powerpoint(pptx_path: Path, names: list[str], out_dir: Path) -> Path:
@@ -127,41 +175,53 @@ def render_with_powerpoint(pptx_path: Path, names: list[str], out_dir: Path) -> 
     "grant access" dialog, so the file is staged inside the container first.
     Needs the deck's fonts installed locally (DM Sans / DM Mono for the corpora).
 
-    PowerPoint is quit first and every run stages under a name of its own:
-    ``open`` on a file whose name is still open re-activates the old
-    presentation, and its PDF would hold the wrong slides. Returns the PDF
-    PowerPoint saved.
+    Every run stages under a name of its own, because ``open`` on a file whose
+    name is still open re-activates the old presentation, and its PDF would
+    hold the wrong slides. A staged copy an earlier run left open is closed
+    first (close_harness_presentations); the owner's own documents are never
+    touched, so the script saves and closes only the presentation whose path
+    is the copy it staged. The PDF is copied into ``out_dir/powerpoint`` and
+    both staged files are deleted from the container. Returns the copied PDF.
     """
     import fitz  # pymupdf
 
-    subprocess.run(["osascript", "-e", POWERPOINT_QUIT], check=False, capture_output=True)
+    close_harness_presentations()
     POWERPOINT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
     stamp = f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{os.getpid()}"
-    staged_pptx = POWERPOINT_STAGING_DIR / f"export-{stamp}.pptx"
-    staged_pdf = POWERPOINT_STAGING_DIR / f"export-{stamp}.pdf"
+    staged_pptx = POWERPOINT_STAGING_DIR / f"{POWERPOINT_STAGED_PREFIX}{stamp}.pptx"
+    staged_pdf = POWERPOINT_STAGING_DIR / f"{POWERPOINT_STAGED_PREFIX}{stamp}.pdf"
+    powerpoint_dir = out_dir / "powerpoint"
+    powerpoint_dir.mkdir(parents=True, exist_ok=True)
+    exported_pdf = powerpoint_dir / f"{pptx_path.stem}.pdf"
     shutil.copyfile(pptx_path, staged_pptx)
-    script = f'''
+    staged = _applescript_string(str(staged_pptx))
+    script = f"""
 with timeout of 600 seconds
 tell application "Microsoft PowerPoint"
-  open POSIX file "{staged_pptx}"
+  open POSIX file {staged}
   delay 3
-  set exported to active presentation
-  save exported in POSIX file "{staged_pdf}" as save as PDF
+  set exported to presentation {_applescript_string(staged_pptx.name)}
+  if (full name of exported) is not {staged} then error "PowerPoint did not open " & {staged}
+  save exported in POSIX file {_applescript_string(str(staged_pdf))} as save as PDF
   close exported saving no
 end tell
 end timeout
-'''
+"""
     try:
         subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
+        shutil.copyfile(staged_pdf, exported_pdf)
+    except BaseException:
+        # The script stopped part-way: its presentation may still be open.
+        close_harness_presentations()
+        raise
     finally:
         staged_pptx.unlink(missing_ok=True)
-    powerpoint_dir = out_dir / "powerpoint"
-    powerpoint_dir.mkdir(parents=True, exist_ok=True)
-    pdf = fitz.open(staged_pdf)
+        staged_pdf.unlink(missing_ok=True)
+    pdf = fitz.open(exported_pdf)
     for index, page in enumerate(pdf):
         zoom = SLIDE_WIDTH_PX / page.rect.width
         page.get_pixmap(matrix=fitz.Matrix(zoom, zoom)).save(str(powerpoint_dir / f"{names[index]}.png"))
-    return staged_pdf
+    return exported_pdf
 
 
 def _normalise_text(text: str) -> str:

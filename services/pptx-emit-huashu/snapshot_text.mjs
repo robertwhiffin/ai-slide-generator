@@ -23,6 +23,20 @@
 // text spans its container's content box so the alignment survives a slightly
 // wider font. Every box carries width slack on the side its alignment grows.
 //
+// Inline decorations (spec §3 Text). A display:inline element that paints a
+// box (a background, a uniform border or a shadow: a chip, <mark>, <kbd>, an
+// empty status dot) is one box per fragment the browser laid it out in, its
+// getClientRects(), so a chip that wraps is a box on each line. It belongs to
+// the block its text is in, and paints under that block's text: the snapshot
+// walk orders it there and draws no box of its own for the element.
+//
+// Inline boxes. An atomic inline (an inline <svg> or <img>, an inline-block
+// pill or track) leaves a gap in its line that no text box can hold. A line
+// that holds one is cut there: the text on each side of it is a block of its
+// own, one line at its own bounds, so the text after an icon keeps its x
+// instead of sliding into the icon's gap (RC13). The lines around it keep
+// their own block.
+//
 // Runs carry the browser's typography (spec §3 Runs, RC7). It is read from the
 // computed style of the text node's parent element. Three things CSS does not
 // inherit reach a run from further up:
@@ -43,10 +57,14 @@
 //   0.5% carries the difference per character as tracking (task-4 A1).
 //
 // /**
-//  * TextBlock = {order, x,y,w,h, rotate:null, wrap, align:'left'|'center'|'right', rtl,
+//  * InlineGroup = {follows:Element|null, decorations:Decoration[], blocks:TextBlock[]}
+//  *              (page-side only; never in the slide model): one run of a block's
+//  *              inline content. The walk gives every item of it its order.
+//  * Decoration = {style, opacity, boxes}: an inline element's computed style, its
+//  *              cumulative opacity and one box (snapshot.mjs boxGeometry) per fragment.
+//  * TextBlock = {x,y,w,h, rotate:null, wrap, align:'left'|'center'|'right', rtl,
 //  *              paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
-//  *                           lines:[{runs:Run[]}]}],
-//  *              follows:Element|null}   (page-side only; never in the slide model)
+//  *                           lines:[{runs:Run[]}]}]}
 //  * Run = {text, family, weight, italic, sizePx, color:'RRGGBB', letterSpacingPx,
 //  *        underline, strike, baseline:null|'super'|'sub', opticalTrackingPx}
 //  *
@@ -79,7 +97,8 @@
 //   backdropInside  (backdrop, style) -> the backdrop of the content inside that element;
 //   textColour      (backdrop, style) -> 'RRGGBB', the solid colour its text paints;
 //   boxGeometry     (element, rect, frame) -> the element's box | null;
-//   contentBox      (style, box) -> the box inside border and padding | null.
+//   contentBox      (style, box) -> the box inside border and padding | null;
+//   paintsBox       (style, opacity) -> whether the element's box paints anything.
 function createTextLayout(env) {
   const TEXT_NODE = 3;
   const ELEMENT_NODE = 1;
@@ -238,7 +257,12 @@ function createTextLayout(env) {
   //   {kind:'break'}                a <br>;
   //   {kind:'atomic', element}      an atomic inline: it paints its own
   //                                 content (its own block, or a picture)
-  //                                 and gives the run no text.
+  //                                 and gives the run no text;
+  //   {kind:'decoration', element, style, opacity}
+  //                                 a visible inline element whose box paints,
+  //                                 at its cumulative opacity, before the
+  //                                 pieces it holds. It keeps a run with no
+  //                                 text (an empty status dot) a run.
   // display:contents children are transparent: no box, so no opacity,
   // background or decoration of their own. display:none ones are skipped.
   // `walk` is the container's {opacity, backdrop, decoration} from the
@@ -294,7 +318,11 @@ function createTextLayout(env) {
         run.push({ kind: 'atomic', element: node });
       } else if (role === 'inline') {
         const context = inlineContext(frame.context, cs);
-        if (context.opacity > 0) openChildren(stack, node, context, frame.depth + 1);
+        if (!(context.opacity > 0)) continue;
+        if (cs.visibility === 'visible' && env.paintsBox(cs, context.opacity)) {
+          run.push({ kind: 'decoration', element: node, style: cs, opacity: context.opacity });
+        }
+        openChildren(stack, node, context, frame.depth + 1);
       }
       // An out-of-flow child (a float, an absolute box) leaves the line where it
       // is: it is a block of its own and does not split the text around it.
@@ -372,6 +400,13 @@ function createTextLayout(env) {
   function decorationOf(outer, element, s) {
     const role = inlineRole(String(dom.tagName(element) || '').toLowerCase(), s);
     return decorationInside(outer, s, role === 'out-of-flow' || role === 'atomic');
+  }
+
+  // isInlineBox(name, s) -> whether the element (tag name, computed style) is a
+  // non-atomic inline box: its box paints per line fragment, as a decoration
+  // of the block whose text it is in (collectRuns), never as one box of its own.
+  function isInlineBox(name, s) {
+    return inlineRole(name, s) === 'inline';
   }
 
   function baselineShiftOf(s) {
@@ -568,6 +603,91 @@ function createTextLayout(env) {
       }
     }
     return painted;
+  }
+
+  // ─── fragments ───────────────────────────────────────────────────────
+  // An element's box fragments, its getClientRects() as {left, top, width,
+  // height}, in the browser's order. The method, the DOMRectList it returns
+  // and the DOMRects in it are read through the pristine realm (dom_access.mjs),
+  // because page script can replace each of them. An element has one fragment
+  // per line box it lies on, so a list longer than WALK_STEP_LIMIT is a lie:
+  // the read stops there and the loss is announced. Every rect read spends from
+  // the layout's budget. A rect whose values are not finite numbers is dropped.
+  function fragmentsOf(element) {
+    const fragments = [];
+    let list;
+    let reported;
+    try {
+      list = dom.clientRects(element);
+      reported = Number(dom.rectListLength(list));
+    } catch (e) {
+      console.warn('[html2pptx] the box fragments of an inline element could not be read (' +
+        (e && e.message) + '); its box is not in the exported deck');
+      return fragments;
+    }
+    if (!(reported >= 0)) {
+      truncated = true;
+      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'dropped entirely, length read as ' + String(reported), 'the snapshot inline fragments');
+      return fragments;
+    }
+    if (reported > WALK_STEP_LIMIT) {
+      truncated = true;
+      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + WALK_STEP_LIMIT + ' of ' + reported + ' box fragments', 'the snapshot inline fragments');
+    }
+    const length = Math.min(reported, WALK_STEP_LIMIT);
+    if (!spend(length)) return fragments;
+    try {
+      for (let index = 0; index < length; index++) {
+        const rect = dom.rectAt(list, index);
+        if (!rect) continue;
+        const bounds = dom.rectBounds(rect);
+        const fragment = {
+          left: Number(bounds.left),
+          top: Number(bounds.top),
+          width: Number(bounds.width),
+          height: Number(bounds.height),
+        };
+        if (Number.isFinite(fragment.left) && Number.isFinite(fragment.top) &&
+            Number.isFinite(fragment.width) && Number.isFinite(fragment.height)) {
+          fragments.push(fragment);
+        }
+      }
+    } catch (e) {
+      console.warn('[html2pptx] reading the box fragments of an inline element failed (' +
+        (e && e.message) + '); the fragments past that point are not in the exported deck');
+    }
+    return fragments;
+  }
+
+  // The union {left, top, width, height} of fragments, or null for none.
+  function unionOf(fragments) {
+    if (!fragments.length) return null;
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (let index = 0; index < fragments.length; index++) {
+      const fragment = fragments[index];
+      left = Math.min(left, fragment.left);
+      top = Math.min(top, fragment.top);
+      right = Math.max(right, fragment.left + fragment.width);
+      bottom = Math.max(bottom, fragment.top + fragment.height);
+    }
+    return { left, top, width: right - left, height: bottom - top };
+  }
+
+  // An atomic inline's place in its line, {left, top, right, bottom}: the union
+  // of its fragments that have width. Null when it has none, because then it
+  // leaves no gap in the line to cut it at.
+  function atomicRect(element) {
+    const fragments = fragmentsOf(element);
+    const wide = [];
+    for (let index = 0; index < fragments.length; index++) {
+      if (fragments[index].width > 0) wide.push(fragments[index]);
+    }
+    const union = unionOf(wide);
+    if (!union) return null;
+    return { left: union.left, top: union.top, right: union.left + union.width, bottom: union.top + union.height };
   }
 
   // A preserved space token's text: every space a NBSP, so no importer
@@ -802,12 +922,49 @@ function createTextLayout(env) {
     return { runs, extents, rect, lineHeight };
   }
 
-  // layoutInlineRun(nodes, s, scale) -> {lines:[{runs, extents, rect, lineHeight}], rtl} | null
+  // A line that holds an atomic inline, cut at each one: the text between them
+  // as lines of their own, in order, each assembled like a whole line, so the
+  // spaces either side of the atomic are dropped as at a line's ends. Text on
+  // neither side (only spaces, or nothing) is no segment.
+  function segmentsOf(line, lineHeight) {
+    const segments = [];
+    let tokens = [];
+    for (let index = 0; index <= line.tokens.length; index++) {
+      const token = index < line.tokens.length ? line.tokens[index] : null;
+      if (token && token.kind !== 'atomic') {
+        tokens.push(token);
+        continue;
+      }
+      const segment = tokens.length ? assembleLine({ tokens }, lineHeight) : null;
+      if (segment && segment.runs.length) segments.push(segment);
+      tokens = [];
+    }
+    return segments;
+  }
+
+  function holdsAtomic(line) {
+    for (let index = 0; index < line.tokens.length; index++) {
+      if (line.tokens[index].kind === 'atomic') return true;
+    }
+    return false;
+  }
+
+  // A line that paints nothing: a blank line (only breaks make those). A cut
+  // line is never blank, even with no text: it stands where its atomic is.
+  function isBlank(line) {
+    return !line.segments && !line.runs.length;
+  }
+
+  // layoutInlineRun(nodes, s, scale) -> {lines, rtl} | null
   //   nodes  one run's pieces, as collectRuns gathers them;
   //   s      the computed style of the block that holds the run;
   //   scale  the block's cumulative transform scale (font sizes and tracking scale with it).
+  // Each line is {runs, extents, rect, lineHeight}, or {segments} for a line
+  // that holds an atomic inline: its text either side of each atomic, each
+  // segment a line of that first form. An atomic inline is a token with the
+  // rect it fills in its line, so lines cluster around it as around a word.
   // Leading and trailing blank lines paint nothing and are dropped; null when
-  // nothing in the run paints.
+  // no text in the run paints.
   function layoutInlineRun(nodes, s, scale) {
     const rtl = s.direction === 'rtl';
     const range = document.createRange();
@@ -819,21 +976,38 @@ function createTextLayout(env) {
         readTokens(piece, scale, range, tokens, words);
         continue;
       }
-      if (piece.kind === 'break') tokens.push(BREAK);
+      // An inline element's box is no boundary in its text.
+      if (piece.kind === 'decoration') continue;
+      if (piece.kind === 'break') {
+        tokens.push(BREAK);
+      } else if (piece.kind === 'atomic') {
+        const rect = atomicRect(piece.element);
+        if (rect) tokens.push({ kind: 'atomic', rect });
+      }
       // A break or an atomic inline ends the word before it.
       words.previous = '';
     }
     const clustered = clusterLines(tokens, rtl);
+    const lineHeight = String(s.lineHeight);
     const lines = [];
+    let painted = false;
     for (let index = 0; index < clustered.length; index++) {
-      const line = assembleLine(clustered[index], String(s.lineHeight));
-      if (line) lines.push(line);
+      if (holdsAtomic(clustered[index])) {
+        const segments = segmentsOf(clustered[index], lineHeight);
+        if (segments.length) painted = true;
+        lines.push({ segments });
+        continue;
+      }
+      const line = assembleLine(clustered[index], lineHeight);
+      if (!line) continue;
+      if (line.runs.length) painted = true;
+      lines.push(line);
     }
+    if (!painted) return null;
     let first = 0;
     let last = lines.length - 1;
-    while (first <= last && !lines[first].runs.length) first++;
-    while (last >= first && !lines[last].runs.length) last--;
-    if (first > last) return null;
+    while (first <= last && isBlank(lines[first])) first++;
+    while (last >= first && isBlank(lines[last])) last--;
     return { lines: lines.slice(first, last + 1), rtl };
   }
 
@@ -902,9 +1076,15 @@ function createTextLayout(env) {
     return rtl ? 'right' : 'left';
   }
 
-  // The text box of one laid-out run.
-  // * Left-aligned text, and any anonymous flex or grid item (whose own box the
-  //   page never exposes), is placed by its text bounds: the union of its lines.
+  // The text box of one laid-out run, or of the lines of one between cut lines.
+  // `placement` is how its box is found:
+  //   'container'  the element's own text;
+  //   'text'       an anonymous flex or grid item, whose own box the page never
+  //                exposes: placed by its text bounds whatever its alignment;
+  //   'segment'    one segment of a cut line (segmentsOf): placed by its text
+  //                bounds and written from the line's start side, because the
+  //                alignment placed the whole line, not the piece of it.
+  // * Left-aligned text is placed by its text bounds: the union of its lines.
   // * Centred, right-aligned and justified text spans its container's content
   //   box, widened to the text where the text overflows it.
   // * Slack (6% + 4 px) widens the box on the side its alignment grows: right
@@ -919,7 +1099,7 @@ function createTextLayout(env) {
   //   the browser's line breaks: PowerPoint and Google Slides justify a line
   //   to the full box, slack included, so every justified line ran about 35 px
   //   past the browser's (scripts/export_fidelity/CALIBRATION.md, A3).
-  function textBlock(layout, element, s, order, frame, anonymous) {
+  function textBlock(layout, element, s, frame, placement) {
     const lines = layout.lines;
     let left = Infinity;
     let right = -Infinity;
@@ -937,7 +1117,7 @@ function createTextLayout(env) {
     const align = alignmentOf(s, layout.rtl);
     let x = left;
     let w = right - left;
-    if (align !== 'left' && !anonymous) {
+    if (align !== 'left' && placement === 'container') {
       const box = env.boxGeometry(element, element.getBoundingClientRect(), frame);
       const area = box ? env.contentBox(s, box) : null;
       if (area) {
@@ -945,12 +1125,12 @@ function createTextLayout(env) {
         w = Math.max(area.x + area.w, right) - x;
       }
     }
-    const written = align === 'justify' ? (layout.rtl ? 'right' : 'left') : align;
+    const start = layout.rtl ? 'right' : 'left';
+    const written = placement === 'segment' || align === 'justify' ? start : align;
     const extra = w * SLACK_FRACTION + SLACK_PX;
     const shift = written === 'center' ? extra / 2 : written === 'right' ? extra : 0;
     queueRuns(lines, align, frame);
     return {
-      order,
       x: x - shift,
       y: top,
       w: w + extra,
@@ -1113,19 +1293,77 @@ function createTextLayout(env) {
     }
   }
 
-  // collectTextBlocks(el, s, paint, seq, walk) -> TextBlock[]
+  // The text blocks of one laid-out run, appended to `blocks` in order. Each cut
+  // line gives one block per segment; the lines between cut lines are a block
+  // together, less the blank lines at its ends, which paint nothing there.
+  function blocksOf(layout, element, s, frame, placement, blocks) {
+    let pending = [];
+    const flush = () => {
+      let first = 0;
+      let last = pending.length - 1;
+      while (first <= last && isBlank(pending[first])) first++;
+      while (last >= first && isBlank(pending[last])) last--;
+      if (first <= last) {
+        const block = textBlock({ lines: pending.slice(first, last + 1), rtl: layout.rtl }, element, s, frame, placement);
+        if (block) blocks.push(block);
+      }
+      pending = [];
+    };
+    for (let index = 0; index < layout.lines.length; index++) {
+      const line = layout.lines[index];
+      if (!line.segments) {
+        pending.push(line);
+        continue;
+      }
+      flush();
+      for (let segment = 0; segment < line.segments.length; segment++) {
+        const block = textBlock({ lines: [line.segments[segment]], rtl: layout.rtl }, element, s, frame, 'segment');
+        if (block) blocks.push(block);
+      }
+    }
+    flush();
+  }
+
+  // The decorations of one run, in DOM order: one box per fragment that has
+  // area. Under a rotation the fragments' rects bound the turned fragments,
+  // not their boxes, so the element is one box: its unrotated offset size,
+  // centred on the union of its fragments (boxGeometry), as getBoundingClientRect
+  // would bound it.
+  function decorationsOf(nodes, frame) {
+    const decorations = [];
+    for (let index = 0; index < nodes.length; index++) {
+      const piece = nodes[index];
+      if (piece.kind !== 'decoration') continue;
+      const fragments = fragmentsOf(piece.element);
+      const painted = [];
+      for (let fragment = 0; fragment < fragments.length; fragment++) {
+        if (fragments[fragment].width > 0 && fragments[fragment].height > 0) painted.push(fragments[fragment]);
+      }
+      const rects = frame.angle && painted.length ? [unionOf(painted)] : painted;
+      const boxes = [];
+      for (let rect = 0; rect < rects.length; rect++) {
+        const box = env.boxGeometry(piece.element, rects[rect], frame);
+        if (box) boxes.push(box);
+      }
+      if (boxes.length) decorations.push({ style: piece.style, opacity: piece.opacity, boxes });
+    }
+    return decorations;
+  }
+
+  // collectTextBlocks(el, s, walk) -> InlineGroup[]
   //   el, s   the element the snapshot walk is visiting and its computed style;
-  //   paint   its paint-order prefix; its text paints at paint + [4, 0, seq, 1],
-  //           inline content of its layer, above any decoration (sub 0) of the block;
   //   walk    {opacity, frame, backdrop, decoration}: its cumulative opacity, its
   //           transform frame, the backdrop of its content (backdropInside) and
   //           the decorations on its text (decorationOf).
-  // A block that comes after a block-level child also names that child in
-  // `follows`: in tree order it paints after the child's whole subtree, which
-  // only the walk can place, so the walk re-sequences it there.
+  // One group per run of its inline content that paints: the run's decorations
+  // and its text blocks. The walk orders them: every decoration of the group
+  // under every text block of it (snapshot.mjs pushGroup). A group that comes
+  // after a block-level child also names that child in `follows`: in tree order
+  // it paints after the child's whole subtree, which only the walk can place,
+  // so the walk re-sequences it there.
   // The text of an inline element belongs to the block that contains it, so an
   // inline element, a replaced element or a box-less one holds no block of its own.
-  function collectTextBlocks(el, s, paint, seq, walk) {
+  function collectTextBlocks(el, s, walk) {
     const name = String(dom.tagName(el) || '').toLowerCase();
     const display = String(s.display);
     if (env.replaced.has(name) || display === 'inline' || display === 'none' ||
@@ -1134,22 +1372,23 @@ function createTextLayout(env) {
     }
     const itemsAreBlocks = /flex|grid/.test(display);
     const runs = collectRuns(el, s, walk, itemsAreBlocks);
-    const blocks = [];
+    const groups = [];
     for (let index = 0; index < runs.length; index++) {
+      const decorations = decorationsOf(runs[index].nodes, walk.frame);
+      const blocks = [];
       const layout = layoutInlineRun(runs[index].nodes, s, walk.frame.scale);
-      if (!layout) continue;
-      const block = textBlock(layout, el, s, paint.concat([4, 0, seq, 1]), walk.frame, itemsAreBlocks);
-      if (!block) continue;
-      block.follows = runs[index].follows;
-      blocks.push(block);
+      if (layout) blocksOf(layout, el, s, walk.frame, itemsAreBlocks ? 'text' : 'container', blocks);
+      if (!decorations.length && !blocks.length) continue;
+      groups.push({ follows: runs[index].follows, decorations, blocks });
     }
-    return blocks;
+    return groups;
   }
 
   return {
     applyMetrics,
     collectTextBlocks,
     decorationOf,
+    isInlineBox,
     layoutInlineRun,
     loadedFonts,
     truncated: () => truncated,

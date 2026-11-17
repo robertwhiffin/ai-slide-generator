@@ -572,6 +572,15 @@ async function snapshotPage(config) {
     return /\btext\b/.test(String(s.backgroundClip || '')) || /\btext\b/.test(String(s.webkitBackgroundClip || ''));
   }
 
+  // Whether an element's box paints anything emitBox draws: a fill, a uniform
+  // border or an outer shadow, at its cumulative opacity. Its geometry changes
+  // none of the three, so an untransformed unit box stands in for it.
+  const UNIT_BOX = { scale: 1, rotate: null };
+  function paintsBox(s, opacity) {
+    return Boolean((!clipsToText(s) && paintedColour(s.backgroundColor, opacity)) ||
+      uniformBorder(s, opacity, UNIT_BOX.scale) || outerShadow(s.boxShadow, opacity, UNIT_BOX));
+  }
+
   // A painted box becomes a shape: background colour, uniform border and outer
   // shadow. The slide root's ground is the slide background (BG_TRANSFER put
   // it on body), so its fill and shadow are never painted a second time here.
@@ -678,14 +687,15 @@ async function snapshotPage(config) {
   }
 
   // ─── text ────────────────────────────────────────────────────────────
-  // Each element the walk visits holds the text blocks of its own inline
-  // content (snapshot_text.mjs); an inline element's text belongs to its block.
-  // Text before the element's first block-level child is emitted at the
-  // element's visit, at its sequence. Text after a block-level child comes, in
-  // tree order, after that child's whole subtree, so it waits until the walk
-  // leaves the subtree and takes the sequence half-way between the subtree's
-  // last element and the next one: its paint order and its id both follow the
-  // document.
+  // Each element the walk visits holds the inline groups of its own inline
+  // content (snapshot_text.mjs): each run's decorations (the boxes of its
+  // inline elements, per line fragment) and text blocks. An inline element's
+  // text and box belong to its block. A group before the element's first
+  // block-level child is emitted at the element's visit, at its sequence. A
+  // group after a block-level child comes, in tree order, after that child's
+  // whole subtree, so it waits until the walk leaves the subtree and takes the
+  // sequence half-way between the subtree's last element and the next one:
+  // its paint order and its ids both follow the document.
   const textLayout = createTextLayout({
     replaced: REPLACED,
     opacityOf,
@@ -693,8 +703,9 @@ async function snapshotPage(config) {
     textColour,
     boxGeometry,
     contentBox,
+    paintsBox,
   });
-  // follows element -> its waiting {block, paint} entries, and every entry in the
+  // follows element -> its waiting {group, paint} entries, and every entry in the
   // order it was collected (the Map is only ever read by key).
   const waitingText = new Map();
   const waitingInOrder = [];
@@ -706,25 +717,47 @@ async function snapshotPage(config) {
     stats.texts++;
   }
 
+  // One group at its block's place in the inline content layer (4) of `paint`:
+  // each decoration at paint + [4, 0, blockSeq, 0, elSeq], every fragment of
+  // it, then each text block at paint + [4, 0, blockSeq, 1]. So a block's
+  // decorations paint over every block background of their stacking context
+  // and under that block's own text, as CSS paints inline content (CSS 2.1
+  // Appendix E, step 7 after step 4). elSeq is the decoration's place in DOM
+  // order among its block's decorations, which orders them as the walk's own
+  // sequence numbers would: both follow the document, and no other key of the
+  // slide compares with it.
+  function pushGroup(group, paint, blockSeq) {
+    for (let index = 0; index < group.decorations.length; index++) {
+      const decoration = group.decorations[index];
+      for (let fragment = 0; fragment < decoration.boxes.length; fragment++) {
+        emitBox(decoration.style, decoration.boxes[fragment], decoration.opacity,
+          paint.concat([4, 0, blockSeq, 0, index]), false);
+      }
+    }
+    for (let index = 0; index < group.blocks.length; index++) {
+      pushText({ ...group.blocks[index], order: paint.concat([4, 0, blockSeq, 1]) });
+    }
+  }
+
   function releaseText(entry, lastSeq) {
     if (entry.released) return;
     entry.released = true;
-    pushText({ ...entry.block, order: entry.paint.concat([4, 0, lastSeq + 0.5, 1]) });
+    pushGroup(entry.group, entry.paint, lastSeq + 0.5);
   }
 
-  // The element's text blocks, as items now or waiting for the subtree they follow.
+  // The element's inline groups, as items now or waiting for the subtree they follow.
   function collectText(element, s, paint, seq, walk) {
-    const blocks = textLayout.collectTextBlocks(element, s, paint, seq, walk);
-    for (let index = 0; index < blocks.length; index++) {
-      const { follows, ...block } = blocks[index];
-      if (!follows) {
-        pushText(block);
+    const groups = textLayout.collectTextBlocks(element, s, walk);
+    for (let index = 0; index < groups.length; index++) {
+      const group = groups[index];
+      if (!group.follows) {
+        pushGroup(group, paint, seq);
         continue;
       }
-      const entry = { block, paint, released: false };
-      const waiting = waitingText.get(follows);
+      const entry = { group, paint, released: false };
+      const waiting = waitingText.get(group.follows);
       if (waiting) waiting.push(entry);
-      else waitingText.set(follows, [entry]);
+      else waitingText.set(group.follows, [entry]);
       waitingInOrder.push(entry);
     }
   }
@@ -788,7 +821,10 @@ async function snapshotPage(config) {
     const replaced = REPLACED.has(name);
     const place = placement(s, state.layoutStyle, state.ctx, state.paint, seq, replaced);
     const frame = frameOf(s, state.frame);
-    if (s.visibility === 'visible') {
+    // An inline box paints one box per line fragment, under its block's text:
+    // the text layout collects it with that block (pushGroup), so its bounding
+    // rect, which spans every line it is on, is never a box of its own.
+    if (s.visibility === 'visible' && !textLayout.isInlineBox(name, s)) {
       const box = boxGeometry(element, element.getBoundingClientRect(), frame);
       if (box) {
         emitBox(s, box, opacity, place.box, element === slideRoot);

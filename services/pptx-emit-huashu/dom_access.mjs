@@ -69,6 +69,15 @@ export const DOM_ACCESS_SOURCE = `
       const docQueryAll = realm.Document.prototype.querySelectorAll;
       const elQuery = realm.Element.prototype.querySelector;
       const elQueryAll = realm.Element.prototype.querySelectorAll;
+      // An element's box fragments. Even through the pristine method the DOMRectList and its DOMRects
+      // are the page realm's objects, whose length, item and rect getters page script can replace, so those are captured too.
+      const clientRects = realm.Element.prototype.getClientRects;
+      const rectListLength = describe(realm.DOMRectList.prototype, 'length');
+      const rectListItem = realm.DOMRectList.prototype.item;
+      const rectLeft = describe(realm.DOMRectReadOnly.prototype, 'left');
+      const rectTop = describe(realm.DOMRectReadOnly.prototype, 'top');
+      const rectWidth = describe(realm.DOMRectReadOnly.prototype, 'width');
+      const rectHeight = describe(realm.DOMRectReadOnly.prototype, 'height');
       if (typeof firstChild.get !== 'function' ||
           typeof nextSibling.get !== 'function' ||
           typeof tag.get !== 'function' ||
@@ -81,7 +90,14 @@ export const DOM_ACCESS_SOURCE = `
           typeof docQuery !== 'function' ||
           typeof docQueryAll !== 'function' ||
           typeof elQuery !== 'function' ||
-          typeof elQueryAll !== 'function') return null;
+          typeof elQueryAll !== 'function' ||
+          typeof clientRects !== 'function' ||
+          typeof rectListLength.get !== 'function' ||
+          typeof rectListItem !== 'function' ||
+          typeof rectLeft.get !== 'function' ||
+          typeof rectTop.get !== 'function' ||
+          typeof rectWidth.get !== 'function' ||
+          typeof rectHeight.get !== 'function') return null;
       return {
         pristine: true,
         firstElementChild: (el) => firstChild.get.call(el),
@@ -98,6 +114,15 @@ export const DOM_ACCESS_SOURCE = `
         documentQuerySelectorAll: (selector) => docQueryAll.call(document, selector),
         elementQuerySelector: (el, selector) => elQuery.call(el, selector),
         elementQuerySelectorAll: (el, selector) => elQueryAll.call(el, selector),
+        clientRects: (el) => clientRects.call(el),
+        rectListLength: (list) => rectListLength.get.call(list),
+        rectAt: (list, index) => rectListItem.call(list, index),
+        rectBounds: (rect) => ({
+          left: rectLeft.get.call(rect),
+          top: rectTop.get.call(rect),
+          width: rectWidth.get.call(rect),
+          height: rectHeight.get.call(rect),
+        }),
       };
     } catch (e) {
       return null;
@@ -125,6 +150,10 @@ export const DOM_ACCESS_SOURCE = `
     documentQuerySelectorAll: (selector) => document.querySelectorAll(selector),
     elementQuerySelector: (el, selector) => el.querySelector(selector),
     elementQuerySelectorAll: (el, selector) => el.querySelectorAll(selector),
+    clientRects: (el) => el.getClientRects(),
+    rectListLength: (list) => list.length,
+    rectAt: (list, index) => list[index],
+    rectBounds: (rect) => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height }),
   };
 
   // One capture per pass, made on first use, so no pass re-enters the iframe per call.

@@ -683,10 +683,13 @@ class TestSnapshotLineSpacing:
         """RC6: fixture 01's slide expresses line spacing as percentages only.
 
         It carries ``<a:lnSpc>`` (the multi-line cover title needs one), every
-        ``<a:lnSpc>`` holds an ``<a:spcPct>``, and no ``<a:spcPts>`` appears
-        anywhere in the slide: Drive converts exact points into a percentage
-        of the natural line height and mis-scales them (22.5 pt on 13.5 pt
-        became 166%).
+        ``<a:lnSpc>`` holds an ``<a:spcPct>``, and no ``<a:lnSpc>`` holds an
+        ``<a:spcPts>``: Drive converts exact-point line spacing into a
+        percentage of the natural line height and mis-scales it (22.5 pt on
+        13.5 pt became 166%). Space before a paragraph is another matter:
+        ruling R2 writes a loosely spaced block's leading beyond single as
+        ``<a:spcBef><a:spcPts>``, which both renderers honour, so only
+        ``<a:lnSpc>`` is held to percentages.
         """
         root = slide_xml(corpus_pptx, 0)
         spacings = _line_spacing_elements(root)
@@ -695,11 +698,9 @@ class TestSnapshotLineSpacing:
             "fixture 01's slide has no <a:lnSpc> at all: its two-line cover title must carry "
             "percentage line spacing"
         )
-        in_points = root.findall(".//a:spcPts", NAMESPACES)
-        assert not in_points, "the slide writes exact points: " + ", ".join(
-            f"<a:{etree.QName(element.getparent()).localname}><a:spcPts "
-            f"val={element.get('val')!r}/>"
-            for element in in_points
+        in_points = root.findall(".//a:lnSpc/a:spcPts", NAMESPACES)
+        assert not in_points, "the slide writes line spacing in exact points: " + ", ".join(
+            f"<a:lnSpc><a:spcPts val={element.get('val')!r}/>" for element in in_points
         )
         not_percent = [
             element for element in spacings if element.find("a:spcPct", NAMESPACES) is None
