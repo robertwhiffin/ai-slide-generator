@@ -344,6 +344,7 @@ CORPUS_TITLE_TEXT = "Three drivers explain the margin step-up"
 # Fixture 09's list: the chip line, the footnote marker line and the italic line.
 CHIP_LINE = "Mix shift"
 CHIP_TEXT = "SKU-7"
+CHIP_SENTENCE_REST = "now 31% of revenue"
 FOOTNOTE_LINE = "Operating leverage"
 FOOTNOTE_MARKER = "1"
 ITALIC_LINE = "Interest expense fell as"
@@ -742,17 +743,22 @@ class TestSnapshotRunInheritance:
 
         The ``SKU-7`` run is typeface ``DM Mono`` (the chip's ``var(--mono)``)
         while the sentence around it stays ``DM Sans``: the family is per run,
-        so mono numerals never turn sans.
+        so mono numerals never turn sans. The chip's padding cuts its line into
+        items of their own (Task 5, coordinator ruling on concern 1), so the
+        chip's run is in its own item and the sentence's are in the items of
+        its two lines.
         """
-        box = _box(_corpus_shapes(corpus_pptx, "09"), CHIP_LINE)
+        shapes = _corpus_shapes(corpus_pptx, "09")
+        chip = _box(shapes, CHIP_TEXT)
 
-        assert _run(box, CHIP_TEXT).typeface == "DM Mono", (
-            f"the {CHIP_TEXT} chip is not DM Mono:\n{_box_runs(box)}"
+        assert _run(chip, CHIP_TEXT).typeface == "DM Mono", (
+            f"the {CHIP_TEXT} chip is not DM Mono:\n{_box_runs(chip)}"
         )
         sans = [
             _describe_run(run)
+            for box in (_box(shapes, CHIP_LINE), _box(shapes, CHIP_SENTENCE_REST))
             for run in _runs(box)
-            if CHIP_TEXT not in run.text and run.text.strip() and run.typeface != "DM Sans"
+            if run.text.strip() and run.typeface != "DM Sans"
         ]
         assert not sans, "the sentence around the chip is not DM Sans:\n  " + "\n  ".join(sans)
 

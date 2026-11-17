@@ -35,7 +35,10 @@
 // that holds one is cut there: the text on each side of it is a block of its
 // own, one line at its own bounds, so the text after an icon keeps its x
 // instead of sliding into the icon's gap (RC13). The lines around it keep
-// their own block.
+// their own block. An inline element whose horizontal margin, border and
+// padding take space (a chip, a <kbd>) leaves such gaps too, at either end of
+// it, so its line is cut at both ends the same way: its own text is a
+// segment, inside its decoration, and the text after it keeps its x.
 //
 // Runs carry the browser's typography (spec §3 Runs, RC7). It is read from the
 // computed style of the text node's parent element. Three things CSS does not
@@ -141,6 +144,11 @@ function createTextLayout(env) {
     'letterSpacingPx', 'underline', 'strike', 'baseline',
   ];
   const BREAK = { kind: 'break' };
+  // Either edge of an inline element whose horizontal margin, border and padding
+  // add up to more than this moves the text after it by more than a renderer's
+  // own rounding, so the element is a cut in its line (collectRuns).
+  const INLINE_EDGE_PX = 0.5;
+  const EDGE = { kind: 'edge' };
   // Chrome's default tab-size; a computed length instead of a count falls back to it.
   const DEFAULT_TAB_SIZE = 8;
   // A generic family keyword or a system alias names no face an importer can
@@ -224,18 +232,36 @@ function createTextLayout(env) {
   //   backdrop    what it is composited over (snapshot.mjs backdropInside);
   //   decoration  {underline, strike} propagated to it;
   //   baseline    'super' | 'sub' from an inline ancestor's vertical-align, else null.
-  function openChildren(stack, node, context, depth) {
+  // `closesWith` is a piece the run takes once the node's children are done, or
+  // null. Returns whether the children were opened.
+  function openChildren(stack, node, context, depth, closesWith) {
     if (depth > WALK_STEP_LIMIT) {
       if (!truncated) {
         truncated = true;
         reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'cut at depth ' + WALK_STEP_LIMIT, 'the snapshot text layout');
       }
-      return;
+      return false;
     }
-    if (budget <= 0) return;
+    if (budget <= 0) return false;
     const nodes = childNodesOf(node);
-    if (!spend(nodes.length)) return;
-    stack.push({ nodes, index: 0, context, depth });
+    if (!spend(nodes.length)) return false;
+    stack.push({ nodes, index: 0, context, depth, closesWith: closesWith || null });
+    return true;
+  }
+
+  // The horizontal space an inline element takes on one side of what it holds:
+  // its margin, border and padding there (a border with no style computes to 0).
+  function inlineEdge(cs, side) {
+    return (parseFloat(cs['margin' + side]) || 0) + (parseFloat(cs['border' + side + 'Width']) || 0) +
+      (parseFloat(cs['padding' + side]) || 0);
+  }
+
+  // Whether an inline element's edges move the text around it: PowerPoint and
+  // Google Slides lay a paragraph's runs out with no room for them, so the text
+  // inside a chip would start at its left edge and the text after it slide left
+  // into it.
+  function hasInlineEdges(cs) {
+    return Math.abs(inlineEdge(cs, 'Left')) > INLINE_EDGE_PX || Math.abs(inlineEdge(cs, 'Right')) > INLINE_EDGE_PX;
   }
 
   // The context inside an inline child element. Its own opacity, background,
@@ -262,7 +288,11 @@ function createTextLayout(env) {
   //                                 a visible inline element whose box paints,
   //                                 at its cumulative opacity, before the
   //                                 pieces it holds. It keeps a run with no
-  //                                 text (an empty status dot) a run.
+  //                                 text (an empty status dot) a run;
+  //   {kind:'edge'}                 either end of an inline element with
+  //                                 edges (hasInlineEdges): one before the
+  //                                 pieces it holds and one after, so its line
+  //                                 is cut there, as at an atomic inline.
   // display:contents children are transparent: no box, so no opacity,
   // background or decoration of their own. display:none ones are skipped.
   // `walk` is the container's {opacity, backdrop, decoration} from the
@@ -284,6 +314,7 @@ function createTextLayout(env) {
       const frame = stack[stack.length - 1];
       if (frame.index >= frame.nodes.length) {
         stack.pop();
+        if (frame.closesWith) run.push(frame.closesWith);
         continue;
       }
       const node = frame.nodes[frame.index++];
@@ -318,11 +349,17 @@ function createTextLayout(env) {
         run.push({ kind: 'atomic', element: node });
       } else if (role === 'inline') {
         const context = inlineContext(frame.context, cs);
-        if (!(context.opacity > 0)) continue;
-        if (cs.visibility === 'visible' && env.paintsBox(cs, context.opacity)) {
-          run.push({ kind: 'decoration', element: node, style: cs, opacity: context.opacity });
+        // Its edges take their space even where nothing of it shows, so they
+        // cut the line whatever its opacity or visibility.
+        const edged = hasInlineEdges(cs);
+        if (edged) run.push(EDGE);
+        if (context.opacity > 0) {
+          if (cs.visibility === 'visible' && env.paintsBox(cs, context.opacity)) {
+            run.push({ kind: 'decoration', element: node, style: cs, opacity: context.opacity });
+          }
+          if (openChildren(stack, node, context, frame.depth + 1, edged ? EDGE : null)) continue;
         }
-        openChildren(stack, node, context, frame.depth + 1);
+        if (edged) run.push(EDGE);
       }
       // An out-of-flow child (a float, an absolute box) leaves the line where it
       // is: it is a block of its own and does not split the text around it.
@@ -718,7 +755,7 @@ function createTextLayout(env) {
   // nothing (a joiner, a combining mark) travels with its neighbour, so no
   // character is lost. Each code point is cased after the one before it, so a
   // word that wraps at its hyphen capitalises as it would on one line.
-  //   source    one text node's {node, data, mode, style, tabSize, transform};
+  //   source    one text node's {node, data, mode, style, tabSize, transform, segment};
   //   previous  the character before the token (casedText).
   function splitToken(source, start, end, space, previous, range, tokens) {
     const pieces = [];
@@ -741,6 +778,7 @@ function createTextLayout(env) {
       }
       pieces.push({
         kind: 'text', text: pending + text, rect: rects[0], style: source.style, face: source.face, collapsible: false, tabSize: source.tabSize,
+        segment: source.segment,
       });
       pending = '';
     }
@@ -760,13 +798,18 @@ function createTextLayout(env) {
         splitToken(source, start, end, space, previous, range, tokens)) {
       return;
     }
-    tokens.push({ kind: 'text', text, rect: rects[0], style: source.style, face: source.face, collapsible, tabSize: source.tabSize });
+    tokens.push({
+      kind: 'text', text, rect: rects[0], style: source.style, face: source.face, collapsible, tabSize: source.tabSize,
+      segment: source.segment,
+    });
   }
 
   // Word and space tokens of one text node, plus a break for each preserved
   // newline. `words.previous` is the character the next token follows
   // (casedText); it carries over from one text node to the next, hidden ones
-  // included, because they are still in the text.
+  // included, because they are still in the text. `words.segment` counts the
+  // inline edges crossed so far: every token carries it, and a line is cut
+  // where it changes (segmentsOf).
   function readTokens(piece, scale, range, tokens, words) {
     const ps = piece.context.style;
     // A hidden text node keeps its place in the layout, line breaks included,
@@ -785,6 +828,7 @@ function createTextLayout(env) {
       face: probeFaceOf(ps, style.family, scale),
       tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
       transform: String(ps.textTransform || 'none'),
+      segment: words.segment,
     };
     let start = 0;
     while (start < length) {
@@ -922,29 +966,36 @@ function createTextLayout(env) {
     return { runs, extents, rect, lineHeight };
   }
 
-  // A line that holds an atomic inline, cut at each one: the text between them
-  // as lines of their own, in order, each assembled like a whole line, so the
-  // spaces either side of the atomic are dropped as at a line's ends. Text on
-  // neither side (only spaces, or nothing) is no segment.
+  // A cut line (isCut), cut at each atomic inline and at each inline edge: the
+  // text between the cuts as lines of their own, in order, each assembled like
+  // a whole line, so the spaces either side of a cut are dropped as at a line's
+  // ends. Text between two cuts that is only spaces, or nothing, is no segment.
   function segmentsOf(line, lineHeight) {
     const segments = [];
     let tokens = [];
     for (let index = 0; index <= line.tokens.length; index++) {
       const token = index < line.tokens.length ? line.tokens[index] : null;
-      if (token && token.kind !== 'atomic') {
-        tokens.push(token);
-        continue;
+      const cut = !token || token.kind === 'atomic' ||
+        (tokens.length && token.segment !== tokens[tokens.length - 1].segment);
+      if (cut && tokens.length) {
+        const segment = assembleLine({ tokens }, lineHeight);
+        if (segment && segment.runs.length) segments.push(segment);
+        tokens = [];
       }
-      const segment = tokens.length ? assembleLine({ tokens }, lineHeight) : null;
-      if (segment && segment.runs.length) segments.push(segment);
-      tokens = [];
+      if (token && token.kind !== 'atomic') tokens.push(token);
     }
     return segments;
   }
 
-  function holdsAtomic(line) {
+  // Whether a line is cut: it holds an atomic inline, or text on both sides of
+  // an inline edge (its tokens' segments differ).
+  function isCut(line) {
+    let segment = null;
     for (let index = 0; index < line.tokens.length; index++) {
-      if (line.tokens[index].kind === 'atomic') return true;
+      const token = line.tokens[index];
+      if (token.kind === 'atomic') return true;
+      if (segment !== null && token.segment !== segment) return true;
+      segment = token.segment;
     }
     return false;
   }
@@ -959,25 +1010,30 @@ function createTextLayout(env) {
   //   nodes  one run's pieces, as collectRuns gathers them;
   //   s      the computed style of the block that holds the run;
   //   scale  the block's cumulative transform scale (font sizes and tracking scale with it).
-  // Each line is {runs, extents, rect, lineHeight}, or {segments} for a line
-  // that holds an atomic inline: its text either side of each atomic, each
-  // segment a line of that first form. An atomic inline is a token with the
-  // rect it fills in its line, so lines cluster around it as around a word.
+  // Each line is {runs, extents, rect, lineHeight}, or {segments} for a cut
+  // line (isCut): its text between the atomic inlines and inline edges on it,
+  // each segment a line of that first form. An atomic inline is a token with
+  // the rect it fills in its line, so lines cluster around it as around a
+  // word; an inline edge moves no token, it only starts a new segment.
   // Leading and trailing blank lines paint nothing and are dropped; null when
   // no text in the run paints.
   function layoutInlineRun(nodes, s, scale) {
     const rtl = s.direction === 'rtl';
     const range = document.createRange();
     const tokens = [];
-    const words = { previous: '' };
+    const words = { previous: '', segment: 0 };
     for (let index = 0; index < nodes.length; index++) {
       const piece = nodes[index];
       if (piece.kind === 'text') {
         readTokens(piece, scale, range, tokens, words);
         continue;
       }
-      // An inline element's box is no boundary in its text.
+      // An inline element's box and its edges are no word boundary in its text.
       if (piece.kind === 'decoration') continue;
+      if (piece.kind === 'edge') {
+        words.segment++;
+        continue;
+      }
       if (piece.kind === 'break') {
         tokens.push(BREAK);
       } else if (piece.kind === 'atomic') {
@@ -992,7 +1048,7 @@ function createTextLayout(env) {
     const lines = [];
     let painted = false;
     for (let index = 0; index < clustered.length; index++) {
-      if (holdsAtomic(clustered[index])) {
+      if (isCut(clustered[index])) {
         const segments = segmentsOf(clustered[index], lineHeight);
         if (segments.length) painted = true;
         lines.push({ segments });
