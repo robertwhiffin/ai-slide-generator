@@ -675,7 +675,9 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
         matched = first_task_at(t)
         first = override or (matched.ts if matched else None)
         if first is None:
-            print(f"build-metrics: PR {entry['pr']}: no task dispatch in {session}", file=sys.stderr)
+            print(
+                f"build-metrics: PR {entry['pr']}: no task dispatch in {session}", file=sys.stderr
+            )
             return 2
         pull = fetch_pr(entry["pr"])
         handover = baseline_handover(pull, t)
@@ -689,7 +691,10 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
             first_task=first,
         )
         records.append(rec)
-        what = "(first_task_at override)" if override or matched is None else repr(matched.description)
+        if override or matched is None:
+            what = "(first_task_at override)"
+        else:
+            what = repr(matched.description)
         print(
             f"PR {rec.pr}: first dispatch {what}; first task {_iso(first)}; "
             f"handover {_iso(handover)}; ${sum(rec.cost_usd.values()):.2f}"
