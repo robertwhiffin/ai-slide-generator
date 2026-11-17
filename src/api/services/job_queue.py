@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.services.generation_fence import TurnStopped
-from src.services.model_calls import set_turn_deadline
+from src.services.model_calls import model_fault_kind, set_turn_deadline
 from src.services.persisted_graph_release import PersistedRuntimeError
 
 logger = logging.getLogger(__name__)
@@ -210,7 +210,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     A graph request (an Agent deck's turn, ``engine_mode == "graph"``) is
     all-or-nothing: it starts only if it is still ``pending`` (a stop while it
     was queued already rolled it back), completes only while it is still live,
-    and a failure rolls back its generation snapshot.  Every other request (a
+    and a failure rolls back its generation snapshot and records the kind of
+    model fault that ended it (best-effort).  Every other request (a
     Legacy deck's, every MCP job) takes the path it always has.
 
     Args:
@@ -359,7 +360,7 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
             "Chat job ended: its turn was stopped", extra={"request_id": request_id}
         )
 
-    except _PinnedGraphConfigurationTerminalError:
+    except _PinnedGraphConfigurationTerminalError as exc:
         if not is_graph:
             session_manager.update_chat_request_status(
                 request_id,
@@ -377,6 +378,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
             )
         else:
             session_manager.fail_chat_request(request_id, PINNED_GRAPH_CONFIGURATION_ERROR)
+        if is_graph:
+            _record_fault_kind(session_manager, request_id, exc)
 
     except Exception as e:
         logger.error(f"Job failed: {e}", extra={"request_id": request_id})
@@ -393,6 +396,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
             # No snapshot: a stop (or another rollback) has already ended the
             # turn, and its status must not be overwritten.
             session_manager.fail_chat_request(request_id, str(e))
+        if is_graph:
+            _record_fault_kind(session_manager, request_id, e)
         raise
 
     finally:
@@ -408,6 +413,21 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
             session_manager.release_session_lock(session_id, request_id=request_id)
         # Clean up in-memory tracking
         jobs.pop(request_id, None)
+
+
+def _record_fault_kind(session_manager: Any, request_id: str, exc: BaseException) -> None:
+    """Best-effort: record the kind of model fault that ended a failed graph turn.
+
+    Never raises, so it cannot mask the error the caller is handling.
+    """
+    try:
+        session_manager.set_chat_request_fault_kind(request_id, model_fault_kind(exc))
+    except Exception:
+        logger.warning(
+            "Could not record the model fault kind of request %s",
+            request_id,
+            exc_info=True,
+        )
 
 
 def _snapshot_survives(request_id: str) -> bool:

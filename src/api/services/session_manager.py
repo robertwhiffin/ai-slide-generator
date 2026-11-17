@@ -4495,6 +4495,9 @@ class SessionManager:
     ) -> None:
         """Update request status (pending/running/completed/error).
 
+        Moving to ``running`` stamps ``started_at`` when it is still NULL; no
+        other status sets it.
+
         Args:
             request_id: Request ID to update
             status: New status
@@ -4512,10 +4515,27 @@ class SessionManager:
                 return
 
             chat_request.status = status
+            if status == "running" and chat_request.started_at is None:
+                chat_request.started_at = datetime.utcnow()
             if error:
                 chat_request.error_message = error
             if status in ("completed", "error"):
                 chat_request.completed_at = datetime.utcnow()
+
+    def set_chat_request_fault_kind(self, request_id: str, kind: str) -> None:
+        """Record which model fault ended a failed Agent turn.
+
+        Conditional on ``status = 'error'``: a stopped or cancelled row is never
+        written, and an unknown id writes nothing and raises nothing.
+        """
+        with get_db_session() as db:
+            db.execute(
+                text(
+                    "UPDATE chat_requests SET model_fault_kind = :kind "
+                    "WHERE request_id = :rid AND status = 'error'"
+                ),
+                {"kind": kind, "rid": request_id},
+            )
 
     def set_chat_request_result(
         self, request_id: str, result: Optional[dict]

@@ -1136,8 +1136,21 @@ def test_forced_failure_mid_build_rolls_back(stop_env):
     ][:2] == [built_html("A2"), built_html("D")], "the failure was not mid-build"
 
     after = stop.tables()
+    # Read just before the rollback, so after the start: it carries started_at.
+    # The job writes the fault kind after the rollback; a 403 is not transient.
+    started_at = _one(at_turn_end["chat_requests"], request_id=rid).get(
+        "started_at", "<no started_at column>"
+    )
+    assert isinstance(started_at, datetime), f"the graph ran with started_at {started_at!r}"
+    expected_turn_end = dict(
+        at_turn_end,
+        chat_requests=[
+            dict(r, model_fault_kind="not_transient") if r["request_id"] == rid else r
+            for r in at_turn_end["chat_requests"]
+        ],
+    )
     _assert_rolled_back_to_enter(
-        stop.rb, before, at_turn_end, after,
+        stop.rb, before, expected_turn_end, after,
         rid=rid, actor_sid=sid, owner_sid=sid,
         terminal_status="error", error_message=PINNED_GRAPH_CONFIGURATION_ERROR,
         deck_existed=True,
