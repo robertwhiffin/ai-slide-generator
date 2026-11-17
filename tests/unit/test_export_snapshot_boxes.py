@@ -14,9 +14,12 @@ and emits each painted box as a native shape:
 * the slide root's background is the slide's ``<p:bg>``, not a slide-sized
   shape on top of it;
 * shapes follow CSS painting order (z-index, negative z-index, atomic flex
-  items), not DOM order;
+  items, atomic floats), not DOM order;
 * entrance animations are finished before the snapshot, so a fade-in exports
-  its settled, opaque state (Review Focus 2).
+  its settled, opaque state (Review Focus 2);
+* the page is read as the browser laid it out: none of the legacy
+  preprocess's DOM-mutating passes runs before the snapshot, so a monospace
+  code panel keeps each line's own box (PLAN-CORRECTIONS C1).
 
 Every assertion reads the emitted slide XML (``slide_shapes``) and, where the
 geometry matters, compares it with the browser's own layout of the very same
@@ -297,6 +300,32 @@ class TestSnapshotBoxes:
                 "a finished fade-in is fully opaque"
             )
 
+    def test_code_panel_lines_keep_their_own_boxes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """PLAN-CORRECTIONS C1: no layout-mutating preprocess pass runs before the snapshot.
+
+        A monospace panel holding one ``<div>`` per code line is exactly what the
+        legacy ``flattenMonospaceCodeBlocks`` collapses into a single ``<p>``,
+        taking every line's own background with it. The snapshot engine runs
+        only the background transfer, so each line's box is still on the page
+        when it is read and exports as its own shape.
+        """
+        body = (
+            '<div class="slide">'
+            '<div style="font-family: monospace; font-size: 14px;">'
+            '<div style="width: 300px; height: 24px; background: #FF5F46;">SELECT 1</div>'
+            '<div style="width: 300px; height: 24px; background: #00A972;">FROM t</div>'
+            "</div>"
+            "</div>"
+        )
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        for line, fill in (("SELECT 1", "FF5F46"), ("FROM t", "00A972")):
+            _, box = _filled(shapes, fill)
+            assert box.kind == "shape", (
+                f"the {line!r} code line's background is a {box.kind}, not a shape:\n"
+                f"{_describe(shapes)}"
+            )
+
 
 @pytest.mark.slow
 @requires_huashu_sidecar
@@ -402,4 +431,31 @@ class TestSnapshotPaintOrder:
                 ("#mark-b", "FFB347"),
             ],
             "block backgrounds paint before the inline content of any block",
+        )
+
+    def test_floats_paint_atomically_above_in_flow_blocks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A float paints atomically, after the in-flow blocks of its context (CSS 2.1
+        Appendix E): its own block child paints over its background, and the in-flow
+        block it overlaps paints under it even though that block is later in the DOM.
+
+        ``#after`` is an in-flow block, so its box starts beside the float's top
+        and the float covers its left part, exactly as the browser draws it.
+        """
+        body = (
+            '<div class="slide">'
+            '<div id="floated" style="float: left; width: 240px; height: 160px; '
+            'background: #DCE0E2;">'
+            '<div id="band" style="height: 24px; background: #FF5F46;"></div>'
+            "</div>"
+            '<div id="after" style="width: 480px; height: 200px; background: #5A6F77;"></div>'
+            "</div>"
+        )
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        _assert_paint_order(
+            shapes,
+            [("#after", "5A6F77"), ("#floated", "DCE0E2"), ("#band", "FF5F46")],
+            "in-flow block backgrounds paint first, then each float with its own content",
         )

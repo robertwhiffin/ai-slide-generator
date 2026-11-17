@@ -176,7 +176,7 @@ async function snapshotPage(config) {
   // ─── paint order ─────────────────────────────────────────────────────
   // ctx = {prefix: number[]} is the current REAL stacking context; paint is
   // where this element's own non-context content is painted (a pseudo-context
-  // for positioned z:auto elements, flex and grid items, and atomic inlines).
+  // for positioned z:auto elements, flex and grid items, atomic inlines and floats).
   // Within a context the layers are: 0 its own box, 1 negative z-index,
   // 2 in-flow blocks, 3 floats, 4 inline content and atomic boxes, 5 positioned
   // z:auto/0 in tree order, 6 positive z-index. Item order keys extend these.
@@ -213,8 +213,14 @@ async function snapshotPage(config) {
       const group = (positioned ? ctx.prefix : paint).concat(positioned ? [5, 0, seq] : [4, 0, seq]);
       return { ctx, paint: group, box: group.concat([0, 0, 0]) };
     }
-    const layer = s.float !== 'none' ? 3 : 2;
-    return { ctx, paint, box: paint.concat([layer, 0, seq]) };
+    // A float paints atomically (CSS 2.1 Appendix E): after every in-flow block
+    // of its context, and with its own content above its own background. After
+    // the branch above, so a positioned float keeps the positioned layer.
+    if (s.float !== 'none') {
+      const group = paint.concat([3, 0, seq]);
+      return { ctx, paint: group, box: group.concat([0, 0, 0]) };
+    }
+    return { ctx, paint, box: paint.concat([2, 0, seq]) };
   }
 
   function compareItems(a, b) {

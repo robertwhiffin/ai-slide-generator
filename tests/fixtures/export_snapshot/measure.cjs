@@ -4,8 +4,9 @@
 // Loads one complete slide document with the SAME Playwright build and browser
 // channel the huashu sidecar uses, on the same 1280x720 viewport at device scale
 // 2 (render_slide.cjs's page), and with the same settle sequence: networkidle,
-// document.fonts.ready, the canvas wait, then every animation finished. So the
-// rect it reports comes from the layout the export itself reads.
+// document.fonts.ready, the canvas wait, then every animation finished (or
+// cancelled when it has no end). So the rect it reports comes from the layout the
+// export itself reads.
 //
 // usage: node measure.cjs <document.html> <selector> [index]
 // prints {"x":…,"y":…,"w":…,"h":…}: getBoundingClientRect() of the index-th
@@ -30,30 +31,59 @@ function launchOptions() {
   return options;
 }
 
+// The same settle as render_slide.cjs, step for step and with the same bounds,
+// so a test measures the state the engine exports. Written out here rather than
+// imported from the engine, so the measurement stays an independent oracle.
+const NETWORK_IDLE_TIMEOUT_MS = 4000;
+const FONTS_READY_TIMEOUT_MS = 5000;
+const CANVAS_READY_TIMEOUT_MS = 5000;
+const CANVAS_SETTLE_MS = 2000;
+
+async function waitForFonts(page) {
+  let timer;
+  try {
+    await Promise.race([
+      page.evaluate(() => document.fonts.ready.then(() => true)),
+      new Promise((resolve) => { timer = setTimeout(resolve, FONTS_READY_TIMEOUT_MS); }),
+    ]);
+  } catch (error) {
+    // The engine continues without fonts.ready too.
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function settle(page) {
   try {
-    await page.waitForLoadState('networkidle', { timeout: 4000 });
+    await page.waitForLoadState('networkidle', { timeout: NETWORK_IDLE_TIMEOUT_MS });
   } catch (error) {
     // A slide may legitimately keep a request open; the sidecar ignores this too.
   }
-  await page.evaluate(() => document.fonts.ready);
+  await waitForFonts(page);
   const canvasCount = await page.evaluate(() => document.querySelectorAll('canvas').length);
   if (canvasCount > 0) {
+    // The options are waitForFunction's THIRD argument; the second is the page function's arg.
     await page.waitForFunction(
       () => Array.from(document.querySelectorAll('canvas')).every((canvas) => canvas.width > 0 && canvas.height > 0),
-      { timeout: 5000 },
+      undefined,
+      { timeout: CANVAS_READY_TIMEOUT_MS },
     ).catch(() => {});
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(CANVAS_SETTLE_MS);
   }
   // The settled state: an entrance animation is measured where it ends. Each
-  // finish() is guarded on its own, because an infinite animation throws.
+  // finish() is guarded on its own, because an infinite animation throws; such
+  // an animation is cancelled instead, so it is measured in its un-animated style.
   await page.evaluate(() => {
     const animations = document.getAnimations();
     for (let index = 0; index < animations.length; index++) {
       try {
         animations[index].finish();
       } catch (error) {
-        // An infinite animation cannot finish; it is measured as it stands.
+        try {
+          animations[index].cancel();
+        } catch (cancelError) {
+          // Neither finished nor cancelled: it is measured as it stands.
+        }
       }
     }
   });
