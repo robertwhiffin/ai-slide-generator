@@ -70,6 +70,7 @@ from src.services.graph_definition_manifest import (
     definition_content_hash,
     schema_contract_identity,
 )
+from src.services.model_calls import TRANSIENT_FAULT_KINDS, model_fault_kind
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
     PersistedGraphReleaseLoader,
@@ -737,11 +738,6 @@ class DatabricksModelAdapter:
             )
 
 
-#: HTTP statuses a retry or a later turn can succeed on: request timeout,
-#: conflict, rate limit, and every server-side error.
-_TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429})
-
-
 def is_transient_model_failure(error: BaseException) -> bool:
     """True when *error* was caused by a provider fault that may clear by itself.
 
@@ -757,32 +753,7 @@ def is_transient_model_failure(error: BaseException) -> bool:
     cause at all) is NOT transient, so the pinned-failure contract is unchanged
     wherever the provider's own error is not a transient one.
     """
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(
-            current,
-            (
-                openai.APITimeoutError,
-                openai.APIConnectionError,
-                httpx.TimeoutException,
-                httpx.TransportError,
-                requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError,
-                TimeoutError,
-                ConnectionError,
-                DeadlineExceeded,
-                Aborted,
-                InternalError,
-            ),
-        ):
-            return True
-        if isinstance(current, openai.APIStatusError):
-            status = current.status_code
-            return status in _TRANSIENT_HTTP_STATUSES or status >= 500
-        current = current.__cause__ or current.__context__
-    return False
+    return model_fault_kind(error) in TRANSIENT_FAULT_KINDS
 
 
 def _supplied_output_keys(provider_output: BaseModel) -> Mapping[str, Any]:
