@@ -30,11 +30,14 @@ Every test uses ``tmp_path`` as the projects dir; nothing reads ``~/.claude``.
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+import scripts.build_metrics as bm
 from scripts.build_metrics import (
     AgentSpan,
     ApiCall,
@@ -669,3 +672,382 @@ def test_session_split_across_project_dirs_is_loaded(tmp_path):
     assert len(t.calls) == 3
     assert set(t.calls) == expected_calls
     assert find_sessions(tmp_path, needle) == ["S"]
+
+
+# ---------------------------------------------------------------------------
+# Task 2: GitHub PR data, the baseline handover, and edits after it
+# ---------------------------------------------------------------------------
+#
+# Interface under test (Task 2 of the plan):
+#
+#     REPO = "robertwhiffin/ai-slide-generator"
+#     PARKED_RE = re.compile(r"^Parked-task:\s*\S+", re.M)
+#     Commit(sha, committed_at, parents, lines, message)           # frozen dataclasses
+#     PullRequest(number, created_at, merged_at, body, commits)    # commits: tuple[Commit, ...]
+#     Edits(commits, lines, share, parked_commits, parked_lines)
+#
+#     fetch_pr(number, *, repo=REPO, gh=gh_json) -> PullRequest
+#     baseline_handover(pr, t) -> datetime
+#     edits_after(pr, handover) -> Edits
+#
+# The Task 2 names are reached through ``bm`` rather than imported at the top, so that
+# while they are missing only these tests fail and Task 1's still run. ``gh`` is always
+# a fake here: no test runs the real ``gh`` or touches the network.
+
+H = datetime(2026, 11, 14, 12, 0, 0, tzinfo=timezone.utc)  # the handover in edits tests
+HOUR = timedelta(hours=1)
+
+
+class FakeGh:
+    """Stands in for ``gh api <args>``, answering only the calls in ``responses``.
+
+    ``responses`` maps ``tuple(args)`` to the parsed JSON ``gh`` would print. Any other
+    call raises. Every call is recorded in ``calls``, so a test can check the sequence
+    (an implementation that swallows the error still leaves the bad call on record).
+    """
+
+    def __init__(self, responses: dict[tuple[str, ...], object]):
+        self.responses = responses
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, args: list[str]) -> object:
+        key = tuple(args)
+        self.calls.append(key)
+        if key not in self.responses:
+            raise AssertionError(f"unexpected gh api call: {list(args)!r}")
+        # A copy, so an implementation that mutates what it is given cannot alter the fixture.
+        return copy.deepcopy(self.responses[key])
+
+
+def gh_time(ts: datetime) -> str:
+    """GitHub's timestamp format: whole seconds, UTC, ``Z`` suffix."""
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def gh_listed_commit(
+    sha: str, *, authored: datetime, committed: datetime, parents: int, message: str
+) -> dict:
+    """A commit as ``pulls/{n}/commits`` lists it. The listing carries no ``stats``."""
+    person = {"name": "Robert Whiffin", "email": "dev@example.com"}
+    return {
+        "sha": sha,
+        "node_id": "C_kwDO" + sha[:12],
+        "commit": {
+            # The author date is when the change was first written; the committer date
+            # moves on every rebase or amend. They differ here on purpose.
+            "author": {**person, "date": gh_time(authored)},
+            "committer": {**person, "date": gh_time(committed)},
+            "message": message,
+            "comment_count": 0,
+        },
+        "author": {"login": "robertwhiffin"},
+        "committer": {"login": "robertwhiffin"},
+        "parents": [
+            {"sha": f"{i + 1:040x}", "url": f"https://api.github.com/commits/{i + 1:040x}"}
+            for i in range(parents)
+        ],
+    }
+
+
+def gh_commit_detail(listed: dict, *, additions: int, deletions: int, files: list[dict]) -> dict:
+    """The same commit as ``commits/{sha}`` returns it, with ``stats`` and ``files``."""
+    return {
+        **listed,
+        "stats": {"total": additions + deletions, "additions": additions, "deletions": deletions},
+        "files": files,
+    }
+
+
+def gh_file(name: str, additions: int, deletions: int) -> dict:
+    return {
+        "filename": name,
+        "status": "modified",
+        "additions": additions,
+        "deletions": deletions,
+        "changes": additions + deletions,
+    }
+
+
+def assert_utc_aware(ts: datetime) -> None:
+    assert isinstance(ts, datetime), ts
+    assert ts.tzinfo is not None, f"{ts!r} is naive"
+    assert ts.utcoffset() == timedelta(0), ts
+
+
+def commit(sha: str, when: datetime, lines: int, *, parents: int = 1, message: str | None = None):
+    return bm.Commit(
+        sha=sha,
+        committed_at=when,
+        parents=parents,
+        lines=lines,
+        message=f"fix: {sha}" if message is None else message,
+    )
+
+
+def pr_with(*commits, created_at: datetime = H - 3 * HOUR):
+    return bm.PullRequest(
+        number=412,
+        created_at=created_at,
+        merged_at=H + 4 * HOUR,
+        body="## Handover\n\nReady for review.",
+        commits=tuple(commits),
+    )
+
+
+def brief_commits() -> tuple:
+    """The brief's three commits: an hour before the handover (100 lines), exactly at it
+    (10), and an hour after it (30). 140 lines in all.
+
+    Listed out of time order on purpose: GitHub lists a PR's commits in graph order, and
+    committer dates need not follow it. Edits are picked by time, not by position.
+    """
+    return (
+        commit("after", H + HOUR, 30, message="fix: export keeps slide notes"),
+        commit("before", H - HOUR, 100, message="feat: export deck to PPTX"),
+        commit("at", H, 10, message="test: cover export of notes"),
+    )
+
+
+def test_fetch_pr_parses_commits_and_lines():
+    repo = "robertwhiffin/ai-slide-generator"  # REPO, the default
+    work_sha = "3f9c2a1e7b6d5c4f8a0e9d1b2c3a4f5e6d7c8b9a"
+    merge_sha = "c0ffee5a1b2c3d4e5f60718293a4b5c6d7e8f901"
+    opened = datetime(2026, 11, 13, 10, 0, 0, tzinfo=timezone.utc)
+    merged = datetime(2026, 11, 14, 16, 30, 0, tzinfo=timezone.utc)
+    work_at = opened - timedelta(hours=1)
+    merge_at = opened + timedelta(hours=5)
+    work_message = "feat: export deck to PPTX\n\nAdds the export button and its endpoint."
+    merge_message = "Merge branch 'main' into feat/export"
+    body = "## Handover\n\nAll tasks done; waiting on a browser check."
+
+    work = gh_listed_commit(
+        work_sha,
+        authored=work_at - timedelta(hours=2),
+        committed=work_at,
+        parents=1,
+        message=work_message,
+    )
+    merge = gh_listed_commit(
+        merge_sha,
+        authored=merge_at - timedelta(minutes=10),
+        committed=merge_at,
+        parents=2,
+        message=merge_message,
+    )
+    pull = {
+        "number": 412,
+        "title": "feat: export deck to PPTX",
+        "state": "closed",
+        "draft": False,
+        "user": {"login": "robertwhiffin"},
+        "created_at": gh_time(opened),
+        "updated_at": gh_time(merged),
+        "closed_at": gh_time(merged),
+        "merged_at": gh_time(merged),
+        "body": body,
+    }
+    pull_call = (f"repos/{repo}/pulls/412",)
+    list_call = (f"repos/{repo}/pulls/412/commits?per_page=100", "--paginate", "--slurp")
+    gh = FakeGh(
+        {
+            pull_call: pull,
+            # --slurp wraps the pages in one outer list: here, one commit per page.
+            list_call: [[work], [merge]],
+            (f"repos/{repo}/commits/{work_sha}",): gh_commit_detail(
+                work,
+                additions=100,
+                deletions=20,
+                files=[gh_file("src/export.py", 90, 15), gh_file("tests/test_export.py", 10, 5)],
+            ),
+            # A merge of main touches many files and GitHub truncates ``files``, so only
+            # ``stats.total`` holds the whole commit.
+            (f"repos/{repo}/commits/{merge_sha}",): gh_commit_detail(
+                merge,
+                additions=2000,
+                deletions=300,
+                files=[gh_file("src/other.py", 40, 2)],
+            ),
+        }
+    )
+
+    pr = bm.fetch_pr(412, gh=gh)
+
+    assert gh.calls[:2] == [pull_call, list_call]
+    # Then one detail call per commit, for its ``stats.total``, and nothing else.
+    assert sorted(gh.calls[2:]) == [
+        (f"repos/{repo}/commits/{work_sha}",),
+        (f"repos/{repo}/commits/{merge_sha}",),
+    ]
+    assert_utc_aware(pr.created_at)
+    assert_utc_aware(pr.merged_at)
+    for c in pr.commits:
+        assert_utc_aware(c.committed_at)
+    assert pr == bm.PullRequest(
+        number=412,
+        created_at=opened,
+        merged_at=merged,
+        body=body,
+        commits=(
+            bm.Commit(
+                sha=work_sha, committed_at=work_at, parents=1, lines=120, message=work_message
+            ),
+            bm.Commit(
+                sha=merge_sha, committed_at=merge_at, parents=2, lines=2300, message=merge_message
+            ),
+        ),
+    )
+
+    # A PR in another repo that was closed without merging: the repo argument is used, and
+    # merged_at stays None even though closed_at is set.
+    small_sha = "0badc0de" * 5
+    small = gh_listed_commit(
+        small_sha, authored=opened, committed=opened, parents=1, message="fix: typo"
+    )
+    gh = FakeGh(
+        {
+            ("repos/octo/widgets/pulls/7",): {
+                **pull,
+                "number": 7,
+                "state": "closed",
+                "closed_at": gh_time(merged),
+                "merged_at": None,
+            },
+            ("repos/octo/widgets/pulls/7/commits?per_page=100", "--paginate", "--slurp"): [[small]],
+            (f"repos/octo/widgets/commits/{small_sha}",): gh_commit_detail(
+                small, additions=3, deletions=1, files=[gh_file("README.md", 3, 1)]
+            ),
+        }
+    )
+
+    unmerged = bm.fetch_pr(7, repo="octo/widgets", gh=gh)
+
+    assert len(gh.calls) == 3
+    assert unmerged == bm.PullRequest(
+        number=7,
+        created_at=opened,
+        merged_at=None,
+        body=body,
+        commits=(
+            bm.Commit(sha=small_sha, committed_at=opened, parents=1, lines=4, message="fix: typo"),
+        ),
+    )
+
+
+def test_edits_after_counts_only_commits_after_handover():
+    pr = pr_with(*brief_commits())
+
+    # Only the commit an hour after the handover is an edit; the one exactly at it is not.
+    assert bm.edits_after(pr, H) == bm.Edits(
+        commits=1, lines=30, share=pytest.approx(30 / 140), parked_commits=0, parked_lines=0
+    )
+    # The same PR from other handovers: the share's denominator is always the whole PR.
+    assert bm.edits_after(pr, H - 2 * HOUR) == bm.Edits(
+        commits=3, lines=140, share=pytest.approx(1.0), parked_commits=0, parked_lines=0
+    )
+    assert bm.edits_after(pr, H + 2 * HOUR) == bm.Edits(
+        commits=0, lines=0, share=0.0, parked_commits=0, parked_lines=0
+    )
+
+
+def test_merge_commits_are_not_edits():
+    unchanged = bm.Edits(
+        commits=1, lines=30, share=pytest.approx(30 / 140), parked_commits=0, parked_lines=0
+    )
+    # Merging main into the branch after the handover brings in 500 lines of other work.
+    merge_after = commit(
+        "merge-main", H + 2 * HOUR, 500, parents=2, message="Merge branch 'main' into feat/export"
+    )
+    assert bm.edits_after(pr_with(*brief_commits(), merge_after), H) == unchanged
+
+    # A merge before the handover is not the PR's own lines either: it stays out of the
+    # denominator.
+    merge_before = commit(
+        "merge-main-early",
+        H - HOUR / 2,
+        800,
+        parents=2,
+        message="Merge remote-tracking branch 'origin/main' into feat/export",
+    )
+    assert bm.edits_after(pr_with(*brief_commits(), merge_before, merge_after), H) == unchanged
+
+
+def test_parked_task_trailer_is_reported_separately():
+    parked = commit("parked", H + HOUR, 40, message="fix: finish export\n\nParked-task: 3")
+
+    # The parked commit is kept out of the misses, but its lines are still the PR's lines.
+    assert bm.edits_after(pr_with(*brief_commits(), parked), H) == bm.Edits(
+        commits=1, lines=30, share=pytest.approx(30 / 180), parked_commits=1, parked_lines=40
+    )
+
+    # A trailer before the handover counts in neither bucket. A subject that only mentions
+    # the trailer mid-line is not a trailer, so that commit is an ordinary miss.
+    early_parked = commit(
+        "early-parked", H - 2 * HOUR, 25, message="feat: start export\n\nParked-task: 3"
+    )
+    mention = commit("mention", H + 2 * HOUR, 5, message="docs: explain the Parked-task: trailer")
+    assert bm.edits_after(pr_with(*brief_commits(), parked, early_parked, mention), H) == bm.Edits(
+        commits=2, lines=35, share=pytest.approx(35 / 210), parked_commits=1, parked_lines=40
+    )
+
+
+def test_share_is_zero_for_empty_pr():
+    nothing = bm.Edits(commits=0, lines=0, share=0.0, parked_commits=0, parked_lines=0)
+
+    assert bm.edits_after(pr_with(), H) == nothing
+    # Only a merge commit: the PR has no lines of its own.
+    only_merge = commit(
+        "merge-main", H + HOUR, 500, parents=2, message="Merge branch 'main' into feat/export"
+    )
+    assert bm.edits_after(pr_with(only_merge), H) == nothing
+    # An empty commit pushed after the handover to re-run CI is an edit of zero lines, and
+    # there are still no lines to take a share of.
+    empty = commit("rerun-ci", H + HOUR, 0, message="chore: re-run CI")
+    assert bm.edits_after(pr_with(empty), H) == bm.Edits(
+        commits=1, lines=0, share=0.0, parked_commits=0, parked_lines=0
+    )
+
+
+def test_baseline_handover_is_later_of_pr_open_and_final_review(tmp_path):
+    opened = at(3600)
+    pr = pr_with(created_at=opened)
+
+    def handover(session_id: str, spans: list[tuple[str, datetime, datetime]]) -> datetime:
+        """Write a session whose subagents have these (description, start, end) spans,
+        load it, and return its baseline handover for ``pr``."""
+        write_session(
+            tmp_path,
+            session_id,
+            [user(at(0), "Execute the plan."), assistant(at(1), f"{session_id}-main", OPUS)],
+            {
+                f"{session_id}-{i}": (
+                    description,
+                    [
+                        user(start, f"You are the {description}."),
+                        assistant(end, f"{session_id}-{i}", OPUS),
+                    ],
+                )
+                for i, (description, start, end) in enumerate(spans)
+            },
+        )
+        return bm.baseline_handover(pr, load_sessions(tmp_path, [session_id]))
+
+    # The final review returns after the PR opened, so its fixes fall before the handover.
+    # Fixing red CI afterwards is not part of the final review and does not move it.
+    late = handover(
+        "LATE",
+        [("Final branch review", at(4000), at(9000)), ("Fix red CI", at(9100), at(12000))],
+    )
+    assert late == at(9000)
+    assert_utc_aware(late)
+
+    # The PR opened after the final review returned.
+    assert (
+        handover(
+            "EARLY",
+            [("Final branch review", at(1000), at(2000)), ("Fix red CI", at(4000), at(5000))],
+        )
+        == opened
+    )
+
+    # No final review at all: the PR's open time, even though other agents ran later.
+    assert handover("NO-FINAL", [("Task 1 supervisor", at(100), at(9000))]) == opened

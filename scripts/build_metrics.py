@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator, Sequence
+import subprocess
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -238,3 +240,88 @@ def first_task_at(t: Transcript) -> Dispatch | None:
 def final_review_end(t: Transcript) -> datetime | None:
     ends = [s.end for s in t.spans if FINAL_RE.search(s.description)]
     return max(ends) if ends else None
+
+
+REPO = "robertwhiffin/ai-slide-generator"
+PARKED_RE = re.compile(r"^Parked-task:\s*\S+", re.M)
+GhJson = Callable[[list[str]], Any]  # runs `gh api <args>`, returns parsed JSON
+
+
+@dataclass(frozen=True)
+class Commit:
+    sha: str
+    committed_at: datetime
+    parents: int
+    lines: int  # additions + deletions (API stats.total)
+    message: str
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    number: int
+    created_at: datetime
+    merged_at: datetime | None
+    body: str
+    commits: tuple[Commit, ...]
+
+
+@dataclass(frozen=True)
+class Edits:
+    commits: int
+    lines: int
+    share: float  # lines / all non-merge lines in the PR; 0.0 when the PR has none
+    parked_commits: int
+    parked_lines: int
+
+
+def gh_json(args: list[str]) -> Any:
+    result = subprocess.run(["gh", "api", *args], check=True, capture_output=True, text=True)
+    return json.loads(result.stdout)
+
+
+def fetch_pr(number: int, *, repo: str = REPO, gh: GhJson = gh_json) -> PullRequest:
+    pull = gh([f"repos/{repo}/pulls/{number}"])
+    pages = gh([f"repos/{repo}/pulls/{number}/commits?per_page=100", "--paginate", "--slurp"])
+    listed = [item for page in pages for item in page]
+    commits = []
+    for item in listed:
+        sha = item["sha"]
+        detail = gh([f"repos/{repo}/commits/{sha}"])
+        commits.append(
+            Commit(
+                sha=sha,
+                committed_at=_parse_ts(item["commit"]["committer"]["date"]),
+                parents=len(item.get("parents", [])),
+                lines=int(detail.get("stats", {}).get("total", 0)),
+                message=item["commit"].get("message", ""),
+            )
+        )
+    return PullRequest(
+        number=number,
+        created_at=_parse_ts(pull["created_at"]),
+        merged_at=_parse_ts(pull.get("merged_at")),
+        body=pull.get("body") or "",
+        commits=tuple(commits),
+    )
+
+
+def baseline_handover(pr: PullRequest, t: Transcript) -> datetime:
+    """The later of the PR opening and the end of the final review."""
+    end = final_review_end(t)
+    return pr.created_at if end is None else max(pr.created_at, end)
+
+
+def edits_after(pr: PullRequest, handover: datetime) -> Edits:
+    own = [c for c in pr.commits if c.parents == 1]
+    total = sum(c.lines for c in own)
+    after = [c for c in own if c.committed_at > handover]
+    parked = [c for c in after if PARKED_RE.search(c.message)]
+    misses = [c for c in after if not PARKED_RE.search(c.message)]
+    lines = sum(c.lines for c in misses)
+    return Edits(
+        commits=len(misses),
+        lines=lines,
+        share=lines / total if total else 0.0,
+        parked_commits=len(parked),
+        parked_lines=sum(c.lines for c in parked),
+    )
