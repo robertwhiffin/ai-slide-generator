@@ -116,7 +116,7 @@ def load_sessions(projects_dir: Path, session_ids: Sequence[str]) -> Transcript:
     calls: list[ApiCall] = []
     dispatches: list[Dispatch] = []
     spans: list[AgentSpan] = []
-    seen_ids: set[tuple[str, str]] = set()
+    seen_ids: set[str] = set()
     seen_dispatch: set[tuple[datetime, str]] = set()
 
     for session_id in session_ids:
@@ -154,12 +154,14 @@ def load_sessions(projects_dir: Path, session_ids: Sequence[str]) -> Transcript:
                 family = model_family(str(message.get("model", "")))
                 if not isinstance(usage, dict) or family is None:
                     continue
-                # Usage is repeated on every line of a split response: count it once.
+                # Usage is repeated on every line of a split response: count it once. A
+                # message id names one API response, so dedupe across every loaded file and
+                # session (a stale or copied transcript must not double-count).
                 msg_id = message.get("id")
                 if isinstance(msg_id, str) and msg_id:
-                    if (session_id, msg_id) in seen_ids:
+                    if msg_id in seen_ids:
                         continue
-                    seen_ids.add((session_id, msg_id))
+                    seen_ids.add(msg_id)
                 calls.append(
                     ApiCall(
                         ts=ts,
