@@ -519,12 +519,14 @@ def test_databricks_model_adapter_never_binds_legacy_tool_grants():
     assert actual == schema.model_validate(output)
     assert structured_bindings == [([schema], {"tool_choice": "auto"})]
     assert prompts == ["assembled prompt"]
-    # Sampling values are stored but never sent (follow-up A).
+    # Sampling values are stored but never sent (follow-up A); a production adapter
+    # turns the SDK's own retries off, because the adapter owns them (spec §3).
     assert constructed == [
         {
             "model": "databricks-claude-opus-4-6",
             "max_tokens": 60000,
             "workspace_client": constructed[0]["workspace_client"],
+            "max_retries": 0,
         }
     ]
 
@@ -788,6 +790,7 @@ def test_structured_output_runtime_adapter_binds_through_the_extracted_helper(mo
     assert helper_calls[0]["configuration"] is _SAVED_CONFIGURATION
     assert helper_calls[0]["schema"] is OUTPUT_SCHEMAS["data_analyst"]
     # Follow-up A: no temperature / top_p sent; schema bound once, tool_choice auto.
+    # A production adapter turns the SDK's own retries off (spec §3).
     assert events == [
         ("client_factory", None),
         (
@@ -796,6 +799,7 @@ def test_structured_output_runtime_adapter_binds_through_the_extracted_helper(mo
                 "model": "saved exact endpoint-name",
                 "max_tokens": 321,
                 "workspace_client": runtime_client,
+                "max_retries": 0,
             },
         ),
         ("bind_tools", OUTPUT_SCHEMAS["data_analyst"], {"tool_choice": "auto"}),
@@ -1621,12 +1625,16 @@ def test_the_agent_test_runtime_bounds_its_model_call_to_120_seconds_and_no_retr
         get_agent_runtime.cache_clear()
 
 
-def test_the_production_runtime_adapter_still_hands_no_transport_options():
+def test_the_production_runtime_adapter_turns_off_the_sdk_retries():
+    """Spec §3: the adapter owns retries, so the SDK's own are off (``max_retries=0``)."""
     from src.services.agent_runtime import get_agent_runtime
 
     get_agent_runtime.cache_clear()
     try:
-        assert _drive_adapter_kwargs(get_agent_runtime()._model_adapter) == _SAVED_MODEL_KWARGS
+        assert _drive_adapter_kwargs(get_agent_runtime()._model_adapter) == {
+            **_SAVED_MODEL_KWARGS,
+            "max_retries": 0,
+        }
     finally:
         get_agent_runtime.cache_clear()
 
