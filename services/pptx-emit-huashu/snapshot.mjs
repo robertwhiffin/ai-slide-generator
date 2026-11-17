@@ -14,7 +14,7 @@
 //  *   items: Item[],                        // sorted back to front, by `order` then `id`
 //  *   captures: Capture[],
 //  *   reference: {hiddenText: string},
-//  *   stats: {elements, shapes, images, truncated},
+//  *   stats: {elements, shapes, images, texts, truncated},
 //  * }
 //  *
 //  * Every Item carries:
@@ -27,6 +27,9 @@
 //  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate}
 //  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
+//  *  {kind:'text', x,y,w,h, rotate:null, wrap:boolean, align:'left'|'center'|'right'|'justify',
+//  *   rtl:boolean, paragraphs:[{lineSpacingPct:number|null, lines:[{runs:Run[]}]}]}
+//  *   (one text block; snapshot_text.mjs documents Run, lines and the geometry)
 //  *
 //  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]'}
 //  *
@@ -40,11 +43,13 @@
 
 import { DOM_ACCESS_SOURCE } from './dom_access.mjs';
 import { SLIDE_ROOT_MARKER } from './preprocess.mjs';
+import { TEXT_SOURCE } from './snapshot_text.mjs';
 
-// Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE: queryOne,
-// elementChildrenOf, domAccess, reportCollectionLoss and the two limits are its
-// free names. It is stringified, so it closes over nothing on the Node side;
-// everything it needs from here arrives in `config`.
+// Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE and
+// TEXT_SOURCE: queryOne, elementChildrenOf, domAccess, reportCollectionLoss, the
+// two limits and createTextLayout are its free names. It is stringified, so it
+// closes over nothing on the Node side; everything it needs from here arrives
+// in `config`.
 async function snapshotPage(config) {
   const SLIDE_WIDTH = 1280;
   const SLIDE_HEIGHT = 720;
@@ -65,7 +70,7 @@ async function snapshotPage(config) {
 
   const items = [];
   const captures = [];
-  const stats = { elements: 0, shapes: 0, images: 0, truncated: false };
+  const stats = { elements: 0, shapes: 0, images: 0, texts: 0, truncated: false };
   let nextItemId = 0;
 
   // ─── colours ─────────────────────────────────────────────────────────
@@ -527,6 +532,66 @@ async function snapshotPage(config) {
     stats.images++;
   }
 
+  // ─── text ────────────────────────────────────────────────────────────
+  // Each element the walk visits holds the text blocks of its own inline
+  // content (snapshot_text.mjs); an inline element's text belongs to its block.
+  // Text before the element's first block-level child is emitted at the
+  // element's visit, at its sequence. Text after a block-level child comes, in
+  // tree order, after that child's whole subtree, so it waits until the walk
+  // leaves the subtree and takes the sequence half-way between the subtree's
+  // last element and the next one: its paint order and its id both follow the
+  // document.
+  const textLayout = createTextLayout({ replaced: REPLACED, parseColour, opacityOf, boxGeometry, contentBox });
+  // follows element -> its waiting {block, paint} entries, and every entry in the
+  // order it was collected (the Map is only ever read by key).
+  const waitingText = new Map();
+  const waitingInOrder = [];
+  // Subtrees the walk is inside whose end releases waiting text: {depth, entries}.
+  const openSubtrees = [];
+
+  function pushText(block) {
+    items.push({ kind: 'text', id: nextItemId++, ...block });
+    stats.texts++;
+  }
+
+  function releaseText(entry, lastSeq) {
+    if (entry.released) return;
+    entry.released = true;
+    pushText({ ...entry.block, order: entry.paint.concat([4, 0, lastSeq + 0.5, 1]) });
+  }
+
+  function emitText(element, s, paint, seq, walk) {
+    const blocks = textLayout.collectTextBlocks(element, s, paint, seq, walk);
+    for (let index = 0; index < blocks.length; index++) {
+      const { follows, ...block } = blocks[index];
+      if (!follows) {
+        pushText(block);
+        continue;
+      }
+      const entry = { block, paint, released: false };
+      const waiting = waitingText.get(follows);
+      if (waiting) waiting.push(entry);
+      else waitingText.set(follows, [entry]);
+      waitingInOrder.push(entry);
+    }
+  }
+
+  // The walk is about to visit an element at `depth`, so every open subtree at
+  // that depth or deeper ended with the element visited at `lastSeq`.
+  function closeSubtrees(depth, lastSeq) {
+    while (openSubtrees.length && openSubtrees[openSubtrees.length - 1].depth >= depth) {
+      const entries = openSubtrees.pop().entries;
+      for (let index = 0; index < entries.length; index++) releaseText(entries[index], lastSeq);
+    }
+  }
+
+  function openSubtree(element, depth) {
+    const entries = waitingText.get(element);
+    if (!entries) return;
+    waitingText.delete(element);
+    openSubtrees.push({ depth, entries });
+  }
+
   // ─── the walk ────────────────────────────────────────────────────────
   // Depth-first from body over an explicit stack, in DOM pre-order. Depth is
   // bounded by WALK_STEP_LIMIT and the elements visited by COLLECTION_ITEM_LIMIT,
@@ -578,6 +643,7 @@ async function snapshotPage(config) {
       }
     }
     if (replaced) return;
+    emitText(element, s, place.paint, seq, { opacity, frame });
     pushChildren(element, {
       ctx: place.ctx,
       paint: place.paint,
@@ -591,19 +657,31 @@ async function snapshotPage(config) {
   const htmlStyle = window.getComputedStyle(html);
   const bodyStyle = window.getComputedStyle(body);
   const background = slideBackground(htmlStyle, bodyStyle);
+  const bodyOpacity = opacityOf(htmlStyle) * opacityOf(bodyStyle);
+  const bodyFrame = frameOf(bodyStyle, { angle: 0, scaleX: 1, scaleY: 1 });
+  // Body is the walk's root, so its own inline content is collected here, as
+  // sequence 0, ahead of every element the walk visits.
+  emitText(body, bodyStyle, [], 0, { opacity: bodyOpacity, frame: bodyFrame });
   pushChildren(body, {
     ctx: { prefix: [] },
     paint: [],
-    opacity: opacityOf(htmlStyle) * opacityOf(bodyStyle),
+    opacity: bodyOpacity,
     layoutStyle: bodyStyle,
-    frame: frameOf(bodyStyle, { angle: 0, scaleX: 1, scaleY: 1 }),
+    frame: bodyFrame,
     depth: 1,
   });
   let seq = 0;
   while (stack.length) {
     const next = stack.pop();
-    visit(next.element, next.state, ++seq);
+    seq++;
+    closeSubtrees(next.state.depth, seq - 1);
+    openSubtree(next.element, next.state.depth);
+    visit(next.element, next.state, seq);
   }
+  closeSubtrees(0, seq);
+  // Text after a child the walk never reached (it was cut short) still paints, last.
+  for (let index = 0; index < waitingInOrder.length; index++) releaseText(waitingInOrder[index], seq);
+  if (textLayout.truncated()) stats.truncated = true;
 
   items.sort(compareItems);
   return {
@@ -621,6 +699,7 @@ export const SNAPSHOT_SOURCE = `
 (async function () {
   const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${DOM_ACCESS_SOURCE}
+${TEXT_SOURCE}
   return await (${snapshotPage.toString()})(${JSON.stringify({ slideRootMarker: SLIDE_ROOT_MARKER })});
 })()
 `;

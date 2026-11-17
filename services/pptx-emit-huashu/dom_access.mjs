@@ -61,6 +61,9 @@ export const DOM_ACCESS_SOURCE = `
       const firstNode = describe(realm.Node.prototype, 'firstChild');
       const nextNode = describe(realm.Node.prototype, 'nextSibling');
       const listLength = describe(realm.NodeList.prototype, 'length');
+      // What a child node is, and a text node's characters, for passes that read text.
+      const typeOfNode = describe(realm.Node.prototype, 'nodeType');
+      const characterData = describe(realm.CharacterData.prototype, 'data');
       // Document's and Element's lookups are DISTINCT function objects, so both are captured.
       const docQuery = realm.Document.prototype.querySelector;
       const docQueryAll = realm.Document.prototype.querySelectorAll;
@@ -73,6 +76,8 @@ export const DOM_ACCESS_SOURCE = `
           typeof firstNode.get !== 'function' ||
           typeof nextNode.get !== 'function' ||
           typeof listLength.get !== 'function' ||
+          typeof typeOfNode.get !== 'function' ||
+          typeof characterData.get !== 'function' ||
           typeof docQuery !== 'function' ||
           typeof docQueryAll !== 'function' ||
           typeof elQuery !== 'function' ||
@@ -86,6 +91,8 @@ export const DOM_ACCESS_SOURCE = `
         firstChild: (node) => firstNode.get.call(node),
         nextSibling: (node) => nextNode.get.call(node),
         nodeListLength: (list) => listLength.get.call(list),
+        nodeType: (node) => typeOfNode.get.call(node),
+        textData: (node) => characterData.get.call(node),
         // The receiver stays this realm's document; a native lookup with an explicit receiver works across realms.
         documentQuerySelector: (selector) => docQuery.call(document, selector),
         documentQuerySelectorAll: (selector) => docQueryAll.call(document, selector),
@@ -112,6 +119,8 @@ export const DOM_ACCESS_SOURCE = `
     firstChild: (node) => node.firstChild,
     nextSibling: (node) => node.nextSibling,
     nodeListLength: (list) => list.length,
+    nodeType: (node) => node.nodeType,
+    textData: (node) => node.data,
     documentQuerySelector: (selector) => document.querySelector(selector),
     documentQuerySelectorAll: (selector) => document.querySelectorAll(selector),
     elementQuerySelector: (el, selector) => el.querySelector(selector),

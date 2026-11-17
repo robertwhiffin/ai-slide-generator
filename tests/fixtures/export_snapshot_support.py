@@ -14,6 +14,8 @@ what the browser itself laid out for the same document.
 * ``browser_rect`` measures an element in the same browser build and channel
   the sidecar uses, through ``tests/fixtures/export_snapshot/measure.cjs``
   (Python has no Playwright in this repo, so measurement goes through Node).
+  ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
+  lines from the same page, with a ``Range`` per character.
 * ``corpus_slide`` / ``corpus_document`` load the committed brand corpus in
   ``tests/fixtures/export_fidelity`` by its numeric prefix, so no test copies
   corpus HTML.
@@ -251,6 +253,46 @@ def browser_rect(document_html: str, selector: str, index: int = 0) -> dict:
     """
     rect = json.loads(_run_measure(document_html, selector, str(index)))
     return {key: float(rect[key]) for key in ("x", "y", "w", "h")}
+
+
+def browser_line_boxes(document_html: str, selector: str, index: int = 0) -> list[dict]:
+    """The rendered text lines of the ``index``-th match of ``selector``, in reading order.
+
+    Each line is ``{"text", "x", "y", "w", "h"}``: its text as painted and the
+    union of its character rects in CSS px. ``measure.cjs --mode=lines`` reads
+    every character with a ``Range`` and clusters the painted ones into lines
+    by vertical overlap, so the line breaks are the browser's own:
+
+    * collapsible white space reads as the single space it renders as, and a
+      line is trimmed at both ends; ``pre``, ``pre-wrap`` and ``break-spaces``
+      keep their spaces as written;
+    * text inside ``<svg>`` is not part of any line;
+    * side-by-side flex or grid items on one band cluster into one line, so
+      measure one text block at a time.
+    """
+    lines = json.loads(_run_measure(document_html, selector, str(index), "--mode=lines"))
+    return [
+        {"text": line["text"], **{key: float(line[key]) for key in ("x", "y", "w", "h")}}
+        for line in lines
+    ]
+
+
+def browser_lines(document_html: str, selector: str, index: int = 0) -> list[str]:
+    """The rendered line texts of the ``index``-th match of ``selector``.
+
+    The ``text`` of each ``browser_line_boxes`` line, in reading order.
+    """
+    return [line["text"] for line in browser_line_boxes(document_html, selector, index)]
+
+
+def text_bounds(line_boxes: list[dict]) -> dict:
+    """The union ``{"x", "y", "w", "h"}`` of ``browser_line_boxes`` lines: the text's own bounds."""
+    assert line_boxes, "no rendered text lines to bound"
+    left = min(line["x"] for line in line_boxes)
+    top = min(line["y"] for line in line_boxes)
+    right = max(line["x"] + line["w"] for line in line_boxes)
+    bottom = max(line["y"] + line["h"] for line in line_boxes)
+    return {"x": left, "y": top, "w": right - left, "h": bottom - top}
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,10 @@
 // screen's.
 //
 // Only raster data: pictures are embedded (SDR-4437): from a capture or from the
-// item's own data: src. Anything else is skipped and announced on stderr.
+// item's own data: src. Anything else is skipped and announced on stderr. Text
+// items are written by emit_text.cjs.
+
+const { emitText } = require('./emit_text.cjs');
 
 const PX_PER_IN = 96;
 const PT_PER_PX = 0.75;
@@ -151,6 +154,8 @@ function emitSlide(pres, model, captures) {
       const data = pictureData(item, captures);
       if (data) emitImage(slide, item, data);
       else skippedPictures += 1;
+    } else if (item.kind === 'text') {
+      emitText(slide, item);
     } else {
       throw new Error(`[html2pptx] the slide model holds an item kind the emitter does not know: ${item.kind}`);
     }

@@ -8,11 +8,17 @@
 // cancelled when it has no end). So the rect it reports comes from the layout the
 // export itself reads.
 //
-// usage: node measure.cjs <document.html> <selector> [index]
-// prints {"x":…,"y":…,"w":…,"h":…}: getBoundingClientRect() of the index-th
-// (default 0) match of selector, in CSS px. Exits 2 when nothing matches.
+// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines]
+// Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
+// nothing matches.
+//   --mode=rect  (the default) prints {"x":…,"y":…,"w":…,"h":…}, the element's
+//                getBoundingClientRect().
+//   --mode=lines prints [{"text":…,"x":…,"y":…,"w":…,"h":…}, …], the element's
+//                rendered text lines in reading order, each with the union of its
+//                character rects. See measureLines for how lines are found.
 //
-// Called from tests/fixtures/export_snapshot_support.py::browser_rect.
+// Called from tests/fixtures/export_snapshot_support.py (browser_rect,
+// browser_line_boxes, browser_lines).
 
 const path = require('path');
 
@@ -100,10 +106,135 @@ async function measureRect(page, selector, index) {
   }, { selector, index });
 }
 
+// The element's rendered text, line by line, read character by character with a
+// Range, which is how the browser itself reports where each glyph was painted.
+// Written independently of the engine's tokenizer, so a test can hold the
+// engine's lines against it.
+//
+// * Text inside <svg> is skipped: it is part of the drawing, not of a CSS line.
+// * A character counts when it painted a rect: white space (CSS's: space, tab,
+//   LF, CR, FF, never NBSP) needs a rect with width, because Chrome reports a
+//   collapsed space as a zero-width rect (and a space at a wrap point as a
+//   zero-width rect on both lines); any other character needs a rect at all. A
+//   painted white-space character is the single space it renders as; under
+//   white-space pre, pre-wrap and break-spaces it is kept as written. Where
+//   newlines are preserved (those three and pre-line) a newline is a forced
+//   break and never paints; elsewhere it is collapsible white space like a space.
+// * Lines are clustered by vertical overlap, in DOM order: a character joins the
+//   current line when its rect overlaps the line's vertical range by more than
+//   half the smaller of the two heights. Half, not any overlap: glyph rects are
+//   the font's ascent plus descent, so with a line-height under about 1.3 (the
+//   corpus titles use 1.08) consecutive lines' rects overlap by several px.
+// * A collapsible line is trimmed at both ends. A line with no painted
+//   character (an empty pre line) is not reported.
+//
+// Measures one text block: side-by-side flex or grid items on the same band
+// would cluster into one line.
+async function measureLines(page, selector, index) {
+  return page.evaluate(({ selector, index }) => {
+    const matches = document.querySelectorAll(selector);
+    if (index >= matches.length) {
+      return { error: `selector ${selector} matched ${matches.length} element(s); index ${index} is out of range` };
+    }
+    const PRESERVED_WHITE_SPACE = /^(pre|pre-wrap|break-spaces)$/;
+    const PRESERVED_NEWLINES = /^(pre|pre-wrap|pre-line|break-spaces)$/;
+    // CSS's collapsible white space; NBSP is not, and JS \s would include it.
+    const CSS_WHITE_SPACE = /^[ \t\n\r\f]$/;
+    const lines = [];
+    let current = null;
+    const walker = document.createTreeWalker(matches[index], NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest('svg')) continue;
+      const whiteSpace = getComputedStyle(parent).whiteSpace;
+      const preserved = PRESERVED_WHITE_SPACE.test(whiteSpace);
+      const newlinesPreserved = PRESERVED_NEWLINES.test(whiteSpace);
+      const data = node.data;
+      let offset = 0;
+      while (offset < data.length) {
+        // One code point at a time, so an astral character (emoji) is one Range.
+        const length = data.codePointAt(offset) > 0xffff ? 2 : 1;
+        const character = data.slice(offset, offset + length);
+        const range = document.createRange();
+        range.setStart(node, offset);
+        range.setEnd(node, offset + length);
+        offset += length;
+        if (newlinesPreserved && (character === '\n' || character === '\r')) continue;
+        const whitespace = CSS_WHITE_SPACE.test(character);
+        const rects = range.getClientRects();
+        let rect = null;
+        for (let rectIndex = 0; rectIndex < rects.length; rectIndex++) {
+          if (rects[rectIndex].width > 0 || (!whitespace && rects[rectIndex].height > 0)) {
+            rect = rects[rectIndex];
+            break;
+          }
+        }
+        if (!rect) continue;
+        const text = whitespace && !preserved ? ' ' : character;
+        const overlap = current
+          ? Math.min(current.bottom, rect.bottom) - Math.max(current.top, rect.top)
+          : 0;
+        const sameLine = current &&
+          overlap > Math.min(current.bottom - current.top, rect.height) / 2;
+        if (!sameLine) {
+          current = {
+            text: '',
+            preserved,
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+          };
+          lines.push(current);
+        }
+        current.text += text;
+        current.left = Math.min(current.left, rect.left);
+        current.top = Math.min(current.top, rect.top);
+        current.right = Math.max(current.right, rect.right);
+        current.bottom = Math.max(current.bottom, rect.bottom);
+      }
+    }
+    const result = [];
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      const line = lines[lineIndex];
+      const text = line.preserved ? line.text : line.text.replace(/ {2,}/g, ' ').replace(/^ | $/g, '');
+      if (!text) continue;
+      result.push({ text, x: line.left, y: line.top, w: line.right - line.left, h: line.bottom - line.top });
+    }
+    return { lines: result };
+  }, { selector, index });
+}
+
+const MODES = {
+  rect: measureRect,
+  lines: async (page, selector, index) => {
+    const measured = await measureLines(page, selector, index);
+    return measured.error ? measured : measured.lines;
+  },
+};
+
+function parseArguments(argv) {
+  const positional = [];
+  let mode = 'rect';
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index];
+    if (argument.startsWith('--mode=')) {
+      mode = argument.slice('--mode='.length);
+    } else {
+      positional.push(argument);
+    }
+  }
+  return { documentPath: positional[0], selector: positional[1], indexArgument: positional[2], mode };
+}
+
 async function main() {
-  const [documentPath, selector, indexArgument] = process.argv.slice(2);
+  const { documentPath, selector, indexArgument, mode } = parseArguments(process.argv.slice(2));
   if (!documentPath || !selector) {
-    console.error('usage: node measure.cjs <document.html> <selector> [index]');
+    console.error('usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines]');
+    process.exit(1);
+  }
+  if (!Object.prototype.hasOwnProperty.call(MODES, mode)) {
+    console.error(`unknown mode ${mode}; expected one of ${Object.keys(MODES).join(', ')}`);
     process.exit(1);
   }
   const index = indexArgument === undefined ? 0 : Number.parseInt(indexArgument, 10);
@@ -116,13 +247,13 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, deviceScaleFactor: 2 });
     await page.goto('file://' + path.resolve(documentPath));
     await settle(page);
-    const rect = await measureRect(page, selector, index);
-    if (rect.error) {
-      console.error(rect.error);
+    const measured = await MODES[mode](page, selector, index);
+    if (measured.error) {
+      console.error(measured.error);
       process.exitCode = 2;
       return;
     }
-    process.stdout.write(JSON.stringify(rect) + '\n');
+    process.stdout.write(JSON.stringify(measured) + '\n');
   } finally {
     await browser.close();
   }
