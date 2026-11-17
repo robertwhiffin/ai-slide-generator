@@ -96,8 +96,11 @@ BARE_TEXT_START = "Then bare text that follows"
 
 # Fixture 03's chart: the legend and source line are HTML text; the bar values,
 # axis years and margin labels are SVG <text>. The SVG labels listed here are
-# the ones no HTML text on the slide repeats (the visually-hidden data table
-# repeats FY20, 905, FY24 and 1,240, and its visibility belongs to Task 6).
+# the ones no HTML text on the slide contains, even as a substring (the
+# visually-hidden data table repeats FY20, 905, FY24 and 1,240, and its
+# visibility belongs to Task 6). Leaked SVG labels glue together with no white
+# space between them ("905FY20968FY21"), so a leak is found by containment.
+CHART_SVG = "svg.chart-svg"
 CHART_HTML_TEXT = (
     "Revenue ($M)",
     "FY2024 revenue",
@@ -341,7 +344,9 @@ class TestSnapshotTextBlocks:
         """Upstream #56, fixture 17: text that follows a block child in the same container.
 
         The bare text is an anonymous block. It is present, in its own box, with
-        the browser's lines, and that box sits below the block child's box.
+        the browser's lines, and that box sits below the block child's box. It
+        follows the block child in the spTree too: line boxes paint in tree
+        order, which is also the slide's reading order.
         """
         lines = browser_lines(corpus_document("17"), BARE_TEXT_CONTAINER)
         assert len(lines) >= 2 and lines[0] == BLOCK_CHILD, (
@@ -349,8 +354,12 @@ class TestSnapshotTextBlocks:
         )
         shapes = _corpus_shapes(corpus_pptx, "17")
 
-        _, block = _text_box(shapes, BLOCK_CHILD)
-        _, bare = _text_box_containing(shapes, BARE_TEXT_START)
+        block_index, block = _text_box(shapes, BLOCK_CHILD)
+        bare_index, bare = _text_box_containing(shapes, BARE_TEXT_START)
+        assert bare_index > block_index, (
+            f"the bare text (spTree index {bare_index}) is emitted before the block child it "
+            f"follows (index {block_index}):\n{_describe(shapes)}"
+        )
         assert BLOCK_CHILD not in bare.text, (
             f"the bare text shares a box with its block sibling: {bare.text!r}"
         )
@@ -385,8 +394,10 @@ class TestSnapshotTextBlocks:
 
         The chart's HTML legend and source line are text boxes. None of the SVG's
         own ``<text>`` labels (bar values, axis years, margin labels) appears in
-        any text box, and no run carries the SVG source's raw white space.
+        any text box, not even glued to its neighbours, no text box lies over
+        the chart, and no run carries the SVG source's raw white space.
         """
+        document = corpus_document("03")
         shapes = _corpus_shapes(corpus_pptx, "03")
 
         for text in CHART_HTML_TEXT:
@@ -396,9 +407,16 @@ class TestSnapshotTextBlocks:
             for shape in shapes
             if shape.kind == "text"
             for label in SVG_ONLY_LABELS
-            if label in shape.text.split()
+            if label in shape.text
         ]
         assert leaked == [], f"SVG chart labels leaked into slide text: {leaked}"
+        chart = browser_rect(document, CHART_SVG)
+        over_chart = [
+            (_box(shape), shape.text[:60])
+            for shape in shapes
+            if shape.kind == "text" and overlaps(shape, _browser_box(chart, "chart"))
+        ]
+        assert over_chart == [], f"text boxes lie over the SVG chart at {chart}: {over_chart}"
         raw = [text for text in _run_texts(shapes) if "\n" in text or "  " in text]
         assert raw == [], f"runs carry raw source white space: {raw}"
 
@@ -447,6 +465,47 @@ class TestSnapshotTextLines:
             f"the title's lines are {title.text.split(chr(10))}; the browser's are {lines}"
         )
         assert title.wrap == "square", f"a two-line title must wrap, got wrap={title.wrap!r}"
+
+    def test_blank_line_keeps_the_size_of_its_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A blank line (``<br><br>``) is as tall as its block's text, not PowerPoint's 18 pt.
+
+        A bare ``<a:br/>`` carries no run properties, so PowerPoint sizes the
+        blank line at its 18 pt default and every later line shifts down. The
+        blank line is therefore a run of its own, sized like the line before
+        it: in a 13 px paragraph every run, the blank line's included, is
+        ``sz="975"`` (13 x 0.75 pt), and none is at the default.
+        """
+        body = (
+            '<div class="slide">'
+            '<p id="gap" style="font-size: 13px;">First line<br><br>Third line</p>'
+            "</div>"
+        )
+        line_boxes = browser_line_boxes(_document(body), "#gap")
+        assert [line["text"] for line in line_boxes] == ["First line", "Third line"], (
+            f"fixture drift: the paragraph renders {line_boxes}"
+        )
+        assert line_boxes[1]["y"] - line_boxes[0]["y"] > 1.5 * line_boxes[0]["h"], (
+            f"fixture drift: no blank line between the two painted lines: {line_boxes}"
+        )
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        _, box = _text_box_containing(shapes, "First line")
+        runs = [run for para in box.paras for run in para.runs]
+        blank = [run for run in runs if run.soft_break_before and not run.text.strip()]
+        assert len(blank) == 1, (
+            f"expected one run for the blank line, got {len(blank)}: "
+            f"{[(run.text, run.size_pt) for run in runs]}"
+        )
+        expected_pt = 13 * 0.75
+        assert blank[0].size_pt == expected_pt, (
+            f"the blank line's run is {blank[0].size_pt} pt; the paragraph is {expected_pt} pt"
+        )
+        assert all(run.size_pt == expected_pt for run in runs), (
+            f"a run in the box is not at the paragraph's {expected_pt} pt (an absent sz is "
+            f"PowerPoint's 18 pt default): {[(run.text, run.size_pt) for run in runs]}"
+        )
+        lines = [line.strip() for line in box.text.split("\n")]
+        assert lines == ["First line", "", "Third line"], f"the box reads {box.text!r}"
 
     def test_single_line_label_is_unwrapped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A label that is one line in the browser gets ``wrap="none"`` (PowerPoint honours it)."""
@@ -657,3 +716,35 @@ class TestSnapshotTextPaintOrder:
                 f"{rule}: expected back-to-front {[label for label, _ in expected]}, emitted "
                 f"{emitted} (spTree indices {dict(expected)}):\n{_describe(shapes)}"
             )
+
+    def test_text_after_a_block_child_follows_that_childs_whole_subtree(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bare text after a block child paints after everything inside that child.
+
+        ``#outer`` holds the block ``#block`` (its own text, then the nested
+        block ``#nested``) followed by bare text. Line boxes paint in tree order,
+        so the emitted order is "Block", then "Nested", then "Bare tail". Placing
+        the bare text by its container's position puts it first; placing it
+        right after ``#block`` itself, rather than after ``#block``'s whole
+        subtree, puts it before "Nested".
+        """
+        body = (
+            '<div class="slide">'
+            '<div id="outer" style="font-size: 20px;">'
+            '<div id="block">Block<div id="nested">Nested</div></div>Bare tail'
+            "</div>"
+            "</div>"
+        )
+        shapes = slide_shapes(_export_one(body, monkeypatch))
+
+        expected = [
+            ("Block", _text_box(shapes, "Block")[0]),
+            ("Nested", _text_box(shapes, "Nested")[0]),
+            ("Bare tail", _text_box(shapes, "Bare tail")[0]),
+        ]
+        emitted = [label for label, _ in sorted(expected, key=lambda pair: pair[1])]
+        assert emitted == [label for label, _ in expected], (
+            f"text in tree order: expected {[label for label, _ in expected]}, emitted "
+            f"{emitted} (spTree indices {dict(expected)}):\n{_describe(shapes)}"
+        )

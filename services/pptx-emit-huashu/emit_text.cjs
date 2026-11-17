@@ -17,10 +17,14 @@
 //   pptxgenjs writes as <a:br/> inside the paragraph (only for a run that is not
 //   first in its paragraph, which a later line's first run never is);
 // * the last run of every paragraph but the final one carries breakLine, which
-//   ends the paragraph.
+//   ends the paragraph;
+// * a blank line (two <br>s, an empty pre line) is a NBSP run in the style of
+//   the run before it. A bare <a:br/> carries no run properties, so PowerPoint
+//   would size the blank line at its 18 pt default and push every later line down.
 
 const PX_PER_IN = 96;
 const PT_PER_PX = 0.75;
+const NBSP = '\u00a0';
 // CSS weights from 600 up are written bold.
 const BOLD_FROM_WEIGHT = 600;
 // XML 1.0 cannot carry C0 controls other than tab, LF and CR, nor an unpaired
@@ -40,25 +44,34 @@ function runOptions(run) {
   };
 }
 
+// A run's options in this item: its style, and the item's direction.
+function itemRunOptions(run, item) {
+  const options = runOptions(run);
+  if (item.rtl) options.rtlMode = true;
+  return options;
+}
+
 function textObjects(item) {
   const objects = [];
   const paragraphs = item.paragraphs || [];
+  // The last run written, whose style a following blank line takes.
+  let previousRun = null;
   for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex++) {
     const lines = paragraphs[paragraphIndex].lines || [];
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       const runs = lines[lineIndex].runs || [];
       if (!runs.length) {
-        // A blank line is its <a:br/> alone: pptxgenjs writes no run for empty text.
-        const options = { softBreakBefore: lineIndex > 0 };
-        if (item.rtl) options.rtlMode = true;
-        objects.push({ text: '', options });
+        // A blank line never opens its paragraph, so a run precedes it.
+        const options = previousRun ? itemRunOptions(previousRun, item) : {};
+        options.softBreakBefore = lineIndex > 0;
+        objects.push({ text: NBSP, options });
         continue;
       }
       for (let runIndex = 0; runIndex < runs.length; runIndex++) {
-        const options = runOptions(runs[runIndex]);
-        if (item.rtl) options.rtlMode = true;
+        const options = itemRunOptions(runs[runIndex], item);
         if (lineIndex > 0 && runIndex === 0) options.softBreakBefore = true;
         objects.push({ text: String(runs[runIndex].text || '').replace(XML_UNSAFE, ''), options });
+        previousRun = runs[runIndex];
       }
     }
     if (paragraphIndex < paragraphs.length - 1 && objects.length) {
