@@ -74,3 +74,26 @@ export TWINE_PASSWORD="pypi-<your-token>"
 ```bash
 export TWINE_REPOSITORY="pypi"      # or "testpypi"
 ```
+
+---
+
+## `build_metrics.py`
+
+Measures an agent build from Claude Code transcripts and GitHub PR data (standard library
+only; `gh` for GitHub). It reports, per build, the time and cost from the first task
+dispatch to handover, and how much of the PR was edited after handover (commits, lines,
+share of the PR, and commits marked `Parked-task:`). Costs are list prices, relative only:
+use them to compare builds, not to reconcile a bill.
+
+```bash
+# Print the build-metrics block to paste into the PR body
+uv run python -m scripts.build_metrics record --pr 412 --plan docs/superpowers/plans/x.md
+
+# Build the single-session baseline from [{"pr", "session", "first_task_at"?}, ...]
+uv run python -m scripts.build_metrics baseline --input builds.json --out docs/agents/build-metrics-baseline.json
+
+# Print the report: the baseline plus every PR body carrying a block, with a median row per mode
+uv run python -m scripts.build_metrics report [--baseline PATH] [--limit 200]
+```
+
+The user reads the report and decides; no thresholds, and nothing is reverted automatically.

@@ -31,7 +31,12 @@ Every test uses ``tmp_path`` as the projects dir; nothing reads ``~/.claude``.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
+import os
+import re
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1051,3 +1056,672 @@ def test_baseline_handover_is_later_of_pr_open_and_final_review(tmp_path):
 
     # No final review at all: the PR's open time, even though other agents ran later.
     assert handover("NO-FINAL", [("Task 1 supervisor", at(100), at(9000))]) == opened
+
+
+# ---------------------------------------------------------------------------
+# Task 3: build records in the PR body, the report, and the CLI
+# ---------------------------------------------------------------------------
+#
+# Interface under test (Task 3 of the plan):
+#
+#     BLOCK_START = "<!-- build-metrics"
+#     BLOCK_END = "-->"
+#     BuildRecord(pr, mode, plan, sessions, first_task_at, handover_at, final_review_at,
+#                 cost_usd)                          # frozen; sessions is a tuple of ids
+#     render_block(rec) -> str      # BLOCK_START, \n, one-line JSON, \n, BLOCK_END
+#     parse_block(body) -> BuildRecord | None
+#     build_record(*, pr, mode, plan, sessions, projects_dir, handover_at, first_task=None)
+#     report_rows(records, prs) -> list[dict]
+#     render_report(rows) -> str
+#     main(argv) -> int             # record | baseline | report
+#
+# As in Task 2, the names are reached through ``bm``, so while they are missing only these
+# tests fail. ``record`` reads transcripts and nothing else: the CLI tests point HOME at an
+# empty dir, put a fake ``gh`` that fails first on PATH, and make ``bm.gh_json`` and
+# ``bm.fetch_pr`` raise. Every attempt is recorded, so a swallowed error still shows.
+
+PLAN = "docs/superpowers/plans/x.md"
+MODES = ("chained", "single-session")
+RECORD_FIELDS = {
+    "pr",
+    "mode",
+    "plan",
+    "sessions",
+    "first_task_at",
+    "handover_at",
+    "final_review_at",
+    "cost_usd",
+}
+TIME_FIELDS = ("first_task_at", "handover_at", "final_review_at")
+REPORT_COLUMNS = [
+    "PR",
+    "mode",
+    "time to handover (h)",
+    "cost to handover ($)",
+    "edits after: commits",
+    "lines",
+    "share",
+    "parked commits",
+    "share after final review",
+]
+ISO_Z = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
+UTC_PLUS_1 = timezone(timedelta(hours=1))
+
+
+def chained_record():
+    """A chained build's record with every field set, holding values a lossy encoding drops."""
+    return bm.BuildRecord(
+        pr=412,
+        mode="chained",
+        plan=PLAN,
+        sessions=("3b1a43fb-4ff7-4575-8bf1-090b96a5963f", "125625f6-9d1e-4b7a-8c2d-0e5f6a7b8c9d"),
+        # Given in a UTC+1 zone; the block writes it as UTC with a Z.
+        first_task_at=datetime(2026, 11, 14, 8, 30, 12, 345000, tzinfo=UTC_PLUS_1),
+        final_review_at=datetime(2026, 11, 14, 14, 41, 0, 7000, tzinfo=timezone.utc),
+        # The default handover is "now", which carries microseconds.
+        handover_at=datetime(2026, 11, 14, 15, 2, 9, 123456, tzinfo=timezone.utc),
+        cost_usd={"opus": 41.234567, "sonnet": 0.1 + 0.2, "haiku": 0.0123},
+    )
+
+
+def baseline_record():
+    """A baseline build's record: one session, and no final review found."""
+    return bm.BuildRecord(
+        pr=359,
+        mode="single-session",
+        plan="(baseline)",
+        sessions=("dfd8af7c-1a2b-4c3d-8e9f-0a1b2c3d4e5f",),
+        first_task_at=datetime(2026, 11, 2, 10, 4, 51, 250000, tzinfo=timezone.utc),
+        handover_at=datetime(2026, 11, 2, 18, 0, 0, tzinfo=timezone.utc),
+        final_review_at=None,
+        cost_usd={"opus": 48.5},
+    )
+
+
+def write_chained_build(root: Path, *, supervisor: tuple[str, int] = (SONNET, 1_000_000)) -> None:
+    """A chained build of PLAN over two sessions, plus a build of another plan alongside it.
+
+    B1 (primary checkout) names the plan in its prompt, spends 1M opus output at at(10),
+    runs a pre-pass, then dispatches "Task 1 supervisor" at at(100). That supervisor makes
+    one call, ``supervisor`` = (model, output tokens), at at(500).
+
+    A2 (the worktree; it sorts first) resumes from the ledger and names the plan only in a
+    subagent brief. Its Task 2 supervisor spends 1M opus output at at(1100). The final
+    agent's "Final branch review" ends at at(1500), the final agent itself at at(1990), and
+    1M opus output is spent at at(2100), after a handover at at(2000).
+
+    C3 builds plans/y.md: its first task is at at(50), and it spends 1M opus at at(700).
+    """
+    model, output = supervisor
+    write_session(
+        root,
+        "B1",
+        [
+            user(at(0), f"Execute {PLAN} in chained mode."),
+            assistant(at(10), "b1-before", OPUS, output=1_000_000),  # before the first task
+            assistant(at(20), "b1-prepass", OPUS, dispatch="Pre-pass"),
+            assistant(at(100), "b1-task1", OPUS, dispatch="Task 1 supervisor"),
+        ],
+        {
+            "pre": (
+                "Pre-pass",
+                [user(at(21), "You are the pre-pass."), assistant(at(80), "pre-1", OPUS)],
+            ),
+            "t1": (
+                "Task 1 supervisor",
+                [
+                    user(at(101), "You are the Task 1 supervisor."),
+                    assistant(at(500), "t1-1", model, output=output),
+                    tool_result(at(600)),
+                ],
+            ),
+        },
+    )
+    write_session(
+        root,
+        "A2",
+        [
+            user(at(1000), "Resume the chain from the ledger."),
+            assistant(at(1050), "a2-task2", OPUS, dispatch="Task 2 supervisor"),
+            assistant(at(1200), "a2-final", OPUS, dispatch="Final agent"),
+            assistant(at(2100), "a2-after", OPUS, output=1_000_000),  # after the handover
+        ],
+        {
+            "t2": (
+                "Task 2 supervisor",
+                [
+                    user(at(1051), f"Supervise Task 2 of {PLAN}."),
+                    assistant(at(1100), "t2-1", OPUS, output=1_000_000),  # in the window
+                    tool_result(at(1190)),
+                ],
+            ),
+            "fa": (
+                "Final agent",
+                [
+                    user(at(1201), "You are the final agent."),
+                    assistant(at(1210), "fa-1", OPUS, dispatch="Final branch review"),
+                    tool_result(at(1990), "PR marked ready for review."),
+                ],
+            ),
+            "fbr": (
+                "Final branch review",
+                [user(at(1211), "Review the whole branch."), assistant(at(1500), "fbr-1", OPUS)],
+                {"parentAgentId": "fa", "spawnDepth": 2},
+            ),
+        },
+        project=WORKTREE,
+    )
+    write_session(
+        root,
+        "C3",
+        [
+            user(at(0), "Execute docs/superpowers/plans/y.md in chained mode."),
+            assistant(at(50), "c3-task1", OPUS, dispatch="Task 1 supervisor"),
+            assistant(at(700), "c3-spend", OPUS, output=1_000_000),
+        ],
+    )
+
+
+class NoGh:
+    """Guards a CLI run that must not reach GitHub or read the real ``~/.claude``.
+
+    HOME points at an empty dir, and a fake ``gh`` that logs its arguments and exits 1 is
+    first on PATH; a child process inherits both. ``bm.gh_json`` and ``bm.fetch_pr`` record
+    the call and raise. ``calls()`` lists every attempt made through any of these.
+    """
+
+    def __init__(self, tmp_path: Path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        self.log = tmp_path / "gh-calls.log"
+        fake_gh = bin_dir / "gh"
+        fake_gh.write_text(f'#!/bin/sh\necho "gh $*" >> "{self.log}"\nexit 1\n')
+        fake_gh.chmod(0o755)
+        self.attempts: list[str] = []
+
+        def refuse(*args, **kwargs):
+            self.attempts.append(f"in-process: {args!r}")
+            raise AssertionError("record must not call gh")
+
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setattr(bm, "gh_json", refuse)
+        monkeypatch.setattr(bm, "fetch_pr", refuse)
+
+    def calls(self) -> list[str]:
+        logged = self.log.read_text().splitlines() if self.log.exists() else []
+        return [*self.attempts, *logged]
+
+
+def run_module(args: list[str]) -> subprocess.CompletedProcess:
+    """``python -m scripts.build_metrics <args>``, as the final agent runs it.
+
+    Run from the dir holding the ``scripts`` package the tests imported, with this
+    process's environment (so a ``NoGh`` guard applies to it too).
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.build_metrics", *args],
+        cwd=Path(bm.__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def table_cells(text: str) -> list[list[str]]:
+    """The stripped cells of each Markdown table line in ``text``, outer pipes dropped."""
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if "|" not in line:
+            continue
+        if line.startswith("|"):
+            line = line[1:]
+        if line.endswith("|"):
+            line = line[:-1]
+        rows.append([cell.strip() for cell in line.split("|")])
+    return rows
+
+
+def number(cell: str) -> float | None:
+    """A rendered number (``4``, ``4.0``, ``$30.00``, ``0.10``, ``10%``) as a float, with a
+    percentage as a fraction. None for anything else: a blank, ``-``, ``—``, ``n/a``."""
+    match = re.fullmatch(r"\$?(-?\d+(?:\.\d+)?)\s*(%?)", cell.strip())
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value / 100 if match.group(2) else value
+
+
+def report_row(pr, mode, time_h, cost_total, commits, lines, share, parked, after_review) -> dict:
+    return {
+        "pr": pr,
+        "mode": mode,
+        "time_h": time_h,
+        "cost_total": cost_total,
+        "commits": commits,
+        "lines": lines,
+        "share": share,
+        "parked_commits": parked,
+        "share_after_final_review": after_review,
+    }
+
+
+def test_block_round_trips():
+    for rec in (chained_record(), baseline_record()):
+        block = bm.render_block(rec)
+
+        parsed = bm.parse_block(block)
+
+        # Every field survives: aware datetimes (one given in UTC+1, one with microseconds),
+        # final_review_at=None, the sessions tuple, and costs to the last bit.
+        assert parsed == rec
+        assert isinstance(parsed.sessions, tuple)
+        for name in TIME_FIELDS:
+            if getattr(rec, name) is not None:
+                assert_utc_aware(getattr(parsed, name))
+
+        # The block: the start marker, one line of JSON, the end marker.
+        lines = block.split("\n")
+        assert len(lines) == 3, block
+        assert lines[0] == "<!-- build-metrics"
+        assert lines[2] == "-->"
+        data = json.loads(lines[1])
+        assert data["version"] == 1
+        assert set(data) == RECORD_FIELDS | {"version"}
+        assert list(data) == sorted(data)  # sort_keys, at every level
+        assert list(data["cost_usd"]) == sorted(data["cost_usd"])
+        assert data["pr"] == rec.pr
+        assert data["mode"] == rec.mode
+        assert data["plan"] == rec.plan
+        assert data["sessions"] == list(rec.sessions)
+        assert data["cost_usd"] == rec.cost_usd
+        for name in TIME_FIELDS:
+            value = getattr(rec, name)
+            if value is None:
+                assert data[name] is None
+            else:
+                assert ISO_Z.fullmatch(data[name]), data[name]
+                assert datetime.fromisoformat(data[name].replace("Z", "+00:00")) == value
+
+    assert bm.BLOCK_START == "<!-- build-metrics"
+    assert bm.BLOCK_END == "-->"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        chained_record().pr = 413
+
+
+def test_parse_block_absent_or_malformed_returns_none():
+    absent = [
+        "",
+        "## Handover\n\nAll seven tasks done. Waiting on a browser check.",
+        # A PR template's HTML comment is a comment, but not a build-metrics block.
+        "<!-- Describe the change and how you tested it. -->\n## Summary\n\nAdds the export.",
+    ]
+    malformed = [
+        "<!-- build-metrics\n{not json}\n-->",
+        # Cut short, say by a hand edit of the body.
+        '<!-- build-metrics\n{"version": 1, "pr": 412, "mode": "chained"\n-->',
+        # JSON, but not a record.
+        '<!-- build-metrics\n[412, "chained"]\n-->',
+        '<!-- build-metrics\n{"version": 1, "pr": 412}\n-->',
+    ]
+
+    for body in absent:
+        assert bm.parse_block(body) is None, body
+    for block in malformed:
+        assert bm.parse_block(block) is None, block
+        assert bm.parse_block(f"## Handover\n\nReady.\n\n{block}\n\nRulings: none.\n") is None
+
+
+def test_block_survives_surrounding_body():
+    rec = chained_record()
+    # HTML comments before and after the block: its end is the first "-->" after its start.
+    body = (
+        "<!-- Describe the change and how you tested it. -->\n"
+        "## Handover\n\n"
+        f"Built in chained mode from `{PLAN}`. All 7 tasks done; CI is green.\n\n"
+        "### Rulings\n\n- Task 3: kept the plan's report columns.\n\n"
+        f"{bm.render_block(rec)}\n\n"
+        "### Waits on you\n\n- [ ] Browser check of the export button\n- [ ] Merge\n\n"
+        "Finish a parked task with a `Parked-task: <n>` commit trailer.\n"
+        "<!-- Reviewers: tick the boxes above. -->\n"
+    )
+
+    assert bm.parse_block(body) == rec
+    # GitHub returns a body edited in its web UI (a box ticked, say) with CRLF line endings.
+    assert bm.parse_block(body.replace("\n", "\r\n")) == rec
+
+
+def test_build_record_windows_cost_from_first_task_to_handover(tmp_path):
+    # Opus only: 1M output before the first "Task 1 supervisor" dispatch (B1, at(10)), 1M
+    # between it and the handover (A2's Task 2 supervisor, at(1100)), and 1M after the
+    # handover (A2, at(2100)). C3, another build in the same dirs, is not one of the sessions.
+    write_chained_build(tmp_path, supervisor=(OPUS, 0))
+    handover = at(2000)
+
+    rec = bm.build_record(
+        pr=7,
+        mode="chained",
+        plan=PLAN,
+        sessions=["A2", "B1"],
+        projects_dir=tmp_path,
+        handover_at=handover,
+    )
+
+    assert rec.cost_usd == {"opus": pytest.approx(20.0)}
+    assert rec == bm.BuildRecord(
+        pr=7,
+        mode="chained",
+        plan=PLAN,
+        sessions=("A2", "B1"),
+        first_task_at=at(100),
+        handover_at=handover,
+        final_review_at=at(1500),  # final_review_end(): "Final branch review", not "Final agent"
+        cost_usd={"opus": pytest.approx(20.0)},
+    )
+
+    # first_task overrides the dispatch found in the transcripts, and the window opens there.
+    assert bm.build_record(
+        pr=359,
+        mode="single-session",
+        plan="(baseline)",
+        sessions=["A2", "B1"],
+        projects_dir=tmp_path,
+        handover_at=handover,
+        first_task=at(5),
+    ) == bm.BuildRecord(
+        pr=359,
+        mode="single-session",
+        plan="(baseline)",
+        sessions=("A2", "B1"),
+        first_task_at=at(5),
+        handover_at=handover,
+        final_review_at=at(1500),
+        cost_usd={"opus": pytest.approx(40.0)},
+    )
+
+
+def test_report_rows_compute_time_cost_and_edits():
+    # The brief's record: a 5 h window, $10 + $2.50, and PR 412's three commits (140 lines,
+    # one 30-line commit after the handover).
+    brief = bm.BuildRecord(
+        pr=412,
+        mode="single-session",
+        plan="(baseline)",
+        sessions=("S",),
+        first_task_at=H - 5 * HOUR,
+        handover_at=H,
+        final_review_at=None,
+        cost_usd={"opus": 10.0, "sonnet": 2.5},
+    )
+    # An earlier chained build whose parked task was finished after its handover.
+    h2 = H - 24 * HOUR
+    earlier = bm.BuildRecord(
+        pr=413,
+        mode="chained",
+        plan=PLAN,
+        sessions=("T",),
+        first_task_at=h2 - 1.5 * HOUR,
+        handover_at=h2,
+        final_review_at=None,
+        cost_usd={"opus": 7.0},
+    )
+    pr413 = bm.PullRequest(
+        number=413,
+        created_at=h2 - HOUR,
+        merged_at=h2 + 3 * HOUR,
+        body="",
+        commits=(
+            commit("work", h2 - 2 * HOUR, 60),
+            commit("miss", h2 + HOUR, 15),
+            commit("parked", h2 + 2 * HOUR, 25, message="feat: finish import\n\nParked-task: 2"),
+        ),
+    )
+
+    rows = bm.report_rows([brief, earlier], {412: pr_with(*brief_commits()), 413: pr413})
+
+    # One row per record, each with its own PR's edits, sorted by handover.
+    assert rows == [
+        {
+            "pr": 413,
+            "mode": "chained",
+            "time_h": pytest.approx(1.5),
+            "cost_total": pytest.approx(7.0),
+            "commits": 1,
+            "lines": 15,
+            "share": pytest.approx(15 / 100),
+            "parked_commits": 1,
+            "share_after_final_review": None,
+        },
+        {
+            "pr": 412,
+            "mode": "single-session",
+            "time_h": pytest.approx(5.0),
+            "cost_total": pytest.approx(12.5),
+            "commits": 1,
+            "lines": 30,
+            "share": pytest.approx(30 / 140),
+            "parked_commits": 0,
+            "share_after_final_review": None,
+        },
+    ]
+
+
+def test_report_rows_include_share_after_final_review():
+    # 140 lines: 90 before the final review returned (h - 1h), a 20-line review fix between
+    # it and the handover (h), and a 30-line miss after the handover.
+    commits = (
+        commit("work", H - 3 * HOUR, 90),
+        commit("review-fix", H - HOUR / 2, 20, message="fix: final review findings"),
+        commit("miss", H + HOUR, 30),
+    )
+
+    def build(pr_number: int, mode: str, final_review_at: datetime | None):
+        record = bm.BuildRecord(
+            pr=pr_number,
+            mode=mode,
+            plan=PLAN if mode == "chained" else "(baseline)",
+            sessions=(f"s{pr_number}",),
+            first_task_at=H - 6 * HOUR,
+            handover_at=H,
+            final_review_at=final_review_at,
+            cost_usd={"opus": 30.0},
+        )
+        pull = bm.PullRequest(
+            number=pr_number,
+            created_at=H - 4 * HOUR,
+            merged_at=H + 5 * HOUR,
+            body="",
+            commits=commits,
+        )
+        return record, pull
+
+    chained = build(501, "chained", H - HOUR)
+    # A baseline's final review is known too, but its handover already comes after it.
+    baseline = build(502, "single-session", H - HOUR)
+    no_review = build(503, "chained", None)
+    builds = [chained, baseline, no_review]
+
+    rows = bm.report_rows([r for r, _ in builds], {p.number: p for _, p in builds})
+
+    by_pr = {row["pr"]: row for row in rows}
+    assert len(rows) == 3 and set(by_pr) == {501, 502, 503}
+    assert by_pr[501]["share_after_final_review"] == pytest.approx(50 / 140)
+    # The edits after the handover are the same for all three.
+    for row in rows:
+        assert (row["commits"], row["lines"], row["share"]) == (1, 30, pytest.approx(30 / 140))
+    assert by_pr[502]["share_after_final_review"] is None
+    assert by_pr[503]["share_after_final_review"] is None
+
+
+def test_render_report_has_median_row_per_mode():
+    # Each chained column's median comes from a different row, and no mean equals a median.
+    chained = [
+        report_row(401, "chained", 2.0, 30.0, 5, 60, 0.10, 0, 0.40),
+        report_row(402, "chained", 9.0, 10.0, 2, 0, 0.30, 1, 0.05),
+        report_row(403, "chained", 4.0, 80.0, 0, 20, 0.0, 0, 0.15),
+    ]
+    single = [
+        report_row(359, "single-session", 8.0, 48.0, 0, 0, 0.0, 0, None),
+        report_row(351, "single-session", 3.5, 126.0, 3, 90, 0.12, 0, None),
+        report_row(354, "single-session", 28.0, 24.0, 9, 400, 0.26, 0, None),
+    ]
+    # In handover order the modes interleave; a median over all six rows differs per column.
+    rows = [single[0], chained[0], single[1], chained[1], single[2], chained[2]]
+    medians = {  # time_h, cost_total, commits, share, share after final review
+        "chained": (4.0, 30.0, 2, 0.10, 0.15),
+        "single-session": (8.0, 48.0, 3, 0.12, None),
+    }
+
+    table = table_cells(bm.render_report(rows))
+
+    assert table[0] == REPORT_COLUMNS
+    assert len(table[1]) == len(REPORT_COLUMNS)
+    assert all(re.fullmatch(r":?-+:?", cell) for cell in table[1]), table[1]
+    body = table[2:]
+    assert all(len(cells) == len(REPORT_COLUMNS) for cells in body), body
+    assert len(body) == len(rows) + 2, body
+
+    # One line per row, in the order given.
+    for cells, row in zip(body[: len(rows)], rows):
+        assert int(re.search(r"\d+", cells[0]).group()) == row["pr"], cells
+        assert cells[1] == row["mode"], cells
+        assert number(cells[2]) == pytest.approx(row["time_h"], abs=0.051), cells
+        assert number(cells[3]) == pytest.approx(row["cost_total"], abs=0.006), cells
+        assert number(cells[4]) == row["commits"], cells
+        assert number(cells[5]) == row["lines"], cells
+        assert number(cells[6]) == pytest.approx(row["share"], abs=0.0051), cells
+        assert number(cells[7]) == row["parked_commits"], cells
+        if row["share_after_final_review"] is None:
+            assert number(cells[8]) is None, cells
+        else:
+            assert number(cells[8]) == pytest.approx(row["share_after_final_review"], abs=0.0051)
+
+    # Then one median row per mode, each over that mode's rows only.
+    by_mode = {}
+    for cells in body[len(rows) :]:
+        labels = [mode for mode in MODES if f"median ({mode})" in " | ".join(cells)]
+        assert len(labels) == 1, cells
+        by_mode[labels[0]] = cells
+    assert set(by_mode) == set(MODES)
+    for mode, (time_h, cost, commits, share, after_review) in medians.items():
+        cells = by_mode[mode]
+        assert number(cells[2]) == pytest.approx(time_h, abs=0.051), cells
+        assert number(cells[3]) == pytest.approx(cost, abs=0.006), cells
+        assert number(cells[4]) == pytest.approx(commits), cells
+        assert number(cells[6]) == pytest.approx(share, abs=0.0051), cells
+        if after_review is None:
+            assert number(cells[8]) is None, cells
+        else:
+            assert number(cells[8]) == pytest.approx(after_review, abs=0.0051), cells
+
+    # Only the modes present get a median row.
+    only_chained = bm.render_report(chained)
+    assert only_chained.count("median (chained)") == 1
+    assert "median (single-session)" not in only_chained
+
+
+def test_cli_record_prints_block(tmp_path, monkeypatch, capsys):
+    projects = tmp_path / "projects"
+    write_chained_build(projects)
+    guard = NoGh(tmp_path, monkeypatch)
+    handover = "2026-11-17T09:33:20Z"  # at(2000)
+    argv = ["record", "--pr", "7", "--plan", PLAN, "--handover", handover]
+    argv += ["--projects-dir", str(projects)]
+    # Sessions found by the plan path (A2 names it only in a subagent brief; C3 is another
+    # plan's build), mode chained by default, the window from B1's first task to the
+    # handover: 1M opus output in A2's Task 2 supervisor and 1M sonnet output in B1's.
+    expected = bm.BuildRecord(
+        pr=7,
+        mode="chained",
+        plan=PLAN,
+        sessions=("A2", "B1"),
+        first_task_at=at(100),
+        handover_at=at(2000),
+        final_review_at=at(1500),
+        cost_usd={"opus": pytest.approx(20.0), "sonnet": pytest.approx(10.0)},
+    )
+
+    assert bm.main(argv) == 0
+    out = capsys.readouterr().out
+
+    assert bm.parse_block(out).pr == 7
+    assert bm.parse_block(out) == expected
+    # stdout is the block and nothing else: the final agent pastes it into the PR body.
+    assert out.strip() == bm.render_block(bm.parse_block(out))
+
+    # --session names the sessions instead: B1 alone has the first task but no final review.
+    assert bm.main([*argv, "--session", "B1"]) == 0
+    only_b1 = bm.parse_block(capsys.readouterr().out)
+    assert only_b1.sessions == ("B1",)
+    assert (only_b1.first_task_at, only_b1.handover_at) == (at(100), at(2000))
+    assert only_b1.final_review_at is None
+    assert {k: v for k, v in only_b1.cost_usd.items() if v} == {"sonnet": pytest.approx(10.0)}
+
+    # Without --handover, the handover is now, in UTC.
+    before = datetime.now(timezone.utc)
+    assert bm.main(["record", "--pr", "7", "--plan", PLAN, "--projects-dir", str(projects)]) == 0
+    after = datetime.now(timezone.utc)
+    now_rec = bm.parse_block(capsys.readouterr().out)
+    assert_utc_aware(now_rec.handover_at)
+    assert before - timedelta(seconds=1) <= now_rec.handover_at <= after + timedelta(seconds=1)
+
+    # The same as the final agent runs it: `python -m scripts.build_metrics record ...`.
+    child = run_module(argv)
+    assert child.returncode == 0, child.stderr
+    assert bm.parse_block(child.stdout) == expected
+
+    assert guard.calls() == []
+
+
+def test_cli_record_exits_2_without_sessions(tmp_path, monkeypatch, capsys):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    guard = NoGh(tmp_path, monkeypatch)
+    argv = ["record", "--pr", "7", "--plan", PLAN, "--handover", "2026-11-17T09:33:20Z"]
+    argv += ["--projects-dir", str(projects)]
+
+    def assert_exits_2() -> None:
+        assert bm.main(argv) == 2
+        out, err = capsys.readouterr()
+        assert err.strip(), "the reason goes to stderr"
+        assert "build-metrics" not in out
+        child = run_module(argv)
+        assert child.returncode == 2, (child.stdout, child.stderr)
+        assert child.stderr.strip()
+        assert "build-metrics" not in child.stdout
+
+    # An empty projects dir.
+    assert_exits_2()
+
+    # Only another plan's build: no session names this plan.
+    write_session(
+        projects,
+        "C3",
+        [
+            user(at(0), "Execute docs/superpowers/plans/y.md in chained mode."),
+            assistant(at(50), "c3-task1", OPUS, dispatch="Task 1 supervisor"),
+        ],
+    )
+    assert_exits_2()
+
+    # A session names the plan but stopped in the pre-pass: no first task, so no record.
+    write_session(
+        projects,
+        "P",
+        [
+            user(at(0), f"Execute {PLAN} in chained mode."),
+            assistant(at(20), "p-prepass", OPUS, dispatch="Pre-pass"),
+        ],
+        {
+            "pre": (
+                "Pre-pass",
+                [user(at(21), "You are the pre-pass."), assistant(at(80), "p1", OPUS)],
+            )
+        },
+    )
+    assert_exits_2()
+
+    assert guard.calls() == []

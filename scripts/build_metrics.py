@@ -14,10 +14,14 @@ Standard library only.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
+import statistics
 import subprocess
-from collections.abc import Callable, Iterable, Iterator, Sequence
+import sys
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -325,3 +329,351 @@ def edits_after(pr: PullRequest, handover: datetime) -> Edits:
         parked_commits=len(parked),
         parked_lines=sum(c.lines for c in parked),
     )
+
+
+# ---------------------------------------------------------------------------
+# Build records (kept in the PR body), the report, and the CLI
+# ---------------------------------------------------------------------------
+
+BLOCK_START = "<!-- build-metrics"
+BLOCK_END = "-->"
+RECORD_VERSION = 1
+DEFAULT_BASELINE = Path(__file__).resolve().parents[1] / "docs/agents/build-metrics-baseline.json"
+
+
+@dataclass(frozen=True)
+class BuildRecord:
+    pr: int
+    mode: str  # "chained" | "single-session"
+    plan: str  # plan path, or "(baseline)"
+    sessions: tuple[str, ...]
+    first_task_at: datetime
+    handover_at: datetime
+    final_review_at: datetime | None  # final_review_end() at record time
+    cost_usd: dict[str, float]
+
+
+def _iso(ts: datetime | None) -> str | None:
+    if ts is None:
+        return None
+    return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def record_to_dict(rec: BuildRecord) -> dict:
+    return {
+        "version": RECORD_VERSION,
+        "pr": rec.pr,
+        "mode": rec.mode,
+        "plan": rec.plan,
+        "sessions": list(rec.sessions),
+        "first_task_at": _iso(rec.first_task_at),
+        "handover_at": _iso(rec.handover_at),
+        "final_review_at": _iso(rec.final_review_at),
+        "cost_usd": dict(rec.cost_usd),
+    }
+
+
+def record_from_dict(data: object) -> BuildRecord | None:
+    """A record from its JSON form, or None if it is not a well-formed record."""
+    if not isinstance(data, dict) or data.get("version") != RECORD_VERSION:
+        return None
+    try:
+        pr, mode, plan = data["pr"], data["mode"], data["plan"]
+        sessions, costs = data["sessions"], data["cost_usd"]
+        first, handover = _parse_ts(data["first_task_at"]), _parse_ts(data["handover_at"])
+        raw_review = data["final_review_at"]
+        review = _parse_ts(raw_review)
+    except KeyError:
+        return None
+    if not (isinstance(pr, int) and isinstance(mode, str) and isinstance(plan, str)):
+        return None
+    if not (isinstance(sessions, list) and all(isinstance(x, str) for x in sessions)):
+        return None
+    if not (isinstance(costs, dict) and all(isinstance(v, (int, float)) for v in costs.values())):
+        return None
+    if first is None or handover is None or (raw_review is not None and review is None):
+        return None
+    return BuildRecord(
+        pr=pr,
+        mode=mode,
+        plan=plan,
+        sessions=tuple(sessions),
+        first_task_at=first,
+        handover_at=handover,
+        final_review_at=review,
+        cost_usd={str(k): float(v) for k, v in costs.items()},
+    )
+
+
+def render_block(rec: BuildRecord) -> str:
+    return f"{BLOCK_START}\n{json.dumps(record_to_dict(rec), sort_keys=True)}\n{BLOCK_END}"
+
+
+def parse_block(body: str) -> BuildRecord | None:
+    """The first well-formed build-metrics block in a PR body, else None."""
+    pos = 0
+    while True:
+        start = body.find(BLOCK_START, pos)
+        if start < 0:
+            return None
+        begin = start + len(BLOCK_START)
+        end = body.find(BLOCK_END, begin)
+        if end < 0:
+            return None
+        try:
+            rec = record_from_dict(json.loads(body[begin:end]))
+        except ValueError:
+            rec = None
+        if rec is not None:
+            return rec
+        pos = begin
+
+
+def build_record(
+    *,
+    pr: int,
+    mode: str,
+    plan: str,
+    sessions: Sequence[str],
+    projects_dir: Path,
+    handover_at: datetime,
+    first_task: datetime | None = None,
+) -> BuildRecord:
+    """Cost is windowed from the first task to the handover. Raises ValueError if no first
+    task is given and none is found in the transcripts."""
+    t = load_sessions(projects_dir, sessions)
+    if first_task is None:
+        found = first_task_at(t)
+        if found is None:
+            raise ValueError("no task dispatch found in the sessions")
+        first_task = found.ts
+    return BuildRecord(
+        pr=pr,
+        mode=mode,
+        plan=plan,
+        sessions=tuple(sessions),
+        first_task_at=first_task,
+        handover_at=handover_at,
+        final_review_at=final_review_end(t),
+        cost_usd=cost_usd(t.calls, first_task, handover_at),
+    )
+
+
+def report_rows(records: Sequence[BuildRecord], prs: Mapping[int, PullRequest]) -> list[dict]:
+    rows = []
+    for rec in sorted(records, key=lambda r: r.handover_at):
+        pull = prs[rec.pr]
+        edits = edits_after(pull, rec.handover_at)
+        after_review = None
+        if rec.mode == "chained" and rec.final_review_at is not None:
+            after_review = edits_after(pull, rec.final_review_at).share
+        rows.append(
+            {
+                "pr": rec.pr,
+                "mode": rec.mode,
+                "time_h": (rec.handover_at - rec.first_task_at).total_seconds() / 3600,
+                "cost_total": sum(rec.cost_usd.values()),
+                "commits": edits.commits,
+                "lines": edits.lines,
+                "share": edits.share,
+                "parked_commits": edits.parked_commits,
+                "share_after_final_review": after_review,
+            }
+        )
+    return rows
+
+
+REPORT_HEADER = [
+    "PR",
+    "mode",
+    "time to handover (h)",
+    "cost to handover ($)",
+    "edits after: commits",
+    "lines",
+    "share",
+    "parked commits",
+    "share after final review",
+]
+
+
+def _pct(value: float | None) -> str:
+    return "-" if value is None else f"{value * 100:.1f}%"
+
+
+def _median(values: Iterable[float | None]) -> float | None:
+    present = [v for v in values if v is not None]
+    return statistics.median(present) if present else None
+
+
+def _count(value: float | None) -> str:
+    return "-" if value is None else f"{value:g}"
+
+
+def render_report(rows: list[dict]) -> str:
+    def line(cells: list[str]) -> str:
+        return "| " + " | ".join(cells) + " |"
+
+    lines = [line(REPORT_HEADER), line(["---"] * len(REPORT_HEADER))]
+    for r in rows:
+        lines.append(
+            line(
+                [
+                    f"#{r['pr']}",
+                    r["mode"],
+                    f"{r['time_h']:.1f}",
+                    f"{r['cost_total']:.2f}",
+                    str(r["commits"]),
+                    str(r["lines"]),
+                    _pct(r["share"]),
+                    str(r["parked_commits"]),
+                    _pct(r["share_after_final_review"]),
+                ]
+            )
+        )
+    for mode in dict.fromkeys(r["mode"] for r in rows):
+        group = [r for r in rows if r["mode"] == mode]
+        lines.append(
+            line(
+                [
+                    f"median ({mode})",
+                    "",
+                    f"{_median(r['time_h'] for r in group):.1f}",
+                    f"{_median(r['cost_total'] for r in group):.2f}",
+                    _count(_median(r["commits"] for r in group)),
+                    _count(_median(r["lines"] for r in group)),
+                    _pct(_median(r["share"] for r in group)),
+                    _count(_median(r["parked_commits"] for r in group)),
+                    _pct(_median(r["share_after_final_review"] for r in group)),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _projects_dir(arg: str | None) -> Path:
+    return Path(os.path.expanduser(arg or "~/.claude/projects"))
+
+
+def _cmd_record(args: argparse.Namespace) -> int:
+    projects_dir = _projects_dir(args.projects_dir)
+    sessions = list(args.session) or find_sessions(projects_dir, args.plan)
+    if not sessions:
+        print(f"build-metrics: no session names {args.plan} under {projects_dir}", file=sys.stderr)
+        return 2
+    try:
+        rec = build_record(
+            pr=args.pr,
+            mode=args.mode,
+            plan=args.plan,
+            sessions=sessions,
+            projects_dir=projects_dir,
+            handover_at=args.handover or datetime.now(timezone.utc),
+        )
+    except ValueError as exc:
+        print(f"build-metrics: {exc}", file=sys.stderr)
+        return 2
+    print(render_block(rec))
+    return 0
+
+
+def _cmd_baseline(args: argparse.Namespace) -> int:
+    projects_dir = _projects_dir(args.projects_dir)
+    entries = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    records = []
+    for entry in entries:
+        session = entry["session"]
+        t = load_sessions(projects_dir, [session])
+        override = _parse_ts(entry.get("first_task_at"))
+        matched = first_task_at(t)
+        first = override or (matched.ts if matched else None)
+        if first is None:
+            print(f"build-metrics: PR {entry['pr']}: no task dispatch in {session}", file=sys.stderr)
+            return 2
+        pull = fetch_pr(entry["pr"])
+        handover = baseline_handover(pull, t)
+        rec = build_record(
+            pr=entry["pr"],
+            mode="single-session",
+            plan="(baseline)",
+            sessions=[session],
+            projects_dir=projects_dir,
+            handover_at=handover,
+            first_task=first,
+        )
+        records.append(rec)
+        what = "(first_task_at override)" if override or matched is None else repr(matched.description)
+        print(
+            f"PR {rec.pr}: first dispatch {what}; first task {_iso(first)}; "
+            f"handover {_iso(handover)}; ${sum(rec.cost_usd.values()):.2f}"
+        )
+    records.sort(key=lambda r: r.pr)
+    Path(args.out).write_text(
+        json.dumps([record_to_dict(r) for r in records], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    baseline_path = Path(args.baseline) if args.baseline else DEFAULT_BASELINE
+    records: dict[int, BuildRecord] = {}
+    if baseline_path.exists():
+        for item in json.loads(baseline_path.read_text(encoding="utf-8")):
+            rec = record_from_dict(item)
+            if rec is not None:
+                records[rec.pr] = rec
+    elif args.baseline:
+        print(f"build-metrics: no baseline file at {baseline_path}", file=sys.stderr)
+        return 2
+    pages = gh_json([f"repos/{REPO}/pulls?state=all&per_page=100", "--paginate", "--slurp"])
+    pulls = sorted((p for page in pages for p in page), key=lambda p: p["number"], reverse=True)
+    for pull in pulls[: args.limit]:
+        rec = parse_block(pull.get("body") or "")
+        if rec is not None:
+            records[rec.pr] = rec
+    prs = {n: fetch_pr(n) for n in records}
+    print(render_report(report_rows(list(records.values()), prs)), end="")
+    return 0
+
+
+def _iso_arg(value: str) -> datetime:
+    ts = _parse_ts(value)
+    if ts is None:
+        raise argparse.ArgumentTypeError(f"not an ISO-8601 time: {value!r}")
+    return ts
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="build_metrics", description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    rec = sub.add_parser("record", help="print the build-metrics block for a PR body")
+    rec.add_argument("--pr", type=int, required=True)
+    rec.add_argument("--plan", required=True)
+    rec.add_argument("--mode", default="chained", choices=["chained", "single-session"])
+    rec.add_argument("--session", action="append", default=[])
+    rec.add_argument("--handover", type=_iso_arg)
+    rec.add_argument("--projects-dir")
+    rec.set_defaults(func=_cmd_record)
+
+    base = sub.add_parser("baseline", help="build the single-session baseline file")
+    base.add_argument("--input", required=True)
+    base.add_argument("--out", required=True)
+    base.add_argument("--projects-dir")
+    base.set_defaults(func=_cmd_baseline)
+
+    rep = sub.add_parser("report", help="print the report table")
+    rep.add_argument("--baseline")
+    rep.add_argument("--limit", type=int, default=200)
+    rep.set_defaults(func=_cmd_report)
+
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except subprocess.CalledProcessError as exc:
+        print(exc.stderr or f"build-metrics: {exc}", file=sys.stderr)
+        return exc.returncode or 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
