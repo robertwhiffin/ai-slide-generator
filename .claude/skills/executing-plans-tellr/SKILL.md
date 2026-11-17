@@ -42,7 +42,9 @@ Reverting:
   text from before chained mode with
   `git restore --source=executing-plans-tellr/single-session-v1 -- .claude/skills/executing-plans-tellr/SKILL.md`,
   delete the three brief files beside it, and drop the `Execution:` paragraph from
-  `CLAUDE.md`.
+  `CLAUDE.md`. `executing-plans-tellr/single-session-v1` is a branch, never a tag:
+  setuptools-scm reads the nearest tag as the package version, and fails on a tag that
+  isn't one.
 
 Measuring: `uv run python -m scripts.build_metrics report` prints every chained build (each
 final agent writes its record into its PR body) beside the single-session baseline. It
