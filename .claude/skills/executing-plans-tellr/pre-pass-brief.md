@@ -96,7 +96,7 @@ rulings: <one line, or "none">
 ```
 
 Here `stage=pre-pass` and `commits: none`. On success, `status=done` and `next` matches
-your `NEXT:` line: the first task not `outside the chain`. The `summary` gives the number of corrections and
-names any that change a task's interface.
+your `NEXT:` line: the first task not `outside the chain`. The `summary` gives the number
+of corrections and names any that change a task's interface.
 
 On failure, `status=failed` and `next=done`. The `summary` says what the user must fix.
