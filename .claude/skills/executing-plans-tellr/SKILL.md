@@ -27,6 +27,12 @@ A plan overrides the default with a header line, `Execution: chained` or
   "orchestrator" or "I", read the stage running them: the pre-pass for §2, the task
   supervisor for its task, the final agent for §7.
 
+**If you are the top-level of a chained build**, your whole job is §10's "The top-level"
+and "Resume". You use three tools: Agent, Read of this file and its brief templates, and
+the resume grep. Navigate this file with Read alone, not shell. **Never Read the ledger,
+not even on a resume to orient yourself:** the grep is your only view of it, and each
+stage reads the ledger itself.
+
 Reverting:
 
 - For one build, edit its plan's `Execution:` line.
@@ -279,9 +285,11 @@ gave it. Never run a command or read a file to find a value.
 
 ### Resume
 
-When the user says "continue the build in `<ledger>`", run
-`grep '^NEXT:' <ledger> | tail -1`, dispatch the stage it names, and carry on as above.
-If the shell refuses the pipe, run `grep '^NEXT:' <ledger>` and take its last line.
+When the user says "continue the build in `<ledger>`", your first command is
+`grep '^NEXT:' <ledger> | tail -1`. Don't Read the ledger before it or after it: the
+stage you dispatch reads the ledger, and the values you lack are `(ledger header)`.
+Dispatch the stage the grep names and carry on as above. If the shell refuses the pipe,
+run `grep '^NEXT:' <ledger>` and take its last line.
 
 - `NEXT: done`: the build is over. Say so.
 - No `NEXT:` line: the pre-pass did not finish. Dispatch `Pre-pass`.
