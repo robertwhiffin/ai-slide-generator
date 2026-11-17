@@ -544,14 +544,12 @@ class DatabricksModelAdapter:
         self._client_factory = client_factory or self._default_client_factory
         # ``None`` (production): the SDK's own retries are off and Tellr's
         # ``call_model`` retries under the process limiter.  An adapter given
-        # transport options (``get_agent_test_runtime``, #267 C33) bounds the
-        # call itself, so it gets no retries and no slot unless asked.
+        # transport options (``get_agent_test_runtime``, #267 C33, and the eval
+        # harness) bounds the call itself, so it gets no retries and no slot
+        # unless asked.
         if transport_options is None:
-            self._transport_options: dict[str, Any] | None = {"max_retries": 0}
-            default_policy: RetryPolicy | None = DEFAULT_RETRY_POLICY
-            self._retry_policy = (
-                default_policy if retry_policy is _MANAGED else retry_policy
-            )
+            self._transport_options: dict[str, Any] = {"max_retries": 0}
+            self._retry_policy = DEFAULT_RETRY_POLICY if retry_policy is _MANAGED else retry_policy
             self._limiter = get_model_call_limiter() if limiter is _MANAGED else limiter
         else:
             self._transport_options = dict(transport_options)
@@ -582,7 +580,8 @@ class DatabricksModelAdapter:
         prompt: str,
     ) -> BaseModel:
         # ``agent_key`` is deliberately a separate selection seam.  In particular,
-        # Build Reviewer and Fix Reviewer have the same output schema.
+        # Build Reviewer and Fix Reviewer have the same output schema.  It also
+        # names the ``model_call_retry`` / ``model_call_gave_up`` log lines.
         with _model_provider_errors_collapsed():
             structured_model = bind_structured_output_model(
                 model_factory=self._model_factory,
@@ -631,7 +630,9 @@ class DatabricksModelAdapter:
         After ``max_calls + 3`` rounds without a schema call it raises
         ``OutputParserException``.  Only the model's own calls (construction,
         binding, each round) collapse provider failures into
-        ``ModelProviderUnavailableError``; a tool's failure never does.
+        ``ModelProviderUnavailableError``; a tool's failure never does.  Each
+        round's model call goes through ``call_model`` on its own (its own
+        retries, holding one limiter slot); tools run outside it, holding none.
 
         Every round after the first starts with ``raise_if_turn_ended``: a
         read-only tool writes nothing, so no fence would stop a turn stopped

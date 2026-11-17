@@ -1626,12 +1626,19 @@ def test_the_agent_test_runtime_bounds_its_model_call_to_120_seconds_and_no_retr
 
 
 def test_the_production_runtime_adapter_turns_off_the_sdk_retries():
-    """Spec §3: the adapter owns retries, so the SDK's own are off (``max_retries=0``)."""
+    """Spec §3: the adapter owns retries, so the SDK's own are off (``max_retries=0``).
+
+    Production's adapter also keeps the defaults it owns them with: Tellr's retry
+    policy and the process's model-call limiter (not an explicit ``None``)."""
     from src.services.agent_runtime import get_agent_runtime
+    from src.services.model_calls import DEFAULT_RETRY_POLICY, get_model_call_limiter
 
     get_agent_runtime.cache_clear()
     try:
-        assert _drive_adapter_kwargs(get_agent_runtime()._model_adapter) == {
+        adapter = get_agent_runtime()._model_adapter
+        assert adapter._retry_policy is DEFAULT_RETRY_POLICY
+        assert adapter._limiter is get_model_call_limiter()
+        assert _drive_adapter_kwargs(adapter) == {
             **_SAVED_MODEL_KWARGS,
             "max_retries": 0,
         }
