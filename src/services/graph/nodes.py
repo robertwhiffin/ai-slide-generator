@@ -7575,7 +7575,9 @@ def _holds_placeholder(row: Optional[dict]) -> bool:
     )
 
 
-def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
+def _write_draft_row(
+    record: dict, mutation: DeckMutationContext, *, replace_real: bool = False
+) -> bool:
     """Commit the builder's HTML so the slide is visible before it is reviewed.
 
     Product decision (2026-10-12): show the draft, then replace it once the
@@ -7592,6 +7594,12 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
     pending inserted slide or a failed one — ``_holds_placeholder``), has no
     real slide to protect and is filled.
 
+    The one exception is ``replace_real=True`` (decided 2026-11-17), used only
+    by the transient-review fallback of :func:`slide_pipeline_node`: when the
+    build's review fails transiently after retries are spent, the unreviewed
+    build lands over the real slide instead of failing the turn.  The draft
+    write itself never passes it.
+
     **No ``verification_record``**: ``write_slide`` preserves the row's existing
     record when given ``None``, and that record is keyed by content hash, so
     the draft's own hash carries no verdict and reads as unreviewed rather than
@@ -7607,15 +7615,16 @@ def _write_draft_row(record: dict, mutation: DeckMutationContext) -> bool:
     edit (the stop's rollback puts the real slides back) went on to pay for the
     build review, and only the reviewed write refused it.
 
-    Returns whether the draft was committed — the pipeline may keep it as the
-    slide's final row if review then fails transiently.
+    Returns whether the row was committed — the pipeline may keep it as the
+    slide's final row if review then fails transiently (for a draft it was
+    written early; with ``replace_real=True`` it is the landing write itself).
     """
     position = record["position"]
     slide_spec = record.get("slide_spec")
     try:
         writer = SlideWriter()
         existing = writer.get_slide(record["session_id"], position)
-        if existing is not None and not _holds_placeholder(existing):
+        if not replace_real and existing is not None and not _holds_placeholder(existing):
             raise_if_turn_ended()
             return False
         writer.write_slide(
@@ -7727,14 +7736,20 @@ def slide_pipeline_node(payload: dict) -> Dict[str, Any]:
         _fold(acc, build_reviewer_node(build_review_payload(record, payload)))
     except PersistedRuntimeError as exc:
         # A transient model fault (rate limit, 5xx, timeout) while reviewing:
-        # the draft is already the committed row, so keep it — unreviewed, no
-        # verdict — rather than fail the deck.  Without a draft (the position
-        # held a slide already) there is nothing safe to keep: re-raise.
-        if not (drafted and is_transient_model_failure(exc)):
+        # land the build unreviewed — no verdict — rather than fail the deck.
+        # A draft is already the committed row.  Without one (an edit: the
+        # position holds the user's slide) the build is written over it now;
+        # if that write cannot land, re-raise the review's own fault.  The
+        # notice follows only a landed write.
+        if not is_transient_model_failure(exc):
+            raise
+        if not drafted and not _write_draft_row(record, mutation, replace_real=True):
             raise
         logger.warning(
-            "Build review of slide %s failed transiently; keeping its draft",
+            "Build review of slide %s failed transiently; keeping its build "
+            "unreviewed (drafted=%s)",
             position,
+            drafted,
             exc_info=True,
         )
         _transient_failure_notice(session_id, position, during="review")

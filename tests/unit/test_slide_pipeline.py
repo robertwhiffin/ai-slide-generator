@@ -26,8 +26,8 @@ from typing import Any, Dict
 
 import pytest
 
-from src.api.services.slide_repository import is_placeholder_record
-from src.domain.finding import VERDICT_KEY, DeckReviewOutput
+from src.api.services.slide_repository import SlideWriter, is_placeholder_record
+from src.domain.finding import VERDICT_KEY, DeckReviewOutput, build_verification_record
 from src.services.foreman_service import CAP
 from src.services.graph import nodes
 from src.services.graph.builder import build_graph
@@ -544,18 +544,131 @@ class TestATransientModelFaultKeepsTheDraft:
         with pytest.raises(PinnedInvocationEndpointError):
             _run(env)
 
-    def test_without_a_draft_a_transient_review_failure_still_fails_the_turn(
-        self, graph_env_threadsafe
-    ):
-        """On an edit or rebuild there is no draft (the user's slide is kept), so
-        there is nothing safe to keep in its place."""
-        from src.services.persisted_graph_release import PinnedInvocationEndpointError
+    # -- Spec §4b (owner, 2026-11-17): an EDIT has no draft ---------------------
+    #
+    # On an edit the position already holds the user's slide, so no draft is
+    # written (``test_a_draft_never_overwrites_a_committed_slide``).  A transient
+    # review fault used to fail the whole turn there, and #385 then rolled back
+    # every other slide's work.  Now the build lands as built, unreviewed, with the
+    # same notice a kept draft gets.  A fault no retry can cure, or a build whose
+    # row cannot be written, still fails the turn and keeps the user's slide.
 
+    _EXISTING = "<div class='slide'>existing 0</div>"
+    _BUILT = "<div class='slide'>slide 0</div>"
+
+    @staticmethod
+    def _verdict_now(row):
+        """The verdict stored for the slide *row* holds NOW, or None.
+
+        A verification record is keyed by content hash and keeps every hash the
+        position has held, so a verdict for the slide an edit replaced says
+        nothing about this one.  ``get_slide_deck`` reads it exactly this way:
+        ``.get(compute_slide_hash(row.html))``.
+        """
+        record = row.verification_record
+        if isinstance(record, str):
+            record = json.loads(record) if record.strip() else None
+        return (record or {}).get(compute_slide_hash(row.html))
+
+    @staticmethod
+    def _no_notice(env, caplog):
+        """No slide was announced as kept unreviewed: no chat notice, no log line."""
+        info = [m for m in env.messages() if m["message_type"] == "info"]
+        notices = [m["content"] for m in info if m["content"] != nodes._advisory_text([])]
+        assert notices == [], notices
+        records = failure_notice_records(caplog)
+        assert records == [], [r.getMessage() for r in records]
+
+    @pytest.mark.parametrize(
+        "old_slide_reviewed", [False, True], ids=["no-record", "old-slide-reviewed"]
+    )
+    def test_an_edits_transient_review_failure_lands_the_build_unreviewed(
+        self, graph_env_threadsafe, caplog, old_slide_reviewed
+    ):
+        """``old-slide-reviewed``: in production the edited slide carries a record
+        with a verdict for its OLD hash, and the landing write
+        (``verification_record=None``) preserves it.  The landed build must still
+        read unreviewed: no verdict under its own hash."""
+        caplog.set_level(logging.WARNING, logger="src.services.graph.nodes")
         env = graph_env_threadsafe
         _wire(env, (0,))
-        env.seed_slides(["<div class='slide'>existing 0</div>"])
+        env.seed_slides([self._EXISTING])
+        if old_slide_reviewed:
+            SlideWriter().write_slide(
+                env.session_id,
+                0,
+                self._EXISTING,
+                verification_record=build_verification_record(
+                    content_hash=compute_slide_hash(self._EXISTING),
+                    findings=[],
+                    verdict="clean",
+                ),
+            )
+            seeded = self._verdict_now(_rows(env)[0])
+            assert seeded[VERDICT_KEY]["verdict"] == "clean", "the seed did not take"
         env.skills.set("build_reviewer", _transient("opus"))
+
+        _run(env)
+
+        rows = _rows(env)
+        assert sorted(rows) == [0]
+        assert rows[0].html == self._BUILT
+        if not old_slide_reviewed:
+            assert rows[0].verification_record in (None, "", "{}", "null")
+        assert self._verdict_now(rows[0]) is None, (
+            f"the landed build claims a review it never had: {rows[0].verification_record}"
+        )
+        # Landed and reviewed as far as the turn is concerned, so the foreman
+        # neither rebuilds nor placeholds the position, and the deck is reviewed.
+        assert len(env.skills.calls_for("builder")) == 1, "the slide was rebuilt"
+        assert len(env.skills.calls_for("build_reviewer")) == 1
+        assert len(env.skills.calls_for("deck_reviewer")) == 1
+        # Position 0 is the deck's FIRST slide: "Slide 1" in the UI.
+        self._the_one_notice(env, caplog, unreviewed_slide_notice(0, during="review"), position=0)
+
+    def test_an_edits_permanent_review_failure_still_keeps_the_users_slide(
+        self, graph_env_threadsafe, caplog
+    ):
+        """A removed or forbidden endpoint cannot work on any retry: the turn
+        fails and the user's good slide is never overwritten by it."""
+        from src.services.persisted_graph_release import PinnedInvocationEndpointError
+
+        caplog.set_level(logging.WARNING, logger="src.services.graph.nodes")
+        env = graph_env_threadsafe
+        _wire(env, (0,))
+        env.seed_slides([self._EXISTING])
+        env.skills.set("build_reviewer", _permanent("opus"))
 
         with pytest.raises(PinnedInvocationEndpointError):
             _run(env)
-        assert _rows(env)[0].html == "<div class='slide'>existing 0</div>"
+        assert _rows(env)[0].html == self._EXISTING
+        self._no_notice(env, caplog)
+
+    def test_an_edit_whose_build_cannot_be_written_still_fails(
+        self, graph_env_threadsafe, caplog, monkeypatch
+    ):
+        """The build lands only if its row is written.  When that write fails there
+        is nothing to keep: the review's fault fails the turn, the user's slide
+        stays, and no notice claims a slide that never landed."""
+        from src.services.persisted_graph_release import PinnedInvocationEndpointError
+
+        caplog.set_level(logging.WARNING, logger="src.services.graph.nodes")
+        env = graph_env_threadsafe
+        _wire(env, (0,))
+        env.seed_slides([self._EXISTING])
+        env.skills.set("build_reviewer", _transient("opus"))
+        real_write_slide = SlideWriter.write_slide
+        built = self._BUILT
+
+        def write_slide(writer, *args, **kwargs):
+            html = kwargs["html"] if "html" in kwargs else args[2]
+            if html == built:
+                raise RuntimeError("the slide row could not be written")
+            return real_write_slide(writer, *args, **kwargs)
+
+        monkeypatch.setattr(SlideWriter, "write_slide", write_slide)
+
+        with pytest.raises(PinnedInvocationEndpointError):
+            _run(env)
+        assert _rows(env)[0].html == self._EXISTING
+        self._no_notice(env, caplog)
