@@ -86,8 +86,10 @@ share of the PR, and commits marked `Parked-task:`). Costs are list prices, rela
 use them to compare builds, not to reconcile a bill.
 
 ```bash
-# Print the build-metrics block to paste into the PR body
-uv run python -m scripts.build_metrics record --pr 412 --plan docs/superpowers/plans/x.md
+# Print the build-metrics block to paste into the PR body (a chained build's final agent
+# runs this, with --find set to the build's ledger)
+uv run --directory <worktree> python -m scripts.build_metrics record --pr 412 \
+  --plan docs/superpowers/plans/x.md --find ~/tellr-loop/x/LEDGER.md
 
 # Build the single-session baseline from [{"pr", "session", "first_task_at"?}, ...]
 uv run python -m scripts.build_metrics baseline --input builds.json --out docs/agents/build-metrics-baseline.json
@@ -95,5 +97,13 @@ uv run python -m scripts.build_metrics baseline --input builds.json --out docs/a
 # Print the report: the baseline plus every PR body carrying a block, with a median row per mode
 uv run python -m scripts.build_metrics report [--baseline PATH] [--limit 200]
 ```
+
+`record` costs the sessions whose transcripts contain the `--find` string (default: the
+`--plan` value), or those named with `--session`. In chained mode (`--mode`, the default)
+it keeps only sessions that dispatched a `Task <n> supervisor` or the `Final agent`, and
+starts the clock at the earliest `Task <n> supervisor` dispatch whose prompt contains the
+`--find` string, falling back to the first dispatch naming a task. `--first-task <ISO>`
+sets the clock by hand, and `--handover <ISO>` the end (default: now). It prints the
+sessions and the first task it chose on stderr.
 
 The user reads the report and decides; no thresholds, and nothing is reverted automatically.

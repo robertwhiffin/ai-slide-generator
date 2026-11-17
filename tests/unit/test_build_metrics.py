@@ -1725,3 +1725,266 @@ def test_cli_record_exits_2_without_sessions(tmp_path, monkeypatch, capsys):
     assert_exits_2()
 
     assert guard.calls() == []
+
+
+# ---------------------------------------------------------------------------
+# Final-review fixes: `record` keys on the ledger, and the final review is clipped
+# ---------------------------------------------------------------------------
+#
+#     Dispatch(ts, description, prompt="")   # prompt: the Agent call's input.prompt
+#     build_record(..., find=None)           # chained: the clock starts at the earliest
+#                                            # "Task <n> supervisor" whose prompt has `find`
+#     record --find STRING (default: the --plan value) --first-task ISO
+#
+# A chained build's top-level fills the ledger's absolute path into every stage brief, so
+# the ledger path names this build's stage dispatches and nothing else.
+
+LEDGER = "/Users/dev/tellr-loop/x/LEDGER.md"
+
+
+def dispatch_block(description: str, prompt: str) -> dict:
+    """An Agent tool_use with this prompt (``agent_block`` writes a stock one)."""
+    return {
+        "type": "tool_use",
+        "id": "toolu_" + re.sub(r"\W", "_", description)[:40],
+        "name": "Agent",
+        "input": {"description": description, "prompt": prompt, "subagent_type": "general-purpose"},
+    }
+
+
+def stage_brief(stage: str, *, ledger: str = LEDGER, plan: str = PLAN) -> str:
+    """The head of a filled stage brief, as the top-level sends it."""
+    return f"You are the `{stage}` of a chained build.\n\n- Plan: `{plan}`\n- Ledger: `{ledger}`"
+
+
+def nonzero(costs: dict[str, float]) -> dict[str, float]:
+    return {family: cost for family, cost in costs.items() if cost}
+
+
+def test_cli_record_costs_only_the_chains_sessions(tmp_path, monkeypatch, capsys):
+    projects = tmp_path / "projects"
+    guard = NoGh(tmp_path, monkeypatch)
+    # The build. Its Task 1 supervisor spends 1M sonnet output at at(500).
+    write_session(
+        projects,
+        "build",
+        [
+            user(at(0), f"Execute {PLAN} in chained mode."),
+            assistant(
+                at(100),
+                "b-1",
+                OPUS,
+                blocks=(dispatch_block("Task 1 supervisor", stage_brief("Task 1 supervisor")),),
+            ),
+        ],
+        {
+            "t1": (
+                "Task 1 supervisor",
+                [
+                    user(at(101), stage_brief("Task 1 supervisor")),
+                    assistant(at(500), "t1-1", SONNET, output=1_000_000),
+                    tool_result(at(600)),
+                ],
+            )
+        },
+    )
+    # The top-level died while the final agent waited on CI, and a fresh session resumed the
+    # build. It dispatched only the final agent, whose brief does not know the plan path.
+    # The final agent spends 1M opus output at at(1300); its review ends at at(1500).
+    resume_brief = stage_brief("Final agent", plan="(ledger header)")
+    write_session(
+        projects,
+        "resume",
+        [
+            user(at(1000), f"Continue the build in {LEDGER}."),
+            assistant(at(1200), "r-1", OPUS, blocks=(dispatch_block("Final agent", resume_brief),)),
+        ],
+        {
+            "fa": (
+                "Final agent",
+                [
+                    user(at(1201), resume_brief),
+                    assistant(
+                        at(1300), "fa-1", OPUS, output=1_000_000, dispatch="Final branch review"
+                    ),
+                    tool_result(at(1990), "PR marked ready for review."),
+                ],
+            ),
+            "fbr": (
+                "Final branch review",
+                [user(at(1301), "Review the whole branch."), assistant(at(1500), "fbr-1", OPUS)],
+                {"parentAgentId": "fa", "spawnDepth": 2},
+            ),
+        },
+        project=WORKTREE,
+    )
+    # The user talking the plan over while it builds. It names the plan, but neither names
+    # the ledger nor dispatches a stage. 1M opus output at at(300).
+    write_session(
+        projects,
+        "chat",
+        [
+            user(at(200), f"While that builds: is Task 3 of {PLAN} still right?"),
+            assistant(at(300), "c-1", OPUS, output=1_000_000, dispatch="Explore Task 3 code"),
+        ],
+    )
+    # A smoke run of the same plan, with a ledger of its own: a supervisor whose brief names
+    # this plan but not this ledger. 1M haiku output at at(400).
+    smoke_brief = stage_brief("Task 1 supervisor", ledger="/Users/dev/tellr-loop/smoke/LEDGER.md")
+    write_session(
+        projects,
+        "smoke",
+        [
+            user(at(0), f"Smoke-run {PLAN}."),
+            assistant(
+                at(400),
+                "s-1",
+                HAIKU,
+                output=1_000_000,
+                blocks=(dispatch_block("Task 1 supervisor", smoke_brief),),
+            ),
+        ],
+    )
+    argv = ["record", "--pr", "7", "--plan", PLAN, "--handover", iso(at(2000))]
+    argv += ["--projects-dir", str(projects)]
+
+    # --find the ledger: the build and its resume, and nothing else.
+    assert bm.main([*argv, "--find", LEDGER]) == 0
+    out, err = capsys.readouterr()
+    rec = bm.parse_block(out)
+    assert rec.sessions == ("build", "resume")
+    assert rec.plan == PLAN  # --plan is still what the record names
+    assert (rec.first_task_at, rec.final_review_at) == (at(100), at(1500))
+    assert nonzero(rec.cost_usd) == {"sonnet": pytest.approx(10.0), "opus": pytest.approx(20.0)}
+    assert "build-metrics: sessions: build, resume" in err.splitlines()
+
+    # Without --find the plan path finds them. The chat names the plan too, but dispatched
+    # no stage, so it is still left out; the smoke run's supervisor is a stage, so it counts.
+    assert bm.main(argv) == 0
+    out, err = capsys.readouterr()
+    rec = bm.parse_block(out)
+    assert rec.sessions == ("build", "smoke")
+    assert nonzero(rec.cost_usd) == {"sonnet": pytest.approx(10.0), "haiku": pytest.approx(0.5)}
+    assert "build-metrics: sessions: build, smoke" in err.splitlines()
+
+    # The stage filter is for chained builds only.
+    assert bm.main([*argv, "--mode", "single-session"]) == 0
+    out, err = capsys.readouterr()
+    assert bm.parse_block(out).sessions == ("build", "chat", "smoke")
+    assert "build-metrics: sessions: build, chat, smoke" in err.splitlines()
+
+    assert guard.calls() == []
+
+
+def test_chained_clock_starts_at_this_builds_first_supervisor(tmp_path, capsys):
+    # One session that ran other work before this build: a reviewer of an earlier build
+    # (its description names a task, and its prompt even names this ledger), and another
+    # build's chain. Neither starts this build's clock.
+    other_ledger = "/Users/dev/tellr-loop/other/LEDGER.md"
+    write_session(
+        tmp_path,
+        "S",
+        [
+            user(at(0), "Review the last build, then run the next one."),
+            assistant(
+                at(10),
+                "m-review",
+                OPUS,
+                blocks=(
+                    dispatch_block(
+                        "Review Task 8 supervisor's commits", f"Check them against {LEDGER}."
+                    ),
+                ),
+            ),
+            assistant(
+                at(20),
+                "m-other",
+                OPUS,
+                blocks=(
+                    dispatch_block(
+                        "Task 1 supervisor", stage_brief("Task 1 supervisor", ledger=other_ledger)
+                    ),
+                ),
+            ),
+            assistant(at(50), "m-between", OPUS, output=1_000_000),  # before this build's clock
+            assistant(
+                at(100),
+                "m-task1",
+                OPUS,
+                blocks=(dispatch_block("Task 1 supervisor", stage_brief("Task 1 supervisor")),),
+            ),
+            assistant(at(500), "m-spend", SONNET, output=1_000_000),
+        ],
+    )
+
+    def record(mode: str, find: str) -> bm.BuildRecord:
+        return bm.build_record(
+            pr=7,
+            mode=mode,
+            plan=PLAN,
+            find=find,
+            sessions=["S"],
+            projects_dir=tmp_path,
+            handover_at=at(2000),
+        )
+
+    # The Agent call's prompt is kept on its dispatch; a positional Dispatch still builds.
+    t = load_sessions(tmp_path, ["S"])
+    assert {d.prompt for d in t.dispatches if d.ts == at(100)} == {stage_brief("Task 1 supervisor")}
+    assert Dispatch(at(5), "Pre-pass").prompt == ""
+
+    rec = record("chained", LEDGER)
+    err = capsys.readouterr().err
+    assert rec.first_task_at == at(100)
+    assert nonzero(rec.cost_usd) == {"sonnet": pytest.approx(10.0)}  # m-between is outside
+    # The matched dispatch and its time go to stderr, for the final agent's ledger entry.
+    assert "Task 1 supervisor" in err and "2026-11-17T09:01:40" in err
+
+    # No supervisor's prompt names the string: fall back to the first task dispatch, and say
+    # so on stderr.
+    missing = "/Users/dev/tellr-loop/never/LEDGER.md"
+    rec = record("chained", missing)
+    err = capsys.readouterr().err
+    assert rec.first_task_at == at(10)
+    assert missing in err
+    assert "Review Task 8 supervisor's commits" in err and "2026-11-17T09:00:10" in err
+
+    # A single-session build keeps the first task dispatch.
+    assert record("single-session", LEDGER).first_task_at == at(10)
+
+
+def test_cli_record_first_task_overrides(tmp_path, monkeypatch, capsys):
+    projects = tmp_path / "projects"
+    write_chained_build(projects)
+    guard = NoGh(tmp_path, monkeypatch)
+    argv = ["record", "--pr", "7", "--plan", PLAN, "--handover", "2026-11-17T09:33:20Z"]
+    argv += ["--projects-dir", str(projects)]
+
+    # The window opens at the override, so B1's 1M opus output at at(10) is in it.
+    assert bm.main([*argv, "--first-task", "2026-11-17T09:00:05Z"]) == 0
+    rec = bm.parse_block(capsys.readouterr().out)
+    assert rec.first_task_at == at(5)
+    assert nonzero(rec.cost_usd) == {"opus": pytest.approx(40.0), "sonnet": pytest.approx(10.0)}
+
+    with pytest.raises(SystemExit) as refused:
+        bm.main([*argv, "--first-task", "yesterday morning"])
+    assert refused.value.code == 2
+
+    assert guard.calls() == []
+
+
+def test_build_record_clips_final_review_to_handover(tmp_path):
+    write_chained_build(tmp_path)
+
+    # The final review's last span ends at at(1500), after a handover given at at(1200).
+    rec = bm.build_record(
+        pr=7,
+        mode="chained",
+        plan=PLAN,
+        sessions=["A2", "B1"],
+        projects_dir=tmp_path,
+        handover_at=at(1200),
+    )
+
+    assert rec.final_review_at == at(1200)
+    assert rec.handover_at == at(1200)

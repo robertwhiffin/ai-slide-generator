@@ -22,7 +22,7 @@ import statistics
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,6 +42,9 @@ class ApiCall:
 class Dispatch:
     ts: datetime
     description: str
+    # The Agent call's input.prompt. Left out of equality and repr: a dispatch is its time
+    # and description (as the dedupe key in load_sessions has it), and a brief is long.
+    prompt: str = field(default="", compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,10 @@ PRICES: dict[str, tuple[float, float, float, float]] = {
 
 TASK_RE = re.compile(r"\btask\s*\d+|^T\d+\b", re.I)
 FINAL_RE = re.compile(r"\bfinal\b(?! agent)|whole[- ]branch", re.I)
+# Chained builds, matched against the whole description: the dispatch that starts the clock,
+# and the dispatches that make a session part of the chain.
+SUPERVISOR_RE = re.compile(r"Task \d+ supervisor")
+CHAIN_STAGE_RE = re.compile(r"Task \d+ supervisor|Final agent")
 
 
 def model_family(model_id: str) -> str | None:
@@ -152,10 +159,12 @@ def load_sessions(projects_dir: Path, session_ids: Sequence[str]) -> Transcript:
                             and block.get("name") == "Agent"
                         ):
                             inp = block.get("input")
-                            desc = str(inp.get("description", "")) if isinstance(inp, dict) else ""
+                            inp = inp if isinstance(inp, dict) else {}
+                            desc = str(inp.get("description", ""))
                             if (ts, desc) not in seen_dispatch:
                                 seen_dispatch.add((ts, desc))
-                                dispatches.append(Dispatch(ts=ts, description=desc))
+                                prompt = str(inp.get("prompt", ""))
+                                dispatches.append(Dispatch(ts=ts, description=desc, prompt=prompt))
                 usage = message.get("usage")
                 family = model_family(str(message.get("model", "")))
                 if not isinstance(usage, dict) or family is None:
@@ -239,6 +248,32 @@ def cost_usd(calls: Iterable[ApiCall], start: datetime, end: datetime) -> dict[s
 def first_task_at(t: Transcript) -> Dispatch | None:
     matches = [d for d in t.dispatches if TASK_RE.search(d.description)]
     return min(matches, key=lambda d: d.ts) if matches else None
+
+
+def first_supervisor_at(t: Transcript, find: str) -> Dispatch | None:
+    """The earliest ``Task <n> supervisor`` dispatch whose prompt contains ``find``.
+
+    Every stage brief carries the ledger's path, so with ``find`` the ledger this skips a
+    reviewer that merely names a task and another build's chain in the same session.
+    """
+    matches = [
+        d for d in t.dispatches if SUPERVISOR_RE.fullmatch(d.description) and find in d.prompt
+    ]
+    return min(matches, key=lambda d: d.ts) if matches else None
+
+
+def chain_sessions(projects_dir: Path, session_ids: Iterable[str]) -> list[str]:
+    """The sessions that dispatched a chain stage: a task supervisor or the final agent.
+
+    The final agent counts too: a build resumed while its final agent ran dispatches only
+    that agent, and that resumed session is the one the final agent records from.
+    """
+    kept = []
+    for session_id in session_ids:
+        dispatches = load_sessions(projects_dir, [session_id]).dispatches
+        if any(CHAIN_STAGE_RE.fullmatch(d.description) for d in dispatches):
+            kept.append(session_id)
+    return kept
 
 
 def final_review_end(t: Transcript) -> datetime | None:
@@ -438,15 +473,40 @@ def build_record(
     projects_dir: Path,
     handover_at: datetime,
     first_task: datetime | None = None,
+    find: str | None = None,
 ) -> BuildRecord:
     """Cost is windowed from the first task to the handover. Raises ValueError if no first
-    task is given and none is found in the transcripts."""
+    task is given and none is found in the transcripts.
+
+    Without ``first_task``, a chained build's clock starts at the earliest
+    ``Task <n> supervisor`` dispatch whose prompt contains ``find`` (default: ``plan``), and
+    falls back to the first task dispatch when there is none. The dispatch chosen, and any
+    fall-back, are printed on stderr.
+    """
     t = load_sessions(projects_dir, sessions)
     if first_task is None:
-        found = first_task_at(t)
+        found = None
+        if mode == "chained":
+            needle = find or plan
+            found = first_supervisor_at(t, needle)
+            if found is None:
+                print(
+                    f"build-metrics: no 'Task <n> supervisor' dispatch has {needle} in its "
+                    "prompt; falling back to the first task dispatch",
+                    file=sys.stderr,
+                )
+        if found is None:
+            found = first_task_at(t)
         if found is None:
             raise ValueError("no task dispatch found in the sessions")
+        print(
+            f"build-metrics: first task {found.description!r} at {_iso(found.ts)}",
+            file=sys.stderr,
+        )
         first_task = found.ts
+    review = final_review_end(t)
+    if review is not None and review > handover_at:
+        review = handover_at  # a review that ends after the handover is cut off at it
     return BuildRecord(
         pr=pr,
         mode=mode,
@@ -454,7 +514,7 @@ def build_record(
         sessions=tuple(sessions),
         first_task_at=first_task,
         handover_at=handover_at,
-        final_review_at=final_review_end(t),
+        final_review_at=review,
         cost_usd=cost_usd(t.calls, first_task, handover_at),
     )
 
@@ -556,10 +616,23 @@ def _projects_dir(arg: str | None) -> Path:
 
 def _cmd_record(args: argparse.Namespace) -> int:
     projects_dir = _projects_dir(args.projects_dir)
-    sessions = list(args.session) or find_sessions(projects_dir, args.plan)
+    needle = args.find or args.plan
+    sessions = list(args.session)
     if not sessions:
-        print(f"build-metrics: no session names {args.plan} under {projects_dir}", file=sys.stderr)
+        sessions = find_sessions(projects_dir, needle)
+        if args.mode == "chained":
+            # Other sessions name the plan too: a chat about it, another build of it.
+            sessions = chain_sessions(projects_dir, sessions)
+    if not sessions:
+        stage = " and dispatched a chain stage" if args.mode == "chained" else ""
+        print(
+            f"build-metrics: no session names {needle}{stage} under {projects_dir}",
+            file=sys.stderr,
+        )
         return 2
+    print(f"build-metrics: sessions: {', '.join(sessions)}", file=sys.stderr)
+    if args.first_task is not None:
+        print(f"build-metrics: first task {_iso(args.first_task)} (--first-task)", file=sys.stderr)
     try:
         rec = build_record(
             pr=args.pr,
@@ -568,6 +641,8 @@ def _cmd_record(args: argparse.Namespace) -> int:
             sessions=sessions,
             projects_dir=projects_dir,
             handover_at=args.handover or datetime.now(timezone.utc),
+            first_task=args.first_task,
+            find=needle,
         )
     except ValueError as exc:
         print(f"build-metrics: {exc}", file=sys.stderr)
@@ -658,9 +733,15 @@ def main(argv: list[str] | None = None) -> int:
     rec = sub.add_parser("record", help="print the build-metrics block for a PR body")
     rec.add_argument("--pr", type=int, required=True)
     rec.add_argument("--plan", required=True)
+    rec.add_argument(
+        "--find",
+        help="string that names the build's sessions and supervisors (default: --plan); "
+        "a chained build passes its ledger's absolute path",
+    )
     rec.add_argument("--mode", default="chained", choices=["chained", "single-session"])
     rec.add_argument("--session", action="append", default=[])
     rec.add_argument("--handover", type=_iso_arg)
+    rec.add_argument("--first-task", type=_iso_arg, help="start the clock here (ISO-8601)")
     rec.add_argument("--projects-dir")
     rec.set_defaults(func=_cmd_record)
 
