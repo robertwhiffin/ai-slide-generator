@@ -17,9 +17,9 @@ untagged task. Set the tiers when authoring the plan — they are a review point
 author, not a dispatch-time afterthought.
 
 A plan also carries an `Execution: chained` or `Execution: single-session` line. A missing
-line means the skill's default, which is chained (§10): a thin top-level session dispatches
-a pre-pass, one supervisor per task and a final agent that opens the PR, and the state
-lives in a ledger under `~/tellr-loop/<build>/`. To resume a chained build from a fresh
+line means the skill's default (its "Choosing the mode" line). In chained mode (§10) a thin
+top-level session dispatches a pre-pass, one supervisor per task and a final agent that
+opens the PR, and the state lives in a ledger under `~/tellr-loop/<build>/`. To resume a chained build from a fresh
 session, say "continue the build in `<ledger>`". In chained mode the top-level loads only
 this skill; each stage loads `superpowers:subagent-driven-development` itself.
 `uv run python -m scripts.build_metrics report` compares chained builds with the

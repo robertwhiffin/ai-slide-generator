@@ -1,6 +1,6 @@
 ---
 name: executing-plans-tellr
-description: Use when executing any written implementation plan in this repo via subagents, when resuming a chained build, or when reviewing work a subagent produced here. Runs a plan in chained mode (the default — a thin top-level session dispatches a pre-pass, one Opus supervisor per task and a final agent that opens the PR, with the state in a ledger on disk) or single-session mode (one coordinating session), and adds Tellr's hard-won practices to superpowers:subagent-driven-development — sabotage-verification of every test, a plan-vs-code corrections pre-pass, cause-based baselines, and re-probing subagent claims. Triggers on "execute this plan", "build PR from plan", "subagent-driven development", "run the plan", "continue the build in".
+description: Use when executing any written implementation plan in this repo via subagents, when resuming a chained build, or when reviewing work a subagent produced here. Runs a plan in chained mode (a thin top-level session dispatches a pre-pass, one Opus supervisor per task and a final agent that opens the PR, with the state in a ledger on disk) or single-session mode (one coordinating session); 'Choosing the mode' sets the default. Adds Tellr's hard-won practices to superpowers:subagent-driven-development — sabotage-verification of every test, a plan-vs-code corrections pre-pass, cause-based baselines, and re-probing subagent claims. Triggers on "execute this plan", "build PR from plan", "subagent-driven development", "run the plan", "continue the build in".
 ---
 
 # Executing Plans in Tellr
@@ -29,16 +29,20 @@ A plan overrides the default with a header line, `Execution: chained` or
 
 **If you are the top-level of a chained build**, your whole job is §10's "The top-level"
 and "Resume". You use three tools: Agent, Read of this file and its brief templates, and
-the resume grep. Navigate this file with Read alone, not shell. **Never Read the ledger,
-not even on a resume to orient yourself:** the grep is your only view of it, and each
-stage reads the ledger itself.
+two greps: the plan's `Execution:` line before the pre-pass (§10 "The top-level", step 0)
+and the resume grep. Navigate this file with Read alone, not shell. **Never Read the
+ledger, not even on a resume to orient yourself:** the resume grep is your only view of
+it, and each stage reads the ledger itself.
 
 Reverting:
 
 - For one build, edit its plan's `Execution:` line.
 - For every build, change the default line above to `single-session`.
-- For the whole skill, restore its text from before chained mode with
-  `git show executing-plans-tellr/single-session-v1:.claude/skills/executing-plans-tellr/SKILL.md`.
+- For the whole skill, `git revert -m 1 <this PR's merge commit>`. Or restore the skill's
+  text from before chained mode with
+  `git restore --source=executing-plans-tellr/single-session-v1 -- .claude/skills/executing-plans-tellr/SKILL.md`,
+  delete the three brief files beside it, and drop the `Execution:` paragraph from
+  `CLAUDE.md`.
 
 Measuring: `uv run python -m scripts.build_metrics report` prints every chained build (each
 final agent writes its record into its PR body) beside the single-session baseline. It
@@ -227,16 +231,24 @@ anything is parked.
 | Task supervisor: one per task, in plan order | `Task <n> supervisor` | Opus | `task-supervisor-brief.md` |
 | Final agent | `Final agent` | Opus | `final-agent-brief.md` |
 
-The briefs sit beside this file. `scripts/build_metrics.py` starts a build's clock at the
-first dispatch whose description names a task. It ends the final review at the last agent
-whose description contains `final` or `whole-branch`, not counting `Final agent`. So the
-pre-pass dispatches no agents, and the final agent's §7 dispatch, `Final branch review`, is
-the only description in the chain that contains either word.
+The briefs sit beside this file. `scripts/build_metrics.py record --find <ledger>` costs
+the sessions that name the ledger and dispatched a `Task <n> supervisor` or the
+`Final agent`. It starts the build's clock at the first `Task <n> supervisor` dispatch
+whose prompt names the ledger, and falls back to the first dispatch whose description names
+a task. It ends the final review at the last agent whose description contains `final` or
+`whole-branch`, not counting `Final agent`. So the pre-pass dispatches no agents, and the
+final agent's §7 dispatch, `Final branch review`, is the only description in the chain that
+contains either word.
 
 ### The top-level
 
 After the user approves the plan, the top-level runs the chain and does nothing else:
 
+0. Take the plan's `Execution:` line, from your context or with
+   `grep -m1 '^Execution:' <plan>`. If it is `single-session`, or the plan has none and the
+   default line in "Choosing the mode" says `single-session`, you are not a chained
+   top-level: run the build per §1–§9. A resume skips this step; the pre-pass checks the
+   line too.
 1. Dispatch `Pre-pass`. After each verdict, dispatch the stage its `next` names:
    `task-<n>` → `Task <n> supervisor`, `final` → `Final agent`. When a verdict has
    `next=done` or `status=failed`, give the user that verdict and stop. `status=parked`
@@ -257,13 +269,11 @@ After the user approves the plan, the top-level runs the chain and does nothing 
    - If the harness offers neither, stop and tell your caller. Never dispatch the next
      stage without a verdict.
 4. Read only verdicts. Never run tests, git or deploys, and never read diffs, transcripts,
-   the plan or the ledger. The one exception is a resume's
-   `grep '^NEXT:' <ledger> | tail -1`. Your only tools are Agent, Read of this file and
-   the brief templates, and that grep. Load no other skill: each stage loads
-   `superpowers:subagent-driven-development` itself. If it is already loaded, leave its
-   Setup, Task Loop and waiting rules to the stages. Don't read the plan for its
-   `Execution:` line either: the pre-pass checks it, and fails a `single-session` plan
-   with a summary that says so.
+   the plan or the ledger. The two exceptions are step 0's
+   `grep -m1 '^Execution:' <plan>` and a resume's `grep '^NEXT:' <ledger> | tail -1`. Your
+   only tools are Agent, Read of this file and the brief templates, and those two greps.
+   Load no other skill: each stage loads `superpowers:subagent-driven-development` itself.
+   If it is already loaded, leave its Setup, Task Loop and waiting rules to the stages.
 5. A report with no `VERDICT` line means the stage stopped early. Dispatch a fresh agent
    for the same stage.
 
@@ -272,8 +282,8 @@ Fill paths absolute with `~` expanded, except `{{PLAN}}`:
 | Placeholder | Value |
 |---|---|
 | `{{SKILL_DIR}}` | this file's directory |
-| `{{PLAN}}` | the plan's path: relative to the worktree root when the plan is inside the worktree you are in, else absolute. The final agent passes the same string to `record`, which finds the build's sessions by searching transcripts for it. |
-| `{{LEDGER}}` | the ledger the user names, else `~/tellr-loop/<build>/LEDGER.md`, where `<build>` is the plan's file name without `.md` |
+| `{{PLAN}}` | the plan's path: relative to the worktree root when the plan is inside the worktree you are in, else absolute. The final agent passes the same string to `record` as `--plan`. |
+| `{{LEDGER}}` | the ledger the user names, else `~/tellr-loop/<build>/LEDGER.md`, where `<build>` is the plan's file name without `.md`. Every stage brief carries it, so the final agent's `record --find <ledger>` finds the build's sessions and its first supervisor by it. |
 | `{{CORRECTIONS}}` | `PLAN-CORRECTIONS.md` in the ledger's directory |
 | `{{WORKTREE}}`, `{{BRANCH}}` | the git worktree that holds the plan, and its branch: your own directory and branch when the plan is inside it. Otherwise `(ledger header)`, and the pre-pass works them out from the plan's directory. Never give your own directory for a plan outside it. |
 | `{{TASK}}` | the `<n>` of `next=task-<n>` |
@@ -359,7 +369,9 @@ every call, and some sessions refuse commands with `$VAR`, `$(…)`, heredocs or
 
 **Pre-pass.** §2, written to `{{CORRECTIONS}}`, plus these checks:
 
-- The `Execution:` line. Missing or `chained` passes. Anything else → `status=failed`.
+- The `Execution:` line. `chained` passes. A missing line passes only while the default
+  line in "Choosing the mode" says chained, so the pre-pass reads that line. Anything else
+  → `status=failed`.
 - `Models:` (§9). An untagged task, or a tag with test below impl → `status=failed`,
   listing the tasks.
 - A `Depends on:` line per task in `{{CORRECTIONS}}`, taken from the plan's order and
@@ -392,14 +404,17 @@ own entry. The first task it does not skip is `next`. If none is left, `next=fin
 **Final agent.** §7, dispatched as `Final branch review`, then one fix dispatch and one
 scoped re-review. Then:
 
-1. Push as `robertwhiffin`, after checking `gh auth status`. Never use the EMU account.
+1. Rename a `worktree-<name>` branch to `feat/<name>`. Push as `robertwhiffin`, after
+   checking `gh auth status`. Never use the EMU account.
 2. `gh pr create --draft`. CI runs only on pull requests, so the PR must exist first.
-3. Wait on `gh pr checks --watch`, and fix red CI inside the chain.
+3. Wait on `gh pr checks --watch`, and fix red CI inside the chain, for at most 3 fix
+   rounds. A check still red after them is parked.
 4. Once CI is green, or every red check is parked, run
-   `uv run python -m scripts.build_metrics record --pr <n> --plan <plan>`, and put the
-   block it prints into the PR body. The body also carries the handover: every ruling,
-   every parked item, the `Parked-task: <n>` commit trailer to use when finishing one, and
-   what waits on the user (browser check, devloop deploy, merge).
+   `uv run --directory <worktree> python -m scripts.build_metrics record --pr <n> --plan <plan> --find <ledger>`,
+   and put the block it prints into the PR body. The body also carries the handover: every
+   ruling, every parked item, the `Parked-task: <n>` commit trailer to use when finishing
+   one, what waits on the user (browser check, devloop deploy, merge), and that the branch
+   takes `main` by a merge, not a rebase, after handover.
 5. `gh pr ready <n>`, unless anything is parked, in which case the PR stays a draft. This
    is the handover, which the metrics measure from.
 6. Write `NEXT: done`.

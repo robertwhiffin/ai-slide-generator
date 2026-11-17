@@ -66,10 +66,18 @@ A value written `(ledger header)` means the matching line of the ledger's header
      carrying the trailer `Parked-task: <n>`.
    - **Waiting on you:** every `User check:` line, every task outside the chain, the
      browser check, the devloop deploy, and the merge.
+   - **After handover:** merge `main` into the branch, don't rebase. A rebase rewrites
+     every commit's date, so the metrics would count every commit as an edit after
+     handover.
 6. **No publish.** If Publish is `no`, put the handover in your entry and go to step 11.
-7. **Push as `robertwhiffin`.** `gh auth status` must show `robertwhiffin` active.
-   Otherwise run `gh auth switch --user robertwhiffin` and check again. Never use the EMU
-   account. Then `git push -u origin {{BRANCH}}`.
+7. **Push as `robertwhiffin`.** First, if the branch is named `worktree-<name>`, rename it
+   with `git -C {{WORKTREE}} branch -m feat/<name>`, per the worktree convention in
+   `CLAUDE.local.md`. Write `Branch renamed: <old> → <new>` in your entry, and use the new
+   name for `{{BRANCH}}` from here on. A later attempt takes the name from that line.
+
+   `gh auth status` must show `robertwhiffin` active. Otherwise run
+   `gh auth switch --user robertwhiffin` and check again. Never use the EMU account. Then
+   `git push -u origin {{BRANCH}}`.
 8. **Draft PR.** Run
    `gh pr create --draft --base main --head {{BRANCH}} --title <title> --body-file <file>`.
    The body has these parts, in order:
@@ -81,13 +89,20 @@ A value written `(ledger header)` means the matching line of the ledger's header
 9. **CI.** Run `gh pr checks <n> --watch --fail-fast` in the background, and wait for it to
    exit. If it reports no checks just after the PR opened, wait a minute and run it again.
    - Fix red CI yourself with the smallest change, push, note it in your entry, and watch
-     again.
+     again. Stop after 3 fix rounds: write `PARKED: CI <check> — still red after 3 fix
+     rounds` for each check still red, and leave the PR a draft.
    - A check that is red for a cause outside the branch, such as one that also fails on
      `main`, is parked: `PARKED: CI <check> — <reason>`.
+   - After writing any `PARKED: CI` line, refresh the body's `## Handover` so its Parked
+     list names it, with `gh pr edit <n> --body-file <file>`.
 10. **Record and hand over.** Once CI is green, or every red check is parked:
-    - Run `uv run python -m scripts.build_metrics record --pr <n> --plan {{PLAN}}`. Pass
-      `--plan` exactly as the header's `Plan:` line writes it: `record` finds the
-      build's sessions by that string.
+    - Run
+      `uv run --directory {{WORKTREE}} python -m scripts.build_metrics record --pr <n> --plan {{PLAN}} --find {{LEDGER}}`.
+      Pass `--plan` exactly as the header's `Plan:` line writes it, and `--find` as the
+      ledger's absolute path. Every stage brief carries that path, so `record` finds the
+      build's sessions and its first `Task <n> supervisor` by it.
+    - `record` prints on stderr the sessions it costed and the first task it chose, with
+      its description and time. Copy both into your entry.
     - Put the printed block in the body, just above its last line, with
       `gh pr edit <n> --body-file <file>`. If `record` exits 2, put its message under
       Waiting on you instead.

@@ -29,8 +29,10 @@ given above. The final agent passes that string to `record`.
    Otherwise create the ledger, and its directory if needed, with the header from §10
    "The ledger". `Base:` is the output of `git -C <worktree> rev-parse --short HEAD`.
    Then append your heading and `Start:`.
-2. **`Execution:`.** A missing line, or `Execution: chained`, passes. Anything else →
-   `status=failed`, quoting the line.
+2. **`Execution:`.** `Execution: chained` passes. A missing line passes only while the
+   skill's default line ("Choosing the mode", `**Default mode: …**`) says chained, so read
+   that line. Anything else → `status=failed`, quoting the plan's line, or the default
+   line when the plan has none.
 3. **`Models:` (§9).** Every task needs a tag, with test ≥ impl (`test=n/a` passes).
    Otherwise → `status=failed`, listing the tasks. Don't fix tags yourself: the tiers are
    the author's call.
@@ -68,7 +70,8 @@ given above. The final agent passes that string to `record`.
    - one `Ruling: <decision> — <why> — <cost if wrong>` line per ruling;
    - `Parked: none`;
    - `End:`;
-   - last, `NEXT: task-<the plan's first task>`.
+   - last, `NEXT: task-<m>`, where Task `<m>` is the plan's first task that is not marked
+     `outside the chain` in `## Depends on`. If every task is, `NEXT: final`.
 
    On failure, end the entry at `End:` with no `NEXT:` line, so a resume re-runs the
    pre-pass once the user has fixed the plan.
@@ -92,8 +95,8 @@ summary: <one line>
 rulings: <one line, or "none">
 ```
 
-Here `stage=pre-pass` and `commits: none`. On success, `status=done` and
-`next=task-<the plan's first task>`. The `summary` gives the number of corrections and
+Here `stage=pre-pass` and `commits: none`. On success, `status=done` and `next` matches
+your `NEXT:` line: the first task not `outside the chain`. The `summary` gives the number of corrections and
 names any that change a task's interface.
 
 On failure, `status=failed` and `next=done`. The `summary` says what the user must fix.
