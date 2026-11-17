@@ -291,9 +291,11 @@ stage you dispatch reads the ledger, and the values you lack are `(ledger header
 Dispatch the stage the grep names and carry on as above. If the shell refuses the pipe,
 run `grep '^NEXT:' <ledger>` and take its last line.
 
+Run nothing before the grep, not even an `ls`: the grep's own output covers every case.
+
 - `NEXT: done`: the build is over. Say so.
 - No `NEXT:` line: the pre-pass did not finish. Dispatch `Pre-pass`.
-- No such file: the build never started. Ask the user for the plan.
+- `No such file`, in the grep's error: the build never started. Ask the user for the plan.
 
 Resume only once the old top-level session has ended. Its running stage dies with it, and
 two agents on one stage corrupt each other's work. A stage whose previous attempt died gets
