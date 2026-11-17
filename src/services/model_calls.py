@@ -1,4 +1,4 @@
-"""Model calls: the fault kinds, the per-process call limiter, the stop check, the deadline.
+"""Model calls: the fault kinds, the limiter, the stop check, the deadline, the retries.
 
 - ``model_fault_kind`` names the provider fault behind a failed call.
 - ``FairCallLimiter`` caps the model calls in flight in one process
@@ -9,7 +9,9 @@
 - ``set_turn_deadline`` / ``turn_deadline`` carry the turn's hard deadline in a
   ``ContextVar``.
 
-The retries that use these arrive in a later task of the chat-concurrency build.
+- ``call_model`` owns the retries: it runs a call under the limiter and retries a transient
+  fault with jittered, ``Retry-After``-aware backoff (``RetryPolicy``), never past the
+  turn's deadline and never after the turn was stopped.
 
 It must never import ``src.services.agent_runtime``: the runtime imports this module.
 ``generation_fence`` and ``graph.event_emitter`` are imported inside the functions that
@@ -18,16 +20,21 @@ use them.
 
 from __future__ import annotations
 
+import email.utils
 import itertools
 import logging
+import math
 import os
+import random
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from datetime import timezone
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, TypeVar
 
 import httpx
 import openai
@@ -35,6 +42,8 @@ import requests
 from databricks.sdk.errors import Aborted, DeadlineExceeded, InternalError
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 ModelFaultKind = Literal["rate_limited", "server_error", "timeout", "connection", "not_transient"]
 
@@ -329,3 +338,161 @@ def set_turn_deadline(deadline: float | None) -> None:
 def turn_deadline() -> float | None:
     """The current context's turn deadline, or ``None``."""
     return _turn_deadline_var.get()
+
+
+# --------------------------------------------------------------------------- retries
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """How a transient fault is retried.
+
+    - ``base_seconds``: the cap of the first wait; it doubles with each failure.
+    - ``max_wait_seconds``: the cap of one backed-off wait (a ``Retry-After`` hint is not
+      capped by it).
+    - ``budget_seconds``: how long retrying may go on, counted from the first failure.
+    """
+
+    base_seconds: float = 2.0
+    max_wait_seconds: float = 30.0
+    budget_seconds: float = 150.0
+
+
+DEFAULT_RETRY_POLICY = RetryPolicy()
+
+# A backoff sleeps in slices of at most this long, so a stop is noticed within one.
+_SLEEP_SLICE_SECONDS = 1.0
+
+
+def _usable_seconds(value: float) -> float | None:
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def retry_after_seconds(
+    error: BaseException, *, now: Callable[[], float] = time.time
+) -> float | None:
+    """The wait the provider asked for, in seconds, or ``None``.
+
+    Reads the first ``openai.APIStatusError`` on the ``__cause__ or __context__`` chain:
+    ``retry-after-ms`` (milliseconds), else ``retry-after`` as seconds or an HTTP-date
+    (a zone-less date is UTC).  An unusable ``retry-after-ms`` falls through to
+    ``retry-after``; a negative or non-finite result is ``None``.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, openai.APIStatusError):
+            break
+        current = current.__cause__ or current.__context__
+    else:
+        return None
+    headers = current.response.headers
+
+    raw_ms = headers.get("retry-after-ms")
+    if raw_ms is not None:
+        try:
+            ms = _usable_seconds(float(raw_ms))
+        except ValueError:
+            ms = None
+        if ms is not None:
+            return ms / 1000.0
+
+    raw = headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return _usable_seconds(float(raw))
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return _usable_seconds(when.timestamp() - now())
+
+
+def call_model(
+    fn: Callable[[], T],
+    *,
+    agent_key: str,
+    policy: RetryPolicy | None = DEFAULT_RETRY_POLICY,
+    limiter: FairCallLimiter | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    rand: Callable[[], float] = random.random,
+) -> T:
+    """Run *fn*, a model call, retrying a transient fault; the one place retries live.
+
+    - The turn's stop check runs before every attempt, whatever the policy.  With a
+      *limiter*, *fn* runs holding one slot of ``current_call_group()``.
+    - ``TurnFencedError``, a non-transient error, and every error when *policy* is
+      ``None`` propagate at once.
+    - After the n-th transient failure the wait is ``hint * (1 + 0.25 * rand())`` when the
+      provider sent a ``Retry-After``, else ``cap * (0.5 + 0.5 * rand())`` with
+      ``cap = min(max_wait_seconds, base_seconds * 2 ** (n - 1))``.
+    - The original error is re-raised when the wait would run past ``budget_seconds``
+      (counted from the first failure) or reach the turn's deadline.
+    - The wait is slept outside the limiter's slot, in slices, with a stop check after each.
+    """
+    from src.services.generation_fence import TurnFencedError
+
+    entered = clock()
+    first_failure: float | None = None
+    attempt = 0
+    while True:
+        check_turn_stopped()
+        attempt += 1
+        try:
+            if limiter is None:
+                return fn()
+            with limiter.slot(current_call_group(), check_stop=check_turn_stopped):
+                return fn()
+        except TurnFencedError:
+            raise
+        except Exception as error:
+            if policy is None:
+                raise
+            kind = model_fault_kind(error)
+            if kind not in TRANSIENT_FAULT_KINDS:
+                raise
+            now = clock()
+            if first_failure is None:
+                first_failure = now
+            hint = retry_after_seconds(error)
+            if hint is not None:
+                wait = hint * (1 + 0.25 * rand())
+            else:
+                cap = min(policy.max_wait_seconds, policy.base_seconds * 2 ** (attempt - 1))
+                wait = cap * (0.5 + 0.5 * rand())
+            deadline = turn_deadline()
+            if now - first_failure + wait > policy.budget_seconds or (
+                deadline is not None and now + wait >= deadline
+            ):
+                logger.warning(
+                    "model_call_gave_up agent=%s fault=%s attempts=%d elapsed_s=%.1f request_id=%s",
+                    agent_key,
+                    kind,
+                    attempt,
+                    now - entered,
+                    current_call_group(),
+                )
+                raise
+            logger.warning(
+                "model_call_retry agent=%s fault=%s attempt=%d wait_s=%.1f request_id=%s",
+                agent_key,
+                kind,
+                attempt,
+                wait,
+                current_call_group(),
+            )
+        # Outside the except block, so a stop raised here does not carry the fault as its
+        # __context__.
+        remaining = wait
+        while remaining > 0:
+            step = min(_SLEEP_SLICE_SECONDS, remaining)
+            sleep(step)
+            remaining -= step
+            check_turn_stopped()
