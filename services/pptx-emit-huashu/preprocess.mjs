@@ -28,9 +28,11 @@
 //     slide-root background transfer only. The snapshot reads the page as the
 //     browser laid it out, so a pass that rewraps text, flattens tables or
 //     swaps elements for pictures would move the very layout it then reads.
-// Both read the tree through DOM_ACCESS_SOURCE (dom_access.mjs).
+// Both read the tree through DOM_ACCESS_SOURCE (dom_access.mjs) and rasterize a
+// gradient ground with GRADIENT_SOURCE (gradient.mjs).
 
 import { DOM_ACCESS_SOURCE } from './dom_access.mjs';
+import { GRADIENT_SOURCE } from './gradient.mjs';
 
 // The attribute BG_TRANSFER_SOURCE puts on the slide root it resolved, so the
 // snapshot can route that element's ground to the slide background alone.
@@ -47,61 +49,8 @@ const ROOT_AND_BACKGROUND_SRC = `
   // to a PNG dataURL via canvas, set as body's background-image so
   // huashu's addBackground emits it as a full-slide picture. Solid
   // colors (or the gradient fallback if rasterization fails) go to
-  // body's backgroundColor.
-  function rasterizeGradientToDataURL(gradientCss, w, h) {
-    try {
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(w));
-      c.height = Math.max(1, Math.round(h));
-      const ctx = c.getContext('2d');
-      // Match linear-gradient(<angle>, <stop1>, <stop2>, ...)
-      const m = gradientCss.match(/linear-gradient\\((.+)\\)\\s*\$/);
-      if (!m) return null;
-      // Split top-level commas (paren-aware, like our walker).
-      const inner = m[1];
-      const parts = [];
-      let depth = 0, current = '';
-      for (let i = 0; i < inner.length; i++) {
-        const ch = inner[i];
-        if (ch === '(') depth++;
-        else if (ch === ')') depth--;
-        if (ch === ',' && depth === 0) { parts.push(current.trim()); current = ''; }
-        else current += ch;
-      }
-      if (current.trim()) parts.push(current.trim());
-      let angle = 180, stopStart = 0;
-      if (/deg|turn|rad|to /.test(parts[0])) {
-        const a = parts[0].match(/(-?\\d+(?:\\.\\d+)?)deg/);
-        if (a) angle = parseFloat(a[1]);
-        stopStart = 1;
-      }
-      const stops = [];
-      const rawStops = parts.slice(stopStart);
-      for (let i = 0; i < rawStops.length; i++) {
-        const s = rawStops[i];
-        const pctMatch = s.match(/\\s+(\\d+(?:\\.\\d+)?)%\\s*\$/);
-        const color = (pctMatch ? s.slice(0, pctMatch.index) : s).trim();
-        const pos = pctMatch ? parseFloat(pctMatch[1]) / 100 : i / Math.max(1, rawStops.length - 1);
-        if (color) stops.push({ color: color, pos: pos });
-      }
-      if (!stops.length) return null;
-      const rad = (angle - 90) * Math.PI / 180;
-      const cx = c.width / 2, cy = c.height / 2;
-      const len = Math.abs(c.width * Math.cos(rad)) + Math.abs(c.height * Math.sin(rad));
-      const dx = Math.cos(rad) * len / 2;
-      const dy = Math.sin(rad) * len / 2;
-      const grad = ctx.createLinearGradient(cx - dx, cy - dy, cx + dx, cy + dy);
-      for (const s of stops) {
-        try { grad.addColorStop(Math.max(0, Math.min(1, s.pos)), s.color); }
-        catch (e) { return null; }
-      }
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, c.width, c.height);
-      return c.toDataURL('image/png');
-    } catch (e) {
-      return null;
-    }
-  }
+  // body's backgroundColor. rasterizeGradientToDataURL is GRADIENT_SOURCE's
+  // (gradient.mjs), composed ahead of this fragment.
 
   // ─── locate the slide root ─────────────────────────────────────────
   // The slide root is the outermost element standing for the whole slide.
@@ -930,6 +879,7 @@ export const PREPROCESS_SOURCE = `
 (async function () {
   const DOM_ACCESS_LOG_PREFIX = '[preprocess]';
 ${DOM_ACCESS_SOURCE}
+${GRADIENT_SOURCE}
 ${ROOT_AND_BACKGROUND_SRC}
 ${MUTATING_PASSES_SRC}
   // ─── orchestrator ──────────────────────────────────────────────────
@@ -961,6 +911,7 @@ export const BG_TRANSFER_SOURCE = `
 (async function () {
   const DOM_ACCESS_LOG_PREFIX = '[preprocess]';
 ${DOM_ACCESS_SOURCE}
+${GRADIENT_SOURCE}
 ${ROOT_AND_BACKGROUND_SRC}
   const root = findSlideRoot();
   markSlideRoot(root);

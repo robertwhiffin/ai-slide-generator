@@ -23,27 +23,43 @@
 // text spans its container's content box so the alignment survives a slightly
 // wider font. Every box carries width slack on the side its alignment grows.
 //
+// Runs carry the browser's typography (spec §3 Runs, RC7). It is read from the
+// computed style of the text node's parent element. Three things CSS does not
+// inherit reach a run from further up:
+// * the backdrop its colour is composited over (snapshot.mjs backdropInside);
+// * underline and line-through, which CSS propagates to in-flow inline
+//   content: a <b> inside a <u> computes none and is underlined;
+// * super- and subscript, from an inline ancestor's vertical-align.
+// The weights of the webfonts the page loaded go to the slide model as
+// model.fonts (loadedFonts), so the emitter can name a weight's face.
+//
 // /**
 //  * TextBlock = {order, x,y,w,h, rotate:null, wrap, align:'left'|'center'|'right'|'justify', rtl,
 //  *              paragraphs:[{lineSpacingPct:number|null, lines:[{runs:Run[]}]}],
 //  *              follows:Element|null}   (page-side only; never in the slide model)
-//  * Run = {text, family, weight, italic, sizePx, color:'RRGGBB', alpha, letterSpacingPx,
+//  * Run = {text, family, weight, italic, sizePx, color:'RRGGBB', letterSpacingPx,
 //  *        underline, strike, baseline:null|'super'|'sub'}
 //  *
 //  * A line after the first in its paragraph is a soft break; a line with no runs
-//  * is a blank line (two <br>s, an empty pre line). `alpha` is the colour's own
-//  * alpha times the cumulative opacity. Sizes are CSS px on the slide.
+//  * is a blank line (two <br>s, an empty pre line). Sizes are CSS px on the slide.
+//  * text     as painted: text-transform applied;
+//  * family   the first face in the stack that is not a generic or a system alias;
+//  *          a stack of generics alone is Arial, Times New Roman or Courier New;
+//  * weight   100..900, the computed weight to the nearest hundred;
+//  * color    solid, pre-blended: what the browser paints the glyphs with, composited
+//  *          layer by layer over the backdrop (Drive drops text alpha).
 //  */
 
 // Runs in the page, inside the snapshot IIFE, after DOM_ACCESS_SOURCE: domAccess,
 // childNodesOf, reportCollectionLoss, DOM_ACCESS_LOG_PREFIX and the two limits are
 // its free names. It is stringified, so it closes over nothing on the Node side;
 // what it needs from the snapshot arrives in `env`:
-//   replaced      the Set of tag names whose content is drawn, not laid out as text;
-//   parseColour   CSS colour -> {color:'RRGGBB', alpha} | null;
-//   opacityOf     computed style -> its own opacity;
-//   boxGeometry   (element, rect, frame) -> the element's box | null;
-//   contentBox    (style, box) -> the box inside border and padding | null.
+//   replaced        the Set of tag names whose content is drawn, not laid out as text;
+//   opacityOf       computed style -> its own opacity;
+//   backdropInside  (backdrop, style) -> the backdrop of the content inside that element;
+//   textColour      (backdrop, style) -> 'RRGGBB', the solid colour its text paints;
+//   boxGeometry     (element, rect, frame) -> the element's box | null;
+//   contentBox      (style, box) -> the box inside border and padding | null.
 function createTextLayout(env) {
   const TEXT_NODE = 3;
   const ELEMENT_NODE = 1;
@@ -66,12 +82,40 @@ function createTextLayout(env) {
   // Every field a Run carries besides its text. Adjacent tokens equal in all of
   // them are one run.
   const RUN_STYLE_FIELDS = [
-    'family', 'weight', 'italic', 'sizePx', 'color', 'alpha',
+    'family', 'weight', 'italic', 'sizePx', 'color',
     'letterSpacingPx', 'underline', 'strike', 'baseline',
   ];
   const BREAK = { kind: 'break' };
   // Chrome's default tab-size; a computed length instead of a count falls back to it.
   const DEFAULT_TAB_SIZE = 8;
+  // A generic family keyword or a system alias names no face an importer can
+  // resolve, so a run takes the first face after them. A stack of nothing else
+  // takes, for its first one, a face every machine has. A plain table, read
+  // with hasOwnProperty: page script can replace Map and Set.
+  const GENERIC_FACES = {
+    'serif': 'Times New Roman',
+    'ui-serif': 'Times New Roman',
+    'fangsong': 'Times New Roman',
+    'monospace': 'Courier New',
+    'ui-monospace': 'Courier New',
+    'sans-serif': 'Arial',
+    'ui-sans-serif': 'Arial',
+    'ui-rounded': 'Arial',
+    'system-ui': 'Arial',
+    '-apple-system': 'Arial',
+    'blinkmacsystemfont': 'Arial',
+    'cursive': 'Arial',
+    'fantasy': 'Arial',
+    'emoji': 'Arial',
+    'math': 'Arial',
+  };
+  const DEFAULT_FACE = 'Arial';
+  const REGULAR_WEIGHT = 400;
+  const BOLD_WEIGHT = 700;
+  const LIGHTEST_WEIGHT = 100;
+  const HEAVIEST_WEIGHT = 900;
+  const WEIGHT_STEP = 100;
+  const NO_DECORATION = { underline: false, strike: false };
 
   const dom = domAccess();
   // Text layout is bounded on its own: every child node listed and every rect
@@ -107,7 +151,14 @@ function createTextLayout(env) {
     return display === 'inline' || ruby ? 'inline' : 'atomic';
   }
 
-  function openChildren(stack, node, style, opacity, depth) {
+  // What a text node paints with, carried down the inline descent:
+  //   {style, opacity, backdrop, decoration, baseline}
+  //   style       its parent element's computed style;
+  //   opacity     the cumulative opacity it paints at;
+  //   backdrop    what it is composited over (snapshot.mjs backdropInside);
+  //   decoration  {underline, strike} propagated to it;
+  //   baseline    'super' | 'sub' from an inline ancestor's vertical-align, else null.
+  function openChildren(stack, node, context, depth) {
     if (depth > WALK_STEP_LIMIT) {
       if (!truncated) {
         truncated = true;
@@ -118,25 +169,46 @@ function createTextLayout(env) {
     if (budget <= 0) return;
     const nodes = childNodesOf(node);
     if (!spend(nodes.length)) return;
-    stack.push({ nodes, index: 0, style, opacity, depth });
+    stack.push({ nodes, index: 0, context, depth });
+  }
+
+  // The context inside an inline child element. Its own opacity, background,
+  // decoration and vertical-align apply to the text it holds.
+  function inlineContext(outer, cs) {
+    return {
+      style: cs,
+      opacity: outer.opacity * env.opacityOf(cs),
+      backdrop: env.backdropInside(outer.backdrop, cs),
+      decoration: decorationInside(outer.decoration, cs, false),
+      baseline: baselineShiftOf(cs) || outer.baseline,
+    };
   }
 
   // The container's runs, in DOM order. Each is {nodes, follows}: `follows` is
   // the block-level child the run comes after (null for the leading run), and
   // `nodes` its pieces in DOM order:
-  //   {kind:'text', node, style, opacity}  a text node, its parent's computed style
-  //                                        and the cumulative opacity it paints at;
-  //   {kind:'break'}                       a <br>;
-  //   {kind:'atomic', element}             an atomic inline: it paints its own
-  //                                        content (its own block, or a picture)
-  //                                        and gives the run no text.
-  // display:contents children are transparent; display:none ones are skipped.
-  function collectRuns(container, containerStyle, opacity, itemsAreBlocks) {
+  //   {kind:'text', node, context}  a text node and what it paints with;
+  //   {kind:'break'}                a <br>;
+  //   {kind:'atomic', element}      an atomic inline: it paints its own
+  //                                 content (its own block, or a picture)
+  //                                 and gives the run no text.
+  // display:contents children are transparent: no box, so no opacity,
+  // background or decoration of their own. display:none ones are skipped.
+  // `walk` is the container's {opacity, backdrop, decoration} from the
+  // snapshot walk; the container's own vertical-align is already where the
+  // browser placed its text, so its runs start on the baseline.
+  function collectRuns(container, containerStyle, walk, itemsAreBlocks) {
     const runs = [];
     let run = [];
     let follows = null;
     const stack = [];
-    openChildren(stack, container, containerStyle, opacity, 1);
+    openChildren(stack, container, {
+      style: containerStyle,
+      opacity: walk.opacity,
+      backdrop: walk.backdrop,
+      decoration: walk.decoration,
+      baseline: null,
+    }, 1);
     while (stack.length) {
       const frame = stack[stack.length - 1];
       if (frame.index >= frame.nodes.length) {
@@ -146,7 +218,7 @@ function createTextLayout(env) {
       const node = frame.nodes[frame.index++];
       const type = dom.nodeType(node);
       if (type === TEXT_NODE) {
-        run.push({ kind: 'text', node, style: frame.style, opacity: frame.opacity });
+        run.push({ kind: 'text', node, context: frame.context });
         continue;
       }
       if (type !== ELEMENT_NODE) continue;
@@ -154,7 +226,14 @@ function createTextLayout(env) {
       const cs = window.getComputedStyle(node);
       if (cs.display === 'none') continue;
       if (cs.display === 'contents') {
-        openChildren(stack, node, cs, frame.opacity, frame.depth + 1);
+        const outer = frame.context;
+        openChildren(stack, node, {
+          style: cs,
+          opacity: outer.opacity,
+          backdrop: outer.backdrop,
+          decoration: outer.decoration,
+          baseline: outer.baseline,
+        }, frame.depth + 1);
         continue;
       }
       const role = itemsAreBlocks ? 'block' : name === 'br' ? 'break' : inlineRole(name, cs);
@@ -167,8 +246,8 @@ function createTextLayout(env) {
       } else if (role === 'atomic') {
         run.push({ kind: 'atomic', element: node });
       } else if (role === 'inline') {
-        const nested = frame.opacity * env.opacityOf(cs);
-        if (nested > 0) openChildren(stack, node, cs, nested, frame.depth + 1);
+        const context = inlineContext(frame.context, cs);
+        if (context.opacity > 0) openChildren(stack, node, context, frame.depth + 1);
       }
       // An out-of-flow child (a float, an absolute box) leaves the line where it
       // is: it is a block of its own and does not split the text around it.
@@ -178,42 +257,166 @@ function createTextLayout(env) {
   }
 
   // ─── run style ───────────────────────────────────────────────────────
-  // The first face in a font-family stack, quotes stripped. Commas inside a
-  // quoted name do not separate faces.
-  function firstFamily(stack) {
+  // The faces of a font-family stack in order, quotes stripped. Commas inside
+  // a quoted name do not separate faces.
+  function familyNames(stack) {
     const value = String(stack || '');
+    const names = [];
     let quote = '';
-    let end = value.length;
-    for (let index = 0; index < value.length; index++) {
+    let start = 0;
+    for (let index = 0; index <= value.length; index++) {
+      const end = index === value.length;
       const character = value[index];
-      if (quote) {
+      if (quote && !end) {
         if (character === quote) quote = '';
-      } else if (character === '"' || character === "'") {
+      } else if (!end && (character === '"' || character === "'")) {
         quote = character;
-      } else if (character === ',') {
-        end = index;
-        break;
+      } else if (end || character === ',') {
+        const name = value.slice(start, index).trim().replace(/^["']|["']$/g, '').trim();
+        if (name) names.push(name);
+        start = index + 1;
       }
     }
-    return value.slice(0, end).trim().replace(/^["']|["']$/g, '').trim();
+    return names;
   }
 
-  function runStyle(ps, opacity, scale) {
-    const colour = env.parseColour(ps.color);
-    const decoration = String(ps.textDecorationLine || '');
+  // The run's family: the first face that is not a generic keyword or a system
+  // alias, else the face the first generic maps to. Quoted or not: Chrome
+  // serialises BlinkMacSystemFont as the quoted family "system-ui".
+  function familyOf(stack) {
+    const names = familyNames(stack);
+    let generic = null;
+    for (let index = 0; index < names.length; index++) {
+      const key = names[index].toLowerCase();
+      if (Object.prototype.hasOwnProperty.call(GENERIC_FACES, key)) {
+        if (generic === null) generic = GENERIC_FACES[key];
+        continue;
+      }
+      return names[index];
+    }
+    return generic || DEFAULT_FACE;
+  }
+
+  // The computed weight to the nearest hundred: a variable font's 450 is 500.
+  function weightOf(value) {
+    const weight = parseFloat(value);
+    if (!Number.isFinite(weight)) return REGULAR_WEIGHT;
+    const rounded = Math.round(weight / WEIGHT_STEP) * WEIGHT_STEP;
+    return Math.min(HEAVIEST_WEIGHT, Math.max(LIGHTEST_WEIGHT, rounded));
+  }
+
+  // The decorations painted on an element's text: its own text-decoration-line
+  // plus the ones propagated to it. CSS propagates a decoration to in-flow
+  // content and not into an `isolated` box, one that is out of flow (absolute,
+  // fixed, float) or an atomic inline (inline-block, inline-flex…). It is not
+  // inherited: a <b> inside a <u> computes none and is still underlined.
+  function decorationInside(outer, s, isolated) {
+    const own = String(s.textDecorationLine || '');
+    const underline = /\bunderline\b/.test(own);
+    const strike = /\bline-through\b/.test(own);
+    const propagated = isolated || !outer ? NO_DECORATION : outer;
+    if (!underline && !strike) return propagated;
+    return { underline: underline || propagated.underline, strike: strike || propagated.strike };
+  }
+
+  // decorationOf(outer, element, s) -> {underline, strike}: the decorations on
+  // the text of an element the snapshot walk visits, given its parent's (null
+  // at the root).
+  function decorationOf(outer, element, s) {
+    const role = inlineRole(String(dom.tagName(element) || '').toLowerCase(), s);
+    return decorationInside(outer, s, role === 'out-of-flow' || role === 'atomic');
+  }
+
+  function baselineShiftOf(s) {
+    return s.verticalAlign === 'super' ? 'super' : s.verticalAlign === 'sub' ? 'sub' : null;
+  }
+
+  function runStyle(context, scale) {
+    const ps = context.style;
     const letterSpacing = parseFloat(ps.letterSpacing);
     return {
-      family: firstFamily(ps.fontFamily),
-      weight: parseInt(ps.fontWeight, 10) || 400,
+      family: familyOf(ps.fontFamily),
+      weight: weightOf(ps.fontWeight),
       italic: ps.fontStyle !== 'normal',
       sizePx: (parseFloat(ps.fontSize) || 0) * scale,
-      color: colour ? colour.color : '000000',
-      alpha: (colour ? colour.alpha : 0) * opacity,
+      color: env.textColour(context.backdrop, ps),
       letterSpacingPx: Number.isFinite(letterSpacing) ? letterSpacing * scale : 0,
-      underline: /\bunderline\b/.test(decoration),
-      strike: /\bline-through\b/.test(decoration),
-      baseline: ps.verticalAlign === 'super' ? 'super' : ps.verticalAlign === 'sub' ? 'sub' : null,
+      underline: context.decoration.underline,
+      strike: context.decoration.strike,
+      baseline: context.baseline,
     };
+  }
+
+  // A word's text as text-transform paints it. capitalize upper-cases the first
+  // letter of a word, after any leading punctuation, so it needs to know whether
+  // the word starts one: after a space, a break or an atomic inline, or first in
+  // the run.
+  function casedText(text, transform, wordStart) {
+    if (transform === 'uppercase') return text.toUpperCase();
+    if (transform === 'lowercase') return text.toLowerCase();
+    if (transform === 'capitalize' && wordStart) {
+      return text.replace(/^(\p{P}*)(\p{Ll})/u, (match, lead, letter) => lead + letter.toUpperCase());
+    }
+    return text;
+  }
+
+  // ─── webfonts ────────────────────────────────────────────────────────
+  // A face's weight descriptor as the hundreds it covers: "600" is [600], a
+  // variable face's "100 900" every hundred from 100 to 900.
+  function faceWeights(descriptor) {
+    const parts = String(descriptor || '').trim().split(/\s+/);
+    const bounds = [];
+    for (let index = 0; index < parts.length && index < 2; index++) {
+      const value = parts[index] === 'normal' ? REGULAR_WEIGHT : parts[index] === 'bold' ? BOLD_WEIGHT : parseFloat(parts[index]);
+      if (Number.isFinite(value)) bounds.push(value);
+    }
+    if (!bounds.length) return [];
+    const low = Math.min(bounds[0], bounds[bounds.length - 1]);
+    const high = Math.max(bounds[0], bounds[bounds.length - 1]);
+    const weights = [];
+    for (let weight = LIGHTEST_WEIGHT; weight <= HEAVIEST_WEIGHT; weight += WEIGHT_STEP) {
+      if (weight >= low && weight <= high) weights.push(weight);
+    }
+    return weights.length ? weights : [weightOf(low)];
+  }
+
+  // loadedFonts() -> model.fonts: family -> the weights (100..900) of its faces
+  // in document.fonts whose status is 'loaded', the webfonts the page painted
+  // with. The emitter names a weight's face only for such a family
+  // (emit_typography.cjs typefaceFor). document.fonts is a FontFaceSet, not a
+  // DOM collection, so it is read with its own iterator. Page script can
+  // replace that iterator too, so the read is bounded by COLLECTION_ITEM_LIMIT,
+  // and a throw keeps the faces read before it.
+  function loadedFonts() {
+    // No prototype, so no family name can reach an inherited property or setter.
+    const fonts = Object.create(null);
+    try {
+      const iterator = document.fonts.values();
+      let read = 0;
+      for (; read < COLLECTION_ITEM_LIMIT; read++) {
+        const step = iterator.next();
+        if (!step || step.done) break;
+        const face = step.value;
+        if (!face || face.status !== 'loaded') continue;
+        const family = String(face.family || '').trim().replace(/^["']|["']$/g, '').trim();
+        if (!family) continue;
+        if (!fonts[family]) fonts[family] = [];
+        const weights = faceWeights(face.weight);
+        for (let index = 0; index < weights.length; index++) {
+          if (fonts[family].indexOf(weights[index]) < 0) fonts[family].push(weights[index]);
+        }
+      }
+      if (read >= COLLECTION_ITEM_LIMIT) {
+        truncated = true;
+        reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' font faces', 'the snapshot webfont read');
+      }
+    } catch (e) {
+      console.warn('[html2pptx] document.fonts could not be read (' + (e && e.message) +
+        '); a family whose faces were not read exports without weight-named faces');
+    }
+    const families = Object.keys(fonts);
+    for (let index = 0; index < families.length; index++) fonts[families[index]].sort((a, b) => a - b);
+    return fonts;
   }
 
   function sameStyle(a, b) {
@@ -306,16 +509,17 @@ function createTextLayout(env) {
   // split into code points, each measured on its own; a code point that paints
   // nothing (a joiner, a combining mark) travels with its neighbour, so no
   // character is lost.
-  function splitToken(node, data, start, end, space, style, tabSize, range, tokens) {
+  //   source  one text node's {node, data, mode, style, tabSize, transform}.
+  function splitToken(source, start, end, space, wordStart, range, tokens) {
     const pieces = [];
     let pending = '';
     let index = start;
     while (index < end) {
-      const length = codePointLength(data, index);
-      const raw = data.slice(index, index + length);
-      const text = space ? preservedSpaces(raw) : raw;
-      range.setStart(node, index);
-      range.setEnd(node, index + length);
+      const length = codePointLength(source.data, index);
+      const raw = source.data.slice(index, index + length);
+      const text = space ? preservedSpaces(raw) : casedText(raw, source.transform, wordStart && index === start);
+      range.setStart(source.node, index);
+      range.setEnd(source.node, index + length);
       index += length;
       const rects = paintedRects(range, space);
       if (!rects.length) {
@@ -323,31 +527,35 @@ function createTextLayout(env) {
         else pending += text;
         continue;
       }
-      pieces.push({ kind: 'text', text: pending + text, rect: rects[0], style, collapsible: false, tabSize });
+      pieces.push({
+        kind: 'text', text: pending + text, rect: rects[0], style: source.style, collapsible: false, tabSize: source.tabSize,
+      });
       pending = '';
     }
     for (let piece = 0; piece < pieces.length; piece++) tokens.push(pieces[piece]);
     return pieces.length > 0;
   }
 
-  function measureToken(node, data, start, end, space, mode, style, tabSize, range, tokens) {
-    range.setStart(node, start);
-    range.setEnd(node, end);
+  function measureToken(source, start, end, space, wordStart, range, tokens) {
+    range.setStart(source.node, start);
+    range.setEnd(source.node, end);
     const rects = paintedRects(range, space);
     if (!rects.length) return;
-    const collapsible = space && !mode.spaces;
-    const raw = data.slice(start, end);
-    const text = !space ? raw : collapsible ? ' ' : preservedSpaces(raw);
+    const collapsible = space && !source.mode.spaces;
+    const raw = source.data.slice(start, end);
+    const text = !space ? casedText(raw, source.transform, wordStart) : collapsible ? ' ' : preservedSpaces(raw);
     if (rects.length > 1 && !collapsible &&
-        splitToken(node, data, start, end, space, style, tabSize, range, tokens)) {
+        splitToken(source, start, end, space, wordStart, range, tokens)) {
       return;
     }
-    tokens.push({ kind: 'text', text, rect: rects[0], style, collapsible, tabSize });
+    tokens.push({ kind: 'text', text, rect: rects[0], style: source.style, collapsible, tabSize: source.tabSize });
   }
 
-  // Word and space tokens of one text node, plus a break for each preserved newline.
-  function readTokens(piece, scale, range, tokens) {
-    const ps = piece.style;
+  // Word and space tokens of one text node, plus a break for each preserved
+  // newline. `words.start` says whether the next word starts one (casedText);
+  // it carries over from one text node to the next.
+  function readTokens(piece, scale, range, tokens, words) {
+    const ps = piece.context.style;
     // A hidden text node keeps its place in the layout, line breaks included,
     // but paints nothing.
     const hidden = ps.visibility !== 'visible';
@@ -355,19 +563,27 @@ function createTextLayout(env) {
     const length = Math.min(data.length, COLLECTION_ITEM_LIMIT);
     if (!length) return;
     const mode = whiteSpaceOf(ps);
-    const style = runStyle(ps, piece.opacity, scale);
-    const tabSize = mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE;
+    const source = {
+      node: piece.node,
+      data,
+      mode,
+      style: runStyle(piece.context, scale),
+      tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
+      transform: String(ps.textTransform || 'none'),
+    };
     let start = 0;
     while (start < length) {
       const kind = characterKind(data.charCodeAt(start), mode);
       let end = start + 1;
       if (kind === 'break') {
         tokens.push(BREAK);
+        words.start = true;
         start = end;
         continue;
       }
       while (end < length && characterKind(data.charCodeAt(end), mode) === kind) end++;
-      if (!hidden) measureToken(piece.node, data, start, end, kind === 'space', mode, style, tabSize, range, tokens);
+      if (!hidden) measureToken(source, start, end, kind === 'space', words.start, range, tokens);
+      words.start = kind === 'space';
       start = end;
     }
   }
@@ -493,10 +709,16 @@ function createTextLayout(env) {
     const rtl = s.direction === 'rtl';
     const range = document.createRange();
     const tokens = [];
+    const words = { start: true };
     for (let index = 0; index < nodes.length; index++) {
       const piece = nodes[index];
+      if (piece.kind === 'text') {
+        readTokens(piece, scale, range, tokens, words);
+        continue;
+      }
       if (piece.kind === 'break') tokens.push(BREAK);
-      else if (piece.kind === 'text') readTokens(piece, scale, range, tokens);
+      // A break or an atomic inline ends the word before it.
+      words.start = true;
     }
     const clustered = clusterLines(tokens, rtl);
     const lines = [];
@@ -604,7 +826,9 @@ function createTextLayout(env) {
   //   el, s   the element the snapshot walk is visiting and its computed style;
   //   paint   its paint-order prefix; its text paints at paint + [4, 0, seq, 1],
   //           inline content of its layer, above any decoration (sub 0) of the block;
-  //   walk    {opacity, frame}: its cumulative opacity and transform frame.
+  //   walk    {opacity, frame, backdrop, decoration}: its cumulative opacity, its
+  //           transform frame, the backdrop of its content (backdropInside) and
+  //           the decorations on its text (decorationOf).
   // A block that comes after a block-level child also names that child in
   // `follows`: in tree order it paints after the child's whole subtree, which
   // only the walk can place, so the walk re-sequences it there.
@@ -618,7 +842,7 @@ function createTextLayout(env) {
       return [];
     }
     const itemsAreBlocks = /flex|grid/.test(display);
-    const runs = collectRuns(el, s, walk.opacity, itemsAreBlocks);
+    const runs = collectRuns(el, s, walk, itemsAreBlocks);
     const blocks = [];
     for (let index = 0; index < runs.length; index++) {
       const layout = layoutInlineRun(runs[index].nodes, s, walk.frame.scale);
@@ -633,7 +857,9 @@ function createTextLayout(env) {
 
   return {
     collectTextBlocks,
+    decorationOf,
     layoutInlineRun,
+    loadedFonts,
     truncated: () => truncated,
   };
 }

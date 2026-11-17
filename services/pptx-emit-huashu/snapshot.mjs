@@ -13,6 +13,8 @@
 //  *   background: {color: 'RRGGBB'} | {image: 'data:image/…;base64,…'},
 //  *   items: Item[],                        // sorted back to front, by `order` then `id`
 //  *   captures: Capture[],
+//  *   fonts: {'<family>': number[]},        // the weights (100..900) of its faces in
+//  *                                         // document.fonts that loaded: the page's webfonts
 //  *   reference: {hiddenText: string},
 //  *   stats: {elements, shapes, images, texts, truncated},
 //  * }
@@ -42,14 +44,17 @@
 //  */
 
 import { DOM_ACCESS_SOURCE } from './dom_access.mjs';
+import { blendOver } from './emit_typography.cjs';
+import { GRADIENT_SOURCE } from './gradient.mjs';
 import { SLIDE_ROOT_MARKER } from './preprocess.mjs';
 import { TEXT_SOURCE } from './snapshot_text.mjs';
 
-// Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE and
-// TEXT_SOURCE: queryOne, elementChildrenOf, domAccess, reportCollectionLoss, the
-// two limits and createTextLayout are its free names. It is stringified, so it
-// closes over nothing on the Node side; everything it needs from here arrives
-// in `config`.
+// Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE,
+// GRADIENT_SOURCE, TEXT_SOURCE and blendOver: queryOne, elementChildrenOf,
+// domAccess, reportCollectionLoss, the two limits, splitTopLevelCommas,
+// parseLinearGradient, createTextLayout and blendOver are its free names. It is
+// stringified, so it closes over nothing on the Node side; everything it needs
+// from here arrives in `config`.
 async function snapshotPage(config) {
   const SLIDE_WIDTH = 1280;
   const SLIDE_HEIGHT = 720;
@@ -144,6 +149,135 @@ async function snapshotPage(config) {
     return alpha > 0 ? { color: colour.color, alpha } : null;
   }
 
+  // ─── gradient colour ─────────────────────────────────────────────────
+  // The colour at the middle of a background-image's first gradient, as
+  // parseColour gives a colour, or null for none. Halfway along a linear
+  // gradient's line its stops are interpolated there (premultiplied, as CSS
+  // interpolates legacy colours), so a three-stop gradient gives its middle
+  // stop and a two-stop one the mix of both. A gradient the stop parser
+  // (GRADIENT_SOURCE) does not read, a radial or conic one, gives its first colour.
+  const gradientCache = new Map();
+  const COLOUR_IN_GRADIENT = /(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^)]*\)|#[0-9a-f]{3,8}\b/i;
+
+  function colourAt(stops, position) {
+    let lower = null;
+    let upper = null;
+    for (let index = 0; index < stops.length; index++) {
+      if (stops[index].pos <= position) {
+        lower = stops[index];
+      } else {
+        upper = stops[index];
+        break;
+      }
+    }
+    if (!lower) return upper.colour;
+    if (!upper) return lower.colour;
+    const fraction = (position - lower.pos) / (upper.pos - lower.pos);
+    const from = lower.colour;
+    const to = upper.colour;
+    const alpha = from.alpha + (to.alpha - from.alpha) * fraction;
+    if (!(alpha > 0)) return colourFrom(0, 0, 0, 0);
+    const channel = (start, end) => (start * from.alpha + (end * to.alpha - start * from.alpha) * fraction) / alpha;
+    return colourFrom(channel(from.r, to.r), channel(from.g, to.g), channel(from.b, to.b), alpha);
+  }
+
+  function gradientLayerMiddle(layer) {
+    const parsed = /^(repeating-)?linear-gradient\(/i.test(layer) ? parseLinearGradient(layer) : null;
+    if (!parsed) {
+      const first = COLOUR_IN_GRADIENT.exec(layer);
+      return first ? parseColour(first[0]) : null;
+    }
+    // Stops in order: CSS moves a stop placed before the one ahead of it up to it.
+    const stops = [];
+    for (let index = 0; index < parsed.stops.length; index++) {
+      const colour = parseColour(parsed.stops[index].color);
+      if (!colour) continue;
+      const floor = stops.length ? stops[stops.length - 1].pos : -Infinity;
+      stops.push({ colour, pos: Math.max(parsed.stops[index].pos, floor) });
+    }
+    return stops.length ? colourAt(stops, 0.5) : null;
+  }
+
+  function gradientMiddle(value) {
+    if (!value || value === 'none' || !/gradient\(/i.test(value)) return null;
+    if (gradientCache.has(value)) return gradientCache.get(value);
+    let middle = null;
+    try {
+      const layers = splitTopLevelCommas(String(value));
+      for (let index = 0; index < layers.length; index++) {
+        if (!/gradient\(/i.test(layers[index])) continue;
+        middle = gradientLayerMiddle(layers[index]);
+        break;
+      }
+    } catch (e) {
+      middle = null;
+    }
+    gradientCache.set(value, middle);
+    return middle;
+  }
+
+  // ─── text colour ─────────────────────────────────────────────────────
+  // Drive drops text alpha, so every run is written in the solid colour the
+  // browser paints its glyphs with (spec §3 Runs). The walk carries a backdrop
+  // down the tree, and the text layout extends it through inline elements:
+  //   Backdrop = {color:'RRGGBB', alpha, group: {opacity, beneath: Backdrop} | null}
+  // `color` at `alpha` is what is painted so far inside the innermost opacity
+  // group, or on the slide's opaque ground when the group is null.
+  // * An element with opacity below 1 opens a group. Its content, its own
+  //   background first, paints on a transparent layer, which is then faded as
+  //   a whole over what lies beneath it.
+  // * A visible element's background colour, then the colour at the middle of
+  //   its gradient, are layers over the backdrop. They lie under its text
+  //   whatever they are clipped to: background-clip: text clips them to exactly
+  //   the glyphs, which is how gradient text shows its gradient. A url() image
+  //   has no colour to read and adds no layer.
+  // * Only ancestors are read. A sibling box drawn under the text is not.
+  // The glyphs (-webkit-text-fill-color, which defaults to color) paint over
+  // their backdrop inside the innermost group. Then each group, inner to outer,
+  // is faded at its opacity over the backdrop beneath it. Every step is
+  // blendOver (emit_typography.cjs) on 'RRGGBB', rounded at each step.
+  const TRANSPARENT_LAYER = { color: '000000', alpha: 0 };
+  // A text colour no parser reads is painted black rather than dropped, so its words still show.
+  const UNREADABLE_TEXT_COLOUR = { color: '000000', alpha: 1 };
+
+  // `layer` ({color, alpha}) painted over `backdrop`, inside the backdrop's group.
+  function paintOver(layer, backdrop) {
+    if (!(layer.alpha > 0)) return backdrop;
+    if (layer.alpha >= 1 || backdrop.alpha >= 1) {
+      return { color: blendOver(layer.color, layer.alpha, backdrop.color), alpha: 1, group: backdrop.group };
+    }
+    const alpha = layer.alpha + backdrop.alpha * (1 - layer.alpha);
+    return { color: blendOver(layer.color, layer.alpha / alpha, backdrop.color), alpha, group: backdrop.group };
+  }
+
+  // backdropInside(backdrop, s) -> the backdrop of the content inside the
+  // element whose computed style is `s`, given the backdrop it sits on.
+  function backdropInside(backdrop, s) {
+    let inside = backdrop;
+    const opacity = opacityOf(s);
+    if (opacity < 1) {
+      inside = { color: TRANSPARENT_LAYER.color, alpha: TRANSPARENT_LAYER.alpha, group: { opacity, beneath: inside } };
+    }
+    if (s.visibility !== 'visible') return inside;
+    const colour = parseColour(s.backgroundColor);
+    if (colour) inside = paintOver(colour, inside);
+    const middle = gradientMiddle(s.backgroundImage);
+    if (middle) inside = paintOver(middle, inside);
+    return inside;
+  }
+
+  // textColour(backdrop, s) -> 'RRGGBB': the solid colour the text of the
+  // element whose computed style is `s` paints, over `backdrop`.
+  function textColour(backdrop, s) {
+    const fill = parseColour(s.webkitTextFillColor) || parseColour(s.color) || UNREADABLE_TEXT_COLOUR;
+    let layer = paintOver(fill, backdrop);
+    for (let depth = 0; layer.group && depth < WALK_STEP_LIMIT; depth++) {
+      const group = layer.group;
+      layer = paintOver({ color: layer.color, alpha: layer.alpha * group.opacity }, group.beneath);
+    }
+    return layer.color;
+  }
+
   // ─── the slide background ────────────────────────────────────────────
   // The background transfer (BG_TRANSFER_SOURCE) has already moved the slide
   // root's ground onto body, so body is the slide's ground: its raster image if
@@ -164,6 +298,13 @@ async function snapshotPage(config) {
   function slideBackground(htmlStyle, bodyStyle) {
     const image = backgroundImageOf(bodyStyle.backgroundImage);
     if (image) return { image };
+    return { color: groundColour(htmlStyle, bodyStyle) };
+  }
+
+  // The slide's ground colour: body's background colour over html's over the
+  // white canvas. Under a background image it is still what the text backdrop
+  // starts from; the slide root that painted the image adds its own layer.
+  function groundColour(htmlStyle, bodyStyle) {
     let ground = { r: 255, g: 255, b: 255 };
     const layers = [parseColour(htmlStyle.backgroundColor), parseColour(bodyStyle.backgroundColor)];
     for (let index = 0; index < layers.length; index++) {
@@ -175,7 +316,7 @@ async function snapshotPage(config) {
         b: layer.b * layer.alpha + ground.b * (1 - layer.alpha),
       };
     }
-    return { color: colourFrom(ground.r, ground.g, ground.b, 1).color };
+    return colourFrom(ground.r, ground.g, ground.b, 1).color;
   }
 
   // ─── paint order ─────────────────────────────────────────────────────
@@ -375,34 +516,15 @@ async function snapshotPage(config) {
     return { color: painted.color, alpha: painted.alpha, widthPx: width * scale, dash };
   }
 
-  // Top-level comma split: commas inside rgba(...) do not separate shadows.
-  function splitShadowLayers(value) {
-    const layers = [];
-    let depth = 0;
-    let current = '';
-    for (let index = 0; index < value.length; index++) {
-      const character = value[index];
-      if (character === '(') depth++;
-      else if (character === ')') depth--;
-      if (character === ',' && depth === 0) {
-        layers.push(current.trim());
-        current = '';
-      } else {
-        current += character;
-      }
-    }
-    if (current.trim()) layers.push(current.trim());
-    return layers;
-  }
-
   // The first painted outer shadow (PowerPoint keeps one per shape). Chrome
   // writes each layer colour first, then offset-x, offset-y, blur, spread. A
   // spread with no blur or offset is an outline ring, not a shadow. The
   // direction is screen-fixed, because the emitted shadow does not rotate with
-  // its shape.
+  // its shape. Layers split at top-level commas (GRADIENT_SOURCE): the commas
+  // inside rgba(...) separate nothing.
   function outerShadow(value, opacity, box) {
     if (!value || value === 'none') return null;
-    const layers = splitShadowLayers(value);
+    const layers = splitTopLevelCommas(value);
     for (let index = 0; index < layers.length; index++) {
       const layer = layers[index];
       if (/\binset\b/.test(layer)) continue;
@@ -427,11 +549,17 @@ async function snapshotPage(config) {
     return null;
   }
 
+  // background-clip: text paints the background inside the glyphs only, where
+  // the text's own colour carries it (textColour), so it fills no box.
+  function clipsToText(s) {
+    return /\btext\b/.test(String(s.backgroundClip || '')) || /\btext\b/.test(String(s.webkitBackgroundClip || ''));
+  }
+
   // A painted box becomes a shape: background colour, uniform border and outer
   // shadow. The slide root's ground is the slide background (BG_TRANSFER put
   // it on body), so its fill and shadow are never painted a second time here.
   function emitBox(s, box, opacity, order, isSlideRoot) {
-    const fill = isSlideRoot ? null : paintedColour(s.backgroundColor, opacity);
+    const fill = isSlideRoot || clipsToText(s) ? null : paintedColour(s.backgroundColor, opacity);
     let line = uniformBorder(s, opacity, box.scale);
     const shadow = isSlideRoot ? null : outerShadow(s.boxShadow, opacity, box);
     if (!fill && !line && !shadow) return;
@@ -541,7 +669,14 @@ async function snapshotPage(config) {
   // leaves the subtree and takes the sequence half-way between the subtree's
   // last element and the next one: its paint order and its id both follow the
   // document.
-  const textLayout = createTextLayout({ replaced: REPLACED, parseColour, opacityOf, boxGeometry, contentBox });
+  const textLayout = createTextLayout({
+    replaced: REPLACED,
+    opacityOf,
+    backdropInside,
+    textColour,
+    boxGeometry,
+    contentBox,
+  });
   // follows element -> its waiting {block, paint} entries, and every entry in the
   // order it was collected (the Map is only ever read by key).
   const waitingText = new Map();
@@ -560,7 +695,8 @@ async function snapshotPage(config) {
     pushText({ ...entry.block, order: entry.paint.concat([4, 0, lastSeq + 0.5, 1]) });
   }
 
-  function emitText(element, s, paint, seq, walk) {
+  // The element's text blocks, as items now or waiting for the subtree they follow.
+  function collectText(element, s, paint, seq, walk) {
     const blocks = textLayout.collectTextBlocks(element, s, paint, seq, walk);
     for (let index = 0; index < blocks.length; index++) {
       const { follows, ...block } = blocks[index];
@@ -643,13 +779,17 @@ async function snapshotPage(config) {
       }
     }
     if (replaced) return;
-    emitText(element, s, place.paint, seq, { opacity, frame });
+    const backdrop = backdropInside(state.backdrop, s);
+    const decoration = textLayout.decorationOf(state.decoration, element, s);
+    collectText(element, s, place.paint, seq, { opacity, frame, backdrop, decoration });
     pushChildren(element, {
       ctx: place.ctx,
       paint: place.paint,
       opacity,
       layoutStyle: s,
       frame,
+      backdrop,
+      decoration,
       depth: state.depth + 1,
     });
   }
@@ -659,15 +799,29 @@ async function snapshotPage(config) {
   const background = slideBackground(htmlStyle, bodyStyle);
   const bodyOpacity = opacityOf(htmlStyle) * opacityOf(bodyStyle);
   const bodyFrame = frameOf(bodyStyle, { angle: 0, scaleX: 1, scaleY: 1 });
+  // Text starts on the slide's opaque ground. html's and body's backgrounds are
+  // that ground already, so only their opacity, if any, opens a group over it.
+  const ground = { color: groundColour(htmlStyle, bodyStyle), alpha: 1, group: null };
+  const bodyBackdrop = bodyOpacity < 1
+    ? { color: TRANSPARENT_LAYER.color, alpha: TRANSPARENT_LAYER.alpha, group: { opacity: bodyOpacity, beneath: ground } }
+    : ground;
+  const bodyDecoration = textLayout.decorationOf(textLayout.decorationOf(null, html, htmlStyle), body, bodyStyle);
   // Body is the walk's root, so its own inline content is collected here, as
   // sequence 0, ahead of every element the walk visits.
-  emitText(body, bodyStyle, [], 0, { opacity: bodyOpacity, frame: bodyFrame });
+  collectText(body, bodyStyle, [], 0, {
+    opacity: bodyOpacity,
+    frame: bodyFrame,
+    backdrop: bodyBackdrop,
+    decoration: bodyDecoration,
+  });
   pushChildren(body, {
     ctx: { prefix: [] },
     paint: [],
     opacity: bodyOpacity,
     layoutStyle: bodyStyle,
     frame: bodyFrame,
+    backdrop: bodyBackdrop,
+    decoration: bodyDecoration,
     depth: 1,
   });
   let seq = 0;
@@ -681,6 +835,7 @@ async function snapshotPage(config) {
   closeSubtrees(0, seq);
   // Text after a child the walk never reached (it was cut short) still paints, last.
   for (let index = 0; index < waitingInOrder.length; index++) releaseText(waitingInOrder[index], seq);
+  const fonts = textLayout.loadedFonts();
   if (textLayout.truncated()) stats.truncated = true;
 
   items.sort(compareItems);
@@ -690,6 +845,7 @@ async function snapshotPage(config) {
     background,
     items,
     captures,
+    fonts,
     reference: { hiddenText: '' },
     stats,
   };
@@ -699,7 +855,9 @@ export const SNAPSHOT_SOURCE = `
 (async function () {
   const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${DOM_ACCESS_SOURCE}
+${GRADIENT_SOURCE}
 ${TEXT_SOURCE}
+${blendOver.toString()}
   return await (${snapshotPage.toString()})(${JSON.stringify({ slideRootMarker: SLIDE_ROOT_MARKER })});
 })()
 `;

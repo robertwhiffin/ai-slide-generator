@@ -15,27 +15,37 @@ what the browser itself laid out for the same document.
   the sidecar uses, through ``tests/fixtures/export_snapshot/measure.cjs``
   (Python has no Playwright in this repo, so measurement goes through Node).
   ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
-  lines from the same page, with a ``Range`` per character.
+  lines from the same page, with a ``Range`` per character. ``browser_style``
+  reads its computed typography, ``browser_text`` its rendered ``innerText``
+  and ``browser_loaded_weights`` the webfont weights the page loaded.
+* ``text_loss`` runs the export fidelity harness's text-loss oracle
+  (``scripts/export_fidelity/run.py::check_text_loss``) on an exported deck.
+* ``node_json`` evaluates a script in the sidecar directory with ``node -e``,
+  so a sidecar module's pure functions are testable without a browser.
 * ``corpus_slide`` / ``corpus_document`` load the committed brand corpus in
   ``tests/fixtures/export_fidelity`` by its numeric prefix, so no test copies
   corpus HTML.
 
 Gating matches the sibling export suites: ``requires_huashu_sidecar`` skips
 unless node, the extracted sidecar ``node_modules`` and a local
-Chrome/Chromium are present.
+Chrome/Chromium are present; ``requires_node`` needs node alone.
 """
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
 import os
 import posixpath
+import shutil
 import subprocess
 import tempfile
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 import pytest
@@ -48,6 +58,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CORPUS_DIR = REPO_ROOT / "tests" / "fixtures" / "export_fidelity"
 SNAPSHOT_FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "export_snapshot"
 MEASURE_SCRIPT = SNAPSHOT_FIXTURE_DIR / "measure.cjs"
+FIDELITY_HARNESS = REPO_ROOT / "scripts" / "export_fidelity" / "run.py"
 
 DECK_CSS: str = (CORPUS_DIR / "deck.css").read_text(encoding="utf-8")
 # deck.json carries the corpus deck's ``title``, ``scripts`` and ``external_scripts``.
@@ -65,6 +76,12 @@ PERCENT_UNITS = 100000
 # a:rPr sz and spc are written in hundredths of a point.
 HUNDREDTHS = 100
 MEASURE_TIMEOUT_SECONDS = 120
+NODE_TIMEOUT_SECONDS = 30
+# CSS font weights are multiples of 100 from 100 to 900; a variable face's
+# weight is a range of them ("100 900").
+FONT_WEIGHT_STEP = 100
+FONT_WEIGHT_MIN = 100
+FONT_WEIGHT_MAX = 900
 
 NAMESPACES = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
@@ -97,6 +114,10 @@ requires_huashu_sidecar: pytest.MarkDecorator = pytest.mark.skipif(
         "requires node, services/pptx-emit-huashu/node_modules (run setup.sh) "
         "and a local Chrome/Chromium"
     ),
+)
+
+requires_node: pytest.MarkDecorator = pytest.mark.skipif(
+    shutil.which("node") is None, reason="requires node"
 )
 
 
@@ -295,6 +316,121 @@ def text_bounds(line_boxes: list[dict]) -> dict:
     return {"x": left, "y": top, "w": right - left, "h": bottom - top}
 
 
+def browser_style(document_html: str, selector: str, index: int = 0) -> dict[str, str]:
+    """The computed typography of the ``index``-th match of ``selector``.
+
+    Keys are the camelCase ``getComputedStyle`` names ``measure.cjs`` lists in
+    ``STYLE_PROPERTIES`` (``fontFamily``, ``fontWeight``, ``letterSpacing``,
+    ``textTransform``, ``color``, ``opacity``, ``backgroundColor``,
+    ``backgroundImage``, ``backgroundClip`` and so on), each value as the
+    browser serialises it (``"600"``, ``"2.08px"``, ``"rgb(27, 49, 57)"``).
+    """
+    return json.loads(_run_measure(document_html, selector, str(index), "--mode=style"))
+
+
+def browser_text(document_html: str, selector: str = "body", index: int = 0) -> str:
+    """The ``innerText`` of the ``index``-th match of ``selector``, as the browser renders it.
+
+    ``innerText`` applies ``text-transform`` and the rendered line breaks.
+    Every ``<svg>`` and ``<canvas>`` is hidden first, so with the default
+    selector this is exactly the export fidelity harness's text-loss reference
+    (``scripts/export_fidelity/render_truth.cjs``).
+    """
+    return json.loads(_run_measure(document_html, selector, str(index), "--mode=text"))["text"]
+
+
+def _face_weights(weight: str) -> list[int]:
+    """The hundreds a FontFace ``weight`` descriptor covers: ``"600"`` or a range ``"100 900"``."""
+    bounds = [int(round(float(value))) for value in weight.split()]
+    low, high = min(bounds), max(bounds)
+    return [
+        hundred
+        for hundred in range(FONT_WEIGHT_MIN, FONT_WEIGHT_MAX + 1, FONT_WEIGHT_STEP)
+        if low <= hundred <= high
+    ]
+
+
+def browser_loaded_weights(document_html: str) -> dict[str, list[int]]:
+    """Family -> the weights of its faces in ``document.fonts`` whose status is ``loaded``.
+
+    A face is ``loaded`` only once the page used it, so this is the set of
+    webfont weights the page really painted with. A variable face's weight
+    range (``"100 900"``) contributes every hundred inside it. Family names are
+    unquoted; weights are sorted and distinct.
+    """
+    faces = json.loads(_run_measure(document_html, "--mode=fonts"))
+    loaded: dict[str, set[int]] = {}
+    for face in faces:
+        if face["status"] != "loaded":
+            continue
+        family = face["family"].strip().strip("\"'")
+        loaded.setdefault(family, set()).update(_face_weights(face["weight"]))
+    return {family: sorted(weights) for family, weights in sorted(loaded.items())}
+
+
+# ---------------------------------------------------------------------------
+# The export fidelity harness's text-loss oracle, and sidecar modules in Node
+# ---------------------------------------------------------------------------
+
+
+@functools.cache
+def fidelity_harness() -> ModuleType:
+    """``scripts/export_fidelity/run.py``, imported by path (it is a script, not a package)."""
+    spec = importlib.util.spec_from_file_location("export_fidelity_harness", FIDELITY_HARNESS)
+    assert spec is not None and spec.loader is not None, f"cannot load {FIDELITY_HARNESS}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def text_loss(pptx: bytes, documents: list[str]) -> list[list[str]]:
+    """Per slide, the words the browser renders that the exported slide lacks.
+
+    ``documents[i]`` is the complete document exported as slide ``i`` (0-based),
+    so the list covers the deck's first ``len(documents)`` slides in order. The
+    comparison is the harness's own, ``check_text_loss``: each reference word,
+    whitespace removed and lower-cased, must be a substring of the slide's
+    concatenated text-frame and table text, likewise normalised. The reference
+    is the one ``render_truth.cjs`` writes, the body's ``innerText`` with SVG and
+    canvas hidden (``browser_text``), measured on the sidecar's settled page.
+    An empty list for a slide means nothing it renders is missing.
+    """
+    harness = fidelity_harness()
+    names = [f"slide-{position}" for position in range(1, len(documents) + 1)]
+    with tempfile.TemporaryDirectory(prefix="tellr-text-loss-") as directory:
+        out_dir = Path(directory)
+        truth_dir = out_dir / "truth"
+        truth_dir.mkdir()
+        for name, document in zip(names, documents):
+            (truth_dir / f"{name}.txt").write_text(browser_text(document), encoding="utf-8")
+        pptx_path = out_dir / "export.pptx"
+        pptx_path.write_bytes(pptx)
+        missing = harness.check_text_loss(pptx_path, names, out_dir)
+    return [missing.get(name, []) for name in names]
+
+
+def node_json(script: str) -> object:
+    """Run ``node -e script`` in the sidecar directory and parse what it prints as JSON.
+
+    The script's working directory is the sidecar's, with the sidecar's own
+    environment, so it can ``require`` a sidecar module by absolute path and
+    print ``JSON.stringify`` of what that module returns.
+    """
+    process = subprocess.run(
+        ["node", "-e", script],
+        cwd=pptx_from_html_huashu.SIDECAR_DIR,
+        env=pptx_from_html_huashu.sidecar_subprocess_env(),
+        capture_output=True,
+        text=True,
+        timeout=NODE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    assert process.returncode == 0, (
+        f"node -e exited {process.returncode}: {process.stderr.strip()}\nscript: {script}"
+    )
+    return json.loads(process.stdout)
+
+
 # ---------------------------------------------------------------------------
 # Reading the emitted .pptx
 # ---------------------------------------------------------------------------
@@ -313,6 +449,11 @@ class Run:
     underline: bool
     strike: bool
     soft_break_before: bool  # an <a:br/> separates this run from the previous one
+    # a:rPr baseline in 1000ths of a percent (30000 is superscript); 0 when absent
+    baseline_offset: int = 0
+    color_alpha: float | None = None  # 0..1 <a:alpha> of the run colour; None when absent
+    east_asian_typeface: str | None = None  # a:ea typeface; None when the run names none
+    complex_script_typeface: str | None = None  # a:cs typeface; None when the run names none
 
 
 @dataclass
@@ -493,7 +634,9 @@ def _run(run: etree._Element, soft_break_before: bool) -> Run:
     properties = run.find("a:rPr", NAMESPACES)
     attributes = {} if properties is None else properties.attrib
     latin = None if properties is None else properties.find("a:latin", NAMESPACES)
-    color, _ = _solid_color(properties)
+    east_asian = None if properties is None else properties.find("a:ea", NAMESPACES)
+    complex_script = None if properties is None else properties.find("a:cs", NAMESPACES)
+    color, color_alpha = _solid_color(properties)
     baseline = int(attributes.get("baseline", 0))
     size = attributes.get("sz")
     return Run(
@@ -508,6 +651,10 @@ def _run(run: etree._Element, soft_break_before: bool) -> Run:
         underline=attributes.get("u", "none") != "none",
         strike=attributes.get("strike", "noStrike") != "noStrike",
         soft_break_before=soft_break_before,
+        baseline_offset=baseline,
+        color_alpha=color_alpha,
+        east_asian_typeface=None if east_asian is None else east_asian.get("typeface"),
+        complex_script_typeface=None if complex_script is None else complex_script.get("typeface"),
     )
 
 

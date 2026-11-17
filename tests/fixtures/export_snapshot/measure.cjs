@@ -8,7 +8,8 @@
 // cancelled when it has no end). So the rect it reports comes from the layout the
 // export itself reads.
 //
-// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines]
+// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines|style|text]
+//        node measure.cjs <document.html> --mode=fonts
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
 // nothing matches.
 //   --mode=rect  (the default) prints {"x":…,"y":…,"w":…,"h":…}, the element's
@@ -16,9 +17,17 @@
 //   --mode=lines prints [{"text":…,"x":…,"y":…,"w":…,"h":…}, …], the element's
 //                rendered text lines in reading order, each with the union of its
 //                character rects. See measureLines for how lines are found.
+//   --mode=style prints {"fontFamily":…, "fontWeight":…, …}, the element's computed
+//                typography (STYLE_PROPERTIES), as getComputedStyle serialises it.
+//   --mode=text  prints {"text":…}, the element's innerText once every <svg> and
+//                <canvas> in the document is hidden. See measureText.
+//   --mode=fonts prints [{"family","weight","style","status"}, …], every face in
+//                document.fonts. It reads the whole document, so it takes no
+//                selector.
 //
 // Called from tests/fixtures/export_snapshot_support.py (browser_rect,
-// browser_line_boxes, browser_lines).
+// browser_line_boxes, browser_lines, browser_style, browser_text,
+// browser_loaded_weights).
 
 const path = require('path');
 
@@ -205,13 +214,72 @@ async function measureLines(page, selector, index) {
   }, { selector, index });
 }
 
+// The computed properties a run's style is read from, plus the ones the
+// typography tests guard their fixtures with (the backdrop and gradient text).
+const STYLE_PROPERTIES = [
+  'fontFamily', 'fontWeight', 'fontStyle', 'fontSize', 'letterSpacing', 'textTransform',
+  'textDecorationLine', 'verticalAlign', 'direction', 'color', 'opacity',
+  'backgroundColor', 'backgroundImage', 'backgroundClip', 'webkitBackgroundClip',
+];
+
+async function measureStyle(page, selector, index) {
+  return page.evaluate(({ selector, index, properties }) => {
+    const matches = document.querySelectorAll(selector);
+    if (index >= matches.length) {
+      return { error: `selector ${selector} matched ${matches.length} element(s); index ${index} is out of range` };
+    }
+    const style = getComputedStyle(matches[index]);
+    const result = {};
+    for (const property of properties) result[property] = String(style[property]);
+    return result;
+  }, { selector, index, properties: STYLE_PROPERTIES });
+}
+
+// The element's text as the browser renders it, read with innerText, which
+// applies text-transform and the rendered line breaks. Every <svg> and <canvas>
+// in the document is hidden first, exactly as the export fidelity harness's
+// text-loss reference is taken (scripts/export_fidelity/render_truth.cjs): their
+// text travels inside a picture, never as slide text. Hiding them changes the
+// layout, so this mode reads nothing else, and with the selector "body" it is
+// that reference.
+async function measureText(page, selector, index) {
+  return page.evaluate(({ selector, index }) => {
+    const matches = document.querySelectorAll(selector);
+    if (index >= matches.length) {
+      return { error: `selector ${selector} matched ${matches.length} element(s); index ${index} is out of range` };
+    }
+    const graphics = document.querySelectorAll('svg, canvas');
+    for (let graphicIndex = 0; graphicIndex < graphics.length; graphicIndex++) {
+      graphics[graphicIndex].style.display = 'none';
+    }
+    return { text: matches[index].innerText };
+  }, { selector, index });
+}
+
+// Every face in document.fonts (a FontFaceSet), with the status it settled at:
+// a face is 'loaded' only once the page used it.
+async function measureFonts(page) {
+  return page.evaluate(() => {
+    const faces = [];
+    document.fonts.forEach((face) => {
+      faces.push({ family: face.family, weight: face.weight, style: face.style, status: face.status });
+    });
+    return faces;
+  });
+}
+
 const MODES = {
   rect: measureRect,
   lines: async (page, selector, index) => {
     const measured = await measureLines(page, selector, index);
     return measured.error ? measured : measured.lines;
   },
+  style: measureStyle,
+  text: measureText,
+  fonts: measureFonts,
 };
+// Modes that read the whole document rather than one element.
+const DOCUMENT_MODES = new Set(['fonts']);
 
 function parseArguments(argv) {
   const positional = [];
@@ -229,8 +297,11 @@ function parseArguments(argv) {
 
 async function main() {
   const { documentPath, selector, indexArgument, mode } = parseArguments(process.argv.slice(2));
-  if (!documentPath || !selector) {
-    console.error('usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines]');
+  if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
+    console.error(
+      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|lines|style|text]\n' +
+      '       node measure.cjs <document.html> --mode=fonts',
+    );
     process.exit(1);
   }
   if (!Object.prototype.hasOwnProperty.call(MODES, mode)) {
