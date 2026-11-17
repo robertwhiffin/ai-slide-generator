@@ -40,6 +40,14 @@
 // it, so its line is cut at both ends the same way: its own text is a
 // segment, inside its decoration, and the text after it keeps its x.
 //
+// Visibility (spec §3 Visibility). A word that paints nothing is a gap in its
+// line, cut like an atomic inline: hidden or transparent text keeps its room,
+// so the text after it keeps its x, and a word a clip shows under 2 px of (a
+// line a box cuts off, the visually-hidden pattern, text off the slide) is
+// not slide text. The words a slide drops but the page still reads (its
+// innerText, which leaves out visibility: hidden) are its hidden text, which
+// the snapshot reports as model.reference.hiddenText.
+//
 // Runs carry the browser's typography (spec §3 Runs, RC7). It is read from the
 // computed style of the text node's parent element. Three things CSS does not
 // inherit reach a run from further up:
@@ -63,8 +71,9 @@
 //  * InlineGroup = {follows:Element|null, decorations:Decoration[], blocks:TextBlock[]}
 //  *              (page-side only; never in the slide model): one run of a block's
 //  *              inline content. The walk gives every item of it its order.
-//  * Decoration = {style, opacity, boxes}: an inline element's computed style, its
-//  *              cumulative opacity and one box (snapshot.mjs boxGeometry) per fragment.
+//  * Decoration = {style, opacity, boxes, clip}: an inline element's computed style, its
+//  *              cumulative opacity, one box (snapshot.mjs boxGeometry) per fragment
+//  *              and the clip its boxes are cut to.
 //  * TextBlock = {x,y,w,h, rotate:null, wrap, align:'left'|'center'|'right', rtl,
 //  *              paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
 //  *                           lines:[{runs:Run[]}]}]}
@@ -101,7 +110,10 @@
 //   textColour      (backdrop, style) -> 'RRGGBB', the solid colour its text paints;
 //   boxGeometry     (element, rect, frame) -> the element's box | null;
 //   contentBox      (style, box) -> the box inside border and padding | null;
-//   paintsBox       (style, opacity) -> whether the element's box paints anything.
+//   paintsBox       (style, opacity) -> whether the element's box paints anything;
+//   inlineClip      (clip, element, style, frame) -> the clip of an inline element's
+//                   content, given the clip of the text around it;
+//   shows           (bounds, clip) -> whether the clip shows {left, top, right, bottom}.
 function createTextLayout(env) {
   const TEXT_NODE = 3;
   const ELEMENT_NODE = 1;
@@ -199,6 +211,11 @@ function createTextLayout(env) {
   //                whose drawn width includes the stretch)}
   const pendingParagraphs = [];
   const pendingRuns = [];
+  // The slide's hidden text (hiddenText), in the order it is read. `dropping`
+  // is true while the tokens read in a row are all dropped, so a word split
+  // over two text nodes ("Rev<b>enue</b>") is recorded whole.
+  const hiddenParts = [];
+  let dropping = false;
 
   function spend(count) {
     if (budget <= 0 || count > budget) {
@@ -227,12 +244,14 @@ function createTextLayout(env) {
   }
 
   // What a text node paints with, carried down the inline descent:
-  //   {style, opacity, backdrop, decoration, baseline}
+  //   {style, opacity, backdrop, decoration, baseline, clip}
   //   style       its parent element's computed style;
   //   opacity     the cumulative opacity it paints at;
   //   backdrop    what it is composited over (snapshot.mjs backdropInside);
   //   decoration  {underline, strike} propagated to it;
-  //   baseline    'super' | 'sub' from an inline ancestor's vertical-align, else null.
+  //   baseline    'super' | 'sub' from an inline ancestor's vertical-align, else null;
+  //   clip        what clips it (snapshot.mjs shownPart): its block's content clip,
+  //               narrowed by each inline ancestor's own clip-path.
   // `closesWith` is a piece the run takes once the node's children are done, or
   // null. Returns whether the children were opened.
   function openChildren(stack, node, context, depth, closesWith) {
@@ -266,14 +285,16 @@ function createTextLayout(env) {
   }
 
   // The context inside an inline child element. Its own opacity, background,
-  // decoration and vertical-align apply to the text it holds.
-  function inlineContext(outer, cs) {
+  // decoration, vertical-align and clip-path apply to the text it holds.
+  // `frame` is its block's transform frame: an inline box has none of its own.
+  function inlineContext(outer, element, cs, frame) {
     return {
       style: cs,
       opacity: outer.opacity * env.opacityOf(cs),
       backdrop: env.backdropInside(outer.backdrop, cs),
       decoration: decorationInside(outer.decoration, cs, false),
       baseline: baselineShiftOf(cs) || outer.baseline,
+      clip: env.inlineClip(outer.clip, element, cs, frame),
     };
   }
 
@@ -285,21 +306,23 @@ function createTextLayout(env) {
   //   {kind:'atomic', element}      an atomic inline: it paints its own
   //                                 content (its own block, or a picture)
   //                                 and gives the run no text;
-  //   {kind:'decoration', element, style, opacity}
+  //   {kind:'decoration', element, style, opacity, clip}
   //                                 a visible inline element whose box paints,
-  //                                 at its cumulative opacity, before the
-  //                                 pieces it holds. It keeps a run with no
-  //                                 text (an empty status dot) a run;
+  //                                 at its cumulative opacity and cut to its
+  //                                 clip, before the pieces it holds. It keeps
+  //                                 a run with no text (an empty status dot) a run;
   //   {kind:'edge', opens}          either end of an inline element with
   //                                 edges (hasInlineEdges): an opening one
   //                                 before the pieces it holds and a closing
   //                                 one after, so its lines are cut there, as
   //                                 at an atomic inline.
   // display:contents children are transparent: no box, so no opacity,
-  // background or decoration of their own. display:none ones are skipped.
-  // `walk` is the container's {opacity, backdrop, decoration} from the
-  // snapshot walk; the container's own vertical-align is already where the
-  // browser placed its text, so its runs start on the baseline.
+  // background, decoration or clip of their own. display:none ones are skipped.
+  // A transparent inline element's text is still read: it keeps its room in
+  // the line, so it is a gap there (readTokens).
+  // `walk` is the container's {opacity, frame, backdrop, decoration, clip}
+  // from the snapshot walk; the container's own vertical-align is already
+  // where the browser placed its text, so its runs start on the baseline.
   function collectRuns(container, containerStyle, walk, itemsAreBlocks) {
     const runs = [];
     let run = [];
@@ -311,6 +334,7 @@ function createTextLayout(env) {
       backdrop: walk.backdrop,
       decoration: walk.decoration,
       baseline: null,
+      clip: walk.clip,
     }, 1);
     while (stack.length) {
       const frame = stack[stack.length - 1];
@@ -337,6 +361,7 @@ function createTextLayout(env) {
           backdrop: outer.backdrop,
           decoration: outer.decoration,
           baseline: outer.baseline,
+          clip: outer.clip,
         }, frame.depth + 1);
         continue;
       }
@@ -350,17 +375,15 @@ function createTextLayout(env) {
       } else if (role === 'atomic') {
         run.push({ kind: 'atomic', element: node });
       } else if (role === 'inline') {
-        const context = inlineContext(frame.context, cs);
+        const context = inlineContext(frame.context, node, cs, walk.frame);
         // Its edges take their space even where nothing of it shows, so they
         // cut the line whatever its opacity or visibility.
         const edged = hasInlineEdges(cs);
         if (edged) run.push(OPENING_EDGE);
-        if (context.opacity > 0) {
-          if (cs.visibility === 'visible' && env.paintsBox(cs, context.opacity)) {
-            run.push({ kind: 'decoration', element: node, style: cs, opacity: context.opacity });
-          }
-          if (openChildren(stack, node, context, frame.depth + 1, edged ? CLOSING_EDGE : null)) continue;
+        if (context.opacity > 0 && cs.visibility === 'visible' && env.paintsBox(cs, context.opacity)) {
+          run.push({ kind: 'decoration', element: node, style: cs, opacity: context.opacity, clip: context.clip });
         }
+        if (openChildren(stack, node, context, frame.depth + 1, edged ? CLOSING_EDGE : null)) continue;
         if (edged) run.push(CLOSING_EDGE);
       }
       // An out-of-flow child (a float, an absolute box) leaves the line where it
@@ -756,8 +779,11 @@ function createTextLayout(env) {
   // split into code points, each measured on its own; a code point that paints
   // nothing (a joiner, a combining mark) travels with its neighbour, so no
   // character is lost. Each code point is cased after the one before it, so a
-  // word that wraps at its hyphen capitalises as it would on one line.
-  //   source    one text node's {node, data, mode, style, tabSize, transform, segment};
+  // word that wraps at its hyphen capitalises as it would on one line. A code
+  // point the clip hides is dropped (dropToken), so a word cut off on its
+  // second line keeps its first.
+  //   source    one text node's {node, data, mode, style, tabSize, transform,
+  //             segment, hidden, recordsHidden, clip} (readTokens);
   //   previous  the character before the token (casedText).
   function splitToken(source, start, end, space, previous, range, tokens) {
     const pieces = [];
@@ -778,14 +804,44 @@ function createTextLayout(env) {
         else pending += text;
         continue;
       }
-      pieces.push({
-        kind: 'text', text: pending + text, rect: rects[0], style: source.style, face: source.face, collapsible: false, tabSize: source.tabSize,
-        segment: source.segment,
-      });
+      pieces.push({ text: pending + text, rects, shown: anyShown(rects, source.clip) });
       pending = '';
     }
-    for (let piece = 0; piece < pieces.length; piece++) tokens.push(pieces[piece]);
+    for (let piece = 0; piece < pieces.length; piece++) {
+      if (pieces[piece].shown) pushTextToken(source, pieces[piece].text, pieces[piece].rects[0], false, tokens);
+      else dropToken(source, pieces[piece].text, pieces[piece].rects, tokens);
+    }
     return pieces.length > 0;
+  }
+
+  // Whether the clip shows any of a token's rects.
+  function anyShown(rects, clip) {
+    for (let index = 0; index < rects.length; index++) {
+      if (env.shows(rects[index], clip)) return true;
+    }
+    return false;
+  }
+
+  function pushTextToken(source, text, rect, collapsible, tokens) {
+    tokens.push({
+      kind: 'text', text, rect, style: source.style, face: source.face, collapsible, tabSize: source.tabSize,
+      segment: source.segment,
+    });
+    dropping = false;
+  }
+
+  // A token that paints nothing: hidden or transparent text, which keeps its
+  // room in the line, or text its clip shows under 2 px of. Each of its rects
+  // that takes width is a gap in its line, as an atomic inline is (isCut), so
+  // the text after it keeps its x. Its text is hidden text unless it is
+  // visibility: hidden, which the page's innerText leaves out too.
+  function dropToken(source, text, rects, tokens) {
+    for (let index = 0; index < rects.length; index++) {
+      if (rects[index].right > rects[index].left) tokens.push({ kind: 'gap', rect: rects[index] });
+    }
+    if (!source.recordsHidden) return;
+    hiddenParts.push(dropping ? text : ' ' + text);
+    dropping = true;
   }
 
   function measureToken(source, start, end, space, previous, range, tokens) {
@@ -796,14 +852,15 @@ function createTextLayout(env) {
     const collapsible = space && !source.mode.spaces;
     const raw = source.data.slice(start, end);
     const text = !space ? casedText(raw, source.transform, previous) : collapsible ? ' ' : preservedSpaces(raw);
+    if (source.hidden || !anyShown(rects, source.clip)) {
+      dropToken(source, text, rects, tokens);
+      return;
+    }
     if (rects.length > 1 && !collapsible &&
         splitToken(source, start, end, space, previous, range, tokens)) {
       return;
     }
-    tokens.push({
-      kind: 'text', text, rect: rects[0], style: source.style, face: source.face, collapsible, tabSize: source.tabSize,
-      segment: source.segment,
-    });
+    pushTextToken(source, text, rects[0], collapsible, tokens);
   }
 
   // Word and space tokens of one text node, plus a break for each preserved
@@ -814,9 +871,9 @@ function createTextLayout(env) {
   // where it changes (segmentsOf).
   function readTokens(piece, scale, range, tokens, words) {
     const ps = piece.context.style;
-    // A hidden text node keeps its place in the layout, line breaks included,
-    // but paints nothing.
-    const hidden = ps.visibility !== 'visible';
+    // Hidden or transparent text keeps its place in the layout, line breaks
+    // included, but paints nothing: its tokens are gaps (dropToken).
+    const visible = ps.visibility === 'visible';
     const data = String(dom.textData(piece.node) || '');
     const length = Math.min(data.length, COLLECTION_ITEM_LIMIT);
     if (!length) return;
@@ -831,6 +888,9 @@ function createTextLayout(env) {
       tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
       transform: String(ps.textTransform || 'none'),
       segment: words.segment,
+      hidden: !visible || !(piece.context.opacity > 0),
+      recordsHidden: visible,
+      clip: piece.context.clip,
     };
     let start = 0;
     while (start < length) {
@@ -839,11 +899,12 @@ function createTextLayout(env) {
       if (kind === 'break') {
         tokens.push(BREAK);
         words.previous = '';
+        dropping = false;
         start = end;
         continue;
       }
       while (end < length && characterKind(data.charCodeAt(end), mode) === kind) end++;
-      if (!hidden) measureToken(source, start, end, kind === 'space', words.previous, range, tokens);
+      measureToken(source, start, end, kind === 'space', words.previous, range, tokens);
       words.previous = kind === 'space' ? ' ' : lastCodePoint(data, start, end);
       start = end;
     }
@@ -968,28 +1029,34 @@ function createTextLayout(env) {
     return { runs, extents, rect, lineHeight };
   }
 
-  // A cut line (isCut), cut at each atomic inline and at each inline edge: the
-  // text between the cuts as lines of their own, in order, each assembled like
-  // a whole line, so the spaces either side of a cut are dropped as at a line's
+  // Whether a token is room in its line that holds no text: an atomic inline,
+  // or a word that paints nothing (dropToken).
+  function isGap(token) {
+    return token.kind === 'atomic' || token.kind === 'gap';
+  }
+
+  // A cut line (isCut), cut at each gap and at each inline edge: the text
+  // between the cuts as lines of their own, in order, each assembled like a
+  // whole line, so the spaces either side of a cut are dropped as at a line's
   // ends. Text between two cuts that is only spaces, or nothing, is no segment.
   function segmentsOf(line, lineHeight) {
     const segments = [];
     let tokens = [];
     for (let index = 0; index <= line.tokens.length; index++) {
       const token = index < line.tokens.length ? line.tokens[index] : null;
-      const cut = !token || token.kind === 'atomic' ||
+      const cut = !token || isGap(token) ||
         (tokens.length && token.segment !== tokens[tokens.length - 1].segment);
       if (cut && tokens.length) {
         const segment = assembleLine({ tokens }, lineHeight);
         if (segment && segment.runs.length) segments.push(segment);
         tokens = [];
       }
-      if (token && token.kind !== 'atomic') tokens.push(token);
+      if (token && !isGap(token)) tokens.push(token);
     }
     return segments;
   }
 
-  // Whether a line is cut: it holds an atomic inline, text on both sides of an
+  // Whether a line is cut: it holds a gap, text on both sides of an
   // inline edge (its tokens' segments differ), or an inset with text on one
   // side of it only. Under box-decoration-break: slice an element's start inset
   // is on the line of the text after its opening edge, and its end inset on
@@ -1002,7 +1069,7 @@ function createTextLayout(env) {
     let segment = null;
     for (let index = 0; index < tokens.length; index++) {
       const token = tokens[index];
-      if (token.kind === 'atomic') return true;
+      if (isGap(token)) return true;
       if (segment !== null && token.segment !== segment) return true;
       segment = token.segment;
     }
@@ -1042,18 +1109,20 @@ function createTextLayout(env) {
   //   s      the computed style of the block that holds the run;
   //   scale  the block's cumulative transform scale (font sizes and tracking scale with it).
   // Each line is {runs, extents, rect, lineHeight}, or {segments} for a cut
-  // line (isCut): its text between the atomic inlines and inline edges on it,
-  // each segment a line of that first form. An atomic inline is a token with
-  // the rect it fills in its line, so lines cluster around it as around a
-  // word; an inline edge moves no token, it only starts a new segment.
-  // Leading and trailing blank lines paint nothing and are dropped; null when
-  // no text in the run paints.
+  // line (isCut): its text between the gaps and inline edges on it, each
+  // segment a line of that first form. A gap (an atomic inline, or a word that
+  // paints nothing) is a token with the rect it fills in its line, so lines
+  // cluster around it as around a word; an inline edge moves no token, it only
+  // starts a new segment. A line a clip cuts off is a cut line of gaps alone,
+  // which has no segment. Leading and trailing blank lines paint nothing and
+  // are dropped; null when no text in the run paints.
   function layoutInlineRun(nodes, s, scale) {
     const rtl = s.direction === 'rtl';
     const range = document.createRange();
     const tokens = [];
     const words = { previous: '', segment: 0 };
     const edges = { opening: false };
+    dropping = false;
     for (let index = 0; index < nodes.length; index++) {
       const piece = nodes[index];
       if (piece.kind === 'text') {
@@ -1079,6 +1148,7 @@ function createTextLayout(env) {
       }
       // A break or an atomic inline ends the word before it.
       words.previous = '';
+      dropping = false;
     }
     const clustered = clusterLines(tokens, rtl);
     const lineHeight = String(s.lineHeight);
@@ -1438,16 +1508,31 @@ function createTextLayout(env) {
         const box = env.boxGeometry(piece.element, rects[rect], frame);
         if (box) boxes.push(box);
       }
-      if (boxes.length) decorations.push({ style: piece.style, opacity: piece.opacity, boxes });
+      if (boxes.length) decorations.push({ style: piece.style, opacity: piece.opacity, boxes, clip: piece.clip });
     }
     return decorations;
   }
 
+  // recordHiddenText(text): the rendered text (innerText) of a subtree the
+  // walk skips because nothing in it shows (opacity 0, an empty clip). It is
+  // still what a screen reader reads, so it is hidden text.
+  function recordHiddenText(text) {
+    hiddenParts.push(' ' + text);
+    dropping = false;
+  }
+
+  // hiddenText() -> model.reference.hiddenText: the words of every token
+  // dropped and every subtree recorded, in order, single-spaced.
+  function hiddenText() {
+    return hiddenParts.join('').replace(/\s+/g, ' ').trim();
+  }
+
   // collectTextBlocks(el, s, walk) -> InlineGroup[]
   //   el, s   the element the snapshot walk is visiting and its computed style;
-  //   walk    {opacity, frame, backdrop, decoration}: its cumulative opacity, its
-  //           transform frame, the backdrop of its content (backdropInside) and
-  //           the decorations on its text (decorationOf).
+  //   walk    {opacity, frame, backdrop, decoration, clip}: its cumulative
+  //           opacity, its transform frame, the backdrop of its content
+  //           (backdropInside), the decorations on its text (decorationOf) and
+  //           what clips its inline content (snapshot.mjs clipsOf).
   // One group per run of its inline content that paints: the run's decorations
   // and its text blocks. The walk orders them: every decoration of the group
   // under every text block of it (snapshot.mjs pushGroup). A group that comes
@@ -1481,9 +1566,11 @@ function createTextLayout(env) {
     applyMetrics,
     collectTextBlocks,
     decorationOf,
+    hiddenText,
     isInlineBox,
     layoutInlineRun,
     loadedFonts,
+    recordHiddenText,
     truncated: () => truncated,
   };
 }

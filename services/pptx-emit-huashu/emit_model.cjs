@@ -84,8 +84,22 @@ function shadowOptions(shadow) {
   };
 }
 
+// A path item's polylines as pptxgenjs custom-geometry points, in inches from
+// the shape's top left: each polyline starts with a move, and a closed one ends
+// with a close.
+function pathPoints(item) {
+  const points = [];
+  for (const polyline of item.path) {
+    polyline.forEach((point, index) => {
+      points.push({ x: inches(point.x), y: inches(point.y), moveTo: index === 0 });
+    });
+    if (item.closed) points.push({ close: true });
+  }
+  return points;
+}
+
 function emitShape(slide, pres, item) {
-  const shapeType = pres.ShapeType[item.geometry];
+  const shapeType = item.geometry === 'path' ? pres.ShapeType.custGeom : pres.ShapeType[item.geometry];
   if (!shapeType) throw new Error(`[html2pptx] unknown shape geometry: ${item.geometry}`);
   const options = {
     x: inches(item.x),
@@ -94,6 +108,7 @@ function emitShape(slide, pres, item) {
     h: inches(item.h),
     line: item.line ? lineOptions(item.line) : { type: 'none' },
   };
+  if (item.geometry === 'path') options.points = pathPoints(item);
   if (item.fill) {
     options.fill = { color: item.fill.color };
     const transparency = transparencyOf(item.fill.alpha);

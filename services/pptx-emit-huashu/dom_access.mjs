@@ -64,6 +64,8 @@ export const DOM_ACCESS_SOURCE = `
       // What a child node is, and a text node's characters, for passes that read text.
       const typeOfNode = describe(realm.Node.prototype, 'nodeType');
       const characterData = describe(realm.CharacterData.prototype, 'data');
+      // An HTML element's rendered text, as a screen reader and the text-loss oracle read it.
+      const renderedText = describe(realm.HTMLElement.prototype, 'innerText');
       // Document's and Element's lookups are DISTINCT function objects, so both are captured.
       const docQuery = realm.Document.prototype.querySelector;
       const docQueryAll = realm.Document.prototype.querySelectorAll;
@@ -87,6 +89,7 @@ export const DOM_ACCESS_SOURCE = `
           typeof listLength.get !== 'function' ||
           typeof typeOfNode.get !== 'function' ||
           typeof characterData.get !== 'function' ||
+          typeof renderedText.get !== 'function' ||
           typeof docQuery !== 'function' ||
           typeof docQueryAll !== 'function' ||
           typeof elQuery !== 'function' ||
@@ -109,6 +112,8 @@ export const DOM_ACCESS_SOURCE = `
         nodeListLength: (list) => listLength.get.call(list),
         nodeType: (node) => typeOfNode.get.call(node),
         textData: (node) => characterData.get.call(node),
+        // Throws for an element that is not HTML (an <svg>): callers guard it.
+        innerText: (el) => renderedText.get.call(el),
         // The receiver stays this realm's document; a native lookup with an explicit receiver works across realms.
         documentQuerySelector: (selector) => docQuery.call(document, selector),
         documentQuerySelectorAll: (selector) => docQueryAll.call(document, selector),
@@ -146,6 +151,7 @@ export const DOM_ACCESS_SOURCE = `
     nodeListLength: (list) => list.length,
     nodeType: (node) => node.nodeType,
     textData: (node) => node.data,
+    innerText: (el) => el.innerText,
     documentQuerySelector: (selector) => document.querySelector(selector),
     documentQuerySelectorAll: (selector) => document.querySelectorAll(selector),
     elementQuerySelector: (el, selector) => el.querySelector(selector),

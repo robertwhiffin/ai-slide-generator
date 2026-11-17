@@ -8,9 +8,10 @@
 // cancelled when it has no end). So the rect it reports comes from the layout the
 // export itself reads.
 //
-// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|lines|style|text]
+// usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text]
 //        node measure.cjs <document.html> --mode=fonts
 //        node measure.cjs <document.html> <probes-json> --mode=probe
+//        node measure.cjs <document.html> <point-json> --mode=hit
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
 // nothing matches.
 //   --mode=rect  (the default) prints {"x":…,"y":…,"w":…,"h":…}, the element's
@@ -19,6 +20,9 @@
 //                getClientRects(): one border-box rect per box fragment, which
 //                for an inline element is one per line it spans. See
 //                measureClientRects.
+//   --mode=padding-box prints {"x":…,"y":…,"w":…,"h":…}, the element's padding
+//                box: where its overflow clips what it holds. See
+//                measurePaddingBox.
 //   --mode=lines prints [{"text":…,"x":…,"y":…,"w":…,"h":…}, …], the element's
 //                rendered text lines in reading order, each with the union of its
 //                character rects. See measureLines for how lines are found.
@@ -34,10 +38,15 @@
 //                [{"w":…,"h":…}, …], the size of each probe's text set in the
 //                document with that inline CSS, plus "ascent" for a baseline
 //                probe. See measureProbes.
+//   --mode=hit   takes, in place of the selector, a point as JSON {"x":…,"y":…}
+//                in CSS px and prints {"id":…}: the id of the element the
+//                browser hit-tests there, or of its nearest ancestor that has
+//                one, else null. See measureHit.
 //
 // Called from tests/fixtures/export_snapshot_support.py (browser_rect,
-// browser_client_rects, browser_line_boxes, browser_lines, browser_style,
-// browser_text, browser_loaded_weights, browser_probes).
+// browser_client_rects, browser_padding_box, browser_line_boxes, browser_lines,
+// browser_style, browser_text, browser_loaded_weights, browser_probes,
+// browser_hit_id).
 
 const path = require('path');
 
@@ -151,6 +160,56 @@ async function measureClientRects(page, selector, index) {
     }
     return { rects: result };
   }, { selector, index, limit: CLIENT_RECT_LIMIT });
+}
+
+// The element's padding box: its border box (getBoundingClientRect()) less its
+// computed border width on each side. An element's overflow (hidden, clip,
+// auto, scroll) clips what it holds to this box, its overflow clip edge under
+// the default overflow-clip-margin of 0. Read from the computed widths, not
+// clientLeft/clientWidth, which round to whole pixels. The element must not be
+// transformed: the bounding rect of a rotated box is not its border box.
+async function measurePaddingBox(page, selector, index) {
+  return page.evaluate(({ selector, index }) => {
+    const matches = document.querySelectorAll(selector);
+    if (index >= matches.length) {
+      return { error: `selector ${selector} matched ${matches.length} element(s); index ${index} is out of range` };
+    }
+    const element = matches[index];
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const left = parseFloat(style.borderLeftWidth) || 0;
+    const right = parseFloat(style.borderRightWidth) || 0;
+    const top = parseFloat(style.borderTopWidth) || 0;
+    const bottom = parseFloat(style.borderBottomWidth) || 0;
+    return { x: rect.x + left, y: rect.y + top, w: rect.width - left - right, h: rect.height - top - bottom };
+  }, { selector, index });
+}
+
+// What the browser shows at a point, by hit testing: document.elementFromPoint
+// returns the topmost element painted there. Hit testing honours everything
+// that clips or hides an element (an overflow ancestor, clip, clip-path,
+// visibility: hidden) but not opacity, so it tells whether an element is
+// visible at that point without trusting any reading of the CSS. It tells
+// shown from hidden, not where a clip's edge lies: Chrome hit-tests an
+// overflow clip at the clipping element's border box, though it paints the
+// clip at the padding box. The point arrives as JSON in place of the selector
+// and must lie in the viewport; outside it nothing is hit. Reports the id of
+// the hit element or of its nearest ancestor that has one, else null.
+async function measureHit(page, pointArgument) {
+  let point;
+  try {
+    point = JSON.parse(pointArgument);
+  } catch (error) {
+    return { error: `the point is not JSON: ${error.message}` };
+  }
+  if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+    return { error: 'the point must be JSON {"x": number, "y": number}' };
+  }
+  return page.evaluate(({ x, y }) => {
+    const hit = document.elementFromPoint(x, y);
+    const owner = hit ? hit.closest('[id]') : null;
+    return { id: owner ? owner.id : null };
+  }, { x: point.x, y: point.y });
 }
 
 // The element's rendered text, line by line, read character by character with a
@@ -383,6 +442,7 @@ const MODES = {
     const measured = await measureClientRects(page, selector, index);
     return measured.error ? measured : measured.rects;
   },
+  'padding-box': measurePaddingBox,
   lines: async (page, selector, index) => {
     const measured = await measureLines(page, selector, index);
     return measured.error ? measured : measured.lines;
@@ -394,6 +454,7 @@ const MODES = {
     const measured = await measureProbes(page, probesArgument);
     return measured.error ? measured : measured.sizes;
   },
+  hit: measureHit,
 };
 // Modes that read the whole document rather than one element.
 const DOCUMENT_MODES = new Set(['fonts']);
@@ -416,9 +477,10 @@ async function main() {
   const { documentPath, selector, indexArgument, mode } = parseArguments(process.argv.slice(2));
   if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
     console.error(
-      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|lines|style|text]\n' +
+      'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text]\n' +
       '       node measure.cjs <document.html> --mode=fonts\n' +
-      '       node measure.cjs <document.html> <probes-json> --mode=probe',
+      '       node measure.cjs <document.html> <probes-json> --mode=probe\n' +
+      '       node measure.cjs <document.html> <point-json> --mode=hit',
     );
     process.exit(1);
   }

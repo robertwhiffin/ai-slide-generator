@@ -15,7 +15,9 @@
 //  *   captures: Capture[],
 //  *   fonts: {'<family>': number[]},        // the weights (100..900) of its faces in
 //  *                                         // document.fonts that loaded: the page's webfonts
-//  *   reference: {hiddenText: string},
+//  *   reference: {hiddenText: string},      // the words the page reads (its innerText)
+//  *                                         // that the slide does not show, single-spaced:
+//  *                                         // clipped, transparent and off-slide text
 //  *   stats: {elements, shapes, images, texts, truncated},
 //  * }
 //  *
@@ -24,9 +26,12 @@
 //  *   order  its CSS paint-order key, a number[] compared lexicographically.
 //  *
 //  * Item =
-//  *  {kind:'shape', x,y,w,h, geometry:'rect'|'roundRect'|'ellipse', radius,
+//  *  {kind:'shape', x,y,w,h, geometry:'rect'|'roundRect'|'ellipse'|'path', radius,
 //  *   fill:{color:'RRGGBB', alpha}|null, line:{color, alpha, widthPx, dash:'solid'|'dash'|'dot'}|null,
-//  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate}
+//  *   shadow:{color, alpha, blurPx, offsetPx, angle}|null, rotate,
+//  *   path:[{x,y}[]], closed:boolean}   (path and closed for geometry 'path' only: the
+//  *   polylines it draws, in px from its top left, each closed or each open; a
+//  *   shape a clip cuts that is not a plain rect, see pushClippedShape)
 //  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
 //  *  {kind:'text', x,y,w,h, rotate:null, wrap:boolean, align:'left'|'center'|'right',
@@ -460,6 +465,242 @@ async function snapshotPage(config) {
     return { x: centreX - w / 2, y: centreY - h / 2, w, h, scale: frame.scale, rotate: frame.angle };
   }
 
+  // A box ({x, y, w, h, rotate}) as bounds {left, top, right, bottom}: its
+  // axis-aligned extent on the slide, the turned box's when it is rotated.
+  function boundsOf(box) {
+    if (!box.rotate) return { left: box.x, top: box.y, right: box.x + box.w, bottom: box.y + box.h };
+    const radians = box.rotate * Math.PI / 180;
+    const halfWidth = (Math.abs(box.w * Math.cos(radians)) + Math.abs(box.h * Math.sin(radians))) / 2;
+    const halfHeight = (Math.abs(box.w * Math.sin(radians)) + Math.abs(box.h * Math.cos(radians))) / 2;
+    const centreX = box.x + box.w / 2;
+    const centreY = box.y + box.h / 2;
+    return { left: centreX - halfWidth, top: centreY - halfHeight, right: centreX + halfWidth, bottom: centreY + halfHeight };
+  }
+
+  function boundsOfRect(rect) {
+    const left = Number(rect.left);
+    const top = Number(rect.top);
+    return { left, top, right: left + Number(rect.width), bottom: top + Number(rect.height) };
+  }
+
+  // ─── visibility and clipping ─────────────────────────────────────────
+  // Spec §3 Visibility. A clip is bounds {left, top, right, bottom} in slide
+  // px; an axis nothing clips runs to ±Infinity. The walk carries Clips =
+  // {tree, flow, absolute, fixed} down the tree:
+  //   tree      the intersection of every ancestor's clip: rect() and
+  //             clip-path: inset(), each of which clips its element and
+  //             everything it holds;
+  //   flow      what clips an in-flow box: the slide rect, narrowed by the
+  //             padding box of each overflow box its containing-block chain
+  //             passes through;
+  //   absolute  the same for an absolutely positioned box: the flow clip of its
+  //             containing block, so an overflow box between that block and the
+  //             box does not clip it (CSS 2.1 §11.1.1);
+  //   fixed     the same for a fixed box, whose containing block is the
+  //             viewport, the slide, unless an ancestor makes one (containsFixed).
+  // What a clip shows of a box, a picture or a word is shownPart. What it shows
+  // under MINIMUM_VISIBLE_PX of, along an axis it cuts, is hidden: the
+  // visually-hidden pattern clips to 1 px.
+  const SLIDE_CLIP = { left: 0, top: 0, right: SLIDE_WIDTH, bottom: SLIDE_HEIGHT };
+  const NO_CLIP = { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
+  const VIEWPORT_CLIPS = { tree: NO_CLIP, flow: SLIDE_CLIP, absolute: SLIDE_CLIP, fixed: SLIDE_CLIP };
+  const MINIMUM_VISIBLE_PX = 2;
+  // A clip edge within this of an edge of what it clips cuts nothing (layout rounding).
+  const CUT_EPSILON_PX = 0.01;
+  // overflow applies to block, flex and grid containers: not to an inline box,
+  // nor to a table's rows, columns and their groups.
+  const NO_OVERFLOW_DISPLAY = /^(inline|contents|none|table-(row|row-group|header-group|footer-group|column|column-group))$/;
+  // Chrome computes clip: rect(0 0 0 0) as "rect(0px, 0px, 0px, 0px)", keeping each auto.
+  const CLIP_RECT = /^rect\(\s*([^,\s]+)[\s,]+([^,\s]+)[\s,]+([^,\s]+)[\s,]+([^,\s)]+)\s*\)$/;
+  const CLIP_PATH_INSET = /^inset\(([^)]*)\)/;
+  const REFERENCE_BOX = /\b(margin-box|border-box|padding-box|content-box|fill-box|stroke-box|view-box)\b/;
+
+  function intersectClips(a, b) {
+    return {
+      left: Math.max(a.left, b.left),
+      top: Math.max(a.top, b.top),
+      right: Math.min(a.right, b.right),
+      bottom: Math.min(a.bottom, b.bottom),
+    };
+  }
+
+  function clipIsEmpty(clip) {
+    return !(clip.right > clip.left && clip.bottom > clip.top);
+  }
+
+  // What a clip from clipStart to clipEnd shows of [start, end] on one axis:
+  // {from, to, cut}, or null when it cuts it and shows under MINIMUM_VISIBLE_PX.
+  function shownSpan(start, end, clipStart, clipEnd) {
+    const cutsStart = clipStart - start > CUT_EPSILON_PX;
+    const cutsEnd = end - clipEnd > CUT_EPSILON_PX;
+    if (!cutsStart && !cutsEnd) return { from: start, to: end, cut: false };
+    const from = cutsStart ? clipStart : start;
+    const to = cutsEnd ? clipEnd : end;
+    return to - from >= MINIMUM_VISIBLE_PX ? { from, to, cut: true } : null;
+  }
+
+  // shownPart(bounds, clip) -> {left, top, right, bottom, cut} | null: what the
+  // clip shows of `bounds`, `cut` when it takes any of it away. An axis the clip
+  // does not cut keeps its extent, so a 1 px rule the clip only shortens still
+  // shows. An empty clip shows nothing.
+  function shownPart(bounds, clip) {
+    if (clipIsEmpty(clip)) return null;
+    const x = shownSpan(bounds.left, bounds.right, clip.left, clip.right);
+    const y = x && shownSpan(bounds.top, bounds.bottom, clip.top, clip.bottom);
+    if (!y) return null;
+    return { left: x.from, top: y.from, right: x.to, bottom: y.to, cut: x.cut || y.cut };
+  }
+
+  function clipsOverflow(s) {
+    return !NO_OVERFLOW_DISPLAY.test(String(s.display)) && (s.overflowX !== 'visible' || s.overflowY !== 'visible');
+  }
+
+  // An overflow box clips what it holds to its padding box (CSS Overflow 3, the
+  // overflow clip edge), on each axis whose overflow is not visible: hidden,
+  // clip, auto and scroll all clip. Under a rotation the bounds hold the turned
+  // box and are the clip, which hides nothing the box shows.
+  function overflowClipOf(s, bounds, frame) {
+    const clipsX = s.overflowX !== 'visible';
+    const clipsY = s.overflowY !== 'visible';
+    const border = (side, scale) => (frame.angle ? 0 : (parseFloat(s['border' + side + 'Width']) || 0) * scale);
+    return {
+      left: clipsX ? bounds.left + border('Left', frame.scaleX) : -Infinity,
+      top: clipsY ? bounds.top + border('Top', frame.scaleY) : -Infinity,
+      right: clipsX ? bounds.right - border('Right', frame.scaleX) : Infinity,
+      bottom: clipsY ? bounds.bottom - border('Bottom', frame.scaleY) : Infinity,
+    };
+  }
+
+  function hasClipRect(s) {
+    return (s.position === 'absolute' || s.position === 'fixed') && Boolean(s.clip) && s.clip !== 'auto';
+  }
+
+  function hasOwnClip(s) {
+    return hasClipRect(s) || (Boolean(s.clipPath) && s.clipPath !== 'none');
+  }
+
+  // clip: rect(top, right, bottom, left) on an absolutely positioned box:
+  // offsets from its border box's top left corner, each auto that box's own
+  // edge (CSS 2.1 §11.1.2). Under a rotation only a clip with no area is
+  // read: it hides the box in any frame.
+  function clipRectOf(s, bounds, frame) {
+    const match = hasClipRect(s) ? CLIP_RECT.exec(String(s.clip)) : null;
+    if (!match) return NO_CLIP;
+    const offset = (value, auto, scale) => (value === 'auto' ? auto : (parseFloat(value) || 0) * scale);
+    const clip = {
+      left: bounds.left + offset(match[4], 0, frame.scaleX),
+      top: bounds.top + offset(match[1], 0, frame.scaleY),
+      right: bounds.left + offset(match[2], bounds.right - bounds.left, frame.scaleX),
+      bottom: bounds.top + offset(match[3], bounds.bottom - bounds.top, frame.scaleY),
+    };
+    return frame.angle && !clipIsEmpty(clip) ? NO_CLIP : clip;
+  }
+
+  // The box a clip-path is drawn in: the border box unless it names another
+  // (an SVG box is the border box for an HTML element).
+  function referenceBox(s, bounds, frame, name) {
+    const edge = (side, kind, scale) => (parseFloat(s[kind === 'border' ? 'border' + side + 'Width' : kind + side]) || 0) * scale;
+    const inward = { Left: 0, Top: 0, Right: 0, Bottom: 0 };
+    const sides = ['Left', 'Top', 'Right', 'Bottom'];
+    for (let index = 0; index < sides.length; index++) {
+      const side = sides[index];
+      const scale = side === 'Left' || side === 'Right' ? frame.scaleX : frame.scaleY;
+      if (name === 'margin-box') inward[side] = -edge(side, 'margin', scale);
+      if (name === 'padding-box' || name === 'content-box') inward[side] = edge(side, 'border', scale);
+      if (name === 'content-box') inward[side] += edge(side, 'padding', scale);
+    }
+    return {
+      left: bounds.left + inward.Left,
+      top: bounds.top + inward.Top,
+      right: bounds.right - inward.Right,
+      bottom: bounds.bottom - inward.Bottom,
+    };
+  }
+
+  // clip-path: inset(top right bottom left [round …]) [box], or a box alone:
+  // the element and all it holds are clipped to its reference box less the
+  // insets, a percentage taken of the box's width for left and right and of
+  // its height for top and bottom. Round corners are not read: the clip is the
+  // rect around them. No other shape is read: it clips nothing here.
+  function clipPathOf(s, bounds, frame) {
+    const value = String(s.clipPath || 'none').trim();
+    const inset = CLIP_PATH_INSET.exec(value);
+    const rest = inset ? value.slice(inset[0].length).trim() : value;
+    const named = REFERENCE_BOX.exec(rest);
+    if (!inset && !(named && rest === named[0])) return NO_CLIP;
+    const box = referenceBox(s, bounds, frame, named ? named[1] : 'border-box');
+    const lengths = inset ? inset[1].split(/\s+round\s+/)[0].trim().split(/\s+/) : ['0px'];
+    const top = lengths[0];
+    const right = lengths.length > 1 ? lengths[1] : top;
+    const bottom = lengths.length > 2 ? lengths[2] : top;
+    const left = lengths.length > 3 ? lengths[3] : right;
+    const width = box.right - box.left;
+    const height = box.bottom - box.top;
+    const clip = {
+      left: box.left + lengthAgainst(left, width, frame.scaleX),
+      top: box.top + lengthAgainst(top, height, frame.scaleY),
+      right: box.right - lengthAgainst(right, width, frame.scaleX),
+      bottom: box.bottom - lengthAgainst(bottom, height, frame.scaleY),
+    };
+    return frame.angle && !clipIsEmpty(clip) ? NO_CLIP : clip;
+  }
+
+  // Whether an element is the containing block of the fixed boxes it holds,
+  // as a transform, a filter or containment makes it; else the viewport is.
+  function containsFixed(s) {
+    return s.transform !== 'none' || (Boolean(s.perspective) && s.perspective !== 'none') ||
+      (Boolean(s.rotate) && s.rotate !== 'none') || (Boolean(s.scale) && s.scale !== 'none') ||
+      (Boolean(s.translate) && s.translate !== 'none') ||
+      s.filter !== 'none' || (Boolean(s.backdropFilter) && s.backdropFilter !== 'none') ||
+      /\b(paint|layout|strict|content)\b/.test(s.contain || '') ||
+      /\bsize\b/.test(s.containerType || '') ||
+      /\b(transform|perspective|filter|translate|rotate|scale)\b/.test(s.willChange || '');
+  }
+
+  // ... and of the absolutely positioned ones, as every positioned box is too.
+  function containsAbsolute(s) {
+    return s.position !== 'static' || containsFixed(s);
+  }
+
+  // clipsOf(clips, element, s, frame, overflowToViewport) -> {rect, box, content, children}
+  //   clips     the Clips its parent hands down;
+  //   overflowToViewport  its overflow is the viewport's (html's, or body's when
+  //             html's is visible), where the slide rect already clips;
+  //   rect      its getBoundingClientRect() when a clip of its own needed it, else null;
+  //   box       what clips its own background, border and picture;
+  //   content   what clips its own inline content: its text and inline boxes;
+  //   children  the Clips its child elements inherit.
+  // Its overflow clips what it holds, not its own box; its clip and clip-path clip both.
+  function clipsOf(clips, element, s, frame, overflowToViewport) {
+    const overflows = !overflowToViewport && clipsOverflow(s);
+    const own = hasOwnClip(s);
+    const rect = overflows || own ? element.getBoundingClientRect() : null;
+    const bounds = rect ? boundsOfRect(rect) : null;
+    const tree = own ? intersectClips(clips.tree, intersectClips(clipRectOf(s, bounds, frame), clipPathOf(s, bounds, frame))) : clips.tree;
+    const outer = s.position === 'absolute' ? clips.absolute : s.position === 'fixed' ? clips.fixed : clips.flow;
+    const flow = overflows ? intersectClips(outer, overflowClipOf(s, bounds, frame)) : outer;
+    return {
+      rect,
+      box: intersectClips(outer, tree),
+      content: intersectClips(flow, tree),
+      children: {
+        tree,
+        flow,
+        absolute: containsAbsolute(s) ? flow : clips.absolute,
+        fixed: containsFixed(s) ? flow : clips.fixed,
+      },
+    };
+  }
+
+  // The clip of an inline element's content, given the clip of the text around
+  // it: its own clip-path narrows it. An inline box has no overflow clip, and
+  // clip needs an absolutely positioned box.
+  function inlineClip(clip, element, s, frame) {
+    if (!hasOwnClip(s)) return clip;
+    const bounds = boundsOfRect(element.getBoundingClientRect());
+    return intersectClips(clip, intersectClips(clipRectOf(s, bounds, frame), clipPathOf(s, bounds, frame)));
+  }
+
   // ─── boxes ───────────────────────────────────────────────────────────
   function lengthAgainst(token, basis, scale) {
     if (/%$/.test(token)) return parseFloat(token) / 100 * basis;
@@ -582,13 +823,16 @@ async function snapshotPage(config) {
   }
 
   // A painted box becomes a shape: background colour, uniform border and outer
-  // shadow. The slide root's ground is the slide background (BG_TRANSFER put
-  // it on body), so its fill and shadow are never painted a second time here.
-  function emitBox(s, box, opacity, order, isSlideRoot) {
+  // shadow, cut to its clip. The slide root's ground is the slide background
+  // (BG_TRANSFER put it on body), so its fill and shadow are never painted a
+  // second time here.
+  function emitBox(s, box, opacity, order, isSlideRoot, clip) {
     const fill = isSlideRoot || clipsToText(s) ? null : paintedColour(s.backgroundColor, opacity);
     let line = uniformBorder(s, opacity, box.scale);
     const shadow = isSlideRoot ? null : outerShadow(s.boxShadow, opacity, box);
     if (!fill && !line && !shadow) return;
+    const shown = shownPart(boundsOf(box), clip);
+    if (!shown) return;
     // The outline is stroked on the shape's edge, centred on it; CSS paints the
     // border inside the border box. Inset by half the width so the two coincide.
     let inset = line ? line.widthPx / 2 : 0;
@@ -606,9 +850,7 @@ async function snapshotPage(config) {
       radius = Math.min(corners.radius - inset, Math.min(w, h) / 2);
       if (!(radius > 0)) geometry = 'rect';
     }
-    items.push({
-      kind: 'shape',
-      id: nextItemId++,
+    const shape = {
       order,
       x: box.x + inset,
       y: box.y + inset,
@@ -620,6 +862,284 @@ async function snapshotPage(config) {
       line,
       shadow,
       rotate: box.rotate,
+    };
+    if (!shown.cut) {
+      pushShape(shape);
+    } else if (geometry === 'rect' && !box.rotate && !line) {
+      // A plain rect the clip cuts is the rect it shows (no line, so no inset).
+      pushShape({
+        ...shape,
+        x: shown.left,
+        y: shown.top,
+        w: shown.right - shown.left,
+        h: shown.bottom - shown.top,
+      });
+    } else {
+      pushClippedShape(shape, clip);
+    }
+  }
+
+  function pushShape(shape) {
+    items.push({
+      kind: 'shape',
+      id: nextItemId++,
+      order: shape.order,
+      x: shape.x,
+      y: shape.y,
+      w: shape.w,
+      h: shape.h,
+      geometry: shape.geometry,
+      radius: shape.radius,
+      fill: shape.fill,
+      line: shape.line,
+      shadow: shape.shadow,
+      rotate: shape.rotate,
+    });
+    stats.shapes++;
+  }
+
+  // ─── clipped shapes ──────────────────────────────────────────────────
+  // A shape a clip cuts that is not a plain rect (round corners, an ellipse, a
+  // rotation or an outline) is drawn as the part of it the clip shows: its
+  // outline as a polygon (outlineOf), cut to the clip. The cut polygon is one
+  // closed path holding the fill and the shadow. The line runs only along what
+  // is left of the shape's own outline, never along the cut, as the browser
+  // draws a clipped border: a second path, open where the clip cuts it, with
+  // no fill, painted over the first.
+  // Arcs become polygons that stray from them by at most ARC_TOLERANCE_PX.
+  const ARC_TOLERANCE_PX = 0.05;
+  const ARC_STEP_LIMIT = 64;
+  // A path's box keeps at least this extent, so a straight one still has a frame to scale.
+  const PATH_MIN_EXTENT_PX = 0.01;
+  const SAME_POINT_PX = 1e-6;
+
+  // The segments that stand for a quarter arc of `radius`.
+  function arcSteps(radius) {
+    if (!(radius > ARC_TOLERANCE_PX)) return 1;
+    const step = 2 * Math.acos(1 - ARC_TOLERANCE_PX / radius);
+    return Math.max(2, Math.min(ARC_STEP_LIMIT, Math.ceil(Math.PI / 2 / step)));
+  }
+
+  // A shape's outline as a polygon of slide px, clockwise from its left: each
+  // corner's arc for a roundRect, the ellipse's four quarters, turned about the
+  // centre by its rotation.
+  function outlineOf(shape) {
+    const points = [];
+    const centreX = shape.x + shape.w / 2;
+    const centreY = shape.y + shape.h / 2;
+    // A quarter arc about (x, y) from `start` radians (clockwise, from 3 o'clock).
+    const arc = (x, y, radiusX, radiusY, start) => {
+      const steps = arcSteps(Math.max(radiusX, radiusY));
+      for (let step = 0; step <= steps; step++) {
+        const angle = start + (Math.PI / 2) * (step / steps);
+        points.push({ x: x + radiusX * Math.cos(angle), y: y + radiusY * Math.sin(angle) });
+      }
+    };
+    const right = shape.x + shape.w;
+    const bottom = shape.y + shape.h;
+    if (shape.geometry === 'ellipse') {
+      for (let quarter = 0; quarter < 4; quarter++) {
+        arc(centreX, centreY, shape.w / 2, shape.h / 2, Math.PI * (1 + quarter / 2));
+      }
+    } else if (shape.geometry === 'roundRect') {
+      const radius = Math.min(shape.radius, shape.w / 2, shape.h / 2);
+      arc(shape.x + radius, shape.y + radius, radius, radius, Math.PI);
+      arc(right - radius, shape.y + radius, radius, radius, Math.PI * 1.5);
+      arc(right - radius, bottom - radius, radius, radius, 0);
+      arc(shape.x + radius, bottom - radius, radius, radius, Math.PI * 0.5);
+    } else {
+      points.push({ x: shape.x, y: bottom }, { x: shape.x, y: shape.y }, { x: right, y: shape.y }, { x: right, y: bottom });
+    }
+    const outline = [];
+    const radians = (shape.rotate || 0) * Math.PI / 180;
+    for (let index = 0; index < points.length; index++) {
+      const dx = points[index].x - centreX;
+      const dy = points[index].y - centreY;
+      const point = radians
+        ? { x: centreX + dx * Math.cos(radians) - dy * Math.sin(radians), y: centreY + dx * Math.sin(radians) + dy * Math.cos(radians) }
+        : points[index];
+      const previous = outline.length ? outline[outline.length - 1] : null;
+      if (!previous || Math.abs(previous.x - point.x) > SAME_POINT_PX || Math.abs(previous.y - point.y) > SAME_POINT_PX) {
+        outline.push(point);
+      }
+    }
+    const first = outline[0];
+    const last = outline[outline.length - 1];
+    if (outline.length > 1 && Math.abs(first.x - last.x) <= SAME_POINT_PX && Math.abs(first.y - last.y) <= SAME_POINT_PX) {
+      outline.pop();
+    }
+    return outline;
+  }
+
+  // The four edges of a clip; an edge at infinity cuts nothing.
+  function clipEdges(clip) {
+    return [
+      { axis: 'x', bound: clip.left, keepsBelow: false },
+      { axis: 'x', bound: clip.right, keepsBelow: true },
+      { axis: 'y', bound: clip.top, keepsBelow: false },
+      { axis: 'y', bound: clip.bottom, keepsBelow: true },
+    ];
+  }
+
+  function crossing(from, to, axis, bound) {
+    const fraction = (bound - from[axis]) / (to[axis] - from[axis]);
+    const point = { x: from.x + (to.x - from.x) * fraction, y: from.y + (to.y - from.y) * fraction };
+    point[axis] = bound;
+    return point;
+  }
+
+  // The convex polygon `points` cut to the clip, one clip edge at a time
+  // (Sutherland-Hodgman).
+  function clipPolygon(points, clip) {
+    let polygon = points;
+    const edges = clipEdges(clip);
+    for (let edge = 0; edge < edges.length && polygon.length; edge++) {
+      const axis = edges[edge].axis;
+      const bound = edges[edge].bound;
+      const keepsBelow = edges[edge].keepsBelow;
+      if (!Number.isFinite(bound)) continue;
+      const inside = (point) => (keepsBelow ? point[axis] <= bound : point[axis] >= bound);
+      const kept = [];
+      for (let index = 0; index < polygon.length; index++) {
+        const current = polygon[index];
+        const previous = polygon[(index + polygon.length - 1) % polygon.length];
+        if (inside(current) !== inside(previous)) kept.push(crossing(previous, current, axis, bound));
+        if (inside(current)) kept.push(current);
+      }
+      polygon = kept;
+    }
+    return polygon;
+  }
+
+  // What the clip shows of the segment from -> to (Liang-Barsky):
+  // {from, to, cutsStart, cutsEnd}, or null for none of it.
+  function clipSegment(from, to, clip) {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const sides = [
+      { direction: -dx, room: from.x - clip.left },
+      { direction: dx, room: clip.right - from.x },
+      { direction: -dy, room: from.y - clip.top },
+      { direction: dy, room: clip.bottom - from.y },
+    ];
+    let enter = 0;
+    let leave = 1;
+    for (let index = 0; index < sides.length; index++) {
+      const direction = sides[index].direction;
+      const room = sides[index].room;
+      if (direction === 0) {
+        if (room < 0) return null;
+        continue;
+      }
+      const at = room / direction;
+      if (direction < 0) {
+        if (at > leave) return null;
+        if (at > enter) enter = at;
+      } else {
+        if (at < enter) return null;
+        if (at < leave) leave = at;
+      }
+    }
+    if (!(leave > enter)) return null;
+    const point = (at) => ({ x: from.x + dx * at, y: from.y + dy * at });
+    return { from: enter > 0 ? point(enter) : from, to: leave < 1 ? point(leave) : to, cutsStart: enter > 0, cutsEnd: leave < 1 };
+  }
+
+  // What the clip shows of the closed outline `points`, as polylines in order:
+  // {pieces, closed}. `closed` when it cuts none of it: then the one piece is
+  // the outline itself. Otherwise each piece is open, ending where it is cut.
+  function clipOutline(points, clip) {
+    const pieces = [];
+    let piece = null;
+    let cut = false;
+    let leavesFirstUncut = false;
+    let reachesFirstUncut = false;
+    for (let index = 0; index < points.length; index++) {
+      const segment = clipSegment(points[index], points[(index + 1) % points.length], clip);
+      if (!segment || segment.cutsStart) {
+        piece = null;
+        cut = true;
+      }
+      if (!segment) continue;
+      if (index === 0) leavesFirstUncut = !segment.cutsStart;
+      if (index === points.length - 1) reachesFirstUncut = !segment.cutsEnd;
+      if (!piece) {
+        piece = [segment.from];
+        pieces.push(piece);
+      }
+      piece.push(segment.to);
+      if (segment.cutsEnd) {
+        piece = null;
+        cut = true;
+      }
+    }
+    if (!cut) return { pieces: [points], closed: true };
+    // The outline is closed: the piece that reaches its first point carries on into the one leaving it.
+    if (leavesFirstUncut && reachesFirstUncut && pieces.length > 1) {
+      const first = pieces.shift();
+      const last = pieces[pieces.length - 1];
+      for (let index = 1; index < first.length; index++) last.push(first[index]);
+    }
+    return { pieces, closed: false };
+  }
+
+  function pushClippedShape(shape, clip) {
+    const outline = outlineOf(shape);
+    if (shape.fill || shape.shadow) {
+      const region = clipPolygon(outline, clip);
+      if (region.length >= 3) pushPath(shape.order, [region], true, shape.fill, null, shape.shadow);
+    }
+    if (shape.line) {
+      // Widened by the rounding a clip edge may differ by, so an outline that
+      // only touches the clip is not cut into pieces.
+      const visible = clipOutline(outline, {
+        left: clip.left - CUT_EPSILON_PX,
+        top: clip.top - CUT_EPSILON_PX,
+        right: clip.right + CUT_EPSILON_PX,
+        bottom: clip.bottom + CUT_EPSILON_PX,
+      });
+      if (visible.pieces.length) pushPath(shape.order, visible.pieces, visible.closed, null, shape.line, null);
+    }
+  }
+
+  // A path item over `polylines` (slide px), placed at their bounds.
+  function pushPath(order, polylines, closed, fill, line, shadow) {
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (let index = 0; index < polylines.length; index++) {
+      for (let point = 0; point < polylines[index].length; point++) {
+        left = Math.min(left, polylines[index][point].x);
+        top = Math.min(top, polylines[index][point].y);
+        right = Math.max(right, polylines[index][point].x);
+        bottom = Math.max(bottom, polylines[index][point].y);
+      }
+    }
+    const path = [];
+    for (let index = 0; index < polylines.length; index++) {
+      const relative = [];
+      for (let point = 0; point < polylines[index].length; point++) {
+        relative.push({ x: polylines[index][point].x - left, y: polylines[index][point].y - top });
+      }
+      path.push(relative);
+    }
+    items.push({
+      kind: 'shape',
+      id: nextItemId++,
+      order,
+      x: left,
+      y: top,
+      w: Math.max(right - left, PATH_MIN_EXTENT_PX),
+      h: Math.max(bottom - top, PATH_MIN_EXTENT_PX),
+      geometry: 'path',
+      radius: 0,
+      fill,
+      line,
+      shadow,
+      rotate: null,
+      path,
+      closed,
     });
     stats.shapes++;
   }
@@ -665,11 +1185,13 @@ async function snapshotPage(config) {
     return null;
   }
 
-  function emitReplaced(element, name, s, box, opacity, order) {
+  // A picture its clip hides is not on the slide; one it only cuts is drawn whole.
+  function emitReplaced(element, name, s, box, opacity, order, clip) {
     const area = contentBox(s, box);
     if (!area) return;
     const embedded = name === 'img' ? embeddedImage(element, s, area) : null;
     const placed = embedded ? embedded.area : area;
+    if (!shownPart(boundsOf({ x: placed.x, y: placed.y, w: placed.w, h: placed.h, rotate: box.rotate }), clip)) return;
     items.push({
       kind: 'image',
       id: nextItemId++,
@@ -704,6 +1226,8 @@ async function snapshotPage(config) {
     boxGeometry,
     contentBox,
     paintsBox,
+    inlineClip,
+    shows: (bounds, clip) => shownPart(bounds, clip) !== null,
   });
   // follows element -> its waiting {group, paint} entries, and every entry in the
   // order it was collected (the Map is only ever read by key).
@@ -731,7 +1255,7 @@ async function snapshotPage(config) {
       const decoration = group.decorations[index];
       for (let fragment = 0; fragment < decoration.boxes.length; fragment++) {
         emitBox(decoration.style, decoration.boxes[fragment], decoration.opacity,
-          paint.concat([4, 0, blockSeq, 0, index]), false);
+          paint.concat([4, 0, blockSeq, 0, index]), false, decoration.clip);
       }
     }
     for (let index = 0; index < group.blocks.length; index++) {
@@ -804,37 +1328,59 @@ async function snapshotPage(config) {
     }
   }
 
+  // A subtree that shows nothing still holds text the page reads (its
+  // innerText, which a screen reader and the text-loss oracle read), so it is
+  // the slide's hidden text. An inline box's text belongs to its block's
+  // layout, which records it there.
+  function recordHiddenSubtree(element, name, s) {
+    if (textLayout.isInlineBox(name, s)) return;
+    let text;
+    try {
+      text = String(dom.innerText(element) || '');
+    } catch (e) {
+      // Not an HTML element (an <svg>): its text is drawn in its picture, not set as text.
+      return;
+    }
+    textLayout.recordHiddenText(text);
+  }
+
   function visit(element, state, seq) {
     stats.elements++;
     const name = String(dom.tagName(element) || '').toLowerCase();
     const s = window.getComputedStyle(element);
     if (s.display === 'none') return;
-    // display: contents generates no box: no paint, no opacity, no context of
-    // its own. Its children lay out (and stack) as children of its parent.
+    // display: contents generates no box: no paint, no opacity, no clip, no
+    // context of its own. Its children lay out (and stack) as children of its parent.
     if (s.display === 'contents') {
       pushChildren(element, { ...state, depth: state.depth + 1 });
       return;
     }
     const opacity = state.opacity * opacityOf(s);
-    // Opacity applies to the whole subtree, so nothing beneath can show.
-    if (!(opacity > 0)) return;
+    const frame = frameOf(s, state.frame);
+    const clips = clipsOf(state.clips, element, s, frame, false);
+    // Opacity applies to the whole subtree, and so do clip and clip-path: when
+    // either leaves nothing, nothing beneath can show. An overflow clip does
+    // not prune: a box positioned outside it may hold what escapes it.
+    if (!(opacity > 0) || clipIsEmpty(clips.children.tree)) {
+      recordHiddenSubtree(element, name, s);
+      return;
+    }
     const replaced = REPLACED.has(name);
     const place = placement(s, state.layoutStyle, state.ctx, state.paint, seq, replaced);
-    const frame = frameOf(s, state.frame);
     // An inline box paints one box per line fragment, under its block's text:
     // the text layout collects it with that block (pushGroup), so its bounding
     // rect, which spans every line it is on, is never a box of its own.
     if (s.visibility === 'visible' && !textLayout.isInlineBox(name, s)) {
-      const box = boxGeometry(element, element.getBoundingClientRect(), frame);
+      const box = boxGeometry(element, clips.rect || element.getBoundingClientRect(), frame);
       if (box) {
-        emitBox(s, box, opacity, place.box, element === slideRoot);
-        if (replaced) emitReplaced(element, name, s, box, opacity, place.paint.concat([4, 0, seq, 0]));
+        emitBox(s, box, opacity, place.box, element === slideRoot, clips.box);
+        if (replaced) emitReplaced(element, name, s, box, opacity, place.paint.concat([4, 0, seq, 0]), clips.box);
       }
     }
     if (replaced) return;
     const backdrop = backdropInside(state.backdrop, s);
     const decoration = textLayout.decorationOf(state.decoration, element, s);
-    collectText(element, s, place.paint, seq, { opacity, frame, backdrop, decoration });
+    collectText(element, s, place.paint, seq, { opacity, frame, backdrop, decoration, clip: clips.content });
     pushChildren(element, {
       ctx: place.ctx,
       paint: place.paint,
@@ -843,6 +1389,7 @@ async function snapshotPage(config) {
       frame,
       backdrop,
       decoration,
+      clips: clips.children,
       depth: state.depth + 1,
     });
   }
@@ -859,6 +1406,12 @@ async function snapshotPage(config) {
     ? { color: TRANSPARENT_LAYER.color, alpha: TRANSPARENT_LAYER.alpha, group: { opacity: bodyOpacity, beneath: ground } }
     : ground;
   const bodyDecoration = textLayout.decorationOf(textLayout.decorationOf(null, html, htmlStyle), body, bodyStyle);
+  // The viewport is the slide, and it clips everything, off-slide content
+  // included. html's overflow is the viewport's, and so is body's while html's
+  // is visible (CSS Overflow 3, overflow propagation), so neither clips again.
+  const htmlClips = clipsOf(VIEWPORT_CLIPS, html, htmlStyle, { angle: 0, scaleX: 1, scaleY: 1, scale: 1 }, true);
+  const bodyOverflowToViewport = htmlStyle.overflowX === 'visible' && htmlStyle.overflowY === 'visible';
+  const bodyClips = clipsOf(htmlClips.children, body, bodyStyle, bodyFrame, bodyOverflowToViewport);
   // Body is the walk's root, so its own inline content is collected here, as
   // sequence 0, ahead of every element the walk visits.
   collectText(body, bodyStyle, [], 0, {
@@ -866,6 +1419,7 @@ async function snapshotPage(config) {
     frame: bodyFrame,
     backdrop: bodyBackdrop,
     decoration: bodyDecoration,
+    clip: bodyClips.content,
   });
   pushChildren(body, {
     ctx: { prefix: [] },
@@ -875,6 +1429,7 @@ async function snapshotPage(config) {
     frame: bodyFrame,
     backdrop: bodyBackdrop,
     decoration: bodyDecoration,
+    clips: bodyClips.children,
     depth: 1,
   });
   let seq = 0;
@@ -902,7 +1457,7 @@ async function snapshotPage(config) {
     items,
     captures,
     fonts,
-    reference: { hiddenText: '' },
+    reference: { hiddenText: textLayout.hiddenText() },
     stats,
   };
 }

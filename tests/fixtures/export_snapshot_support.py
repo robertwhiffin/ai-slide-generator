@@ -17,7 +17,9 @@ what the browser itself laid out for the same document.
   the sidecar uses, through ``tests/fixtures/export_snapshot/measure.cjs``
   (Python has no Playwright in this repo, so measurement goes through Node);
   ``browser_client_rects`` reads its box fragments, one per line an inline
-  element spans. ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
+  element spans, and ``browser_padding_box`` the box its overflow clips to.
+  ``browser_hit_id`` says what the browser shows at a point, by hit testing.
+  ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
   lines from the same page, with a ``Range`` per character. ``browser_style``
   reads its computed typography, ``browser_text`` its rendered ``innerText``
   and ``browser_loaded_weights`` the webfont weights the page loaded.
@@ -293,6 +295,39 @@ def browser_client_rects(document_html: str, selector: str, index: int = 0) -> l
     """
     rects = json.loads(_run_measure(document_html, selector, str(index), "--mode=rects"))
     return [{key: float(rect[key]) for key in ("x", "y", "w", "h")} for rect in rects]
+
+
+def browser_padding_box(document_html: str, selector: str, index: int = 0) -> dict:
+    """The padding box of the ``index``-th match of ``selector``, in CSS px.
+
+    ``{"x", "y", "w", "h"}``: the border box (``browser_rect``) less the
+    computed border width on each side. An element whose ``overflow`` is
+    ``hidden``, ``clip``, ``auto`` or ``scroll`` clips what it holds to this
+    box (its overflow clip edge, under the default ``overflow-clip-margin``
+    of 0). Measured on the same settled page as ``browser_rect``; the element
+    must not be transformed.
+    """
+    box = json.loads(_run_measure(document_html, selector, str(index), "--mode=padding-box"))
+    return {key: float(box[key]) for key in ("x", "y", "w", "h")}
+
+
+def browser_hit_id(document_html: str, x: float, y: float) -> str | None:
+    """The id of what the browser shows at ``(x, y)``, by hit testing.
+
+    ``document.elementFromPoint(x, y)`` on the settled page gives the topmost
+    element painted at the point; this returns its id, or the id of its
+    nearest ancestor that has one, and None when neither has. Hit testing
+    honours whatever clips or hides an element (an ``overflow`` ancestor,
+    ``clip``, ``clip-path``, ``visibility: hidden``) but not ``opacity``, so it
+    tells whether the browser shows an element at a point without trusting any
+    reading of the CSS. It tells shown from hidden, not where a clip's edge
+    lies: Chrome hit-tests an ``overflow`` clip at the clipping element's
+    border box, while it paints the clip at the padding box
+    (``browser_padding_box``). The point must lie in the 1280x720 viewport,
+    outside which nothing is hit.
+    """
+    point = json.dumps({"x": x, "y": y})
+    return json.loads(_run_measure(document_html, point, "--mode=hit"))["id"]
 
 
 def browser_line_boxes(document_html: str, selector: str, index: int = 0) -> list[dict]:
