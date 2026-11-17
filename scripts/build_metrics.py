@@ -583,7 +583,15 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
     for entry in entries:
         session = entry["session"]
         t = load_sessions(projects_dir, [session])
-        override = _parse_ts(entry.get("first_task_at"))
+        raw_override = entry.get("first_task_at")
+        override = _parse_ts(raw_override)
+        if raw_override is not None and override is None:
+            # An override exists because the found dispatch is wrong: never fall back to it.
+            print(
+                f"build-metrics: PR {entry['pr']}: first_task_at {raw_override!r} is not ISO-8601",
+                file=sys.stderr,
+            )
+            return 2
         matched = first_task_at(t)
         first = override or (matched.ts if matched else None)
         if first is None:
@@ -671,7 +679,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except subprocess.CalledProcessError as exc:
-        print(exc.stderr or f"build-metrics: {exc}", file=sys.stderr)
+        # Name the call that failed: report and baseline make one per PR and commit.
+        detail = (exc.stderr or "").strip() or f"exit {exc.returncode}"
+        print(f"build-metrics: {' '.join(map(str, exc.cmd))} failed: {detail}", file=sys.stderr)
         return exc.returncode or 1
 
 
