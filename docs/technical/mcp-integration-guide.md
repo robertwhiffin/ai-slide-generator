@@ -164,7 +164,9 @@ def generate_deck(tellr_base: str, prompt_text: str, status) -> dict:
             n += 1
             if payload["result"].get("isError"):
                 raise RuntimeError(payload["result"]["content"][0]["text"])
-            data = json.loads(payload["result"]["content"][0]["text"])
+            content = payload["result"]["content"]
+            data = json.loads(content[0]["text"])
+            data["preview_html"] = content[1]["text"] if len(content) > 1 else None
             status.info(
                 f"status={data['status']} "
                 f"elapsed={int(time.time() - started)}s"
@@ -188,9 +190,12 @@ if generate:
         slot.success(f"Ready — {result['slide_count']} slides, "
                      f"title: {result['title']!r}")
         st.link_button("Open in tellr", result["deck_url"])
-        st.components.v1.html(
-            result["html_document"], height=600, scrolling=True
-        )
+        # The preview page (at most 10 slides) is content[1].text; it is
+        # absent when preview.included is false.
+        if result.get("preview_html"):
+            st.components.v1.html(
+                result["preview_html"], height=600, scrolling=True
+            )
 ```
 
 **`app.yaml`:**
@@ -515,10 +520,10 @@ Genie should call the tellr MCP tools. The first call sends you through OAuth co
 
 | Tool | Purpose | Key inputs | Key outputs |
 |---|---|---|---|
-| `create_deck` | Generate a new deck from a prompt | `prompt`, `design_system_id?`, `template_name?`, `slide_style_id?` | `session_id`, `request_id`, `status: pending` |
-| `get_deck_status` | Poll for completion and retrieve ready deck | `session_id`, `request_id` | `status`, plus (on ready) `deck`, `html_document`, `deck_url`, `deck_view_url`, `reply`, `deck_changed` |
-| `edit_deck` | Ask for a change to an existing deck, or a question about it (owner only; Agent decks only) | `session_id`, `instruction` | `request_id` (poll via `get_deck_status`) |
-| `get_deck` | Re-read current deck state without submitting work | `session_id` | Same shape as `get_deck_status` ready response, minus `status`/`messages` |
+| `create_deck` | Generate a new deck from a prompt | `prompt`, `design_system_id?`, `template_name?`, `slide_style_id?` | `deck_url`, `deck_view_url`, `session_id`, `request_id`, `status: pending` |
+| `get_deck_status` | Poll for completion and retrieve ready deck | `session_id`, `request_id` | `deck_url`, `deck_view_url`, `status`, plus (on ready) `title`, `slide_count`, `preview`, `reply`, `deck_changed`; a second content item holds the preview HTML (at most 10 slides) |
+| `edit_deck` | Ask for a change to an existing deck, or a question about it (owner only; Agent decks only) | `session_id`, `instruction` | `deck_url`, `deck_view_url`, `request_id` (poll via `get_deck_status`) |
+| `get_deck` | Re-read current deck state without submitting work | `session_id` | `deck_url`, `deck_view_url`, `title`, `slide_count`, `preview`; a second content item holds the preview HTML |
 
 Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 

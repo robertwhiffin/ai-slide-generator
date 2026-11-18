@@ -53,6 +53,27 @@ from src.api.routes.chat import EnteredTurn
 # case explicitly.
 MCP_PATH = "/mcp/"
 
+#: The public app URL the tool-call tests patch in, so the links are exact.
+_BASE = "https://t.example"
+#: Item 1's key orders (a contract: a truncating client meets the links first).
+_SUBMIT_KEYS = ["deck_url", "deck_view_url", "session_id", "request_id", "status"]
+_GET_DECK_KEYS = ["deck_url", "deck_view_url", "session_id", "title", "slide_count", "preview"]
+_READY_KEYS = [
+    "deck_url",
+    "deck_view_url",
+    "session_id",
+    "request_id",
+    "status",
+    "title",
+    "slide_count",
+    "preview",
+    "reply",
+    "deck_changed",
+    "replacement_info",
+    "metadata",
+]
+_STRIP_COPY = "preview — open the full deck in tellr"
+
 
 def _jsonrpc(method: str, params: dict | None = None, rid: int = 1) -> dict:
     """Build a minimal JSON-RPC 2.0 request body for the MCP transport."""
@@ -336,6 +357,7 @@ def test_create_deck_returns_pending(client, mock_identity_client):
     # ``mcp_server`` by name, so it is patched there as an AsyncMock that
     # returns the ``EnteredTurn`` Enter would.
     with patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server._public_app_url", return_value=_BASE), \
          patch(
              "src.api.mcp_server.enter_chat_turn",
              new_callable=AsyncMock,
@@ -360,10 +382,17 @@ def test_create_deck_returns_pending(client, mock_identity_client):
     assert resp.status_code == 200, resp.text
     body = _decode_mcp_response(resp)
     assert not _is_tool_error(body), f"tool reported error: {body!r}"
+    assert "structuredContent" not in body["result"]
     parsed = _parse_tool_result(body)
-    assert parsed["session_id"] == "sess-int-1"
-    assert parsed["request_id"] == "req-int-1"
-    assert parsed["status"] == "pending"
+    # The links come first on the wire, at once.
+    assert list(parsed) == _SUBMIT_KEYS
+    assert parsed == {
+        "deck_url": "https://t.example/sessions/sess-int-1/edit",
+        "deck_view_url": "https://t.example/sessions/sess-int-1/view",
+        "session_id": "sess-int-1",
+        "request_id": "req-int-1",
+        "status": "pending",
+    }
 
 
 def test_create_deck_ignores_a_removed_num_slides_argument(client, mock_identity_client):
@@ -386,6 +415,7 @@ def test_create_deck_ignores_a_removed_num_slides_argument(client, mock_identity
         return {"session_id": "sess-int-2"}
 
     with patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server._public_app_url", return_value=_BASE), \
          patch("src.api.mcp_server.get_default_design_system_id", return_value=None), \
          patch("src.api.mcp_server.get_default_slide_style_id", return_value=None), \
          patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
@@ -417,7 +447,10 @@ def test_create_deck_ignores_a_removed_num_slides_argument(client, mock_identity
     assert resp.status_code == 200, resp.text
     body = _decode_mcp_response(resp)
     assert not _is_tool_error(body), f"tool reported error: {body!r}"
+    assert list(_parse_tool_result(body)) == _SUBMIT_KEYS
     assert _parse_tool_result(body) == {
+        "deck_url": "https://t.example/sessions/sess-int-2/edit",
+        "deck_view_url": "https://t.example/sessions/sess-int-2/view",
         "session_id": "sess-int-2",
         "request_id": "req-int-2",
         "status": "pending",
@@ -465,6 +498,8 @@ def test_edit_deck_ignores_a_removed_slide_indices_argument(client, mock_identit
     with patch(
         "src.api.mcp_server.permission_service.can_edit_deck", return_value=True
     ), patch("src.api.mcp_server.get_session_manager", return_value=sm), patch(
+        "src.api.mcp_server._public_app_url", return_value=_BASE
+    ), patch(
         "src.api.mcp_server.resolve_engine_mode_or_unavailable", return_value="graph"
     ), patch(
         "src.api.mcp_server.enter_chat_turn",
@@ -490,7 +525,10 @@ def test_edit_deck_ignores_a_removed_slide_indices_argument(client, mock_identit
     assert resp.status_code == 200, resp.text
     body = _decode_mcp_response(resp)
     assert not _is_tool_error(body), f"tool reported error: {body!r}"
+    assert list(_parse_tool_result(body)) == _SUBMIT_KEYS
     assert _parse_tool_result(body) == {
+        "deck_url": "https://t.example/sessions/sess-int-3/edit",
+        "deck_view_url": "https://t.example/sessions/sess-int-3/view",
         "session_id": "sess-int-3",
         "request_id": "req-int-3",
         "status": "pending",
@@ -611,6 +649,154 @@ def test_permission_denied_on_other_users_deck(client, mock_identity_client):
     assert (
         "permission" in lowered or "not found" in lowered
     ), f"denial error didn't mention permission/not-found: {text!r}"
+
+
+_WIRE_DECK = {
+    "title": "Wire Deck",
+    "slides": [
+        {"html": '<div class="slide"><h1>MK-WIRE-ONE</h1></div>', "scripts": ""},
+        {"html": '<div class="slide"><h1>MK-WIRE-TWO</h1></div>', "scripts": ""},
+    ],
+    "css": ".slide{color:#1B3139}",
+    "external_scripts": [],
+    "head_meta": {},
+}
+#: A session title with non-ASCII, which item 1 carries raw (``ensure_ascii=False``).
+_WIRE_TITLE = "Wire Deck — Q3 € résumé"
+
+
+def _assert_links_json_then_preview(body, *, keys, session_id):
+    """The serialized ``tools/call`` result: no ``structuredContent``, two text items,
+    item 1 the payload as indented JSON with the links first, item 2 the raw preview."""
+    assert not _is_tool_error(body), f"tool reported error: {body!r}"
+    result = body["result"]
+    # Spec hazard: no structured copy of the payload (or of the preview).
+    assert "structuredContent" not in result, sorted(result)
+    content = result["content"]
+    assert [item["type"] for item in content] == ["text", "text"], content
+
+    item1_text = content[0]["text"]
+    item1 = json.loads(item1_text)
+    assert next(iter(item1)) == "deck_url"
+    assert list(item1) == keys
+    assert item1["deck_url"] == f"https://t.example/sessions/{session_id}/edit"
+    assert item1["deck_view_url"] == f"https://t.example/sessions/{session_id}/view"
+    # Item 1 is exactly the indented, non-ASCII-raw JSON of the payload.
+    assert item1_text == json.dumps(item1, ensure_ascii=False, indent=2)
+    assert _WIRE_TITLE in item1_text
+    assert "html_document" not in item1 and "deck" not in item1
+
+    page = content[1]["text"]
+    assert page.startswith("<!doctype html>")
+    assert _STRIP_COPY in page
+    assert "<h1>MK-WIRE-ONE</h1>" in page and "<h1>MK-WIRE-TWO</h1>" in page
+    # The preview travels once, as item 2, and is not inside item 1.
+    assert _STRIP_COPY not in item1_text
+    assert "MK-WIRE-ONE" not in item1_text
+    return item1, page
+
+
+def test_get_deck_returns_links_json_then_preview_html(client, mock_identity_client):
+    """``get_deck`` over the real JSON-RPC path: two text content items, links-first
+    JSON then the preview HTML, and no ``structuredContent``.
+
+    The permission facade and the tool's session manager are patched (as in
+    ``test_permission_denied_on_other_users_deck``); the design-system lookup reads
+    the real session manager, misses, and resolves to no scope (C30)."""
+    session_id = _initialize_session(client)
+
+    sm = MagicMock()
+    sm.get_session.return_value = {"session_id": "sess-wire-1", "title": _WIRE_TITLE}
+    sm.get_slide_deck.return_value = copy.deepcopy(_WIRE_DECK)
+
+    with patch(
+        "src.api.mcp_server.permission_service.can_view_deck", return_value=True
+    ), patch("src.api.mcp_server.get_session_manager", return_value=sm), patch(
+        "src.api.mcp_server._public_app_url", return_value=_BASE
+    ):
+        resp = client.post(
+            MCP_PATH,
+            headers=_mcp_headers(session_id=session_id),
+            json=_jsonrpc(
+                "tools/call",
+                {"name": "get_deck", "arguments": {"session_id": "sess-wire-1"}},
+            ),
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = _decode_mcp_response(resp)
+    item1, _page = _assert_links_json_then_preview(
+        body, keys=_GET_DECK_KEYS, session_id="sess-wire-1"
+    )
+    assert item1["session_id"] == "sess-wire-1"
+    assert item1["title"] == _WIRE_TITLE
+    assert item1["slide_count"] == 2
+    assert item1["preview"]["included"] is True
+    assert item1["preview"]["slides_shown"] == 2
+
+
+def test_ready_get_deck_status_returns_links_json_then_preview_html(
+    client, mock_identity_client
+):
+    """A ready ``get_deck_status`` over the real JSON-RPC path has the same wire shape
+    as ``get_deck``: links-first JSON (ready key order) then the preview, and no
+    ``structuredContent``."""
+    session_id = _initialize_session(client)
+
+    sm = MagicMock()
+    sm.get_chat_request.return_value = {
+        "request_id": "req-wire-1",
+        "session_id": 42,
+        "status": "completed",
+        "error_message": None,
+        "result": {
+            "replacement_info": None,
+            "experiment_url": None,
+            "metadata": {"engine_mode": "graph", "architect_intent": "build"},
+            "session_title": _WIRE_TITLE,
+        },
+    }
+    sm.get_session_id_for_request.return_value = "sess-wire-2"
+    sm.get_session.return_value = {"session_id": "sess-wire-2", "title": _WIRE_TITLE}
+    sm.get_slide_deck.return_value = copy.deepcopy(_WIRE_DECK)
+    sm.get_messages_for_request.return_value = [
+        {
+            "id": 1,
+            "role": "assistant",
+            "content": "Built two slides.",
+            "message_type": "llm_response",
+            "created_at": "2026-11-18T09:00:01",
+            "metadata": None,
+        }
+    ]
+
+    with patch(
+        "src.api.mcp_server.permission_service.can_view_deck", return_value=True
+    ), patch("src.api.mcp_server.get_session_manager", return_value=sm), patch(
+        "src.api.mcp_server.get_job_status", return_value=None
+    ), patch("src.api.mcp_server._public_app_url", return_value=_BASE):
+        resp = client.post(
+            MCP_PATH,
+            headers=_mcp_headers(session_id=session_id),
+            json=_jsonrpc(
+                "tools/call",
+                {
+                    "name": "get_deck_status",
+                    "arguments": {"session_id": "sess-wire-2", "request_id": "req-wire-1"},
+                },
+            ),
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = _decode_mcp_response(resp)
+    item1, _page = _assert_links_json_then_preview(
+        body, keys=_READY_KEYS, session_id="sess-wire-2"
+    )
+    assert item1["status"] == "ready"
+    assert item1["reply"] == "Built two slides."
+    assert item1["deck_changed"] is True
+    assert item1["slide_count"] == 2
+    assert "messages" not in item1
 
 
 def test_mcp_endpoint_accepts_both_slash_forms(client, mock_identity_client):

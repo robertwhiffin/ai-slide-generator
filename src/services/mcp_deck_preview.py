@@ -1,4 +1,4 @@
-"""Build the HTML preview the MCP deck tools return alongside the structured deck.
+"""Build the HTML preview the MCP deck tools return as the second part of their result.
 
 The preview shows at most ``MAX_PREVIEW_SLIDES`` whole slides, with standard fonts (embedded
 faces become Google Fonts imports) and no images other than small scoped SVGs, inside a UTF-8

@@ -31,7 +31,7 @@ also seeds an active Graph Release).  Only three seams are patched:
 * ``src.api.routes.chat.enqueue_job`` records ``(request_id, payload)``, or
   records and then raises;
 * ``src.api.mcp_server._public_app_url`` returns ``""`` where error copy with a
-  ``deck_url`` is asserted (C12).
+  ``deck_url``, or the relative links a create/edit returns, is asserted (C12).
 
 Every assertion reads the database (every row of every table, before and after)
 or the real readers (``has_generation_snapshot``, ``live_generation_holder``,
@@ -79,6 +79,9 @@ CORRELATION_ID = "mk-corr-7f3a"
 #: (user_sessions), the request, the user message and the snapshot.  Every other
 #: table must be byte-identical across a create or an edit.
 _ENTER_TABLES = ("user_sessions", "chat_requests", "session_messages", "generation_snapshots")
+
+#: create_deck / edit_deck's reply, in order: the deck's links first.
+_SUBMIT_KEYS = ["deck_url", "deck_view_url", "session_id", "request_id", "status"]
 
 
 # ---------------------------------------------------------------------------
@@ -180,15 +183,19 @@ def _graph_payload(session_id: str, message: str) -> Dict[str, Any]:
 def test_create_deck_leaves_an_agent_deck_with_a_live_snapshotted_request(pg_env, monkeypatch):
     env = pg_env
     enqueue = _patch_enqueue(monkeypatch)
+    monkeypatch.setattr("src.api.mcp_server._public_app_url", lambda: "")
     before = env.tables()
 
     result = asyncio.run(
         _create_deck_impl(request=None, prompt=PROMPT, correlation_id=CORRELATION_ID)
     )
 
-    assert set(result) == {"session_id", "request_id", "status"}, result
+    # The new deck's links come first (relative: no public app URL).
+    assert list(result) == _SUBMIT_KEYS, result
     sid, rid = result["session_id"], result["request_id"]
     assert result["status"] == "pending"
+    assert result["deck_url"] == f"/sessions/{sid}/edit"
+    assert result["deck_view_url"] == f"/sessions/{sid}/view"
     after = env.tables()
     pk = env.pk(sid)
 
@@ -330,6 +337,7 @@ def test_edit_deck_on_a_legacy_deck_writes_nothing(pg_env, monkeypatch):
 def test_edit_deck_on_an_app_made_agent_deck_enters(pg_env, monkeypatch):
     env = pg_env
     enqueue = _patch_enqueue(monkeypatch)
+    monkeypatch.setattr("src.api.mcp_server._public_app_url", lambda: "")
     # The deck the app's New Deck makes: the route's own session creation, as its
     # creator, before any message (graph_capable=True, deck_mode not chosen).
     set_current_user(OWNER)
@@ -360,7 +368,14 @@ def test_edit_deck_on_an_app_made_agent_deck_enters(pg_env, monkeypatch):
 
     assert len(enqueue.calls) == 1
     rid = enqueue.calls[0][0]
-    assert result == {"session_id": sid, "request_id": rid, "status": "pending"}
+    assert list(result) == _SUBMIT_KEYS, result
+    assert result == {
+        "deck_url": f"/sessions/{sid}/edit",
+        "deck_view_url": f"/sessions/{sid}/view",
+        "session_id": sid,
+        "request_id": rid,
+        "status": "pending",
+    }
     after = env.tables()
 
     # The deck is now locked to Agent, its pin unchanged.
