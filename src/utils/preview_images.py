@@ -14,6 +14,13 @@ The preview carries no image bytes and no base64. :func:`hide_images_in_html` an
 
 Only the edited values change; everything else comes back byte-for-byte, so the text is
 never parsed and re-serialised.
+
+Every pattern here runs in linear time on unclosed or malformed input: each repeated part
+stops at the first character it cannot contain (a ``url(`` body at a quote or paren, a tag
+body at a ``<`` outside quotes), and no two adjacent parts can both match the same run, so
+a failed match never rescans what follows it. Slide html is untrusted: anyone who can edit
+a deck could otherwise stall the event loop with a few kilobytes of unclosed markup. These
+patterns stay within Python 3.10's ``re`` (no possessive quantifiers or atomic groups).
 """
 
 from __future__ import annotations
@@ -33,9 +40,24 @@ SVG_INLINE_MAX_BYTES = 10_240
 
 _SVG_URI_PREFIX = "data:image/svg+xml,"
 _SVG_SAFE_CHARS = " =:/;,.-_()!*~"
-_XML_PROLOG = re.compile(r"<\?xml.*?\?>", re.DOTALL)
-_XML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+# An XML declaration holds no ``<`` or ``>``, so the match stops at the next tag.
+_XML_PROLOG = re.compile(r"<\?xml[^<>]*\?>")
 _BETWEEN_TAGS = re.compile(r">\s+<")
+
+
+def _strip_xml_comments(text: str) -> str:
+    """Remove every closed ``<!-- … -->``; an unclosed one and what follows stay as written."""
+    out: list[str] = []
+    pos = 0
+    while True:
+        start = text.find("<!--", pos)
+        end = -1 if start < 0 else text.find("-->", start + 4)
+        if end < 0:
+            break
+        out.append(text[pos:start])
+        pos = end + 3
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def svg_data_uri(svg_text: str) -> str:
@@ -45,7 +67,7 @@ def svg_data_uri(svg_text: str) -> str:
     single space. ``# % " ' < >`` and ``&`` are always encoded, so the value is safe inside
     an HTML attribute, a CSS string or a ``url()`` in either quote style.
     """
-    text = _XML_COMMENT.sub("", _XML_PROLOG.sub("", svg_text))
+    text = _strip_xml_comments(_XML_PROLOG.sub("", svg_text))
     text = _BETWEEN_TAGS.sub("> <", text).strip()
     return _SVG_URI_PREFIX + quote(text, safe=_SVG_SAFE_CHARS)
 
@@ -115,13 +137,37 @@ def _resolve_source(value: str, svg_assets: Mapping[int, str]) -> object:
 # CSS ``url()`` pass and the final sweep
 # ---------------------------------------------------------------------------
 
-_CSS_URL = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE)
+# ``url(`` then a double-quoted string, a single-quoted string (backslash escapes kept), or
+# an unquoted body. The unquoted body starts at a non-space and runs to the ``)`` across
+# whitespace, so a line-wrapped base64 payload is one value and goes whole; it stops at a
+# quote or a paren, which an unquoted url cannot hold.
+_CSS_URL = re.compile(
+    r"url\(\s*(?:"
+    r"\"((?:[^\"\\]|\\[\s\S])*)\"\s*\)"
+    r"|'((?:[^'\\]|\\[\s\S])*)'\s*\)"
+    r"|([^\s\"'()][^\"'()]*)?\))",
+    re.IGNORECASE,
+)
+# Parameters hold no ``:`` (a MIME parameter value is a token), so a run of parameters
+# cannot reach into the next ``data:``. A payload wrapped over lines continues after each
+# line break.
+_B64_CHARS = r"[A-Za-z0-9+/=_%-]"
 _LEFTOVER = re.compile(
     r"\{\{image:[A-Za-z0-9_-]+\}\}"
     r"|\{\{ds-asset:\d+\}\}"
-    r"|data:[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+(?:;[^;,\s\"'()]*)*;base64,[A-Za-z0-9+/=_%-]*",
+    r"|data:[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+(?:;[^;,:\s\"'()]*)*;base64,"
+    rf"{_B64_CHARS}*(?:[ \t]*\r?\n\s*{_B64_CHARS}+)*",
     re.IGNORECASE,
 )
+
+
+def _url_quote_and_value(match: re.Match) -> tuple[str, str]:
+    """The quote character (``""`` when unquoted) and the value of a ``_CSS_URL`` match."""
+    if match.group(1) is not None:
+        return '"', match.group(1)
+    if match.group(2) is not None:
+        return "'", match.group(2)
+    return "", match.group(3) or ""
 
 
 def _css_urls(css: str, svg_assets: Mapping[int, str], *, reuse_quote: bool) -> tuple[str, int]:
@@ -134,13 +180,14 @@ def _css_urls(css: str, svg_assets: Mapping[int, str], *, reuse_quote: bool) -> 
 
     def replace(match: re.Match) -> str:
         nonlocal hidden
-        result = _resolve_source(match.group(2), svg_assets)
+        original_quote, value = _url_quote_and_value(match)
+        result = _resolve_source(value, svg_assets)
         if result is None:
             return match.group(0)
         if result is _HIDE:
             hidden += 1
             return "none"
-        quote_char = (match.group(1) or "'") if reuse_quote else '"'
+        quote_char = (original_quote or "'") if reuse_quote else '"'
         return f"url({quote_char}{result}{quote_char})"
 
     return _CSS_URL.sub(replace, css), hidden
@@ -192,7 +239,11 @@ def hide_images_in_css(css: str, svg_assets: Mapping[int, str]) -> tuple[str, in
 # HTML pass
 # ---------------------------------------------------------------------------
 
-_IMG_OR_SOURCE_TAG = re.compile(r"<(img|source)\b((?:\"[^\"]*\"|'[^']*'|[^'\">])*)>", re.IGNORECASE)
+# Quote-aware; an unquoted ``<`` ends the attempt, so an unclosed tag is never scanned past
+# the next tag.
+_IMG_OR_SOURCE_TAG = re.compile(
+    r"<(img|source)\b((?:\"[^\"]*\"|'[^']*'|[^'\"<>])*)>", re.IGNORECASE
+)
 # An unquoted value stops before a ``/`` that ends the tag (``<img src={{image:b}}/>``).
 _ATTRIBUTE = re.compile(r"([^\s\"'>/=]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|(?:[^\s\"'>/]|/(?!\Z))+))?")
 _ALT_ATTR = f' alt="{IMAGE_NOTICE}"'

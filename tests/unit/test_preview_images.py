@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import re
+import time
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from urllib.parse import quote, unquote
@@ -1013,3 +1014,91 @@ def test_get_small_svg_assets_returns_empty_without_a_query(unseeded_session):
             == {}
         )
     assert log.statements == []
+
+
+# ---------------------------------------------------------------------------
+# Final review: linear time on unclosed markup (I1), line-wrapped base64 (M4)
+# ---------------------------------------------------------------------------
+
+_HUGE = 100_000
+
+
+def _repeated(atom: str) -> str:
+    """About ``_HUGE`` characters of ``atom``, never closed."""
+    return atom * (_HUGE // len(atom))
+
+
+@pytest.mark.parametrize(
+    ("kind", "text"),
+    [
+        pytest.param("css", _repeated("url("), id="css-unclosed-url"),
+        pytest.param("css", "url(" + " " * _HUGE + "x", id="css-url-then-whitespace"),
+        pytest.param("css", 'url("a"' + " " * _HUGE, id="css-quoted-url-then-whitespace"),
+        pytest.param("css", _repeated("data:a/b;x"), id="css-data-uri-parameter-chain"),
+        pytest.param("html", _repeated('<img src="x" '), id="html-unclosed-img"),
+        pytest.param(
+            "html", _repeated('<div style="background:url('), id="html-unclosed-style-url"
+        ),
+        pytest.param("html", _repeated("<source srcset='x' "), id="html-unclosed-source"),
+        pytest.param("html", _repeated("<img a=\"<img b='"), id="html-img-quotes-across-tags"),
+        pytest.param("html", _repeated('url("'), id="html-unclosed-quoted-url"),
+        pytest.param("html", _repeated("data:a/b;x"), id="html-data-uri-parameter-chain"),
+    ],
+)
+def test_unclosed_markup_costs_milliseconds_and_comes_back_unchanged(kind, text):
+    """Anyone who can edit a deck can plant these; every get_deck of it runs them inline
+    on the event loop. The old patterns took seconds (one of them minutes) on 100 KB."""
+    hide = hide_images_in_css if kind == "css" else hide_images_in_html
+
+    started = time.perf_counter()
+    out, hidden = hide(text, {})
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0, f"{elapsed:.2f} s"
+    assert (out, hidden) == (text, 0)
+
+
+@pytest.mark.parametrize(
+    "svg",
+    [
+        pytest.param("<svg>" + _repeated("<!--") + "</svg>", id="unclosed-comments"),
+        pytest.param("<svg>" + _repeated("<?xml") + "</svg>", id="unclosed-prologs"),
+    ],
+)
+def test_svg_data_uri_is_linear_on_unclosed_comments_and_prologs(svg):
+    started = time.perf_counter()
+    uri = svg_data_uri(svg)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0, f"{elapsed:.2f} s"
+    # nothing was closed, so nothing was removed
+    assert unquote(uri[len(TEXT_SVG_PREFIX) :]) == svg
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "url(data:image/png;base64,AAAA\nBBBB)",
+        "url( data:image/png;base64,AAAA\r\n  BBBB\r\n  CC== )",
+        'url("data:image/png;base64,AAAA\nBBBB")',
+        "url('data:image/png;base64,AAAA\n BBBB')",
+    ],
+)
+def test_a_url_with_a_line_wrapped_base64_payload_goes_whole(url):
+    """M4: the whole ``url(...)`` becomes ``none``; no tail of the payload is left."""
+    out, hidden = hide_images_in_css(f".a{{background:#fff {url} no-repeat}}", {})
+    assert (out, hidden) == (".a{background:#fff none no-repeat}", 1)
+
+    out, hidden = hide_images_in_html(f'<div style="background:{url}">x</div>', {})
+    assert (out, hidden) == ('<div style="background:none">x</div>', 1)
+
+
+def test_the_sweep_hides_a_line_wrapped_base64_payload_whole():
+    """M4 in the final sweep: a wrapped payload outside ``url()`` goes with its URI."""
+    payload = "data:image/png;base64,AAAA\nBBBB\r\n  CC=="
+
+    out, hidden = hide_images_in_html(f'<svg><image href="{payload}"/></svg>', {})
+    assert (out, hidden) == ('<svg><image href="' + NOTICE_IMG_SRC + '"/></svg>', 1)
+
+    out, hidden = hide_images_in_css(f'.b{{--i:"{payload}"}}', {})
+    assert (out, hidden) == ('.b{--i:"none"}', 1)

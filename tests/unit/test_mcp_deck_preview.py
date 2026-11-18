@@ -35,7 +35,9 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import unquote
 
 import pytest
@@ -621,6 +623,57 @@ def test_missing_css_none_html_and_missing_scripts_do_not_raise():
     assert "A-TEXT" in _html(preview)
     assert preview.slides_shown == 1
     assert mcp_deck_preview.ds_asset_ids_in(none_css) == set()
+
+
+_HUGE = 100_000
+
+
+def _repeated(atom: str) -> str:
+    """About ``_HUGE`` characters of ``atom``, never closed."""
+    return atom * (_HUGE // len(atom))
+
+
+@pytest.mark.parametrize(
+    "deck",
+    [
+        pytest.param(_deck([_slide(0)], css=_repeated("url(")), id="css-unclosed-url"),
+        pytest.param(_deck([_slide(0, _repeated('<img src="x" '))]), id="slide-unclosed-img"),
+        pytest.param(
+            _deck([_slide(0, _repeated('<div style="background:url('))]),
+            id="slide-unclosed-style-url",
+        ),
+    ],
+)
+def test_unclosed_markup_does_not_stall_the_preview(deck):
+    """Final review I1: the preview is built inline on the event loop, so ~100 KB of
+    unclosed atoms must cost milliseconds, not the seconds the old patterns took."""
+    started = time.perf_counter()
+    preview = _build(deck, max_html_bytes=UNLIMITED)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, f"{elapsed:.2f} s"
+    assert preview.slides_shown == 1
+    assert _token(0) in _html(preview)
+
+
+def test_only_the_slides_that_can_be_shown_go_through_the_image_pass():
+    """Images on slides past the cap are never counted (S1), so they are not processed
+    either: the image pass sees the first ``min(total, max_slides)`` slides only."""
+    seen: list[str] = []
+    real = mcp_deck_preview.hide_images_in_html
+
+    def recording(html, svg_assets):
+        seen.append(html)
+        return real(html, svg_assets)
+
+    deck = _tiny_deck(14)
+    with patch.object(mcp_deck_preview, "hide_images_in_html", side_effect=recording):
+        preview = _build(deck)
+        assert preview.slides_shown == 10
+        assert seen == [s["html"] for s in deck["slides"][:10]]
+
+        seen.clear()
+        assert _build(deck, max_slides=3).slides_shown == 3
+        assert seen == [s["html"] for s in deck["slides"][:3]]
 
 
 def test_ds_asset_ids_skip_font_faces():

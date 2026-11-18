@@ -94,14 +94,17 @@ def build_deck_preview(
     imports = google_fonts_imports(faces)
     css, css_hidden = hide_images_in_css(css, svg_assets)
 
+    # Only the slides that can be shown are prepared: the rest are never on the page and
+    # their images are not counted.
+    limit = max(0, min(total, max_slides))
     prepared: list[dict] = []
     slide_hidden: list[int] = []
-    for slide in slides:
+    for slide in slides[:limit]:
         slide_html, hidden = hide_images_in_html(slide.get("html") or "", svg_assets)
         prepared.append({**slide, "html": slide_html, "scripts": slide.get("scripts") or ""})
         slide_hidden.append(hidden)
 
-    for k in range(min(total, max_slides), 0, -1):
+    for k in range(limit, 0, -1):
         shown = prepared[:k]
         used = "\n".join(s["html"] + "\n" + s["scripts"] for s in shown)
         trimmed = trim_css(css, used)
