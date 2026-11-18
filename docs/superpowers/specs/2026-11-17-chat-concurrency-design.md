@@ -309,3 +309,34 @@ new values are code defaults.
 
   The fault-kind column (section 5) answers it after release, and the devloop load test
   shows how retries behave under a burst.
+
+- **Devloop load test (2026-11-18): results, and the cap.** The test ran 8 runs on
+  `db-tellr-dev-chat-conc` (tellr-dev, MEDIUM), builds `0.5.8.dev2`–`dev4`. Each burst
+  POSTed within about 1 s. Full results are in `~/tellr-loop/chat-concurrency/results.md`.
+  - **Passes in every run.**
+    - Every turn started within 0.8 s of its POST.
+    - Nothing hung.
+    - Peak Postgres connections for the app role were 44, against 400.
+    - The longest turn took 870 s. No turn reached the hard timeout.
+    - Every failure carried `model_fault_kind`.
+    - No `wait_s` fell below 1 s, and the OpenAI SDK logged no retries.
+    - A stop 1.4 s into a 7.8 s backoff freed the runner within about 1 s.
+  - **Scenario (b) and the one-process runs pass in full.**
+    - (b), 4 new decks and 4 edits on 4 processes: 0 failures, and 56 × 429, all retried.
+    - (c), one process: 0 failures and 0 × 429 for 8 new decks (max 518 s), and for
+      4 × 16-slide decks plus 4 heavy edits (max 870 s, 72 % of the clock).
+  - **The 8-new-deck burst on 4 processes fails the "at most 1 failure" bar at every cap.**
+    - Cap 15 gave 4 of 7 failures (290 × 429), cap 10 gave 5 of 8 (368), and cap 6 gave
+      3 of 8 (274).
+    - Every failure was a builder `model_call_gave_up … fault=rate_limited` at the 150 s
+      budget.
+    - Successes were flat at about 210 per burst. The limit is tellr-dev's shared model
+      throughput. The cap bounds attempts in flight, not callers in backoff, so lowering
+      it barely changed the outcome.
+  - **The tuning rule moved the default to 6 (commits 256f5a7e, d30dc8e4).** This
+    contradicts the Verification section's own reasoning, that the cap should default to
+    today's ceiling "rather than a number tuned on tellr-dev".
+    - At cap 6, a lone 16-slide deck took 287 s, against 190 s at 15 (one sample each).
+    - On one process, cap 6 is what pushes 8 long turns to 870 s.
+  - **Open for the owner:** keep 6, or go back to 15 and handle burst give-ups another
+    way: a longer per-call budget, a cap that adapts to 429s, or more workspace capacity.
