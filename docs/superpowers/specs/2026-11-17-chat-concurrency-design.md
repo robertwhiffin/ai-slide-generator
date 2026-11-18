@@ -333,10 +333,16 @@ new values are code defaults.
     - Successes were flat at about 210 per burst. The limit is tellr-dev's shared model
       throughput. The cap bounds attempts in flight, not callers in backoff, so lowering
       it barely changed the outcome.
-  - **The tuning rule moved the default to 6 (commits 256f5a7e, d30dc8e4).** This
-    contradicts the Verification section's own reasoning, that the cap should default to
-    today's ceiling "rather than a number tuned on tellr-dev".
+  - **The tuning rule moved the default to 6 (commits 256f5a7e, d30dc8e4); both are
+    reverted.** Moving it contradicted the Verification section's own reasoning, that the
+    cap should default to today's ceiling "rather than a number tuned on tellr-dev".
     - At cap 6, a lone 16-slide deck took 287 s, against 190 s at 15 (one sample each).
     - On one process, cap 6 is what pushes 8 long turns to 870 s.
-  - **Open for the owner:** keep 6, or go back to 15 and handle burst give-ups another
-    way: a longer per-call budget, a cap that adapts to 429s, or more workspace capacity.
+  - **Decision (owner, 2026-11-18): the cap stays at 15 (decided).** The burst limit is
+    the workspace's model throughput, which Tellr can't easily influence. So an 8-new-deck
+    burst failing on a busy workspace is accepted as a known limit rather than tuned
+    around. The app log records only the 429 status, not which limit it hit, so whether
+    that throughput is counted in tokens or requests is unknown. After release,
+    `model_fault_kind` measures how often rate limits actually end turns on logfood.
+    Possible follow-ups, if that number warrants one: a longer per-call retry budget, or a
+    cap that adapts to 429s.
