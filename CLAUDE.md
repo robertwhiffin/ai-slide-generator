@@ -16,6 +16,15 @@ specifies the format and the model-tiering pipeline, and the pre-pass refuses to
 untagged task. Set the tiers when authoring the plan — they are a review point with the
 author, not a dispatch-time afterthought.
 
+A plan also carries an `Execution: chained` or `Execution: single-session` line. A missing
+line means the skill's default (its "Choosing the mode" line). In chained mode (§10) a thin
+top-level session dispatches a pre-pass, one supervisor per task and a final agent that
+opens the PR, and the state lives in a ledger under `~/tellr-loop/<build>/`. To resume a chained build from a fresh
+session, say "continue the build in `<ledger>`". In chained mode the top-level loads only
+this skill; each stage loads `superpowers:subagent-driven-development` itself.
+`uv run python -m scripts.build_metrics report` compares chained builds with the
+single-session baseline. The user reads it and decides which mode stays.
+
 Two environment facts it depends on: the Python env is a **per-worktree uv `.venv`** —
 create it with `uv sync --extra dev` in each worktree root and run commands via `uv run`
 (never `pip install` into a shared/global interpreter — it corrupts parallel agents' runs;
