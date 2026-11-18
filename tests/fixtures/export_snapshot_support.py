@@ -8,11 +8,27 @@ what the browser itself laid out for the same document.
 
 * ``export_slides`` / ``export_corpus`` run the production export
   (``build_slide_html`` then ``build_pptx_huashu``) with the engine selected
-  through ``TELLR_EXPORT_ENGINE``.
+  through ``TELLR_EXPORT_ENGINE``; ``export_documents`` exports complete
+  documents (corpus and inline slides mixed in one deck).
 * ``slide_shapes`` parses one slide's ``spTree`` with lxml into ``Shape``
   records, in z-order, with geometry in CSS px (``EMU / 9525``);
   ``slide_xml`` is the slide part itself and ``slide_shape_elements`` each
-  record's own XML, for what the records do not model.
+  record's own XML, for what the records do not model. A native table
+  (``p:graphicFrame`` holding ``a:tbl``) is a ``Shape`` of kind ``table``
+  whose ``Table`` holds every grid slot as a ``Cell`` (merged slots included);
+  ``table_frames``, ``table_extent``, ``table_column_edges``,
+  ``table_row_edges``, ``table_slot_owner`` and ``table_cell_rect`` read its
+  grid back in CSS px.
+* ``browser_tables`` reads every table the browser laid out, each cell with
+  its box, its grid slot under the HTML table model, its spans, padding,
+  own borders and text style, from one page load; ``browser_pixels`` reads
+  many screen colours from one screenshot (what a collapsed border painted).
+* ``requires_google_slides`` skips unless ``TELLR_GOOGLE_TESTS=1`` and gcloud
+  application-default credentials work, so no ordinary run uploads to Drive;
+  ``google_slides_presentation`` converts a deck through Drive with the
+  fidelity harness and returns the Slides API JSON (which
+  ``slides_api_tables`` and ``slides_api_color`` read) with the presentation's
+  id, and ``delete_drive_file`` deletes it afterwards.
 * ``browser_rect`` measures an element in the same browser build and channel
   the sidecar uses, through ``tests/fixtures/export_snapshot/measure.cjs``
   (Python has no Playwright in this repo, so measurement goes through Node);
@@ -32,7 +48,8 @@ what the browser itself laid out for the same document.
   ``browser_probes`` sets text offscreen in the page's own fonts and reads its
   size; ``browser_natural_line_height`` is the ``line-height: normal`` probe.
 * ``text_loss`` runs the export fidelity harness's text-loss oracle
-  (``scripts/export_fidelity/run.py::check_text_loss``) on an exported deck.
+  (``scripts/export_fidelity/run.py::check_text_loss``) on an exported deck;
+  ``slide_text_loss`` runs it on one slide of a deck.
 * ``node_json`` evaluates a script in the sidecar directory with ``node -e``,
   so a sidecar module's pure functions are testable without a browser.
 * ``corpus_slide`` / ``corpus_document`` load the committed brand corpus in
@@ -54,6 +71,9 @@ import posixpath
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from dataclasses import dataclass
 from io import BytesIO
@@ -254,6 +274,23 @@ def export_corpus(
     )
 
 
+def export_documents(
+    documents: list[str],
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str = "snapshot",
+) -> tuple[bytes, list[dict]]:
+    """Export complete slide documents, one slide each and in order, through the production wrapper.
+
+    Each document is exported exactly as given, so corpus documents
+    (``corpus_document``) and inline ones (``slide_document``) can share one
+    deck. Returns ``(pptx_bytes, failures)`` as ``export_slides`` does.
+    """
+    return _export_documents(
+        documents, title=TEST_DECK_TITLE, engine=engine, monkeypatch=monkeypatch
+    )
+
+
 # ---------------------------------------------------------------------------
 # Browser measurement (C3): measure.cjs on the sidecar's own Playwright
 # ---------------------------------------------------------------------------
@@ -422,6 +459,199 @@ def browser_pixel(document_html: str, x: float, y: float) -> tuple[int, int, int
     point = json.dumps({"x": x, "y": y})
     measured = json.loads(_run_measure(document_html, point, "--mode=pixel"))
     return measured["r"], measured["g"], measured["b"]
+
+
+def browser_pixels(
+    document_html: str, points: list[tuple[float, float]]
+) -> list[tuple[int, int, int]]:
+    """The colour the settled page shows at each ``(x, y)``, as ``(r, g, b)``, in order.
+
+    ``browser_pixel`` for many points, read from one screenshot of one page
+    load. The same sampling rule holds: sample where what is measured fully
+    covers its device pixels.
+    """
+    payload = json.dumps([{"x": x, "y": y} for x, y in points])
+    colours = json.loads(_run_measure(document_html, payload, "--mode=pixels"))
+    return [(colour["r"], colour["g"], colour["b"]) for colour in colours]
+
+
+@dataclass(frozen=True)
+class BrowserBorder:
+    """One side of a cell's own border, as the cascade computes it (not the collapsed winner)."""
+
+    width_px: float
+    style: str  # 'none' | 'solid' | 'dashed' | 'dotted' | 'double' | ...
+    color: str  # as getComputedStyle serialises it: 'rgb(27, 49, 57)'
+
+
+@dataclass(frozen=True)
+class BrowserCell:
+    """A ``<td>`` or ``<th>`` as the browser laid it out."""
+
+    row: int  # the grid slot of its top left corner, by the HTML table model
+    col: int
+    row_span: int  # the rows and columns it covers in that grid
+    col_span: int
+    x: float  # its border box, CSS px
+    y: float
+    w: float
+    h: float
+    tag: str  # 'td' | 'th'
+    text: str  # innerText
+    padding: dict[str, float]  # computed, CSS px; keys 'top' 'right' 'bottom' 'left'
+    borders: dict[str, BrowserBorder]  # its own; keys 'top' 'right' 'bottom' 'left'
+    # getComputedStyle: verticalAlign, textAlign, backgroundColor, color,
+    # fontFamily, fontWeight, fontStyle, as the browser serialises them
+    style: dict[str, str]
+
+    @property
+    def rect(self) -> dict:
+        return {"x": self.x, "y": self.y, "w": self.w, "h": self.h}
+
+
+@dataclass(frozen=True)
+class BrowserTable:
+    """A ``<table>`` as the browser laid it out: its box, caption, rows and cells."""
+
+    x: float  # its border box, CSS px (a <caption> lies inside it)
+    y: float
+    w: float
+    h: float
+    border_collapse: str  # 'collapse' | 'separate'
+    border_spacing: str  # as serialised: '2px' (both axes alike) or '2px 4px'
+    background: str  # computed backgroundColor
+    caption: dict | None  # {"x","y","w","h","text","side"} or None
+    rows: list[dict]  # each row's border box {"x","y","w","h"}, in HTMLTableElement.rows order
+    cells: list[BrowserCell]  # in row order, then cell order
+    columns: int  # the grid's column count under the HTML table model
+    # Each row's own computed border, in row order; keys 'top' 'right' 'bottom'
+    # 'left'. A row's border paints only by taking part in border collapsing.
+    row_borders: list[dict[str, BrowserBorder]]
+
+    @property
+    def rect(self) -> dict:
+        return {"x": self.x, "y": self.y, "w": self.w, "h": self.h}
+
+    def cell_at(self, row: int, col: int) -> BrowserCell:
+        """The cell whose top left grid slot is ``(row, col)``."""
+        for cell in self.cells:
+            if (cell.row, cell.col) == (row, col):
+                return cell
+        raise AssertionError(f"no browser cell starts at grid slot ({row}, {col})")
+
+    def cells_reading(self, text: str) -> list[BrowserCell]:
+        """The cells whose innerText, white space collapsed, equals ``text``."""
+        return [cell for cell in self.cells if " ".join(cell.text.split()) == text]
+
+
+def _grid_slots(rows: list[dict]) -> tuple[list[tuple[int, int, int, int]], int]:
+    """Each cell's (row, col, row_span, col_span) under the HTML table model, and the column count.
+
+    The model's slot assignment (HTML §4.9.12, "forming a table"): each row's
+    cells take, in order, the first grid columns no cell from a row above
+    still covers; ``rowspan`` reaches at most the end of the cell's row group,
+    and ``rowspan="0"`` reaches exactly that far.
+    """
+    group_end: list[int] = []
+    for index, row in enumerate(rows):
+        end = index + 1
+        while end < len(rows) and rows[end]["group"] == row["group"]:
+            end += 1
+        group_end.append(end)
+    occupied: set[tuple[int, int]] = set()
+    slots = []
+    for row_index, row in enumerate(rows):
+        column = 0
+        for cell in row["cells"]:
+            while (row_index, column) in occupied:
+                column += 1
+            reach = group_end[row_index] - row_index
+            row_span = reach if cell["rowSpan"] == 0 else min(cell["rowSpan"], reach)
+            col_span = max(1, cell["colSpan"])
+            for row_offset in range(row_span):
+                for column_offset in range(col_span):
+                    occupied.add((row_index + row_offset, column + column_offset))
+            slots.append((row_index, column, row_span, col_span))
+            column += col_span
+    columns = 1 + max((column for _, column in occupied), default=-1)
+    return slots, columns
+
+
+def _browser_borders(measured: dict) -> dict[str, BrowserBorder]:
+    return {
+        side: BrowserBorder(
+            width_px=float(border["width"]), style=border["style"], color=border["color"]
+        )
+        for side, border in measured.items()
+    }
+
+
+def browser_tables(document_html: str, selector: str = "table") -> list[BrowserTable]:
+    """Every ``<table>`` matching ``selector``, in document order, as the browser laid it out.
+
+    One ``measure.cjs --mode=tables`` page load reads each table's border
+    box, computed ``border-collapse``, ``border-spacing`` and background, its
+    ``<caption>`` (box, text, ``caption-side``), its rows' boxes in
+    ``HTMLTableElement.rows`` order, and every cell's border box, spans,
+    innerText, computed padding, own per-side borders and text style, and
+    every row's own computed borders. Each
+    cell's grid slot is derived here from the rows, spans and row groups by
+    the HTML table model, so a test can hold an emitted grid slot by slot
+    against the browser's cells. Under ``border-collapse: collapse`` a cell's
+    reported border is its own, not the edge's winner: what the browser
+    painted on a shared edge is on the screen (``browser_pixels``).
+    """
+    measured = json.loads(_run_measure(document_html, selector, "--mode=tables"))
+    tables = []
+    for table in measured:
+        slots, columns = _grid_slots(table["rows"])
+        raw_cells = [cell for row in table["rows"] for cell in row["cells"]]
+        cells = [
+            BrowserCell(
+                row=row,
+                col=col,
+                row_span=row_span,
+                col_span=col_span,
+                x=float(cell["x"]),
+                y=float(cell["y"]),
+                w=float(cell["w"]),
+                h=float(cell["h"]),
+                tag=cell["tag"],
+                text=cell["text"],
+                padding={side: float(value) for side, value in cell["padding"].items()},
+                borders=_browser_borders(cell["borders"]),
+                style=dict(cell["style"]),
+            )
+            for (row, col, row_span, col_span), cell in zip(slots, raw_cells)
+        ]
+        caption = table["caption"]
+        tables.append(
+            BrowserTable(
+                x=float(table["x"]),
+                y=float(table["y"]),
+                w=float(table["w"]),
+                h=float(table["h"]),
+                border_collapse=table["borderCollapse"],
+                border_spacing=table["borderSpacing"],
+                background=table["backgroundColor"],
+                caption=(
+                    None
+                    if caption is None
+                    else {
+                        "text": caption["text"],
+                        "side": caption["side"],
+                        **{key: float(caption[key]) for key in ("x", "y", "w", "h")},
+                    }
+                ),
+                rows=[
+                    {key: float(row[key]) for key in ("x", "y", "w", "h")} for row in table["rows"]
+                ],
+                cells=cells,
+                columns=columns,
+                row_borders=[_browser_borders(row["borders"]) for row in table["rows"]],
+            )
+        )
+    return tables
 
 
 def browser_line_boxes(document_html: str, selector: str, index: int = 0) -> list[dict]:
@@ -603,6 +833,205 @@ def text_loss(pptx: bytes, documents: list[str]) -> list[list[str]]:
     return [missing.get(name, []) for name in names]
 
 
+def slide_text_loss(pptx: bytes, index: int, document: str) -> list[str]:
+    """The words the browser renders for ``document`` that slide ``index`` (0-based) lacks.
+
+    ``text_loss`` for one slide of a deck: ``document`` is the complete
+    document exported as that slide. The harness pairs references with slides
+    by position, so the slides before it are given an empty reference, which
+    holds no word to lose.
+    """
+    harness = fidelity_harness()
+    names = [f"slide-{position}" for position in range(1, index + 2)]
+    with tempfile.TemporaryDirectory(prefix="tellr-text-loss-") as directory:
+        out_dir = Path(directory)
+        truth_dir = out_dir / "truth"
+        truth_dir.mkdir()
+        for name in names[:-1]:
+            (truth_dir / f"{name}.txt").write_text("", encoding="utf-8")
+        (truth_dir / f"{names[-1]}.txt").write_text(browser_text(document), encoding="utf-8")
+        pptx_path = out_dir / "export.pptx"
+        pptx_path.write_bytes(pptx)
+        missing = harness.check_text_loss(pptx_path, names, out_dir)
+    return missing.get(names[-1], [])
+
+
+# ---------------------------------------------------------------------------
+# Google Slides: the Drive conversion the Google Slides export uses
+# ---------------------------------------------------------------------------
+
+# Minting a token refreshes the credentials over the network: bounded, so an
+# offline machine skips rather than hangs.
+GCLOUD_TOKEN_TIMEOUT_SECONDS = 60
+# Google tests upload to the owner's Drive, so they run only when asked to.
+GOOGLE_TESTS_SWITCH = "TELLR_GOOGLE_TESTS"
+# The quota project run.py::_google_request bills when GOOGLE_QUOTA_PROJECT is
+# unset; the Drive calls made here send the same headers as it does.
+GOOGLE_QUOTA_PROJECT_DEFAULT = "gcp-dev-field-eng-aiapiquota"
+DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
+GOOGLE_REQUEST_TIMEOUT_SECONDS = 60
+
+
+@functools.cache
+def google_slides_available() -> bool:
+    """Whether ``gcloud auth application-default print-access-token`` exits 0.
+
+    Run once per session, and only when a test marked ``requires_google_slides``
+    is about to run: the command takes seconds.
+    """
+    if shutil.which("gcloud") is None:
+        return False
+    try:
+        process = subprocess.run(
+            ["gcloud", "auth", "application-default", "print-access-token"],
+            capture_output=True,
+            text=True,
+            timeout=GCLOUD_TOKEN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return process.returncode == 0
+
+
+def google_tests_enabled() -> bool:
+    """Whether Google tests run: ``TELLR_GOOGLE_TESTS=1`` AND gcloud can mint a token.
+
+    The switch is read first, so a run that has not opted in never calls gcloud.
+    """
+    return os.environ.get(GOOGLE_TESTS_SWITCH) == "1" and google_slides_available()
+
+
+# A string condition is evaluated when a marked test is set up (with ``sys`` in
+# its namespace), not when this module is imported, so collecting the suite
+# never waits on gcloud.
+requires_google_slides: pytest.MarkDecorator = pytest.mark.skipif(
+    f"not sys.modules[{__name__!r}].google_tests_enabled()",
+    reason=(
+        f"uploads to Google Drive: opt in with {GOOGLE_TESTS_SWITCH}=1, with gcloud "
+        "application-default credentials (gcloud auth application-default login) and the "
+        "quota project in GOOGLE_QUOTA_PROJECT"
+    ),
+)
+
+
+@dataclass(frozen=True)
+class GoogleSlidesConversion:
+    """A deck Drive converted: the Slides API presentation, its URL and its Drive file id."""
+
+    presentation: dict
+    url: str
+    presentation_id: str
+
+
+def _google_headers() -> dict[str, str]:
+    """The headers run.py::_google_request sends: a fresh ADC token and the quota project."""
+    return {
+        "Authorization": f"Bearer {fidelity_harness()._google_token()}",
+        "x-goog-user-project": os.environ.get("GOOGLE_QUOTA_PROJECT", GOOGLE_QUOTA_PROJECT_DEFAULT),
+    }
+
+
+def _drive_file_url(file_id: str) -> str:
+    return f"{DRIVE_FILES_URL}/{urllib.parse.quote(file_id, safe='')}"
+
+
+def delete_drive_file(file_id: str) -> None:
+    """Delete a Drive file for good, by its id: Drive v3 ``files.delete``, which skips the trash."""
+    request = urllib.request.Request(
+        _drive_file_url(file_id), headers=_google_headers(), method="DELETE"
+    )
+    with urllib.request.urlopen(request, timeout=GOOGLE_REQUEST_TIMEOUT_SECONDS) as response:
+        response.read()
+
+
+def drive_file_exists(file_id: str) -> bool:
+    """Whether Drive still holds the file: ``files.get`` answers 404 once it is deleted."""
+    request = urllib.request.Request(
+        f"{_drive_file_url(file_id)}?fields=id", headers=_google_headers(), method="GET"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=GOOGLE_REQUEST_TIMEOUT_SECONDS) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return False
+        raise
+    return True
+
+
+def google_slides_presentation(pptx: bytes, names: list[str]) -> GoogleSlidesConversion:
+    """Convert a deck through Drive, as the Google Slides export does.
+
+    Runs the fidelity harness's ``render_with_google_slides``: the deck is
+    uploaded to Drive as a Google Slides presentation (named
+    ``tellr-export-fidelity <timestamp>``), read back through the Slides API
+    (``gslides.json``) and thumbnailed (one name per slide). The presentation
+    stays in Drive: the caller deletes it with ``delete_drive_file`` once it
+    has read the JSON, in a ``finally``. When the harness fails after the
+    presentation was read back, it is deleted here before the error propagates.
+    """
+    harness = fidelity_harness()
+    with tempfile.TemporaryDirectory(prefix="tellr-gslides-") as directory:
+        out_dir = Path(directory)
+        pptx_path = out_dir / "export.pptx"
+        pptx_path.write_bytes(pptx)
+        read_back = out_dir / "gslides.json"
+        try:
+            url = harness.render_with_google_slides(pptx_path, names, out_dir)
+        except BaseException:
+            if read_back.exists():
+                delete_drive_file(
+                    json.loads(read_back.read_text(encoding="utf-8"))["presentationId"]
+                )
+            raise
+        presentation = json.loads(read_back.read_text(encoding="utf-8"))
+    return GoogleSlidesConversion(
+        presentation=presentation, url=url, presentation_id=presentation["presentationId"]
+    )
+
+
+def slides_api_tables(presentation: dict, index: int) -> list[dict]:
+    """The table page elements of slide ``index`` (0-based) of a Slides API presentation.
+
+    Each is the page element itself (``size``, ``transform``, ``table``). In a
+    ``table``, ``horizontalBorderRows[i]`` is the line along the TOP of row
+    ``i`` (one more than the rows), ``verticalBorderRows[r]
+    .tableBorderCells[c]`` the line along the LEFT of column ``c`` in row ``r``,
+    and a zero row or column index is omitted from a ``location``.
+    """
+    slides = presentation.get("slides", [])
+    assert 0 <= index < len(slides), (
+        f"slide index {index} is out of range: the presentation has {len(slides)} slides"
+    )
+    return [element for element in slides[index].get("pageElements", []) if "table" in element]
+
+
+def slides_api_color(fill: dict | None) -> str | None:
+    """'RRGGBB' of a Slides API fill (``{"solidFill": {"color": {"rgbColor": …}, "alpha": …}}``).
+
+    None when it paints nothing: no solid fill, alpha 0 (how Drive reads an
+    ``a:noFill`` border), or no RGB colour. A channel the API omits is 0.
+    """
+    solid = (fill or {}).get("solidFill")
+    if not solid or solid.get("alpha", 1) == 0:
+        return None
+    rgb = solid.get("color", {}).get("rgbColor")
+    if rgb is None:
+        return None
+    return "".join(
+        f"{round(rgb.get(channel, 0) * 255):02X}" for channel in ("red", "green", "blue")
+    )
+
+
+def slides_api_cell_text(cell: dict) -> str:
+    """The text of a Slides API table cell, its text runs concatenated."""
+    return "".join(
+        element.get("textRun", {}).get("content", "")
+        for element in cell.get("text", {}).get("textElements", [])
+    )
+
+
 def node_json(script: str) -> object:
     """Run ``node -e script`` in the sidecar directory and parse what it prints as JSON.
 
@@ -687,7 +1116,11 @@ class Cell:
     v_merge: bool
     margins_px: dict[str, float | None]  # keys 'left' 'right' 'top' 'bottom'
     anchor: str | None
-    borders: dict[str, Border | None]  # keys 'left' 'right' 'top' 'bottom'
+    # keys 'left' 'right' 'top' 'bottom'; None when the side is absent or a:noFill
+    borders: dict[str, Border | None]
+    # The sides whose a:lnL/lnR/lnT/lnB the a:tcPr writes at all, a:noFill ones
+    # included: a side left out is no line in PowerPoint but Drive's default.
+    sides_written: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -926,6 +1359,11 @@ def _cell(cell: etree._Element) -> Cell:
             )
             for side, element in sides.items()
         },
+        sides_written=frozenset(
+            side
+            for side, element in sides.items()
+            if properties is not None and properties.find(f"a:{element}", NAMESPACES) is not None
+        ),
     )
 
 
@@ -1108,6 +1546,101 @@ def slide_background(pptx: bytes, index: int = 0) -> str | None:
 def text_shapes(shapes: list[Shape], contains: str) -> list[Shape]:
     """The text shapes whose text contains ``contains``, in z-order."""
     return [shape for shape in shapes if shape.kind == "text" and contains in shape.text]
+
+
+# ---------------------------------------------------------------------------
+# Native tables: the a:tbl grid of a graphicFrame, in CSS px
+# ---------------------------------------------------------------------------
+
+
+def table_frames(shapes: list[Shape]) -> list[tuple[int, Shape]]:
+    """(spTree index, shape) of every native table (a ``p:graphicFrame`` with ``a:tbl``), by z.
+
+    In spTree order, back to front.
+    """
+    return [(position, shape) for position, shape in enumerate(shapes) if shape.kind == "table"]
+
+
+def table_extent(frame: Shape) -> dict:
+    """``{"x", "y", "w", "h"}`` of a native table as PowerPoint lays it out, in CSS px.
+
+    Its frame's offset, and the sums of its ``gridCol`` widths and ``a:tr``
+    heights: PowerPoint sizes a table from its grid, not from the frame's
+    ``a:ext``.
+    """
+    assert frame.table is not None, f"{frame.kind} {frame.name!r} is not a native table"
+    return {
+        "x": frame.x,
+        "y": frame.y,
+        "w": sum(frame.table.col_widths),
+        "h": sum(frame.table.row_heights),
+    }
+
+
+def _edges(start: float, sizes: list[float]) -> list[float]:
+    edges = [start]
+    for size in sizes:
+        edges.append(edges[-1] + size)
+    return edges
+
+
+def table_column_edges(frame: Shape) -> list[float]:
+    """The x of every vertical grid line of a native table, left to right, in CSS px.
+
+    One more than its columns.
+    """
+    assert frame.table is not None, f"{frame.kind} {frame.name!r} is not a native table"
+    return _edges(frame.x, frame.table.col_widths)
+
+
+def table_row_edges(frame: Shape) -> list[float]:
+    """The y of every horizontal grid line of a native table, top to bottom, in CSS px.
+
+    One more than its rows.
+    """
+    assert frame.table is not None, f"{frame.kind} {frame.name!r} is not a native table"
+    return _edges(frame.y, frame.table.row_heights)
+
+
+def table_slot_owner(table: Table, row: int, col: int) -> tuple[int, int]:
+    """The grid slot of the cell that covers slot ``(row, col)``: itself, or the merge's origin.
+
+    Every slot of an ``a:tbl`` is an ``a:tc``. One a merge covers is a
+    placeholder: ``hMerge`` continues the cell to its left, ``vMerge`` the
+    cell above (a slot under a cell spanning both ways is both), so the owner
+    is found by walking left over ``hMerge`` and up over ``vMerge``.
+    """
+    assert 0 <= row < len(table.rows) and 0 <= col < len(table.rows[row]), (
+        f"grid slot ({row}, {col}) is outside the {len(table.rows)}-row table"
+    )
+    while True:
+        cell = table.rows[row][col]
+        if cell.h_merge and col > 0:
+            col -= 1
+        elif cell.v_merge and row > 0:
+            row -= 1
+        else:
+            return row, col
+
+
+def table_cell_rect(frame: Shape, row: int, col: int) -> dict:
+    """``{"x", "y", "w", "h"}`` of the cell covering slot ``(row, col)``, spans included.
+
+    In CSS px, from the grid lines PowerPoint lays the table out on.
+    """
+    assert frame.table is not None, f"{frame.kind} {frame.name!r} is not a native table"
+    owner_row, owner_col = table_slot_owner(frame.table, row, col)
+    owner = frame.table.rows[owner_row][owner_col]
+    columns = table_column_edges(frame)
+    rows = table_row_edges(frame)
+    right = columns[min(owner_col + owner.grid_span, len(columns) - 1)]
+    bottom = rows[min(owner_row + owner.row_span, len(rows) - 1)]
+    return {
+        "x": columns[owner_col],
+        "y": rows[owner_row],
+        "w": right - columns[owner_col],
+        "h": bottom - rows[owner_row],
+    }
 
 
 def overlaps(a: Shape, b: Shape, tolerance_px: float = 0.5) -> bool:

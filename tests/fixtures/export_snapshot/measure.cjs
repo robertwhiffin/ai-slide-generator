@@ -9,10 +9,11 @@
 // export itself reads.
 //
 // usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text]
-//        node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box
+//        node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|tables
 //        node measure.cjs <document.html> --mode=fonts
 //        node measure.cjs <document.html> <probes-json> --mode=probe
 //        node measure.cjs <document.html> <point-json> --mode=hit|pixel
+//        node measure.cjs <document.html> <points-json> --mode=pixels
 //        node measure.cjs <document.html> <pseudo-json> --mode=each-pseudo
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
 // nothing matches.
@@ -53,6 +54,16 @@
 //                in CSS px and prints {"r":…,"g":…,"b":…}: the colour of the
 //                device pixel the settled page's screenshot shows there. See
 //                measurePixel.
+//   --mode=pixels takes, in place of the selector, a JSON array of points
+//                [{"x":…,"y":…}, …] and prints [{"r":…,"g":…,"b":…}, …], each
+//                point's colour as --mode=pixel reads it, all from one
+//                screenshot. See measurePixels.
+//   --mode=tables prints, for EVERY match of selector (each a <table>) in
+//                document order, {"x","y","w","h", "borderCollapse",
+//                "borderSpacing", "backgroundColor", "caption", "rows"}: the
+//                table's box, its <caption> or null, and each row with its
+//                box, row group and cells (box, spans, text, padding, borders,
+//                style), from one page load. See measureTables.
 //   --mode=each-pseudo takes, in place of the selector, JSON
 //                {"selector":…, "pseudo":"before"|"after"|"marker"} and prints, for
 //                EVERY match of the selector in document order, null when it
@@ -68,7 +79,7 @@
 // browser_each_rect, browser_client_rects, browser_padding_box,
 // browser_each_padding_box, browser_line_boxes, browser_lines, browser_style,
 // browser_text, browser_loaded_weights, browser_probes, browser_hit_id,
-// browser_pixel, browser_each_pseudo).
+// browser_pixel, browser_pixels, browser_tables, browser_each_pseudo).
 
 const path = require('path');
 const zlib = require('zlib');
@@ -285,7 +296,12 @@ async function measurePixel(page, pointArgument) {
     return { error: 'the point must be JSON {"x": number, "y": number}' };
   }
   const shot = decodePng(await page.screenshot({ type: 'png' }));
-  const scale = shot.width / page.viewportSize().width;
+  return pixelAt(shot, shot.width / page.viewportSize().width, point);
+}
+
+// The device pixel of a decoded screenshot that covers a CSS px point, as
+// {r, g, b}, or {error} when the point lies outside the screenshot.
+function pixelAt(shot, scale, point) {
   const column = Math.floor(point.x * scale);
   const row = Math.floor(point.y * scale);
   if (!(column >= 0 && column < shot.width && row >= 0 && row < shot.height)) {
@@ -293,6 +309,156 @@ async function measurePixel(page, pointArgument) {
   }
   const at = (row * shot.width + column) * shot.channels;
   return { r: shot.pixels[at], g: shot.pixels[at + 1], b: shot.pixels[at + 2] };
+}
+
+// More points than any test samples: a longer list is a mistake, not a probe.
+const PIXEL_POINT_LIMIT = 10000;
+
+// The colours the settled page shows at many points, from ONE screenshot:
+// measurePixel's reading for each point of a JSON array, in order.
+async function measurePixels(page, pointsArgument) {
+  let points;
+  try {
+    points = JSON.parse(pointsArgument);
+  } catch (error) {
+    return { error: `the points are not JSON: ${error.message}` };
+  }
+  if (!Array.isArray(points) || !(points.length <= PIXEL_POINT_LIMIT)) {
+    return { error: `the points must be a JSON array of at most ${PIXEL_POINT_LIMIT} {"x": number, "y": number}` };
+  }
+  for (const point of points) {
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+      return { error: 'every point must be JSON {"x": number, "y": number}' };
+    }
+  }
+  const shot = decodePng(await page.screenshot({ type: 'png' }));
+  const scale = shot.width / page.viewportSize().width;
+  const colours = [];
+  for (const point of points) {
+    const colour = pixelAt(shot, scale, point);
+    if (colour.error) return colour;
+    colours.push(colour);
+  }
+  return { colours };
+}
+
+// Every match of selector (each a <table>) as the browser laid it out, from
+// one settled page, so a test holds a whole emitted grid against the browser's
+// own cells in one browser launch. For each table:
+// * its border box (getBoundingClientRect), its computed border-collapse,
+//   border-spacing and background colour;
+// * its <caption> (HTMLTableElement.caption): border box, innerText and
+//   computed caption-side, or null;
+// * its rows in HTMLTableElement.rows order (thead's, then each tbody's, then
+//   tfoot's), each with its border box, the index of its row group among the
+//   groups met so far (for rowspan="0", which spans to the end of its group),
+//   its own computed per-side border (a row's border takes part in collapsing
+//   only), and its cells in HTMLTableRowElement.cells order. Each cell reports its
+//   border box, tag, rowSpan and colSpan as the DOM reflects them, innerText,
+//   computed padding and per-side border (width, style, colour) as the
+//   cascade gives them, and the computed style its text is read with.
+// The border a cell reports is its own; under border-collapse: collapse the
+// browser paints the winner of each shared edge, which only the screen shows
+// (--mode=pixels). The cells' grid slots are the HTML table model's, which the
+// caller derives from the rows, spans and groups.
+const CELL_STYLE_PROPERTIES = [
+  'verticalAlign', 'textAlign', 'backgroundColor', 'color', 'fontFamily', 'fontWeight', 'fontStyle',
+];
+
+async function measureTables(page, selector) {
+  return page.evaluate(({ selector, limit, properties }) => {
+    const matches = document.querySelectorAll(selector);
+    if (matches.length === 0) {
+      return { error: `selector ${selector} matched no element` };
+    }
+    if (!(matches.length <= limit)) {
+      return { error: `selector ${selector} matched ${matches.length} elements; more than ${limit} is not a real slide` };
+    }
+    const boxOf = (element) => {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+    };
+    const sideOf = (style, side) => ({
+      width: parseFloat(style[`border${side}Width`]) || 0,
+      style: style[`border${side}Style`],
+      color: style[`border${side}Color`],
+    });
+    const tables = [];
+    for (let tableIndex = 0; tableIndex < matches.length; tableIndex++) {
+      const table = matches[tableIndex];
+      if (!(table instanceof HTMLTableElement)) {
+        return { error: `match ${tableIndex} of ${selector} is a <${table.localName}>, not a <table>` };
+      }
+      const tableStyle = getComputedStyle(table);
+      const caption = table.caption;
+      const groups = [];
+      const rows = [];
+      if (!(table.rows.length <= limit)) {
+        return { error: `table ${tableIndex} reports ${table.rows.length} rows; more than ${limit} is not a real slide` };
+      }
+      for (let rowIndex = 0; rowIndex < table.rows.length; rowIndex++) {
+        const row = table.rows[rowIndex];
+        let group = groups.indexOf(row.parentElement);
+        if (group < 0) {
+          groups.push(row.parentElement);
+          group = groups.length - 1;
+        }
+        const cells = [];
+        if (!(row.cells.length <= limit)) {
+          return { error: `row ${rowIndex} of table ${tableIndex} reports ${row.cells.length} cells; more than ${limit} is not a real slide` };
+        }
+        for (let cellIndex = 0; cellIndex < row.cells.length; cellIndex++) {
+          const cell = row.cells[cellIndex];
+          const style = getComputedStyle(cell);
+          const read = {};
+          for (const property of properties) read[property] = String(style[property]);
+          cells.push({
+            ...boxOf(cell),
+            tag: cell.localName,
+            rowSpan: cell.rowSpan,
+            colSpan: cell.colSpan,
+            text: cell.innerText,
+            padding: {
+              top: parseFloat(style.paddingTop) || 0,
+              right: parseFloat(style.paddingRight) || 0,
+              bottom: parseFloat(style.paddingBottom) || 0,
+              left: parseFloat(style.paddingLeft) || 0,
+            },
+            borders: {
+              top: sideOf(style, 'Top'),
+              right: sideOf(style, 'Right'),
+              bottom: sideOf(style, 'Bottom'),
+              left: sideOf(style, 'Left'),
+            },
+            style: read,
+          });
+        }
+        const rowStyle = getComputedStyle(row);
+        rows.push({
+          ...boxOf(row),
+          group,
+          borders: {
+            top: sideOf(rowStyle, 'Top'),
+            right: sideOf(rowStyle, 'Right'),
+            bottom: sideOf(rowStyle, 'Bottom'),
+            left: sideOf(rowStyle, 'Left'),
+          },
+          cells,
+        });
+      }
+      tables.push({
+        ...boxOf(table),
+        borderCollapse: tableStyle.borderCollapse,
+        borderSpacing: tableStyle.borderSpacing,
+        backgroundColor: tableStyle.backgroundColor,
+        caption: caption
+          ? { ...boxOf(caption), text: caption.innerText, side: getComputedStyle(caption).captionSide }
+          : null,
+        rows,
+      });
+    }
+    return { tables };
+  }, { selector, limit: MATCH_LIMIT, properties: CELL_STYLE_PROPERTIES });
 }
 
 // The element's rendered text, line by line, read character by character with a
@@ -827,6 +993,14 @@ const MODES = {
   },
   hit: measureHit,
   pixel: measurePixel,
+  pixels: async (page, pointsArgument) => {
+    const measured = await measurePixels(page, pointsArgument);
+    return measured.error ? measured : measured.colours;
+  },
+  tables: async (page, selector) => {
+    const measured = await measureTables(page, selector);
+    return measured.error ? measured : measured.tables;
+  },
   'each-pseudo': async (page, argument) => {
     const measured = await measurePseudo(page, argument);
     return measured.error ? measured : measured.boxes;
@@ -854,10 +1028,11 @@ async function main() {
   if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
     console.error(
       'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text]\n' +
-      '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box\n' +
+      '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box|tables\n' +
       '       node measure.cjs <document.html> --mode=fonts\n' +
       '       node measure.cjs <document.html> <probes-json> --mode=probe\n' +
       '       node measure.cjs <document.html> <point-json> --mode=hit|pixel\n' +
+      '       node measure.cjs <document.html> <points-json> --mode=pixels\n' +
       '       node measure.cjs <document.html> <pseudo-json> --mode=each-pseudo',
     );
     process.exit(1);
