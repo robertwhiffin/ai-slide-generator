@@ -54,22 +54,30 @@ const COMPUTED_VALUE = /^[a-z0-9\s(),.%#+/-]*$/i;
 
 // Each :not(#…) adds id-level specificity, so these rules beat the deck's own
 // !important rules on classes and elements (Review Focus 5); the trick of
-// SLIDE_ROOT_RESET_STYLE's #tellr-root-reset-boost.
+// SLIDE_ROOT_RESET_STYLE's #tellr-root-reset-boost. `*` never matches a
+// ::before or ::after, and a pseudo-element's own visibility beats the one it
+// would inherit from its hidden element, so pseudo-elements are hidden by
+// rules of their own, and shown again for the target (and, in subtree mode,
+// for what the target holds).
 function isolationCss(id, mode) {
   const target = `[data-tellr-capture="${id}"]`;
   const boost = ':not(#tellr-capture-a):not(#tellr-capture-b):not(#tellr-capture-c)';
   return `html${boost}, body${boost} { background: transparent !important; }\n` +
     `*${boost} { visibility: hidden !important; }\n` +
+    `*${boost}::before, *${boost}::after { visibility: hidden !important; }\n` +
+    `${target}${boost}::before, ${target}${boost}::after { visibility: visible !important; }\n` +
     (mode === 'subtree'
-      ? `${target}${boost}, ${target} *${boost} { visibility: visible !important; }`
+      ? `${target}${boost}, ${target} *${boost} { visibility: visible !important; }\n` +
+        `${target} *${boost}::before, ${target} *${boost}::after { visibility: visible !important; }`
       : `${target}${boost} { visibility: visible !important; color: transparent !important;` +
         ` -webkit-text-fill-color: transparent !important; text-shadow: none !important; }`);
 }
 
 // What the isolation must not change about the target's own painting.
 // * Subtree mode shows every descendant, so a descendant the slide hides
-//   (an SVG group with visibility="hidden") is hidden again, one attribute
-//   selector more specific than the rule that shows it.
+//   (an SVG group with visibility="hidden") is hidden again, with its
+//   pseudo-elements, one attribute selector more specific than the rules
+//   that show them.
 // * Box mode makes the target's text transparent by setting `color`, which a
 //   border or shadow drawn in currentColor follows; each is pinned to the
 //   colour the slide paints it in.
@@ -78,7 +86,8 @@ function retainedCss(capture) {
   const boost = ':not(#tellr-capture-a):not(#tellr-capture-b):not(#tellr-capture-c)';
   const rules = [];
   if (capture.mode === 'subtree' && capture.hiddenWithin) {
-    rules.push(`${target} [${HIDDEN_ATTRIBUTE}]${boost} { visibility: hidden !important; }`);
+    const hidden = `${target} [${HIDDEN_ATTRIBUTE}]${boost}`;
+    rules.push(`${hidden}, ${hidden}::before, ${hidden}::after { visibility: hidden !important; }`);
   }
   const paint = capture.mode === 'box' && capture.paint ? capture.paint : null;
   if (paint) {
@@ -103,10 +112,24 @@ function captureNumber(capture) {
   return Number(String(capture.id).slice(1));
 }
 
+// Playwright floors a page clip's width and height to whole CSS px
+// (helper.enclosingIntSize) and Chrome snaps its origin to a device pixel, so
+// a PNG can only cover a whole number of CSS px from about the rect's corner.
+// Half a pixel more turns the floor into a rounding: the PNG then covers the
+// picture's rect to within half a pixel at its far edges (a quarter at its
+// corner), and is twice the rect to within one device pixel. The picture
+// keeps the exact rect, so the PNG is stretched by at most half a pixel.
+const CLIP_ROUNDING_PX = 0.5;
+
 async function captureOne(page, capture) {
   const retained = retainedCss(capture);
   const png = await page.screenshot({
-    clip: { x: capture.x, y: capture.y, width: capture.w, height: capture.h },
+    clip: {
+      x: capture.x,
+      y: capture.y,
+      width: capture.w + CLIP_ROUNDING_PX,
+      height: capture.h + CLIP_ROUNDING_PX,
+    },
     omitBackground: true,
     type: 'png',
     scale: 'device',

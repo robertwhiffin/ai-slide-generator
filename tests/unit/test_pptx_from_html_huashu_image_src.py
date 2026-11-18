@@ -17,6 +17,10 @@ Fixed the same two ways as the records sidecar:
    environment. Unlike the records sidecar it must keep the real ``HOME``
    (Playwright finds Chromium under ``~/.cache/ms-playwright``) and any proxy
    settings (the page loads Chart.js from a CDN).
+
+Both engines are held to it (``TELLR_EXPORT_ENGINE``): the legacy converter
+and the snapshot engine, which embeds a raster ``data:`` image as it is and
+captures nothing whose source is not ``data:``.
 """
 
 from __future__ import annotations
@@ -87,11 +91,17 @@ def _zip_entries(pptx: bytes) -> dict[str, bytes]:
         return {n: zf.read(n) for n in zf.namelist() if not n.endswith("/")}
 
 
+# The per-slide converters the sidecar can run (emit_deck.mjs).
+ENGINES = ("legacy", "snapshot")
+
+
 @pytest.mark.slow
 @requires_huashu_sidecar
+@pytest.mark.parametrize("engine", ENGINES)
 class TestHuashuImageSrc:
-    def test_local_files_are_not_embedded(self, tmp_path, monkeypatch):
+    def test_local_files_are_not_embedded(self, tmp_path, monkeypatch, engine):
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        monkeypatch.setenv("TELLR_EXPORT_ENGINE", engine)
         img = tmp_path / "img-canary"
         img.write_bytes(IMG_CANARY)
         bg = tmp_path / "bg-canary"
@@ -109,8 +119,9 @@ class TestHuashuImageSrc:
         ]
         assert not leaked, f"canary file bytes embedded in {leaked}"
 
-    def test_data_image_is_still_embedded(self, monkeypatch):
+    def test_data_image_is_still_embedded(self, monkeypatch, engine):
         monkeypatch.setenv("HUASHU_PIPELINE_ENABLED", "1")
+        monkeypatch.setenv("TELLR_EXPORT_ENGINE", engine)
 
         pptx, failures = pptx_from_html_huashu.build_pptx_huashu(
             "t", [{"html": _slide_html(PNG_DATA_URI), "notes": ""}], bypass_validation=True

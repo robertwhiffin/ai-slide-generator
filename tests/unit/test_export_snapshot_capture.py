@@ -35,10 +35,11 @@ stays hidden although the isolation shows the target's whole subtree.
 A target that an ``overflow`` ancestor cuts is captured cut, and its picture's
 rect is the target rect intersected with the clip (C7.3). Captured pixels
 already carry the target's cumulative opacity, so the picture is shown at the
-browser's opacity, not that opacity twice. Two exports of one rendered page
-are byte-identical (C7.4): the determinism test pins the corpus deck's fonts,
-because Google Fonts now and then serves another DM Sans file and so another
-page. A 20-slide chart deck exports inside the sidecar's budget (Review Focus 1).
+browser's opacity, not that opacity twice. Repeated exports of one rendered
+page are byte-identical (C7.4): the determinism test exports it five times,
+three renders each, and pins the corpus deck's fonts, because Google Fonts now
+and then serves another DM Sans file and so another page. A 20-slide chart
+deck exports inside the sidecar's budget (Review Focus 1).
 
 Isolation must hold against the deck's own CSS (Review Focus 5): a deck rule
 ``.x { visibility: visible !important }`` loses to the isolation stylesheet's
@@ -199,6 +200,14 @@ HOSTILE_RULES = {
     # More specific than an unboosted "html, body" reset, so without the boost
     # the slide ground would paint the whole picture.
     "ground-forced": f"html > body {{ background: #{LEAK} !important; }}",
+    # A pseudo-element of an unrelated element, laid over the chart, that
+    # declares itself visible: `*` never matches ::before/::after, and a
+    # pseudo-element's own declaration beats the visibility it would inherit
+    # from its hidden element.
+    "pseudo-forced-visible": (
+        ".dk-legend::after { content: ''; position: fixed; left: 100px; top: 200px; "
+        f"width: 500px; height: 150px; background: #{LEAK}; visibility: visible !important; }}"
+    ),
 }
 
 # Fixture 04: Harvey balls, conic gradients clockwise from 12 o'clock.
@@ -372,7 +381,7 @@ HIDPI_BLUE_AT = 0.875
 CHARTJS_CANVAS = "canvas#segChart"
 CHARTJS_MIN_SHARE = {"industrial": 0.10, "automotive": 0.05}
 
-# C7.4 compares two exports of one rendered page. The corpus deck loads DM Sans
+# C7.4 compares repeated exports of one rendered page. The corpus deck loads DM Sans
 # and DM Mono from Google Fonts, which now and then answers its @import with
 # another stylesheet naming another DM Sans file, so the page (and its text
 # widths) differ. The determinism test pins the deck's fonts: the latin files
@@ -413,6 +422,15 @@ def _pinned_font_css() -> str:
         )
     return "\n".join(faces) + "\n" + GOOGLE_FONTS_IMPORT.sub("", DECK_CSS, count=1)
 
+
+# C7.4: the determinism test makes DETERMINISM_EXPORTS exports, each of the
+# slide DETERMINISM_SLIDES times (every slide renders in its own browser). A
+# GPU rasterization draws one chart in about three a little differently, so
+# one comparison of two single-slide exports misses it in most runs, and 5 of
+# them in about one run in four (measured); 5 exports of 3 renders each miss
+# it in under one run in a hundred.
+DETERMINISM_EXPORTS = 5
+DETERMINISM_SLIDES = 3
 
 # A chart inside a half-transparent group.
 FADE_OPACITY = 0.5
@@ -561,6 +579,21 @@ def _box_probe_body() -> str:
 
 
 BOX_PROBE_BODY = _box_probe_body()
+
+# A gradient highlight on an inline span that wraps onto a second line. Its box
+# is one box-only picture over both fragments (the union of its client rects);
+# its words stay native.
+HIGHLIGHT_BODY = (
+    '<div class="slide">'
+    '<p style="position: absolute; left: 80px; top: 200px; width: 520px; margin: 0; '
+    f'font-size: 30px; line-height: 44px; color: #{INK};">Lead words then '
+    f'<span id="highlight" style="background: linear-gradient(90deg, #{ACCENT_2}, #{BLUE}); '
+    'color: #FFFFFF;">a highlighted phrase that wraps onto</span> a tail.</p>'
+    "</div>"
+)
+HIGHLIGHT_WORD = "highlighted"
+# A fragment is sampled on its middle row, this far in from the end the gradient starts or ends at.
+HIGHLIGHT_END_INSET_PX = 3.0
 CARD_TEXT = "Card heading text"
 GRADIENT_PROBE_WORDS = "Gradient words"
 GRADIENT_BLOCK_WORDS = "Gradient heading"
@@ -1080,7 +1113,10 @@ class TestSnapshotCaptureIsolation:
           visible !important }`` with the legend moved 120 px up, over the
           chart (the brief's ``.dk-legend`` rule alone leaks nothing even
           without the boost: see the module docstring);
-        * ``ground-forced``: ``html > body { background: … !important }``.
+        * ``ground-forced``: ``html > body { background: … !important }``;
+        * ``pseudo-forced-visible``: a ``.dk-legend::after`` box fixed over the
+          chart with ``visibility: visible !important`` on the pseudo-element
+          itself, which no ``*`` rule matches.
 
         The chart is still captured (its FY24 bar shows ``FF3621``), and its
         picture holds no ``#00FF00`` pixel.
@@ -1795,6 +1831,69 @@ class TestSnapshotBoxOnlyCapture:
         ]
         assert not doubled, f"the box's shadow is drawn a second time, natively, at {doubled}"
 
+    def test_inline_gradient_highlight_is_one_picture_under_its_words(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wrapping inline span's gradient is one box-only picture, under its native words.
+
+        The span's ``linear-gradient(90deg, FF3621, 2F5BEA)`` paints both of
+        its line fragments. The engine captures the span's box once: one
+        picture at the union of its client rects (within 0.5 px), 2x it. In it:
+        * each fragment shows the gradient: with box-decoration-break: slice
+          one gradient runs across the fragments, so the first fragment starts
+          ``FF3621`` and the second ends ``2F5BEA``;
+        * the union's other corners, where the paragraph's own words lie, are
+          transparent: only the span's box is in the picture.
+        The words stay an editable white run, above the picture.
+        """
+        document = _document(HIGHLIGHT_BODY)
+        fragments = sorted(browser_client_rects(document, "#highlight"), key=lambda rect: rect["y"])
+        assert len(fragments) == 2, f"fixture drift: the highlight has {len(fragments)} fragments"
+        first, second = fragments
+        left = min(rect["x"] for rect in fragments)
+        top = min(rect["y"] for rect in fragments)
+        right = max(rect["x"] + rect["w"] for rect in fragments)
+        bottom = max(rect["y"] + rect["h"] for rect in fragments)
+        union = {"x": left, "y": top, "w": right - left, "h": bottom - top}
+
+        shapes = slide_shapes(_export_one(HIGHLIGHT_BODY, monkeypatch))
+        picture_index, picture = _picture_at(shapes, union, "the highlight")
+        image = _image(picture, "the highlight")
+        _assert_twice_its_box(image, union, "the highlight")
+        start = _pixel(
+            image, picture, first["x"] + HIGHLIGHT_END_INSET_PX, first["y"] + first["h"] / 2
+        )
+        end = _pixel(
+            image,
+            picture,
+            second["x"] + second["w"] - HIGHLIGHT_END_INSET_PX,
+            second["y"] + second["h"] / 2,
+        )
+        assert _is(start, ACCENT_2) and _is(end, BLUE), (
+            f"the highlight's gradient: first fragment starts {_show(start)} (want #{ACCENT_2}), "
+            f"second ends {_show(end)} (want #{BLUE})"
+        )
+        before = _pixel(image, picture, left + HIGHLIGHT_END_INSET_PX, first["y"] + first["h"] / 2)
+        after = _pixel(
+            image, picture, right - HIGHLIGHT_END_INSET_PX, second["y"] + second["h"] / 2
+        )
+        assert _is_transparent(before) and _is_transparent(after), (
+            f"the highlight's picture holds more than the span's box: {_show(before)} before "
+            f"its first fragment, {_show(after)} after its second"
+        )
+
+        text_index, text = _text_item(shapes, HIGHLIGHT_WORD)
+        highlighted = [
+            run for para in text.paras for run in para.runs if HIGHLIGHT_WORD in run.text
+        ]
+        assert highlighted and all(run.color == "FFFFFF" for run in highlighted), (
+            "the highlighted words are not an editable white run"
+        )
+        assert picture_index < text_index, (
+            f"the highlight's words (spTree {text_index}) are not above its picture "
+            f"({picture_index}):\n{_describe(shapes)}"
+        )
+
     def test_box_capture_keeps_a_current_colour_border_and_shadow(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1911,6 +2010,61 @@ class TestSnapshotRasterImages:
                 f"outlined image: edge {_show(edge)} (want #{INK}), centre {_show(centre)}"
             )
 
+    def test_local_and_remote_sources_never_reach_the_deck(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SDR-4437: a source outside ``data:`` never reaches the deck, captured or not.
+
+        A capture screenshots whatever the page loaded, so under the export
+        document's CSP (``img-src data:``, from ``build_slide_html``) a local
+        ``file://`` image or a remote one must load nowhere: not as an
+        ``<img>`` (plain, or rounded, which would be captured), not as a
+        box's ``url()`` background (a box capture), not as an SVG ``<image>``
+        (a subtree capture). The local file is a ``#00FF00`` PNG: no media
+        part holds its bytes, no picture holds a ``#00FF00`` pixel, and no
+        picture lies at any of the three ``<img>`` rects.
+        """
+        local = tmp_path / "local-secret.png"
+        local.write_bytes(_png_bytes(Image.new("RGBA", (64, 64), _rgb(LEAK) + (255,))))
+        uri = local.as_uri()
+        body = (
+            '<div class="slide">'
+            f'<img class="outside" src="{uri}" alt="" style="position: absolute; left: 80px; '
+            'top: 120px; width: 160px; height: 160px;">'
+            f'<img class="outside" src="{uri}" alt="" style="position: absolute; left: 280px; '
+            'top: 120px; width: 160px; height: 160px; border-radius: 12px;">'
+            '<img class="outside" src="https://example.com/a.png" alt="" style="position: '
+            'absolute; left: 480px; top: 120px; width: 160px; height: 160px;">'
+            '<div style="position: absolute; left: 80px; top: 340px; width: 240px; height: '
+            f"160px; background: url('{uri}') center / cover;\"></div>"
+            '<svg width="240" height="160" viewBox="0 0 240 160" style="position: absolute; '
+            f'left: 380px; top: 340px;"><image href="{uri}" width="240" height="160"/></svg>'
+            "</div>"
+        )
+        rects = browser_each_rect(_document(body), "img.outside")
+        assert len(rects) == 3, f"fixture drift: {len(rects)} outside images"
+
+        pptx = _export_one(body, monkeypatch)
+        secret = local.read_bytes()
+        with zipfile.ZipFile(BytesIO(pptx)) as archive:
+            media = {
+                name: archive.read(name)
+                for name in archive.namelist()
+                if name.startswith("ppt/media/") and not name.endswith("/")
+            }
+        holding = sorted(name for name, data in media.items() if secret in data)
+        assert not holding, f"the local file's bytes are embedded in {holding}"
+        leaking = {
+            name: leaked
+            for name, data in media.items()
+            if data[:8] == PNG_SIGNATURE
+            and (leaked := _count(Image.open(BytesIO(data)).convert("RGBA"), _is_leak))
+        }
+        assert not leaking, f"pictures show the local file's #{LEAK}: {leaking}"
+        shapes = slide_shapes(pptx)
+        placed = [_rect(shape) for rect in rects for shape in _pictures_over(shapes, rect)]
+        assert not placed, f"pictures stand where the outside images are: {placed}"
+
 
 # ---------------------------------------------------------------------------
 # Opacity, determinism and timing
@@ -1945,15 +2099,20 @@ class TestSnapshotCaptureOutput:
             for channel, value in zip(pixel[:3], _rgb(ACCENT_2))
         ), f"the faded chart's colour is {_show(pixel)}, not #{ACCENT_2}"
 
-    def test_two_exports_are_identical(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """C7.4: two exports of fixture 03, captures included, are byte-identical.
+    def test_repeated_exports_are_identical(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """C7.4: repeated exports of fixture 03, captures included, are byte-identical.
 
-        Both export the same rendered page: fixture 03 on the corpus deck, its
-        CSS and Chart.js scripts, with the deck's fonts pinned (the faces its
-        Google Fonts @import loads, embedded as data:, ``_pinned_font_css``),
-        so no font the network serves can differ between them. Both hold the
-        chart's picture, and their structural manifests (every part's SHA-256,
-        ``docProps/core.xml`` timestamps masked) are equal.
+        Every export is of the same rendered page: fixture 03 on the corpus
+        deck, its CSS and Chart.js scripts, with the deck's fonts pinned (the
+        faces its Google Fonts @import loads, embedded as data:,
+        ``_pinned_font_css``), so no font the network serves can differ
+        between them. A rasterization that is not deterministic (GPU
+        anti-aliasing) draws one chart in a few differently, so there are
+        ``DETERMINISM_EXPORTS`` exports, each holding the slide
+        ``DETERMINISM_SLIDES`` times, and every export is held against the
+        first: each slide holds the chart's picture, and each export's
+        structural manifest (every part's SHA-256, ``docProps/core.xml``
+        timestamps masked) equals the first's.
         """
         css = _pinned_font_css()
         body = corpus_slide("03")
@@ -1962,29 +2121,39 @@ class TestSnapshotCaptureOutput:
         document = slide_document(body, css=css, scripts=scripts, external_scripts=external_scripts)
         chart = browser_rect(document, CHART)
         exports = []
-        for _ in range(2):
+        for _ in range(DETERMINISM_EXPORTS):
             pptx, failures = export_slides(
-                [body],
+                [body] * DETERMINISM_SLIDES,
                 css=css,
                 scripts=scripts,
                 external_scripts=external_scripts,
                 monkeypatch=monkeypatch,
             )
             assert failures == [], f"the export rejected corpus slide 03: {failures}"
+            for index in range(DETERMINISM_SLIDES):
+                _picture_at(slide_shapes(pptx, index), chart, f"slide {index + 1}'s chart")
             exports.append(pptx)
-        first, second = exports
-        for pptx in (first, second):
-            _chart_picture(pptx, chart)
+        first = exports[0]
         first_manifest = structural_manifest(first)
-        second_manifest = structural_manifest(second)
-        differing = sorted(
-            name
-            for name in set(first_manifest["sha256"]) | set(second_manifest["sha256"])
-            if first_manifest["sha256"].get(name) != second_manifest["sha256"].get(name)
-        )
-        assert first_manifest == second_manifest, (
-            f"the two exports differ in {differing}"
-            + "".join(f"\n  {name}: {_media_difference(first, second, name)}" for name in differing)
+        mismatches = []
+        for number, other in enumerate(exports[1:], start=2):
+            manifest = structural_manifest(other)
+            if manifest == first_manifest:
+                continue
+            differing = sorted(
+                name
+                for name in set(first_manifest["sha256"]) | set(manifest["sha256"])
+                if first_manifest["sha256"].get(name) != manifest["sha256"].get(name)
+            )
+            mismatches.append(
+                f"export {number} differs from export 1 in {differing}"
+                + "".join(
+                    f"\n  {name}: {_media_difference(first, other, name)}" for name in differing
+                )
+            )
+        assert not mismatches, (
+            f"{len(mismatches)} of {DETERMINISM_EXPORTS - 1} exports differ from the first:\n"
+            + "\n".join(mismatches)
         )
 
     def test_twenty_chart_slides_export_within_budget(
