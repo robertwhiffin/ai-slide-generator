@@ -146,8 +146,24 @@ def _css_urls(css: str, svg_assets: Mapping[int, str], *, reuse_quote: bool) -> 
     return _CSS_URL.sub(replace, css), hidden
 
 
-def _sweep(text: str, svg_assets: Mapping[int, str], hidden_value: str) -> tuple[str, int]:
-    """Resolve leftover handles and base64 data URIs anywhere in *text*."""
+# `` name=`` right before a position: an unquoted attribute value starts there. The
+# leading whitespace keeps ``?src=`` inside a quoted URL from counting as one.
+_UNQUOTED_VALUE_START = re.compile(r"\s[^\s\"'<>/=]+\s*=\s*\Z")
+
+
+def _starts_unquoted_value(text: str, index: int) -> bool:
+    """True when *index* starts an unquoted HTML attribute value."""
+    return _UNQUOTED_VALUE_START.search(text, max(0, index - 256), index) is not None
+
+
+def _sweep(
+    text: str, svg_assets: Mapping[int, str], hidden_value: str, *, html: bool = False
+) -> tuple[str, int]:
+    """Resolve leftover handles and base64 data URIs anywhere in *text*.
+
+    With ``html``, a value written where an unquoted attribute value starts is
+    double-quoted: the notice and inlined SVGs hold raw spaces, which would end it.
+    """
     hidden = 0
 
     def replace(match: re.Match) -> str:
@@ -157,7 +173,9 @@ def _sweep(text: str, svg_assets: Mapping[int, str], hidden_value: str) -> tuple
             return match.group(0)
         if result is _HIDE:
             hidden += 1
-            return hidden_value
+            result = hidden_value
+        if html and _starts_unquoted_value(text, match.start()):
+            return f'"{result}"'
         return str(result)
 
     return _LEFTOVER.sub(replace, text), hidden
@@ -175,7 +193,8 @@ def hide_images_in_css(css: str, svg_assets: Mapping[int, str]) -> tuple[str, in
 # ---------------------------------------------------------------------------
 
 _IMG_OR_SOURCE_TAG = re.compile(r"<(img|source)\b((?:\"[^\"]*\"|'[^']*'|[^'\">])*)>", re.IGNORECASE)
-_ATTRIBUTE = re.compile(r"([^\s\"'>/=]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s\"'>]+))?")
+# An unquoted value stops before a ``/`` that ends the tag (``<img src={{image:b}}/>``).
+_ATTRIBUTE = re.compile(r"([^\s\"'>/=]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|(?:[^\s\"'>/]|/(?!\Z))+))?")
 _ALT_ATTR = f' alt="{IMAGE_NOTICE}"'
 
 
@@ -192,6 +211,9 @@ def _rewrite_tag(match: re.Match, svg_assets: Mapping[int, str]) -> tuple[str, i
     hidden = 0
     for attr in _ATTRIBUTE.finditer(body):
         name, raw = attr.group(1).lower(), attr.group(2)
+        if name == "alt":  # a bare ``alt`` is replaced too, never doubled
+            alt_span = (attr.start(), attr.end())
+            continue
         if raw is None:
             continue
         value = _unquote_attr(raw)
@@ -204,8 +226,6 @@ def _rewrite_tag(match: re.Match, svg_assets: Mapping[int, str]) -> tuple[str, i
                 src_hidden_at = attr.end()
                 result = NOTICE_IMG_SRC
             edits.append((attr.start(), attr.end(), f'src="{result}"'))
-        elif name == "alt":
-            alt_span = (attr.start(), attr.end())
         elif name == "srcset" and ("data:" in value.lower() or _LEFTOVER.search(value)):
             start = attr.start()
             while start > 0 and body[start - 1].isspace():
@@ -239,5 +259,5 @@ def hide_images_in_html(html: str, svg_assets: Mapping[int, str]) -> tuple[str, 
 
     html = _IMG_OR_SOURCE_TAG.sub(rewrite, html)
     html, urls = _css_urls(html, svg_assets, reuse_quote=True)
-    html, swept = _sweep(html, svg_assets, NOTICE_IMG_SRC)
+    html, swept = _sweep(html, svg_assets, NOTICE_IMG_SRC, html=True)
     return html, total + urls + swept

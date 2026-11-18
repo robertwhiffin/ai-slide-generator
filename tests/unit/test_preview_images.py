@@ -826,6 +826,61 @@ def test_http_and_relative_urls_are_untouched():
 
 
 # ---------------------------------------------------------------------------
+# Review fixes: unquoted self-closing src, unquoted attributes in the sweep, bare alt
+# ---------------------------------------------------------------------------
+
+
+def test_unquoted_self_closing_img_src_gets_the_notice():
+    """``<img src=X/>``: the ``/`` closes the tag, so X is the source and gets the notice."""
+    kept = "<img src=https://e.com/dir/>"
+    html = "<img src={{image:b}}/><img src=data:image/png;base64,AAAA/>" + kept
+
+    out, hidden = hide_images_in_html(html, {})
+
+    assert hidden == 2
+    assert "base64" not in out
+    assert "{{" not in out
+    assert out.endswith(kept)
+    imgs = _tags(out, "img")
+    assert len(imgs) == 3
+    assert _assert_notice_img(imgs[0]).keys() == {"src", "alt"}
+    assert _assert_notice_img(imgs[1]).keys() == {"src", "alt"}
+
+
+def test_sweep_quotes_what_it_writes_into_an_unquoted_attribute():
+    """The notice and an inlined SVG hold raw spaces; unquoted they would end the value."""
+    html = (
+        "<video poster={{image:p}}></video><svg><image href={{ds-asset:4}} /></svg>"
+        '<a href="https://e.com/x?src={{image:q}}">l</a>'
+    )
+
+    out, hidden = hide_images_in_html(html, {4: DS_SVG_RAW})
+
+    assert hidden == 2
+    assert "{{" not in out
+    videos = _tags(out, "video")
+    assert len(videos) == 1
+    assert _attr_dict(videos[0]) == {"poster": NOTICE_IMG_SRC}
+    images = _tags(out, "image")
+    assert len(images) == 1
+    assert list(_attr_dict(images[0])) == ["href"]
+    _assert_inlined_text_svg(_attr_dict(images[0])["href"], DS_SVG_CLEAN)
+    # inside a quoted value a ``?src=`` is not an attribute start: no quotes are added
+    links = _tags(out, "a")
+    assert len(links) == 1
+    assert _attr_dict(links[0]) == {"href": "https://e.com/x?src=" + NOTICE_IMG_SRC}
+
+
+def test_bare_alt_on_a_hidden_img_is_replaced_not_doubled():
+    out, hidden = hide_images_in_html('<img alt src="{{image:a}}">', {})
+
+    assert hidden == 1
+    imgs = _tags(out, "img")
+    assert len(imgs) == 1
+    assert _assert_notice_img(imgs[0]).keys() == {"src", "alt"}
+
+
+# ---------------------------------------------------------------------------
 # design_system_service.get_small_svg_assets
 # ---------------------------------------------------------------------------
 
