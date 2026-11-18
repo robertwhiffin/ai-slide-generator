@@ -676,6 +676,43 @@ def test_only_the_slides_that_can_be_shown_go_through_the_image_pass():
         assert seen == [s["html"] for s in deck["slides"][:3]]
 
 
+def _outside_style_blocks(html: str) -> str:
+    """``html`` with every ``<style>`` element's raw text removed, ending each where the
+    HTML tokenizer does: at ``</style`` followed by whitespace, ``/`` or ``>``."""
+    return re.sub(r"<style\b[^>]*>.*?(?:</style(?=[\t\n\f\r />])|\Z)", "", html, flags=re.S | re.I)
+
+
+def test_rule_9_guards_hold_in_the_preview():
+    """Final review M2 (spec rule 9): the preview page is built by ``to_html_document``,
+    so its guards apply: the title is escaped, no ``</style`` closer in the deck css ends
+    the style block early, and only http(s) script srcs are kept, attribute-escaped."""
+    title = "</title><script>alert('title')</script>"
+    css = (
+        ".slide{color:red}</style><script>alert('css1')</script><style>"
+        ".q{a:b}</style x><script>alert('css2')</script>"
+    )
+    hostile_src = "https://e.com/x.js\"><script>alert('src')</script>"
+    deck = _deck([_slide(0)], css=css)
+    deck["external_scripts"] = ["javascript:alert('js')", hostile_src]
+
+    html = _html(_build(deck, title=title))
+    soup = _soup(html)
+
+    # title escaped
+    assert soup.title.get_text() == title
+    assert "<script>alert('title')" not in html
+    # the css stays inside its style block, whatever closer it carries
+    assert "alert('css1')" in html and "alert('css2')" in html
+    outside = _outside_style_blocks(html)
+    assert "alert('css" not in outside, outside[:400]
+    # scripts: no javascript: src, the quote-breaking src never opens a script
+    srcs = [s.get("src") for s in soup.find_all("script") if s.get("src")]
+    assert not [s for s in srcs if s.lower().startswith("javascript:")]
+    assert set(srcs) <= {CHART_JS, hostile_src}
+    assert "alert('src')" not in "".join(s.get_text() for s in soup.find_all("script"))
+    assert "<script>alert('src')" not in html
+
+
 def test_ds_asset_ids_skip_font_faces():
     deck = {
         "css": (
