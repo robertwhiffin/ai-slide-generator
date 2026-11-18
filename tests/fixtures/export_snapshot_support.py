@@ -22,8 +22,9 @@ what the browser itself laid out for the same document.
   for every match of a selector from one page load.
   ``browser_hit_id`` says what the browser shows at a point, by hit testing.
   ``browser_each_pseudo`` reads the box and rendered text of each match's
-  ``::before`` or ``::after``, which no page API reports, from the browser's
-  own layout through the DevTools protocol.
+  ``::before``, ``::after`` or ``::marker``, which no page API reports, from
+  the browser's own layout through the DevTools protocol, and for a marker
+  where its pixels are on screen.
   ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
   lines from the same page, with a ``Range`` per character. ``browser_style``
   reads its computed typography, ``browser_text`` its rendered ``innerText``
@@ -311,10 +312,14 @@ def browser_each_padding_box(document_html: str, selector: str) -> list[dict]:
     return [{key: float(box[key]) for key in ("x", "y", "w", "h")} for box in boxes]
 
 
+def _measured_rect(rect: dict | None) -> dict | None:
+    return None if rect is None else {key: float(rect[key]) for key in ("x", "y", "w", "h")}
+
+
 def browser_each_pseudo(
     document_html: str, selector: str, pseudo: str = "before"
 ) -> list[dict | None]:
-    """The ``::before`` (or ``::after``) of EVERY match of ``selector``, as the browser renders it.
+    """The ``::before``, ``::after`` or ``::marker`` of EVERY match of ``selector``, as rendered.
 
     One entry per match, in document order: None when the element generates
     no such pseudo-element box (its ``content`` is ``none`` or ``normal``, or
@@ -329,19 +334,33 @@ def browser_each_pseudo(
     ``measure.cjs --mode=each-pseudo`` reads them from the browser's layout of
     the untouched page through the DevTools protocol (``DOM.getBoxModel`` and
     ``DOMSnapshot.captureSnapshot``), on the settled page ``browser_rect`` reads.
+
+    With ``pseudo="marker"`` it reads each list item's ``::marker``: None for
+    an item that has none (``list-style-type: none``, or ``::marker { content:
+    none }``), else the entry above, whose ``text`` is Chrome's own marker
+    with its trailing space ("1. ", "4. " in ``<ol start="4" reversed>``,
+    "• ", "◦ ", "" for an image marker), plus ``"ink"``: the ``{"x", "y", "w",
+    "h"}`` bounds of the pixels the marker paints, or None when it paints none
+    that its colour sets (an image marker). The box is not the glyphs: a text
+    marker's box ends with the advance of its trailing space, while Chrome
+    paints a disc, circle or square in a box of the symbol's own size and
+    leaves the gap to the item's text as a margin. So where a marker's glyphs
+    are is read from the screen: ``measure.cjs`` screenshots the settled page
+    as it is and with every ``::marker`` transparent, and ``ink`` is where the
+    two differ inside the marker's band, in CSS px at device scale 2.
     """
     payload = json.dumps({"selector": selector, "pseudo": pseudo})
     boxes = json.loads(_run_measure(document_html, payload, "--mode=each-pseudo"))
-    return [
-        None
-        if box is None
-        else {
-            "text": box["text"],
-            "style": dict(box["style"]),
-            **{key: float(box[key]) for key in ("x", "y", "w", "h")},
-        }
-        for box in boxes
-    ]
+    measured: list[dict | None] = []
+    for box in boxes:
+        if box is None:
+            measured.append(None)
+            continue
+        entry = {"text": box["text"], "style": dict(box["style"]), **_measured_rect(box)}
+        if "ink" in box:
+            entry["ink"] = _measured_rect(box["ink"])
+        measured.append(entry)
+    return measured
 
 
 def browser_client_rects(document_html: str, selector: str, index: int = 0) -> list[dict]:

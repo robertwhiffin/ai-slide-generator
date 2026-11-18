@@ -50,13 +50,15 @@
 //                browser hit-tests there, or of its nearest ancestor that has
 //                one, else null. See measureHit.
 //   --mode=each-pseudo takes, in place of the selector, JSON
-//                {"selector":…, "pseudo":"before"|"after"} and prints, for EVERY
-//                match of the selector in document order, null when it
+//                {"selector":…, "pseudo":"before"|"after"|"marker"} and prints, for
+//                EVERY match of the selector in document order, null when it
 //                generates no such pseudo-element box, else
 //                {"x":…,"y":…,"w":…,"h":…,"text":…,"style":{…}}: the
 //                pseudo-element's own border box and its rendered text, read
 //                from the browser's layout through the DevTools protocol, and
-//                its computed style (PSEUDO_STYLE_PROPERTIES). See measurePseudo.
+//                its computed style (PSEUDO_STYLE_PROPERTIES). A ::marker also
+//                reports "ink": {"x":…,"y":…,"w":…,"h":…} or null, the extent of
+//                the pixels it paints. See measurePseudo and measureMarkerInk.
 //
 // Called from tests/fixtures/export_snapshot_support.py (browser_rect,
 // browser_each_rect, browser_client_rects, browser_padding_box,
@@ -65,6 +67,7 @@
 // browser_each_pseudo).
 
 const path = require('path');
+const zlib = require('zlib');
 
 const SIDECAR_DIR = path.resolve(__dirname, '..', '..', '..', 'services', 'pptx-emit-huashu');
 const { chromium } = require(path.join(SIDECAR_DIR, 'node_modules', 'playwright'));
@@ -512,7 +515,21 @@ async function measureProbes(page, probesArgument) {
 // Pseudo-element nodes are matched across the two protocol reads by their
 // backend node id. Its computed style (getComputedStyle(element, '::before'))
 // is read in the page, for the matches in the same document order.
-const PSEUDO_TYPES = new Set(['before', 'after']);
+//
+// A list item's ::marker is read the same way: the protocol lists it among the
+// element's pseudoElements with pseudoType "marker" (a node of its own, with no
+// children), and its layout text is the marker as Chrome renders it, the
+// list's own numbering included ("1. ", "4. " for <ol start="4">, "• ", "◦ ").
+// An item with list-style-type: none, or whose ::marker has content: none, has
+// no marker node. What the box holds is not uniform, so a marker also reports
+// where its pixels are (measureMarkerInk):
+// * a text marker ("1. ", "a. ", content: "→ ") is laid out as its text, so
+//   its box ends with the advance of its trailing space;
+// * a disc, circle or square marker is a shape Chrome paints in a box of the
+//   symbol's own size, though its layout text is "• ": its box holds no space,
+//   and the gap to the item's text is a margin;
+// * an image marker (list-style-image) has a box and no text.
+const PSEUDO_TYPES = new Set(['before', 'after', 'marker']);
 // Deeper than any pseudo-element's own layout subtree: a layout text object
 // is the pseudo-element node's or a child's.
 const PSEUDO_TEXT_DEPTH_LIMIT = 16;
@@ -525,7 +542,7 @@ async function measurePseudo(page, argument) {
     return { error: `the pseudo request is not JSON: ${error.message}` };
   }
   if (!request || typeof request.selector !== 'string' || !PSEUDO_TYPES.has(request.pseudo)) {
-    return { error: 'the pseudo request must be JSON {"selector": string, "pseudo": "before" | "after"}' };
+    return { error: 'the pseudo request must be JSON {"selector": string, "pseudo": "before" | "after" | "marker"}' };
   }
   const session = await page.context().newCDPSession(page);
   try {
@@ -612,10 +629,145 @@ async function measurePseudo(page, argument) {
         style: styles[matchIndex],
       });
     }
+    if (request.pseudo === 'marker') {
+      const ink = await measureMarkerInk(page, boxes);
+      if (ink.error) return ink;
+    }
     return { boxes };
   } finally {
     await session.detach().catch(() => {});
   }
+}
+
+// Where each marker's own pixels are, which no protocol read reports: two
+// screenshots of the settled page, as it is and with every ::marker painted
+// transparent (a ::marker's color is what its glyphs, and the disc, circle or
+// square Chrome draws for it, are painted with), differ exactly where a marker
+// paints. Each marker's ink is the bounds of the differing device pixels
+// within its box's band, searched INK_SEARCH_MARGIN_PX past either end of the
+// box so a glyph that overhangs its advance is held whole, in CSS px; null
+// when nothing differs there (an image marker, which color does not paint, or
+// a marker outside the viewport). Every protocol read is done by then: the
+// stylesheet that hides the markers is the last thing this mode adds.
+const INK_SEARCH_MARGIN_PX = 4;
+// A device pixel is the marker's when a channel differs by more than this.
+const INK_CHANNEL_THRESHOLD = 16;
+const HIDE_MARKERS_CSS =
+  '*::marker { color: transparent !important; transition: none !important; animation: none !important; }';
+
+async function measureMarkerInk(page, boxes) {
+  let shown;
+  let hidden;
+  try {
+    shown = decodePng(await page.screenshot({ type: 'png' }));
+    await page.addStyleTag({ content: HIDE_MARKERS_CSS });
+    hidden = decodePng(await page.screenshot({ type: 'png' }));
+  } catch (error) {
+    return { error: `the marker screenshots could not be read: ${error.message}` };
+  }
+  if (shown.width !== hidden.width || shown.height !== hidden.height) {
+    return { error: `the marker screenshots differ in size: ${shown.width}x${shown.height}, ${hidden.width}x${hidden.height}` };
+  }
+  const scale = shown.width / page.viewportSize().width;
+  for (const box of boxes) {
+    if (box) box.ink = inkWithin(shown, hidden, scale, box);
+  }
+  return {};
+}
+
+function inkWithin(shown, hidden, scale, box) {
+  const left = Math.max(0, Math.floor((box.x - INK_SEARCH_MARGIN_PX) * scale));
+  const right = Math.min(shown.width, Math.ceil((box.x + box.w + INK_SEARCH_MARGIN_PX) * scale));
+  const top = Math.max(0, Math.floor(box.y * scale));
+  const bottom = Math.min(shown.height, Math.ceil((box.y + box.h) * scale));
+  let minColumn = Infinity;
+  let maxColumn = -Infinity;
+  let minRow = Infinity;
+  let maxRow = -Infinity;
+  for (let row = top; row < bottom; row++) {
+    for (let column = left; column < right; column++) {
+      const shownAt = (row * shown.width + column) * shown.channels;
+      const hiddenAt = (row * hidden.width + column) * hidden.channels;
+      let differs = false;
+      for (let channel = 0; channel < 3 && !differs; channel++) {
+        differs = Math.abs(shown.pixels[shownAt + channel] - hidden.pixels[hiddenAt + channel]) > INK_CHANNEL_THRESHOLD;
+      }
+      if (!differs) continue;
+      minColumn = Math.min(minColumn, column);
+      maxColumn = Math.max(maxColumn, column);
+      minRow = Math.min(minRow, row);
+      maxRow = Math.max(maxRow, row);
+    }
+  }
+  if (!(maxColumn >= minColumn)) return null;
+  return {
+    x: minColumn / scale,
+    y: minRow / scale,
+    w: (maxColumn + 1 - minColumn) / scale,
+    h: (maxRow + 1 - minRow) / scale,
+  };
+}
+
+// The pixels of a PNG screenshot as {width, height, channels, pixels}: 8-bit
+// RGB or RGBA, not interlaced, which is what the browser writes. Decoded here
+// with zlib, so the oracle needs no image library of its own.
+const PNG_SIGNATURE_BYTES = 8;
+const PNG_CHANNELS = { 2: 3, 6: 4 };
+
+function decodePng(buffer) {
+  let offset = PNG_SIGNATURE_BYTES;
+  let header = null;
+  const compressed = [];
+  while (offset + 8 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString('ascii', offset + 4, offset + 8);
+    const data = buffer.subarray(offset + 8, offset + 8 + length);
+    if (type === 'IHDR') {
+      header = { width: data.readUInt32BE(0), height: data.readUInt32BE(4), depth: data[8], colour: data[9], interlace: data[12] };
+    } else if (type === 'IDAT') {
+      compressed.push(data);
+    } else if (type === 'IEND') {
+      break;
+    }
+    offset += length + 12;
+  }
+  if (!header || header.depth !== 8 || header.interlace !== 0 || !PNG_CHANNELS[header.colour]) {
+    throw new Error(`unsupported PNG ${JSON.stringify(header)}`);
+  }
+  const { width, height } = header;
+  const channels = PNG_CHANNELS[header.colour];
+  const raw = zlib.inflateSync(Buffer.concat(compressed));
+  const stride = width * channels;
+  const pixels = Buffer.alloc(height * stride);
+  for (let row = 0; row < height; row++) {
+    const filter = raw[row * (stride + 1)];
+    const line = row * (stride + 1) + 1;
+    const out = row * stride;
+    const above = out - stride;
+    for (let index = 0; index < stride; index++) {
+      const left = index >= channels ? pixels[out + index - channels] : 0;
+      const up = row > 0 ? pixels[above + index] : 0;
+      const upLeft = row > 0 && index >= channels ? pixels[above + index - channels] : 0;
+      let predictor = 0;
+      if (filter === 1) {
+        predictor = left;
+      } else if (filter === 2) {
+        predictor = up;
+      } else if (filter === 3) {
+        predictor = (left + up) >> 1;
+      } else if (filter === 4) {
+        const estimate = left + up - upLeft;
+        const toLeft = Math.abs(estimate - left);
+        const toUp = Math.abs(estimate - up);
+        const toUpLeft = Math.abs(estimate - upLeft);
+        predictor = toLeft <= toUp && toLeft <= toUpLeft ? left : toUp <= toUpLeft ? up : upLeft;
+      } else if (filter !== 0) {
+        throw new Error(`unsupported PNG row filter ${filter}`);
+      }
+      pixels[out + index] = (raw[line + index] + predictor) & 0xff;
+    }
+  }
+  return { width, height, channels, pixels };
 }
 
 const MODES = {
