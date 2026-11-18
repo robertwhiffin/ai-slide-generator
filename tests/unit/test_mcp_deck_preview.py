@@ -380,6 +380,8 @@ def test_each_shown_slide_sits_in_its_own_frame_with_the_strip_and_notice_outsid
         "position:relative!important",
         "width:1280px!important",
         "height:720px!important",
+        # the frames are <body>'s children: a flex-column body must not shrink them
+        "flex:none!important",
         "overflow:hidden",
         "margin:",
     ):

@@ -38,11 +38,13 @@ _FRAME_CLASS = "tellr-preview-frame"
 # positioned 1280x720 box, and its direct child (the slide root) fills it. The
 # ``:not(#tellr-host-frame-boost)`` arm lifts the child rule to id specificity so an
 # id-scoped ``!important`` size on a slide root cannot shrink it; ``.slide-wrapper`` is
-# excluded as there.
+# excluded as there. Unlike the app's host (``<body>`` itself), the frames are children of
+# ``<body>``, so ``flex:none`` stops a deck that lays its body out as a flex column (Legacy
+# decks and the app's own HTML export do) from shrinking them to fit the window.
 _FRAME_STYLE = (
     "  <style>\n"
     f".{_FRAME_CLASS}{{position:relative!important;width:1280px!important;"
-    "height:720px!important;overflow:hidden;margin:16px auto}\n"
+    "height:720px!important;flex:none!important;overflow:hidden;margin:16px auto}\n"
     f".{_FRAME_CLASS}>:not(#tellr-host-frame-boost):not(.slide-wrapper){{"
     "position:absolute!important;inset:0!important;width:100%!important;"
     "height:100%!important;box-sizing:border-box!important;overflow:hidden}\n"
