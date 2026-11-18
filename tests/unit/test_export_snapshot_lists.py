@@ -27,9 +27,17 @@ How a marker is drawn:
   margin) the line is cut there: the marker is an item of its own and the
   text keeps its browser x (R9g);
 * an image marker (``list-style-image``) is a picture of its own pixels at its
-  box (R9d);
+  box (R9d), and only one: where its item is a picture of its own box that
+  already holds the marker, that picture is the marker's;
 * no paragraph anywhere is a native PowerPoint bullet (``a:buChar``,
   ``a:buAutoNum``, ``a:buBlip``): markers are only ever items or tokens (R9f).
+
+A marker outside its item paints outside the item's box, so its colour is
+composited over what the item sits on, never over the item's own background.
+The engine measures marker advances with probes it adds to the page and takes
+off again before it reads a style: a deck rule that matches while anything is
+left after body shows a probe that stayed, as does a page that disables the
+DOM's own removal.
 
 Every assertion reads the emitted slide XML and holds it against the browser's
 own rendering of the very same document. ``browser_each_pseudo(..., "marker")``
@@ -51,10 +59,12 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 from __future__ import annotations
 
 import base64
+import json
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -67,11 +77,13 @@ from tests.fixtures.export_snapshot_support import (
     browser_each_pseudo,
     browser_each_rect,
     browser_line_boxes,
+    browser_pixel,
     browser_style,
     corpus_document,
     corpus_slide,
     export_corpus,
     export_slides,
+    node_json,
     requires_huashu_sidecar,
     slide_document,
     slide_shapes,
@@ -237,6 +249,14 @@ KIND_LISTS = (
         ("Governed", "Shared"),
         ("\u2022 ", "\u2022 "),
     ),
+    MarkedList(
+        "lm-value",
+        720,
+        560,
+        '<ol id="lm-value"><li>Kickoff</li><li value="7">Seventh</li><li>Eighth</li></ol>',
+        ("Kickoff", "Seventh", "Eighth"),
+        ("1. ", "7. ", "8. "),
+    ),
 )
 KINDS = {kind.list_id: kind for kind in KIND_LISTS}
 KINDS_BODY = (
@@ -290,6 +310,162 @@ HOSTILE_MARKERS = ("1. ", "2. ")
 HOSTILE_TEXT_NODES = "hostile_text_nodes"
 BENIGN_TWIN = "collection_passes"
 
+# An outside marker beside a white item on a navy panel, both in a translucent
+# colour: the browser composites the marker over the panel, the item's text
+# over the white. A 40 px disc covers its middle pixels fully, so a screenshot
+# sample there is the composited colour.
+BACKDROP_CSS = """
+.lm-panel { position: absolute; left: 80px; top: 120px; width: 560px; padding: 24px 0;
+            background: #1B3139; }
+.lm-panel ul, .lm-panel ol { margin: 0 0 16px; font-size: 40px; }
+.lm-panel li { background: #FFFFFF; color: rgba(0, 0, 0, 0.5); }
+"""
+BACKDROP_BODY = (
+    '<div class="slide"><div class="lm-panel">'
+    '<ul id="lm-on-white"><li>Over white</li></ul>'
+    '<ol id="lm-numbered-on-white"><li>Numbered</li></ol>'
+    "</div></div>"
+)
+BACKDROP_LISTS = {"lm-on-white": "Over white", "lm-numbered-on-white": "Numbered"}
+
+# A deck rule that matches only while body is not html's last child: a probe or
+# an iframe the export leaves on the document element while it reads the page
+# turns every item and marker it reads green.
+LEFTOVER_DETECTOR_CSS = (
+    "\nhtml > body:not(:last-child) li { color:#00FF00 !important }\n"
+    "#lm-left-inside { list-style-position: inside; }\n"
+)
+LEFTOVER_GREEN = "00FF00"
+LEFTOVER_BODY = (
+    '<div class="slide"><p class="dk-eyebrow">Nothing left behind</p>'
+    '<div class="lm-col" style="left: 120px; top: 160px;">'
+    '<ol id="lm-left-outside"><li>Outside one</li><li>Outside two</li></ol></div>'
+    '<div class="lm-col" style="left: 520px; top: 160px;">'
+    '<ol id="lm-left-inside"><li>Inside one</li></ol></div>'
+    "</div>"
+)
+LEFTOVER_LISTS = {
+    "lm-left-outside": ("Outside one", "Outside two"),
+    "lm-left-inside": ("Inside one",),
+}
+# Slide script that takes away the DOM's own removal before the export runs:
+# a node the export adds stays unless it is removed through a realm page
+# script never touched. Slide scripts go in the slide root as an inline
+# <script> (_with_script): the deck's scripts run only once Chart.js loads.
+DISABLE_REMOVAL_SCRIPT = """(function() {
+  Element.prototype.remove = function () {};
+  Node.prototype.removeChild = function (child) { return child; };
+})();"""
+
+# Image markers whose items are pictures of their own boxes (a gradient
+# background): one inside its item's box, one outside it but inside the reach
+# of the item's shadow. Either way the item's picture holds the marker.
+BOXED_IMAGE_CSS = (
+    f".lm-boxed {{ position: absolute; width: 360px; margin: 0; font-size: 20px; "
+    f"list-style-image: url('{_png_data_uri(IMAGE_COLOUR, IMAGE_SIDE_PX)}'); }}\n"
+    ".lm-boxed li { background: linear-gradient(90deg, #FFE7DF, #FFFFFF); }\n"
+    "#lm-boxed-inside { left: 120px; top: 160px; list-style-position: inside; }\n"
+    "#lm-boxed-shadow { left: 560px; top: 160px; }\n"
+    "#lm-boxed-shadow li { box-shadow: 0 0 24px 16px rgba(27, 49, 57, 0.2); }\n"
+)
+BOXED_IMAGE_BODY = (
+    '<div class="slide"><p class="dk-eyebrow">Pictures</p>'
+    '<ul class="lm-boxed" id="lm-boxed-inside"><li>Governed inside</li></ul>'
+    '<ul class="lm-boxed" id="lm-boxed-shadow"><li>Shadowed outside</li></ul>'
+    "</div>"
+)
+BOXED_IMAGE_LISTS = ("lm-boxed-inside", "lm-boxed-shadow")
+
+# Slide script that lies about the size of every offscreen probe the export
+# measures with (they sit at left: -10000px), so no marker advance is finite.
+LYING_PROBES_SCRIPT = """(function() {
+  var measure = Element.prototype.getBoundingClientRect;
+  Element.prototype.getBoundingClientRect = function () {
+    var rect = measure.call(this);
+    if (String(this.getAttribute('style') || '').indexOf('-10000px') < 0) return rect;
+    return { left: NaN, top: NaN, right: NaN, bottom: NaN, width: NaN, height: NaN };
+  };
+})();"""
+UNMEASURED_LINE = "[html2pptx] list markers:"
+UNMEASURED_BODY = (
+    '<div class="slide"><p class="dk-eyebrow">Unmeasured</p>'
+    '<div class="lm-col" style="left: 120px; top: 160px;">'
+    '<ol id="lm-unmeasured"><li>Unmeasured one</li><li>Unmeasured two</li></ol></div>'
+    "</div>"
+)
+
+# The export with a DevTools session whose box reads of ::marker nodes, and of
+# nothing else, reject: the markers are left out, said so in the count line,
+# and the rest of the slide, a ::before included, exports.
+UNREAD_BOXES_LINE = "[html2pptx] pseudo-elements:"
+UNREAD_BOXES_CSS = '\n.lm-tagged::before { content: "\\2605 "; color: #FF3621; }\n'
+UNREAD_BOXES_BODY = (
+    '<div class="slide"><p class="dk-eyebrow lm-tagged">Unread boxes</p>'
+    '<div class="lm-col" style="left: 120px; top: 160px;">'
+    '<ol id="lm-unread"><li>Unread one</li><li>Unread two</li></ol></div>'
+    "</div>"
+)
+UNREAD_BOXES_SCRIPT = """
+(async () => {
+  const documentPath = %(document)s;
+  const lines = [];
+  const originalError = console.error;
+  const originalLog = console.log;
+  console.error = (...parts) => { lines.push(parts.join(' ')); };
+  console.log = () => {};
+  try {
+    const playwright = require('playwright');
+    const launch = playwright.chromium.launch.bind(playwright.chromium);
+    playwright.chromium.launch = async (options) => {
+      const browser = await launch(options);
+      const newPage = browser.newPage.bind(browser);
+      browser.newPage = async (...args) => {
+        const page = await newPage(...args);
+        const context = page.context();
+        const newSession = context.newCDPSession.bind(context);
+        context.newCDPSession = async (target) => {
+          const session = await newSession(target);
+          const markers = new Set();
+          const collect = (node, depth) => {
+            if (!node || depth > 64) return;
+            for (const pseudo of node.pseudoElements || []) {
+              if (pseudo.pseudoType === 'marker') markers.add(pseudo.nodeId);
+            }
+            for (const child of node.children || []) collect(child, depth + 1);
+          };
+          return {
+            send: async (method, params) => {
+              if (method === 'DOM.getBoxModel' && markers.has(params.nodeId)) {
+                throw new Error('the box of a ::marker is unreadable (test stub)');
+              }
+              const result = await session.send(method, params);
+              if (method === 'DOM.getDocument') collect(result.root, 0);
+              return result;
+            },
+            detach: () => session.detach(),
+          };
+        };
+        return page;
+      };
+      return browser;
+    };
+    const { renderSlide } = require('./render_slide.cjs');
+    const PptxGenJS = require('pptxgenjs');
+    const pres = new PptxGenJS();
+    pres.layout = 'LAYOUT_WIDE';
+    const { summary } = await renderSlide(documentPath, pres, { bypassValidation: true });
+    const pptx = await pres.write({ outputType: 'base64' });
+    console.error = originalError;
+    console.log = originalLog;
+    process.stdout.write(JSON.stringify({ summary, lines, pptx }));
+  } catch (error) {
+    console.error = originalError;
+    console.error(error);
+    process.exit(1);
+  }
+})();
+"""
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -301,6 +477,16 @@ def _export(body: str, monkeypatch: pytest.MonkeyPatch, *, css: str = DECK_CSS) 
     assert failures == [], f"the export rejected the slide: {failures}"
     assert pptx, "the export produced no .pptx bytes"
     return pptx
+
+
+def _with_script(body: str, script: str) -> str:
+    """``body`` with ``script`` inline at the end of its slide root.
+
+    It runs as the page is parsed, before any export pass, and body's one
+    element child stays the slide root.
+    """
+    assert body.endswith("</div>"), "fixture drift: the body does not end with its slide root"
+    return body[: -len("</div>")] + f"<script>{script}</script></div>"
 
 
 def _document(body: str, *, css: str = DECK_CSS) -> str:
@@ -476,6 +662,40 @@ def _is(pixel: tuple[int, int, int, int], colour: str) -> bool:
     )
 
 
+def _rgba(colour: str) -> tuple[float, float, float, float]:
+    """The channels and alpha of a computed ``rgb(…)`` or ``rgba(…)`` colour."""
+    match = re.fullmatch(r"rgba?\(([^)]*)\)", colour.strip())
+    assert match, f"not a computed rgb() colour: {colour!r}"
+    channels = [float(part) for part in match.group(1).replace("/", ",").split(",")]
+    return channels[0], channels[1], channels[2], channels[3] if len(channels) > 3 else 1.0
+
+
+def _composite(colour: str, ground: str) -> tuple[int, int, int]:
+    """``colour`` (computed, perhaps translucent) painted over the opaque ``ground``."""
+    red, green, blue, alpha = _rgba(colour)
+    under = _rgba(ground)
+    return tuple(
+        int(round(channel * alpha + beneath * (1 - alpha)))
+        for channel, beneath in zip((red, green, blue), under[:3])
+    )
+
+
+def _channels(hex_colour: str | None) -> tuple[int, int, int] | None:
+    if hex_colour is None:
+        return None
+    return int(hex_colour[0:2], 16), int(hex_colour[2:4], 16), int(hex_colour[4:6], 16)
+
+
+def _near(colour: tuple[int, int, int] | None, expected: tuple[int, int, int]) -> bool:
+    return colour is not None and all(
+        abs(channel - want) <= COLOUR_TOLERANCE for channel, want in zip(colour, expected)
+    )
+
+
+def _text_runs(shape: Shape) -> list:
+    return [run for para in shape.paras for run in para.runs if run.text.strip()]
+
+
 def _only(shapes: list[Shape], label: str, what: str) -> tuple[int, Shape]:
     """The one text item holding an item's label, and its spTree index."""
     found = [
@@ -599,6 +819,52 @@ def image_markers() -> Iterator[Exported]:
     yield Exported(pptx=pptx, shapes=slide_shapes(pptx), geometry={"markers": markers})
 
 
+@pytest.fixture(scope="module")
+def backdrop() -> Iterator[Exported]:
+    """The translucent-marker panel exported once, with the colours the browser paints."""
+    css = DECK_CSS + BACKDROP_CSS
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx = _export(BACKDROP_BODY, monkeypatch, css=css)
+    document = _document(BACKDROP_BODY, css=css)
+    markers = {
+        list_id: browser_each_pseudo(document, f"#{list_id} li", "marker")[0]
+        for list_id in BACKDROP_LISTS
+    }
+    disc = markers["lm-on-white"]
+    assert disc is not None and disc["ink"] is not None, (
+        f"fixture drift: the panel's disc paints nothing: {disc}"
+    )
+    ink = disc["ink"]
+    yield Exported(
+        pptx=pptx,
+        shapes=slide_shapes(pptx),
+        geometry={
+            "markers": markers,
+            "panel": browser_style(document, ".lm-panel"),
+            "item": browser_style(document, "#lm-on-white li"),
+            "disc_pixel": browser_pixel(document, ink["x"] + ink["w"] / 2, ink["y"] + ink["h"] / 2),
+        },
+    )
+
+
+@pytest.fixture(scope="module")
+def boxed_images() -> Iterator[Exported]:
+    """The image markers whose items are pictures of their own boxes, exported once."""
+    css = DECK_CSS + BOXED_IMAGE_CSS
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx = _export(BOXED_IMAGE_BODY, monkeypatch, css=css)
+    document = _document(BOXED_IMAGE_BODY, css=css)
+    markers = {
+        list_id: browser_each_pseudo(document, f"#{list_id} li", "marker")[0]
+        for list_id in BOXED_IMAGE_LISTS
+    }
+    for list_id, marker in markers.items():
+        assert marker is not None and marker["text"] == "", (
+            f"fixture drift: #{list_id}'s marker is no image marker: {marker}"
+        )
+    yield Exported(pptx=pptx, shapes=slide_shapes(pptx), geometry={"markers": markers})
+
+
 def _marked(exported: Exported, list_id: str) -> list[tuple[dict, str]]:
     """The markers of one list of the kinds slide, each with its item's label."""
     return list(zip(exported.geometry["markers"][list_id], KINDS[list_id].labels))
@@ -679,6 +945,17 @@ class TestOrderedListMarkers:
         """
         shapes = kinds.shapes
         for marker, label in _marked(kinds, "lm-reversed"):
+            _assert_outside_marker(shapes, marker, f"the {label!r} item's marker")
+
+    def test_a_value_attribute_renumbers_the_list_from_it(self, kinds: Exported) -> None:
+        """``<li value="7">`` in an ``<ol>`` reads "1.", "7.", "8.", as Chrome numbers it.
+
+        The item's ``value`` sets its own number and the count goes on from it:
+        Chrome's text, never counted by the export, each marker an outside
+        marker at its glyphs.
+        """
+        shapes = kinds.shapes
+        for marker, label in _marked(kinds, "lm-value"):
             _assert_outside_marker(shapes, marker, f"the {label!r} item's marker")
 
 
@@ -807,6 +1084,61 @@ class TestMarkerStyle:
     def _label_runs(shapes: list[Shape], label: str) -> list:
         _, item = _only(shapes, label, f"the {label!r} item")
         return [run for para in item.paras for run in para.runs if run.text.strip()]
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestOutsideMarkerBackdrop:
+    def test_an_outside_marker_is_composited_over_what_its_item_sits_on(
+        self, backdrop: Exported
+    ) -> None:
+        """A translucent outside marker is blended over its item's parent, not its item's box.
+
+        Chrome lays an outside marker out before its item's border box, so the
+        item's own background is never under it: beside a white item on a navy
+        panel, both in ``rgba(0, 0, 0, 0.5)``, the browser paints the disc and
+        the "1." navy-blended and the item's text white-blended. The fixture's
+        reading of the browser is checked against a screenshot sample in the
+        disc's middle. Each marker run is the colour composited over the
+        panel, and each item's text the colour composited over the white,
+        within 6 per channel.
+        """
+        panel = backdrop.geometry["panel"]["backgroundColor"]
+        item_ground = backdrop.geometry["item"]["backgroundColor"]
+        disc = backdrop.geometry["markers"]["lm-on-white"]
+        over_panel = _composite(disc["style"]["color"], panel)
+        over_item = _composite(disc["style"]["color"], item_ground)
+        assert not _near(over_item, over_panel), (
+            f"fixture drift: over the panel {over_panel} and over the item {over_item} are alike"
+        )
+        assert _near(backdrop.geometry["disc_pixel"], over_panel), (
+            f"fixture drift: the browser paints the disc {backdrop.geometry['disc_pixel']}, "
+            f"not {over_panel} over the panel"
+        )
+        shapes = backdrop.shapes
+
+        wrong = []
+        for list_id, label in BACKDROP_LISTS.items():
+            marker = backdrop.geometry["markers"][list_id]
+            expected = _composite(marker["style"]["color"], panel)
+            found = _items_on(shapes, marker)
+            assert len(found) == 1, (
+                f"#{list_id}'s marker is not one text item on its browser box {_rect(marker)}:\n"
+                f"{_describe(shapes)}"
+            )
+            for run in _text_runs(shapes[found[0]]):
+                if not _near(_channels(run.color), expected):
+                    wrong.append(
+                        f"#{list_id}'s marker run {run.text!r} is {run.color}, not {expected}"
+                    )
+            _, item = _only(shapes, label, f"#{list_id}'s item")
+            item_expected = _composite(backdrop.geometry["item"]["color"], item_ground)
+            for run in _text_runs(item):
+                if not _near(_channels(run.color), item_expected):
+                    wrong.append(
+                        f"#{list_id}'s item run {run.text!r} is {run.color}, not {item_expected}"
+                    )
+        assert not wrong, "\n".join([*wrong, _describe(shapes)])
 
 
 # ---------------------------------------------------------------------------
@@ -1015,6 +1347,48 @@ class TestImageMarkers:
             stand_ins = [shapes[position].text for position in _items_on(shapes, marker)]
             assert stand_ins == [], f"{what} is drawn as text {stand_ins}"
 
+    @pytest.mark.parametrize("list_id", BOXED_IMAGE_LISTS)
+    def test_an_image_marker_its_items_picture_holds_is_drawn_once(
+        self, boxed_images: Exported, list_id: str
+    ) -> None:
+        """An image marker inside its item's own picture is in that picture alone.
+
+        An item whose background is a gradient is a picture of its own box,
+        which shows the marker it holds: one inside the item's box, and one
+        outside it but inside the reach of the item's shadow. Exactly one
+        picture holds the marker's pixels (at least 90% of the 32x32 of a 2x
+        capture), it covers the marker's browser box, and the marker's middle
+        is the marker's colour in it.
+        """
+        marker = boxed_images.geometry["markers"][list_id]
+        holding = []
+        for shape in boxed_images.shapes:
+            if shape.kind != "picture" or not shape.image:
+                continue
+            image = Image.open(BytesIO(shape.image)).convert("RGBA")
+            painted = sum(1 for pixel in image.getdata() if _is(pixel, IMAGE_COLOUR))
+            if painted >= IMAGE_PIXEL_SHARE * IMAGE_PIXELS:
+                holding.append((shape, image))
+        covering = [
+            (shape, image)
+            for shape, image in holding
+            if shape.x <= marker["x"] + RECT_TOLERANCE_PX
+            and shape.y <= marker["y"] + RECT_TOLERANCE_PX
+            and shape.x + shape.w >= _right(marker) - RECT_TOLERANCE_PX
+            and shape.y + shape.h >= marker["y"] + marker["h"] - RECT_TOLERANCE_PX
+        ]
+        assert len(covering) == 1, (
+            f"#{list_id}'s image marker {_rect(marker)}: {len(covering)} pictures over it hold its "
+            f"pixels, expected exactly one:\n{_describe(boxed_images.shapes)}"
+        )
+        shape, image = covering[0]
+        column = int((marker["x"] + marker["w"] / 2 - shape.x) / shape.w * image.width)
+        row = int((marker["y"] + marker["h"] / 2 - shape.y) / shape.h * image.height)
+        assert _is(image.getpixel((column, row)), IMAGE_COLOUR), (
+            f"#{list_id}'s picture does not show the marker at the marker's middle: "
+            f"{image.getpixel((column, row))}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Items with no marker
@@ -1185,3 +1559,189 @@ class TestMarkersInAHostileRealm:
             "the hostile deck's list does not export as its benign twin's:\n"
             f"hostile:\n{_describe(slide_shapes(hostile))}\nbenign:\n{_describe(benign_shapes)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Nothing the export adds stays in the page it reads
+# ---------------------------------------------------------------------------
+
+
+def _leftover_runs(pptx: bytes) -> list[tuple[str, str | None]]:
+    """Every text run of the slide, (text, colour), in spTree order."""
+    return [
+        (run.text, run.color)
+        for shape in slide_shapes(pptx)
+        if shape.kind == "text"
+        for run in _text_runs(shape)
+    ]
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestNothingLeftInThePage:
+    def _browser_colours(self, document: str) -> dict:
+        """What the browser paints each list's markers and items in, guarded against green."""
+        colours = {}
+        for list_id in LEFTOVER_LISTS:
+            markers = browser_each_pseudo(document, f"#{list_id} li", "marker")
+            item = browser_style(document, f"#{list_id} li")
+            colours[list_id] = {"markers": markers, "item": _hex(item["color"])}
+            painted = [_hex(marker["style"]["color"]) for marker in markers] + [
+                colours[list_id]["item"]
+            ]
+            assert LEFTOVER_GREEN not in painted, (
+                f"fixture drift: the browser paints #{list_id} green ({painted}) before any export"
+            )
+        return colours
+
+    def test_no_probe_is_left_in_the_page_while_it_is_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rule that turns lists green while anything follows body leaves the export's colours.
+
+        ``html > body:not(:last-child) li { color: #00FF00 !important }``
+        matches only while a node the export added to the document element (a
+        marker probe, the pristine-realm iframe) is still there. Every such
+        node is taken off before the walk reads a style, so the outside
+        markers, the inside marker's token and every item's text keep the
+        colours the browser paints them in, and no run on the slide is green.
+        """
+        css = DECK_CSS + KINDS_CSS + LEFTOVER_DETECTOR_CSS
+        colours = self._browser_colours(_document(LEFTOVER_BODY, css=css))
+        pptx = _export(LEFTOVER_BODY, monkeypatch, css=css)
+        shapes = slide_shapes(pptx)
+
+        wrong = [
+            f"run {text!r} is green"
+            for text, colour in _leftover_runs(pptx)
+            if colour == LEFTOVER_GREEN
+        ]
+        for marker, label in zip(
+            colours["lm-left-outside"]["markers"], LEFTOVER_LISTS["lm-left-outside"]
+        ):
+            found = _items_on(shapes, marker)
+            assert len(found) == 1, f"the {label!r} item's marker is {found}:\n{_describe(shapes)}"
+            for run in _text_runs(shapes[found[0]]):
+                if run.color != _hex(marker["style"]["color"]):
+                    wrong.append(f"the {label!r} item's marker run {run.text!r} is {run.color}")
+        inside_marker = colours["lm-left-inside"]["markers"][0]
+        _, inside = _only(shapes, "Inside one", "the inside item")
+        line = "".join(run.text for run in inside.paras[0].runs) if inside.paras else ""
+        if not line.startswith(_trimmed(inside_marker)):
+            wrong.append(f"the inside item's line {line!r} does not open with its marker")
+        painted = {_hex(inside_marker["style"]["color"]), colours["lm-left-inside"]["item"]}
+        for run in _text_runs(inside):
+            if run.color not in painted:
+                wrong.append(f"the inside item's run {run.text!r} is {run.color}, not {painted}")
+        for list_id, labels in LEFTOVER_LISTS.items():
+            for label in labels:
+                _, item = _only(shapes, label, f"the {label!r} item")
+                for run in _text_runs(item):
+                    if label in run.text and run.color != colours[list_id]["item"]:
+                        wrong.append(f"the {label!r} item's run {run.text!r} is {run.color}")
+        assert not wrong, "\n".join([*wrong, _describe(shapes)])
+
+    def test_a_page_that_takes_away_removal_keeps_its_colours(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Slide script that disables ``remove`` and ``removeChild`` cannot keep a probe in.
+
+        With the same green-while-anything-follows-body rule, a page whose
+        script replaces ``Element.prototype.remove`` and
+        ``Node.prototype.removeChild`` with ones that do nothing exports every
+        run in the colour its benign twin (the same page without the script)
+        exports it in, and none is green: the export adds and removes its
+        nodes through a realm no page script has run in.
+        """
+        css = DECK_CSS + KINDS_CSS + LEFTOVER_DETECTOR_CSS
+        self._browser_colours(_document(LEFTOVER_BODY, css=css))
+        benign, failures = export_slides([LEFTOVER_BODY], css=css, monkeypatch=monkeypatch)
+        assert failures == [] and benign, f"the benign twin did not export: {failures}"
+        hostile, failures = export_slides(
+            [_with_script(LEFTOVER_BODY, DISABLE_REMOVAL_SCRIPT)], css=css, monkeypatch=monkeypatch
+        )
+        assert failures == [] and hostile, f"the page without removal did not export: {failures}"
+
+        benign_runs = _leftover_runs(benign)
+        hostile_runs = _leftover_runs(hostile)
+        assert all(colour != LEFTOVER_GREEN for _, colour in benign_runs), (
+            f"the benign twin exports green runs: {benign_runs}"
+        )
+        assert hostile_runs == benign_runs, (
+            f"a page without removal exports its runs as {hostile_runs}; its benign twin as "
+            f"{benign_runs}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# What the export cannot read of a marker it says
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestMarkerReadFailures:
+    def test_marker_widths_that_cannot_be_measured_are_announced(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A page that lies about its probes' sizes exports its markers, and the export says so.
+
+        Its slide script makes every offscreen probe (left: -10000px) report
+        NaN sizes, so no marker's advance can be measured. The markers still
+        export as text items on their browser boxes, and one ``[html2pptx]
+        list markers:`` line counts the markers left unmeasured.
+        """
+        css = DECK_CSS + KINDS_CSS
+        markers = browser_each_pseudo(
+            _document(UNMEASURED_BODY, css=css), "#lm-unmeasured li", "marker"
+        )
+        _guard_markers(markers, ("1. ", "2. "), "the unmeasured list")
+        capsys.readouterr()
+        pptx, failures = export_slides(
+            [_with_script(UNMEASURED_BODY, LYING_PROBES_SCRIPT)], css=css, monkeypatch=monkeypatch
+        )
+        stderr = capsys.readouterr().err
+        assert failures == [] and pptx, f"the lying page did not export: {failures}"
+
+        lines = [line for line in stderr.splitlines() if UNMEASURED_LINE in line]
+        assert len(lines) == 1 and "2 " in lines[0], (
+            f"expected one {UNMEASURED_LINE!r} line counting 2 markers, got {lines}"
+        )
+        shapes = slide_shapes(pptx)
+        for marker in markers:
+            on = [shapes[position].text for position in _items_on(shapes, marker)]
+            assert on == [_trimmed(marker)], (
+                f"the unmeasured marker {marker['text']!r} is drawn as {on}:\n{_describe(shapes)}"
+            )
+
+    def test_unreadable_marker_boxes_leave_the_markers_out_and_say_so(self, tmp_path: Path) -> None:
+        """A session whose box reads of ::marker nodes reject exports the slide without them.
+
+        Every ``DOM.getBoxModel`` of a marker node fails, and nothing else does.
+        No marker is drawn (no text item reads as one), the ``[html2pptx]
+        pseudo-elements:`` count line says the box reads failed, the items'
+        text exports, and the slide's ``::before`` is still read and walked.
+        """
+        document = tmp_path / "slide.html"
+        css = DECK_CSS + KINDS_CSS + UNREAD_BOXES_CSS
+        document.write_text(_document(UNREAD_BOXES_BODY, css=css), encoding="utf-8")
+
+        result = node_json(UNREAD_BOXES_SCRIPT % {"document": json.dumps(str(document))})
+
+        lines = [line for line in result["lines"] if UNREAD_BOXES_LINE in line]
+        assert len(lines) == 1 and "2 box read(s) failed" in lines[0], (
+            f"expected one count line with 2 failed box reads, got {lines}"
+        )
+        assert result["summary"]["pseudoElements"] == {"read": 1, "walked": 1}, (
+            f"the ::before was not read and walked alone: {result['summary']['pseudoElements']}"
+        )
+        shapes = slide_shapes(base64.b64decode(result["pptx"]))
+        marker_like = [
+            shape.text
+            for shape in shapes
+            if shape.kind == "text" and MARKER_LIKE.match(_normalised(shape.text))
+        ]
+        assert marker_like == [], f"markers whose boxes were unread are drawn: {marker_like}"
+        for label in ("Unread one", "Unread two"):
+            _, item = _only(shapes, label, f"the {label!r} item")
+            assert _normalised(item.text) == label, f"the {label!r} item reads {item.text!r}"

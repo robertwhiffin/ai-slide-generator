@@ -52,6 +52,7 @@ export const DOM_ACCESS_SOURCE = `
   // DOM reads through primitives from a src-less iframe's realm, which no page script has run in.
   function capturePristineDomAccess() {
     let frame = null;
+    let removeFrame = null;
     try {
       frame = document.createElement('iframe');
       frame.style.display = 'none';
@@ -60,6 +61,9 @@ export const DOM_ACCESS_SOURCE = `
       const realm = frame.contentWindow;
       // A replaced createElement/contentWindow could hand back THIS realm; distinct intrinsics is the check.
       if (!realm || realm === window || realm.Element === window.Element) return null;
+      // The frame is taken off through its own realm: page script can make the
+      // page's remove do nothing, and a frame left after body restyles the page.
+      removeFrame = realm.Element.prototype.remove;
       const describe = realm.Object.getOwnPropertyDescriptor;
       const firstChild = describe(realm.Element.prototype, 'firstElementChild');
       const nextSibling = describe(realm.Element.prototype, 'nextElementSibling');
@@ -91,8 +95,16 @@ export const DOM_ACCESS_SOURCE = `
       // How the snapshot names its capture targets, once it has read everything (snapshot.mjs nameCaptureTargets).
       const setAttribute = realm.Element.prototype.setAttribute;
       const removeAttribute = realm.Element.prototype.removeAttribute;
-      // How the snapshot reads the marker the DevTools protocol put on each pseudo-element host (snapshot.mjs pseudoHostsOf).
+      // How the snapshot reads the attribute the DevTools protocol put on each pseudo-element host (snapshot.mjs readPseudoHosts).
       const getAttribute = realm.Element.prototype.getAttribute;
+      // How a pass adds the nodes it measures with and takes them off again
+      // (snapshot_text.mjs measureProbes): page script can take away the page
+      // realm's own, and a node left in the page restyles what the pass reads.
+      // Document's methods are called with this realm's document as receiver.
+      const createElement = realm.Document.prototype.createElement;
+      const createTextNode = realm.Document.prototype.createTextNode;
+      const appendChild = realm.Node.prototype.appendChild;
+      const removeNode = realm.Element.prototype.remove;
       if (typeof firstChild.get !== 'function' ||
           typeof nextSibling.get !== 'function' ||
           typeof tag.get !== 'function' ||
@@ -116,7 +128,11 @@ export const DOM_ACCESS_SOURCE = `
           typeof rectHeight.get !== 'function' ||
           typeof setAttribute !== 'function' ||
           typeof removeAttribute !== 'function' ||
-          typeof getAttribute !== 'function') return null;
+          typeof getAttribute !== 'function' ||
+          typeof createElement !== 'function' ||
+          typeof createTextNode !== 'function' ||
+          typeof appendChild !== 'function' ||
+          typeof removeNode !== 'function') return null;
       return {
         pristine: true,
         firstElementChild: (el) => firstChild.get.call(el),
@@ -147,13 +163,20 @@ export const DOM_ACCESS_SOURCE = `
         setAttribute: (el, name, value) => setAttribute.call(el, name, value),
         removeAttribute: (el, name) => removeAttribute.call(el, name),
         getAttribute: (el, name) => getAttribute.call(el, name),
+        createElement: (name) => createElement.call(document, name),
+        createTextNode: (text) => createTextNode.call(document, text),
+        appendChild: (parent, child) => appendChild.call(parent, child),
+        remove: (el) => removeNode.call(el),
       };
     } catch (e) {
       return null;
     } finally {
       // The captured accessors keep working once the frame is gone, so the export DOM never contains it.
       if (frame) {
-        try { frame.remove(); } catch (e) { /* already detached — nothing to undo */ }
+        try {
+          if (typeof removeFrame === 'function') removeFrame.call(frame);
+          else frame.remove();
+        } catch (e) { /* already detached — nothing to undo */ }
       }
     }
   }
@@ -182,6 +205,10 @@ export const DOM_ACCESS_SOURCE = `
     setAttribute: (el, name, value) => el.setAttribute(name, value),
     removeAttribute: (el, name) => el.removeAttribute(name),
     getAttribute: (el, name) => el.getAttribute(name),
+    createElement: (name) => document.createElement(name),
+    createTextNode: (text) => document.createTextNode(text),
+    appendChild: (parent, child) => parent.appendChild(child),
+    remove: (el) => el.remove(),
   };
 
   // One capture per pass, made on first use, so no pass re-enters the iframe per call.

@@ -292,14 +292,21 @@ async function snapshotPage(config, pseudoData) {
     return { color: blendOver(layer.color, layer.alpha / alpha, backdrop.color), alpha, group: backdrop.group };
   }
 
-  // backdropInside(backdrop, s) -> the backdrop of the content inside the
-  // element whose computed style is `s`, given the backdrop it sits on.
-  function backdropInside(backdrop, s) {
-    let inside = backdrop;
+  // groupInside(backdrop, s) -> the backdrop inside the opacity group the
+  // element whose computed style is `s` opens, given the backdrop it sits on;
+  // that backdrop itself when it opens none. What the element paints, its own
+  // background included, paints inside the group.
+  function groupInside(backdrop, s) {
     const opacity = opacityOf(s);
-    if (opacity < 1) {
-      inside = { color: TRANSPARENT_LAYER.color, alpha: TRANSPARENT_LAYER.alpha, group: { opacity, beneath: inside } };
-    }
+    if (!(opacity < 1)) return backdrop;
+    return { color: TRANSPARENT_LAYER.color, alpha: TRANSPARENT_LAYER.alpha, group: { opacity, beneath: backdrop } };
+  }
+
+  // backdropInside(backdrop, s) -> the backdrop of the content inside the
+  // element whose computed style is `s`, given the backdrop it sits on: its
+  // opacity group (groupInside), then its own background over it.
+  function backdropInside(backdrop, s) {
+    let inside = groupInside(backdrop, s);
     if (s.visibility !== 'visible') return inside;
     const colour = parseColour(s.backgroundColor);
     if (colour) inside = paintOver(colour, inside);
@@ -1733,23 +1740,36 @@ async function snapshotPage(config, pseudoData) {
     return hidden;
   }
 
+  // What a capture of `element` paints, given the bounds of its box: those
+  // bounds, and for a pseudo-element all it generates, since an icon may stand
+  // out of its line.
+  function paintedBounds(element, bounds) {
+    const extent = isPseudo(element) ? element.extent : null;
+    if (!extent) return bounds;
+    return {
+      left: Math.min(bounds.left, extent.left),
+      top: Math.min(bounds.top, extent.top),
+      right: Math.max(bounds.right, extent.right),
+      bottom: Math.max(bounds.bottom, extent.bottom),
+    };
+  }
+
+  // Whether a capture's picture (or null) covers bounds {left, top, right,
+  // bottom}, to within layout rounding.
+  function holds(capture, bounds) {
+    return Boolean(capture) &&
+      capture.x <= bounds.left + CUT_EPSILON_PX && capture.y <= bounds.top + CUT_EPSILON_PX &&
+      capture.x + capture.w >= bounds.right - CUT_EPSILON_PX &&
+      capture.y + capture.h >= bounds.bottom - CUT_EPSILON_PX;
+  }
+
   // A capture of `element` (computed style `s`) in `mode`, for what `clip`
-  // shows of `bounds`, and its picture item at `order`. Nothing when the clip
-  // hides it all.
+  // shows of `bounds`, and its picture item at `order`. Returns the Capture,
+  // or null when the clip hides it all.
   function pushCapture(element, s, mode, bounds, order, clip) {
     const generated = isPseudo(element);
-    // A pseudo-element's picture holds all it generates: an icon may stand out of its line.
-    const extent = generated ? element.extent : null;
-    const painted = extent
-      ? {
-        left: Math.min(bounds.left, extent.left),
-        top: Math.min(bounds.top, extent.top),
-        right: Math.max(bounds.right, extent.right),
-        bottom: Math.max(bounds.bottom, extent.bottom),
-      }
-      : bounds;
-    const shown = shownPart(painted, clip);
-    if (!shown) return;
+    const shown = shownPart(paintedBounds(element, bounds), clip);
+    if (!shown) return null;
     const id = 'c' + nextCaptureSeq++;
     const x = shown.left;
     const y = shown.top;
@@ -1778,6 +1798,7 @@ async function snapshotPage(config, pseudoData) {
     if (!generated) captureTargets.push({ element, capture, hidden });
     items.push({ kind: 'image', id: nextItemId++, order, x, y, w, h, src: null, captureId: id, alpha: 1, rotate: null });
     stats.images++;
+    return capture;
   }
 
   // The snapshot's one lasting write, made once every read is done (the metric
@@ -2005,24 +2026,33 @@ async function snapshotPage(config, pseudoData) {
   }
 
   // A list item's ::marker, drawn when the walk visits its item (`paint` and
-  // `seq` its item's, `walk` the context of its item's inline content): the
-  // first thing the item's first line paints, so ahead of its decorations and
-  // text, at paint + [4, 0, seq, 0], which sorts before both.
+  // `seq` its item's): the first thing the item's first line paints, so ahead
+  // of its decorations and text, at paint + [4, 0, seq, 0], which sorts before
+  // both. `walk` is the context of its item's inline content, its backdrop
+  // what the item sits on inside the item's opacity group: Chrome lays an
+  // outside marker out before its item's border box, so the item's own
+  // background is never under it. `picture` is the item's own box-only
+  // capture, or null.
   // * Outside its item, a marker with text is a single-line text item of its
   //   own (snapshot_text.mjs markerBlock).
   // * Inside, its text is a token of its item's first line, or a segment of
-  //   it, which the text layout lays out with the item's text (collectRuns).
+  //   it, which the text layout lays out with its item's text (collectRuns),
+  //   over the item's background.
   // * A marker that paints an image is a box-only picture of its box, which
   //   capture.cjs isolates: its item shown with nothing of its own painted.
+  //   The item's own picture holds that image already where it holds all the
+  //   marker shows, so the marker then gets no picture of its own.
   // Never a native bullet: the slide's text has none.
-  function emitMarker(element, paint, seq, walk) {
+  function emitMarker(element, paint, seq, walk, picture) {
     const pseudo = pseudoHosts.get(element);
     const marker = pseudo ? pseudo.marker : null;
     if (!marker) return;
     stats.pseudoElements++;
     const order = paint.concat([4, 0, seq, 0]);
     if (marker.list.image && marker.style.visibility === 'visible') {
-      pushCapture(marker, marker.style, 'box', boundsOfRect(marker.rect), order, walk.clip);
+      const bounds = boundsOfRect(marker.rect);
+      const shown = shownPart(paintedBounds(marker, bounds), walk.clip);
+      if (shown && !holds(picture, shown)) pushCapture(marker, marker.style, 'box', bounds, order, walk.clip);
     }
     if (marker.list.inside) return;
     const block = textLayout.markerBlock(marker, walk);
@@ -2147,12 +2177,14 @@ async function snapshotPage(config, pseudoData) {
     // the text layout collects it with that block (pushGroup), so its bounding
     // rect, which spans every line it is on, is never a box of its own.
     // A box-only capture is the element's box: no native shape beside it.
+    // A box-only capture of the element's own box, which a list marker may lie in.
+    let picture = null;
     if (s.visibility === 'visible' && !textLayout.isInlineBox(name, s)) {
       const box = boxGeometry(element, clips.rect || rectOf(element), frame);
       if (box && replaced) {
         emitReplaced(element, name, s, box, opacity, place, seq, clips.box);
       } else if (box && element !== slideRoot && capturesBox(s, opacity, element)) {
-        pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box);
+        picture = pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box);
       } else if (box) {
         emitBox(s, box, opacity, place.box, element === slideRoot, clips.box);
       }
@@ -2161,7 +2193,9 @@ async function snapshotPage(config, pseudoData) {
     const backdrop = backdropInside(state.backdrop, s);
     const decoration = textLayout.decorationOf(state.decoration, element, s);
     const inline = { opacity, frame, backdrop, decoration, clip: clips.content };
-    emitMarker(element, place.paint, seq, inline);
+    // An outside marker is inside its item's opacity group but not on its
+    // background (emitMarker): its backdrop is what the item sits on.
+    emitMarker(element, place.paint, seq, { ...inline, backdrop: groupInside(state.backdrop, s) }, picture);
     collectText(element, s, place.paint, seq, inline);
     pushChildren(element, {
       ctx: place.ctx,

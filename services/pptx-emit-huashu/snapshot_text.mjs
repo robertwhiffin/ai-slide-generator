@@ -116,9 +116,9 @@
 //  */
 
 // Runs in the page, inside the snapshot IIFE, after DOM_ACCESS_SOURCE: domAccess,
-// childNodesOf, reportCollectionLoss, DOM_ACCESS_LOG_PREFIX and the two limits are
-// its free names. It is stringified, so it closes over nothing on the Node side;
-// what it needs from the snapshot arrives in `env`:
+// childNodesOf, queryOne, reportCollectionLoss, DOM_ACCESS_LOG_PREFIX and the two
+// limits are its free names. It is stringified, so it closes over nothing on the
+// Node side; what it needs from the snapshot arrives in `env`:
 //   replaced        the Set of tag names whose content is drawn, not laid out as text;
 //   opacityOf       computed style -> its own opacity;
 //   backdropInside  (backdrop, style) -> the backdrop of the content inside that element;
@@ -921,6 +921,24 @@ function createTextLayout(env) {
     return false;
   }
 
+  // The source of generated text's tokens (a pseudo-element's, a marker's):
+  // what pushTextToken and dropToken read, plus the white-space `mode` its
+  // text is written in. Generated text is never hidden text.
+  function generatedSource(context, scale, segment) {
+    const ps = context.style;
+    const mode = whiteSpaceOf(ps);
+    const style = runStyle(context, scale);
+    return {
+      style,
+      face: probeFaceOf(ps, style.family, scale),
+      tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
+      segment,
+      recordsHidden: false,
+      clip: context.clip,
+      mode,
+    };
+  }
+
   function pushTextToken(source, text, rect, collapsible, tokens) {
     tokens.push({
       kind: 'text', text, rect, style: source.style, face: source.face, collapsible, tabSize: source.tabSize,
@@ -1043,16 +1061,8 @@ function createTextLayout(env) {
   // is no part of the page's innerText, so it is never hidden text.
   function readGeneratedTokens(piece, scale, tokens, words) {
     const ps = piece.context.style;
-    const mode = whiteSpaceOf(ps);
-    const style = runStyle(piece.context, scale);
-    const source = {
-      style,
-      face: probeFaceOf(ps, style.family, scale),
-      tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
-      segment: words.segment,
-      recordsHidden: false,
-      clip: piece.context.clip,
-    };
+    const source = generatedSource(piece.context, scale, words.segment);
+    const mode = source.mode;
     const paints = ps.visibility === 'visible' && piece.context.opacity > 0;
     const boxes = piece.piece.boxes;
     if (!spend(boxes.length)) return;
@@ -1139,17 +1149,9 @@ function createTextLayout(env) {
   function readMarkerTokens(piece, scale, tokens, words) {
     const marker = piece.marker;
     const ps = piece.context.style;
-    const mode = whiteSpaceOf(ps);
-    const style = runStyle(piece.context, scale);
+    const source = generatedSource(piece.context, scale, words.segment);
+    const mode = source.mode;
     const parts = markerParts(marker, scale);
-    const source = {
-      style,
-      face: probeFaceOf(ps, style.family, scale),
-      tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
-      segment: words.segment,
-      recordsHidden: false,
-      clip: piece.context.clip,
-    };
     const glyphs = marker.list.glyphs;
     const trailing = marker.list.trailing;
     const paints = ps.visibility === 'visible' && piece.context.opacity > 0;
@@ -1218,20 +1220,11 @@ function createTextLayout(env) {
       baseline: null,
       clip: walk.clip,
     };
-    const style = runStyle(context, scale);
-    const mode = whiteSpaceOf(ps);
-    const token = {
-      kind: 'text',
-      text: generatedText(glyphs, mode),
-      rect: parts.glyphs,
-      style,
-      face: probeFaceOf(ps, style.family, scale),
-      collapsible: false,
-      tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
-      segment: 0,
-      shape: marker.list.symbol,
-    };
-    const line = assembleLine({ tokens: [token] }, String(ps.lineHeight));
+    const source = generatedSource(context, scale, 0);
+    const tokens = [];
+    pushTextToken(source, generatedText(glyphs, source.mode), parts.glyphs, false, tokens);
+    tokens[0].shape = marker.list.symbol;
+    const line = assembleLine({ tokens }, String(ps.lineHeight));
     if (!line || !line.runs.length) return null;
     queueRuns([line], 'right', walk.frame);
     const width = parts.glyphs.right - parts.glyphs.left;
@@ -1674,25 +1667,28 @@ function createTextLayout(env) {
   // Range) down to that baseline. Null when the page would not take them,
   // which is announced with `loss`, what the slide then exports without. The
   // text goes in as a text node: page script can take away the textContent
-  // setter (hostile_text_nodes).
+  // setter (hostile_text_nodes). Every probe is made, put in and taken off
+  // through the pristine realm (dom_access.mjs): page script can make the
+  // page's own remove do nothing, and a probe left after body would restyle
+  // what the walk reads (html > body:not(:last-child)).
   function measureProbes(probes, loss) {
     const elements = [];
     const parts = [];
     let sizes = [];
     try {
-      const root = document.documentElement;
+      const root = queryOne('html');
       for (let index = 0; index < probes.length; index++) {
-        const element = document.createElement('div');
-        element.setAttribute('style', PROBE_STYLE + probes[index].css);
+        const element = dom.createElement('div');
+        dom.setAttribute(element, 'style', PROBE_STYLE + probes[index].css);
         let marker = null;
         if (probes[index].baseline) {
-          marker = document.createElement('span');
-          marker.setAttribute('style', BASELINE_MARKER_STYLE);
-          element.appendChild(marker);
+          marker = dom.createElement('span');
+          dom.setAttribute(marker, 'style', BASELINE_MARKER_STYLE);
+          dom.appendChild(element, marker);
         }
-        const text = document.createTextNode(probes[index].text);
-        element.appendChild(text);
-        root.appendChild(element);
+        const text = dom.createTextNode(probes[index].text);
+        dom.appendChild(element, text);
+        dom.appendChild(root, element);
         elements.push(element);
         parts.push({ marker, text });
       }
@@ -1713,7 +1709,7 @@ function createTextLayout(env) {
       sizes = null;
     } finally {
       for (let index = 0; index < elements.length; index++) {
-        try { elements[index].remove(); } catch (e) { /* already detached: nothing to undo */ }
+        try { dom.remove(elements[index]); } catch (e) { /* already detached: nothing to undo */ }
       }
     }
     return sizes;
@@ -1783,10 +1779,20 @@ function createTextLayout(env) {
     const sizes = measureProbes(list.probes, 'this slide exports its list markers at their boxes, ' +
       'trailing space included, and joins each inside one to its line as the browser laid it out');
     if (!sizes) return;
+    let unmeasured = 0;
     for (let index = 0; index < wanted.length; index++) {
       const full = sizes[wanted[index].full].w;
       const glyphs = sizes[wanted[index].glyphs].w;
-      if (full >= 0 && glyphs >= 0) wanted[index].marker.list.advance = { full, glyphs };
+      if (Number.isFinite(full) && Number.isFinite(glyphs) && full >= 0 && glyphs >= 0) {
+        wanted[index].marker.list.advance = { full, glyphs };
+      } else {
+        unmeasured += 1;
+      }
+    }
+    if (unmeasured) {
+      console.warn('[html2pptx] list markers: ' + unmeasured + ' of ' + wanted.length + ' marker width(s) ' +
+        'measured no finite size; those markers are placed at their boxes, trailing space included, ' +
+        'and an inside one joins its line as the browser laid it out');
     }
   }
 

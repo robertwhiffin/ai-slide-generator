@@ -12,7 +12,7 @@
 //        node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box
 //        node measure.cjs <document.html> --mode=fonts
 //        node measure.cjs <document.html> <probes-json> --mode=probe
-//        node measure.cjs <document.html> <point-json> --mode=hit
+//        node measure.cjs <document.html> <point-json> --mode=hit|pixel
 //        node measure.cjs <document.html> <pseudo-json> --mode=each-pseudo
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
 // nothing matches.
@@ -49,6 +49,10 @@
 //                in CSS px and prints {"id":…}: the id of the element the
 //                browser hit-tests there, or of its nearest ancestor that has
 //                one, else null. See measureHit.
+//   --mode=pixel takes, in place of the selector, a point as JSON {"x":…,"y":…}
+//                in CSS px and prints {"r":…,"g":…,"b":…}: the colour of the
+//                device pixel the settled page's screenshot shows there. See
+//                measurePixel.
 //   --mode=each-pseudo takes, in place of the selector, JSON
 //                {"selector":…, "pseudo":"before"|"after"|"marker"} and prints, for
 //                EVERY match of the selector in document order, null when it
@@ -64,7 +68,7 @@
 // browser_each_rect, browser_client_rects, browser_padding_box,
 // browser_each_padding_box, browser_line_boxes, browser_lines, browser_style,
 // browser_text, browser_loaded_weights, browser_probes, browser_hit_id,
-// browser_each_pseudo).
+// browser_pixel, browser_each_pseudo).
 
 const path = require('path');
 const zlib = require('zlib');
@@ -264,6 +268,31 @@ async function measureHit(page, pointArgument) {
     const owner = hit ? hit.closest('[id]') : null;
     return { id: owner ? owner.id : null };
   }, { x: point.x, y: point.y });
+}
+
+// The colour the settled page shows at a point: the device pixel of its
+// screenshot (device scale 2) that covers the CSS px point. A test samples
+// where a glyph or a symbol fully covers its pixels, so the colour is what the
+// browser composited there, never an anti-aliased edge.
+async function measurePixel(page, pointArgument) {
+  let point;
+  try {
+    point = JSON.parse(pointArgument);
+  } catch (error) {
+    return { error: `the point is not JSON: ${error.message}` };
+  }
+  if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+    return { error: 'the point must be JSON {"x": number, "y": number}' };
+  }
+  const shot = decodePng(await page.screenshot({ type: 'png' }));
+  const scale = shot.width / page.viewportSize().width;
+  const column = Math.floor(point.x * scale);
+  const row = Math.floor(point.y * scale);
+  if (!(column >= 0 && column < shot.width && row >= 0 && row < shot.height)) {
+    return { error: `the point ${point.x}, ${point.y} is outside the ${shot.width}x${shot.height} screenshot` };
+  }
+  const at = (row * shot.width + column) * shot.channels;
+  return { r: shot.pixels[at], g: shot.pixels[at + 1], b: shot.pixels[at + 2] };
 }
 
 // The element's rendered text, line by line, read character by character with a
@@ -797,6 +826,7 @@ const MODES = {
     return measured.error ? measured : measured.sizes;
   },
   hit: measureHit,
+  pixel: measurePixel,
   'each-pseudo': async (page, argument) => {
     const measured = await measurePseudo(page, argument);
     return measured.error ? measured : measured.boxes;
@@ -827,7 +857,7 @@ async function main() {
       '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box\n' +
       '       node measure.cjs <document.html> --mode=fonts\n' +
       '       node measure.cjs <document.html> <probes-json> --mode=probe\n' +
-      '       node measure.cjs <document.html> <point-json> --mode=hit\n' +
+      '       node measure.cjs <document.html> <point-json> --mode=hit|pixel\n' +
       '       node measure.cjs <document.html> <pseudo-json> --mode=each-pseudo',
     );
     process.exit(1);

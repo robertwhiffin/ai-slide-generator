@@ -410,6 +410,20 @@ def browser_hit_id(document_html: str, x: float, y: float) -> str | None:
     return json.loads(_run_measure(document_html, point, "--mode=hit"))["id"]
 
 
+def browser_pixel(document_html: str, x: float, y: float) -> tuple[int, int, int]:
+    """The colour the settled page shows at ``(x, y)``, as ``(r, g, b)``.
+
+    The device pixel of the page's screenshot (device scale 2) that covers the
+    CSS px point. Sample where a glyph or shape fully covers its pixels (the
+    middle of a disc, a wide stroke), so the colour is what the browser
+    composited there and not an anti-aliased edge. The point must lie in the
+    1280x720 viewport.
+    """
+    point = json.dumps({"x": x, "y": y})
+    measured = json.loads(_run_measure(document_html, point, "--mode=pixel"))
+    return measured["r"], measured["g"], measured["b"]
+
+
 def browser_line_boxes(document_html: str, selector: str, index: int = 0) -> list[dict]:
     """The rendered text lines of the ``index``-th match of ``selector``, in reading order.
 
