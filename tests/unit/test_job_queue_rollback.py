@@ -275,7 +275,7 @@ def _graph_result(slides: Any) -> Dict[str, Any]:
                 "raw_html": None,
                 "replacement_info": None,
                 "experiment_url": None,
-                "metadata": {"engine_mode": "graph"},
+                "metadata": {"engine_mode": "graph", "architect_intent": None},
             }
         )
     )
