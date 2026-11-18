@@ -118,8 +118,9 @@
 //   textColour      (backdrop, style) -> 'RRGGBB', the solid colour its text paints;
 //   boxGeometry     (element, rect, frame) -> the element's box | null;
 //   contentBox      (style, box) -> the box inside border and padding | null;
-//   paintsBox       (style, opacity) -> whether the element's box paints anything,
-//                   as a shape or as a box-only capture;
+//   paintsBox       (style, opacity, element) -> whether the element's box paints
+//                   anything, as a shape or as a box-only capture (a pseudo-element
+//                   that generates an image is one);
 //   inlineClip      (clip, element, style, frame) -> the clip of an inline element's
 //                   content, given the clip of the text around it;
 //   shows           (bounds, clip) -> whether the clip shows {left, top, right, bottom};
@@ -438,7 +439,7 @@ function createTextLayout(env) {
         // cut the line whatever its opacity or visibility.
         const edged = hasInlineEdges(cs);
         if (edged) run.push(OPENING_EDGE);
-        if (context.opacity > 0 && cs.visibility === 'visible' && env.paintsBox(cs, context.opacity)) {
+        if (context.opacity > 0 && cs.visibility === 'visible' && env.paintsBox(cs, context.opacity, node)) {
           run.push({ kind: 'decoration', element: node, style: cs, opacity: context.opacity, clip: context.clip });
         }
         if (openChildren(stack, node, context, frame.depth + 1, edged ? CLOSING_EDGE : null)) continue;

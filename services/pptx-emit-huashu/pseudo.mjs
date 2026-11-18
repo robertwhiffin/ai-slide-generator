@@ -34,16 +34,24 @@
 // Every loop is bounded by dom_access.mjs's WALK_STEP_LIMIT (depth) and
 // COLLECTION_ITEM_LIMIT (breadth), as the page-side reads are; meeting a bound
 // is announced on stderr. A read that fails is announced too, and the slide
-// then exports without its pseudo-elements.
+// then exports without its pseudo-elements; so is every marker that could not
+// be written or taken off, and every box read that failed, in one count line.
+//
+// Coordinates. DOM.getBoxModel and DOM.getContentQuads report the viewport's,
+// as getBoundingClientRect and Range rects do; DOMSnapshot reports the
+// document's. Its rects are moved by the document's scroll offset, so a page
+// its slide script scrolled reads as the viewport shows it.
 //
 // /**
 //  * PseudoData = {hosts: Host[], count, truncated}
 //  * Host       = {before: Pseudo|null, after: Pseudo|null}   (index = the host's marker value)
-//  * Pseudo     = {quad: number[8], fragments: number[8][], pieces: Box[][]}
+//  * Pseudo     = {quad: number[8], fragments: number[8][], pieces: Box[][], extent: Rect|null}
 //  *   quad       its border box, four corners clockwise from the top left, CSS px;
 //  *   fragments  its box fragments as quads, in the browser's order;
 //  *   pieces     its text, one piece per layout text object in layout order,
 //  *              each piece its inline text boxes in order;
+//  *   extent     the union of every layout object it generates ({x, y, w, h}): an
+//  *              image it generates may be taller than the line it sits in;
 //  * Box        = {text, x, y, w, h}: the text one box paints and its rect, CSS px.
 //  */
 
@@ -137,14 +145,17 @@ function findHosts(root) {
   return { hosts, marked, truncated };
 }
 
-// backendNodeId -> the pseudo-element's text pieces, from one DOMSnapshot.
-// Each layout object holding text is owned by the pseudo-element node it
-// descends from, within PSEUDO_TEXT_DEPTH_LIMIT; each of its inline text boxes
-// is one Box of its piece, the substring of the layout text it paints.
-function textPiecesOf(snapshot, wanted) {
-  const pieces = new Map();
+// backendNodeId -> {pieces, extent}: what each pseudo-element generates, from
+// one DOMSnapshot. Each layout object is owned by the pseudo-element node it
+// descends from, within PSEUDO_TEXT_DEPTH_LIMIT. Each inline text box of one
+// is a Box of that object's piece, the substring of the layout text it
+// paints; the extent is the union of the owned objects' bounds that have
+// area. Every rect is moved from the document's coordinates to the
+// viewport's, by the document's scroll offset.
+function generatedContentOf(snapshot, wanted) {
+  const content = new Map();
   const documentSnapshot = snapshot && Array.isArray(snapshot.documents) ? snapshot.documents[0] : null;
-  if (!documentSnapshot) return pieces;
+  if (!documentSnapshot) return content;
   const strings = Array.isArray(snapshot.strings) ? snapshot.strings : [];
   const nodes = documentSnapshot.nodes || {};
   const layout = documentSnapshot.layout || {};
@@ -152,18 +163,27 @@ function textPiecesOf(snapshot, wanted) {
   const backendIds = Array.isArray(nodes.backendNodeId) ? nodes.backendNodeId : [];
   const parents = Array.isArray(nodes.parentIndex) ? nodes.parentIndex : [];
   const layoutNodes = Array.isArray(layout.nodeIndex) ? layout.nodeIndex : [];
+  const layoutBounds = Array.isArray(layout.bounds) ? layout.bounds : [];
   const layoutText = Array.isArray(layout.text) ? layout.text : [];
   const boxLayout = Array.isArray(textBoxes.layoutIndex) ? textBoxes.layoutIndex : [];
   const boxBounds = Array.isArray(textBoxes.bounds) ? textBoxes.bounds : [];
   const boxStart = Array.isArray(textBoxes.start) ? textBoxes.start : [];
   const boxLength = Array.isArray(textBoxes.length) ? textBoxes.length : [];
+  const scrollX = Number(documentSnapshot.scrollOffsetX) || 0;
+  const scrollY = Number(documentSnapshot.scrollOffsetY) || 0;
+  // {x, y, w, h} in the viewport, or null for bounds that are not four finite numbers.
+  const viewportRect = (bounds) => {
+    if (!Array.isArray(bounds) || bounds.length < 4) return null;
+    const rect = { x: Number(bounds[0]) - scrollX, y: Number(bounds[1]) - scrollY, w: Number(bounds[2]), h: Number(bounds[3]) };
+    return Number.isFinite(rect.x) && Number.isFinite(rect.y) && rect.w >= 0 && rect.h >= 0 ? rect : null;
+  };
 
   // Snapshot node index -> backendNodeId, for the pseudo-element nodes only.
   const ownerIds = new Map();
   for (let index = 0; index < backendIds.length && index < COLLECTION_ITEM_LIMIT; index++) {
     if (wanted.has(backendIds[index])) ownerIds.set(index, backendIds[index]);
   }
-  if (!ownerIds.size) return pieces;
+  if (!ownerIds.size) return content;
   const ownerOfLayout = new Map();
   const ownerOf = (layoutIndex) => {
     if (ownerOfLayout.has(layoutIndex)) return ownerOfLayout.get(layoutIndex);
@@ -179,6 +199,28 @@ function textPiecesOf(snapshot, wanted) {
     ownerOfLayout.set(layoutIndex, owner);
     return owner;
   };
+  const contentOf = (owner) => {
+    if (!content.has(owner)) content.set(owner, { pieces: [], extent: null });
+    return content.get(owner);
+  };
+
+  for (let index = 0; index < layoutNodes.length && index < COLLECTION_ITEM_LIMIT; index++) {
+    const owner = ownerOf(index);
+    const rect = owner === null ? null : viewportRect(layoutBounds[index]);
+    if (!rect || !(rect.w > 0 && rect.h > 0)) continue;
+    const generated = contentOf(owner);
+    const extent = generated.extent;
+    if (!extent) {
+      generated.extent = rect;
+      continue;
+    }
+    const right = Math.max(extent.x + extent.w, rect.x + rect.w);
+    const bottom = Math.max(extent.y + extent.h, rect.y + rect.h);
+    extent.x = Math.min(extent.x, rect.x);
+    extent.y = Math.min(extent.y, rect.y);
+    extent.w = right - extent.x;
+    extent.h = bottom - extent.y;
+  }
 
   const pieceOfLayout = new Map();
   for (let index = 0; index < boxLayout.length && index < COLLECTION_ITEM_LIMIT; index++) {
@@ -186,8 +228,8 @@ function textPiecesOf(snapshot, wanted) {
     const owner = ownerOf(layoutIndex);
     if (owner === null) continue;
     const text = strings[layoutText[layoutIndex]];
-    const bounds = boxBounds[index];
-    if (typeof text !== 'string' || !Array.isArray(bounds) || bounds.length < 4) continue;
+    const rect = viewportRect(boxBounds[index]);
+    if (typeof text !== 'string' || !rect) continue;
     const start = Number(boxStart[index]);
     const length = Number(boxLength[index]);
     if (!(Number.isInteger(start) && Number.isInteger(length) && start >= 0 && length > 0)) continue;
@@ -195,18 +237,11 @@ function textPiecesOf(snapshot, wanted) {
     if (!piece) {
       piece = [];
       pieceOfLayout.set(layoutIndex, piece);
-      if (!pieces.has(owner)) pieces.set(owner, []);
-      pieces.get(owner).push(piece);
+      contentOf(owner).pieces.push(piece);
     }
-    piece.push({
-      text: text.slice(start, start + length),
-      x: Number(bounds[0]),
-      y: Number(bounds[1]),
-      w: Number(bounds[2]),
-      h: Number(bounds[3]),
-    });
+    piece.push({ text: text.slice(start, start + length), x: rect.x, y: rect.y, w: rect.w, h: rect.h });
   }
-  return pieces;
+  return content;
 }
 
 function isQuad(quad) {
@@ -226,20 +261,25 @@ async function readThrough(session) {
   const snapshot = pseudoNodes.length
     ? await session.send('DOMSnapshot.captureSnapshot', { computedStyles: [] })
     : null;
-  const pieces = snapshot ? textPiecesOf(snapshot, wanted) : new Map();
+  const generated = snapshot ? generatedContentOf(snapshot, wanted) : new Map();
 
-  // A pseudo-element the browser laid out no box for paints nothing.
+  // A pseudo-element whose box cannot be read is not drawn; one whose
+  // fragments cannot be read is drawn without them. Both are counted.
   const boxes = await sendInBatches(pseudoNodes, (node) => session.send('DOM.getBoxModel', { nodeId: node.nodeId }));
   const quads = await sendInBatches(pseudoNodes, (node) => session.send('DOM.getContentQuads', { nodeId: node.nodeId }));
   const readOf = new Map();
+  let unread = 0;
   pseudoNodes.forEach((node, index) => {
     const quad = boxes[index] && boxes[index].model ? boxes[index].model.border : null;
+    if (!isQuad(quad) || !quads[index]) unread += 1;
     if (!isQuad(quad)) return;
     const listed = quads[index] && Array.isArray(quads[index].quads) ? quads[index].quads : [];
+    const content = generated.get(node.backendNodeId) || { pieces: [], extent: null };
     readOf.set(node, {
       quad,
       fragments: listed.slice(0, WALK_STEP_LIMIT).filter(isQuad),
-      pieces: pieces.get(node.backendNodeId) || [],
+      pieces: content.pieces,
+      extent: content.extent,
     });
   });
 
@@ -255,18 +295,30 @@ async function readThrough(session) {
     count += (before ? 1 : 0) + (after ? 1 : 0);
   }
 
-  // The markers, written once everything is read: stale ones off, then one per host.
+  // The markers, written once everything is read: stale ones off, then one
+  // per host. A stale marker left on can claim a real host's pseudo-elements.
   const hostSet = new Set(hostIds);
-  await sendInBatches(found.marked.filter((nodeId) => !hostSet.has(nodeId)), (nodeId) =>
-    session.send('DOM.removeAttribute', { nodeId, name: PSEUDO_HOST_ATTRIBUTE }));
+  const removed = await sendInBatches(found.marked.filter((nodeId) => !hostSet.has(nodeId)), (nodeId) =>
+    session.send('DOM.removeAttribute', { nodeId, name: PSEUDO_HOST_ATTRIBUTE }).then(() => true));
   const written = await sendInBatches(hostIds.map((nodeId, index) => ({ nodeId, index })), (host) =>
     session.send('DOM.setAttributeValue', { nodeId: host.nodeId, name: PSEUDO_HOST_ATTRIBUTE, value: String(host.index) })
       .then(() => true));
-  const unmarked = written.filter((result) => result !== true).length;
-  if (unmarked) {
-    console.error(`[html2pptx] pseudo-elements: ${unmarked} host(s) could not be marked; their ::before and ::after are not in the exported deck`);
-  }
+  reportFailures({
+    unread,
+    unremoved: removed.filter((result) => result !== true).length,
+    unmarked: written.filter((result) => result !== true).length,
+  });
   return { hosts, count, truncated: found.truncated };
+}
+
+// One count line for what the read could not do; nothing when it did it all.
+function reportFailures({ unread, unremoved, unmarked }) {
+  if (!unread && !unremoved && !unmarked) return;
+  console.error(
+    `[html2pptx] pseudo-elements: ${unmarked} host(s) could not be marked, ` +
+    `${unremoved} stale marker(s) could not be taken off and ${unread} box read(s) failed; ` +
+    'the ::before and ::after they hold may be missing from the exported deck or drawn on the wrong element'
+  );
 }
 
 // readPseudoElements(page) -> PseudoData. Never throws: a page whose

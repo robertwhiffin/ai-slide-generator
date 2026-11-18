@@ -436,6 +436,8 @@ async function snapshotPage(config, pseudoData) {
   //   fragments  its box fragments' bounds, as rect, in the browser's order;
   //   pieces     its text: [{boxes: [{text, left, top, right, bottom}]}], one piece
   //              per layout text object, each box one line fragment of it;
+  //   extent     bounds {left, top, right, bottom} of all it generates (an image may
+  //              be taller than its line), or null; its picture covers them;
   //   selector   its host's marker, '[data-tellr-pseudo-host="<n>"]', for a capture.
   // A record is no node: the walk and the text layout tell one apart with
   // isPseudo, which reads nothing of a DOM node.
@@ -517,6 +519,11 @@ async function snapshotPage(config, pseudoData) {
       const fragment = quadOf(listed[index]);
       if (fragment) fragments.push(quadBounds(fragment));
     }
+    const extent = read.extent || {};
+    const extentLeft = Number(extent.x);
+    const extentTop = Number(extent.y);
+    const extentWidth = Number(extent.w);
+    const extentHeight = Number(extent.h);
     const record = {
       host,
       type,
@@ -526,6 +533,9 @@ async function snapshotPage(config, pseudoData) {
       edges: { width: Math.hypot(quad[2] - quad[0], quad[3] - quad[1]), height: Math.hypot(quad[6] - quad[0], quad[7] - quad[1]) },
       fragments,
       pieces: pseudoPieces(read.pieces),
+      extent: Number.isFinite(extentLeft) && Number.isFinite(extentTop) && extentWidth > 0 && extentHeight > 0
+        ? { left: extentLeft, top: extentTop, right: extentLeft + extentWidth, bottom: extentTop + extentHeight }
+        : null,
       selector: '[' + config.pseudoHostAttribute + '="' + hostIndex + '"]',
     };
     pseudoRecords.add(record);
@@ -1538,9 +1548,10 @@ async function snapshotPage(config, pseudoData) {
   //            its box alone, its text, children and own ::before and ::after
   //            staying native (ruling R8b). The picture replaces its native box
   //            (fill, outline and shadow). A pseudo-element's box is captured
-  //            the same way, on its own: capture.cjs isolates its host's
-  //            ::before or ::after, named by the host marker, which is already
-  //            on the page (pseudo.mjs).
+  //            the same way, on its own, and so is one whose content is an
+  //            image (an icon bullet), its picture covering all it generates:
+  //            capture.cjs isolates its host's ::before or ::after, named by
+  //            the host marker, which is already on the page (pseudo.mjs).
   // The picture is what the target's clip shows of all it paints: its bounds,
   // grown by the reach of its outer shadow and filter (paintReach), cut to the
   // clip (C7.3). Its pixels already carry the target's cumulative opacity, so
@@ -1565,9 +1576,19 @@ async function snapshotPage(config, pseudoData) {
       set(s.clipPath, 'none') || set(s.maskImage, 'none') || set(s.webkitMaskImage, 'none');
   }
 
-  // capturesBox(s, opacity) -> whether the element's own box is a box-only
-  // capture: a background image, or an effect on a box that paints.
-  function capturesBox(s, opacity) {
+  // A pseudo-element whose content holds an image (content: url(), image-set()
+  // or a gradient, an icon bullet): the image is generated content no shape
+  // and no text run can draw.
+  const GENERATED_IMAGE = /(?:url|image-set|gradient)\(/i;
+  function generatesImage(element, s) {
+    return isPseudo(element) && GENERATED_IMAGE.test(String(s.content || ''));
+  }
+
+  // capturesBox(s, opacity, element) -> whether the element's own box is a
+  // box-only capture: a background image, an effect on a box that paints, or
+  // for a pseudo-element, an image it generates.
+  function capturesBox(s, opacity, element) {
+    if (generatesImage(element, s)) return true;
     if (clipsToText(s)) return false;
     return paintsBackgroundImage(s) || (hasBoxEffect(s) && paintsBox(s, opacity));
   }
@@ -1654,14 +1675,24 @@ async function snapshotPage(config, pseudoData) {
   // shows of `bounds`, and its picture item at `order`. Nothing when the clip
   // hides it all.
   function pushCapture(element, s, mode, bounds, order, clip) {
-    const shown = shownPart(bounds, clip);
+    const generated = isPseudo(element);
+    // A pseudo-element's picture holds all it generates: an icon may stand out of its line.
+    const extent = generated ? element.extent : null;
+    const painted = extent
+      ? {
+        left: Math.min(bounds.left, extent.left),
+        top: Math.min(bounds.top, extent.top),
+        right: Math.max(bounds.right, extent.right),
+        bottom: Math.max(bounds.bottom, extent.bottom),
+      }
+      : bounds;
+    const shown = shownPart(painted, clip);
     if (!shown) return;
     const id = 'c' + nextCaptureSeq++;
     const x = shown.left;
     const y = shown.top;
     const w = shown.right - shown.left;
     const h = shown.bottom - shown.top;
-    const generated = isPseudo(element);
     const hidden = mode === 'subtree' && tagNameOf(element) === 'svg' ? hiddenDescendants(element) : [];
     const capture = {
       id,
@@ -1845,7 +1876,7 @@ async function snapshotPage(config, pseudoData) {
     contentBox,
     // A box drawn as a shape or captured (capturesBox) paints: a span whose
     // only paint is a gradient is a decoration too.
-    paintsBox: (s, opacity) => paintsBox(s, opacity) || capturesBox(s, opacity),
+    paintsBox: (s, opacity, element) => paintsBox(s, opacity) || capturesBox(s, opacity, element),
     inlineClip,
     shows: (bounds, clip) => shownPart(bounds, clip) !== null,
     isPseudo,
@@ -1879,7 +1910,7 @@ async function snapshotPage(config, pseudoData) {
     for (let index = 0; index < group.decorations.length; index++) {
       const decoration = group.decorations[index];
       const order = paint.concat([4, 0, blockSeq, 0, index]);
-      if (capturesBox(decoration.style, decoration.opacity)) {
+      if (capturesBox(decoration.style, decoration.opacity, decoration.element)) {
         let bounds = boundsOf(decoration.boxes[0]);
         for (let fragment = 1; fragment < decoration.boxes.length; fragment++) {
           const next = boundsOf(decoration.boxes[fragment]);
@@ -2032,7 +2063,7 @@ async function snapshotPage(config, pseudoData) {
       const box = boxGeometry(element, clips.rect || rectOf(element), frame);
       if (box && replaced) {
         emitReplaced(element, name, s, box, opacity, place, seq, clips.box);
-      } else if (box && element !== slideRoot && capturesBox(s, opacity)) {
+      } else if (box && element !== slideRoot && capturesBox(s, opacity, element)) {
         pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box);
       } else if (box) {
         emitBox(s, box, opacity, place.box, element === slideRoot, clips.box);

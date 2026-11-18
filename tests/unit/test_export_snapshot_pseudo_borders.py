@@ -51,11 +51,13 @@ Gating matches the sibling export suites: needs node, the extracted sidecar
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from lxml import etree
@@ -78,6 +80,7 @@ from tests.fixtures.export_snapshot_support import (
     corpus_document,
     export_corpus,
     export_slides,
+    node_json,
     requires_huashu_sidecar,
     slide_document,
     slide_shape_elements,
@@ -530,6 +533,151 @@ LYING_STYLE_LENGTH_SCRIPT = (
     "  document.title = JSON.stringify(report);\n"
     "</script>\n"
 )
+
+
+def _png_data_uri(colour: str, side: int) -> str:
+    """A ``side`` x ``side`` PNG of one colour, as a data: URI."""
+    buffer = BytesIO()
+    Image.new("RGB", (side, side), "#" + colour).save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+# Generated text in a document its slide script scrolls by 100 px. The
+# DevTools protocol reports text boxes in document coordinates and box models
+# in viewport coordinates; the slide is what the viewport shows.
+SCROLL_PX = 100
+SCROLLED_CSS = COUNTER_CSS + (
+    ".scrolled-quote { font-size: 20px; margin: 24px 0 0; }\n"
+    ".scrolled-quote::before { content: open-quote; }\n"
+    ".scrolled-quote::after { content: close-quote; }\n"
+)
+SCROLLED_CONTENT = (
+    '<p class="dk-eyebrow">How we work</p><div class="steps">'
+    + "".join(f'<div class="step"><span>{label}</span></div>' for label in COUNTER_LABELS)
+    + '</div><p class="scrolled-quote" id="scrolled-quote">Quoted words</p>'
+)
+# Body grows past the viewport, so the document can scroll; the twin grows
+# it the same way and does not scroll, so the two differ by the scroll alone.
+# Scroll anchoring is off: the script scrolls before the webfonts load, and
+# the reflow they cause would otherwise move the scroll by a few px.
+GROW_BODY = (
+    "document.documentElement.style.overflowAnchor = 'none'; document.body.style.height = '1100px';"
+)
+SCROLLED_BODY = (
+    f'<div class="slide">{SCROLLED_CONTENT}'
+    f"<script>{GROW_BODY} window.scrollTo(0, {SCROLL_PX});</script></div>"
+)
+UNSCROLLED_BODY = f'<div class="slide">{SCROLLED_CONTENT}<script>{GROW_BODY}</script></div>'
+
+# Icon bullets: each list item's ::before generates a 16x16 data: PNG inline
+# before its text, which only a picture can show.
+ICON_COLOUR = "7B2FBE"
+ICON_SIDE_PX = 16
+ICON_CSS = (
+    ".icon-list { list-style: none; padding: 0; margin: 24px 0 0; font-size: 20px; "
+    "line-height: 1.5; }\n"
+    ".icon-list li { margin-bottom: 12px; }\n"
+    f".icon-list li::before {{ content: url('{_png_data_uri(ICON_COLOUR, ICON_SIDE_PX)}'); "
+    "margin-right: 10px; vertical-align: -2px; }\n"
+)
+ICON_ITEMS = (
+    "Unity Catalog governs every table",
+    "Serverless compute scales to zero",
+    "Lakeflow runs the pipelines",
+)
+ICON_BODY = (
+    '<div class="slide"><p class="dk-eyebrow">Platform</p><ul class="icon-list">'
+    + "".join(f"<li>{item}</li>" for item in ICON_ITEMS)
+    + "</ul></div>"
+)
+# A capture is taken at device scale 2, so a 16 px icon is 32x32 pixels.
+ICON_PIXELS = (ICON_SIDE_PX * CAPTURE_SCALE) ** 2
+ICON_PIXEL_SHARE = 0.9
+# A 32 px icon in 16 px text: it stands out of its inline box, above and below
+# the line's text, so its pseudo-element's box does not hold it.
+TALL_ICON_SIDE_PX = 32
+TALL_ICON_CSS = (
+    ".tall-icons { list-style: none; padding: 0; margin: 40px 0 0; font-size: 16px; }\n"
+    ".tall-icons li { margin-bottom: 32px; }\n"
+    f".tall-icons li::before {{ content: url('{_png_data_uri(ICON_COLOUR, TALL_ICON_SIDE_PX)}'); "
+    "margin-right: 10px; vertical-align: middle; }\n"
+)
+TALL_ICON_ITEM = "Delta Sharing reaches every partner"
+TALL_ICON_BODY = f'<div class="slide"><ul class="tall-icons"><li>{TALL_ICON_ITEM}</li></ul></div>'
+TALL_ICON_PIXELS = (TALL_ICON_SIDE_PX * CAPTURE_SCALE) ** 2
+
+# A slide that carries the export's own host marker on elements of its own,
+# with the values the export gives its real hosts. The export must take those
+# markers off, or the decoys claim the real hosts' pseudo-elements.
+DECOY_CSS = (
+    ".decoy-list { list-style: none; padding: 0; margin: 24px 0 0; font-size: 20px; }\n"
+    ".decoy-list li { position: relative; padding-left: 28px; margin-bottom: 12px; }\n"
+    '.decoy-list li::before { content: ""; position: absolute; left: 0; top: 8px; '
+    "width: 12px; height: 12px; background: #FF5F46; }\n"
+)
+DECOY_BODY = (
+    '<div class="slide">'
+    '<p class="dk-eyebrow" data-tellr-pseudo-host="0">Carried over</p>'
+    '<p data-tellr-pseudo-host="1">A paragraph pasted from an exported deck</p>'
+    '<ul class="decoy-list"><li>Pricing held</li><li>Mix improved</li></ul>'
+    "</div>"
+)
+DECOY_BULLETS = 2
+
+# What the snapshot exports when the DevTools protocol cannot be had: the
+# slide without its pseudo-elements, and a line saying so.
+CDP_UNAVAILABLE_BODY = (
+    '<div class="slide"><p class="dk-eyebrow">Read, never written</p>'
+    '<ul class="ni-list"><li>Pricing held</li><li>Mix improved</li></ul>'
+    f'<div id="ni-probe" class="ni-probe">{NO_INSERTION_PROBE_TEXT}</div></div>'
+)
+CDP_UNAVAILABLE_LINE = "[html2pptx] pseudo-elements could not be read"
+# A stub CDPSession factory, and a launch wrapper that gives every page of the
+# export's browser it; the renderer then exports one document with it.
+CDP_UNAVAILABLE_SCRIPT = """
+(async () => {
+  const documentPath = %(document)s;
+  const lines = [];
+  const originalError = console.error;
+  const originalLog = console.log;
+  console.error = (...parts) => { lines.push(parts.join(' ')); };
+  console.log = () => {};
+  const unavailable = async () => {
+    throw new Error('the DevTools protocol is unavailable (test stub)');
+  };
+  try {
+    const { pathToFileURL } = require('url');
+    const pseudo = await import(pathToFileURL(require('path').resolve('pseudo.mjs')).href);
+    const stubPage = { context: () => ({ newCDPSession: unavailable }) };
+    const read = await pseudo.readPseudoElements(stubPage);
+    const readLines = lines.splice(0);
+    const playwright = require('playwright');
+    const launch = playwright.chromium.launch.bind(playwright.chromium);
+    playwright.chromium.launch = async (options) => {
+      const browser = await launch(options);
+      const newPage = browser.newPage.bind(browser);
+      browser.newPage = async (...args) => {
+        const page = await newPage(...args);
+        page.context().newCDPSession = unavailable;
+        return page;
+      };
+      return browser;
+    };
+    const { renderSlide } = require('./render_slide.cjs');
+    const PptxGenJS = require('pptxgenjs');
+    const pres = new PptxGenJS();
+    pres.layout = 'LAYOUT_WIDE';
+    const { summary } = await renderSlide(documentPath, pres, { bypassValidation: true });
+    console.error = originalError;
+    console.log = originalLog;
+    process.stdout.write(JSON.stringify({ read, readLines, summary, renderLines: lines }));
+  } catch (error) {
+    console.error = originalError;
+    console.error(error);
+    process.exit(1);
+  }
+})();
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -1143,6 +1291,71 @@ class TestPseudoElementBoxes:
                 f"sits on (spTree {line_index})"
             )
 
+    def test_an_image_pseudo_element_is_a_picture_of_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``content: url(…)`` icon bullets: each is a picture of its ``::before``, at its box.
+
+        Each list item's ``::before`` generates a 16x16 data: PNG (7B2FBE)
+        inline before its text. No shape can draw an image, so the
+        pseudo-element is a box capture of its own: one picture at its browser
+        box within 0.5 px, holding the icon's pixels (at least 90% of the 32x32
+        a 2x capture of it has), and lying left of its item's text.
+        """
+        css = DECK_CSS + ICON_CSS
+        icons = browser_each_pseudo(_document(ICON_BODY, css=css), ".icon-list li")
+        assert len(icons) == len(ICON_ITEMS) and all(
+            icon is not None and abs(icon["w"] - ICON_SIDE_PX) < 0.01 for icon in icons
+        ), f"fixture drift: the icon bullets are {[_rect(icon) for icon in icons]}"
+        shapes = slide_shapes(_export(ICON_BODY, monkeypatch, css=css))
+
+        for icon, item in zip(icons, ICON_ITEMS):
+            what = f"the {item!r} icon"
+            _, picture = _picture_at(shapes, icon, what)
+            image = _image(picture, what)
+            painted = sum(1 for pixel in image.getdata() if _is(pixel, ICON_COLOUR))
+            assert painted >= ICON_PIXEL_SHARE * ICON_PIXELS, (
+                f"{what}'s picture holds {painted} {ICON_COLOUR} pixels; the icon is "
+                f"{ICON_PIXELS} at 2x"
+            )
+            texts = text_shapes(shapes, item)
+            assert texts and picture.x + picture.w <= min(text.x for text in texts) + (
+                RECT_TOLERANCE_PX
+            ), f"{what} (ends at {picture.x + picture.w:.2f}) is not left of its text:\n" + (
+                _describe(shapes)
+            )
+
+    def test_an_icon_taller_than_its_line_is_pictured_whole(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 32 px ``content: url(…)`` icon in 16 px text is one picture holding all of it.
+
+        The icon stands out of its ``::before``'s inline box, which is only as
+        tall as the text. Its picture covers everything the pseudo-element
+        generates: it is at least 32 px high, it holds the icon's pixels (at
+        least 90% of the 64x64 a 2x capture of it has), and it starts at the
+        inline box's left edge within 0.5 px.
+        """
+        css = DECK_CSS + TALL_ICON_CSS
+        box = browser_each_pseudo(_document(TALL_ICON_BODY, css=css), ".tall-icons li")[0]
+        assert box is not None and box["h"] < TALL_ICON_SIDE_PX, (
+            f"fixture drift: the icon's inline box {_rect(box)} already holds the icon"
+        )
+        shapes = slide_shapes(_export(TALL_ICON_BODY, monkeypatch, css=css))
+
+        pictures = [shape for shape in shapes if shape.kind == "picture"]
+        assert len(pictures) == 1, f"expected the icon as one picture:\n{_describe(shapes)}"
+        picture = pictures[0]
+        assert abs(picture.x - box["x"]) <= RECT_TOLERANCE_PX and (
+            picture.h >= TALL_ICON_SIDE_PX - RECT_TOLERANCE_PX
+        ), f"the icon's picture is {(picture.x, picture.y, picture.w, picture.h)}; its box {box}"
+        image = _image(picture, "the tall icon")
+        painted = sum(1 for pixel in image.getdata() if _is(pixel, ICON_COLOUR))
+        assert painted >= ICON_PIXEL_SHARE * TALL_ICON_PIXELS, (
+            f"the tall icon's picture holds {painted} {ICON_COLOUR} pixels of the "
+            f"{TALL_ICON_PIXELS} the icon has at 2x: it is cut to its line"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Generated text
@@ -1258,6 +1471,58 @@ class TestGeneratedContent:
             if shape.kind == "text" and _normalised(shape.text) in ("\u201c", "\u201d")
         ]
         assert alone == [], f"a quote is exported as a text item of its own:\n{_describe(shapes)}"
+
+    def test_generated_text_in_a_scrolled_page_sits_where_the_browser_shows_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A page its slide script scrolls exports its generated text at its viewport boxes.
+
+        The DevTools protocol gives text boxes in document coordinates and box
+        models in viewport coordinates, and the slide is what the viewport
+        shows. Each step number is a text item at its ``::before``'s browser
+        box (left edge within 0.5 px, centre inside it), and the quote's \u201c and
+        \u201d stay on the line of the words they enclose: one text item reading
+        \u201cQuoted words\u201d, at its ``::before``'s left edge, its middle on that
+        line and no taller than one line and a half.
+        """
+        css = DECK_CSS + SCROLLED_CSS
+        document = _document(SCROLLED_BODY, css=css)
+        numbers = browser_each_pseudo(document, ".step")
+        assert [box["text"] if box else None for box in numbers] == list(COUNTER_TEXTS), (
+            f"fixture drift: the browser numbers the steps {numbers}"
+        )
+        unscrolled = browser_each_pseudo(_document(UNSCROLLED_BODY, css=css), ".step")
+        assert abs(unscrolled[0]["y"] - numbers[0]["y"] - SCROLL_PX) < 0.01, (
+            f"fixture drift: the slide script does not scroll the page by {SCROLL_PX} px "
+            f"(the first step is at y={numbers[0]['y']}, unscrolled {unscrolled[0]['y']})"
+        )
+        quote = browser_each_pseudo(document, "#scrolled-quote")[0]
+        shapes = slide_shapes(_export(SCROLLED_BODY, monkeypatch, css=css))
+
+        for number, box in zip(COUNTER_TEXTS, numbers):
+            items = [
+                item for item in _text_items_at(shapes, box) if _normalised(item.text) == number
+            ]
+            assert len(items) == 1, (
+                f"no text item {number!r} at its pseudo-element's browser box {_rect(box)}:\n"
+                f"{_describe(shapes)}"
+            )
+        items = [shape for shape in shapes if shape.kind == "text" and "Quoted words" in shape.text]
+        assert [_normalised(item.text) for item in items] == [INLINE_QUOTE_TEXT], (
+            f"the quoted paragraph reads {[item.text for item in items]}:\n{_describe(shapes)}"
+        )
+        item = items[0]
+        assert abs(item.x - quote["x"]) <= TEXT_LEFT_TOLERANCE_PX, (
+            f"the quote starts at x={item.x:.2f}; its open-quote is at {quote['x']:.2f}"
+        )
+        assert quote["y"] <= item.y + item.h / 2 <= quote["y"] + quote["h"], (
+            f"the quote's middle y={item.y + item.h / 2:.2f} is off its line "
+            f"{quote['y']:.2f}..{quote['y'] + quote['h']:.2f}"
+        )
+        assert item.h <= 1.5 * quote["h"], (
+            f"the quote is {item.h:.2f} px high, its line {quote['h']:.2f}: its quotes are "
+            "placed off the line"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1382,6 +1647,68 @@ class TestReadOnlyPseudoElements:
         assert len(track_shapes) == 1, (
             f"the milestone track is not exported at its browser box {_rect(track)}:\n"
             f"{_describe(shapes)}"
+        )
+
+    def test_a_slide_carrying_the_host_marker_cannot_take_its_pseudo_elements(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Elements that carry ``data-tellr-pseudo-host`` of their own claim no pseudo-element.
+
+        The slide puts the export's host marker, with the values its two real
+        hosts get, on two paragraphs ahead of them in document order. The
+        export takes those markers off before marking the hosts, so each list
+        item's ``::before`` bullet is a 12x12 FF5F46 shape at its browser box,
+        and nothing coral is drawn anywhere else.
+        """
+        css = DECK_CSS + DECOY_CSS
+        bullets = browser_each_pseudo(_document(DECOY_BODY, css=css), ".decoy-list li")
+        assert len(bullets) == DECOY_BULLETS and all(bullets), (
+            f"fixture drift: the list's ::before bullets are {[_rect(box) for box in bullets]}"
+        )
+        shapes = slide_shapes(_export(DECOY_BODY, monkeypatch, css=css))
+
+        coral = [position for position, shape in enumerate(shapes) if shape.fill == ACCENT]
+        at_bullets = [
+            [position for position in _at(shapes, bullet) if position in coral]
+            for bullet in bullets
+        ]
+        assert all(len(found) == 1 for found in at_bullets) and len(coral) == DECOY_BULLETS, (
+            f"the bullets at {[_rect(bullet) for bullet in bullets]} are exported as "
+            f"{at_bullets}, and the slide's coral shapes are {coral}:\n{_describe(shapes)}"
+        )
+
+    def test_without_the_devtools_protocol_the_slide_exports_without_its_pseudo_elements(
+        self, tmp_path: Path
+    ) -> None:
+        """When no CDP session can be had, the pseudo-elements are left out, the rest exports.
+
+        ``readPseudoElements`` given a page whose ``newCDPSession`` throws
+        returns no pseudo-element data and prints ``[html2pptx] pseudo-elements
+        could not be read``. An export whose every page throws there renders
+        the slide all the same: it reads no pseudo-element and still holds the
+        slide's text and its filled probe box, and the same line is printed.
+        """
+        document = tmp_path / "slide.html"
+        document.write_text(
+            _document(CDP_UNAVAILABLE_BODY, css=DECK_CSS + NO_INSERTION_CSS), encoding="utf-8"
+        )
+
+        result = node_json(CDP_UNAVAILABLE_SCRIPT % {"document": json.dumps(str(document))})
+
+        assert result["read"] == {"hosts": [], "count": 0, "truncated": False}, (
+            f"a page without the protocol read as {result['read']}"
+        )
+        printed = ((result["readLines"], "the read"), (result["renderLines"], "the export"))
+        for lines, what in printed:
+            assert any(line.startswith(CDP_UNAVAILABLE_LINE) for line in lines), (
+                f"{what} printed no {CDP_UNAVAILABLE_LINE!r} line: {lines}"
+            )
+        summary = result["summary"]
+        assert summary["pseudoElements"] == {"read": 0, "walked": 0}, (
+            f"the export read pseudo-elements without the protocol: {summary['pseudoElements']}"
+        )
+        assert summary["kinds"].get("text", 0) >= 3 and summary["kinds"].get("shape", 0) >= 1, (
+            f"the slide's text and probe box did not export: {summary['kinds']}"
         )
 
 
