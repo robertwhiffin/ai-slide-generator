@@ -141,6 +141,8 @@ For polling-based streaming, async requests are tracked in the `chat_requests` t
 | `progress_seq` | `INTEGER NULL` | `seq` of the stored `progress_json` (#319) |
 | `created_at` | `TIMESTAMP` | Request creation time |
 | `completed_at` | `TIMESTAMP` | Request completion time |
+| `started_at` | `TIMESTAMP NULL` | When a runner starts the request; wait time is `started_at - created_at` |
+| `model_fault_kind` | `VARCHAR(32) NULL` | On a failed Agent turn: `rate_limited`, `server_error`, `timeout`, `connection` or `not_transient`; NULL otherwise |
 
 Messages are linked to requests via `session_messages.request_id` for efficient polling.
 
@@ -236,9 +238,23 @@ Set the `UVICORN_WORKERS` environment variable to override the default. Each wor
 
 ### Chat Job Runners
 
-A chat turn (polling mode) runs on the uvicorn worker that received its `POST /api/chat/async`, in that worker's in-memory queue (`src/api/services/job_queue.py`). Each worker runs `TELLR_CHAT_JOB_CONCURRENCY` job runners over its queue: default 1, at most 16, and an unusable value falls back to 1. With the default 4 workers, the app runs up to 4 turns at once. A turn waits only when all runners on its worker are busy.
+A chat turn (polling mode) runs on the uvicorn worker that received its `POST /api/chat/async`, in that worker's in-memory queue (`src/api/services/job_queue.py`). Each worker runs `TELLR_CHAT_JOB_CONCURRENCY` job runners over its queue: default 8, at most 16, and an unusable value falls back to 8. With the default 4 workers, the app runs up to 32 turns at once. A turn waits only when all runners on its worker are busy (a turn queues only if 9 land on one worker).
 
-The default stays 1 until model rate limits are handled better. On 2026-10-31 a devloop load test of 8 decks of 8 slides, submitted together with 4 runners per worker, started 7 of the 8 turns within 2 s. But the AI Gateway returned 118 `429 Too Many Requests`, and 6 of the 8 turns failed: a 429 during a slide's build review can fail the whole turn. Raise the setting only after that path, and the client's two short retries, are fixed.
+Runners only decide which turns start. Model load is capped separately, per process, and the turns' model calls are retried by Tellr. The design is in [`docs/superpowers/specs/2026-11-17-chat-concurrency-design.md`](../superpowers/specs/2026-11-17-chat-concurrency-design.md).
+
+- **Model-call cap.** `TELLR_MODEL_CALL_CONCURRENCY` (default 15, max 64; an unusable value logs a warning and falls back to 15) sets one `FairCallLimiter` per process (`get_model_call_limiter`, `src/services/model_calls.py`). With the default 4 workers the app-wide ceiling is about 60 model calls in flight, the same ceiling one runner per worker had, so more runners do not raise the peak load on the models. They only change who gets the calls. The cap covers every production `DatabricksModelAdapter` model call. A slot is held only for the HTTP call itself: it is released during backoff sleeps and while a tool runs between tool-loop rounds.
+- **Fairness.** When a slot frees, it goes to the waiting caller whose turn has the fewest calls in flight; ties go first come, first served. A turn's group is its chat request id. Callers with no turn (the arc-review sweeper, slide-style previews) share one group and never query the database for a stop. A caller waiting for a slot checks for a stop, so a stopped turn leaves the line at once (the answer is reused per turn for 2 s, `STOP_CHECK_INTERVAL_SECONDS`).
+- **Retries.** `call_model` (`src/services/model_calls.py`) owns retries in one place. The OpenAI SDK's own retries are off (`max_retries=0`) on production graph calls.
+  - Retried: transient faults only. That is 429 (`rate_limited`), 408 and timeouts (`timeout`), 409 and 5xx (`server_error`), and dropped connections (`connection`). Everything else fails at once, as before.
+  - Waits start at 2 s and double, capped at 30 s each, with jitter. When the provider sends `Retry-After` (or `retry-after-ms`), that wait is used instead, jittered upwards.
+  - The budget is 150 s of retrying per call, counted from its first failure, and never past the turn's deadline. The deadline is the timeout sweeper's clock: the job entry's `started_at` plus the hard timeout (1200 s for an Agent turn, 600 s otherwise), set by the runner (`set_turn_deadline`). Calls with no turn have only their own budget.
+  - A wait is slept outside the slot, checking for a stop at least once a second, so a stop during a backoff ends it promptly.
+  - Each retry logs one WARNING `model_call_retry`. Giving up (budget or deadline) logs `model_call_gave_up` once.
+  - When the retries are spent, the error is raised exactly as before, so the existing collapsing, fallbacks and rollback still apply. One fallback is new: an edited slide whose build review fails transiently lands as built, unreviewed, with the existing "kept unreviewed" notice, instead of failing the turn. A non-transient fault still fails the turn.
+  - Slide-style previews make no queue retry of their own (`PREVIEW_MAX_RETRIES = 0` in `slide_style_preview_queue.py`); the adapter owns their retries. Adapters built with `transport_options` (admin test runs, the offline eval harness `evals/harness/runner.py`) keep their old behaviour: no Tellr retries and no limiter.
+- **Measurement columns.** `chat_requests.started_at` records when a runner starts the request, so wait time is `started_at - created_at`. `chat_requests.model_fault_kind` records why a failed Agent turn failed. Both are added at startup by `_migrate_chat_request_measurement()`.
+
+The history behind the cap and the retries: on 2026-10-31 a devloop load test of 8 decks of 8 slides, with 4 runners per worker, started 7 of the 8 turns within 2 s, but the AI Gateway returned 118 `429 Too Many Requests` and 6 of the 8 turns failed.
 
 - **Sessions stay serial.** The database session lock still allows one turn per session, so runners only overlap different sessions.
 - **Own thread pool.** Chat jobs run on a dedicated `chat-job` thread pool sized to the runners, not on the loop's default executor. Request handlers (the chat poll among them) `asyncio.to_thread` onto the default executor, and jobs that hold a thread for minutes would starve them.
@@ -252,12 +268,12 @@ The default stays 1 until model rate limits are handled better. On 2026-10-31 a 
   - Autologging is explicitly disabled at startup unless `TELLR_MLFLOW_LANGCHAIN_AUTOLOG=1`. Otherwise `evaluate` would enable it process-wide and trace other turns into the verifying user's experiment. With the opt-in, autolog traces are not experiment-isolated across concurrent turns.
   - Fluent run calls such as `mlflow.log_param` outside a run would open a run in whichever experiment is global; do not add them on the chat path.
 
-With one runner (the default), a second turn on the same worker waits for the first to finish. On 2026-10-31 an agent turn waited 3 m 45 s behind a concurrent legacy turn. Prod history over 35 days (6,182 turns) peaked at 9 concurrent turns against 4 slots.
+With one runner (the old default), a second turn on the same worker waited for the first to finish. With 8 runners, a turn queues only if 9 land on one worker. On 2026-10-31 an agent turn waited 3 m 45 s behind a concurrent legacy turn. Prod history over 35 days (6,182 turns) peaked at 9 concurrent turns against 4 slots.
 
 ### Scaling Considerations
 
 - **Worker count:** Defaults to 4 (configurable via `UVICORN_WORKERS` env var). Each worker holds a database pool of up to 100 connections (`pool_size=80`, `max_overflow=20`) and runs every periodic loop, so prefer raising `TELLR_CHAT_JOB_CONCURRENCY` for more concurrent turns.
-- **Concurrent turns:** `UVICORN_WORKERS × TELLR_CHAT_JOB_CONCURRENCY` (4 by default). The model endpoints' rate limits are the next ceiling: a deck builds its slides in parallel, so each turn makes many model calls at once.
+- **Concurrent turns:** `UVICORN_WORKERS × TELLR_CHAT_JOB_CONCURRENCY` (32 by default). Model calls in flight are capped at `UVICORN_WORKERS × TELLR_MODEL_CALL_CONCURRENCY` (about 60 by default). The model endpoints' rate limits are the next ceiling: a deck builds its slides in parallel, so each turn makes many model calls at once.
 - **Lock timeout and heartbeat:** a session lock goes stale 5 minutes after `processing_started_at`. Each worker's 60 s timeout sweep refreshes the locks of its turns that are running (not yet timed out) or queued for less than their hard timeout. So a lock stays live while its turn is alive, and goes stale about 5 minutes after the holding worker stops refreshing it (crash, restart or timeout). The sync `/chat` and SSE routes (local dev) are not heartbeated.
 - **Cache coherence:** Each worker maintains its own cache. Decks are loaded from database on cache miss, ensuring consistency after cross-worker updates.
 

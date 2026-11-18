@@ -6,7 +6,7 @@ Every turn here runs the shipped path end to end:
     POST /api/chat/async            (the real route: lock, request row, snapshot,
                                      user message, deck-mode lock)
       -> job_queue.enqueue_job      (the real one, on the runners' event loop)
-      -> job_queue.worker           (ONE real runner: concurrency 1, the default)
+      -> job_queue.worker           (the real runners: the shipped default count)
       -> process_chat_request       (real)
       -> ChatService graph limb     (real: consumer loop, liveness poll, seal,
                                      save point, title thread)
@@ -670,7 +670,10 @@ def stop_env(graph_env_threadsafe, monkeypatch) -> Iterator[StopEnv]:
     runners = Runners()
     job_queue.jobs.clear()
     job_queue.shutdown_chat_executor()
-    assert job_queue.chat_job_concurrency() == 1, "the default is one runner per process"
+    monkeypatch.delenv(job_queue.CHAT_JOB_CONCURRENCY_ENV, raising=False)
+    assert job_queue.chat_job_concurrency() == job_queue.DEFAULT_CHAT_JOB_CONCURRENCY, (
+        "the stop flow must run under the shipped default runner count"
+    )
     runners.start(monkeypatch, job_queue.chat_job_concurrency())
     monkeypatch.setattr("src.api.routes.chat.enqueue_job", runners.enqueue)
 
@@ -1037,7 +1040,7 @@ def test_late_builder_write_after_stop_changes_nothing(stop_env, monkeypatch, ca
 
 
 def test_resend_after_stop_starts_immediately(stop_env):
-    """One runner per process.  The first turn's graph thread is held in X1's
+    """Under the shipped default runner count.  The first turn's graph thread is held in X1's
     builder.  The sender stops and sends again at once: the second turn is accepted
     and reaches ``running`` (its architect is called) while the first graph thread
     is STILL held, so it was not queued behind the abandoned turn.  When the first

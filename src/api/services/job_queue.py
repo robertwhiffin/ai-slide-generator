@@ -39,13 +39,12 @@ jobs: Dict[str, Dict[str, Any]] = {}
 job_queue: asyncio.Queue = asyncio.Queue()
 
 # Job runners per uvicorn process.  Each process (UVICORN_WORKERS, default 4) takes
-# the chat jobs POSTed to it; with one runner a second turn on the same process
-# waited "pending" until the first finished.  A session's turns are still
-# serialised by its database session lock, so runners only overlap different
-# sessions.  The default stays 1: a load test of 8 concurrent decks drew 118
-# model 429s and failed 6 turns, so more runners wait on better 429 handling.
+# the chat jobs POSTed to it.  A session's turns are still serialised by its
+# database session lock, so runners only overlap different sessions.  Runners only
+# decide which turns start; model load is capped separately, per process, by
+# TELLR_MODEL_CALL_CONCURRENCY (default 15) in src/services/model_calls.py.
 CHAT_JOB_CONCURRENCY_ENV = "TELLR_CHAT_JOB_CONCURRENCY"
-DEFAULT_CHAT_JOB_CONCURRENCY = 1
+DEFAULT_CHAT_JOB_CONCURRENCY = 8
 MAX_CHAT_JOB_CONCURRENCY = 16
 
 # Chat jobs block a thread for minutes, so they run on their own pool.  The API's
@@ -56,7 +55,7 @@ _chat_executor_lock = threading.Lock()
 
 
 def chat_job_concurrency() -> int:
-    """Job runners per process, from ``TELLR_CHAT_JOB_CONCURRENCY`` (default 1, max 16)."""
+    """Job runners per process, from ``TELLR_CHAT_JOB_CONCURRENCY`` (default 8, max 16)."""
     raw = os.getenv(CHAT_JOB_CONCURRENCY_ENV)
     if raw is None:
         return DEFAULT_CHAT_JOB_CONCURRENCY
