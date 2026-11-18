@@ -336,6 +336,16 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
             // Step 3: Set canvas dimensions BEFORE Chart.js initialization
             // This is critical - Chart.js needs non-zero dimensions
             canvases.forEach((canvas, idx) => {{
+              // A canvas with a width or height attribute (from its markup, or
+              // set by the slide's own script, as one drawing at 2x for a sharp
+              // display does) already has the size its author gave it. Leave it
+              // alone: resizing a canvas clears what is drawn on it.
+              if (canvas.hasAttribute('width') || canvas.hasAttribute('height')) {{
+                console.log('[CHART_INIT] Canvas ' + idx + ' (' + (canvas.id || 'unnamed') +
+                            ') keeps its own size: ' + canvas.width + 'x' + canvas.height);
+                return;
+              }}
+
               const rect = canvas.getBoundingClientRect();
               const container = canvas.closest('.chart-container') || canvas.parentElement;
 
@@ -361,9 +371,11 @@ def build_slide_html(slide: dict, slide_deck: dict) -> str:
                 console.log('[CHART_INIT] Using default dimensions for canvas ' + idx);
               }}
 
-              // Set dimensions explicitly (Chart.js will respect these)
-              canvas.width = targetWidth;
-              canvas.height = targetHeight;
+              // Set dimensions explicitly (Chart.js will respect these).
+              // Only when they differ: assigning a canvas dimension clears its
+              // bitmap, even to the same value.
+              if (canvas.width !== targetWidth) canvas.width = targetWidth;
+              if (canvas.height !== targetHeight) canvas.height = targetHeight;
 
               // Also set CSS dimensions to match (for responsive behavior)
               canvas.style.width = targetWidth + 'px';

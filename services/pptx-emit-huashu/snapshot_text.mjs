@@ -71,9 +71,9 @@
 //  * InlineGroup = {follows:Element|null, decorations:Decoration[], blocks:TextBlock[]}
 //  *              (page-side only; never in the slide model): one run of a block's
 //  *              inline content. The walk gives every item of it its order.
-//  * Decoration = {style, opacity, boxes, clip}: an inline element's computed style, its
-//  *              cumulative opacity, one box (snapshot.mjs boxGeometry) per fragment
-//  *              and the clip its boxes are cut to.
+//  * Decoration = {element, style, opacity, boxes, clip}: an inline element, its computed
+//  *              style, its cumulative opacity, one box (snapshot.mjs boxGeometry) per
+//  *              fragment and the clip its boxes are cut to.
 //  * TextBlock = {x,y,w,h, rotate:null, wrap, align:'left'|'center'|'right', rtl,
 //  *              paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
 //  *                           lines:[{runs:Run[]}]}]}
@@ -110,7 +110,8 @@
 //   textColour      (backdrop, style) -> 'RRGGBB', the solid colour its text paints;
 //   boxGeometry     (element, rect, frame) -> the element's box | null;
 //   contentBox      (style, box) -> the box inside border and padding | null;
-//   paintsBox       (style, opacity) -> whether the element's box paints anything;
+//   paintsBox       (style, opacity) -> whether the element's box paints anything,
+//                   as a shape or as a box-only capture;
 //   inlineClip      (clip, element, style, frame) -> the clip of an inline element's
 //                   content, given the clip of the text around it;
 //   shows           (bounds, clip) -> whether the clip shows {left, top, right, bottom}.
@@ -1508,7 +1509,9 @@ function createTextLayout(env) {
         const box = env.boxGeometry(piece.element, rects[rect], frame);
         if (box) boxes.push(box);
       }
-      if (boxes.length) decorations.push({ style: piece.style, opacity: piece.opacity, boxes, clip: piece.clip });
+      if (boxes.length) {
+        decorations.push({ element: piece.element, style: piece.style, opacity: piece.opacity, boxes, clip: piece.clip });
+      }
     }
     return decorations;
   }

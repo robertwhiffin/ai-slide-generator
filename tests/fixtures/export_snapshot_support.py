@@ -18,6 +18,8 @@ what the browser itself laid out for the same document.
   (Python has no Playwright in this repo, so measurement goes through Node);
   ``browser_client_rects`` reads its box fragments, one per line an inline
   element spans, and ``browser_padding_box`` the box its overflow clips to.
+  ``browser_each_rect`` and ``browser_each_padding_box`` read the same boxes
+  for every match of a selector from one page load.
   ``browser_hit_id`` says what the browser shows at a point, by hit testing.
   ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
   lines from the same page, with a ``Range`` per character. ``browser_style``
@@ -281,6 +283,29 @@ def browser_rect(document_html: str, selector: str, index: int = 0) -> dict:
     """
     rect = json.loads(_run_measure(document_html, selector, str(index)))
     return {key: float(rect[key]) for key in ("x", "y", "w", "h")}
+
+
+def browser_each_rect(document_html: str, selector: str) -> list[dict]:
+    """``getBoundingClientRect()`` of EVERY match of ``selector``, in document order, in CSS px.
+
+    One ``{"x", "y", "w", "h"}`` per match, measured on one settled page (the
+    page ``browser_rect`` reads), so measuring many elements of a slide costs
+    one browser launch. ``browser_each_rect(d, s)[i]`` equals
+    ``browser_rect(d, s, i)``. SVG elements report their geometry's bounds
+    (a horizontal ``<line>`` is zero-high at its ``y``).
+    """
+    rects = json.loads(_run_measure(document_html, selector, "--mode=each-rect"))
+    return [{key: float(rect[key]) for key in ("x", "y", "w", "h")} for rect in rects]
+
+
+def browser_each_padding_box(document_html: str, selector: str) -> list[dict]:
+    """The padding box of EVERY match of ``selector``, in document order, in CSS px.
+
+    ``browser_each_padding_box(d, s)[i]`` equals ``browser_padding_box(d, s, i)``,
+    all read from one settled page.
+    """
+    boxes = json.loads(_run_measure(document_html, selector, "--mode=each-padding-box"))
+    return [{key: float(box[key]) for key in ("x", "y", "w", "h")} for box in boxes]
 
 
 def browser_client_rects(document_html: str, selector: str, index: int = 0) -> list[dict]:

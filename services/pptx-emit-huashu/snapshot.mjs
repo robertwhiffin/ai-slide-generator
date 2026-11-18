@@ -4,6 +4,8 @@
 // It reads; it does not rewrite. Layout is taken exactly as the browser laid it
 // out (getComputedStyle and getBoundingClientRect per element), so nothing the
 // export emits can drift from what the user saw because a pass moved it first.
+// Its one lasting write comes after the last read: it names its capture
+// targets with an attribute (which moves nothing) for capture.cjs.
 // Every DOM traversal goes through DOM_ACCESS_SOURCE (pristine-realm accessors,
 // bounded collections), because slide script runs in this page before we do.
 //
@@ -39,7 +41,12 @@
 //  *   lines:[{runs:Run[]}]}]}
 //  *   (one text block; snapshot_text.mjs documents Run, lines, the metrics and the geometry)
 //  *
-//  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]'}
+//  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]',
+//  *   hiddenWithin:boolean, paint:{borderColors:string[4], boxShadow:string}|null}
+//  *   (the picture's rect, which its image item shares; hiddenWithin when
+//  *   descendants of a subtree target carry data-tellr-capture-hidden; paint,
+//  *   for a box target, its computed border colours and shadow; capture.cjs
+//  *   reads them. `failed` when the target could not be named.)
 //  *
 //  * Units: CSS px on the slide. `alpha` is 0..1 and already includes the cumulative
 //  * opacity of the element and its ancestors. A shape's box is where its outline's
@@ -49,6 +56,7 @@
 //  * capture, whose pixels already carry it.
 //  */
 
+import { CAPTURE_ATTRIBUTE, HIDDEN_ATTRIBUTE } from './capture.cjs';
 import { DOM_ACCESS_SOURCE } from './dom_access.mjs';
 import { blendOver } from './emit_typography.cjs';
 import { GRADIENT_SOURCE } from './gradient.mjs';
@@ -56,7 +64,7 @@ import { SLIDE_ROOT_MARKER } from './preprocess.mjs';
 import { TEXT_SOURCE } from './snapshot_text.mjs';
 
 // Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE,
-// GRADIENT_SOURCE, TEXT_SOURCE and blendOver: queryOne, elementChildrenOf,
+// GRADIENT_SOURCE, TEXT_SOURCE and blendOver: queryOne, queryAll, elementChildrenOf,
 // domAccess, reportCollectionLoss, the two limits, splitTopLevelCommas,
 // parseLinearGradient, createTextLayout and blendOver are its free names. It is
 // stringified, so it closes over nothing on the Node side; everything it needs
@@ -774,28 +782,46 @@ async function snapshotPage(config) {
     return { color: painted.color, alpha: painted.alpha, widthPx: width * scale, dash };
   }
 
-  // The first painted outer shadow (PowerPoint keeps one per shape). Chrome
-  // writes each layer colour first, then offset-x, offset-y, blur, spread. A
-  // spread with no blur or offset is an outline ring, not a shadow. The
-  // direction is screen-fixed, because the emitted shadow does not rotate with
-  // its shape. Layers split at top-level commas (GRADIENT_SOURCE): the commas
-  // inside rgba(...) separate nothing.
-  function outerShadow(value, opacity, box) {
-    if (!value || value === 'none') return null;
+  // The outer layers of a computed box-shadow, in order: {colourText,
+  // offsetX, offsetY, blur, spread}, lengths in the element's own px. Chrome
+  // writes each layer colour first, then offset-x, offset-y, blur, spread.
+  // Layers split at top-level commas (GRADIENT_SOURCE): the commas inside
+  // rgba(...) separate nothing. An inset layer paints inside the box, so it is
+  // no outer layer.
+  function outerShadowLayers(value) {
+    const outer = [];
+    if (!value || value === 'none') return outer;
     const layers = splitTopLevelCommas(value);
     for (let index = 0; index < layers.length; index++) {
       const layer = layers[index];
       if (/\binset\b/.test(layer)) continue;
       const functional = /^[a-z-]+\([^)]*\)/i.exec(layer);
       const colourText = functional ? functional[0] : layer.split(/\s+/)[0];
-      const painted = paintedColour(colourText, opacity);
-      if (!painted) continue;
       const lengths = (layer.slice(colourText.length).match(/-?[\d.]+(?:e[-+]?\d+)?px/g) || []).map(parseFloat);
-      const offsetX = lengths[0] || 0;
-      const offsetY = lengths[1] || 0;
-      const blur = lengths[2] || 0;
-      const spread = lengths[3] || 0;
-      if (spread !== 0 && blur === 0 && offsetX === 0 && offsetY === 0) continue;
+      outer.push({
+        colourText,
+        offsetX: lengths[0] || 0,
+        offsetY: lengths[1] || 0,
+        blur: lengths[2] || 0,
+        spread: lengths[3] || 0,
+      });
+    }
+    return outer;
+  }
+
+  // The first painted outer shadow (PowerPoint keeps one per shape). A spread
+  // with no blur or offset is an outline ring, not a shadow. The direction is
+  // screen-fixed, because the emitted shadow does not rotate with its shape.
+  function outerShadow(value, opacity, box) {
+    const layers = outerShadowLayers(value);
+    for (let index = 0; index < layers.length; index++) {
+      const layer = layers[index];
+      const painted = paintedColour(layer.colourText, opacity);
+      if (!painted) continue;
+      const offsetX = layer.offsetX;
+      const offsetY = layer.offsetY;
+      const blur = layer.blur;
+      if (layer.spread !== 0 && blur === 0 && offsetX === 0 && offsetY === 0) continue;
       return {
         color: painted.color,
         alpha: painted.alpha,
@@ -1144,11 +1170,200 @@ async function snapshotPage(config) {
     stats.shapes++;
   }
 
+  // ─── captures ────────────────────────────────────────────────────────
+  // Spec §4. What no item can draw is a picture of what the browser painted
+  // for it, which capture.cjs takes from this very page once the snapshot has
+  // returned: a capture target, named for it with config.captureAttribute.
+  //   subtree  an inline <svg>, a <canvas>, a <video>, and an <img> that
+  //            cannot be embedded as it is (emitReplaced): the element and
+  //            everything it holds, its own box included;
+  //   box      an element whose own box paints what no shape can (capturesBox):
+  //            its box alone, its text and children staying native. The
+  //            picture replaces its native box (fill, outline and shadow).
+  // The picture is what the target's clip shows of all it paints: its bounds,
+  // grown by the reach of its outer shadow and filter (paintReach), cut to the
+  // clip (C7.3). Its pixels already carry the target's cumulative opacity, so
+  // its alpha is 1. Its rect is axis-aligned, so a turned target is drawn
+  // turned in it, with no rotation.
+  //   captureTargets: {element, capture, hidden: Element[]}, in capture order.
+  const captureTargets = [];
+  let nextCaptureSeq = 0;
+
+  // The background layers a shape cannot paint: a gradient of any kind, or a
+  // url() image. background-clip: text gives them to the glyphs instead, where
+  // the run's solid colour carries them (Task 3), so gradient text is never a
+  // box capture: it would paint a gradient rectangle under its words (C7.2).
+  function paintsBackgroundImage(s) {
+    return !clipsToText(s) && /(?:gradient|url)\(/i.test(String(s.backgroundImage || ''));
+  }
+
+  // The effects that change how a box paints, which no shape carries.
+  function hasBoxEffect(s) {
+    const set = (value, none) => Boolean(value) && value !== none;
+    return set(s.filter, 'none') || set(s.backdropFilter, 'none') || set(s.mixBlendMode, 'normal') ||
+      set(s.clipPath, 'none') || set(s.maskImage, 'none') || set(s.webkitMaskImage, 'none');
+  }
+
+  // capturesBox(s, opacity) -> whether the element's own box is a box-only
+  // capture: a background image, or an effect on a box that paints.
+  function capturesBox(s, opacity) {
+    if (clipsToText(s)) return false;
+    return paintsBackgroundImage(s) || (hasBoxEffect(s) && paintsBox(s, opacity));
+  }
+
+  // How far a box's outer shadows paint past its bounds, in slide px: the
+  // widest painted layer's max(|offset|) + blur + spread, a ring of spread
+  // alone included.
+  function shadowReach(s, box) {
+    const layers = outerShadowLayers(s.boxShadow);
+    let reach = 0;
+    for (let index = 0; index < layers.length; index++) {
+      const layer = layers[index];
+      if (!paintedColour(layer.colourText, 1)) continue;
+      reach = Math.max(reach, Math.max(Math.abs(layer.offsetX), Math.abs(layer.offsetY)) + layer.blur + layer.spread);
+    }
+    return reach * box.scale;
+  }
+
+  // How far a filter paints past its element's bounds, in slide px. blur()
+  // and a drop-shadow()'s blur take a standard deviation σ, and Chrome paints
+  // ~2.45σ past the edge they blur, under 3% alpha past ~1.75σ. A box-shadow's
+  // blur radius is 2σ, so 2σ is the reach shadowReach gives a shadow; a drop
+  // shadow is offset as well. The functions apply one after another, so their
+  // reaches add. No other function moves paint.
+  const PAINT_MOVING_FILTER = /(drop-shadow|blur)\(((?:[^()]|\([^()]*\))*)\)/gi;
+  function filterReach(s, box) {
+    const value = String(s.filter || 'none');
+    if (value === 'none') return 0;
+    let reach = 0;
+    PAINT_MOVING_FILTER.lastIndex = 0;
+    let match = PAINT_MOVING_FILTER.exec(value);
+    for (let count = 0; match && count < WALK_STEP_LIMIT; count++) {
+      // A drop shadow's colour comes first, and may be a function: only its lengths count.
+      const lengths = (match[2].replace(/[a-z-]+\([^()]*\)/gi, ' ').match(/-?[\d.]+(?:e[-+]?\d+)?px/g) || []).map(parseFloat);
+      if (match[1].toLowerCase() === 'blur') {
+        reach += 2 * Math.abs(lengths[0] || 0);
+      } else {
+        reach += Math.max(Math.abs(lengths[0] || 0), Math.abs(lengths[1] || 0)) + 2 * Math.abs(lengths[2] || 0);
+      }
+      match = PAINT_MOVING_FILTER.exec(value);
+    }
+    return reach * box.scale;
+  }
+
+  // How far everything a target paints reaches past its bounds: its outer
+  // shadows, then its filter, which blurs and shadows those too.
+  function paintReach(s, box) {
+    return shadowReach(s, box) + filterReach(s, box);
+  }
+
+  function grown(bounds, reach) {
+    return { left: bounds.left - reach, top: bounds.top - reach, right: bounds.right + reach, bottom: bounds.bottom + reach };
+  }
+
+  // The descendants of a subtree target that the slide does not show (their
+  // computed visibility is not visible, as an SVG group's visibility="hidden"
+  // makes it): the isolation shows a target's whole subtree, so capture.cjs
+  // hides these again. Read only for an <svg>, the one target whose
+  // descendants paint, over the pristine tree and bounded like the walk.
+  function hiddenDescendants(element) {
+    const hidden = [];
+    const pending = [{ element, depth: 0 }];
+    let read = 0;
+    while (pending.length) {
+      const next = pending.pop();
+      if (next.depth >= WALK_STEP_LIMIT) {
+        reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'cut at depth ' + WALK_STEP_LIMIT, 'the snapshot capture targets');
+        continue;
+      }
+      const children = elementChildrenOf(next.element);
+      for (let index = children.length - 1; index >= 0; index--) {
+        if (++read > COLLECTION_ITEM_LIMIT) {
+          reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' elements', 'the snapshot capture targets');
+          return hidden;
+        }
+        if (window.getComputedStyle(children[index]).visibility !== 'visible') hidden.push(children[index]);
+        pending.push({ element: children[index], depth: next.depth + 1 });
+      }
+    }
+    return hidden;
+  }
+
+  // A capture of `element` (computed style `s`) in `mode`, for what `clip`
+  // shows of `bounds`, and its picture item at `order`. Nothing when the clip
+  // hides it all.
+  function pushCapture(element, s, mode, bounds, order, clip) {
+    const shown = shownPart(bounds, clip);
+    if (!shown) return;
+    const id = 'c' + nextCaptureSeq++;
+    const x = shown.left;
+    const y = shown.top;
+    const w = shown.right - shown.left;
+    const h = shown.bottom - shown.top;
+    const hidden = mode === 'subtree' && String(dom.tagName(element) || '').toLowerCase() === 'svg'
+      ? hiddenDescendants(element)
+      : [];
+    const capture = {
+      id,
+      x,
+      y,
+      w,
+      h,
+      mode,
+      selector: '[' + config.captureAttribute + '="' + id + '"]',
+      hiddenWithin: hidden.length > 0,
+      // What box mode's transparent text colour must not take from the box:
+      // a border or shadow painted in currentColor (capture.cjs retainedCss).
+      paint: mode === 'box'
+        ? { borderColors: [s.borderTopColor, s.borderRightColor, s.borderBottomColor, s.borderLeftColor], boxShadow: s.boxShadow }
+        : null,
+    };
+    captures.push(capture);
+    captureTargets.push({ element, capture, hidden });
+    items.push({ kind: 'image', id: nextItemId++, order, x, y, w, h, src: null, captureId: id, alpha: 1, rotate: null });
+    stats.images++;
+  }
+
+  // The snapshot's one lasting write, made once every read is done (the metric
+  // probes are gone by then), so no read saw a changed page: each target is
+  // named for capture.cjs, through the pristine realm, and each descendant
+  // it must hide again is marked. A name the slide carried already is taken
+  // off first, so nothing but the target answers to its selector. A target
+  // that cannot be named is not captured, and says so.
+  function nameCaptureTargets() {
+    if (!captureTargets.length) return;
+    const names = [config.captureAttribute, config.hiddenAttribute];
+    const stale = queryAll('[' + names[0] + '],[' + names[1] + ']');
+    for (let index = 0; index < stale.length; index++) {
+      try {
+        dom.removeAttribute(stale[index], names[0]);
+        dom.removeAttribute(stale[index], names[1]);
+      } catch (e) { /* a name that will not come off: its element may show in a capture */ }
+    }
+    for (let index = 0; index < captureTargets.length; index++) {
+      const target = captureTargets[index];
+      try {
+        dom.setAttribute(target.element, names[0], target.capture.id);
+        for (let hidden = 0; hidden < target.hidden.length; hidden++) {
+          dom.setAttribute(target.hidden[hidden], names[1], '');
+        }
+      } catch (e) {
+        target.capture.failed = true;
+        console.error('[html2pptx] capture failed: ' + target.capture.id + ' the target could not be named (' +
+          (e && e.message) + ')');
+      }
+    }
+  }
+
   // ─── replaced content ────────────────────────────────────────────────
   // The picture sits in the content box (inside border and padding), and a
-  // raster data: <img> is embedded as is when its fit keeps the whole image:
-  // object-fit fill stretches it to the content box, contain letterboxes it at
-  // the centre. Every other picture carries no data until it is captured.
+  // raster data: <img> is embedded as is when the browser shows it as it is
+  // (embeddedImage). Every other <img> with a data: source, and every inline
+  // <svg>, <canvas> and <video>, is captured. The rest (audio, iframe, object,
+  // embed, and an image from anywhere but data:, SDR-4437) has nothing the
+  // slide can take: its picture carries no data and is skipped.
+  const CAPTURED_REPLACED = new Set(['img', 'svg', 'canvas', 'video']);
+
   function contentBox(s, box) {
     const edge = (side) => ((parseFloat(s['border' + side + 'Width']) || 0) +
       (parseFloat(s['padding' + side]) || 0)) * box.scale;
@@ -1168,8 +1383,29 @@ async function snapshotPage(config) {
     return { x: centreX - w / 2, y: centreY - h / 2, w, h };
   }
 
+  function imageSource(element) {
+    return String(element.currentSrc || element.src || '');
+  }
+
+  // Whether an <img>'s own painting changes what its pixels show, so its
+  // source embedded as is would not be what the slide shows: a corner radius,
+  // a shadow or outline ring, a filter, a blend, a clip-path or a mask.
+  function decoratesImage(s) {
+    const corners = [s.borderTopLeftRadius, s.borderTopRightRadius, s.borderBottomRightRadius, s.borderBottomLeftRadius];
+    for (let index = 0; index < corners.length; index++) {
+      const radii = String(corners[index] || '0').trim().split(/\s+/);
+      for (let radius = 0; radius < radii.length; radius++) {
+        if (parseFloat(radii[radius]) > 0) return true;
+      }
+    }
+    return (Boolean(s.boxShadow) && s.boxShadow !== 'none') || hasBoxEffect(s);
+  }
+
+  // A raster data: <img> whose fit keeps the whole image ({src, area}), else
+  // null: object-fit fill stretches it to the content box, contain letterboxes
+  // it at the centre. Any other fit or position crops it.
   function embeddedImage(element, s, area) {
-    const source = String(element.currentSrc || element.src || '');
+    const source = imageSource(element);
     const naturalWidth = Number(element.naturalWidth);
     const naturalHeight = Number(element.naturalHeight);
     if (!RASTER_DATA_URI.test(source) || !(naturalWidth > 0 && naturalHeight > 0)) return null;
@@ -1185,27 +1421,47 @@ async function snapshotPage(config) {
     return null;
   }
 
-  // A picture its clip hides is not on the slide; one it only cuts is drawn whole.
-  function emitReplaced(element, name, s, box, opacity, order, clip) {
-    const area = contentBox(s, box);
-    if (!area) return;
-    const embedded = name === 'img' ? embeddedImage(element, s, area) : null;
-    const placed = embedded ? embedded.area : area;
-    if (!shownPart(boundsOf({ x: placed.x, y: placed.y, w: placed.w, h: placed.h, rotate: box.rotate }), clip)) return;
+  function pushImage(order, area, src, alpha, rotate) {
     items.push({
       kind: 'image',
       id: nextItemId++,
       order,
-      x: placed.x,
-      y: placed.y,
-      w: placed.w,
-      h: placed.h,
-      src: embedded ? embedded.src : null,
+      x: area.x,
+      y: area.y,
+      w: area.w,
+      h: area.h,
+      src,
       captureId: null,
-      alpha: opacity,
-      rotate: box.rotate,
+      alpha,
+      rotate,
     });
     stats.images++;
+  }
+
+  // A replaced element's box and picture. An image embedded as it is sits on
+  // its native box (emitBox), at its cumulative opacity; a picture its clip
+  // hides is not on the slide, and one the clip cuts is captured cut. A
+  // capture holds the element's own box as well, so that box is no shape.
+  function emitReplaced(element, name, s, box, opacity, place, seq, clip) {
+    const order = place.paint.concat([4, 0, seq, 0]);
+    const isSlideRoot = element === slideRoot;
+    if (name === 'img' && !decoratesImage(s)) {
+      const area = contentBox(s, box);
+      const embedded = area ? embeddedImage(element, s, area) : null;
+      const shown = embedded && shownPart(boundsOf({ ...embedded.area, rotate: box.rotate }), clip);
+      if (embedded && !(shown && shown.cut)) {
+        emitBox(s, box, opacity, place.box, isSlideRoot, clip);
+        if (shown) pushImage(order, embedded.area, embedded.src, opacity, box.rotate);
+        return;
+      }
+    }
+    if (CAPTURED_REPLACED.has(name) && (name !== 'img' || /^data:/i.test(imageSource(element)))) {
+      pushCapture(element, s, 'subtree', grown(boundsOf(box), paintReach(s, box)), order, clip);
+      return;
+    }
+    emitBox(s, box, opacity, place.box, isSlideRoot, clip);
+    const area = contentBox(s, box);
+    if (area && shownPart(boundsOf({ ...area, rotate: box.rotate }), clip)) pushImage(order, area, null, opacity, box.rotate);
   }
 
   // ─── text ────────────────────────────────────────────────────────────
@@ -1225,7 +1481,9 @@ async function snapshotPage(config) {
     textColour,
     boxGeometry,
     contentBox,
-    paintsBox,
+    // A box drawn as a shape or captured (capturesBox) paints: a span whose
+    // only paint is a gradient is a decoration too.
+    paintsBox: (s, opacity) => paintsBox(s, opacity) || capturesBox(s, opacity),
     inlineClip,
     shows: (bounds, clip) => shownPart(bounds, clip) !== null,
   });
@@ -1249,13 +1507,30 @@ async function snapshotPage(config) {
   // Appendix E, step 7 after step 4). elSeq is the decoration's place in DOM
   // order among its block's decorations, which orders them as the walk's own
   // sequence numbers would: both follow the document, and no other key of the
-  // slide compares with it.
+  // slide compares with it. A decoration whose box needs a capture (a
+  // highlight gradient, a filtered chip) is one box-only picture at that
+  // place: its fragments' bounds, grown by its shadow and filter, so every fragment is in it.
   function pushGroup(group, paint, blockSeq) {
     for (let index = 0; index < group.decorations.length; index++) {
       const decoration = group.decorations[index];
+      const order = paint.concat([4, 0, blockSeq, 0, index]);
+      if (capturesBox(decoration.style, decoration.opacity)) {
+        let bounds = boundsOf(decoration.boxes[0]);
+        for (let fragment = 1; fragment < decoration.boxes.length; fragment++) {
+          const next = boundsOf(decoration.boxes[fragment]);
+          bounds = {
+            left: Math.min(bounds.left, next.left),
+            top: Math.min(bounds.top, next.top),
+            right: Math.max(bounds.right, next.right),
+            bottom: Math.max(bounds.bottom, next.bottom),
+          };
+        }
+        const reach = paintReach(decoration.style, decoration.boxes[0]);
+        pushCapture(decoration.element, decoration.style, 'box', grown(bounds, reach), order, decoration.clip);
+        continue;
+      }
       for (let fragment = 0; fragment < decoration.boxes.length; fragment++) {
-        emitBox(decoration.style, decoration.boxes[fragment], decoration.opacity,
-          paint.concat([4, 0, blockSeq, 0, index]), false, decoration.clip);
+        emitBox(decoration.style, decoration.boxes[fragment], decoration.opacity, order, false, decoration.clip);
       }
     }
     for (let index = 0; index < group.blocks.length; index++) {
@@ -1370,11 +1645,15 @@ async function snapshotPage(config) {
     // An inline box paints one box per line fragment, under its block's text:
     // the text layout collects it with that block (pushGroup), so its bounding
     // rect, which spans every line it is on, is never a box of its own.
+    // A box-only capture is the element's box: no native shape beside it.
     if (s.visibility === 'visible' && !textLayout.isInlineBox(name, s)) {
       const box = boxGeometry(element, clips.rect || element.getBoundingClientRect(), frame);
-      if (box) {
+      if (box && replaced) {
+        emitReplaced(element, name, s, box, opacity, place, seq, clips.box);
+      } else if (box && element !== slideRoot && capturesBox(s, opacity)) {
+        pushCapture(element, s, 'box', grown(boundsOf(box), paintReach(s, box)), place.box, clips.box);
+      } else if (box) {
         emitBox(s, box, opacity, place.box, element === slideRoot, clips.box);
-        if (replaced) emitReplaced(element, name, s, box, opacity, place.paint.concat([4, 0, seq, 0]), clips.box);
       }
     }
     if (replaced) return;
@@ -1448,6 +1727,7 @@ async function snapshotPage(config) {
   textLayout.applyMetrics();
   const fonts = textLayout.loadedFonts();
   if (textLayout.truncated()) stats.truncated = true;
+  nameCaptureTargets();
 
   items.sort(compareItems);
   return {
@@ -1469,6 +1749,10 @@ ${DOM_ACCESS_SOURCE}
 ${GRADIENT_SOURCE}
 ${TEXT_SOURCE}
 ${blendOver.toString()}
-  return await (${snapshotPage.toString()})(${JSON.stringify({ slideRootMarker: SLIDE_ROOT_MARKER })});
+  return await (${snapshotPage.toString()})(${JSON.stringify({
+    slideRootMarker: SLIDE_ROOT_MARKER,
+    captureAttribute: CAPTURE_ATTRIBUTE,
+    hiddenAttribute: HIDDEN_ATTRIBUTE,
+  })});
 })()
 `;

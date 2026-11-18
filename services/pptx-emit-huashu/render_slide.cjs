@@ -8,7 +8,9 @@
 //   3. validate          the legacy converter's body and text-box checks;
 //   4. snapshot          SNAPSHOT_SOURCE: one read-only page.evaluate that
 //                        returns the slide model (snapshot.mjs);
-//   5. emit              emit_model.cjs writes the model to a pptxgenjs slide.
+//   5. capture           capture.cjs: an element-isolated 2x screenshot of each
+//                        capture target the model names, from the same page;
+//   6. emit              emit_model.cjs writes the model to a pptxgenjs slide.
 //
 // renderSlide(htmlFile, pres, { bypassValidation, preProcessSource })
 //   -> { slide, summary }
@@ -18,6 +20,7 @@
 
 const path = require('path');
 const { chromium } = require('playwright');
+const { captureAll } = require('./capture.cjs');
 const { emitSlide, pictureData } = require('./emit_model.cjs');
 
 const PT_PER_PX = 0.75;
@@ -136,16 +139,20 @@ ${access.DOM_ACCESS_SOURCE}
 // runs as non-root, so the sandbox is off and /dev/shm is not used. The env is
 // merged with process.env so Chromium inherits LD_LIBRARY_PATH, which
 // sidecar_subprocess_env() points at the bundled sys-libs.
+// Rasterization is in software everywhere (--disable-gpu): identical pages
+// must export byte-identical pictures, and GPU rasterization on macOS
+// anti-aliased a chart's edges differently in about one capture in twenty.
+// Databricks Apps has no GPU, so this is how it renders anyway.
 function launchOptions(tmpDir) {
-  const options = { env: { ...process.env, TMPDIR: tmpDir } };
+  const options = { env: { ...process.env, TMPDIR: tmpDir }, args: ['--disable-gpu'] };
   if (process.platform === 'darwin') {
     options.channel = 'chrome';
   } else {
-    options.args = [
+    options.args.push(
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-    ];
+    );
   }
   return options;
 }
@@ -371,9 +378,10 @@ async function renderSlide(htmlFile, pres, options = {}) {
       await finishAnimations(page, sources);
       bodyDimensions = await readBodyDimensions(page, sources);
       model = await page.evaluate(sources.snapshot);
-      // Capture id -> data: PNG for the targets the model names in model.captures.
-      // A target without an entry is a failed capture: its picture is skipped.
-      captures = new Map();
+      // Capture id -> data: PNG for the targets the model names in model.captures,
+      // taken from this page as the snapshot left it. A target without an entry
+      // is a failed capture: its picture is skipped.
+      captures = await captureAll(page, model.captures);
     } finally {
       await browser.close();
     }

@@ -80,6 +80,9 @@ export const DOM_ACCESS_SOURCE = `
       const rectTop = describe(realm.DOMRectReadOnly.prototype, 'top');
       const rectWidth = describe(realm.DOMRectReadOnly.prototype, 'width');
       const rectHeight = describe(realm.DOMRectReadOnly.prototype, 'height');
+      // How the snapshot names its capture targets, once it has read everything (snapshot.mjs nameCaptureTargets).
+      const setAttribute = realm.Element.prototype.setAttribute;
+      const removeAttribute = realm.Element.prototype.removeAttribute;
       if (typeof firstChild.get !== 'function' ||
           typeof nextSibling.get !== 'function' ||
           typeof tag.get !== 'function' ||
@@ -100,7 +103,9 @@ export const DOM_ACCESS_SOURCE = `
           typeof rectLeft.get !== 'function' ||
           typeof rectTop.get !== 'function' ||
           typeof rectWidth.get !== 'function' ||
-          typeof rectHeight.get !== 'function') return null;
+          typeof rectHeight.get !== 'function' ||
+          typeof setAttribute !== 'function' ||
+          typeof removeAttribute !== 'function') return null;
       return {
         pristine: true,
         firstElementChild: (el) => firstChild.get.call(el),
@@ -128,6 +133,8 @@ export const DOM_ACCESS_SOURCE = `
           width: rectWidth.get.call(rect),
           height: rectHeight.get.call(rect),
         }),
+        setAttribute: (el, name, value) => setAttribute.call(el, name, value),
+        removeAttribute: (el, name) => removeAttribute.call(el, name),
       };
     } catch (e) {
       return null;
@@ -160,6 +167,8 @@ export const DOM_ACCESS_SOURCE = `
     rectListLength: (list) => list.length,
     rectAt: (list, index) => list[index],
     rectBounds: (rect) => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height }),
+    setAttribute: (el, name, value) => el.setAttribute(name, value),
+    removeAttribute: (el, name) => el.removeAttribute(name),
   };
 
   // One capture per pass, made on first use, so no pass re-enters the iframe per call.

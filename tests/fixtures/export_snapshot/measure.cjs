@@ -9,6 +9,7 @@
 // export itself reads.
 //
 // usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text]
+//        node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box
 //        node measure.cjs <document.html> --mode=fonts
 //        node measure.cjs <document.html> <probes-json> --mode=probe
 //        node measure.cjs <document.html> <point-json> --mode=hit
@@ -16,6 +17,11 @@
 // nothing matches.
 //   --mode=rect  (the default) prints {"x":…,"y":…,"w":…,"h":…}, the element's
 //                getBoundingClientRect().
+//   --mode=each-rect prints [{"x":…,"y":…,"w":…,"h":…}, …], the
+//                getBoundingClientRect() of EVERY match of selector, in document
+//                order, from one page load. The index is ignored.
+//   --mode=each-padding-box prints the padding box (as --mode=padding-box) of
+//                every match of selector, in document order.
 //   --mode=rects prints [{"x":…,"y":…,"w":…,"h":…}, …], the element's
 //                getClientRects(): one border-box rect per box fragment, which
 //                for an inline element is one per line it spans. See
@@ -44,9 +50,9 @@
 //                one, else null. See measureHit.
 //
 // Called from tests/fixtures/export_snapshot_support.py (browser_rect,
-// browser_client_rects, browser_padding_box, browser_line_boxes, browser_lines,
-// browser_style, browser_text, browser_loaded_weights, browser_probes,
-// browser_hit_id).
+// browser_each_rect, browser_client_rects, browser_padding_box,
+// browser_each_padding_box, browser_line_boxes, browser_lines, browser_style,
+// browser_text, browser_loaded_weights, browser_probes, browser_hit_id).
 
 const path = require('path');
 
@@ -183,6 +189,41 @@ async function measurePaddingBox(page, selector, index) {
     const bottom = parseFloat(style.borderBottomWidth) || 0;
     return { x: rect.x + left, y: rect.y + top, w: rect.width - left - right, h: rect.height - top - bottom };
   }, { selector, index });
+}
+
+// More matches than any real slide has elements of one kind: a document
+// reporting more is lying about its tree, and is reported rather than read.
+const MATCH_LIMIT = 10000;
+
+// The border box (getBoundingClientRect()) or the padding box (as
+// measurePaddingBox reads it: the border box less the computed border widths)
+// of every match of selector, in document order, from the one settled page. So
+// a test measuring many elements of a slide pays for one browser launch.
+async function measureEach(page, selector, box) {
+  return page.evaluate(({ selector, box, limit }) => {
+    const matches = document.querySelectorAll(selector);
+    if (matches.length === 0) {
+      return { error: `selector ${selector} matched no element` };
+    }
+    if (!(matches.length <= limit)) {
+      return { error: `selector ${selector} matched ${matches.length} elements; more than ${limit} is not a real slide` };
+    }
+    const boxes = [];
+    for (let index = 0; index < matches.length; index++) {
+      const rect = matches[index].getBoundingClientRect();
+      if (box !== 'padding') {
+        boxes.push({ x: rect.x, y: rect.y, w: rect.width, h: rect.height });
+        continue;
+      }
+      const style = getComputedStyle(matches[index]);
+      const left = parseFloat(style.borderLeftWidth) || 0;
+      const right = parseFloat(style.borderRightWidth) || 0;
+      const top = parseFloat(style.borderTopWidth) || 0;
+      const bottom = parseFloat(style.borderBottomWidth) || 0;
+      boxes.push({ x: rect.x + left, y: rect.y + top, w: rect.width - left - right, h: rect.height - top - bottom });
+    }
+    return { boxes };
+  }, { selector, box, limit: MATCH_LIMIT });
 }
 
 // What the browser shows at a point, by hit testing: document.elementFromPoint
@@ -443,6 +484,14 @@ const MODES = {
     return measured.error ? measured : measured.rects;
   },
   'padding-box': measurePaddingBox,
+  'each-rect': async (page, selector) => {
+    const measured = await measureEach(page, selector, 'border');
+    return measured.error ? measured : measured.boxes;
+  },
+  'each-padding-box': async (page, selector) => {
+    const measured = await measureEach(page, selector, 'padding');
+    return measured.error ? measured : measured.boxes;
+  },
   lines: async (page, selector, index) => {
     const measured = await measureLines(page, selector, index);
     return measured.error ? measured : measured.lines;
@@ -478,6 +527,7 @@ async function main() {
   if (!documentPath || (!selector && !DOCUMENT_MODES.has(mode))) {
     console.error(
       'usage: node measure.cjs <document.html> <selector> [index] [--mode=rect|rects|padding-box|lines|style|text]\n' +
+      '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box\n' +
       '       node measure.cjs <document.html> --mode=fonts\n' +
       '       node measure.cjs <document.html> <probes-json> --mode=probe\n' +
       '       node measure.cjs <document.html> <point-json> --mode=hit',
