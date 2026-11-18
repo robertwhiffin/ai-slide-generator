@@ -414,7 +414,11 @@ def test_a_slide_is_verbatim_inside_its_frame():
     assert legacy in html
     soup = _soup(html)
     [frame] = [c for c in _body_children(soup) if "T & x" in c.get_text()]
-    assert frame.find("h1").get_text() == "T & x"
+    # The body-level element is the frame, and the slide root is its only element child.
+    assert "slide" not in (frame.get("class") or [])
+    [root] = [c for c in frame.children if isinstance(c, Tag)]
+    assert root.get("class") == ["slide"]
+    assert root.find("h1").get_text() == "T & x"
 
 
 @pytest.mark.parametrize(
@@ -733,13 +737,19 @@ def _repeated(atom: str) -> str:
     return atom * (_HUGE // len(atom))
 
 
+def _unclosed_slide(atom: str) -> dict:
+    """Slide 0 whose html ENDS in the unclosed atoms: no later ``>`` or ``)`` closes them
+    (``_slide``'s closing ``</div>`` would give the old tag pattern one long match)."""
+    return {"slide_id": "slide_0", "html": f"<p>{_token(0)}</p>" + _repeated(atom), "scripts": ""}
+
+
 @pytest.mark.parametrize(
     "deck",
     [
         pytest.param(_deck([_slide(0)], css=_repeated("url(")), id="css-unclosed-url"),
-        pytest.param(_deck([_slide(0, _repeated('<img src="x" '))]), id="slide-unclosed-img"),
+        pytest.param(_deck([_unclosed_slide('<img src="x" ')]), id="slide-unclosed-img"),
         pytest.param(
-            _deck([_slide(0, _repeated('<div style="background:url('))]),
+            _deck([_unclosed_slide('<div style="background:url(')]),
             id="slide-unclosed-style-url",
         ),
     ],

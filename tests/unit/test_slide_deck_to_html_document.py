@@ -135,6 +135,7 @@ _TOKENIZER_STYLE_CLOSER = re.compile(r"</style(?=[\t\n\f\r />]|\Z)", re.IGNORECA
         pytest.param("</style/>", id="self-closing"),
         pytest.param("</STYLE\t>", id="upper-case-tab"),
         pytest.param("<</style/style>", id="re-forms-when-removed"),
+        pytest.param("</</style>style>", id="re-forms-when-its-prefix-is-removed"),
         pytest.param("</sty</style>le>", id="nested-in-a-closer"),
     ],
 )
