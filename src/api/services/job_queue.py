@@ -111,11 +111,13 @@ def shutdown_chat_executor() -> None:
     if executor is not None:
         executor.shutdown(wait=False, cancel_futures=True)
 
-# Maximum duration (seconds) a chat request can stay in "running" before the
-# hard-timeout sweeper marks it failed. Belt-and-suspenders on top of the
-# startup recover_stuck_requests() pass: the sweeper runs continuously while
-# the app is up, whereas recovery only runs at process boot. Gives MCP callers
-# a predictable upper bound on poll duration independent of deploy cadence.
+# Maximum duration (seconds) a monolith (Legacy deck) chat request can stay in
+# "running" before the hard-timeout sweeper marks it failed. Belt-and-suspenders
+# on top of the startup recover_stuck_requests() pass: the sweeper runs
+# continuously while the app is up, whereas recovery only runs at process boot,
+# so a running turn's duration is bounded independent of deploy cadence. MCP
+# turns are Agent (graph) turns and get GRAPH_JOB_HARD_TIMEOUT_SECONDS below;
+# the sweeper counts from when a turn starts running, so queue wait comes on top.
 JOB_HARD_TIMEOUT_SECONDS = 600
 
 # Agent-mode ("graph") turns get a longer hard limit: a multi-step graph run
@@ -397,8 +399,9 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         # request id, so release only while this request still owns it, and not
         # while its snapshot survives: a failed restore keeps the deck locked to
         # its sender until a retry restores it.  Monolith requests (a Legacy
-        # deck's) never bind and release as before.  A graph request that
-        # never started releases nothing: its stop already released the lock.
+        # deck's) release unconditionally, as before, whether or not they bound
+        # the lock.  A graph request that never started releases nothing: its
+        # stop already released the lock.
         if not is_graph:
             session_manager.release_session_lock(session_id)
         elif started and (completed or not _snapshot_survives(request_id)):
@@ -582,7 +585,8 @@ def _fail_stuck_request(request_id: str, session_pk: int) -> bool:
     """A stuck request with nothing to restore (a monolith one): ``error``, and
     its session's lock freed unless a newer request has taken it.
 
-    An unbound lock (a Legacy deck's request never binds its own) counts as this request's.
+    An unbound lock (from a request that never bound its lock: one entered before
+    the bind existed) counts as this request's.
     """
     from sqlalchemy import or_, update
 

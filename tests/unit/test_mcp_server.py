@@ -10,6 +10,7 @@ import copy
 import inspect
 import json
 import re
+import threading
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1867,9 +1868,12 @@ def _assert_ready_payload(result, turn, *, replacement_info=None):
     assert result["messages"] == _as_reported(turn)
 
 
-async def _db_terminal_status(fake_request, identity, *, db_status, error_message):
+async def _db_terminal_status(
+    fake_request, identity, *, db_status, error_message, **row_fields
+):
     """Poll request ``r`` of deck ``s`` after the worker dropped its in-memory entry,
-    with the DB row ended ``db_status``."""
+    with the DB row ended ``db_status``. ``row_fields`` adds further
+    ``get_chat_request`` keys (e.g. ``rollback_outcome``)."""
     from src.api import mcp_server
 
     chat_request = {
@@ -1880,6 +1884,7 @@ async def _db_terminal_status(fake_request, identity, *, db_status, error_messag
         "created_at": "2026-11-18T09:00:00",
         "completed_at": "2026-11-18T09:00:05",
         "result": None,
+        **row_fields,
     }
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
@@ -2125,6 +2130,58 @@ class TestGetDeckStatusReportsAgentTurns:
             "error": mcp_server.MCP_STOPPED_ERROR,
         }
         assert result["error"] == _STOPPED_COPY
+
+    @pytest.mark.asyncio
+    async def test_a_stop_whose_restore_failed_reports_the_restore_pending_copy(
+        self, fake_request, identity
+    ):
+        """Review M1. A stop whose restore failed ends the request ``cancelled``
+        with ``rollback_outcome="restore_failed"`` and the restore-pending copy
+        (``generation_rollback._record_restore_failed``). The deck may still hold
+        the turn's changes and stays locked until a retry restores it, so the poll
+        reports that copy, never "The deck is unchanged"."""
+        result = await _db_terminal_status(
+            fake_request,
+            identity,
+            db_status="cancelled",
+            error_message=_RESTORE_PENDING_COPY,
+            rollback_outcome="restore_failed",
+        )
+
+        assert result == {
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": _RESTORE_PENDING_COPY,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "rollback_outcome",
+        ["rolled_back", None],
+        ids=["rolled-back", "no-outcome"],
+    )
+    async def test_a_rolled_back_stop_keeps_the_stopped_copy(
+        self, fake_request, identity, rollback_outcome
+    ):
+        """Review M1, the converse: only ``restore_failed`` swaps the copy. A normal
+        stop's real row (``rolled_back``, no error message; also what a retry that
+        restored the deck leaves) and a row with no outcome report the stopped
+        copy."""
+        result = await _db_terminal_status(
+            fake_request,
+            identity,
+            db_status="cancelled",
+            error_message=None,
+            rollback_outcome=rollback_outcome,
+        )
+
+        assert result == {
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": _STOPPED_COPY,
+        }
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2576,6 +2633,46 @@ async def test_edit_deck_checks_edit_permission_before_ownership(fake_request, i
     assert sm.mock_calls == []
     resolve_engine.assert_not_called()
     enter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_runs_the_owner_gate_off_the_event_loop(fake_request, identity):
+    """Review M2. The owner gate reads the database and, on a locked deck, may call
+    SCIM for the holder's name, so it runs in a worker thread (as the app route's
+    gate does), never on the event loop. Enter follows it."""
+    from src.api import mcp_server
+
+    loop_thread = threading.get_ident()
+    gate_calls = []
+
+    def _recording_gate(session_id, user_name):
+        gate_calls.append((threading.get_ident(), session_id, user_name))
+
+    sm = _edit_deck_session_manager()
+
+    with _edit_deck_env(identity, sm) as (enter, _resolve_engine, _name), patch(
+        "src.api.mcp_server._require_agent_deck_owner", side_effect=_recording_gate
+    ):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="On slide 2, add a churn chart",
+        )
+
+    [(gate_thread, session_id, user_name)] = gate_calls
+    assert gate_thread != loop_thread
+    assert (session_id, user_name) == ("sess-1", "alice@example.com")
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message="On slide 2, add a churn chart",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
+    assert result == {
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
 
 
 @pytest.mark.asyncio

@@ -672,7 +672,8 @@ async def send_message_streaming(
     # and passed down.  Not in send_message_streaming and not in the job queue:
     # MCP's create_deck and edit_deck enter through enter_chat_turn and drain
     # through the same worker as POST /chat/async, so the choice of engine is made
-    # at Enter, never downstream of enqueue_job.  Resolution reads the database, so it runs off the event loop.
+    # at Enter, never downstream of enqueue_job.  Resolution reads the database,
+    # so it runs off the event loop.
     #
     # FAIL CLOSED (#271 C24/C47): a failure to resolve is a 503, never a silent
     # monolith turn.  The response has not started, so the SSE generator's

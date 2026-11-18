@@ -50,6 +50,7 @@ from src.core.settings_db import (
 )
 from src.domain.slide_deck import SlideDeck
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
+from src.services.generation_rollback import RESTORE_PENDING_MESSAGE, RollbackResult
 from src.services.identity_provider import resolve_display_name
 from src.services.permission_service import get_permission_service
 from src.services.persisted_graph_release import (
@@ -207,9 +208,16 @@ MCP_ENGINE_RACE_ERROR = ENGINE_RACE_DETAIL
 MCP_STOPPED_ERROR = "This generation was stopped in Tellr. The deck is unchanged."
 
 
-def _deck_edit_url(session_id: str) -> str:
-    """The Tellr editor URL for a deck (relative when no public base URL is set)."""
-    return f"{_public_app_url()}/sessions/{session_id}/edit"
+def _deck_edit_url(session_id: str, *, base_url: Optional[str] = None) -> str:
+    """The Tellr editor URL for a deck (relative when no public base URL is set).
+
+    The one writer of this URL: the error copy and ``_render_deck_response``'s
+    ``deck_url`` both come from here. ``base_url`` defaults to
+    ``_public_app_url()``; a caller that already read it passes it in.
+    """
+    if base_url is None:
+        base_url = _public_app_url()
+    return f"{base_url}/sessions/{session_id}/edit"
 
 
 async def _enter_turn_or_tool_error(
@@ -386,8 +394,9 @@ def _resolve_template_name(design_system_id: int, template_name: str) -> Optiona
         "Generate a new slide deck from a natural-language prompt. Returns a "
         "session_id and a request_id; the caller polls get_deck_status for "
         "completion. The resulting deck is attributed to the calling user and "
-        "appears in their tellr UI. It is an Agent deck that uses the user's "
-        "default tools. Any slide count belongs in the prompt, for example "
+        "appears in their tellr UI. It is an Agent deck with the app's default "
+        "tools for a new deck (for example Genie One, when an admin turned that "
+        "default on). Any slide count belongs in the prompt, for example "
         "'make 6 slides'. The deck uses the org-default design system unless "
         "design_system_id or slide_style_id says otherwise; pass template_name "
         "to pin one of that design system's named templates (otherwise the "
@@ -611,11 +620,7 @@ def _render_deck_response(
     else:
         deck = SlideDeck(title=session.get("title"))
 
-    deck_url = (
-        f"{base_url}/sessions/{session_id}/edit"
-        if base_url
-        else f"/sessions/{session_id}/edit"
-    )
+    deck_url = _deck_edit_url(session_id, base_url=base_url)
     deck_view_url = (
         f"{base_url}/sessions/{session_id}/view"
         if base_url
@@ -646,9 +651,14 @@ def _render_deck_response(
         "A ready turn may leave the deck UNCHANGED (the assistant may "
         "answer or ask a question instead of editing). Show `reply` (the "
         "assistant's final message of the turn) to the user; `deck_changed` "
-        "says whether the deck was modified. When deck_changed is false, "
-        "metadata.clarification_needed is true and metadata.clarification "
-        "repeats the reply. A generation stopped in the Tellr app reports "
+        "says whether the deck was modified, and "
+        "metadata.clarification_needed is always its opposite. On an Agent "
+        "turn (every turn create_deck and edit_deck start), "
+        "metadata.clarification repeats the reply when deck_changed is false, "
+        "and a turn with no recorded intent reports deck_changed false. On a "
+        "Legacy turn, deck_changed is false only when the assistant asked a "
+        "clarifying question instead of editing: metadata.clarification is "
+        "that question, and reply may be null. A stopped generation reports "
         "status failed."
     ),
 )
@@ -748,8 +758,24 @@ async def _get_deck_status_impl(
                 }
 
             if db_status == "cancelled":
-                # Only a user stop in the Tellr app writes ``cancelled``
-                # (timeouts and orphan sweeps write ``error``).
+                # Only a stop (``cancel_chat``, by the request's sender) writes
+                # ``cancelled``; timeouts and orphan sweeps write ``error``.
+                if (
+                    chat_request.get("rollback_outcome")
+                    == RollbackResult.RESTORE_FAILED.value
+                ):
+                    # The stop's restore failed: the deck may still hold the
+                    # turn's changes and stays locked until a retry restores
+                    # it, so it is not "unchanged". Report the request's own
+                    # restore-pending copy until a retry settles the request
+                    # (it then records the final outcome and clears the copy).
+                    return {
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "status": "failed",
+                        "error": chat_request.get("error_message")
+                        or RESTORE_PENDING_MESSAGE,
+                    }
                 return {
                     "session_id": session_id,
                     "request_id": request_id,
@@ -819,11 +845,11 @@ async def _get_deck_status_impl(
 
             if result_metadata.get("engine_mode") == "graph":
                 # Agent turn: the architect's intent says whether the deck
-                # changed. ``discuss`` / ``confirm_design_contract`` (and a
-                # missing intent, e.g. an app-made turn from before this
-                # field existed) return before any deck write, so the reply
-                # is the answer or question and is surfaced as the
-                # clarification.
+                # changed. ``discuss`` / ``confirm_design_contract`` return
+                # before any deck write, so the reply is the answer or question
+                # and is surfaced as the clarification. A missing intent is
+                # reported as unchanged (pre-pass Ruling 2: such a result comes
+                # only from an app turn made before this release).
                 deck_changed = result_metadata.get("architect_intent") in (
                     "build",
                     "edit",
@@ -933,9 +959,10 @@ def _require_agent_deck_owner(session_id: str, user_name: str) -> None:
     description=(
         "Ask Tellr's architect about an existing deck: either a change to make "
         "or a question about it. Name slides by number in the instruction "
-        "(e.g. \"On slides 1 and 4, shorten the titles\"). The edit is "
-        "applied in place; the session_id and deck_url stay stable. Returns a "
-        "request_id; poll get_deck_status until it completes, and show the "
+        "(e.g. \"On slides 1 and 4, shorten the titles\"). A change is made to "
+        "this same deck, so the session_id and deck_url stay stable; "
+        "get_deck_status's deck_changed says whether the turn changed it. "
+        "Returns a request_id; poll get_deck_status until it completes, and show the "
         "user the `reply` it returns, which is the architect's answer or a "
         "summary of what changed. Only the deck's owner can edit it over MCP, "
         "and only decks made in Agent mode; for anything else, open the deck "
@@ -994,7 +1021,13 @@ async def _edit_deck_impl(
                     "Deck not found or you do not have permission to edit it"
                 )
 
-            _require_agent_deck_owner(session_id, identity.user_name)
+            # Off the event loop, as the app route's gate is: it reads the DB
+            # and, on a locked deck, may make a SCIM display-name call (cached
+            # per process only after a name's first lookup). ``to_thread``
+            # copies the ContextVars ``mcp_auth_scope`` bound.
+            await asyncio.to_thread(
+                _require_agent_deck_owner, session_id, identity.user_name
+            )
 
             request_id = await _enter_turn_or_tool_error(
                 session_id=session_id,

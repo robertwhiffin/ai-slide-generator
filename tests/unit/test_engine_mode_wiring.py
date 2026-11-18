@@ -13,31 +13,33 @@ one of them is a route:
     src/api/services/job_queue.py   _run_streaming_generator, reached from
                                     process_chat_request <- worker <- enqueue_job
 
-`POST /chat/async` never calls it — it enqueues a job.  **And MCP enqueues onto
-the same queue**, drained by the same worker into the same
-`process_chat_request`.  So resolving mode inside the job queue would put MCP on
-the graph (the exact defect the plan's placement rule exists to prevent), and
-resolving it only in the streaming route would leave the production async path
-on the monolith forever.  Mode is therefore resolved in BOTH chat routes and
-travels to the worker in the job payload.
+`POST /chat/async` never calls it — it enqueues a job.  **MCP's `create_deck` and
+`edit_deck` enqueue onto the same queue** (through `enter_chat_turn`, the async
+route's own Enter), drained by the same worker into the same
+`process_chat_request`.  So resolving mode inside the job queue would decide a
+turn's engine downstream of Enter (the defect the plan's placement rule exists to
+prevent), and resolving it only in the streaming route would leave the production
+async path on the monolith forever.  Mode is therefore resolved in BOTH chat routes
+and travels to the worker in the job payload.
 
 Why the payload key is `engine_mode` and never `mode`
 -----------------------------------------------------
-`mode` is ALREADY a key in that payload: `mcp_server.py`'s `enqueue_create_job`
-sets `"mode": mode` for its own generate-vs-edit flag, whose values are
-`"generate"` and `"edit"`.  `payload.get("mode", "monolith")` would therefore
-return `"generate"` on every MCP job — safe only by accident, and inverted the
-moment anyone compares against `"monolith"` instead of `"graph"`.
-`TestTheKeyIsEngineModeNotMode` is the guard that reddens if the two are ever
-conflated.
+`mode` was a key in that payload before `engine_mode` existed: MCP's old
+`enqueue_create_job` set `"mode": mode` for its own generate-vs-edit flag, whose
+values were `"generate"` and `"edit"`.  `payload.get("mode", "monolith")` would
+therefore return `"generate"` for such a payload — safe only by accident, and
+inverted the moment anyone compares against `"monolith"` instead of `"graph"`.
+MCP turns now enter through `enter_chat_turn`, which sets `engine_mode` and sends
+no `mode` key.  `TestTheKeyIsEngineModeNotMode` is the guard that reddens if the
+two are ever conflated.
 
-MCP's exclusion is STRUCTURAL, not a check
-------------------------------------------
-Nothing in `mcp_server.py` was touched.  Its payload simply carries no
-`engine_mode` key, and `process_chat_request`'s default is `"monolith"`, so an
-MCP job runs on the monolith without MCP knowing this switch exists.
-`TestMcpIsExcludedByItsPayload` drives an MCP-SHAPED payload through the real
-`process_chat_request` rather than only reading source.
+A payload with no `engine_mode` key falls to the monolith
+---------------------------------------------------------
+`process_chat_request`'s default is `"monolith"`, so a payload that carries no
+`engine_mode` key (one built before the key existed, such as the old MCP
+`mode`-flag shape) runs on the monolith and does not error.
+`TestAPayloadWithNoEngineModeKeyFallsToMonolith` drives such payloads through the
+real `process_chat_request` rather than only reading source.
 """
 from __future__ import annotations
 
@@ -298,7 +300,7 @@ class TestAsyncRoute:
 
 
 class TestTheKeyIsEngineModeNotMode:
-    """`mode` is MCP's generate/edit flag. Conflating the two ships a defect."""
+    """`mode` was MCP's old generate/edit flag. Conflating the two ships a defect."""
 
     def test_the_async_payload_carries_engine_mode(self, route_env):
         sid = _seed_session(route_env["factory"], ["build me a deck"])
@@ -322,8 +324,9 @@ class TestTheKeyIsEngineModeNotMode:
         """Source guard on the one line the C-2 collision would live in.
 
         Behavioural coverage of the same rule is
-        `TestMcpIsExcludedByItsPayload`; this pins the READ, because
-        `payload.get("mode", "monolith")` would return MCP's `"generate"` and
+        `TestAPayloadWithNoEngineModeKeyFallsToMonolith`; this pins the READ, because
+        `payload.get("mode", "monolith")` would return the old MCP payload's
+        `"generate"` and
         still compare unequal to `"graph"` — passing every behavioural test
         while being wrong.
         """
@@ -419,14 +422,15 @@ class TestTheWorkerForwardsTheMode:
         assert _run(payload) == "monolith"
 
 
-class TestMcpIsExcludedByItsPayload:
-    """An MCP-shaped payload runs on the monolith, and does not error."""
+class TestAPayloadWithNoEngineModeKeyFallsToMonolith:
+    """The job queue's default: a payload with no `engine_mode` key (the old MCP
+    `mode`-flag shape among them) runs on the monolith, and does not error."""
 
     def test_a_payload_with_no_engine_mode_key_falls_to_monolith(self):
         assert _run(dict(_BASE_PAYLOAD)) == "monolith"
 
-    def test_an_mcp_generate_payload_falls_to_monolith(self):
-        """MCP's real payload shape: `mode` set, `engine_mode` absent."""
+    def test_an_old_mcp_generate_payload_falls_to_monolith(self):
+        """The old MCP payload shape: `mode` set, `engine_mode` absent."""
         payload = {
             **_BASE_PAYLOAD,
             "mode": "generate",
@@ -435,12 +439,13 @@ class TestMcpIsExcludedByItsPayload:
         }
         assert _run(payload) == "monolith"
 
-    def test_an_mcp_edit_payload_falls_to_monolith(self):
+    def test_an_old_mcp_edit_payload_falls_to_monolith(self):
         payload = {**_BASE_PAYLOAD, "mode": "edit", "correlation_id": "corr-2"}
         assert _run(payload) == "monolith"
 
-    def test_an_mcp_payload_does_not_raise(self):
-        """A KeyError here would break every MCP job, not just graph ones."""
+    def test_an_old_mcp_payload_does_not_raise(self):
+        """A KeyError here would break every payload with no `engine_mode` key, not
+        just graph ones."""
         with _worker_env() as (_recorder, manager):
             asyncio.run(
                 job_queue.process_chat_request(
@@ -474,7 +479,8 @@ class TestRunStreamingGeneratorPassesItOn:
 
 
 class TestDefaultsFailClosed:
-    """Every hop defaults to monolith. That default IS MCP's exclusion."""
+    """Every hop defaults to monolith, so a turn that names no engine never runs
+    on the graph."""
 
     @pytest.mark.parametrize(
         "func",
