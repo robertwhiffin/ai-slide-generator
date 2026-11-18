@@ -560,9 +560,11 @@ class TestGeneration:
         s.close()
         assert calls == []
 
-    def test_transient_provider_failure_is_retried(
+    def test_a_transient_failure_is_not_retried_again_by_the_queue(
         self, patched_db, db_factory, graph_release, monkeypatch
     ):
+        """The adapter owns transient retries (spec §3); the queue retrying on top would
+        multiply them, so one transient failure is one generation attempt."""
         from src.api.services import slide_style_preview_queue as q
 
         style_id = _make_style(db_factory)
@@ -576,7 +578,7 @@ class TestGeneration:
         monkeypatch.setattr(q, "_generate_deck", _timeout)
         q.process_preview_job(style_id)
 
-        assert len(calls) == 1 + q.PREVIEW_MAX_RETRIES
+        assert len(calls) == 1
         s = db_factory()
         assert s.get(SlideStyleLibrary, style_id).preview_error_code == "generation_error"
         s.close()

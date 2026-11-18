@@ -1169,8 +1169,11 @@ def test_provider_errors_cross_adapter_runtime_and_each_identity_sink(
     sink = sink_factory()
     runtime = AgentRuntime(
         persisted_release_loader=_Loader(_legacy_endpoint_resolved()),
+        # ``retry_policy=None``: the transient cases collapse after one attempt instead of
+        # retrying for the default 150 s budget; the retry path is covered by
+        # ``test_model_adapter_retries.py``.
         model_adapter=DatabricksModelAdapter(
-            model_factory=model_factory, client_factory=client_factory
+            model_factory=model_factory, client_factory=client_factory, retry_policy=None
         ),
         identity_sink=sink,
     )

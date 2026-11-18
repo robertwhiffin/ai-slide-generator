@@ -63,6 +63,7 @@ from src.services.graph.event_emitter import chat_request_id_var, set_event_emit
 from src.services.graph.state import scoped
 from src.services.shared_deck_attribution import DeckMutationContext, MutationActor
 from src.utils.slide_hash import compute_slide_hash
+from tests.fixtures.notice_assertions import failure_notice_records
 from tests.unit.conftest_graph import (  # noqa: F401 -- fixtures
     DEFAULT_STYLE,
     TEMPLATE_TOKEN_CSS,
@@ -685,6 +686,65 @@ class TestAnAbandonedBranchStops:
             f"the branch did not end at the check; it raised {raised!r}"
         )
         assert self._errors(caplog) == []
+        _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
+
+    @staticmethod
+    def _rate_limited(payload):
+        """A review whose retries are spent on a 429, chained as the runtime does.
+
+        The same error ``test_slide_pipeline._transient`` builds.
+        """
+        import httpx
+        import openai
+
+        from src.services.agent_runtime import ModelProviderUnavailableError
+        from src.services.persisted_graph_release import PinnedInvocationEndpointError
+
+        try:
+            try:
+                raise openai.RateLimitError(
+                    "rate limited",
+                    response=httpx.Response(429, request=httpx.Request("POST", "http://x")),
+                    body=None,
+                )
+            except openai.RateLimitError as cause:
+                raise ModelProviderUnavailableError("unavailable") from cause
+        except ModelProviderUnavailableError as exc:
+            raise PinnedInvocationEndpointError(
+                endpoint_name="system.ai.opus",
+                graph_release_id=1,
+                agent_definition_revision_id=1,
+            ) from exc
+
+    def test_a_stopped_edit_whose_review_fails_transiently_lands_nothing(self, graph_env, caplog):
+        """Stop pressed during an edit's build review, which then fails transiently.
+
+        Spec §4b lands an edit's build over the user's slide when its review fails
+        transiently.  On a stopped turn that slide is the one the stop's rollback
+        puts back, so the landing write must be refused and the refusal must end
+        the branch: an unfenced write, or one whose refusal is swallowed, would
+        overwrite the restored slide or fail the stopped turn with the review's
+        fault.
+        """
+        env = graph_env
+        env.seed_slides(list(_THREE))
+        rid = _seed_request(env, "running")
+        at_cancel: Dict[str, Any] = {}
+        env.skills.set("builder", builder_out)
+        env.skills.set("build_reviewer", self._cancelling(env, rid, at_cancel, self._rate_limited))
+
+        raised = self._pipeline(env, rid, caplog)
+
+        assert "tables" in at_cancel, "the build reviewer was never called"
+        assert isinstance(raised, TurnFencedError), (
+            f"the branch did not end at the refused landing; it raised {raised!r}"
+        )
+        assert [c["name"] for c in env.skills.calls] == ["builder", "build_reviewer"]
+        assert self._errors(caplog) == []
+        # The notice's chat row is fenced too, but its log line is not: a stopped
+        # turn must not log a slide as kept that never landed.
+        notices = failure_notice_records(caplog)
+        assert notices == [], [r.getMessage() for r in notices]
         _assert_unchanged(at_cancel["tables"], _snapshot(env.engine))
 
     def test_refused_reviewed_write_ends_the_build_review_quietly(

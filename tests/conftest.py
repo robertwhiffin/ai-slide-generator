@@ -119,6 +119,22 @@ def clear_settings_cache():
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def reset_model_call_stop_checks():
+    """Empty the model-call stop-check cache before and after each test.
+
+    ``model_calls.check_turn_stopped`` reuses a turn's stop-check answer per request id
+    for ``STOP_CHECK_INTERVAL_SECONDS``, process-wide.  Tests reuse fixed request ids
+    with different statuses within that interval, so an answer cached by one test would
+    decide the next.  Imported here, not at module level: no import-time side effects.
+    """
+    from src.services.model_calls import reset_stop_checks
+
+    reset_stop_checks()
+    yield
+    reset_stop_checks()
+
+
 @pytest.fixture
 def engine_mode_resolves_to_monolith():
     """Answer engine-mode resolution with ``"monolith"``, for tests NOT about it (#271 C47).

@@ -39,6 +39,18 @@ How the tests are built
 * Enter is ``press_enter`` from the Task 4 suite: lock, request row, bound lock,
   snapshot, user message (the order ``submit_chat_async`` uses).
 * "Nothing written" and "rolled back to Enter" compare EVERY table, every column.
+
+Measurement (chat-concurrency Task 6)
+-------------------------------------
+* A graph request's row gets ``started_at`` from its conditional start; a
+  monolith request's from its move to ``running``.
+* A failed graph turn's row gets ``model_fault_kind``: the kind of the provider
+  fault behind the failure (``model_fault_kind`` of the exception the job
+  caught), written after the status write, through both failure branches and
+  both status-write sub-branches (rollback, and the conditional
+  ``fail_chat_request`` when there is no snapshot).  A stopped turn, and every
+  monolith turn, gets none.  The write is best-effort: a failure is logged as a
+  warning and changes nothing else.
 """
 
 from __future__ import annotations
@@ -48,11 +60,14 @@ import contextlib
 import contextvars
 import inspect
 import json
+import logging
 import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterator, List, Optional
 from unittest.mock import MagicMock
 
+import httpx
+import openai
 import pytest
 from sqlalchemy import create_engine
 
@@ -60,15 +75,22 @@ import src.database.models  # noqa: F401 -- registers every ORM model on Base
 from src.api.schemas.streaming import StreamEvent, StreamEventType
 from src.api.services import chat_service as chat_service_module
 from src.api.services import job_queue
-from src.api.services.chat_service import GRAPH_TURN_FAILED_MESSAGE, ChatService
+from src.api.services.chat_service import (
+    GRAPH_TURN_FAILED_MESSAGE,
+    ChatService,
+    GraphTurnFailedError,
+    _pinned_graph_configuration_error_event,
+)
 from src.api.services.job_queue import PINNED_GRAPH_CONFIGURATION_ERROR
 from src.api.services.session_manager import SessionManager, get_session_manager
 from src.core.database import Base, _run_migrations, get_db_session
 from src.services import generation_rollback
+from src.services.agent_runtime import ModelProviderUnavailableError
 from src.services.conversation_pins import ConversationPinMissingError
 from src.services.generation_fence import TurnStopped, start_chat_request
 from src.services.generation_rollback import RollbackResult
 from src.services.graph.event_emitter import chat_request_id_var, set_event_emitter
+from src.services.persisted_graph_release import PinnedInvocationEndpointError
 from tests.unit.test_generation_rollback import (
     OWNER,
     RESTORE_PENDING,
@@ -286,6 +308,205 @@ def _lock_fields(row: Dict[str, Any]) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Measurement helpers (Task 6)
+# ---------------------------------------------------------------------------
+
+#: Every kind ``model_fault_kind`` can name.
+FAULT_KINDS = ("rate_limited", "server_error", "timeout", "connection", "not_transient")
+
+_PROVIDER_REQUEST = httpx.Request("POST", "https://example.invalid/serving-endpoints/mk/invocations")
+
+
+def _with_request(tables, rid: str, **values: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """A copy of *tables* whose *rid* ``chat_requests`` row carries *values*.
+
+    For the shared rollback assertions: they compare the request row with the
+    base snapshot's, so the base must already hold what Task 6 writes.
+    """
+    out = dict(tables)
+    out["chat_requests"] = [
+        dict(row, **values) if row["request_id"] == rid else row
+        for row in tables["chat_requests"]
+    ]
+    return out
+
+
+def _stamped(row: Dict[str, Any], t0: datetime, t1: datetime) -> datetime:
+    """The row's ``started_at``, asserted to be a time inside ``t0 .. t1``."""
+    started_at = row.get("started_at", "<no started_at column>")
+    assert isinstance(started_at, datetime), f"started_at is {started_at!r}"
+    assert t0 <= started_at <= t1, f"started_at {started_at} is outside {t0} .. {t1}"
+    return started_at
+
+
+def _status_error(code: int) -> openai.APIStatusError:
+    return openai.APIStatusError(
+        "status",
+        response=httpx.Response(code, request=_PROVIDER_REQUEST),
+        body=None,
+    )
+
+
+def _provider_fault(kind: str) -> BaseException:
+    """A provider fault that ``model_fault_kind`` names *kind*."""
+    if kind == "rate_limited":
+        return _status_error(429)
+    if kind == "server_error":
+        return _status_error(503)
+    if kind == "timeout":
+        return openai.APITimeoutError(request=_PROVIDER_REQUEST)
+    if kind == "connection":
+        return openai.APIConnectionError(request=_PROVIDER_REQUEST)
+    assert kind == "not_transient", kind
+    return RuntimeError("MK-INJECTED a builder crashed")
+
+
+def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
+    try:
+        raise error from cause
+    except BaseException as raised:  # noqa: BLE001 -- handed back to raise again
+        return raised
+
+
+def _unavailable_from(cause: BaseException) -> BaseException:
+    """What the production adapter raises for a provider fault."""
+    return _raised_from(ModelProviderUnavailableError("MK the endpoint is unavailable"), cause)
+
+
+def _pinned_from(cause: BaseException) -> BaseException:
+    """The full pinned collapse: pinned error from unavailable error from *cause*."""
+    pinned = PinnedInvocationEndpointError(
+        endpoint_name="system.ai.mk-builder",
+        graph_release_id=1,
+        agent_definition_revision_id=1,
+    )
+    return _raised_from(pinned, _unavailable_from(cause))
+
+
+def _graph_fault(branch: str, kind: str) -> BaseException:
+    """What the graph body raises to fail its turn through *branch* with *kind*.
+
+    ``pinned``: a ``PinnedInvocationEndpointError`` from a provider fault, which
+    ends in the job's ``_PinnedGraphConfigurationTerminalError`` branch.
+    ``generic``: a ``ModelProviderUnavailableError`` from a provider fault (or,
+    for ``not_transient``, a bare crash), which chat_service wraps in a
+    ``GraphTurnFailedError`` and the job's ``except Exception`` branch re-raises.
+    """
+    cause = _provider_fault(kind)
+    if branch == "pinned":
+        return _pinned_from(cause)
+    return cause if kind == "not_transient" else _unavailable_from(cause)
+
+
+#: The ``error_message`` each failure branch writes (unchanged by Task 6).
+BRANCH_ERROR = {"pinned": PINNED_GRAPH_CONFIGURATION_ERROR, "generic": GRAPH_TURN_FAILED_MESSAGE}
+
+
+def _discard_snapshot(rid: str) -> None:
+    """Drop the turn's snapshot: the job then takes the ``fail_chat_request`` path."""
+    with get_db_session() as db:
+        generation_rollback.discard_generation_snapshot(db, rid)
+
+
+def _failing_turn(env: JobEnv, fault: BaseException, *, snapshot: bool) -> Dict[str, Any]:
+    """Enter a turn whose graph writes a first generation and then raises *fault*.
+
+    With ``snapshot=False`` the graph drops the turn's snapshot first, so the job
+    fails the still-live row through ``fail_chat_request`` instead of a rollback.
+    Returns ``sid``, ``rid``, ``payload`` and ``at`` (``at["turn_start"]`` is the
+    request row as the graph found it).
+    """
+    sid = env.rb.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    rid = press_enter(env.rb, sid, start=False)
+    payload = graph_payload(sid)
+    track(rid, payload)
+    at: Dict[str, Any] = {}
+
+    def body(s, r):
+        at["turn_start"] = env.rb.request_row(r)
+        first_generation_turn(env.rb, s, r)
+        if not snapshot:
+            _discard_snapshot(r)
+        raise fault
+
+    env.graph.body = body
+    return {"sid": sid, "rid": rid, "payload": payload, "at": at}
+
+
+def _assert_failed(
+    env: JobEnv,
+    turn: Dict[str, Any],
+    raised: Optional[BaseException],
+    fault: BaseException,
+    *,
+    branch: str,
+    snapshot: bool,
+    kind: Optional[str],
+) -> None:
+    """The turn failed through *branch* exactly as before Task 6, plus *kind*.
+
+    The whole request row is compared with the row the graph found (which
+    already carries the start's ``started_at``).
+    """
+    sid, rid, at = turn["sid"], turn["rid"], turn["at"]
+    assert "turn_start" in at, "the graph never ran"
+    if branch == "pinned":
+        assert raised is None, f"the pinned failure escaped the job: {raised!r}"
+    else:
+        assert isinstance(raised, GraphTurnFailedError), raised
+        assert raised.__cause__ is fault, "the job did not re-raise the turn's own failure"
+    row = env.rb.request_row(rid)
+    assert row["completed_at"] is not None, "a failed request carries completed_at"
+    expected = dict(
+        at["turn_start"],
+        status="error",
+        error_message=BRANCH_ERROR[branch],
+        rollback_outcome="rolled_back" if snapshot else None,
+        model_fault_kind=kind,
+    )
+    assert _without(row, ("completed_at",)) == _without(expected, ("completed_at",))
+    started_at = at["turn_start"].get("started_at", "<no started_at column>")
+    assert isinstance(started_at, datetime), f"the graph ran with started_at {started_at!r}"
+    assert env.rb.snapshot_rows(rid) == []
+    _assert_lock(env.rb, sid, held_by=None)
+    assert rid not in job_queue.jobs
+
+
+def _kind_write_fails(monkeypatch) -> List[str]:
+    """Make every ``set_chat_request_fault_kind`` raise; record the request ids."""
+    attempts: List[str] = []
+
+    def failing(self, request_id, kind):
+        attempts.append(request_id)
+        raise RuntimeError("MK-kind write failed")
+
+    monkeypatch.setattr(SessionManager, "set_chat_request_fault_kind", failing)
+    return attempts
+
+
+def _kind_write_warnings(caplog, rid: str) -> List[logging.LogRecord]:
+    """WARNING records of the job module whose message text names *rid*.
+
+    The message text, because the production root logger formats the message alone.
+    """
+    return [
+        r
+        for r in caplog.records
+        if r.name == "src.api.services.job_queue"
+        and r.levelno == logging.WARNING
+        and rid in r.getMessage()
+    ]
+
+
+def _assert_kind_in_warning(caplog, rid: str, kind: str) -> None:
+    """A failed kind write's WARNING carries the kind it could not record, in the text:
+    the column exists for measurement, so the log line is the datum's last copy."""
+    expected = f"Could not record the model fault kind {kind} of request {rid}"
+    messages = [r.getMessage() for r in _kind_write_warnings(caplog, rid)]
+    assert expected in messages, messages
+
+
+# ---------------------------------------------------------------------------
 # Start: a request stopped while queued never starts
 # ---------------------------------------------------------------------------
 
@@ -340,7 +561,8 @@ def test_start_failure_rolls_back_and_frees_the_deck(env, monkeypatch):
     _assert_rolled_back_to_enter(
         env.rb,
         before,
-        at_enter,
+        # The start raised, so nothing stamped started_at; the crash is not transient.
+        _with_request(at_enter, rid, started_at=None, model_fault_kind="not_transient"),
         env.tables(),
         rid=rid,
         actor_sid=sid,
@@ -434,10 +656,16 @@ def test_graph_failure_rolls_back(env, kind):
 
     assert "turn_end" in at, "the graph never ran"
     after = env.tables()
+    # The turn's end was read after its start, so the base already carries the
+    # start's stamp; the job adds the kind of the crash after the rollback.
+    started_at = _one(at["turn_end"]["chat_requests"], request_id=rid).get(
+        "started_at", "<no started_at column>"
+    )
+    assert isinstance(started_at, datetime), f"the graph ran with started_at {started_at!r}"
     _assert_rolled_back_to_enter(
         env.rb,
         before,
-        at["turn_end"],
+        _with_request(at["turn_end"], rid, model_fault_kind="not_transient"),
         after,
         rid=rid,
         actor_sid=sid,
@@ -478,6 +706,8 @@ def test_graph_failure_with_failed_restore_keeps_the_lock(env):
         RESTORE_PENDING,
         "restore_failed",
     )
+    # The turn still failed, and its kind is recorded although the restore failed.
+    assert row.get("model_fault_kind", "<no column>") == "not_transient"
     assert [s["state"] for s in env.rb.snapshot_rows(rid)] == ["restore_failed"]
     _assert_lock(env.rb, sid, held_by=rid)
     assert generation_rollback.has_pending_restore(sid) is True
@@ -503,14 +733,19 @@ def test_pinned_configuration_failure_rolls_back(env):
 
     env.graph.body = body
 
+    t0 = datetime.utcnow()
     run_job(rid, payload)
+    t1 = datetime.utcnow()
 
     assert len(env.graph.calls) == 1
     after = env.tables()
+    # Enter's row is from before the start: the job's start stamped started_at,
+    # and the pin failure has no provider cause.
+    started_at = _stamped(env.rb.request_row(rid), t0, t1)
     _assert_rolled_back_to_enter(
         env.rb,
         before,
-        at_enter,
+        _with_request(at_enter, rid, started_at=started_at, model_fault_kind="not_transient"),
         after,
         rid=rid,
         actor_sid=sid,
@@ -713,13 +948,24 @@ def test_complete_chat_request_completes_and_deletes_the_snapshot(env, snapshot_
 class _MonolithService:
     """Stands in for ChatService on a monolith job: the turn's generator."""
 
-    def __init__(self, *, fail_with: Optional[BaseException] = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_with: Optional[BaseException] = None,
+        events_before_failure: tuple = (),
+        on_call: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.fail_with = fail_with
+        self.events_before_failure = events_before_failure
+        self.on_call = on_call
         self.calls: List[Dict[str, Any]] = []
 
     def send_message_streaming(self, **kwargs) -> Iterator[StreamEvent]:
         self.calls.append(kwargs)
+        if self.on_call is not None:
+            self.on_call()
         if self.fail_with is not None:
+            yield from self.events_before_failure
             raise self.fail_with
         yield StreamEvent(
             type=StreamEventType.COMPLETE,
@@ -851,7 +1097,9 @@ def test_monolith_failure_path_unchanged(env, monkeypatch, shape):
     track(rid, payload)
     before = env.tables()
 
+    t0 = datetime.utcnow()
     raised = run_job(rid, payload)
+    t1 = datetime.utcnow()
 
     assert raised is boom, f"the monolith failure did not propagate unchanged: {raised!r}"
     assert used == []
@@ -863,15 +1111,357 @@ def test_monolith_failure_path_unchanged(env, monkeypatch, shape):
     after = env.tables()
     row = _one(after["chat_requests"], request_id=rid)
     assert row["completed_at"] is not None
+    # The move to running stamped started_at; a monolith turn records no kind.
+    assert _one(before["chat_requests"], request_id=rid).get("started_at", "<no column>") is None
+    started_at = _stamped(row, t0, t1)
     assert _without(row, ("completed_at",)) == _without(
         dict(
             _one(before["chat_requests"], request_id=rid),
             status="error",
             error_message="MK-monolith model call failed: 403",
             rollback_outcome=None,
+            started_at=started_at,
+            model_fault_kind=None,
         ),
         ("completed_at",),
     )
     assert _lock_fields(env.rb.session_row(sid)) == (False, None, None)
     _assert_tables_equal(before, after, exclude=("chat_requests", "user_sessions"))
     assert rid not in job_queue.jobs
+
+
+# ---------------------------------------------------------------------------
+# Measurement: started_at (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_started_graph_turn_records_when_it_started(env):
+    """The conditional start stamps ``started_at`` before the graph runs; the
+    completion keeps it, so ``created_at <= started_at <= completed_at``."""
+    sid = env.rb.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    rid = press_enter(env.rb, sid, start=False)
+    payload = graph_payload(sid)
+    track(rid, payload)
+    assert env.rb.request_row(rid).get("started_at", "<no column>") is None
+    at: Dict[str, Any] = {}
+
+    def body(s, r):
+        at["turn_start"] = env.rb.request_row(r)
+        first_generation_turn(env.rb, s, r)
+
+    env.graph.body = body
+
+    t0 = datetime.utcnow()
+    raised = run_job(rid, payload)
+    t1 = datetime.utcnow()
+
+    assert raised is None, f"the turn failed: {raised!r}"
+    started_at = _stamped(at["turn_start"], t0, t1)
+    row = env.rb.request_row(rid)
+    assert row["status"] == "completed"
+    assert row["started_at"] == started_at, "the completion moved started_at"
+    assert row["created_at"] <= row["started_at"] <= row["completed_at"]
+    assert row["model_fault_kind"] is None, "a completed turn recorded a fault kind"
+
+
+@pytest.mark.parametrize("shape", ["explicit", "mcp"], ids=["engine_mode=monolith", "mcp-payload"])
+def test_a_monolith_job_records_when_it_started(env, monkeypatch, shape):
+    """A monolith job's move to ``running`` stamps ``started_at`` before its
+    generator runs; completing keeps it.  No fault kind."""
+    sid, rid = _monolith_request(env, shape)
+    at: Dict[str, Any] = {}
+    service = _MonolithService(on_call=lambda: at.setdefault("running", env.rb.request_row(rid)))
+    monkeypatch.setattr(chat_service_module, "_chat_service_instance", service)
+    payload = monolith_payload(sid, shape)
+    track(rid, payload)
+    assert env.rb.request_row(rid).get("started_at", "<no column>") is None
+
+    t0 = datetime.utcnow()
+    raised = run_job(rid, payload)
+    t1 = datetime.utcnow()
+
+    assert raised is None, f"the monolith job failed: {raised!r}"
+    started_at = _stamped(at["running"], t0, t1)
+    row = env.rb.request_row(rid)
+    assert row["status"] == "completed"
+    assert row["started_at"] == started_at, "completing the request moved started_at"
+    assert row["created_at"] <= row["started_at"] <= row["completed_at"]
+    assert row["model_fault_kind"] is None
+
+
+# ---------------------------------------------------------------------------
+# Measurement: the fault kind of a failed graph turn (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_rate_limited_failure_records_its_kind(env):
+    """A pinned endpoint failure raised from a 429: the turn is rolled back with
+    the unchanged pinned-configuration text, and its row says ``rate_limited``."""
+    fault = _graph_fault("pinned", "rate_limited")
+    turn = _failing_turn(env, fault, snapshot=True)
+
+    raised = run_job(turn["rid"], turn["payload"])
+
+    row = env.rb.request_row(turn["rid"])
+    assert row.get("model_fault_kind", "<no column>") == "rate_limited"
+    assert row["error_message"] == PINNED_GRAPH_CONFIGURATION_ERROR
+    _assert_failed(env, turn, raised, fault, branch="pinned", snapshot=True, kind="rate_limited")
+
+
+def test_a_crash_records_not_transient(env):
+    """A builder crash with no provider cause: ``not_transient``, and the
+    code-owned failure text, unchanged."""
+    fault = _graph_fault("generic", "not_transient")
+    assert type(fault) is RuntimeError and fault.__cause__ is None
+    turn = _failing_turn(env, fault, snapshot=True)
+
+    raised = run_job(turn["rid"], turn["payload"])
+
+    row = env.rb.request_row(turn["rid"])
+    assert row.get("model_fault_kind", "<no column>") == "not_transient"
+    assert row["error_message"] == GRAPH_TURN_FAILED_MESSAGE
+    _assert_failed(env, turn, raised, fault, branch="generic", snapshot=True, kind="not_transient")
+
+
+@pytest.mark.parametrize("snapshot", [True, False], ids=["rolled_back", "no_snapshot"])
+@pytest.mark.parametrize("kind", FAULT_KINDS)
+@pytest.mark.parametrize("branch", ["pinned", "generic"])
+def test_a_graph_failure_records_the_kind_of_its_cause(env, branch, kind, snapshot):
+    """Both failure branches, both status-write sub-branches, every kind: the
+    row's kind is the kind of the provider fault behind the failure, and
+    nothing else about the failed row changes."""
+    fault = _graph_fault(branch, kind)
+    turn = _failing_turn(env, fault, snapshot=snapshot)
+
+    raised = run_job(turn["rid"], turn["payload"])
+
+    _assert_failed(env, turn, raised, fault, branch=branch, snapshot=snapshot, kind=kind)
+
+
+def test_a_stopped_turn_records_no_kind(env):
+    """The ``test_failure_after_cancel_does_not_overwrite_cancelled`` flow: the
+    stop lands mid-turn and the abandoned graph's next write is refused.  The
+    cancelled row keeps its start time and gets no fault kind."""
+    sid = env.rb.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    rid = press_enter(env.rb, sid, start=False)
+    payload = graph_payload(sid)
+    track(rid, payload)
+    at: Dict[str, Any] = {}
+
+    def body(s, r):
+        first_generation_turn(env.rb, s, r)
+        at["stop"] = roll_back(r, "cancelled", None, True)
+        at["after_stop"] = env.tables()
+        get_session_manager().add_message(
+            s, "assistant", "MK-LATE reply", message_type="chat", request_id=r
+        )
+
+    env.graph.body = body
+
+    run_job(rid, payload)
+
+    assert at.get("stop") == RollbackResult.ROLLED_BACK
+    _assert_tables_equal(at["after_stop"], env.tables())
+    row = env.rb.request_row(rid)
+    assert row == _one(at["after_stop"]["chat_requests"], request_id=rid)
+    assert (
+        row["status"],
+        row["error_message"],
+        row["rollback_outcome"],
+        row.get("model_fault_kind", "<no column>"),
+    ) == ("cancelled", None, "rolled_back", None)
+    assert isinstance(row["started_at"], datetime), row["started_at"]
+    assert rid not in job_queue.jobs
+
+
+@pytest.mark.parametrize("branch", ["pinned", "generic"])
+def test_a_stop_between_the_failure_and_its_write_records_no_kind(env, monkeypatch, branch):
+    """The graph has failed (from a 429), but before the job writes the failure a
+    stop rolls the turn back to ``cancelled``.  The job's failure branch runs on a
+    ``cancelled`` row: its status write is refused, and so is the kind -- the row
+    stays exactly as the stop left it."""
+    fault = _graph_fault(branch, "rate_limited")
+    turn = _failing_turn(env, fault, snapshot=True)
+    rid = turn["rid"]
+    real = generation_rollback.has_generation_snapshot
+    at: Dict[str, Any] = {}
+
+    def stop_first(request_id):
+        # The job's failure branch asks first; _snapshot_survives (the finally) after.
+        if "stop" not in at:
+            at["stop"] = None
+            at["stop"] = roll_back(request_id, "cancelled", None, True)
+            at["after_stop"] = env.tables()
+        return real(request_id)
+
+    monkeypatch.setattr(generation_rollback, "has_generation_snapshot", stop_first)
+
+    raised = run_job(rid, turn["payload"])
+
+    assert "turn_start" in turn["at"], "the graph never ran"
+    assert at.get("stop") == RollbackResult.ROLLED_BACK
+    if branch == "generic":
+        assert isinstance(raised, GraphTurnFailedError) and raised.__cause__ is fault, raised
+    else:
+        assert raised is None, raised
+    _assert_tables_equal(at["after_stop"], env.tables())
+    row = env.rb.request_row(rid)
+    assert (
+        row["status"],
+        row["error_message"],
+        row["rollback_outcome"],
+        row.get("model_fault_kind", "<no column>"),
+    ) == ("cancelled", None, "rolled_back", None)
+    _assert_lock(env.rb, turn["sid"], held_by=None)
+    assert rid not in job_queue.jobs
+
+
+@pytest.mark.parametrize("shape", ["explicit", "mcp"], ids=["engine_mode=monolith", "mcp-payload"])
+def test_a_monolith_failure_records_no_kind(env, monkeypatch, shape):
+    """A monolith turn that fails from a 429 ends ``error`` as it always has, and
+    records no kind: the kind is for graph turns only."""
+    sid, rid = _monolith_request(env, shape)
+    boom = _unavailable_from(_provider_fault("rate_limited"))
+    service = _MonolithService(fail_with=boom)
+    monkeypatch.setattr(chat_service_module, "_chat_service_instance", service)
+    _forbid_rollback_machinery(monkeypatch)
+    payload = monolith_payload(sid, shape)
+    track(rid, payload)
+
+    raised = run_job(rid, payload)
+
+    assert raised is boom, raised
+    row = env.rb.request_row(rid)
+    assert (row["status"], row["error_message"]) == ("error", str(boom))
+    kind = row.get("model_fault_kind", "<no model_fault_kind column>")
+    assert kind is None, f"a monolith failure's model_fault_kind is {kind!r}, expected None"
+    assert isinstance(row["started_at"], datetime), row["started_at"]
+    assert _lock_fields(env.rb.session_row(sid)) == (False, None, None)
+    assert rid not in job_queue.jobs
+
+
+@pytest.mark.parametrize("shape", ["explicit", "mcp"], ids=["engine_mode=monolith", "mcp-payload"])
+def test_a_monolith_pinned_failure_records_no_kind(env, monkeypatch, shape):
+    """The pinned branch's monolith limb (the safe pinned event, then a pinned
+    error from a 429): ``error`` with the pinned text as before, and no kind."""
+    sid, rid = _monolith_request(env, shape)
+    service = _MonolithService(
+        fail_with=_pinned_from(_provider_fault("rate_limited")),
+        events_before_failure=(_pinned_graph_configuration_error_event(),),
+    )
+    monkeypatch.setattr(chat_service_module, "_chat_service_instance", service)
+    _forbid_rollback_machinery(monkeypatch)
+    payload = monolith_payload(sid, shape)
+    track(rid, payload)
+
+    raised = run_job(rid, payload)
+
+    assert raised is None, raised
+    row = env.rb.request_row(rid)
+    assert (row["status"], row["error_message"]) == ("error", PINNED_GRAPH_CONFIGURATION_ERROR)
+    kind = row.get("model_fault_kind", "<no model_fault_kind column>")
+    assert kind is None, f"a monolith pinned failure's model_fault_kind is {kind!r}, expected None"
+    assert _lock_fields(env.rb.session_row(sid)) == (False, None, None)
+    assert rid not in job_queue.jobs
+
+
+# ---------------------------------------------------------------------------
+# Measurement: the kind write is best-effort (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_kind_write_never_masks_the_start_failure(env, monkeypatch, caplog):
+    """The start raises, and then the kind write raises too: the job still
+    raises the start's own exception (the very object), the turn is rolled back
+    as it would be without the write, and the write's failure is a warning."""
+    caplog.set_level(logging.WARNING, logger="src.api.services.job_queue")
+    sid = env.rb.new_session(created_by=OWNER, title="MK-NEW-SESSION")
+    before = env.tables()
+    rid = press_enter(env.rb, sid, start=False)
+    payload = graph_payload(sid, is_first_message=True)
+    track(rid, payload)
+    at_enter = env.tables()
+    start_error = RuntimeError("MK-start failed")
+
+    def failing_start(self, request_id):
+        raise start_error
+
+    monkeypatch.setattr(SessionManager, "start_chat_request", failing_start)
+    attempts = _kind_write_fails(monkeypatch)
+
+    raised = run_job(rid, payload)
+
+    assert raised is start_error, f"the kind write masked the start failure: {raised!r}"
+    assert attempts == [rid], "the job never tried to record the fault kind"
+    _assert_rolled_back_to_enter(
+        env.rb,
+        before,
+        _with_request(at_enter, rid, started_at=None, model_fault_kind=None),
+        env.tables(),
+        rid=rid,
+        actor_sid=sid,
+        owner_sid=sid,
+        terminal_status="error",
+        error_message="MK-start failed",
+        deck_existed=False,
+    )
+    _assert_lock(env.rb, sid, held_by=None)
+    assert rid not in job_queue.jobs
+    assert _kind_write_warnings(caplog, rid), (
+        "the failed kind write was not logged as a WARNING naming the request: "
+        f"{[(r.name, r.levelname, r.getMessage()) for r in caplog.records]}"
+    )
+    _assert_kind_in_warning(caplog, rid, "not_transient")
+
+
+@pytest.mark.parametrize("snapshot", [True, False], ids=["rolled_back", "no_snapshot"])
+@pytest.mark.parametrize("branch", ["pinned", "generic"])
+def test_a_failed_kind_write_never_changes_how_a_turn_fails(
+    env, monkeypatch, caplog, branch, snapshot
+):
+    """With the kind write raising, each failure branch and sub-branch ends
+    exactly as it would without the write: the generic branch re-raises the
+    turn's failure, the pinned branch returns, the row, lock and job entry are
+    unchanged, and the write's failure is a warning."""
+    caplog.set_level(logging.WARNING, logger="src.api.services.job_queue")
+    fault = _graph_fault(branch, "server_error")
+    turn = _failing_turn(env, fault, snapshot=snapshot)
+    attempts = _kind_write_fails(monkeypatch)
+
+    raised = run_job(turn["rid"], turn["payload"])
+
+    assert attempts == [turn["rid"]], "the job never tried to record the fault kind"
+    _assert_failed(env, turn, raised, fault, branch=branch, snapshot=snapshot, kind=None)
+    assert _kind_write_warnings(caplog, turn["rid"]), (
+        "the failed kind write was not logged as a WARNING naming the request: "
+        f"{[(r.name, r.levelname, r.getMessage()) for r in caplog.records]}"
+    )
+    _assert_kind_in_warning(caplog, turn["rid"], "server_error")
+
+
+@pytest.mark.parametrize("branch", ["pinned", "generic"])
+def test_a_failing_fault_classifier_never_changes_how_a_turn_fails(
+    env, monkeypatch, caplog, branch
+):
+    """The kind is worked out before the write, still inside the best-effort
+    guard: a classifier that raises is a warning, no write is tried, and the
+    turn fails exactly as it would without it."""
+    caplog.set_level(logging.WARNING, logger="src.api.services.job_queue")
+    fault = _graph_fault(branch, "server_error")
+    turn = _failing_turn(env, fault, snapshot=True)
+    attempts = _kind_write_fails(monkeypatch)
+
+    def broken(exc):
+        raise RuntimeError("MK-classifier failed")
+
+    monkeypatch.setattr(job_queue, "model_fault_kind", broken)
+
+    raised = run_job(turn["rid"], turn["payload"])
+
+    assert attempts == [], "the kind write ran without a kind"
+    _assert_failed(env, turn, raised, fault, branch=branch, snapshot=True, kind=None)
+    assert _kind_write_warnings(caplog, turn["rid"]), (
+        "the failed classifier was not logged as a WARNING naming the request: "
+        f"{[(r.name, r.levelname, r.getMessage()) for r in caplog.records]}"
+    )
+    _assert_kind_in_warning(caplog, turn["rid"], "unclassified")
