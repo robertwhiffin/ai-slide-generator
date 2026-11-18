@@ -8,18 +8,22 @@
 // `captures` is model.captures (snapshot.mjs): {id, x,y,w,h, mode, selector,
 // pseudo, hiddenWithin, paint}. The snapshot has already named each target
 // with data-tellr-capture="<id>"; a pseudo-element target is named by its
-// host's data-tellr-pseudo-host marker, which pseudo.mjs set. For each
+// host's data-tellr-pseudo-host attribute, which pseudo.mjs set. For each
 // capture, in id order and one at a time:
 //   1. an isolation stylesheet hides every element but the target: its whole
 //      subtree in 'subtree' mode (svg, canvas, video, img), its own box alone
 //      in 'box' mode, with its text transparent so the text and the children
-//      stay native and editable. A box target's own ::before and ::after are
-//      drawn natively too (ruling R8b), so they are hidden with the rest. A
-//      pseudo-element target is a box target of its own: its host is hidden
-//      like everything else, and of every pseudo-element only the target
-//      shows, its text transparent. Visibility changes no layout, and every
-//      ancestor keeps its overflow clip and opacity, so the picture is cut and
-//      faded as the slide shows it;
+//      stay native and editable. A box target's own ::before, ::after and
+//      list marker are drawn natively too (ruling R8b), so they are hidden
+//      with the rest. A pseudo-element target is a box target of its own: its
+//      host is hidden like everything else, and of every pseudo-element only
+//      the target shows, its text transparent. A ::marker takes no visibility
+//      of its own, only its item's, so a marker target's item is shown
+//      instead, painting nothing of its own: its box, its text and its
+//      children hidden or transparent, and the marker's text transparent, so
+//      only the image the marker paints is left. Visibility changes no
+//      layout, and every ancestor keeps its overflow clip and opacity, so the
+//      picture is cut and faded as the slide shows it;
 //   2. the target's rect is screenshotted at the page's device scale (2) on a
 //      transparent ground;
 //   3. the stylesheet is removed.
@@ -61,7 +65,7 @@ const COMPUTED_VALUE = /^[a-z0-9\s(),.%#+/-]*$/i;
 // The only targets the snapshot names, and the pseudo-elements it captures.
 // Anything else is no capture of ours and is not written into a stylesheet.
 const TARGET_SELECTOR = /^\[data-tellr-(?:capture|pseudo-host)="[a-z0-9]{1,16}"\]$/;
-const PSEUDO_ELEMENTS = new Set(['before', 'after']);
+const PSEUDO_ELEMENTS = new Set(['before', 'after', 'marker']);
 
 // Each :not(#…) adds id-level specificity, so these rules beat the deck's own
 // !important rules on classes and elements (Review Focus 5); the trick of
@@ -74,7 +78,7 @@ function targetOf(capture) {
   const selector = String(capture.selector || '');
   if (!TARGET_SELECTOR.test(selector)) throw new Error(`the capture target ${selector.slice(0, 80)} is not one the snapshot names`);
   const pseudo = capture.pseudo === null || capture.pseudo === undefined ? null : String(capture.pseudo);
-  if (pseudo !== null && !PSEUDO_ELEMENTS.has(pseudo)) throw new Error(`the capture pseudo-element ${pseudo.slice(0, 20)} is not ::before or ::after`);
+  if (pseudo !== null && !PSEUDO_ELEMENTS.has(pseudo)) throw new Error(`the capture pseudo-element ${pseudo.slice(0, 20)} is not ::before, ::after or ::marker`);
   return { selector, pseudo };
 }
 
@@ -85,9 +89,15 @@ function targetOf(capture) {
 //   it holds are left to inherit the visibility the isolation gives their
 //   element, or to keep their own declaration, so a pseudo-element the slide
 //   hides stays hidden in the picture;
-// * box mode hides every one, the target's own included: those are native;
-// * a pseudo-element target shows alone, one class more specific than the rule
-//   that hides every pseudo-element.
+// * box mode hides every one, the target's own included: those are native. A
+//   ::marker takes no visibility, so the target's own list marker, which
+//   inherits its transparent colour, is made transparent in case the slide
+//   gave it one of its own;
+// * a ::before or ::after target shows alone, one class more specific than
+//   the rule that hides every pseudo-element;
+// * a ::marker target shows through its item, the only element shown, which
+//   paints no box, its text and the marker's transparent: what is left is the
+//   image the marker paints.
 function isolationCss(capture) {
   const { selector, pseudo } = targetOf(capture);
   const transparentText = 'color: transparent !important; -webkit-text-fill-color: transparent !important;' +
@@ -100,10 +110,18 @@ function isolationCss(capture) {
       `${others}::before, ${others}::after { visibility: hidden !important; }\n` +
       `${selector}${BOOST}, ${selector} *${BOOST} { visibility: visible !important; }`;
   }
+  const pseudoHidden = `*${BOOST}::before, *${BOOST}::after { visibility: hidden !important; }\n`;
+  const ownMarker = `${selector}${BOOST}::marker { color: transparent !important; }`;
+  if (pseudo === 'marker') {
+    const unpainted = 'background: transparent !important; border-color: transparent !important;' +
+      ' box-shadow: none !important; outline-color: transparent !important;' +
+      ' text-decoration-color: transparent !important; -webkit-text-stroke-color: transparent !important;';
+    return hidden + pseudoHidden +
+      `${selector}${BOOST} { visibility: visible !important; ${transparentText} ${unpainted} }\n` + ownMarker;
+  }
   const shown = pseudo ? `${selector}${BOOST}::${pseudo}` : `${selector}${BOOST}`;
-  return hidden +
-    `*${BOOST}::before, *${BOOST}::after { visibility: hidden !important; }\n` +
-    `${shown} { visibility: visible !important; ${transparentText} }`;
+  return hidden + pseudoHidden +
+    `${shown} { visibility: visible !important; ${transparentText} }` + (pseudo ? '' : '\n' + ownMarker);
 }
 
 // What the isolation must not change about the target's own painting.

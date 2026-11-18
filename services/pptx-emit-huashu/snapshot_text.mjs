@@ -26,6 +26,13 @@
 // tokens is one inline text box the browser laid it out in, read through the
 // DevTools protocol, at that box's rect (readGeneratedTokens).
 //
+// List markers. A list item's ::marker is Chrome's own text and box for it,
+// never counted here, in its own computed style. Outside its item it is a
+// single-line text item of its own where its glyphs end (markerBlock); inside,
+// it is the first thing on its item's first line, a token of that line when
+// the text runs straight on from it and a segment of its own when a gap
+// follows it (readMarkerTokens, joinMarkers). See "list markers" below.
+//
 // Geometry comes from the text's own rects, not the element box, so an icon or
 // logo beside the text never overlaps it; centred, right-aligned and justified
 // text spans its container's content box so the alignment survives a slightly
@@ -177,6 +184,11 @@ function createTextLayout(env) {
   const INLINE_EDGE_PX = 0.5;
   const OPENING_EDGE = { kind: 'edge', opens: true };
   const CLOSING_EDGE = { kind: 'edge', opens: false };
+  // An inside marker joins its item's first line only when the text after it
+  // starts within this of where the marker's text, trailing space included,
+  // ends in its font: then a renderer that sets the two as one line puts the
+  // text where the browser did. Else a gap follows it (an inside disc's margin).
+  const INSIDE_JOIN_PX = 1;
   // Chrome's default tab-size; a computed length instead of a count falls back to it.
   const DEFAULT_TAB_SIZE = 8;
   // A generic family keyword or a system alias names no face an importer can
@@ -274,8 +286,10 @@ function createTextLayout(env) {
   //               narrowed by each inline ancestor's own clip-path.
   // `closesWith` is a piece the run takes once the node's children are done, or
   // null. Returns whether the children were opened. An element's children are
-  // its child nodes between its own ::before and ::after; a pseudo-element's
-  // are the pieces of its generated text (`generated`).
+  // its child nodes between its own ::before and ::after, a list item's inside
+  // ::marker ahead of them all; a pseudo-element's are the pieces of its
+  // generated text (`generated`). An outside marker is no part of its item's
+  // lines: it is drawn on its own (markerBlock).
   function openChildren(stack, node, context, depth, closesWith) {
     if (depth > WALK_STEP_LIMIT) {
       if (!truncated) {
@@ -296,15 +310,21 @@ function createTextLayout(env) {
       depth,
       closesWith: closesWith || null,
       generated,
+      marker: pseudo && pseudo.marker && pseudo.marker.list.inside ? pseudo.marker : null,
       before: pseudo ? pseudo.before : null,
       after: pseudo ? pseudo.after : null,
     });
     return true;
   }
 
-  // The next child of a frame: its ::before, then its child nodes, then its
-  // ::after. Null once all are taken.
+  // The next child of a frame: its inside ::marker, its ::before, then its
+  // child nodes, then its ::after. Null once all are taken.
   function nextChild(frame) {
+    if (frame.marker) {
+      const marker = frame.marker;
+      frame.marker = null;
+      return marker;
+    }
     if (frame.before) {
       const before = frame.before;
       frame.before = null;
@@ -368,7 +388,13 @@ function createTextLayout(env) {
   //                                 at an atomic inline;
   //   {kind:'generated', piece, context}
   //                                 one piece of a pseudo-element's generated
-  //                                 text and what it paints with.
+  //                                 text and what it paints with;
+  //   {kind:'marker', marker, context}
+  //                                 a list item's inside ::marker with text
+  //                                 (snapshot.mjs PseudoRecord) and what it
+  //                                 paints with: its own style. One that
+  //                                 paints an image instead is an atomic
+  //                                 inline, a gap where its picture is.
   // A pseudo-element takes part like an element child, at its host's start or
   // end. display:contents children are transparent: no box, so no opacity,
   // background, decoration or clip of their own. display:none ones are skipped.
@@ -403,6 +429,12 @@ function createTextLayout(env) {
         continue;
       }
       const generated = env.isPseudo(node);
+      if (generated && node.list) {
+        run.push(node.list.glyphs
+          ? { kind: 'marker', marker: node, context: inlineContext(frame.context, node, node.style, walk.frame) }
+          : { kind: 'atomic', element: node });
+        continue;
+      }
       const type = generated ? ELEMENT_NODE : dom.nodeType(node);
       if (type === TEXT_NODE) {
         run.push({ kind: 'text', node, context: frame.context });
@@ -1038,6 +1070,185 @@ function createTextLayout(env) {
     }
   }
 
+  // ─── list markers ────────────────────────────────────────────────────
+  // A ::marker's text ends with white space ("1. ") that is no glyph, so it is
+  // exported trimmed (snapshot.mjs ListMarker: glyphs and trailing), and its
+  // glyphs end where its box does, less the trailing white space the box
+  // holds: the space's advance in the marker's font for a text marker, whose
+  // box is that text laid out, and nothing for a symbol, whose box is the
+  // shape Chrome paints. Right to left, the trailing space is the leftmost.
+
+  // Where a marker's text was laid out: the union of its text boxes, or its
+  // box when the protocol listed none. {left, top, right, bottom}.
+  function markerTextRect(marker) {
+    let rect = null;
+    for (let piece = 0; piece < marker.pieces.length; piece++) {
+      const boxes = marker.pieces[piece].boxes;
+      for (let index = 0; index < boxes.length; index++) {
+        const box = boxes[index];
+        if (!rect) {
+          rect = { left: box.left, top: box.top, right: box.right, bottom: box.bottom };
+          continue;
+        }
+        rect.left = Math.min(rect.left, box.left);
+        rect.top = Math.min(rect.top, box.top);
+        rect.right = Math.max(rect.right, box.right);
+        rect.bottom = Math.max(rect.bottom, box.bottom);
+      }
+    }
+    if (rect) return rect;
+    const box = marker.rect;
+    return { left: box.left, top: box.top, right: box.left + box.width, bottom: box.top + box.height };
+  }
+
+  // markerParts(marker, scale) -> {rect, glyphs, space, rtl, ends}: its text
+  // rect, split into where its glyphs paint and where its trailing white space
+  // lies, and `ends`, the x at which its text, trailing space included, ends
+  // in its font (where Chrome ended its box when that advance is unread).
+  // `scale` is its transform scale; the advances were measured unscaled.
+  function markerParts(marker, scale) {
+    const rect = markerTextRect(marker);
+    const rtl = marker.style.direction === 'rtl';
+    const width = Math.max(0, rect.right - rect.left);
+    const advance = marker.list.advance;
+    const held = advance && !marker.list.symbol && marker.list.trailing ? (advance.full - advance.glyphs) * scale : 0;
+    const trailing = Math.min(Math.max(Number.isFinite(held) ? held : 0, 0), width);
+    const glyphs = rtl
+      ? { left: rect.left + trailing, top: rect.top, right: rect.right, bottom: rect.bottom }
+      : { left: rect.left, top: rect.top, right: rect.right - trailing, bottom: rect.bottom };
+    const space = rtl
+      ? { left: rect.left, top: rect.top, right: rect.left + trailing, bottom: rect.bottom }
+      : { left: rect.right - trailing, top: rect.top, right: rect.right, bottom: rect.bottom };
+    const full = advance ? advance.full * scale : NaN;
+    const ends = Number.isFinite(full)
+      ? (rtl ? rect.right - full : rect.left + full)
+      : (rtl ? rect.left : rect.right);
+    return { rect, glyphs, space, rtl, ends };
+  }
+
+  // The tokens of an inside marker: its glyphs, then its trailing white space
+  // as a space (which a line's end drops, as it drops any collapsible one),
+  // each at its part of the marker's text rect, in the marker's own style. A
+  // symbol's glyph token is a `shape`: its rect is the box Chrome paints the
+  // shape in, no advance (assembleLine).
+  // Both carry `joining` {rtl, ends} (markerParts), and the tokens after them
+  // start a new segment, so the line is cut after the marker unless
+  // joinMarkers finds the text runs straight on from it. A marker that paints
+  // nothing (hidden, or clipped away) is a gap that keeps its room. Generated
+  // text is no part of the page's innerText, so it is never hidden text.
+  function readMarkerTokens(piece, scale, tokens, words) {
+    const marker = piece.marker;
+    const ps = piece.context.style;
+    const mode = whiteSpaceOf(ps);
+    const style = runStyle(piece.context, scale);
+    const parts = markerParts(marker, scale);
+    const source = {
+      style,
+      face: probeFaceOf(ps, style.family, scale),
+      tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
+      segment: words.segment,
+      recordsHidden: false,
+      clip: piece.context.clip,
+    };
+    const glyphs = marker.list.glyphs;
+    const trailing = marker.list.trailing;
+    const paints = ps.visibility === 'visible' && piece.context.opacity > 0;
+    if (!paints || !anyShown([parts.rect], source.clip)) {
+      dropToken(source, glyphs, [parts.rect], tokens);
+    } else {
+      const joining = { rtl: parts.rtl, ends: parts.ends };
+      pushTextToken(source, generatedText(glyphs, mode), parts.glyphs, false, tokens);
+      tokens[tokens.length - 1].joining = joining;
+      tokens[tokens.length - 1].shape = marker.list.symbol;
+      if (trailing) {
+        pushTextToken(source, mode.spaces ? preservedSpaces(trailing) : ' ', parts.space, !mode.spaces, tokens);
+        tokens[tokens.length - 1].joining = joining;
+      }
+    }
+    words.previous = trailing ? ' ' : lastCodePoint(glyphs, 0, glyphs.length);
+    words.segment++;
+  }
+
+  // Joins each inside marker to its line when the text after it runs straight
+  // on from it: when the first token after the marker's starts within
+  // INSIDE_JOIN_PX of where the marker's text, trailing space included, ends
+  // in its font. The marker's tokens then take that token's segment, so the
+  // line is not cut there and the marker is a token of it; otherwise they keep
+  // their own segment, and the line is cut at the marker as at an inline edge:
+  // the marker is a segment at its box and the text keeps its own x.
+  function joinMarkers(tokens) {
+    for (let index = 0; index < tokens.length; index++) {
+      const joining = tokens[index].joining;
+      if (!joining) continue;
+      let last = index;
+      while (last + 1 < tokens.length && tokens[last + 1].joining === joining) last++;
+      const next = last + 1 < tokens.length ? tokens[last + 1] : null;
+      if (next && next.kind === 'text' && !next.collapsible) {
+        const starts = joining.rtl ? next.rect.right : next.rect.left;
+        if (Math.abs(starts - joining.ends) <= INSIDE_JOIN_PX) {
+          for (let token = index; token <= last; token++) tokens[token].segment = next.segment;
+        }
+      }
+      index = last;
+    }
+  }
+
+  // markerBlock(marker, walk) -> TextBlock | null: a marker outside its item,
+  // as a single-line text item of its own in the marker's own style, its
+  // glyphs (markerParts) alone. Left to right it is right-aligned, its right
+  // edge where the glyphs end and its slack (spec §3 Text, Wrapping) grown to
+  // the left, so a renderer that ignores wrap="none" can never move the edge
+  // the browser drew; right to left it is the mirror: left-aligned at the
+  // glyphs' left edge, its slack to the right, its paragraph right to left.
+  // An outside marker is an inline-block: its item's underline does not reach
+  // it. `walk` is its item's inline context (snapshot.mjs visit). Null when it
+  // paints nothing.
+  function markerBlock(marker, walk) {
+    const ps = marker.style;
+    const glyphs = marker.list.glyphs;
+    if (!glyphs || ps.visibility !== 'visible' || !(walk.opacity > 0)) return null;
+    const scale = walk.frame.scale;
+    const parts = markerParts(marker, scale);
+    if (!env.shows(parts.rect, walk.clip)) return null;
+    const context = {
+      style: ps,
+      opacity: walk.opacity,
+      backdrop: walk.backdrop,
+      decoration: decorationOf(walk.decoration, marker, ps),
+      baseline: null,
+      clip: walk.clip,
+    };
+    const style = runStyle(context, scale);
+    const mode = whiteSpaceOf(ps);
+    const token = {
+      kind: 'text',
+      text: generatedText(glyphs, mode),
+      rect: parts.glyphs,
+      style,
+      face: probeFaceOf(ps, style.family, scale),
+      collapsible: false,
+      tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
+      segment: 0,
+      shape: marker.list.symbol,
+    };
+    const line = assembleLine({ tokens: [token] }, String(ps.lineHeight));
+    if (!line || !line.runs.length) return null;
+    queueRuns([line], 'right', walk.frame);
+    const width = parts.glyphs.right - parts.glyphs.left;
+    const extra = width * SLACK_FRACTION + SLACK_PX;
+    return {
+      x: parts.rtl ? parts.glyphs.left : parts.glyphs.right - width - extra,
+      y: parts.glyphs.top,
+      w: width + extra,
+      h: parts.glyphs.bottom - parts.glyphs.top,
+      rotate: null,
+      wrap: false,
+      align: parts.rtl ? 'left' : 'right',
+      rtl: parts.rtl,
+      paragraphs: paragraphsOf([line]),
+    };
+  }
+
   // ─── lines ───────────────────────────────────────────────────────────
   // A token starts a new line when it is a <br> (or a preserved newline), or
   // when both hold: its vertical overlap with the current line is at most half
@@ -1110,7 +1321,8 @@ function createTextLayout(env) {
   // Null for a line that held only collapsible spaces: it shows nothing, so it
   // is no blank line (only breaks make those).
   // `extents[i]` is runs[i]'s probe face and the left and right of its tokens'
-  // rects, the width the browser drew it at.
+  // rects, the width the browser drew it at, and `advance`, false when a token
+  // of it was drawn as a shape (a symbol marker), whose rect is no advance.
   function assembleLine(line, lineHeight) {
     const tokens = line.tokens;
     let first = 0;
@@ -1135,6 +1347,7 @@ function createTextLayout(env) {
         const extent = extents[extents.length - 1];
         extent.left = Math.min(extent.left, bounds.left);
         extent.right = Math.max(extent.right, bounds.right);
+        extent.advance = extent.advance && !token.shape;
       } else {
         const created = { text };
         for (let field = 0; field < RUN_STYLE_FIELDS.length; field++) {
@@ -1142,7 +1355,7 @@ function createTextLayout(env) {
         }
         created.opticalTrackingPx = 0;
         runs.push(created);
-        extents.push({ face: token.face, left: bounds.left, right: bounds.right });
+        extents.push({ face: token.face, left: bounds.left, right: bounds.right, advance: !token.shape });
       }
       if (!rect) {
         rect = { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom };
@@ -1241,9 +1454,10 @@ function createTextLayout(env) {
   // segment a line of that first form. A gap (an atomic inline, or a word that
   // paints nothing) is a token with the rect it fills in its line, so lines
   // cluster around it as around a word; an inline edge moves no token, it only
-  // starts a new segment. A line a clip cuts off is a cut line of gaps alone,
-  // which has no segment. Leading and trailing blank lines paint nothing and
-  // are dropped; null when no text in the run paints.
+  // starts a new segment, and so does an inside marker the text does not run
+  // straight on from (joinMarkers). A line a clip cuts off is a cut line of
+  // gaps alone, which has no segment. Leading and trailing blank lines paint
+  // nothing and are dropped; null when no text in the run paints.
   function layoutInlineRun(nodes, s, scale) {
     const rtl = s.direction === 'rtl';
     const range = document.createRange();
@@ -1253,10 +1467,11 @@ function createTextLayout(env) {
     dropping = false;
     for (let index = 0; index < nodes.length; index++) {
       const piece = nodes[index];
-      if (piece.kind === 'text' || piece.kind === 'generated') {
+      if (piece.kind === 'text' || piece.kind === 'generated' || piece.kind === 'marker') {
         const from = tokens.length;
         if (piece.kind === 'text') readTokens(piece, scale, range, tokens, words);
-        else readGeneratedTokens(piece, scale, tokens, words);
+        else if (piece.kind === 'generated') readGeneratedTokens(piece, scale, tokens, words);
+        else readMarkerTokens(piece, scale, tokens, words);
         markAfterOpening(tokens, from, edges);
         continue;
       }
@@ -1279,6 +1494,7 @@ function createTextLayout(env) {
       words.previous = '';
       dropping = false;
     }
+    joinMarkers(tokens);
     const clustered = clusterLines(tokens, rtl);
     const lineHeight = String(s.lineHeight);
     const lines = [];
@@ -1341,8 +1557,9 @@ function createTextLayout(env) {
 
   // Queues every run of the block for the optical-size comparison. Text under a
   // rotation is skipped: its rects bound the turned glyphs, not their advance.
-  // A justified line is drawn stretched, so its natural width at the browser's
-  // own cut is probed instead (width null).
+  // A justified line is drawn stretched, and a symbol marker is drawn as a
+  // shape, so their natural width at the browser's own cut is probed instead
+  // (width null).
   function queueRuns(lines, align, frame) {
     if (frame && frame.angle) return;
     for (let index = 0; index < lines.length; index++) {
@@ -1352,7 +1569,7 @@ function createTextLayout(env) {
         pendingRuns.push({
           run: line.runs[run],
           face: extent.face,
-          width: align === 'justify' ? null : extent.right - extent.left,
+          width: align === 'justify' || !extent.advance ? null : extent.right - extent.left,
         });
       }
     }
@@ -1455,10 +1672,10 @@ function createTextLayout(env) {
   // also holds, before its text, a zero-size inline-block on the baseline, and
   // reports `ascent`: from its text's top (the glyph top the walk reads with a
   // Range) down to that baseline. Null when the page would not take them,
-  // which is announced: the slide then exports without line spacing and
-  // optical-size tracking. The text goes in as a text node: page script can
-  // take away the textContent setter (hostile_text_nodes).
-  function measureProbes(probes) {
+  // which is announced with `loss`, what the slide then exports without. The
+  // text goes in as a text node: page script can take away the textContent
+  // setter (hostile_text_nodes).
+  function measureProbes(probes, loss) {
     const elements = [];
     const parts = [];
     let sizes = [];
@@ -1492,8 +1709,7 @@ function createTextLayout(env) {
         sizes.push(size);
       }
     } catch (e) {
-      console.warn('[html2pptx] the text metric probes could not be read (' + (e && e.message) +
-        '); this slide exports without line spacing and optical-size tracking');
+      console.warn('[html2pptx] the text metric probes could not be read (' + (e && e.message) + '); ' + loss);
       sizes = null;
     } finally {
       for (let index = 0; index < elements.length; index++) {
@@ -1525,6 +1741,55 @@ function createTextLayout(env) {
       '"opsz" ' + EXPORT_CUT_OPTICAL_SIZE + ';';
   }
 
+  // The distinct probes of one measureProbes pass: probe(css, text, baseline)
+  // adds one unless it is there already, and returns its index in `probes`.
+  function probeList() {
+    const probes = [];
+    const probeIndex = Object.create(null);
+    function probe(css, text, baseline) {
+      const key = (baseline ? 'b' : 'w') + css + '\u0000' + text;
+      if (probeIndex[key] === undefined) {
+        probeIndex[key] = probes.length;
+        probes.push({ css, text, baseline });
+      }
+      return probeIndex[key];
+    }
+    return { probes, probe };
+  }
+
+  // measureMarkers(markers): every marker's advance (snapshot.mjs ListMarker),
+  // {full, glyphs}, the widths its whole text and its glyphs take in its own
+  // face as the browser lays them out, its tabular-nums and every other
+  // feature included, in unscaled CSS px. A probe of a text marker's whole
+  // text is as wide as the box Chrome laid it out in, so the two widths give
+  // the trailing white space that box holds. One probe pass, made before the
+  // walk reads any rect: the probes are gone again by then. A marker whose
+  // probes could not be read keeps a null advance.
+  function measureMarkers(markers) {
+    const list = probeList();
+    const wanted = [];
+    const length = Math.min(markers.length, COLLECTION_ITEM_LIMIT);
+    for (let index = 0; index < length; index++) {
+      const marker = markers[index];
+      if (!marker.list.glyphs) continue;
+      const css = browserCutCss(probeFaceOf(marker.style, familyOf(marker.style.fontFamily), 1));
+      wanted.push({
+        marker,
+        full: list.probe(css, marker.text, false),
+        glyphs: list.probe(css, marker.list.glyphs, false),
+      });
+    }
+    if (!wanted.length) return;
+    const sizes = measureProbes(list.probes, 'this slide exports its list markers at their boxes, ' +
+      'trailing space included, and joins each inside one to its line as the browser laid it out');
+    if (!sizes) return;
+    for (let index = 0; index < wanted.length; index++) {
+      const full = sizes[wanted[index].full].w;
+      const glyphs = sizes[wanted[index].glyphs].w;
+      if (full >= 0 && glyphs >= 0) wanted[index].marker.list.advance = { full, glyphs };
+    }
+  }
+
   // applyMetrics() fills in what the walk queued, in place on the blocks it
   // returned (they are the slide model's items by then):
   // * every paragraph's lineHeightPx, its CSS line height (line-height: normal
@@ -1537,16 +1802,9 @@ function createTextLayout(env) {
   //   tracking, which the emitter writes on top, so it is not counted twice.
   // Each distinct probe is measured once.
   function applyMetrics() {
-    const probes = [];
-    const probeIndex = Object.create(null);
-    function probe(css, text, baseline) {
-      const key = (baseline ? 'b' : 'w') + css + '\u0000' + text;
-      if (probeIndex[key] === undefined) {
-        probeIndex[key] = probes.length;
-        probes.push({ css, text, baseline });
-      }
-      return probeIndex[key];
-    }
+    const list = probeList();
+    const probes = list.probes;
+    const probe = list.probe;
     const paragraphProbes = [];
     for (let index = 0; index < pendingParagraphs.length; index++) {
       const face = pendingParagraphs[index].face;
@@ -1560,7 +1818,9 @@ function createTextLayout(env) {
         browserCut: pending.width === null ? probe(browserCutCss(pending.face), pending.run.text, false) : -1,
       });
     }
-    const sizes = probes.length ? measureProbes(probes) : [];
+    const sizes = probes.length
+      ? measureProbes(probes, 'this slide exports without line spacing and optical-size tracking')
+      : [];
     if (!sizes) return;
 
     for (let index = 0; index < pendingParagraphs.length; index++) {
@@ -1701,6 +1961,8 @@ function createTextLayout(env) {
     isInlineBox,
     layoutInlineRun,
     loadedFonts,
+    markerBlock,
+    measureMarkers,
     recordHiddenText,
     truncated: () => truncated,
   };

@@ -6,9 +6,10 @@
 //   2. preprocess        BG_TRANSFER_SOURCE: the slide root's ground onto body,
 //                        nothing that moves layout;
 //   3. validate          the legacy converter's body and text-box checks;
-//   4. pseudo-elements   pseudo.mjs: every ::before and ::after, read from Node
-//                        through the DevTools protocol, read-only; nothing is
-//                        inserted into the page for them (ruling R8);
+//   4. pseudo-elements   pseudo.mjs: every ::before, ::after and list item
+//                        ::marker, read from Node through the DevTools
+//                        protocol, read-only; nothing is inserted into the
+//                        page for them (ruling R8);
 //   5. snapshot          SNAPSHOT_SOURCE: one read-only page.evaluate of what
 //                        step 4 read, which returns the slide model (snapshot.mjs);
 //   6. capture           capture.cjs: an element-isolated 2x screenshot of each
@@ -329,9 +330,9 @@ function reportValidation(validationErrors, bypassValidation) {
 }
 
 // ─── summary ───────────────────────────────────────────────────────────
-// `pseudoElements` is how many ::before and ::after pseudo.mjs read, and how
-// many of them the snapshot walked (a pseudo-element inside a picture, an
-// <svg>'s, is in that picture instead).
+// `pseudoElements` is how many ::before, ::after and ::marker pseudo.mjs read,
+// and how many of them the snapshot walked or drew with its list item (a
+// pseudo-element inside a picture, an <svg>'s, is in that picture instead).
 function summarise(model, captures, preprocessResult, animations, pseudoData) {
   const kinds = {};
   let pictures = 0;

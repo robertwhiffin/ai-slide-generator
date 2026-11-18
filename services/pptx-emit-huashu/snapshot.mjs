@@ -9,10 +9,11 @@
 // Every DOM traversal goes through DOM_ACCESS_SOURCE (pristine-realm accessors,
 // bounded collections), because slide script runs in this page before we do.
 //
-// Pseudo-elements (::before, ::after) are no DOM nodes. pseudo.mjs reads them
-// from Node through the DevTools protocol, and SNAPSHOT_SOURCE is a function
-// of what it read (PseudoData): each one is walked and laid out as its host's
-// first child (::before) or last (::after).
+// Pseudo-elements (::before, ::after, a list item's ::marker) are no DOM
+// nodes. pseudo.mjs reads them from Node through the DevTools protocol, and
+// SNAPSHOT_SOURCE is a function of what it read (PseudoData): each ::before
+// and ::after is walked and laid out as its host's first child or last, and
+// each ::marker is drawn when its item is (emitMarker).
 //
 // /**
 //  * SlideModel = {
@@ -48,11 +49,11 @@
 //  *   (one text block; snapshot_text.mjs documents Run, lines, the metrics and the geometry)
 //  *
 //  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]',
-//  *   pseudo:null|'before'|'after', hiddenWithin:boolean,
+//  *   pseudo:null|'before'|'after'|'marker', hiddenWithin:boolean,
 //  *   paint:{borderColors:string[4], boxShadow:string}|null}
 //  *   (the picture's rect, which its image item shares; selector, the target
 //  *   element, or for a pseudo-element target (pseudo set) its host, named by
-//  *   the host marker '[data-tellr-pseudo-host="<n>"]'; hiddenWithin when
+//  *   the host attribute '[data-tellr-pseudo-host="<n>"]'; hiddenWithin when
 //  *   descendants of a subtree target carry data-tellr-capture-hidden; paint,
 //  *   for a box target, its computed border colours and shadow; capture.cjs
 //  *   reads them. `failed` when the target could not be named.)
@@ -420,30 +421,36 @@ async function snapshotPage(config, pseudoData) {
   }
 
   // ─── pseudo-elements ─────────────────────────────────────────────────
-  // Each ::before and ::after the page generates, as pseudo.mjs read it through
-  // the DevTools protocol: its border box, its box fragments and its rendered
-  // text. Its host carries config.pseudoHostAttribute, whose value is the
-  // host's index in pseudoData.hosts. The walk visits each one as its host's
-  // first child (::before) or last (::after), and the text layout lays out its
-  // text there, so it is drawn like an element at that place in paint order.
-  // Its computed style is the page's own, getComputedStyle(host, '::before'),
-  // read by property name like every element's.
-  //   PseudoRecord = {host, type, name, style, rect, edges, fragments, pieces, selector}
-  //   type       'before' | 'after'; name '::before' | '::after';
+  // Each ::before, ::after and ::marker the page generates, as pseudo.mjs read
+  // it through the DevTools protocol: its border box, its box fragments and
+  // its rendered text. Its host carries config.pseudoHostAttribute, whose
+  // value is the host's index in pseudoData.hosts. The walk visits each
+  // ::before and ::after as its host's first child or last, and the text
+  // layout lays out its text there, so it is drawn like an element at that
+  // place in paint order; a list item's ::marker is drawn with its item
+  // (emitMarker). Its computed style is the page's own,
+  // getComputedStyle(host, '::before'), read by property name like every element's.
+  //   PseudoRecord = {host, type, name, style, rect, edges, fragments, pieces, text,
+  //                   extent, selector, list}
+  //   type       'before' | 'after' | 'marker'; name '::before' | '::after' | '::marker';
   //   rect       its border box's bounds, {left, top, width, height} as a DOMRect has them;
   //   edges      {width, height}: its border box's own sides, the quad's, which a
   //              rotation does not change (boxGeometry);
   //   fragments  its box fragments' bounds, as rect, in the browser's order;
   //   pieces     its text: [{boxes: [{text, left, top, right, bottom}]}], one piece
   //              per layout text object, each box one line fragment of it;
+  //   text       its rendered text in logical order, white space as laid out ("1. ");
   //   extent     bounds {left, top, right, bottom} of all it generates (an image may
   //              be taller than its line), or null; its picture covers them;
-  //   selector   its host's marker, '[data-tellr-pseudo-host="<n>"]', for a capture.
+  //   selector   its host's attribute, '[data-tellr-pseudo-host="<n>"]', for a capture;
+  //   list       for a ::marker, ListMarker (markerOf); null for the others.
   // A record is no node: the walk and the text layout tell one apart with
   // isPseudo, which reads nothing of a DOM node.
   const pseudoRecords = new Set();
-  // host element -> {before: PseudoRecord | null, after: PseudoRecord | null}
+  // host element -> {before, after, marker}: PseudoRecord | null each
   const pseudoHosts = new Map();
+  // Every ::marker record, in document order, for the text layout's probes.
+  const markerRecords = [];
 
   function isPseudo(node) {
     return pseudoRecords.has(node);
@@ -524,26 +531,78 @@ async function snapshotPage(config, pseudoData) {
     const extentTop = Number(extent.y);
     const extentWidth = Number(extent.w);
     const extentHeight = Number(extent.h);
+    const style = window.getComputedStyle(host, '::' + type);
+    const text = typeof read.text === 'string' ? read.text : '';
     const record = {
       host,
       type,
       name: '::' + type,
-      style: window.getComputedStyle(host, '::' + type),
+      style,
       rect: quadBounds(quad),
       edges: { width: Math.hypot(quad[2] - quad[0], quad[3] - quad[1]), height: Math.hypot(quad[6] - quad[0], quad[7] - quad[1]) },
       fragments,
       pieces: pseudoPieces(read.pieces),
+      text,
       extent: Number.isFinite(extentLeft) && Number.isFinite(extentTop) && extentWidth > 0 && extentHeight > 0
         ? { left: extentLeft, top: extentTop, right: extentLeft + extentWidth, bottom: extentTop + extentHeight }
         : null,
       selector: '[' + config.pseudoHostAttribute + '="' + hostIndex + '"]',
+      list: type === 'marker' ? markerOf(style, text) : null,
     };
     pseudoRecords.add(record);
+    if (record.list) markerRecords.push(record);
     return record;
   }
 
+  // ─── list markers ────────────────────────────────────────────────────
+  // What a list item's ::marker is, from Chrome's text for it and its
+  // computed style, which carries its item's list-style (CSS Lists 3):
+  //   ListMarker = {inside, symbol, image, glyphs, trailing, advance}
+  //   inside    list-style-position: inside: it is laid out on its item's first
+  //             line, and the text layout lays it out with the item's text;
+  //   symbol    Chrome paints it as a shape (a disc, circle, square or disclosure
+  //             triangle) in a box the size of that shape, which holds no space,
+  //             though its text is "• ": the list-style-type is a predefined
+  //             symbol and its content is normal;
+  //   image     it paints an image, which only a picture shows: a list-style-image
+  //             in place of any text, or content holding url(), image-set() or a
+  //             gradient;
+  //   glyphs    its text less its trailing white space ("1."): what it exports as;
+  //   trailing  that white space (" ");
+  //   advance   {full, glyphs}: how wide its whole text and its glyphs are in its
+  //             own font as the browser lays them out, unscaled CSS px; the text
+  //             layout measures them before the walk (measureMarkers): null until
+  //             then, and when the measurement could not be read.
+  // Read with hasOwnProperty, a plain table: page script can replace Set.
+  const SYMBOL_MARKER_TYPES = { 'disc': true, 'circle': true, 'square': true, 'disclosure-open': true, 'disclosure-closed': true };
+
+  // CSS white space: space, tab, line feed, carriage return, form feed; never NBSP.
+  function isCssWhiteSpace(code) {
+    return code === 32 || code === 9 || code === 10 || code === 13 || code === 12;
+  }
+
+  function markerOf(s, text) {
+    const content = String(s.content || 'normal');
+    // Scanned back from the end, once: a pattern anchored at the end would
+    // rescan every run of white space inside a long content string.
+    let end = text.length;
+    while (end > 0 && isCssWhiteSpace(text.charCodeAt(end - 1))) end--;
+    const glyphs = text.slice(0, end);
+    const image = GENERATED_IMAGE.test(content) ||
+      (!glyphs && String(s.listStyleImage || 'none') !== 'none');
+    return {
+      inside: s.listStylePosition === 'inside',
+      symbol: !image && content === 'normal' &&
+        Object.prototype.hasOwnProperty.call(SYMBOL_MARKER_TYPES, String(s.listStyleType)),
+      image,
+      glyphs,
+      trailing: text.slice(glyphs.length),
+      advance: null,
+    };
+  }
+
   // The marked hosts, through the pristine realm and bounded like every lookup:
-  // each marker value names one entry of pseudoData.hosts, and the first
+  // each host attribute value names one entry of pseudoData.hosts, and the first
   // element in document order that carries it is that host.
   function readPseudoHosts() {
     const hosts = pseudoData && Array.isArray(pseudoData.hosts) ? pseudoData.hosts : [];
@@ -559,7 +618,8 @@ async function snapshotPage(config, pseudoData) {
       const entry = hosts[hostIndex] || {};
       const before = pseudoRecord(element, 'before', entry.before, hostIndex);
       const after = pseudoRecord(element, 'after', entry.after, hostIndex);
-      if (before || after) pseudoHosts.set(element, { before, after });
+      const marker = pseudoRecord(element, 'marker', entry.marker, hostIndex);
+      if (before || after || marker) pseudoHosts.set(element, { before, after, marker });
     }
   }
 
@@ -1545,13 +1605,15 @@ async function snapshotPage(config, pseudoData) {
   //            cannot be embedded as it is (emitReplaced): the element and
   //            everything it holds, its own box included;
   //   box      an element whose own box paints what no shape can (capturesBox):
-  //            its box alone, its text, children and own ::before and ::after
-  //            staying native (ruling R8b). The picture replaces its native box
-  //            (fill, outline and shadow). A pseudo-element's box is captured
-  //            the same way, on its own, and so is one whose content is an
-  //            image (an icon bullet), its picture covering all it generates:
-  //            capture.cjs isolates its host's ::before or ::after, named by
-  //            the host marker, which is already on the page (pseudo.mjs).
+  //            its box alone, its text, children and own ::before, ::after
+  //            and list marker staying native (ruling R8b). The picture
+  //            replaces its native box (fill, outline and shadow). A
+  //            pseudo-element's box is captured the same way, on its own, and
+  //            so is one whose content is an image (an icon bullet), its
+  //            picture covering all it generates: capture.cjs isolates its
+  //            host's ::before or ::after, named by the host attribute, which
+  //            is already on the page (pseudo.mjs). So is a list marker that
+  //            paints an image (emitMarker), through its item.
   // The picture is what the target's clip shows of all it paints: its bounds,
   // grown by the reach of its outer shadow and filter (paintReach), cut to the
   // clip (C7.3). Its pixels already carry the target's cumulative opacity, so
@@ -1706,7 +1768,8 @@ async function snapshotPage(config, pseudoData) {
       hiddenWithin: hidden.length > 0,
       // What box mode's transparent text colour must not take from the box:
       // a border or shadow painted in currentColor (capture.cjs retainedCss).
-      paint: mode === 'box'
+      // A ::marker paints neither.
+      paint: mode === 'box' && !(generated && element.type === 'marker')
         ? { borderColors: [s.borderTopColor, s.borderRightColor, s.borderBottomColor, s.borderLeftColor], boxShadow: s.boxShadow }
         : null,
     };
@@ -1941,6 +2004,31 @@ async function snapshotPage(config, pseudoData) {
     pushGroup(entry.group, entry.paint, lastSeq + 0.5);
   }
 
+  // A list item's ::marker, drawn when the walk visits its item (`paint` and
+  // `seq` its item's, `walk` the context of its item's inline content): the
+  // first thing the item's first line paints, so ahead of its decorations and
+  // text, at paint + [4, 0, seq, 0], which sorts before both.
+  // * Outside its item, a marker with text is a single-line text item of its
+  //   own (snapshot_text.mjs markerBlock).
+  // * Inside, its text is a token of its item's first line, or a segment of
+  //   it, which the text layout lays out with the item's text (collectRuns).
+  // * A marker that paints an image is a box-only picture of its box, which
+  //   capture.cjs isolates: its item shown with nothing of its own painted.
+  // Never a native bullet: the slide's text has none.
+  function emitMarker(element, paint, seq, walk) {
+    const pseudo = pseudoHosts.get(element);
+    const marker = pseudo ? pseudo.marker : null;
+    if (!marker) return;
+    stats.pseudoElements++;
+    const order = paint.concat([4, 0, seq, 0]);
+    if (marker.list.image && marker.style.visibility === 'visible') {
+      pushCapture(marker, marker.style, 'box', boundsOfRect(marker.rect), order, walk.clip);
+    }
+    if (marker.list.inside) return;
+    const block = textLayout.markerBlock(marker, walk);
+    if (block) pushText({ ...block, order });
+  }
+
   // The element's inline groups, as items now or waiting for the subtree they follow.
   function collectText(element, s, paint, seq, walk) {
     const groups = textLayout.collectTextBlocks(element, s, walk);
@@ -2072,7 +2160,9 @@ async function snapshotPage(config, pseudoData) {
     if (replaced) return;
     const backdrop = backdropInside(state.backdrop, s);
     const decoration = textLayout.decorationOf(state.decoration, element, s);
-    collectText(element, s, place.paint, seq, { opacity, frame, backdrop, decoration, clip: clips.content });
+    const inline = { opacity, frame, backdrop, decoration, clip: clips.content };
+    emitMarker(element, place.paint, seq, inline);
+    collectText(element, s, place.paint, seq, inline);
     pushChildren(element, {
       ctx: place.ctx,
       paint: place.paint,
@@ -2087,6 +2177,8 @@ async function snapshotPage(config, pseudoData) {
   }
 
   readPseudoHosts();
+  // Marker advances, by probe in the page's own fonts, before the walk reads any rect.
+  textLayout.measureMarkers(markerRecords);
   const htmlStyle = window.getComputedStyle(html);
   const bodyStyle = window.getComputedStyle(body);
   const background = slideBackground(htmlStyle, bodyStyle);

@@ -2,9 +2,11 @@
 //
 // What a deck paints with ::before and ::after (square bullets, accent bars,
 // timeline dots, step numbers, quote marks) is no element, so the snapshot's
-// DOM walk cannot read it. This module reads every generated ::before and
-// ::after from Node, through the DevTools protocol (a Playwright CDPSession on
-// the slide's page), once the page has settled and just before the snapshot:
+// DOM walk cannot read it; nor is a list item's ::marker ("1.", "4." in a
+// reversed list, "•", an image), whose numbering no export may count by hand.
+// This module reads every generated ::before, ::after and ::marker from Node,
+// through the DevTools protocol (a Playwright CDPSession on the slide's page),
+// once the page has settled and just before the snapshot:
 //
 //   readPseudoElements(page) -> PseudoData (below), handed to the snapshot
 //                               evaluation as its argument (snapshot.mjs).
@@ -18,7 +20,10 @@
 //   each inline text box with its own rect. That is Chrome's own evaluation of
 //   string escapes, quotes, attr() and counter()/counters() in every counter
 //   style, after text-transform and with collapsed white space already left
-//   out of the boxes.
+//   out of the boxes. For a ::marker it is the list's own numbering, start,
+//   reversed and value included, in the list's counter style ("1. ", "• ").
+//   The layout text itself is read too, in logical order: a right-to-left
+//   marker's text boxes are in visual order ("." then "1"), its text is not.
 // * The computed style is read by the snapshot in the page, with
 //   getComputedStyle(host, '::before'), named properties only.
 //
@@ -34,8 +39,9 @@
 // Every loop is bounded by dom_access.mjs's WALK_STEP_LIMIT (depth) and
 // COLLECTION_ITEM_LIMIT (breadth), as the page-side reads are; meeting a bound
 // is announced on stderr. A read that fails is announced too, and the slide
-// then exports without its pseudo-elements; so is every marker that could not
-// be written or taken off, and every box read that failed, in one count line.
+// then exports without its pseudo-elements; so is every host attribute that
+// could not be written or taken off, and every box read that failed, in one
+// count line.
 //
 // Coordinates. DOM.getBoxModel and DOM.getContentQuads report the viewport's,
 // as getBoundingClientRect and Range rects do; DOMSnapshot reports the
@@ -44,12 +50,15 @@
 //
 // /**
 //  * PseudoData = {hosts: Host[], count, truncated}
-//  * Host       = {before: Pseudo|null, after: Pseudo|null}   (index = the host's marker value)
-//  * Pseudo     = {quad: number[8], fragments: number[8][], pieces: Box[][], extent: Rect|null}
+//  * Host       = {before: Pseudo|null, after: Pseudo|null, marker: Pseudo|null}
+//  *              (index = the host's PSEUDO_HOST_ATTRIBUTE value)
+//  * Pseudo     = {quad: number[8], fragments: number[8][], pieces: Box[][], text, extent: Rect|null}
 //  *   quad       its border box, four corners clockwise from the top left, CSS px;
 //  *   fragments  its box fragments as quads, in the browser's order;
 //  *   pieces     its text, one piece per layout text object in layout order,
 //  *              each piece its inline text boxes in order;
+//  *   text       its layout text objects' text, concatenated in layout order:
+//  *              the text in logical order, white space as laid out ("1. ");
 //  *   extent     the union of every layout object it generates ({x, y, w, h}): an
 //  *              image it generates may be taller than the line it sits in;
 //  * Box        = {text, x, y, w, h}: the text one box paints and its rect, CSS px.
@@ -59,7 +68,10 @@ import { COLLECTION_ITEM_LIMIT, WALK_STEP_LIMIT } from './dom_access.mjs';
 
 export const PSEUDO_HOST_ATTRIBUTE = 'data-tellr-pseudo-host';
 
-const PSEUDO_TYPES = ['before', 'after'];
+// A list item's marker is the protocol's pseudoType "marker": a node with no
+// children, listed only when the item has one (not for list-style-type: none,
+// nor for ::marker { content: none }).
+const PSEUDO_TYPES = ['before', 'after', 'marker'];
 const ELEMENT_NODE = 1;
 // A layout text object is the pseudo-element node's own, or a child's:
 // generated content is a shallow subtree, far shallower than this.
@@ -88,7 +100,7 @@ async function sendInBatches(list, send) {
   return results;
 }
 
-function hasMarker(node) {
+function hasHostAttribute(node) {
   const attributes = Array.isArray(node.attributes) ? node.attributes : [];
   const length = Math.min(attributes.length, COLLECTION_ITEM_LIMIT);
   for (let index = 0; index < length; index += 2) {
@@ -97,21 +109,22 @@ function hasMarker(node) {
   return false;
 }
 
-// The element's generated ::before and ::after nodes, or null for neither.
-// Only generated ones are listed: a pseudo-element whose content is none or
-// normal, or whose display is none, has no node.
+// The element's generated ::before, ::after and ::marker nodes, or null for
+// none. Only generated ones are listed: a pseudo-element whose content is none
+// or normal, or whose display is none, has no node, and nor has the marker of
+// an item that is no list item or whose list-style-type is none.
 function pseudoNodesOf(node) {
   const listed = Array.isArray(node.pseudoElements) ? node.pseudoElements : [];
-  const found = { before: null, after: null };
+  const found = { before: null, after: null, marker: null };
   for (let index = 0; index < listed.length && index < WALK_STEP_LIMIT; index++) {
     const type = listed[index] && listed[index].pseudoType;
     if (PSEUDO_TYPES.includes(type) && !found[type]) found[type] = listed[index];
   }
-  return found.before || found.after ? found : null;
+  return found.before || found.after || found.marker ? found : null;
 }
 
-// The document's elements that generate a ::before or ::after, in DOM
-// pre-order, and every element that carries the host marker already.
+// The document's elements that generate a ::before, ::after or ::marker, in
+// DOM pre-order, and every element that carries the host attribute already.
 function findHosts(root) {
   const hosts = [];
   const marked = [];
@@ -127,9 +140,9 @@ function findHosts(root) {
     }
     const node = next.node;
     if (node.nodeType === ELEMENT_NODE) {
-      if (hasMarker(node)) marked.push(node.nodeId);
+      if (hasHostAttribute(node)) marked.push(node.nodeId);
       const pseudo = pseudoNodesOf(node);
-      if (pseudo) hosts.push({ nodeId: node.nodeId, before: pseudo.before, after: pseudo.after });
+      if (pseudo) hosts.push({ nodeId: node.nodeId, before: pseudo.before, after: pseudo.after, marker: pseudo.marker });
     }
     const children = Array.isArray(node.children) ? node.children : [];
     if (!children.length) continue;
@@ -145,13 +158,14 @@ function findHosts(root) {
   return { hosts, marked, truncated };
 }
 
-// backendNodeId -> {pieces, extent}: what each pseudo-element generates, from
-// one DOMSnapshot. Each layout object is owned by the pseudo-element node it
-// descends from, within PSEUDO_TEXT_DEPTH_LIMIT. Each inline text box of one
+// backendNodeId -> {pieces, text, extent}: what each pseudo-element generates,
+// from one DOMSnapshot. Each layout object is owned by the pseudo-element node
+// it descends from, within PSEUDO_TEXT_DEPTH_LIMIT. Each inline text box of one
 // is a Box of that object's piece, the substring of the layout text it
-// paints; the extent is the union of the owned objects' bounds that have
-// area. Every rect is moved from the document's coordinates to the
-// viewport's, by the document's scroll offset.
+// paints; the text is the owned layout text objects' own text, in layout
+// order, at most COLLECTION_ITEM_LIMIT characters; the extent is the union of
+// the owned objects' bounds that have area. Every rect is moved from the
+// document's coordinates to the viewport's, by the document's scroll offset.
 function generatedContentOf(snapshot, wanted) {
   const content = new Map();
   const documentSnapshot = snapshot && Array.isArray(snapshot.documents) ? snapshot.documents[0] : null;
@@ -200,13 +214,25 @@ function generatedContentOf(snapshot, wanted) {
     return owner;
   };
   const contentOf = (owner) => {
-    if (!content.has(owner)) content.set(owner, { pieces: [], extent: null });
+    if (!content.has(owner)) content.set(owner, { pieces: [], text: '', extent: null });
     return content.get(owner);
   };
 
+  // owner -> {parts, length}: its layout text, joined once every object is read.
+  const textOf = new Map();
   for (let index = 0; index < layoutNodes.length && index < COLLECTION_ITEM_LIMIT; index++) {
     const owner = ownerOf(index);
-    const rect = owner === null ? null : viewportRect(layoutBounds[index]);
+    if (owner === null) continue;
+    const ownText = strings[layoutText[index]];
+    if (typeof ownText === 'string' && ownText) {
+      if (!textOf.has(owner)) textOf.set(owner, { parts: [], length: 0 });
+      const text = textOf.get(owner);
+      if (text.length < COLLECTION_ITEM_LIMIT) {
+        text.parts.push(ownText);
+        text.length += ownText.length;
+      }
+    }
+    const rect = viewportRect(layoutBounds[index]);
     if (!rect || !(rect.w > 0 && rect.h > 0)) continue;
     const generated = contentOf(owner);
     const extent = generated.extent;
@@ -241,6 +267,9 @@ function generatedContentOf(snapshot, wanted) {
     }
     piece.push({ text: text.slice(start, start + length), x: rect.x, y: rect.y, w: rect.w, h: rect.h });
   }
+  for (const [owner, text] of textOf) {
+    contentOf(owner).text = text.parts.join('').slice(0, COLLECTION_ITEM_LIMIT);
+  }
   return content;
 }
 
@@ -274,11 +303,12 @@ async function readThrough(session) {
     if (!isQuad(quad) || !quads[index]) unread += 1;
     if (!isQuad(quad)) return;
     const listed = quads[index] && Array.isArray(quads[index].quads) ? quads[index].quads : [];
-    const content = generated.get(node.backendNodeId) || { pieces: [], extent: null };
+    const content = generated.get(node.backendNodeId) || { pieces: [], text: '', extent: null };
     readOf.set(node, {
       quad,
       fragments: listed.slice(0, WALK_STEP_LIMIT).filter(isQuad),
       pieces: content.pieces,
+      text: content.text,
       extent: content.extent,
     });
   });
@@ -287,16 +317,20 @@ async function readThrough(session) {
   const hostIds = [];
   let count = 0;
   for (const host of found.hosts) {
-    const before = host.before ? readOf.get(host.before) || null : null;
-    const after = host.after ? readOf.get(host.after) || null : null;
-    if (!before && !after) continue;
-    hosts.push({ before, after });
+    const read = {};
+    let any = 0;
+    for (const type of PSEUDO_TYPES) {
+      read[type] = host[type] ? readOf.get(host[type]) || null : null;
+      if (read[type]) any += 1;
+    }
+    if (!any) continue;
+    hosts.push({ before: read.before, after: read.after, marker: read.marker });
     hostIds.push(host.nodeId);
-    count += (before ? 1 : 0) + (after ? 1 : 0);
+    count += any;
   }
 
-  // The markers, written once everything is read: stale ones off, then one
-  // per host. A stale marker left on can claim a real host's pseudo-elements.
+  // The host attributes, written once everything is read: stale ones off,
+  // then one per host. A stale one left on can claim a real host's pseudo-elements.
   const hostSet = new Set(hostIds);
   const removed = await sendInBatches(found.marked.filter((nodeId) => !hostSet.has(nodeId)), (nodeId) =>
     session.send('DOM.removeAttribute', { nodeId, name: PSEUDO_HOST_ATTRIBUTE }).then(() => true));
@@ -316,8 +350,8 @@ function reportFailures({ unread, unremoved, unmarked }) {
   if (!unread && !unremoved && !unmarked) return;
   console.error(
     `[html2pptx] pseudo-elements: ${unmarked} host(s) could not be marked, ` +
-    `${unremoved} stale marker(s) could not be taken off and ${unread} box read(s) failed; ` +
-    'the ::before and ::after they hold may be missing from the exported deck or drawn on the wrong element'
+    `${unremoved} stale host attribute(s) could not be taken off and ${unread} box read(s) failed; ` +
+    'the ::before, ::after and ::marker they hold may be missing from the exported deck or drawn on the wrong element'
   );
 }
 
@@ -330,7 +364,7 @@ export async function readPseudoElements(page) {
     return await readThrough(session);
   } catch (error) {
     const message = String((error && error.message) || error).split('\n')[0];
-    console.error(`[html2pptx] pseudo-elements could not be read (${message}); this slide exports without its ::before and ::after`);
+    console.error(`[html2pptx] pseudo-elements could not be read (${message}); this slide exports without its ::before, ::after and list markers`);
     return NO_PSEUDO_ELEMENTS;
   } finally {
     if (session) await session.detach().catch(() => {});
