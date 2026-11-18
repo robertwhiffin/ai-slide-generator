@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from typing import NamedTuple
+from urllib.parse import quote_plus
 
 # family name -> {(ital, weight)} with ital 0/1
 FontFaces = dict[str, set[tuple[int, int]]]
@@ -185,15 +186,29 @@ def strip_embedded_font_faces(css: str) -> tuple[str, FontFaces]:
 
     Returns the remaining CSS (otherwise byte-for-byte unchanged) and the
     removed faces as ``{family: {(ital, weight)}}``. Faces with only
-    ``http(s):`` sources stay and are not reported.
+    ``http(s):`` sources stay and are not reported. Faces nested in
+    ``@media`` / ``@supports`` / ``@container`` / ``@layer`` blocks go too.
     """
     faces: FontFaces = {}
+    return _strip_faces(css, faces), faces
+
+
+def _strip_faces(css: str, faces: FontFaces) -> str:
     out: list[str] = []
     pos = 0
     for item in _split_items(css):
         if item.block < 0:
             continue
-        if not css[item.start : item.block].strip().lower().startswith("@font-face"):
+        prelude = css[item.start : item.block].strip().lower()
+        if not prelude.startswith("@font-face"):
+            match = _AT_NAME.match(prelude)
+            if match and match.group(1) in _TRIMMED_AT_RULES:
+                body = _block_body(css, item)
+                inner = _strip_faces(body, faces)
+                if inner != body:
+                    out.append(css[pos : item.block + 1])
+                    out.append(inner)
+                    pos = item.block + 1 + len(body)
             continue
         decls = _declarations(_strip_comments(_block_body(css, item)))
         if not _EMBEDDED_SRC.search(decls.get("src", "")):
@@ -204,17 +219,21 @@ def strip_embedded_font_faces(css: str) -> tuple[str, FontFaces]:
         out.append(css[pos : item.start])
         pos = item.end
     out.append(css[pos:])
-    return "".join(out), faces
+    return "".join(out)
 
 
 def google_fonts_imports(faces: FontFaces) -> str:
-    """One Google Fonts ``@import`` line per family (sorted), ``""`` if none."""
+    """One Google Fonts ``@import`` line per family (sorted), ``""`` if none.
+
+    The family is URL-encoded (spaces become ``+``), so a quote or ``&`` in a
+    name cannot end the ``url('...')`` string or the query early.
+    """
     lines = []
     for family in sorted(faces):
         axes = ";".join(f"{ital},{weight}" for ital, weight in sorted(faces[family]))
         lines.append(
             "@import url('https://fonts.googleapis.com/css2?"
-            f"family={family.replace(' ', '+')}:ital,wght@{axes}&display=swap');"
+            f"family={quote_plus(family)}:ital,wght@{axes}&display=swap');"
         )
     return "\n".join(lines)
 
@@ -276,10 +295,20 @@ def _is_dead(selector: str, words: set[str]) -> bool:
 
 def _trim_items(css: str, words: set[str]) -> str:
     out: list[str] = []
+    after_stray = False
     for item in _split_items(css):
         text = css[item.start : item.end]
         if item.block < 0:
-            out.append(text.strip())
+            statement = text.strip()
+            out.append(statement)
+            # A stray ';' / '}' (anything but a clean '@x ...;') joins the next
+            # rule's prelude in a browser, which drops that rule; dropping a dead
+            # rule here would hand the stray the live rule behind it instead.
+            after_stray = not (statement.startswith("@") and statement.endswith(";"))
+            continue
+        if after_stray:
+            out.append(text)
+            after_stray = False
             continue
         prelude = css[item.start : item.block].strip()
         body = _block_body(css, item)
@@ -287,7 +316,9 @@ def _trim_items(css: str, words: set[str]) -> str:
             match = _AT_NAME.match(prelude)
             if match and match.group(1).lower() in _TRIMMED_AT_RULES:
                 inner = _trim_items(body, words)
-                if inner:
+                # an emptied named @layer still fixes that layer's cascade order
+                named_layer = match.group(1).lower() == "layer" and prelude[match.end() :].strip()
+                if inner or named_layer:
                     out.append(f"{prelude}{{{inner}}}")
             else:
                 out.append(text)

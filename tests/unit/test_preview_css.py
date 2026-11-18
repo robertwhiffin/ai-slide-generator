@@ -200,9 +200,42 @@ def test_strip_without_embedded_faces_returns_input_unchanged():
     assert faces == {}
 
 
+def test_strip_removes_embedded_faces_nested_in_grouping_at_rules():
+    """Spec rule 4 says EVERY embedded face: one inside @media / @layer goes too (Tailwind
+    puts faces in ``@layer base``); an https face inside @supports stays; nothing else changes."""
+    css = (
+        "@media screen{@font-face{font-family:Z;src:url(data:font/woff2;base64,AAAA)}.k{a:1}}"
+        "@layer base{@font-face{font-family:'Y Y';font-weight:700;src:url('{{ds-asset:5}}')}}"
+        "@supports (display:grid){@font-face{font-family:W;src:url(https://e.com/w.woff2)}}"
+        ".b{x:1}"
+    )
+
+    out, faces = strip_embedded_font_faces(css)
+
+    assert faces == {"Z": {(0, 400)}, "Y Y": {(0, 700)}}
+    assert out == (
+        "@media screen{.k{a:1}}"
+        "@layer base{}"
+        "@supports (display:grid){@font-face{font-family:W;src:url(https://e.com/w.woff2)}}"
+        ".b{x:1}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # google_fonts_imports
 # ---------------------------------------------------------------------------
+
+
+def test_google_fonts_imports_url_encodes_family_names():
+    """A quote or '&' in a family name must not end the url string or the query early."""
+    out = google_fonts_imports({"Bob's Font": {(0, 400)}, "A&B": {(1, 700)}})
+
+    assert out == (
+        "@import url('https://fonts.googleapis.com/css2?family=A%26B:ital,wght@1,700"
+        "&display=swap');\n"
+        "@import url('https://fonts.googleapis.com/css2?family=Bob%27s+Font:ital,wght@0,400"
+        "&display=swap');"
+    )
 
 
 def test_google_fonts_imports_one_line_per_family():
@@ -277,6 +310,27 @@ def test_trim_recurses_into_media_and_drops_empty_media():
     assert out.count("@media") == 1
     assert _balanced(out)
     _assert_minified(out)
+
+
+def test_trim_keeps_an_emptied_named_layer_for_cascade_order():
+    """A named @layer's first block fixes its place in the layer order even when empty:
+    dropping it would put ``base`` after ``theme`` and flip which colour wins."""
+    css = "@layer base{.dead{x:1}}@layer theme{.b{color:red}}@layer base{.b{color:blue}}"
+
+    out = trim_css(css, used_text='class="b"')
+
+    assert out == "@layer base{}@layer theme{.b{color:red}}@layer base{.b{color:blue}}"
+
+
+def test_trim_keeps_the_rule_after_a_stray_top_level_statement():
+    """Browsers fold a stray top-level ';' or '}' into the NEXT rule's prelude and drop that
+    rule. Dropping the dead rule after one would make the stray kill the live rule behind
+    it, so the rule straight after a stray is kept as written; later dead rules still go."""
+    css = ".a{x:1};\n.dead{z:1}\n.c{w:1}\n.gone{k:1}\n.a{y:1}}\n.dead2{q:1}\n.c{v:1}"
+
+    out = trim_css(css, used_text='class="a c"')
+
+    assert out == ".a{x:1};.dead{z:1}.c{w:1}.a{y:1}}.dead2{q:1}.c{v:1}"
 
 
 def test_trim_recurses_into_supports_container_and_layer_blocks():
