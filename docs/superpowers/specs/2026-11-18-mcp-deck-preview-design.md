@@ -173,7 +173,10 @@ the rules are the contract.
 6. **SVG logos and icons [call]:** an SVG asset of at most ~10 KB (decoded) is inlined as
    URL-encoded text (`data:image/svg+xml,…`, with `#` and quotes escaped — the spike broke logos by
    leaving `#` raw), not base64. Larger SVGs are treated as images (rule 5). Inline `<svg>` markup
-   already in a slide is left alone.
+   already in a slide is left alone. This covers design-system assets and SVG `data:` URIs already
+   in the deck; `{{image:…}}` library handles always get the notice, even when the image is an
+   SVG, so the preview never reads the image library (and never needs its ephemeral-image privacy
+   guard) — **[call]**, made at plan time.
 7. **CSS [call]:** comments removed, whitespace minified, and rules dropped only when they
    **certainly** style nothing in the shown slides: a rule goes only if one of its selectors' class
    or id names appears nowhere in the shown slides' HTML **or scripts**. `:root`, custom
