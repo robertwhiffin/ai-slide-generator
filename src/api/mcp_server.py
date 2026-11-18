@@ -34,7 +34,8 @@ from src.api.routes.chat import (
     apply_new_deck_tool_defaults,
     enter_chat_turn,
 )
-from src.api.services.job_queue import enqueue_job, get_job_status
+from src.api.services.chat_service import resolve_engine_mode_or_unavailable
+from src.api.services.job_queue import get_job_status
 from src.api.services.session_manager import (
     DeckModeLockedError,
     GenerationRefusedError,
@@ -51,6 +52,9 @@ from src.domain.slide_deck import SlideDeck
 from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 from src.services.identity_provider import resolve_display_name
 from src.services.permission_service import get_permission_service
+from src.services.persisted_graph_release import (
+    PersistedConfigurationUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -247,110 +251,6 @@ async def _enter_turn_or_tool_error(
             ) from e
         raise
     return entered.request_id
-
-
-# ---------------------------------------------------------------------------
-# Async submission helper
-# ---------------------------------------------------------------------------
-
-
-async def enqueue_create_job(
-    session_id: str,
-    prompt: str,
-    mode: str = "generate",
-    slide_context: Optional[dict] = None,
-    correlation_id: Optional[str] = None,
-) -> str:
-    """Submit a generate or edit job to tellr's existing chat async queue.
-
-    Mirrors the behaviour of ``POST /api/chat/async`` without re-using the
-    FastAPI route so the MCP call path stays framework-free: the route
-    depends on ``ChatRequest`` (Pydantic) and ``get_db`` (FastAPI), neither
-    of which is natural to call from a FastMCP tool handler. Instead we
-    invoke the underlying primitives directly:
-
-    1. Acquire the session processing lock.
-    2. Create a ``ChatRequest`` row (returns ``request_id``).
-    3. Persist the user's prompt as a ``session_messages`` row so the
-       chat history reflects the MCP call.
-    4. Enqueue the payload on the in-memory job queue; the worker picks
-       it up and runs the agent via ``ChatService.send_message_streaming``.
-
-    Tests patch this helper at a single call site rather than patching
-    the four primitives above, keeping the tool handler test focused on
-    the handler's own logic. Returns the generated ``request_id``.
-
-    Raises:
-        MCPToolError: If the session is already processing another request.
-    """
-    session_manager = get_session_manager()
-
-    # The caller is already authenticated and their identity is bound on
-    # the request-scoped ContextVars by mcp_auth_scope (see mcp_auth.py).
-    # create_chat_request's ``created_by`` kwarg is only consulted on the
-    # auto-create branch of SessionManager.create_chat_request; by the
-    # time we get here the session already exists (the tool handler created
-    # it just before calling this helper), so passing None is correct.
-    from src.core.user_context import get_current_user
-
-    locked = await asyncio.to_thread(
-        session_manager.acquire_session_lock, session_id
-    )
-    if not locked:
-        raise MCPToolError(
-            "Session is currently processing another request"
-        )
-
-    try:
-        request_id = await asyncio.to_thread(
-            session_manager.create_chat_request,
-            session_id,
-            get_current_user(),
-        )
-
-        # Match the /api/chat/async flow: capture first-message flag BEFORE
-        # persisting the user message (add_message increments message_count).
-        session_data = await asyncio.to_thread(
-            session_manager.get_session, session_id
-        )
-        is_first_message = session_data.get("message_count", 0) == 0
-
-        # Persist the user's prompt so MCP-initiated sessions have a chat
-        # transcript identical in shape to browser-initiated ones.
-        # Every prompt, create or edit, is persisted verbatim.
-        await asyncio.to_thread(
-            session_manager.add_message,
-            session_id=session_id,
-            role="user",
-            content=prompt,
-            message_type="user_query",
-            request_id=request_id,
-        )
-
-        await enqueue_job(
-            request_id,
-            {
-                "session_id": session_id,
-                "message": prompt,
-                "slide_context": slide_context,
-                "is_first_message": is_first_message,
-                "image_ids": None,
-                # Forward-looking: mode and correlation_id flow into the
-                # payload so the worker (and logs) can see them even
-                # though v1 only executes generate-mode jobs.
-                "mode": mode,
-                "correlation_id": correlation_id,
-            },
-        )
-
-        return request_id
-    except Exception:
-        # Ensure the session lock is released on any failure before the
-        # worker gets a chance to see the job (matches /api/chat/async).
-        await asyncio.to_thread(
-            session_manager.release_session_lock, session_id
-        )
-        raise
 
 
 # ---------------------------------------------------------------------------
@@ -950,52 +850,65 @@ async def _get_deck_status_impl(
 # ---------------------------------------------------------------------------
 
 
-def _check_contiguous(indices: list[int]) -> None:
-    """Raise MCPToolError unless indices form a contiguous run.
+def _require_agent_deck_owner(session_id: str, user_name: str) -> None:
+    """Refuse unless ``user_name`` owns an Agent deck nobody else is generating on.
 
-    The edit pipeline's ``_parse_slide_replacements`` / ``_apply_slide_
-    replacements`` helpers assume the caller-supplied slide range is a
-    single contiguous slice so replacement output can be spliced back in
-    at a single index. Callers that want to edit disjoint slides should
-    issue one ``edit_deck`` call per slice.
+    Mirrors the app route's owner and live-generation gate
+    (``_check_chat_permission(gate_owner_on_generation=True)``), so an MCP edit
+    cannot do what the same user in the app could not. Collaborators edit in the
+    Tellr app, not over MCP.
     """
-    if not indices:
-        return
-    sorted_idx = sorted(indices)
-    for a, b in zip(sorted_idx, sorted_idx[1:]):
-        if b - a != 1:
-            raise MCPToolError(
-                "slide_indices must be contiguous (e.g. [2, 3, 4], not [2, 4])"
-            )
+    session_manager = get_session_manager()
+    session_info = session_manager.get_session(session_id)
+    if session_info.get("created_by") != user_name or session_info.get(
+        "is_contributor_session", False
+    ):
+        raise MCPToolError(
+            MCP_OWNER_ONLY_ERROR.format(deck_url=_deck_edit_url(session_id))
+        )
+
+    try:
+        engine_mode = resolve_engine_mode_or_unavailable(session_id)
+    except PersistedConfigurationUnavailableError as e:
+        raise MCPToolError(MCP_UNAVAILABLE_ERROR) from e
+    if engine_mode == "monolith":
+        raise MCPToolError(
+            MCP_LEGACY_DECK_ERROR.format(deck_url=_deck_edit_url(session_id))
+        )
+
+    # Only a LIVE generation by someone else blocks the owner (an idle
+    # contributor's heartbeat lock never does).
+    holder = session_manager.live_generation_holder(session_id, live_only=True)
+    if holder and holder != user_name:
+        raise MCPToolError(
+            MCP_DECK_LOCKED_ERROR.format(name=resolve_display_name(holder))
+        )
 
 
 @mcp.tool(
     name="edit_deck",
     description=(
-        "Refine an existing deck through a natural-language instruction. "
-        "Optionally target specific contiguous slides via slide_indices. "
-        "The edit is applied in-place; the session_id and deck_url stay "
-        "stable across edits. Returns a request_id; the caller polls "
-        "get_deck_status for completion and receives the updated deck "
-        "plus replacement_info summarizing what changed. An instruction that "
-        "identifies no slide — neither via slide_indices nor by naming one in "
-        "the text — is answered with a clarifying question INSTEAD of an edit: "
-        "get_deck_status then reports metadata.clarification_needed with the "
-        "deck unchanged."
+        "Ask Tellr's architect about an existing deck: either a change to make "
+        "or a question about it. Name slides by number in the instruction "
+        "(e.g. \"On slides 1 and 4, shorten the titles\"). The edit is "
+        "applied in place; the session_id and deck_url stay stable. Returns a "
+        "request_id; poll get_deck_status until it completes, and show the "
+        "user the `reply` it returns, which is the architect's answer or a "
+        "summary of what changed. Only the deck's owner can edit it over MCP, "
+        "and only decks made in Agent mode; for anything else, open the deck "
+        "in Tellr."
     ),
 )
 async def edit_deck(
     ctx: Context,
     session_id: str,
     instruction: str,
-    slide_indices: Optional[list[int]] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
     return await _edit_deck_impl(
         request=_request_from_context(ctx),
         session_id=session_id,
         instruction=instruction,
-        slide_indices=slide_indices,
         correlation_id=correlation_id,
     )
 
@@ -1004,20 +917,13 @@ async def _edit_deck_impl(
     request: Request,
     session_id: str,
     instruction: str,
-    slide_indices: Optional[list[int]] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
     """Implementation, separated from the decorated tool for testability.
 
-    Reuses ``enqueue_create_job`` with ``mode="edit"`` so the worker
-    dispatches to the existing ChatService edit path (slide_context
-    present => editing_mode in ``agent.chat_async_streaming``). When
-    ``slide_indices`` is provided we pull the current slide HTMLs via
-    ``SessionManager.get_slide_deck`` and bundle them into the
-    ``slide_context`` dict the agent's ``_format_slide_context`` helper
-    expects (``{"indices": [...], "slide_htmls": [...]}``). Without
-    ``slide_indices`` the job is submitted with ``slide_context=None``
-    — still edit-mode, but the agent will operate against the full deck.
+    Enters an Agent turn on the caller's own deck with the instruction verbatim
+    (``_enter_turn_or_tool_error``). The owner and Agent-mode checks run first,
+    so a refused edit writes nothing.
     """
     if not instruction or not instruction.strip():
         raise MCPToolError("instruction must be a non-empty string")
@@ -1037,8 +943,6 @@ async def _edit_deck_impl(
         raise MCPToolError(
             "instruction was blocked because it resembles a prompt-injection attempt"
         )
-    if slide_indices is not None:
-        _check_contiguous(slide_indices)
 
     try:
         with mcp_auth_scope(request) as identity:
@@ -1047,37 +951,11 @@ async def _edit_deck_impl(
                     "Deck not found or you do not have permission to edit it"
                 )
 
-            slide_context: Optional[dict] = None
-            if slide_indices:
-                sm = get_session_manager()
-                deck = sm.get_slide_deck(session_id)
-                if deck is None:
-                    raise MCPToolError(
-                        f"Deck not found for session_id: {session_id}"
-                    )
-                all_slides = deck.get("slides") or []
-                try:
-                    slide_htmls = [
-                        all_slides[i]["html"] for i in slide_indices
-                    ]
-                except IndexError as e:
-                    raise MCPToolError(
-                        f"slide_indices contains out-of-range index: {e}"
-                    ) from e
-                except (TypeError, KeyError) as e:
-                    raise MCPToolError(
-                        f"Failed to read slide html at index: {e}"
-                    ) from e
-                slide_context = {
-                    "indices": slide_indices,
-                    "slide_htmls": slide_htmls,
-                }
+            _require_agent_deck_owner(session_id, identity.user_name)
 
-            request_id = await enqueue_create_job(
+            request_id = await _enter_turn_or_tool_error(
                 session_id=session_id,
-                prompt=instruction,
-                mode="edit",
-                slide_context=slide_context,
+                message=instruction,
                 correlation_id=correlation_id,
             )
 
@@ -1089,7 +967,6 @@ async def _edit_deck_impl(
                     "session_id": session_id,
                     "request_id": request_id,
                     "user_name": identity.user_name,
-                    "slide_indices": slide_indices,
                     "correlation_id": correlation_id,
                 },
             )

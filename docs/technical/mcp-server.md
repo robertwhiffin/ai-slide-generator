@@ -287,20 +287,17 @@ A call that still sends `num_slides` or `deck_prompt_id` succeeds and the value 
 
 ### 5.3 `edit_deck`
 
-**Description.** Refine an existing deck through a natural-language instruction. Optionally target specific contiguous slides via `slide_indices`. The edit is applied in-place; the `session_id` and `deck_url` stay stable across edits. Returns a `request_id`; the caller polls `get_deck_status` for completion and receives the updated deck plus `replacement_info` summarising what changed.
+**Description.** Ask Tellr's architect about an existing deck: either a change to make or a question about it. Name slides by number in the instruction (for example, "On slides 1 and 4, shorten the titles"). The edit is applied in place; the `session_id` and `deck_url` stay stable across edits. Returns a `request_id`; the caller polls `get_deck_status` until it completes and shows the user the `reply` it returns, which is the architect's answer or a summary of what changed. Only the deck's owner can edit it over MCP, and only decks made in Agent mode.
 
 **Input schema**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `session_id` | string | yes | The deck to edit |
-| `instruction` | string | yes | Natural-language change request |
-| `slide_indices` | array of integers | no | Contiguous range (e.g., `[2, 3, 4]`); omit to target the whole deck |
+| `instruction` | string | yes | A change request or a question; name slides by number. Sent to the architect verbatim |
 | `correlation_id` | string | no | Echoed in server logs |
 
-**Contiguity constraint.** `slide_indices` must be a single contiguous slice. `[2, 3, 4]` is valid; `[2, 4]` raises `slide_indices must be contiguous (e.g. [2, 3, 4], not [2, 4])`. For disjoint edits, issue one call per slice.
-
-**Output schema.** Identical shape to `create_deck` — `{ session_id, request_id, status: "pending" }`. Poll `get_deck_status` to receive the updated deck. `replacement_info` on the ready response describes what changed (the same structure as `ChatResponse.replacement_info`).
+**Output schema.** Identical shape to `create_deck` — `{ session_id, request_id, status: "pending" }`. Poll `get_deck_status` to receive the updated deck and the `reply`.
 
 **Example request**
 
@@ -311,8 +308,7 @@ A call that still sends `num_slides` or `deck_prompt_id` succeeds and the value 
     "name": "edit_deck",
     "arguments": {
       "session_id": "c4d8...",
-      "instruction": "Make the EMEA section more prominent and add Q3 vs Q2 deltas",
-      "slide_indices": [1, 2],
+      "instruction": "On slides 2 and 3, make the EMEA section more prominent and add Q3 vs Q2 deltas",
       "correlation_id": "briefing-app-4f2e"
     }
   }
@@ -324,8 +320,13 @@ A call that still sends `num_slides` or `deck_prompt_id` succeeds and the value 
 | Error message | Cause | Fix |
 |---------------|-------|-----|
 | `Deck not found or you do not have permission to edit it` | Caller lacks `CAN_EDIT` on the deck | Use an identity that is the creator or a shared editor |
-| `slide_indices must be contiguous ...` | Non-contiguous indices | Split into multiple calls |
-| `slide_indices contains out-of-range index: ...` | Index ≥ `slide_count` or negative | Fetch `get_deck` first to confirm current count |
+| `Only the deck's owner can edit it over MCP. Open it in Tellr to keep working on it: <url>` | Caller is a collaborator or contributor, not the deck's owner | Open the deck in Tellr, or call as the owner |
+| `This deck was made in Legacy mode and can't be edited over MCP. Open it in Tellr to keep working on it: <url>` | The deck is a Legacy (monolith) deck | Open the deck in Tellr |
+| `This deck is locked by <name>.` | Someone else's live generation holds the deck | Try again when it finishes |
+| `This deck is busy with another request. Try again when it finishes.` | The deck already has a turn running | Poll `get_deck_status`, then retry |
+| `Tellr is temporarily unavailable. Please retry.` | The deck's engine mode could not be resolved | Retry shortly |
+
+A caller that still sends `slide_indices` is not rejected: the argument is ignored. Name the slides in the instruction instead.
 
 ### 5.4 `get_deck`
 

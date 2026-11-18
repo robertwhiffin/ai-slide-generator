@@ -1752,117 +1752,6 @@ async def test_both_clarification_kinds_are_reported_the_same_way(fake_request, 
 
 
 @pytest.mark.asyncio
-async def test_edit_deck_submits_with_slide_context(fake_request, identity):
-    from src.api import mcp_server
-
-    # session_manager.get_slide_deck returns the deck dict
-    fake_deck = {
-        "title": "x",
-        "slides": [
-            {"html": "<div class='slide'>0</div>", "scripts": ""},
-            {"html": "<div class='slide'>1</div>", "scripts": ""},
-            {"html": "<div class='slide'>2</div>", "scripts": ""},
-        ],
-        "css": "",
-        "external_scripts": [],
-        "head_meta": {},
-    }
-
-    async def _fake_enqueue(**kwargs):
-        return "req-edit-1"
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.permission_service") as perm_svc, \
-         patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job", side_effect=_fake_enqueue) as enqueue:
-
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
-
-        sm = MagicMock()
-        sm.get_slide_deck.return_value = fake_deck
-        get_sm.return_value = sm
-
-        result = await mcp_server._edit_deck_impl(
-            request=fake_request,
-            session_id="sess-1",
-            instruction="make slide 2 more exciting",
-            slide_indices=[1],
-        )
-
-        enqueue.assert_called_once()
-        kwargs = enqueue.call_args.kwargs
-        assert kwargs["session_id"] == "sess-1"
-        assert kwargs["prompt"] == "make slide 2 more exciting"
-        assert kwargs["mode"] == "edit"
-        assert kwargs["slide_context"]["indices"] == [1]
-        assert kwargs["slide_context"]["slide_htmls"] == ["<div class='slide'>1</div>"]
-
-        assert result == {
-            "session_id": "sess-1",
-            "request_id": "req-edit-1",
-            "status": "pending",
-        }
-
-
-@pytest.mark.asyncio
-async def test_edit_deck_submits_without_slide_context_when_indices_omitted(
-    fake_request, identity
-):
-    from src.api import mcp_server
-
-    async def _fake_enqueue(**kwargs):
-        return "req-edit-2"
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.permission_service") as perm_svc, \
-         patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job", side_effect=_fake_enqueue) as enqueue:
-
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
-
-        sm = MagicMock()
-        # If slide_indices is omitted, get_slide_deck should NOT be called
-        sm.get_slide_deck.return_value = None
-        get_sm.return_value = sm
-
-        await mcp_server._edit_deck_impl(
-            request=fake_request,
-            session_id="sess-1",
-            instruction="make it more exciting",
-        )
-
-        kwargs = enqueue.call_args.kwargs
-        assert kwargs["mode"] == "edit"
-        assert kwargs["slide_context"] is None
-
-
-@pytest.mark.asyncio
-async def test_edit_deck_rejects_non_contiguous_indices(fake_request, identity):
-    from src.api import mcp_server
-    from src.api.mcp_server import MCPToolError
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.permission_service") as perm_svc:
-
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
-
-        with pytest.raises(MCPToolError) as exc:
-            await mcp_server._edit_deck_impl(
-                request=fake_request,
-                session_id="sess-1",
-                instruction="edit",
-                slide_indices=[0, 2],  # not contiguous
-            )
-        assert "contiguous" in str(exc.value).lower()
-
-
-@pytest.mark.asyncio
 async def test_edit_deck_denies_without_edit_permission(fake_request, identity):
     from src.api import mcp_server
     from src.api.mcp_server import MCPToolError
@@ -1880,6 +1769,342 @@ async def test_edit_deck_denies_without_edit_permission(fake_request, identity):
                 session_id="sess-other",
                 instruction="edit",
             )
+
+
+# ---- edit_deck: owner-only, Agent-only, entered through enter_chat_turn ---
+#
+# edit_deck enters an Agent turn on the caller's own Agent deck through
+# ``_enter_turn_or_tool_error``, with the instruction verbatim (a change or a
+# question for the architect; slides are named by number in the text, so there
+# is no ``slide_indices``). Before Enter, after the edit-permission check,
+# ``_require_agent_deck_owner`` refuses, in this order: a deck the caller doesn't
+# own (or their contributor session on someone's deck), a Legacy deck, and a
+# deck someone else's live generation holds. A refusal enters nothing.
+
+#: Literal copy, as for create_deck above: never the module's constants.
+_OWNER_ONLY_COPY = (
+    "Only the deck's owner can edit it over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+_EDIT_DENIED_COPY = "Deck not found or you do not have permission to edit it"
+
+#: The only session-manager calls the owner gate makes. Both are reads.
+_EDIT_GATE_READS = {"get_session", "live_generation_holder"}
+
+#: What the patched display-name lookup answers (else the email, as SCIM's does).
+_EDIT_DISPLAY_NAMES = {"bob@example.com": "Bob", "carol@example.com": "Carol"}
+
+
+def _edit_deck_session_manager(
+    *,
+    created_by="alice@example.com",
+    is_contributor_session=False,
+    live_holder=None,
+    idle_holder=None,
+):
+    """A session manager that knows one deck, ``sess-1``.
+
+    ``live_generation_holder`` answers ``live_holder`` only for a
+    ``live_only=True`` lookup (the app route's). Without it, it answers
+    ``idle_holder``: an idle contributor's heartbeat lock, which never blocks
+    the owner.
+    """
+    sm = MagicMock()
+
+    def _get_session(session_id):
+        if session_id != "sess-1":
+            raise SessionNotFoundError(session_id)
+        return {
+            "session_id": "sess-1",
+            "created_by": created_by,
+            "is_contributor_session": is_contributor_session,
+        }
+
+    def _live_generation_holder(session_id, *, live_only=False):
+        if session_id != "sess-1":
+            return None
+        return live_holder if live_only else idle_holder
+
+    sm.get_session.side_effect = _get_session
+    sm.live_generation_holder.side_effect = _live_generation_holder
+    return sm
+
+
+@contextmanager
+def _edit_deck_env(identity, session_manager, *, engine="graph", can_edit=True):
+    """Patch what ``_edit_deck_impl`` reaches.
+
+    ``engine`` is what the engine resolver answers for ``sess-1`` (a missing
+    session resolves to "monolith", as the real resolver's does), or an
+    exception for it to raise. The public app URL is empty, so deck links are
+    relative. Display names come from ``_EDIT_DISPLAY_NAMES``.
+    """
+
+    def _resolve_engine(session_id):
+        if isinstance(engine, BaseException):
+            raise engine
+        return engine if session_id == "sess-1" else "monolith"
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager", return_value=session_manager), \
+         patch(
+             "src.api.mcp_server.resolve_engine_mode_or_unavailable",
+             side_effect=_resolve_engine,
+         ) as resolve_engine, \
+         patch(
+             "src.api.mcp_server.resolve_display_name",
+             side_effect=lambda email: _EDIT_DISPLAY_NAMES.get(email, email),
+         ) as resolve_name, \
+         patch("src.api.mcp_server._public_app_url", return_value=""), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-edit-1", engine_mode="graph"),
+         ) as enter:
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_edit_deck.return_value = can_edit
+        yield enter, resolve_engine, resolve_name
+
+
+def _assert_nothing_entered(enter, session_manager):
+    """No turn was entered, and the session manager was only read by the gate."""
+    enter.assert_not_called()
+    enter.assert_not_awaited()
+    made = {name for name, _args, _kwargs in session_manager.mock_calls}
+    assert made <= _EDIT_GATE_READS, session_manager.mock_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "On slides 1 and 4, shorten the titles",
+        # Surrounding whitespace and a newline: the instruction reaches Enter untouched.
+        "  On slides 1 and 4, shorten the titles.\nLeave slide 2 alone.  \n",
+    ],
+    ids=["plain", "whitespace-and-newline"],
+)
+async def test_edit_deck_enters_an_agent_turn_with_the_instruction_verbatim(
+    fake_request, identity, instruction
+):
+    from src.api import mcp_server
+
+    # An idle contributor's heartbeat lock doesn't block the owner; only a live
+    # generation does.
+    sm = _edit_deck_session_manager(idle_holder="carol@example.com")
+
+    with _edit_deck_env(identity, sm) as (enter, _resolve_engine, resolve_name):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction=instruction,
+            correlation_id="corr-edit-7",
+        )
+
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message=instruction,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": "corr-edit-7"},
+    )
+    assert result == {
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+    # edit_deck itself only reads; Enter does the writing.
+    assert {name for name, _a, _k in sm.mock_calls} <= _EDIT_GATE_READS, sm.mock_calls
+    resolve_name.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_refuses_a_legacy_deck_and_writes_nothing(fake_request, identity):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager()
+
+    with _edit_deck_env(identity, sm, engine="monolith") as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _LEGACY_DECK_COPY.format(deck_url="/sessions/sess-1/edit")
+    resolve_engine.assert_called_once()
+    _assert_nothing_entered(enter, sm)
+    # The engine check comes before the live-generation check.
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("created_by", "is_contributor_session"),
+    [
+        ("bob@example.com", False),
+        # The caller's own contributor session on someone else's deck.
+        ("alice@example.com", True),
+    ],
+    ids=["someone-elses-deck", "callers-contributor-session"],
+)
+async def test_edit_deck_refuses_a_collaborator(
+    fake_request, identity, created_by, is_contributor_session
+):
+    """Edit permission isn't enough: only the deck's owner edits it over MCP. The
+    deck is an Agent deck, so the refusal is the owner check's alone."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(
+        created_by=created_by, is_contributor_session=is_contributor_session
+    )
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _OWNER_ONLY_COPY.format(deck_url="/sessions/sess-1/edit")
+    _assert_nothing_entered(enter, sm)
+    # The owner check is the first: neither the engine nor the holder is consulted.
+    resolve_engine.assert_not_called()
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_refuses_the_owner_while_someone_else_generates(
+    fake_request, identity
+):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(live_holder="bob@example.com")
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, _engine, resolve_name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == "This deck is locked by Bob."
+    assert str(exc.value) == _DECK_LOCKED_COPY.format(name="Bob")
+    resolve_name.assert_called_once_with("bob@example.com")
+    _assert_nothing_entered(enter, sm)
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_proceeds_while_the_owner_holds_the_generation(
+    fake_request, identity
+):
+    """The owner's own live generation doesn't refuse the call here; Enter's
+    session lock decides."""
+    from src.api import mcp_server
+
+    sm = _edit_deck_session_manager(live_holder="alice@example.com")
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, _engine, resolve_name):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="On slide 2, add a churn chart",
+        )
+
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message="On slide 2, add a churn chart",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
+    assert result == {
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+    resolve_name.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_answers_an_engine_lookup_failure_as_unavailable(
+    fake_request, identity
+):
+    """The engine resolver fails closed when it can't read the database. The
+    caller gets the unavailable copy, not "Internal error", and nothing is
+    entered."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+    from src.services.persisted_graph_release import (
+        PersistedConfigurationUnavailableError,
+    )
+
+    sm = _edit_deck_session_manager()
+    failure = PersistedConfigurationUnavailableError(code="lakebase_unavailable")
+
+    with _edit_deck_env(identity, sm, engine=failure) as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+                correlation_id="corr-edit-8",
+            )
+
+    assert str(exc.value) == _UNAVAILABLE_COPY
+    resolve_engine.assert_called_once()
+    _assert_nothing_entered(enter, sm)
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_checks_edit_permission_before_ownership(fake_request, identity):
+    """A caller without edit permission gets the not-found-or-denied copy, never
+    the owner-only copy with its deck link, and the owner gate never runs."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(created_by="bob@example.com")
+
+    with _edit_deck_env(identity, sm, can_edit=False) as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _EDIT_DENIED_COPY
+    assert sm.mock_calls == []
+    resolve_engine.assert_not_called()
+    enter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_takes_no_slide_indices():
+    """``slide_indices`` is gone: slides are named by number in the instruction.
+    A call that still sends it succeeds through FastMCP (which drops undeclared
+    arguments; see the integration test), so this pins the removal itself."""
+    from src.api import mcp_server
+
+    tool_params = inspect.signature(mcp_server.edit_deck).parameters
+    assert list(tool_params) == ["ctx", "session_id", "instruction", "correlation_id"]
+    assert tool_params["correlation_id"].default is None
+    assert "slide_indices" not in inspect.signature(mcp_server._edit_deck_impl).parameters
+    # What MCP clients see in tools/list.
+    [tool] = [t for t in await mcp_server.mcp.list_tools() if t.name == "edit_deck"]
+    assert set(tool.inputSchema["properties"]) == {
+        "session_id",
+        "instruction",
+        "correlation_id",
+    }
+    assert set(tool.inputSchema["required"]) == {"session_id", "instruction"}
 
 
 # ---- get_deck -----------------------------------------------------------

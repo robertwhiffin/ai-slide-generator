@@ -440,6 +440,69 @@ def test_create_deck_ignores_a_removed_num_slides_argument(client, mock_identity
     )
 
 
+def test_edit_deck_ignores_a_removed_slide_indices_argument(client, mock_identity_client):
+    """A caller still sending ``slide_indices`` gets its edit entered, and the
+    value has no effect.
+
+    ``slide_indices`` is gone from ``edit_deck`` (slides are named by number in
+    the instruction), and FastMCP drops undeclared arguments, so the call
+    succeeds through the real tool-call path, even with indices that the old
+    contiguity check refused. The caller (``alice@example.com``, from
+    ``mock_identity_client``) owns the Agent deck and no live generation holds
+    it. The instruction reaches Enter unchanged, with no slide context.
+    """
+    session_id = _initialize_session(client)
+    instruction = "  On slides 1 and 3, shorten the titles.\nKeep the subtitles.  "
+
+    sm = MagicMock()
+    sm.get_session.return_value = {
+        "session_id": "sess-int-3",
+        "created_by": "alice@example.com",
+        "is_contributor_session": False,
+    }
+    sm.live_generation_holder.return_value = None
+
+    with patch(
+        "src.api.mcp_server.permission_service.can_edit_deck", return_value=True
+    ), patch("src.api.mcp_server.get_session_manager", return_value=sm), patch(
+        "src.api.mcp_server.resolve_engine_mode_or_unavailable", return_value="graph"
+    ), patch(
+        "src.api.mcp_server.enter_chat_turn",
+        new_callable=AsyncMock,
+        return_value=EnteredTurn(request_id="req-int-3", engine_mode="graph"),
+    ) as enter:
+        resp = client.post(
+            MCP_PATH,
+            headers=_mcp_headers(session_id=session_id),
+            json=_jsonrpc(
+                "tools/call",
+                {
+                    "name": "edit_deck",
+                    "arguments": {
+                        "session_id": "sess-int-3",
+                        "instruction": instruction,
+                        "slide_indices": [0, 2],
+                    },
+                },
+            ),
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = _decode_mcp_response(resp)
+    assert not _is_tool_error(body), f"tool reported error: {body!r}"
+    assert _parse_tool_result(body) == {
+        "session_id": "sess-int-3",
+        "request_id": "req-int-3",
+        "status": "pending",
+    }
+    enter.assert_awaited_once_with(
+        session_id="sess-int-3",
+        message=instruction,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
+
+
 def test_rejects_request_without_auth(client):
     """A ``tools/call`` without any credential header is rejected.
 
