@@ -21,6 +21,9 @@ what the browser itself laid out for the same document.
   ``browser_each_rect`` and ``browser_each_padding_box`` read the same boxes
   for every match of a selector from one page load.
   ``browser_hit_id`` says what the browser shows at a point, by hit testing.
+  ``browser_each_pseudo`` reads the box and rendered text of each match's
+  ``::before`` or ``::after``, which no page API reports, from the browser's
+  own layout through the DevTools protocol.
   ``browser_line_boxes`` and ``browser_lines`` read the element's rendered text
   lines from the same page, with a ``Range`` per character. ``browser_style``
   reads its computed typography, ``browser_text`` its rendered ``innerText``
@@ -306,6 +309,39 @@ def browser_each_padding_box(document_html: str, selector: str) -> list[dict]:
     """
     boxes = json.loads(_run_measure(document_html, selector, "--mode=each-padding-box"))
     return [{key: float(box[key]) for key in ("x", "y", "w", "h")} for box in boxes]
+
+
+def browser_each_pseudo(
+    document_html: str, selector: str, pseudo: str = "before"
+) -> list[dict | None]:
+    """The ``::before`` (or ``::after``) of EVERY match of ``selector``, as the browser renders it.
+
+    One entry per match, in document order: None when the element generates
+    no such pseudo-element box (its ``content`` is ``none`` or ``normal``, or
+    it is ``display: none``), else ``{"x", "y", "w", "h", "text", "style"}``:
+    the pseudo-element's own border box in CSS px, the text its ``content``
+    rendered (string escapes decoded, quotes, ``attr()``, ``counter()`` and
+    ``counters()`` evaluated by the browser) before white space collapses, and
+    its computed style: ``browser_style``'s keys plus ``borderTopWidth``,
+    ``borderTopStyle``, ``borderTopColor``, ``boxShadow``, ``zIndex``,
+    ``display`` and ``position``, as ``getComputedStyle(element, '::before')``
+    serialises them. No page API reports the box or the text, so
+    ``measure.cjs --mode=each-pseudo`` reads them from the browser's layout of
+    the untouched page through the DevTools protocol (``DOM.getBoxModel`` and
+    ``DOMSnapshot.captureSnapshot``), on the settled page ``browser_rect`` reads.
+    """
+    payload = json.dumps({"selector": selector, "pseudo": pseudo})
+    boxes = json.loads(_run_measure(document_html, payload, "--mode=each-pseudo"))
+    return [
+        None
+        if box is None
+        else {
+            "text": box["text"],
+            "style": dict(box["style"]),
+            **{key: float(box[key]) for key in ("x", "y", "w", "h")},
+        }
+        for box in boxes
+    ]
 
 
 def browser_client_rects(document_html: str, selector: str, index: int = 0) -> list[dict]:

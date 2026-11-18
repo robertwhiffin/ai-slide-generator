@@ -105,6 +105,7 @@ from tests.fixtures.export_snapshot_support import (
     Shape,
     browser_client_rects,
     browser_each_padding_box,
+    browser_each_pseudo,
     browser_each_rect,
     browser_hit_id,
     browser_rect,
@@ -504,9 +505,9 @@ SLIDE_RECT = {"x": 0.0, "y": 0.0, "w": 1280.0, "h": 720.0}
 
 # Pseudo-elements on and inside capture targets. The slide hides two of them
 # (#00FF00): one of a gradient box (a box target) and one of an HTML note in an
-# SVG's foreignObject (inside a subtree target); the picture must not show
-# what the browser does not. Two (#FFD400) the slide shows, which the picture
-# must keep.
+# SVG's foreignObject (inside a subtree target); neither may show anywhere.
+# Two (#FFD400) the slide shows: the gradient box's is drawn natively over its
+# picture, and the note's is in the SVG's picture.
 PSEUDO_TARGETS_BODY = (
     '<div class="slide">'
     "<style>"
@@ -1282,31 +1283,73 @@ class TestSnapshotCaptureIsolation:
     def test_pseudo_elements_are_captured_as_the_slide_shows_them(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A capture target's pseudo-elements, and those of what it holds, show as on the slide.
+        """A box target's own pseudo-elements are native; a subtree target's are in its picture.
 
-        The isolation hides every other element's ::before and ::after, but it
-        must not decide for the target's own: a gradient box's ``::after`` the
-        slide hides, and the ``::after`` of an HTML note in an SVG's
-        foreignObject the slide hides, are not in their pictures (no
-        ``#00FF00`` pixel), while each one's ``::before`` the slide shows is
-        (``FFD400`` pixels).
+        A box-only capture holds its target's own box and nothing it paints
+        around it: the target's ``::before`` and ``::after`` are drawn natively,
+        and editable, like its text and children. So the gradient box's
+        ``::before`` the slide shows (``FFD400``) is one native shape at its
+        browser box, over the box's picture, and no pixel of that picture; its
+        ``::after`` the slide hides (``#00FF00``) is nowhere, neither a shape
+        nor a pixel. A subtree capture shows what its target holds as the slide
+        does: in the SVG's picture, the foreignObject note's hidden ``::after``
+        has no ``#00FF00`` pixel and its shown ``::before`` has ``FFD400``
+        pixels, and that ``::before`` is not drawn natively a second time.
         """
         document = _document(PSEUDO_TARGETS_BODY)
         card = browser_rect(document, "#pseudo-card")
         svg = browser_rect(document, "#pseudo-svg")
+        card_before = browser_each_pseudo(document, "#pseudo-card")[0]
+        red, green, blue = _rgb(CHIP_FILL)
+        assert card_before is not None and (
+            card_before["style"]["backgroundColor"] == f"rgb({red}, {green}, {blue})"
+        ), f"fixture drift: the gradient box's ::before is {card_before}"
         shapes = slide_shapes(_export_one(PSEUDO_TARGETS_BODY, monkeypatch))
         wrong = []
-        for what, rect in (("the gradient box", card), ("the SVG", svg)):
-            _, picture = _picture_at(shapes, rect, what)
-            image = _image(picture, what)
-            hidden = _count(image, _is_leak)
-            shown = _count(image, lambda pixel: _is(pixel, CHIP_FILL))
-            if hidden or not shown:
-                wrong.append(
-                    f"{what}: {hidden} pixels of the ::after the slide hides, "
-                    f"{shown} of the ::before it shows"
-                )
-        assert not wrong, f"the pictures show pseudo-elements not as the slide does: {wrong}"
+
+        card_index, card_picture = _picture_at(shapes, card, "the gradient box")
+        card_image = _image(card_picture, "the gradient box")
+        baked = _count(card_image, lambda pixel: _is(pixel, CHIP_FILL))
+        hidden = _count(card_image, _is_leak)
+        if baked or hidden:
+            wrong.append(
+                f"the gradient box's picture holds {baked} pixels of its ::before (drawn natively, "
+                f"not in the picture) and {hidden} of the ::after the slide hides"
+            )
+        natives = [
+            (position, shape)
+            for position, shape in enumerate(shapes)
+            if shape.kind == "shape" and shape.fill == CHIP_FILL
+        ]
+        native_rects = [(position, _rect(shape)) for position, shape in natives]
+        if not (
+            len(natives) == 1
+            and _matches_rect(natives[0][1], card_before)
+            and natives[0][0] > card_index
+        ):
+            wrong.append(
+                f"expected the gradient box's ::before as one native {CHIP_FILL} shape at "
+                f"{ {key: round(card_before[key], 3) for key in ('x', 'y', 'w', 'h')} } over its "
+                f"picture (spTree {card_index}); got {native_rects}"
+            )
+        leaked = [_rect(shape) for shape in shapes if shape.fill == LEAK]
+        if leaked:
+            wrong.append(f"the ::after the slide hides is drawn as shapes {leaked}")
+
+        _, svg_picture = _picture_at(shapes, svg, "the SVG")
+        svg_image = _image(svg_picture, "the SVG")
+        hidden = _count(svg_image, _is_leak)
+        shown = _count(svg_image, lambda pixel: _is(pixel, CHIP_FILL))
+        if hidden or not shown:
+            wrong.append(
+                f"the SVG: {hidden} pixels of the ::after the slide hides, "
+                f"{shown} of the ::before it shows"
+            )
+        assert not wrong, (
+            "the pseudo-elements are not drawn as the slide shows them:\n"
+            + "\n".join(wrong)
+            + f"\n{_describe(shapes)}"
+        )
 
     def test_svg_parts_the_slide_hides_stay_hidden(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A subtree capture shows its target's descendants as the slide does, no more.

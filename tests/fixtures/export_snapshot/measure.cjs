@@ -13,6 +13,7 @@
 //        node measure.cjs <document.html> --mode=fonts
 //        node measure.cjs <document.html> <probes-json> --mode=probe
 //        node measure.cjs <document.html> <point-json> --mode=hit
+//        node measure.cjs <document.html> <pseudo-json> --mode=each-pseudo
 // Measures the index-th (default 0) match of selector, in CSS px. Exits 2 when
 // nothing matches.
 //   --mode=rect  (the default) prints {"x":…,"y":…,"w":…,"h":…}, the element's
@@ -48,11 +49,20 @@
 //                in CSS px and prints {"id":…}: the id of the element the
 //                browser hit-tests there, or of its nearest ancestor that has
 //                one, else null. See measureHit.
+//   --mode=each-pseudo takes, in place of the selector, JSON
+//                {"selector":…, "pseudo":"before"|"after"} and prints, for EVERY
+//                match of the selector in document order, null when it
+//                generates no such pseudo-element box, else
+//                {"x":…,"y":…,"w":…,"h":…,"text":…,"style":{…}}: the
+//                pseudo-element's own border box and its rendered text, read
+//                from the browser's layout through the DevTools protocol, and
+//                its computed style (PSEUDO_STYLE_PROPERTIES). See measurePseudo.
 //
 // Called from tests/fixtures/export_snapshot_support.py (browser_rect,
 // browser_each_rect, browser_client_rects, browser_padding_box,
 // browser_each_padding_box, browser_line_boxes, browser_lines, browser_style,
-// browser_text, browser_loaded_weights, browser_probes, browser_hit_id).
+// browser_text, browser_loaded_weights, browser_probes, browser_hit_id,
+// browser_each_pseudo).
 
 const path = require('path');
 
@@ -363,6 +373,13 @@ const STYLE_PROPERTIES = [
   'lineHeight', 'fontOpticalSizing', 'fontVariationSettings', 'textAlign',
 ];
 
+// What --mode=each-pseudo reports of a pseudo-element's computed style: the
+// typography above, plus what its box paints with and where it stacks.
+const PSEUDO_STYLE_PROPERTIES = [
+  ...STYLE_PROPERTIES,
+  'borderTopWidth', 'borderTopStyle', 'borderTopColor', 'boxShadow', 'zIndex', 'display', 'position',
+];
+
 async function measureStyle(page, selector, index) {
   return page.evaluate(({ selector, index, properties }) => {
     const matches = document.querySelectorAll(selector);
@@ -477,6 +494,130 @@ async function measureProbes(page, probesArgument) {
   }, { probes, timeoutMs: FONTS_READY_TIMEOUT_MS });
 }
 
+// A pseudo-element (::before, ::after) is no DOM element: no page API reports
+// its box or the text its `content` generated (innerText leaves it out). The
+// DevTools protocol reads both from the browser's own layout of the untouched
+// page, so a test holds what the export makes of a pseudo-element against the
+// browser's rendering of that very pseudo-element, never against a re-creation
+// of it:
+// * the box is DOM.getBoxModel's border quad for the pseudo-element node
+//   (DOM.getDocument lists each element's pseudoElements), as its bounds in
+//   CSS px; a pseudo-element the browser generates no box for (display: none)
+//   reports none, and neither does one whose content is none or normal, which
+//   the browser does not generate at all;
+// * the text is that of the layout text objects DOMSnapshot.captureSnapshot
+//   attributes to the pseudo-element node, in layout order: the browser's own
+//   evaluation of its content (string escapes decoded, quotes, attr(),
+//   counter() and counters() with their styles), before white space collapses.
+// Pseudo-element nodes are matched across the two protocol reads by their
+// backend node id. Its computed style (getComputedStyle(element, '::before'))
+// is read in the page, for the matches in the same document order.
+const PSEUDO_TYPES = new Set(['before', 'after']);
+// Deeper than any pseudo-element's own layout subtree: a layout text object
+// is the pseudo-element node's or a child's.
+const PSEUDO_TEXT_DEPTH_LIMIT = 16;
+
+async function measurePseudo(page, argument) {
+  let request;
+  try {
+    request = JSON.parse(argument);
+  } catch (error) {
+    return { error: `the pseudo request is not JSON: ${error.message}` };
+  }
+  if (!request || typeof request.selector !== 'string' || !PSEUDO_TYPES.has(request.pseudo)) {
+    return { error: 'the pseudo request must be JSON {"selector": string, "pseudo": "before" | "after"}' };
+  }
+  const session = await page.context().newCDPSession(page);
+  try {
+    const { root } = await session.send('DOM.getDocument', { depth: -1 });
+    const nodes = new Map();
+    const pending = [root];
+    while (pending.length) {
+      const node = pending.pop();
+      nodes.set(node.nodeId, node);
+      for (const child of node.children || []) pending.push(child);
+      for (const child of node.pseudoElements || []) pending.push(child);
+    }
+    const { nodeIds } = await session.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: request.selector });
+    if (nodeIds.length === 0) {
+      return { error: `selector ${request.selector} matched no element` };
+    }
+    if (!(nodeIds.length <= MATCH_LIMIT)) {
+      return { error: `selector ${request.selector} matched ${nodeIds.length} elements; more than ${MATCH_LIMIT} is not a real slide` };
+    }
+
+    const snapshot = await session.send('DOMSnapshot.captureSnapshot', { computedStyles: [] });
+    const documentSnapshot = snapshot.documents[0];
+    const snapshotIndex = new Map();
+    documentSnapshot.nodes.backendNodeId.forEach((backendNodeId, index) => snapshotIndex.set(backendNodeId, index));
+    const parents = documentSnapshot.nodes.parentIndex;
+    const layout = documentSnapshot.layout;
+    // Layout text, by the pseudo-element node (or ancestor within the depth limit) it belongs to.
+    const textOf = (pseudoIndex) => {
+      let text = '';
+      for (let entry = 0; entry < layout.nodeIndex.length; entry++) {
+        const stringIndex = layout.text[entry];
+        if (!(stringIndex >= 0)) continue;
+        let owner = layout.nodeIndex[entry];
+        for (let depth = 0; depth < PSEUDO_TEXT_DEPTH_LIMIT && owner >= 0 && owner !== pseudoIndex; depth++) {
+          owner = parents[owner];
+        }
+        if (owner === pseudoIndex) text += snapshot.strings[stringIndex];
+      }
+      return text;
+    };
+
+    const styles = await page.evaluate(({ selector, pseudo, properties }) => {
+      const matches = document.querySelectorAll(selector);
+      const result = [];
+      for (let index = 0; index < matches.length; index++) {
+        const style = getComputedStyle(matches[index], '::' + pseudo);
+        const read = {};
+        for (const property of properties) read[property] = String(style[property]);
+        result.push(read);
+      }
+      return result;
+    }, { selector: request.selector, pseudo: request.pseudo, properties: PSEUDO_STYLE_PROPERTIES });
+    if (styles.length !== nodeIds.length) {
+      return { error: `selector ${request.selector} matched ${nodeIds.length} nodes through the protocol but ${styles.length} in the page` };
+    }
+
+    const boxes = [];
+    for (let matchIndex = 0; matchIndex < nodeIds.length; matchIndex++) {
+      const element = nodes.get(nodeIds[matchIndex]);
+      const pseudoNode = element && (element.pseudoElements || []).find((candidate) => candidate.pseudoType === request.pseudo);
+      if (!pseudoNode) {
+        boxes.push(null);
+        continue;
+      }
+      let model;
+      try {
+        ({ model } = await session.send('DOM.getBoxModel', { nodeId: pseudoNode.nodeId }));
+      } catch (error) {
+        // Generated, but laid out as no box (display: none).
+        boxes.push(null);
+        continue;
+      }
+      const xs = [model.border[0], model.border[2], model.border[4], model.border[6]];
+      const ys = [model.border[1], model.border[3], model.border[5], model.border[7]];
+      const left = Math.min(...xs);
+      const top = Math.min(...ys);
+      const pseudoIndex = snapshotIndex.get(pseudoNode.backendNodeId);
+      boxes.push({
+        x: left,
+        y: top,
+        w: Math.max(...xs) - left,
+        h: Math.max(...ys) - top,
+        text: pseudoIndex === undefined ? '' : textOf(pseudoIndex),
+        style: styles[matchIndex],
+      });
+    }
+    return { boxes };
+  } finally {
+    await session.detach().catch(() => {});
+  }
+}
+
 const MODES = {
   rect: measureRect,
   rects: async (page, selector, index) => {
@@ -504,6 +645,10 @@ const MODES = {
     return measured.error ? measured : measured.sizes;
   },
   hit: measureHit,
+  'each-pseudo': async (page, argument) => {
+    const measured = await measurePseudo(page, argument);
+    return measured.error ? measured : measured.boxes;
+  },
 };
 // Modes that read the whole document rather than one element.
 const DOCUMENT_MODES = new Set(['fonts']);
@@ -530,7 +675,8 @@ async function main() {
       '       node measure.cjs <document.html> <selector> --mode=each-rect|each-padding-box\n' +
       '       node measure.cjs <document.html> --mode=fonts\n' +
       '       node measure.cjs <document.html> <probes-json> --mode=probe\n' +
-      '       node measure.cjs <document.html> <point-json> --mode=hit',
+      '       node measure.cjs <document.html> <point-json> --mode=hit\n' +
+      '       node measure.cjs <document.html> <pseudo-json> --mode=each-pseudo',
     );
     process.exit(1);
   }
