@@ -498,6 +498,14 @@ def _kind_write_warnings(caplog, rid: str) -> List[logging.LogRecord]:
     ]
 
 
+def _assert_kind_in_warning(caplog, rid: str, kind: str) -> None:
+    """A failed kind write's WARNING carries the kind it could not record, in the text:
+    the column exists for measurement, so the log line is the datum's last copy."""
+    expected = f"Could not record the model fault kind {kind} of request {rid}"
+    messages = [r.getMessage() for r in _kind_write_warnings(caplog, rid)]
+    assert expected in messages, messages
+
+
 # ---------------------------------------------------------------------------
 # Start: a request stopped while queued never starts
 # ---------------------------------------------------------------------------
@@ -1403,6 +1411,7 @@ def test_a_failed_kind_write_never_masks_the_start_failure(env, monkeypatch, cap
         "the failed kind write was not logged as a WARNING naming the request: "
         f"{[(r.name, r.levelname, r.getMessage()) for r in caplog.records]}"
     )
+    _assert_kind_in_warning(caplog, rid, "not_transient")
 
 
 @pytest.mark.parametrize("snapshot", [True, False], ids=["rolled_back", "no_snapshot"])
@@ -1427,3 +1436,32 @@ def test_a_failed_kind_write_never_changes_how_a_turn_fails(
         "the failed kind write was not logged as a WARNING naming the request: "
         f"{[(r.name, r.levelname, r.getMessage()) for r in caplog.records]}"
     )
+    _assert_kind_in_warning(caplog, turn["rid"], "server_error")
+
+
+@pytest.mark.parametrize("branch", ["pinned", "generic"])
+def test_a_failing_fault_classifier_never_changes_how_a_turn_fails(
+    env, monkeypatch, caplog, branch
+):
+    """The kind is worked out before the write, still inside the best-effort
+    guard: a classifier that raises is a warning, no write is tried, and the
+    turn fails exactly as it would without it."""
+    caplog.set_level(logging.WARNING, logger="src.api.services.job_queue")
+    fault = _graph_fault(branch, "server_error")
+    turn = _failing_turn(env, fault, snapshot=True)
+    attempts = _kind_write_fails(monkeypatch)
+
+    def broken(exc):
+        raise RuntimeError("MK-classifier failed")
+
+    monkeypatch.setattr(job_queue, "model_fault_kind", broken)
+
+    raised = run_job(turn["rid"], turn["payload"])
+
+    assert attempts == [], "the kind write ran without a kind"
+    _assert_failed(env, turn, raised, fault, branch=branch, snapshot=True, kind=None)
+    assert _kind_write_warnings(caplog, turn["rid"]), (
+        "the failed classifier was not logged as a WARNING naming the request: "
+        f"{[(r.name, r.levelname, r.getMessage()) for r in caplog.records]}"
+    )
+    _assert_kind_in_warning(caplog, turn["rid"], "unclassified")

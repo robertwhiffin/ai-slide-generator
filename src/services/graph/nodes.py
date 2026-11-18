@@ -7606,8 +7606,11 @@ def _write_draft_row(
     clean.  The HTML has already been through ``gate_emitted_html`` in the
     builder.
 
-    Best-effort: a failed draft write costs only the early preview, so it is
-    logged and the slide carries on to review, which writes the row anyway.
+    Best-effort, both calls: a failure is logged and returns ``False``.  A
+    failed draft write costs only the early preview, and the slide carries on
+    to review, which writes the row anyway.  A failed landing write
+    (``replace_real=True``) lands nothing, and the caller re-raises the
+    review's fault, so the turn fails with the user's slide kept.
 
     **Either way the turn is checked here**, and ``TurnFencedError`` ends the
     pipeline: the draft write is fenced, and a position that keeps its real slide
@@ -7640,7 +7643,11 @@ def _write_draft_row(
         raise
     except Exception:
         logger.warning(
-            "Could not commit the draft of slide %s; it will appear once reviewed",
+            (
+                "Could not land the unreviewed build of slide %s"
+                if replace_real
+                else "Could not commit the draft of slide %s; it will appear once reviewed"
+            ),
             position,
             exc_info=True,
         )

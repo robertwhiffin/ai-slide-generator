@@ -25,9 +25,11 @@ Conventions:
   raised inside ``run`` would be answered to the model in-band and the test would stay
   green (C11).
 - Tests inject ``POLICY`` (waits of 0.5-2 ms) and a ``FairCallLimiter(2)`` unless they are
-  about the production defaults.  Those use a 429 carrying ``retry-after-ms: 1``, so the
-  default policy waits about 1 ms: ``call_model``'s ``sleep`` is bound at definition time
-  and cannot be patched.
+  about the production defaults.  A production-default test that retries keeps the
+  adapter's own policy and limiter, and has ``_record_sleeps`` hand ``call_model`` a
+  recording ``sleep`` instead: ``call_model``'s default ``sleep`` is bound at definition
+  time, so patching ``time.sleep`` cannot reach it, and a ``Retry-After`` hint is only a
+  floor on the backoff, so no header makes the default policy's 1-2 s first wait shorter.
 - No test binds a chat request id or a turn deadline, so the limiter group is ``None``
   and the real stop check issues no query.  Stop scenarios patch
   ``src.services.model_calls.check_turn_stopped`` (C7).  The stop-check cache reset is the
@@ -83,7 +85,8 @@ RID = "req-adapter-retries"
 POLICY = RetryPolicy(base_seconds=0.001, max_wait_seconds=0.002, budget_seconds=1.0)
 #: Always-failing calls give up after about 0.02 s of retrying.
 SHORT_BUDGET = RetryPolicy(base_seconds=0.001, max_wait_seconds=0.002, budget_seconds=0.02)
-#: A provider hint of 1 ms, so even the default policy retries at once.
+#: A provider hint of 1 ms.  It is below every backoff, so it shortens no wait (a hint is
+#: a floor); a default-policy retry is kept fast by ``_record_sleeps`` instead.
 RETRY_SOON = {"retry-after-ms": "1"}
 
 #: ``invoke`` and ``invoke_with_tools``: every model call must behave the same on both.
@@ -476,14 +479,35 @@ def test_the_production_adapter_turns_off_the_sdk_retries(path):
     assert constructed == [_kwargs(client, max_retries=0)]
 
 
+def _record_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Give every ``call_model`` call a recording ``sleep``; return what it was asked to sleep.
+
+    Everything else (the policy, the limiter) stays as the caller passes it.  An explicit
+    ``sleep`` from the caller would still win.
+    """
+    real = model_calls.call_model
+    slept: list[float] = []
+
+    def with_recorded_sleep(fn, **kwargs):
+        kwargs.setdefault("sleep", slept.append)
+        return real(fn, **kwargs)
+
+    monkeypatch.setattr(model_calls, "call_model", with_recorded_sleep)
+    monkeypatch.setattr(agent_runtime, "call_model", with_recorded_sleep, raising=False)
+    return slept
+
+
 @pytest.mark.parametrize("path", PATHS)
-def test_a_production_adapter_retries_without_being_given_a_policy(path):
+def test_a_production_adapter_retries_without_being_given_a_policy(path, monkeypatch):
     """Built with no ``retry_policy``, the adapter still retries a transient fault."""
+    slept = _record_sleeps(monkeypatch)
     chat = _Chat(_Fault(_soon_rate_limited), _valid())
     rig = _rig(chat)
 
     assert _run(rig.adapter, path) == EXPECTED
     assert len(chat.invocations) == 2
+    # The default policy's first backoff: 2 s cap, ``2 * (0.5 + 0.5 * rand())``.
+    assert 1.0 <= sum(slept) <= 2.0, slept
 
 
 @pytest.mark.parametrize("path", PATHS)

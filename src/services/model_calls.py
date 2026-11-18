@@ -430,9 +430,11 @@ def call_model(
       *limiter*, *fn* runs holding one slot of ``current_call_group()``.
     - ``TurnFencedError``, a non-transient error, and every error when *policy* is
       ``None`` propagate at once.
-    - After the n-th transient failure the wait is ``hint * (1 + 0.25 * rand())`` when the
-      provider sent a ``Retry-After``, else ``cap * (0.5 + 0.5 * rand())`` with
-      ``cap = min(max_wait_seconds, base_seconds * 2 ** (n - 1))``.
+    - After the n-th transient failure the wait is the backoff ``cap * (0.5 + 0.5 * r)``
+      with ``cap = min(max_wait_seconds, base_seconds * 2 ** (n - 1))`` and ``r = rand()``.
+      A ``Retry-After`` from the provider is a floor: the wait is then
+      ``max(hint * (1 + 0.25 * r), backoff)``, so a longer hint is waited in full,
+      jittered upwards, and a shorter or zero one never makes the retry sooner.
     - The original error is re-raised when the wait would run past ``budget_seconds``
       (counted from the first failure) or reach the turn's deadline.
     - The wait is slept outside the limiter's slot, in slices, with a stop check after each.
@@ -461,12 +463,15 @@ def call_model(
             now = clock()
             if first_failure is None:
                 first_failure = now
+            # One draw for both terms.  A hint is a floor, never a replacement: a 0 or
+            # tiny Retry-After still waits the jittered backoff, so slides do not retry
+            # in lockstep.
+            r = rand()
+            cap = min(policy.max_wait_seconds, policy.base_seconds * 2 ** (attempt - 1))
+            wait = cap * (0.5 + 0.5 * r)
             hint = retry_after_seconds(error)
             if hint is not None:
-                wait = hint * (1 + 0.25 * rand())
-            else:
-                cap = min(policy.max_wait_seconds, policy.base_seconds * 2 ** (attempt - 1))
-                wait = cap * (0.5 + 0.5 * rand())
+                wait = max(hint * (1 + 0.25 * r), wait)
             deadline = turn_deadline()
             if now - first_failure + wait > policy.budget_seconds or (
                 deadline is not None and now + wait >= deadline

@@ -3,9 +3,10 @@
 ``call_model(fn, *, agent_key, policy, limiter, sleep, clock, rand)`` checks for a stop before
 every attempt and runs ``fn`` inside one limiter slot of the current turn's group.  A
 ``TurnFencedError``, a non-transient error, and every error when ``policy is None``, propagate
-at once.  After the n-th transient failure it waits ``hint * (1 + 0.25 * rand())`` when the
-error carries a ``Retry-After``, else ``cap * (0.5 + 0.5 * rand())`` with
-``cap = min(max_wait_seconds, base_seconds * 2 ** (n - 1))``.  It re-raises the last attempt's
+at once.  After the n-th transient failure it waits ``cap * (0.5 + 0.5 * rand())`` with
+``cap = min(max_wait_seconds, base_seconds * 2 ** (n - 1))``; when the error carries a
+``Retry-After``, the hint is a floor: the wait is the longer of that backoff and
+``hint * (1 + 0.25 * rand())``, from one ``rand()`` draw (F1).  It re-raises the last attempt's
 own error when that wait would take it past the retry budget (counted from the first
 transient failure, R1) or reach the turn's deadline.  It sleeps in slices of at most 1 s,
 outside the ``except`` block and outside the slot, checking for a stop after each.
@@ -747,11 +748,14 @@ def test_the_no_hint_jitter_spans_half_to_the_whole_cap(fake, stops, rand, gaps)
     [
         pytest.param({"Retry-After": "7"}, 1.0, 8.75, id="retry-after-rand-1"),
         pytest.param({"Retry-After": "7"}, 0.5, 7.875, id="retry-after-rand-0.5"),
-        pytest.param({"retry-after-ms": "1500"}, 1.0, 1.875, id="retry-after-ms-rand-1"),
+        # max(1.5 * 1.25, 2.0 * 1.0): the 1.875 s hint is below the 2 s backoff (F1).
+        pytest.param({"retry-after-ms": "1500"}, 1.0, 2.0, id="retry-after-ms-rand-1"),
+        pytest.param({"retry-after-ms": "5000"}, 1.0, 6.25, id="retry-after-ms-above-the-backoff"),
     ],
 )
 def test_a_retry_after_is_jittered_upwards(fake, stops, headers, rand, gap):
-    """``hint * (1 + 0.25 * rand())`` (R4): never earlier than the server asked."""
+    """``max(hint * (1 + 0.25 * rand()), backoff)`` (R4, F1): never earlier than the server
+    asked, and never earlier than the backoff."""
     model = _Model(fake, _Fail(lambda: _status(429, headers)), "ok")
     assert _call(model, fake, rand=rand) == "ok"
     assert model.gaps == pytest.approx([gap], abs=1e-9)
@@ -764,11 +768,68 @@ def test_a_retry_after_above_the_per_wait_cap_is_honoured(fake, stops):
     assert model.gaps == pytest.approx([45.0], abs=1e-9)
 
 
-def test_a_retry_after_of_zero_retries_at_once(fake, stops):
-    """``0`` is a usable hint (R5), not a missing one: no 1 s exponential wait."""
+@pytest.mark.parametrize(
+    ("rand", "wait"),
+    [pytest.param(0.0, 1.0, id="rand-0"), pytest.param(1.0, 2.0, id="rand-1")],
+)
+def test_a_retry_after_of_zero_waits_the_backoff(fake, stops, caplog, rand, wait):
+    """``0`` still parses as a hint (R5), but a hint is a floor, not a replacement (F1).
+
+    The first wait is the 2 s cap's backoff, ``2 * (0.5 + 0.5 * rand)``: never 0.
+    """
+    caplog.set_level(logging.WARNING, logger=LOGGER)
     model = _Model(fake, _Fail(lambda: _status(429, {"Retry-After": "0"})), "ok")
+    assert _call(model, fake, rand=rand) == "ok"
+    assert model.calls == pytest.approx([0.0, wait], abs=1e-9)
+    assert _lines(caplog) == [_retry_line("rate_limited", 1, f"{wait:.1f}")]
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "gaps"),
+    [
+        # 50 ms at the first failure: the 1 s backoff (2 s cap, rand 0) wins.
+        pytest.param(
+            (_Fail(lambda: _status(429, {"retry-after-ms": "50"})), "ok"),
+            [1.0],
+            id="retry-after-ms-50-at-attempt-1",
+        ),
+        # 1 s at the third failure: the 4 s backoff (8 s cap, rand 0) wins.
+        pytest.param(
+            (
+                _Fail(lambda: _status(503)),
+                _Fail(lambda: _status(503)),
+                _Fail(lambda: _status(429, {"retry-after": "1"})),
+                "ok",
+            ),
+            [1.0, 2.0, 4.0],
+            id="retry-after-1-at-attempt-3",
+        ),
+    ],
+)
+def test_a_retry_after_below_the_backoff_waits_the_backoff(fake, stops, outcomes, gaps):
+    """A small hint never makes a call retry sooner than its own backoff (F1)."""
+    model = _Model(fake, *outcomes)
     assert _call(model, fake, rand=0.0) == "ok"
-    assert model.calls == [0.0, 0.0]
+    assert model.gaps == pytest.approx(gaps, abs=1e-9)
+
+
+def test_slides_rate_limited_with_a_zero_retry_after_spread_their_retries(monkeypatch):
+    """No lockstep (F1): one ``rand()`` per slide spreads the slides' first waits.
+
+    Each slide is its own call with its own clock, as a turn's slides run side by side;
+    under a replacing hint every one of them waited exactly 0.
+    """
+    monkeypatch.setattr(CHECK, _StopWhen())
+    draws = [0.0, 0.25, 0.5, 0.75, 1.0]
+    waits: list[float] = []
+    for draw in draws:
+        slide = _FakeTime()
+        model = _Model(slide, _Fail(lambda: _status(429, {"Retry-After": "0"})), "ok")
+        assert _call(model, slide, rand=draw) == "ok"
+        waits.extend(model.gaps)
+    assert waits == pytest.approx([1.0, 1.25, 1.5, 1.75, 2.0], abs=1e-9)
+    assert len(set(waits)) == len(draws), waits
+    assert min(waits) > 0, waits
 
 
 def test_the_backoff_counts_every_failure_including_a_hinted_one(fake, stops):

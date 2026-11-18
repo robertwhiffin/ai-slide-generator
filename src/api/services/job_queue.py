@@ -417,13 +417,18 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
 def _record_fault_kind(session_manager: Any, request_id: str, exc: BaseException) -> None:
     """Best-effort: record the kind of model fault that ended a failed graph turn.
 
-    Never raises, so it cannot mask the error the caller is handling.
+    Never raises, so it cannot mask the error the caller is handling.  The
+    kind is worked out first, inside the same guard, so a failed write still
+    logs it (``unclassified`` if the classifier itself raised).
     """
+    kind = "unclassified"
     try:
-        session_manager.set_chat_request_fault_kind(request_id, model_fault_kind(exc))
+        kind = model_fault_kind(exc)
+        session_manager.set_chat_request_fault_kind(request_id, kind)
     except Exception:
         logger.warning(
-            "Could not record the model fault kind of request %s",
+            "Could not record the model fault kind %s of request %s",
+            kind,
             request_id,
             exc_info=True,
         )
@@ -456,6 +461,9 @@ def _turn_deadline(request_id: str, engine_mode: str | None) -> float:
 
     Same clock as ``mark_timed_out_jobs_once``: the entry's ``started_at``
     (``datetime.utcnow()``) plus ``job_hard_timeout_seconds(engine_mode)``.
+    With no job entry, or an entry without ``started_at``, the elapsed time
+    counts as 0, so the deadline is the full limit from now; the no-context
+    recovery path relies on that.
     """
     started_at = jobs.get(request_id, {}).get("started_at")
     elapsed = (datetime.utcnow() - started_at).total_seconds() if started_at else 0
@@ -494,10 +502,11 @@ def _run_streaming_generator(
         stage_slide: Optional graph-only snapshot of the slide on stage
             (``{"slide_number", "slide_id"}``), appended after ``engine_mode``
             and passed positionally by both call sites.
-        turn_deadline: ``time.monotonic()`` value past which the turn's model
-            calls never start a retry wait (the job's hard timeout, from
-            ``_turn_deadline``), appended last and passed positionally by both
-            call sites.  Installed first, inside the job's context.
+        turn_deadline: ``time.monotonic()`` value of the job's hard timeout
+            (from ``_turn_deadline``): the turn's model calls never start a retry
+            wait that would end at or after it.  Appended last and passed
+            positionally by both call sites.  Installed first, inside the job's
+            context.
 
     Returns:
         List of all events from the generator

@@ -672,3 +672,8 @@ class TestATransientModelFaultKeepsTheDraft:
             _run(env)
         assert _rows(env)[0].html == self._EXISTING
         self._no_notice(env, caplog)
+        # The failed write was the landing write, not a draft: its log line must not
+        # promise the slide "will appear once reviewed" on a turn that is failing.
+        messages = [r.getMessage() for r in caplog.records if r.name == "src.services.graph.nodes"]
+        assert "Could not land the unreviewed build of slide 0" in messages, messages
+        assert not any(m.startswith("Could not commit the draft") for m in messages), messages
