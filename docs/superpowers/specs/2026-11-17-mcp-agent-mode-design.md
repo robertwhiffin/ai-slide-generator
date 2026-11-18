@@ -107,10 +107,11 @@ Same response (`session_id`, `request_id`, `status: "pending"`). The parameters 
   it: only the monolith's prompt assembly (`agent_resolution._get_prompt_content`)
   does, and the graph reads only `resolve_style_source`. So the parameter does nothing
   on an Agent deck.
-- **Removing a parameter is a breaking change for callers that still send it.** The
-  builder checks what FastMCP does with an argument the tool no longer declares (ignore
-  or reject). The release note names every removed parameter (these two, and
-  `edit_deck`'s `slide_indices`) either way.
+- **Callers that still send a removed parameter don't error.** FastMCP's argument
+  model (`ArgModelBase`, pydantic, extra keys ignored) silently drops an argument the
+  tool no longer declares; checked 2026-11-17 against the locked `mcp` version. The
+  release note still names every removed parameter (these two, and `edit_deck`'s
+  `slide_indices`), because the values now do nothing.
 - **A prompt with no topic** ("make me a deck"): the architect answers `discuss` and
   asks what it's about. The turn completes with no slides. `get_deck_status` returns
   `ready` with the question as the reply and `deck_changed: false`. **(my call)**
