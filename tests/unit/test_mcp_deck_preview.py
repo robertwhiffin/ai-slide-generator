@@ -345,6 +345,106 @@ def test_strip_is_first_in_body_and_notice_follows_the_last_shown_slide():
     assert _hrefs(children[notices[0]]) == [HOSTILE_URL]
 
 
+def _declarations(style: str, selector: str) -> str:
+    """The declarations of the rule written for exactly ``selector`` (whitespace removed)."""
+    flat = re.sub(r"\s+", "", style)
+    match = re.search(re.escape(selector) + r"\{([^{}]*)\}", flat)
+    assert match, f"no rule for {selector} in {flat[:300]!r}"
+    return match.group(1)
+
+
+def test_each_shown_slide_sits_in_its_own_frame_with_the_strip_and_notice_outside():
+    """Final review C1: a design-system deck styles the slide root
+    ``.slide{position:absolute;inset:0}``. As in the Tellr app (``slideHostFrameStyle``),
+    each slide sits in its own positioned 1280x720 frame, whose direct child fills it, so
+    the slides stay in flow and never cover the strip or the notice."""
+    css = ".slide{position:absolute;inset:0;background:#0B2026;color:#fff}"
+    deck = _deck([_slide(i) for i in range(12)], css=css)
+    soup = _soup(_html(_build(deck)))
+    children = _body_children(soup)
+
+    frames = [c for c in children if any(_token(i) in c.get_text() for i in range(12))]
+    assert len(frames) == 10
+    for i, frame in enumerate(frames):
+        assert [k for k in range(12) if _token(k) in frame.get_text()] == [i]
+        [root] = [c for c in frame.children if isinstance(c, Tag)]
+        assert "slide" in root.get("class")
+        assert _token(i) in root.get_text()
+    assert len({tuple(f.get("class") or ()) for f in frames}) == 1
+    [frame_class] = frames[0].get("class")
+    assert frame_class != "slide"
+
+    style = _style_text(soup)
+    frame_rule = _declarations(style, f".{frame_class}")
+    for declaration in (
+        "position:relative!important",
+        "width:1280px!important",
+        "height:720px!important",
+        "overflow:hidden",
+        "margin:",
+    ):
+        assert declaration in frame_rule, declaration
+    child_rule = _declarations(
+        style, f".{frame_class}>:not(#tellr-host-frame-boost):not(.slide-wrapper)"
+    )
+    for declaration in (
+        "position:absolute!important",
+        "inset:0!important",
+        "width:100%!important",
+        "height:100%!important",
+        "box-sizing:border-box!important",
+        "overflow:hidden",
+    ):
+        assert declaration in child_rule, declaration
+
+    # The strip and the notice are body-level siblings of the frames, outside them.
+    assert _text(children[0]) == STRIP_COPY
+    [notice] = _children_with_text(soup, "2 more slides — see full deck in tellr")
+    assert notice > children.index(frames[-1])
+    for frame in frames:
+        assert STRIP_COPY not in frame.get_text()
+        assert "see full deck in tellr" not in frame.get_text()
+
+
+def test_a_slide_is_verbatim_inside_its_frame():
+    """The frame wraps the slide's html and changes nothing in it (C13)."""
+    legacy = "<div class='slide'  data-n=1>\n  <h1 style='color:#FF3621'>T &amp; x</h1>\n</div>"
+    deck = _deck([{"slide_id": "slide_0", "html": legacy, "scripts": ""}])
+    html = _html(_build(deck))
+    assert legacy in html
+    soup = _soup(html)
+    [frame] = [c for c in _body_children(soup) if "T & x" in c.get_text()]
+    assert frame.find("h1").get_text() == "T & x"
+
+
+@pytest.mark.parametrize(
+    ("css", "slide_body"),
+    [
+        pytest.param(
+            '.slide{position:absolute}.slide::after{content:"\n</head>\n<body>\n"}',
+            "",
+            id="css-string-holds-the-head-body-boundary",
+        ),
+        pytest.param(
+            "",
+            "<style>\n.x{color:red}\n  </style>\n<p>x</p>\n</head>\n<body>\n",
+            id="no-deck-css-and-a-slide-style-block",
+        ),
+    ],
+)
+def test_the_strip_and_frame_rules_land_at_the_documents_own_head_and_body(css, slide_body):
+    """The strip is the first child of the real ``<body>`` and the frame rules are a
+    ``<style>`` of the real ``<head>``, whatever text the css or a slide carries."""
+    preview = _build(_deck([_slide(0, slide_body)], css=css))
+    soup = _soup(_html(preview))
+
+    assert _text(_body_children(soup)[0]) == STRIP_COPY
+    head_styles = [s.get_text() for s in soup.head.find_all("style")]
+    assert any(".tellr-preview-frame{" in re.sub(r"\s+", "", s) for s in head_styles)
+    [frame] = [c for c in _body_children(soup) if _token(0) in c.get_text()]
+    assert frame.get("class") == ["tellr-preview-frame"]
+
+
 def test_scripts_only_for_shown_slides():
     slides = [_slide(i, f'<canvas id="cv{i}"></canvas>') for i in range(12)]
     for i in (0, 9, 10, 11):

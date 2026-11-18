@@ -4,6 +4,12 @@ The preview shows at most ``MAX_PREVIEW_SLIDES`` whole slides, with standard fon
 faces become Google Fonts imports) and no images other than small scoped SVGs, inside a UTF-8
 byte budget. The page is built with ``SlideDeck.to_html_document`` so its escaping guards
 still apply.
+
+Each slide sits in its own 1280x720 host frame, as in the Tellr app (the frontend's
+``slideHostFrameStyle``): design-system decks position the slide root absolutely, and
+without a frame every slide would pile up at the top of the page, over the strip and the
+notice. The frame rules are a separate ``<style>`` block after the deck's, so the css
+trimmer never sees them and no stray text in the deck's css can swallow them.
 """
 
 from __future__ import annotations
@@ -22,8 +28,26 @@ MAX_PREVIEW_SLIDES = 10
 MCP_RESULT_BUDGET_BYTES = 150_000
 
 _STRIP_COPY = "preview — open the full deck in tellr"
-_BODY_OPEN = "\n<body>\n"
+# ``to_html_document``'s layout: the deck's style block ends with ``_STYLE_END`` and the
+# head with ``_HEAD_BODY``; the body ends with the last ``_BODY_CLOSE``.
+_STYLE_END = "\n  </style>\n"
+_HEAD_BODY = "\n</head>\n<body>\n"
 _BODY_CLOSE = "\n</body>"
+_FRAME_CLASS = "tellr-preview-frame"
+# Mirrors frontend/src/services/slideDocument.ts slideHostFrameStyle: the frame is the
+# positioned 1280x720 box, and its direct child (the slide root) fills it. The
+# ``:not(#tellr-host-frame-boost)`` arm lifts the child rule to id specificity so an
+# id-scoped ``!important`` size on a slide root cannot shrink it; ``.slide-wrapper`` is
+# excluded as there.
+_FRAME_STYLE = (
+    "  <style>\n"
+    f".{_FRAME_CLASS}{{position:relative!important;width:1280px!important;"
+    "height:720px!important;overflow:hidden;margin:16px auto}\n"
+    f".{_FRAME_CLASS}>:not(#tellr-host-frame-boost):not(.slide-wrapper){{"
+    "position:absolute!important;inset:0!important;width:100%!important;"
+    "height:100%!important;box-sizing:border-box!important;overflow:hidden}\n"
+    "  </style>"
+)
 _BOX_STYLE = (
     "font-family:system-ui,sans-serif;font-size:14px;padding:10px 16px;"
     "background:#1B3139;color:#fff;"
@@ -63,6 +87,24 @@ def _link_div(url: str, text: str) -> str:
     )
 
 
+def _framed(slide_html: str) -> str:
+    """The slide's html, verbatim, inside its host frame."""
+    return f'<div class="{_FRAME_CLASS}">\n{slide_html}\n</div>'
+
+
+def _add_frame_style_and_strip(page: str, strip: str, *, has_deck_style: bool) -> str:
+    """Close ``<head>`` with the frame rules and open ``<body>`` with the strip.
+
+    The deck's css cannot hold a style closer (``to_html_document`` neutralises them) and
+    the title and script srcs are escaped, so the first head/body boundary after the
+    deck's style block (or, with none, the first at all) is the document's own, whatever
+    text the css or the slides carry.
+    """
+    at = page.index(_HEAD_BODY, page.index(_STYLE_END) if has_deck_style else 0)
+    rest = page[at + len(_HEAD_BODY) :]
+    return f"{page[:at]}\n{_FRAME_STYLE}{_HEAD_BODY}{strip}\n{rest}"
+
+
 def _note(shown: int, total: int) -> str:
     tail = "(standard fonts, images not shown). Open the full deck in tellr."
     if shown == total:
@@ -97,22 +139,24 @@ def build_deck_preview(
     # Only the slides that can be shown are prepared: the rest are never on the page and
     # their images are not counted.
     limit = max(0, min(total, max_slides))
-    prepared: list[dict] = []
+    used_texts: list[str] = []
+    framed: list[dict] = []
     slide_hidden: list[int] = []
     for slide in slides[:limit]:
         slide_html, hidden = hide_images_in_html(slide.get("html") or "", svg_assets)
-        prepared.append({**slide, "html": slide_html, "scripts": slide.get("scripts") or ""})
+        scripts = slide.get("scripts") or ""
+        used_texts.append(slide_html + "\n" + scripts)
+        framed.append({**slide, "html": _framed(slide_html), "scripts": scripts})
         slide_hidden.append(hidden)
 
+    strip = _link_div(deck_url, _STRIP_COPY)
     for k in range(limit, 0, -1):
-        shown = prepared[:k]
-        used = "\n".join(s["html"] + "\n" + s["scripts"] for s in shown)
-        trimmed = trim_css(css, used)
+        trimmed = trim_css(css, "\n".join(used_texts[:k]))
         page_css = f"{imports}\n{trimmed}" if imports and trimmed else imports or trimmed
         page = SlideDeck.from_dict(
-            {**deck, "slides": shown, "css": page_css}, title=title
+            {**deck, "slides": framed[:k], "css": page_css}, title=title
         ).to_html_document()
-        page = page.replace(_BODY_OPEN, _BODY_OPEN + _link_div(deck_url, _STRIP_COPY) + "\n", 1)
+        page = _add_frame_style_and_strip(page, strip, has_deck_style=bool(page_css))
         if k < total:
             left = total - k
             word = "slide" if left == 1 else "slides"
