@@ -6,9 +6,11 @@ tests/integration/test_mcp_endpoint.py (added in Task 11).
 """
 
 import base64
+import copy
+import inspect
 import json
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -17,7 +19,21 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.api.mcp_auth import MCPIdentity
+from src.api.routes import chat as chat_routes
+from src.api.routes.chat import (
+    EngineModeUnresolvedError,
+    EngineRaceError,
+    EnteredTurn,
+    SessionBusyError,
+)
+from src.api.schemas.agent_config import GenieOneTool
+from src.api.services.session_manager import (
+    DeckModeLockedError,
+    GenerationRefusedError,
+    SessionNotFoundError,
+)
 from src.core.database import Base
+from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 
 
 @pytest.fixture
@@ -108,7 +124,12 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-777", engine_mode="graph"),
+         ) as enter:
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -117,17 +138,10 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
         sm.create_session.return_value = mock_session
         get_sm.return_value = sm
 
-        async def _fake_enqueue(**kwargs):
-            return "req-777"
-
-        enqueue.side_effect = _fake_enqueue
-
         result = await mcp_server._create_deck_impl(
             request=fake_request,
             prompt="make a deck about Q3",
-            num_slides=7,
             slide_style_id=4,
-            deck_prompt_id=2,
             correlation_id="vibe-xyz",
         )
 
@@ -137,14 +151,11 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
         agent_config = create_kwargs["agent_config"]
         assert agent_config["tools"] == []
         assert agent_config["slide_style_id"] == 4
-        assert agent_config["deck_prompt_id"] == 2
-        assert agent_config["num_slides"] == 7
 
-        enqueue.assert_called_once()
-        assert enqueue.call_args.kwargs["session_id"] == "sess-123"
-        assert enqueue.call_args.kwargs["prompt"] == "make a deck about Q3"
-        assert enqueue.call_args.kwargs["mode"] == "generate"
-        assert enqueue.call_args.kwargs["correlation_id"] == "vibe-xyz"
+        enter.assert_awaited_once()
+        assert enter.await_args.kwargs["session_id"] == "sess-123"
+        assert enter.await_args.kwargs["message"] == "make a deck about Q3"
+        assert enter.await_args.kwargs["extra_payload"] == {"correlation_id": "vibe-xyz"}
 
         assert result == {
             "session_id": "sess-123",
@@ -169,7 +180,12 @@ async def test_create_deck_falls_back_to_tellr_default_slide_style(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -179,11 +195,6 @@ async def test_create_deck_falls_back_to_tellr_default_slide_style(
         get_sm.return_value = sm
 
         get_default.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request,
@@ -207,7 +218,12 @@ async def test_create_deck_skips_default_lookup_when_slide_style_id_provided(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -215,11 +231,6 @@ async def test_create_deck_skips_default_lookup_when_slide_style_id_provided(
         sm = MagicMock()
         sm.create_session.return_value = mock_session
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request,
@@ -246,7 +257,12 @@ async def test_create_deck_defaults_to_org_default_design_system(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -256,11 +272,6 @@ async def test_create_deck_defaults_to_org_default_design_system(
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="a deck about widgets"
@@ -278,7 +289,12 @@ async def test_create_deck_explicit_design_system_wins(fake_request, identity):
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -286,11 +302,6 @@ async def test_create_deck_explicit_design_system_wins(fake_request, identity):
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", design_system_id=8
@@ -312,7 +323,12 @@ async def test_create_deck_explicit_slide_style_suppresses_default_ds(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -321,11 +337,6 @@ async def test_create_deck_explicit_slide_style_suppresses_default_ds(
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
         get_default_ds.return_value = 5
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", slide_style_id=9
@@ -347,7 +358,12 @@ async def test_create_deck_falls_back_to_slide_style_when_no_default_ds(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -357,11 +373,6 @@ async def test_create_deck_falls_back_to_slide_style_when_no_default_ds(
         get_sm.return_value = sm
         get_default_ds.return_value = None
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(request=fake_request, prompt="deck")
 
@@ -382,7 +393,12 @@ async def test_create_deck_resolves_template_name_to_a_pin(fake_request, identit
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -392,11 +408,6 @@ async def test_create_deck_resolves_template_name_to_a_pin(fake_request, identit
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         resolve_name.return_value = 102
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -423,7 +434,12 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
          patch("src.api.mcp_server.get_default_template_id", return_value=None), \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -433,11 +449,6 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         resolve_name.return_value = None  # no such template
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         with caplog.at_level(logging.WARNING):
             result = await mcp_server._create_deck_impl(
@@ -469,7 +480,12 @@ async def test_create_deck_pins_the_design_systems_default_template(
          patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
          patch("src.api.mcp_server._resolve_template_name", return_value=resolved), \
          patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -477,11 +493,6 @@ async def test_create_deck_pins_the_design_systems_default_template(
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name=template_name
@@ -503,7 +514,12 @@ async def test_create_deck_named_template_beats_the_default(fake_request, identi
          patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
          patch("src.api.mcp_server._resolve_template_name", return_value=102), \
          patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -511,11 +527,6 @@ async def test_create_deck_named_template_beats_the_default(fake_request, identi
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -537,7 +548,12 @@ async def test_create_deck_ignores_template_name_without_a_design_system(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -547,11 +563,6 @@ async def test_create_deck_ignores_template_name_without_a_design_system(
         get_sm.return_value = sm
         get_default_ds.return_value = None
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         result = await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -802,29 +813,6 @@ async def test_create_deck_rejects_injection_prompt(fake_request, identity):
 
 
 @pytest.mark.asyncio
-async def test_create_deck_rejects_num_slides_out_of_range(fake_request, identity):
-    from src.api import mcp_server
-    from src.api.mcp_server import MCPToolError
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope:
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-
-        with pytest.raises(MCPToolError):
-            await mcp_server._create_deck_impl(
-                request=fake_request,
-                prompt="foo",
-                num_slides=0,
-            )
-        with pytest.raises(MCPToolError):
-            await mcp_server._create_deck_impl(
-                request=fake_request,
-                prompt="foo",
-                num_slides=51,
-            )
-
-
-@pytest.mark.asyncio
 async def test_create_deck_surfaces_auth_error_as_tool_error(fake_request):
     from src.api import mcp_server
     from src.api.mcp_auth import MCPAuthError
@@ -839,6 +827,433 @@ async def test_create_deck_surfaces_auth_error_as_tool_error(fake_request):
                 prompt="foo",
             )
         assert "auth" in str(exc.value).lower() or "credentials" in str(exc.value).lower()
+
+
+# ---- create_deck: an Agent deck, entered through enter_chat_turn ---------
+#
+# create_deck creates a deck_mode="agent" session seeded with the app's new-deck
+# tool defaults, then enters its first turn through ``_enter_turn_or_tool_error``.
+# That helper calls the async chat route's ``enter_chat_turn`` and maps each of
+# Enter's refusals to MCP error copy; anything it does not map propagates.
+
+#: The MCP error copy, verbatim from the plan's Global Constraints. These are
+#: literals, never the module's constants, so a typo in a constant goes red.
+_LEGACY_DECK_COPY = (
+    "This deck was made in Legacy mode and can't be edited over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+_SESSION_BUSY_COPY = "This deck is busy with another request. Try again when it finishes."
+_DECK_LOCKED_COPY = "This deck is locked by {name}."
+_NO_GRAPH_RELEASE_COPY = (
+    "Tellr can't generate decks right now: no active Graph Release. "
+    "An admin needs to publish one."
+)
+_UNAVAILABLE_COPY = "Tellr is temporarily unavailable. Please retry."
+#: The async route's copy, which MCP reuses (``ENGINE_RACE_DETAIL`` and
+#: ``_GENERATION_REFUSED_DETAILS``).
+_ENGINE_RACE_COPY = "This deck changed while you sent your message. Try again."
+_RESTORE_PENDING_COPY = (
+    "This deck is still being restored after a failed generation. Try again in a minute."
+)
+_ARC_REVIEW_BUSY_COPY = (
+    "This deck is being updated in the background. Try again in a few seconds."
+)
+
+
+def _recording_session_manager(session_id="sess-123", *, create_error=None):
+    """A session manager whose ``create_session`` records a deep copy of each call.
+
+    The copy is taken at call time, so a config mutated after the session was
+    created can't pass for the config the session was created with.
+    """
+    sm = MagicMock()
+    sm.created = []
+
+    def _create_session(*args, **kwargs):
+        sm.created.append((args, copy.deepcopy(kwargs)))
+        if create_error is not None:
+            raise create_error
+        return {"session_id": session_id}
+
+    sm.create_session.side_effect = _create_session
+    return sm
+
+
+@contextmanager
+def _agent_create_deck_env(identity, session_manager, *, genie_one_default, request_id="req-777"):
+    """Patch what ``_create_deck_impl`` reaches, as the tests above patch it.
+
+    The style-source defaults are None, so the stored ``agent_config`` holds only
+    what the call itself put there. Genie One's admin default is patched where
+    the new-deck tool defaults read it (``src.api.routes.chat``).
+    """
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager", return_value=session_manager), \
+         patch("src.api.mcp_server.get_default_design_system_id", return_value=None), \
+         patch("src.api.mcp_server.get_default_slide_style_id", return_value=None), \
+         patch(
+             "src.api.routes.chat.get_genie_one_default",
+             return_value=genie_one_default,
+         ), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id=request_id, engine_mode="graph"),
+         ) as enter:
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        yield enter
+
+
+@pytest.mark.asyncio
+async def test_create_deck_creates_an_agent_deck_and_enters_it(fake_request, identity):
+    from src.api import mcp_server
+
+    # Whitespace and a slide count included: the prompt reaches Enter untouched.
+    prompt = "  Make a deck about Q3 revenue by region.\nUse 6 slides.  "
+    sm = _recording_session_manager("sess-123")
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        result = await mcp_server._create_deck_impl(
+            request=fake_request, prompt=prompt, correlation_id="vibe-xyz"
+        )
+
+    assert sm.created == [
+        (
+            (),
+            {
+                "created_by": "alice@example.com",
+                "agent_config": {"tools": []},
+                "deck_mode": "agent",
+            },
+        )
+    ]
+    enter.assert_awaited_once_with(
+        session_id="sess-123",
+        message=prompt,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": "vibe-xyz"},
+    )
+    assert result == {
+        "session_id": "sess-123",
+        "request_id": "req-777",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_deck_answers_an_agent_deck_refusal_with_its_copy(
+    fake_request, identity
+):
+    """create_deck enters through the refusal mapper: a refusal from Enter reaches
+    the caller as its copy, not as "Internal error"."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _recording_session_manager("sess-123")
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        enter.side_effect = EngineModeUnresolvedError()
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._create_deck_impl(
+                request=fake_request, prompt="a deck about churn", correlation_id="vibe-xyz"
+            )
+
+    assert str(exc.value) == _UNAVAILABLE_COPY
+    enter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_deck_seeds_genie_one_when_the_admin_default_is_on(
+    fake_request, identity
+):
+    from src.api import mcp_server
+
+    sm = _recording_session_manager()
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=True):
+        await mcp_server._create_deck_impl(request=fake_request, prompt="a deck about churn")
+
+    [(_, create_kwargs)] = sm.created
+    assert create_kwargs["agent_config"] == {"tools": [GenieOneTool().model_dump()]}
+
+
+@pytest.mark.asyncio
+async def test_create_deck_seeds_no_tools_for_a_token_less_caller(fake_request):
+    """A forwarded-identity caller has no token to run Genie One with, so the admin
+    default is not applied. The deck is still created and entered."""
+    from src.api import mcp_server
+
+    token_less = MCPIdentity(
+        user_id="user-abc",
+        user_name="alice@example.com",
+        token=None,
+        source="x-forwarded-identity",
+    )
+    sm = _recording_session_manager("sess-tokenless")
+
+    with _agent_create_deck_env(
+        token_less, sm, genie_one_default=True, request_id="req-tokenless-3"
+    ) as enter:
+        result = await mcp_server._create_deck_impl(
+            request=fake_request, prompt="a deck about churn"
+        )
+
+    [(_, create_kwargs)] = sm.created
+    assert create_kwargs["agent_config"] == {"tools": []}
+    enter.assert_awaited_once()
+    assert result == {
+        "session_id": "sess-tokenless",
+        "request_id": "req-tokenless-3",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_deck_no_longer_stores_num_slides_or_deck_prompt_id(
+    fake_request, identity
+):
+    """Both parameters are gone. A slide count belongs in the prompt, and the deck
+    prompt no longer reaches an Agent deck."""
+    from src.api import mcp_server
+
+    for fn in (mcp_server._create_deck_impl, mcp_server.create_deck):
+        params = inspect.signature(fn).parameters
+        assert "num_slides" not in params, fn.__name__
+        assert "deck_prompt_id" not in params, fn.__name__
+    assert list(inspect.signature(mcp_server.create_deck).parameters) == [
+        "ctx",
+        "prompt",
+        "slide_style_id",
+        "design_system_id",
+        "template_name",
+        "correlation_id",
+    ]
+    # What MCP clients see in tools/list.
+    [tool] = [t for t in await mcp_server.mcp.list_tools() if t.name == "create_deck"]
+    assert set(tool.inputSchema["properties"]) == {
+        "prompt",
+        "slide_style_id",
+        "design_system_id",
+        "template_name",
+        "correlation_id",
+    }
+
+    sm = _recording_session_manager()
+    with _agent_create_deck_env(identity, sm, genie_one_default=False):
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="a 4-slide deck about churn", slide_style_id=4
+        )
+
+    [(_, create_kwargs)] = sm.created
+    agent_config = create_kwargs["agent_config"]
+    assert "num_slides" not in agent_config
+    assert "deck_prompt_id" not in agent_config
+    assert agent_config == {"tools": [], "slide_style_id": 4}
+
+
+@pytest.mark.asyncio
+async def test_create_deck_maps_a_missing_graph_release_to_a_tool_error(
+    fake_request, identity
+):
+    """An Agent deck pins the active Graph Release when it is created. With none
+    published, create_session refuses, and the caller gets the copy (not
+    "Internal error"). Nothing is entered."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _recording_session_manager(create_error=ActiveGraphReleaseUnavailableError())
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._create_deck_impl(
+                request=fake_request, prompt="a deck about churn", correlation_id="vibe-xyz"
+            )
+
+    assert str(exc.value) == _NO_GRAPH_RELEASE_COPY
+    assert str(exc.value) == mcp_server.MCP_NO_GRAPH_RELEASE_ERROR
+    assert len(sm.created) == 1
+    enter.assert_not_called()
+    enter.assert_not_awaited()
+
+
+# ---- _enter_turn_or_tool_error ------------------------------------------
+#
+# Each case: the error Enter raises, the app URL the deck link is built on, the
+# exact copy (from the literals above), the same copy built from the module's own
+# constant (so both the text and the constant it comes from are pinned), and the
+# holders whose display name is looked up.
+
+_REFUSAL_CASES = [
+    pytest.param(
+        SessionBusyError,
+        "https://tellr.example",
+        _SESSION_BUSY_COPY,
+        lambda m: m.MCP_SESSION_BUSY_ERROR,
+        [],
+        id="session-busy",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(
+            GenerationRefusedError.GENERATION_IN_FLIGHT, holder="bob@example.com"
+        ),
+        "https://tellr.example",
+        "This deck is locked by Bob.",
+        lambda m: m.MCP_DECK_LOCKED_ERROR.format(name="Bob"),
+        ["bob@example.com"],
+        id="generation-in-flight",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(GenerationRefusedError.RESTORE_PENDING),
+        "https://tellr.example",
+        _RESTORE_PENDING_COPY,
+        lambda m: chat_routes._GENERATION_REFUSED_DETAILS[
+            GenerationRefusedError.RESTORE_PENDING
+        ],
+        [],
+        id="restore-pending",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(GenerationRefusedError.ARC_REVIEW_IN_FLIGHT),
+        "https://tellr.example",
+        _ARC_REVIEW_BUSY_COPY,
+        lambda m: chat_routes._GENERATION_REFUSED_DETAILS[
+            GenerationRefusedError.ARC_REVIEW_IN_FLIGHT
+        ],
+        [],
+        id="arc-review-in-flight",
+    ),
+    pytest.param(
+        EngineRaceError,
+        "https://tellr.example",
+        _ENGINE_RACE_COPY,
+        lambda m: m.MCP_ENGINE_RACE_ERROR,
+        [],
+        id="engine-race",
+    ),
+    pytest.param(
+        EngineModeUnresolvedError,
+        "https://tellr.example",
+        _UNAVAILABLE_COPY,
+        lambda m: m.MCP_UNAVAILABLE_ERROR,
+        [],
+        id="engine-mode-unresolved",
+    ),
+    pytest.param(
+        ActiveGraphReleaseUnavailableError,
+        "https://tellr.example",
+        _NO_GRAPH_RELEASE_COPY,
+        lambda m: m.MCP_NO_GRAPH_RELEASE_ERROR,
+        [],
+        id="no-active-graph-release",
+    ),
+    pytest.param(
+        lambda: DeckModeLockedError("legacy"),
+        "https://tellr.example",
+        _LEGACY_DECK_COPY.format(deck_url="https://tellr.example/sessions/sess-9/edit"),
+        lambda m: m.MCP_LEGACY_DECK_ERROR.format(
+            deck_url="https://tellr.example/sessions/sess-9/edit"
+        ),
+        [],
+        id="legacy-deck-absolute-url",
+    ),
+    pytest.param(
+        lambda: DeckModeLockedError("legacy"),
+        "",
+        _LEGACY_DECK_COPY.format(deck_url="/sessions/sess-9/edit"),
+        lambda m: m.MCP_LEGACY_DECK_ERROR.format(deck_url="/sessions/sess-9/edit"),
+        [],
+        id="legacy-deck-relative-url",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("make_error", "app_url", "expected_copy", "copy_from_constant", "resolved_holders"),
+    _REFUSAL_CASES,
+)
+async def test_enter_turn_maps_every_refusal_to_its_copy(
+    make_error, app_url, expected_copy, copy_from_constant, resolved_holders
+):
+    from unittest.mock import call
+
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    error = make_error()
+    with patch(
+        "src.api.mcp_server.enter_chat_turn", new_callable=AsyncMock, side_effect=error
+    ) as enter, patch(
+        "src.api.mcp_server.resolve_display_name", return_value="Bob"
+    ) as resolve, patch("src.api.mcp_server._public_app_url", return_value=app_url):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._enter_turn_or_tool_error(
+                session_id="sess-9", message="Add a churn slide", correlation_id="corr-5"
+            )
+
+    assert str(exc.value) == expected_copy
+    assert str(exc.value) == copy_from_constant(mcp_server)
+    enter.assert_awaited_once()
+    # Only a live generation's holder is looked up, and it is the holder Enter named.
+    assert resolve.call_args_list == [call(holder) for holder in resolved_holders]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # requested_deck_mode="agent" can't meet a deck locked to agent, so only
+        # "legacy" has copy; any other locked mode is not a refusal MCP maps.
+        pytest.param(lambda: DeckModeLockedError("agent"), id="deck-mode-locked-not-legacy"),
+        pytest.param(lambda: SessionNotFoundError("sess-9"), id="session-not-found"),
+        pytest.param(lambda: RuntimeError("queue exploded"), id="unmapped-error"),
+    ],
+)
+async def test_enter_turn_maps_every_refusal_and_nothing_else(make_error):
+    """What the mapping doesn't name propagates unchanged, to the tool's own
+    ``except Exception`` ("Internal error")."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    error = make_error()
+    with patch(
+        "src.api.mcp_server.enter_chat_turn", new_callable=AsyncMock, side_effect=error
+    ), patch("src.api.mcp_server.resolve_display_name", return_value="Bob"), patch(
+        "src.api.mcp_server._public_app_url", return_value=""
+    ):
+        with pytest.raises(type(error)) as exc:
+            await mcp_server._enter_turn_or_tool_error(
+                session_id="sess-9", message="Add a churn slide", correlation_id="corr-5"
+            )
+
+    assert exc.value is error
+    assert not isinstance(exc.value, MCPToolError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("correlation_id", ["corr-5", None])
+async def test_enter_turn_enters_the_agent_deck_turn_and_returns_its_request_id(
+    correlation_id,
+):
+    from src.api import mcp_server
+
+    with patch(
+        "src.api.mcp_server.enter_chat_turn",
+        new_callable=AsyncMock,
+        return_value=EnteredTurn(request_id="req-success-91", engine_mode="graph"),
+    ) as enter:
+        request_id = await mcp_server._enter_turn_or_tool_error(
+            session_id="sess-9", message="Add a churn slide", correlation_id=correlation_id
+        )
+
+    assert request_id == "req-success-91"
+    enter.assert_awaited_once_with(
+        session_id="sess-9",
+        message="Add a churn slide",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": correlation_id},
+    )
 
 
 # ---- get_deck_status ----------------------------------------------------
@@ -1679,112 +2094,3 @@ async def test_create_deck_length_guard_when_enabled(monkeypatch):
     monkeypatch.setattr(mcp_server, "MCP_PROMPT_LIMIT", 100)
     with pytest.raises(MCPToolError, match="too long"):
         await _create_deck_impl(request=None, prompt="x" * 200)
-
-
-# ---- create_deck: an MCP deck is stored legacy at creation --------------------
-#
-# MCP stays on the monolith (the graph's one-shot path is not built), so
-# create_deck creates its session with deck_mode="legacy": unpinned, and locked
-# to legacy from creation, so a later browser turn on it runs on the monolith
-# too.  The mode lives in the column, so every prompt -- create_deck's first one
-# included -- is persisted exactly as the caller sent it; the old
-# USE LEGACY MODE prepend is gone.  The manager here is a MagicMock: that a
-# legacy deck_mode is never pinned, whatever graph_capable says, is
-# SessionManager's pin rule, covered in test_deck_mode_resolution.py.
-
-# A literal, not the constant: the phrase constants are deleted in Task 6.
-_OLD_LEGACY_PHRASE = "USE LEGACY MODE"
-
-
-async def _drive_enqueue_create_job(*, mode, message_count):
-    from unittest.mock import AsyncMock
-
-    from src.api import mcp_server
-
-    sm = MagicMock()
-    sm.acquire_session_lock.return_value = True
-    sm.create_chat_request.return_value = "req-1"
-    sm.get_session.return_value = {"message_count": message_count}
-    enqueue = AsyncMock()
-    with patch("src.api.mcp_server.get_session_manager", return_value=sm), \
-         patch("src.api.mcp_server.enqueue_job", enqueue), \
-         patch("src.core.user_context.get_current_user", return_value="mcp@example.com"):
-        request_id = await mcp_server.enqueue_create_job(
-            session_id="sess-1", prompt="make a deck about Q3", mode=mode
-        )
-    assert request_id == "req-1"
-    persisted = sm.add_message.call_args.kwargs["content"]
-    payload = enqueue.await_args.args[1]
-    return persisted, payload
-
-
-@pytest.mark.asyncio
-async def test_mcp_create_deck_is_legacy_unpinned_and_persists_the_prompt_verbatim(
-    fake_request, identity
-):
-    """The whole create_deck path, through the real enqueue_create_job: the
-    session is created legacy (so unpinned), and its first message is the
-    caller's prompt, unchanged."""
-    from unittest.mock import AsyncMock
-
-    prompt = "make a deck about Q3 revenue by region"
-    sm = MagicMock()
-    sm.create_session.return_value = {"session_id": "sess-legacy"}
-    sm.acquire_session_lock.return_value = True
-    sm.create_chat_request.return_value = "req-1"
-    sm.get_session.return_value = {"message_count": 0}
-    enqueue = AsyncMock()
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.get_session_manager", return_value=sm), \
-         patch("src.api.mcp_server.enqueue_job", enqueue), \
-         patch("src.core.user_context.get_current_user", return_value="alice@example.com"):
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-
-        result = await _create_deck_impl(
-            request=fake_request, prompt=prompt, slide_style_id=4
-        )
-
-    assert result == {
-        "session_id": "sess-legacy",
-        "request_id": "req-1",
-        "status": "pending",
-    }
-    sm.create_session.assert_called_once()
-    create_kwargs = sm.create_session.call_args.kwargs
-    assert (create_kwargs.get("deck_mode"), create_kwargs.get("graph_capable")) == (
-        "legacy",
-        False,
-    )
-    sm.add_message.assert_called_once()
-    saved = sm.add_message.call_args.kwargs
-    assert (saved["session_id"], saved["role"], saved["content"]) == (
-        "sess-legacy",
-        "user",
-        prompt,
-    )
-    assert _OLD_LEGACY_PHRASE not in saved["content"]
-    payload = enqueue.await_args.args[1]
-    assert (payload["message"], payload["is_first_message"]) == (prompt, True)
-    assert "engine_mode" not in payload
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "message_count"),
-    [("generate", 0), ("edit", 0), ("edit", 3), ("generate", 2)],
-    ids=["create-deck-first-message", "edit-on-empty-deck", "edit", "generate-not-first"],
-)
-async def test_every_enqueued_prompt_is_persisted_verbatim(mode, message_count):
-    """No prompt is altered, create_deck's first message included (it used to
-    get the opt-out prepended).  The first-message flag still reaches the
-    worker, and the payload still carries no engine key."""
-    persisted, payload = await _drive_enqueue_create_job(
-        mode=mode, message_count=message_count
-    )
-
-    assert persisted == "make a deck about Q3"
-    assert _OLD_LEGACY_PHRASE not in persisted
-    assert payload["message"] == "make a deck about Q3"
-    assert payload["is_first_message"] is (message_count == 0)
-    assert "engine_mode" not in payload

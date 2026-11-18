@@ -24,8 +24,22 @@ from fastapi import Request
 from mcp.server.fastmcp import Context, FastMCP
 
 from src.api.mcp_auth import MCPAuthError, mcp_auth_scope
+from src.api.routes.chat import (
+    _GENERATION_REFUSED_DETAILS,
+    ENGINE_RACE_DETAIL,
+    EngineModeUnresolvedError,
+    EngineRaceError,
+    EnteredTurn,
+    SessionBusyError,
+    apply_new_deck_tool_defaults,
+    enter_chat_turn,
+)
 from src.api.services.job_queue import enqueue_job, get_job_status
-from src.api.services.session_manager import get_session_manager
+from src.api.services.session_manager import (
+    DeckModeLockedError,
+    GenerationRefusedError,
+    get_session_manager,
+)
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.settings_db import (
@@ -34,6 +48,8 @@ from src.core.settings_db import (
     get_default_template_id,
 )
 from src.domain.slide_deck import SlideDeck
+from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
+from src.services.identity_provider import resolve_display_name
 from src.services.permission_service import get_permission_service
 
 logger = logging.getLogger(__name__)
@@ -166,6 +182,73 @@ class MCPToolError(Exception):
     """
 
 
+MCP_LEGACY_DECK_ERROR = (
+    "This deck was made in Legacy mode and can't be edited over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+MCP_OWNER_ONLY_ERROR = (
+    "Only the deck's owner can edit it over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+MCP_SESSION_BUSY_ERROR = (
+    "This deck is busy with another request. Try again when it finishes."
+)
+MCP_DECK_LOCKED_ERROR = "This deck is locked by {name}."
+MCP_NO_GRAPH_RELEASE_ERROR = (
+    "Tellr can't generate decks right now: no active Graph Release. "
+    "An admin needs to publish one."
+)
+MCP_UNAVAILABLE_ERROR = "Tellr is temporarily unavailable. Please retry."
+MCP_ENGINE_RACE_ERROR = ENGINE_RACE_DETAIL
+MCP_STOPPED_ERROR = "This generation was stopped in Tellr. The deck is unchanged."
+
+
+def _deck_edit_url(session_id: str) -> str:
+    """The Tellr editor URL for a deck (relative when no public base URL is set)."""
+    return f"{_public_app_url()}/sessions/{session_id}/edit"
+
+
+async def _enter_turn_or_tool_error(
+    *,
+    session_id: str,
+    message: str,
+    correlation_id: Optional[str],
+) -> str:
+    """Enter an Agent turn for ``session_id`` and return its request id.
+
+    Goes through ``enter_chat_turn``, the same Enter the async chat route uses,
+    and turns each refusal into a tool error with its user-facing copy. Anything
+    unmapped propagates to the calling tool's own ``except Exception``.
+    """
+    try:
+        entered: EnteredTurn = await enter_chat_turn(
+            session_id=session_id,
+            message=message,
+            requested_deck_mode="agent",
+            extra_payload={"correlation_id": correlation_id},
+        )
+    except SessionBusyError as e:
+        raise MCPToolError(MCP_SESSION_BUSY_ERROR) from e
+    except GenerationRefusedError as e:
+        if e.reason == GenerationRefusedError.GENERATION_IN_FLIGHT:
+            name = await asyncio.to_thread(resolve_display_name, e.holder)
+            raise MCPToolError(MCP_DECK_LOCKED_ERROR.format(name=name)) from e
+        raise MCPToolError(_GENERATION_REFUSED_DETAILS[e.reason]) from e
+    except EngineRaceError as e:
+        raise MCPToolError(MCP_ENGINE_RACE_ERROR) from e
+    except EngineModeUnresolvedError as e:
+        raise MCPToolError(MCP_UNAVAILABLE_ERROR) from e
+    except ActiveGraphReleaseUnavailableError as e:
+        raise MCPToolError(MCP_NO_GRAPH_RELEASE_ERROR) from e
+    except DeckModeLockedError as e:
+        if e.deck_mode == "legacy":
+            raise MCPToolError(
+                MCP_LEGACY_DECK_ERROR.format(deck_url=_deck_edit_url(session_id))
+            ) from e
+        raise
+    return entered.request_id
+
+
 # ---------------------------------------------------------------------------
 # Async submission helper
 # ---------------------------------------------------------------------------
@@ -234,12 +317,7 @@ async def enqueue_create_job(
 
         # Persist the user's prompt so MCP-initiated sessions have a chat
         # transcript identical in shape to browser-initiated ones.
-        #
-        # MCP stays on the legacy monolith (its worker payload carries no engine
-        # key, and the graph's one-shot path, spec §6.4, is not built).
-        # create_deck stores that on the session it creates (deck_mode="legacy"),
-        # so no prompt has to say it: every prompt, create or edit, is persisted
-        # verbatim.
+        # Every prompt, create or edit, is persisted verbatim.
         await asyncio.to_thread(
             session_manager.add_message,
             session_id=session_id,
@@ -408,10 +486,9 @@ def _resolve_template_name(design_system_id: int, template_name: str) -> Optiona
         "Generate a new slide deck from a natural-language prompt. Returns a "
         "session_id and a request_id; the caller polls get_deck_status for "
         "completion. The resulting deck is attributed to the calling user and "
-        "appears in their tellr UI. v1 runs prompt-only: the agent does not "
-        "invoke Genie, Vector Search, or other tools. Callers that want data-"
-        "backed decks should gather the data themselves and include it in the "
-        "prompt. The deck uses the org-default design system unless "
+        "appears in their tellr UI. It is an Agent deck that uses the user's "
+        "default tools. Any slide count belongs in the prompt, for example "
+        "'make 6 slides'. The deck uses the org-default design system unless "
         "design_system_id or slide_style_id says otherwise; pass template_name "
         "to pin one of that design system's named templates (otherwise the "
         "model picks the best-matching one)."
@@ -420,21 +497,17 @@ def _resolve_template_name(design_system_id: int, template_name: str) -> Optiona
 async def create_deck(
     ctx: Context,
     prompt: str,
-    num_slides: Optional[int] = None,
     slide_style_id: Optional[int] = None,
     design_system_id: Optional[int] = None,
     template_name: Optional[str] = None,
-    deck_prompt_id: Optional[int] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
     return await _create_deck_impl(
         request=_request_from_context(ctx),
         prompt=prompt,
-        num_slides=num_slides,
         slide_style_id=slide_style_id,
         design_system_id=design_system_id,
         template_name=template_name,
-        deck_prompt_id=deck_prompt_id,
         correlation_id=correlation_id,
     )
 
@@ -442,11 +515,9 @@ async def create_deck(
 async def _create_deck_impl(
     request: Request,
     prompt: str,
-    num_slides: Optional[int] = None,
     slide_style_id: Optional[int] = None,
     design_system_id: Optional[int] = None,
     template_name: Optional[str] = None,
-    deck_prompt_id: Optional[int] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
     """Implementation, separated from the decorated tool for testability."""
@@ -454,8 +525,6 @@ async def _create_deck_impl(
         raise MCPToolError("prompt must be a non-empty string")
     if MCP_PROMPT_LIMIT is not None and len(prompt) > MCP_PROMPT_LIMIT:
         raise MCPToolError(f"prompt is too long (max {MCP_PROMPT_LIMIT} characters)")
-    if num_slides is not None and not (1 <= num_slides <= 50):
-        raise MCPToolError("num_slides must be between 1 and 50")
     # Same inbound prompt-injection guard as the browser chat endpoints (AISEC-248).
     from src.utils.pi_filter import scan_for_injection
     injection_matches = scan_for_injection(prompt)
@@ -517,19 +586,26 @@ async def _create_deck_impl(
                         "require a design system and none is selected",
                         template_name,
                     )
-            if deck_prompt_id is not None:
-                agent_config["deck_prompt_id"] = deck_prompt_id
-            if num_slides is not None:
-                agent_config["num_slides"] = num_slides
+
+            # The app's new-deck tool defaults, as the browser seeds them. A
+            # caller with no token can't use a tool, so it gets none.
+            apply_new_deck_tool_defaults(
+                agent_config,
+                client_set_fields=(
+                    frozenset({"tools"}) if identity.token is None else frozenset()
+                ),
+            )
 
             session_manager = get_session_manager()
-            session = session_manager.create_session(
-                created_by=identity.user_name,
-                agent_config=agent_config,
-                # Legacy deck: unpinned, and locked to the monolith from creation.
-                graph_capable=False,
-                deck_mode="legacy",
-            )
+            try:
+                session = session_manager.create_session(
+                    created_by=identity.user_name,
+                    agent_config=agent_config,
+                    # An Agent deck: deck_mode="agent" pins the active Graph Release.
+                    deck_mode="agent",
+                )
+            except ActiveGraphReleaseUnavailableError as e:
+                raise MCPToolError(MCP_NO_GRAPH_RELEASE_ERROR) from e
             # create_session returns a dict (see SessionManager.create_session);
             # guard against a model-object return defensively so this stays
             # robust if the service ever switches to returning a Pydantic model.
@@ -539,11 +615,9 @@ async def _create_deck_impl(
                 else session.session_id
             )
 
-            request_id = await enqueue_create_job(
+            request_id = await _enter_turn_or_tool_error(
                 session_id=session_id,
-                prompt=prompt,
-                mode="generate",
-                slide_context=None,
+                message=prompt,
                 correlation_id=correlation_id,
             )
 

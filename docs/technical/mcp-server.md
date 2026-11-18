@@ -133,18 +133,16 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
 
 ### 5.1 `create_deck`
 
-**Description.** Generate a new slide deck from a natural-language prompt. Returns a `session_id` and a `request_id`; the caller polls `get_deck_status` for completion. The resulting deck is attributed to the calling user and appears in their tellr UI. v1 runs prompt-only: the agent does not invoke Genie, Vector Search, or other tools. Callers that want data-backed decks should gather the data themselves and include it in the prompt.
+**Description.** Generate a new slide deck from a natural-language prompt. Returns a `session_id` and a `request_id`; the caller polls `get_deck_status` for completion. The resulting deck is attributed to the calling user and appears in their tellr UI. The deck is an Agent deck, created and entered through `enter_chat_turn` (the same Enter the browser's async chat route uses), so it runs on the graph. It uses the user's default tools: Genie One is added when an admin turned on "Add Genie One to new decks" and the caller's token can use it. Any slide count belongs in the prompt, for example "make 6 slides".
 
 **Input schema**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `prompt` | string | yes | Natural-language description of the deck. Any length; longer prompts with explicit slide-by-slide structure tend to work best. |
-| `num_slides` | integer (1–50) | no | Target slide count. The agent is not strictly constrained; treat as a hint. |
 | `design_system_id` | integer | no | ID of a design system. Supplies the full brand package — tokens, fonts, brand assets, named templates. Omit to use the **org default design system**, if one is set. |
 | `template_name` | string | no | Human-readable name of one of that design system's named templates (e.g. `"Executive Events"`). Pins the template, so the deck receives that template's own layout HTML and CSS instead of only a catalog of names and descriptions. Resolved only when a design system is in play; an unmatched name is logged and generation continues without a pin. |
 | `slide_style_id` | integer | no | ID of a `SlideStyle` row. **Supplying this suppresses the org default design system** — see the precedence note below. |
-| `deck_prompt_id` | integer | no | ID of a `DeckPrompt` row. Omit for default. |
 | `correlation_id` | string | no | Opaque ID echoed in server logs for cross-system trace correlation. |
 
 **Style precedence for MCP callers.** This is the MCP branch only; the mutual-exclusion invariant and the other entry paths are documented in [Design System Library §4](./design-system-library.md).
@@ -177,7 +175,6 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
     "name": "create_deck",
     "arguments": {
       "prompt": "a three-slide briefing on Q3 renewals with headline metrics and risk summary",
-      "num_slides": 3,
       "correlation_id": "briefing-app-4f2e"
     }
   }
@@ -201,9 +198,11 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
 | Error message | Cause | Fix |
 |---------------|-------|-----|
 | `prompt must be a non-empty string` | Empty or whitespace-only prompt | Send a meaningful prompt |
-| `num_slides must be between 1 and 50` | Out-of-range `num_slides` | Clamp at the caller |
 | `Authentication failed: ...` | Missing/invalid token | See section 4 |
-| `Session is currently processing another request` | Re-submit before previous job cleared the lock | Retry after a short backoff |
+| `Tellr can't generate decks right now: no active Graph Release. An admin needs to publish one.` | No active Graph Release, so an Agent deck can't be created | Ask a Tellr admin to publish one |
+| `Tellr is temporarily unavailable. Please retry.` | The deck's engine could not be resolved | Retry after a short backoff |
+
+A call that still sends `num_slides` or `deck_prompt_id` succeeds and the value is ignored.
 
 ### 5.2 `get_deck_status`
 

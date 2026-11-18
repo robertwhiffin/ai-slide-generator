@@ -208,8 +208,10 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     A graph request (an Agent deck's turn, ``engine_mode == "graph"``) is
     all-or-nothing: it starts only if it is still ``pending`` (a stop while it
     was queued already rolled it back), completes only while it is still live,
-    and a failure rolls back its generation snapshot.  Every other request (a
-    Legacy deck's, every MCP job) takes the path it always has.
+    and a failure rolls back its generation snapshot.  MCP turns are Agent turns
+    too: ``create_deck`` and ``edit_deck`` enter them through ``enter_chat_turn``,
+    the same Enter the async chat route uses.  Every other request (a Legacy
+    deck's) takes the path it always has.
 
     Args:
         request_id: Unique request identifier
@@ -229,17 +231,16 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
     slide_context = payload.get("slide_context")
     is_first_message = payload.get("is_first_message", False)
     image_ids = payload.get("image_ids")
-    # ws4d D2.  The key is `engine_mode`, NOT `mode`: `mode` is already MCP's
-    # generate/edit flag in this same payload (mcp_server.py's enqueue_create_job
-    # sets it), so reading `mode` here would hand this the string "generate".
-    # The default is what excludes MCP structurally — mcp_server.py builds no
-    # `engine_mode` key, so every MCP job runs on the monolith without
-    # mcp_server.py knowing this switch exists.
+    # ws4d D2.  The key is `engine_mode`, NOT `mode`: a payload built before
+    # `engine_mode` existed carried a `mode` generate/edit flag, whose values are
+    # neither "graph" nor "monolith".  MCP turns enter through `enter_chat_turn`,
+    # which sets `engine_mode` and sends no `mode` key.  The default covers only a
+    # payload with no `engine_mode` at all.
     engine_mode = payload.get("engine_mode", "monolith")
-    # Only the async route's Agent-deck turns carry engine_mode "graph"; a payload
-    # without the key (every MCP job) is never one.
+    # Only Agent-deck turns carry engine_mode "graph" (the async route's, and MCP's,
+    # both entered through `enter_chat_turn`); a payload without the key is never one.
     is_graph = payload.get("engine_mode") == "graph"
-    # Graph-only snapshot of the slide on stage; absent on MCP and pre-existing jobs.
+    # Graph-only snapshot of the slide on stage; absent on a Legacy turn and on pre-existing jobs.
     stage_slide = payload.get("stage_slide")
 
     chat_service = get_chat_service()
@@ -395,8 +396,8 @@ async def process_chat_request(request_id: str, payload: dict) -> None:
         # Always release session lock.  Graph requests bind the lock to their
         # request id, so release only while this request still owns it, and not
         # while its snapshot survives: a failed restore keeps the deck locked to
-        # its sender until a retry restores it.  Monolith requests (including
-        # every MCP job) never bind and release as before.  A graph request that
+        # its sender until a retry restores it.  Monolith requests (a Legacy
+        # deck's) never bind and release as before.  A graph request that
         # never started releases nothing: its stop already released the lock.
         if not is_graph:
             session_manager.release_session_lock(session_id)
@@ -581,7 +582,7 @@ def _fail_stuck_request(request_id: str, session_pk: int) -> bool:
     """A stuck request with nothing to restore (a monolith one): ``error``, and
     its session's lock freed unless a newer request has taken it.
 
-    An unbound lock (MCP jobs never bind theirs) counts as this request's.
+    An unbound lock (a Legacy deck's request never binds its own) counts as this request's.
     """
     from sqlalchemy import or_, update
 
@@ -624,7 +625,7 @@ async def recover_stuck_requests() -> int:
     no longer refreshed is rolled back, and every failed restore retried.  Then
     every request still ``running`` past ``GRAPH_JOB_HARD_TIMEOUT_SECONDS``: one
     with a generation snapshot is rolled back to Enter; any other (a Legacy deck's
-    turn, an MCP job) is marked ``error`` as before, its lock freed unless a newer
+    turn) is marked ``error`` as before, its lock freed unless a newer
     request holds it.  One request's error is logged and the others go on.
 
     Returns:
@@ -753,7 +754,7 @@ async def refresh_job_session_locks_once() -> int:
     A graph entry refreshes its session's lock only while the lock is bound to its
     own request: an entry whose turn was stopped while it was queued must not keep
     a newer request's lock alive (that request's process may have died).  A
-    monolith entry (a Legacy deck's turn, an MCP job) refreshes whatever its
+    monolith entry (a Legacy deck's turn) refreshes whatever its
     session holds, as before.
 
     Returns:

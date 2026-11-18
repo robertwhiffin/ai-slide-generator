@@ -389,6 +389,19 @@ def _apply_genie_one_default(
     agent_config_data["tools"] = tools
 
 
+def apply_new_deck_tool_defaults(
+    agent_config_data: dict,
+    *,
+    client_set_fields: frozenset[str] = frozenset(),
+) -> None:
+    """Seed a new deck's tool defaults, in place. The one place a new-deck tool default goes.
+
+    Shared by the browser's new-session path and MCP's ``create_deck`` so both
+    start a deck with the same tools. Today that is the admin's Genie One default.
+    """
+    _apply_genie_one_default(agent_config_data, client_set_fields=client_set_fields)
+
+
 def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
     """Create a session if request.session_id is missing, or sync agent_config if provided.
 
@@ -460,7 +473,7 @@ def _maybe_create_session(request: ChatRequest, session_manager) -> bool:
         """
         seeded = dict(config_data)
         _apply_org_default_style_source(seeded, client_set_fields=client_set_fields)
-        _apply_genie_one_default(seeded, client_set_fields=client_set_fields)
+        apply_new_deck_tool_defaults(seeded, client_set_fields=client_set_fields)
         return seeded
 
     def _without_template_pin(config_data: dict) -> dict:
@@ -657,9 +670,9 @@ async def send_message_streaming(
 
     # ws4d D2 — the engine for this turn is resolved HERE, in the chat route,
     # and passed down.  Not in send_message_streaming and not in the job queue:
-    # MCP's enqueue_create_job drains through the same worker as POST
-    # /chat/async, so a resolution downstream of enqueue_job would put MCP on
-    # the graph.  Resolution reads the database, so it runs off the event loop.
+    # MCP's create_deck and edit_deck enter through enter_chat_turn and drain
+    # through the same worker as POST /chat/async, so the choice of engine is made
+    # at Enter, never downstream of enqueue_job.  Resolution reads the database, so it runs off the event loop.
     #
     # FAIL CLOSED (#271 C24/C47): a failure to resolve is a 503, never a silent
     # monolith turn.  The response has not started, so the SSE generator's
@@ -947,9 +960,9 @@ async def enter_chat_turn(
                     "slide_context": slide_context,
                     "is_first_message": is_first_message,
                     "image_ids": image_ids,
-                    # `engine_mode`, NEVER `mode`: `mode` is already MCP's
-                    # generate/edit flag in this same payload (mcp_server.py), whose
-                    # values are neither "graph" nor "monolith".
+                    # `engine_mode`, NEVER `mode`: an older payload's `mode` was a
+                    # generate/edit flag whose values are neither "graph" nor
+                    # "monolith". MCP sends no `mode` key.
                     "engine_mode": engine_mode,
                     # Graph-only: None on a Legacy turn, even if one was supplied.
                     "stage_slide": stage_slide if engine_mode == "graph" else None,

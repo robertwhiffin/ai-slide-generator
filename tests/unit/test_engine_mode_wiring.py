@@ -331,16 +331,6 @@ class TestTheKeyIsEngineModeNotMode:
         assert 'payload.get("engine_mode", "monolith")' in source
         assert 'payload.get("mode"' not in source
 
-    def test_mcp_builds_no_engine_mode_key(self):
-        """MCP's exclusion must come from the default, not from a check in MCP."""
-        from src.api import mcp_server
-
-        source = inspect.getsource(mcp_server)
-        assert "engine_mode" not in source, (
-            "mcp_server.py must stay unaware of the engine switch — its "
-            "exclusion is structural"
-        )
-
 
 # ---------------------------------------------------------------------------
 # The job queue
