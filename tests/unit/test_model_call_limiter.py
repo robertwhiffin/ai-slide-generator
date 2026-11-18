@@ -207,10 +207,12 @@ class _Clock:
 # --------------------------------------------------------------------------- the cap
 
 
-def test_default_cap_is_fifteen(monkeypatch):
+def test_default_cap_is_ten(monkeypatch):
+    # Lowered from 15 by the 2026-11-18 devloop load test: at 15 per process, 4 of 7
+    # turns in an 8-deck burst gave up on rate_limited (290 Gateway 429s).
     monkeypatch.delenv(MODEL_CALL_CONCURRENCY_ENV, raising=False)
-    assert model_call_concurrency() == 15
-    assert DEFAULT_MODEL_CALL_CONCURRENCY == 15
+    assert model_call_concurrency() == 10
+    assert DEFAULT_MODEL_CALL_CONCURRENCY == 10
 
 
 @pytest.mark.parametrize(("raw", "expected"), [("6", 6), (" 3 ", 3), ("1", 1), ("64", 64)])
@@ -223,7 +225,7 @@ def test_cap_comes_from_the_environment(monkeypatch, raw, expected):
 def test_an_unusable_value_falls_back(monkeypatch, caplog, raw):
     monkeypatch.setenv(MODEL_CALL_CONCURRENCY_ENV, raw)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        assert model_call_concurrency() == 15
+        assert model_call_concurrency() == 10
     warnings = [
         r
         for r in caplog.records

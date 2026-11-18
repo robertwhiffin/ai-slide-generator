@@ -110,16 +110,18 @@ def model_fault_kind(error: BaseException) -> ModelFaultKind:
 # --------------------------------------------------------------------------- the cap
 
 # Model calls in flight per process, across every turn.  With 4 uvicorn processes the
-# default keeps the app-wide ceiling at about 60 calls, as with one job runner each.
+# default keeps the app-wide ceiling at about 40 calls, below the ~60 that one job
+# runner each allowed.  Set by the 2026-11-18 devloop load test: at 15, an 8-deck
+# burst drew 290 Gateway 429s and 4 of 7 turns gave up on rate_limited.
 MODEL_CALL_CONCURRENCY_ENV = "TELLR_MODEL_CALL_CONCURRENCY"
-DEFAULT_MODEL_CALL_CONCURRENCY = 15
+DEFAULT_MODEL_CALL_CONCURRENCY = 10
 MAX_MODEL_CALL_CONCURRENCY = 64
 
 
 def model_call_concurrency() -> int:
     """Model calls in flight per process, from ``TELLR_MODEL_CALL_CONCURRENCY``.
 
-    Default 15, max 64; an unusable value logs a warning and falls back to the default.
+    Default 10, max 64; an unusable value logs a warning and falls back to the default.
     """
     raw = os.getenv(MODEL_CALL_CONCURRENCY_ENV)
     if raw is None:
