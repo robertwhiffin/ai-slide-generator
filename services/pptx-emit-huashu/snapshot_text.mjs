@@ -18,6 +18,14 @@
 // tokens are clustered into lines in DOM order. White space collapses the way
 // the browser collapsed it, read from the rects rather than re-derived.
 //
+// Pseudo-elements. An element's ::before is laid out as its first child and its
+// ::after as its last (snapshot.mjs PseudoRecord): an inline one's text joins
+// its host's line, so a quote's “ and ” are in the sentence's own text block,
+// and a block, absolutely positioned or flex-item one is a text block of its
+// own. Generated text is no DOM text, so no Range can measure it: each of its
+// tokens is one inline text box the browser laid it out in, read through the
+// DevTools protocol, at that box's rect (readGeneratedTokens).
+//
 // Geometry comes from the text's own rects, not the element box, so an icon or
 // logo beside the text never overlaps it; centred, right-aligned and justified
 // text spans its container's content box so the alignment survives a slightly
@@ -114,7 +122,12 @@
 //                   as a shape or as a box-only capture;
 //   inlineClip      (clip, element, style, frame) -> the clip of an inline element's
 //                   content, given the clip of the text around it;
-//   shows           (bounds, clip) -> whether the clip shows {left, top, right, bottom}.
+//   shows           (bounds, clip) -> whether the clip shows {left, top, right, bottom};
+//   isPseudo        node -> whether it is a pseudo-element (a PseudoRecord), read
+//                   without touching a DOM node's own properties;
+//   pseudoOf        element -> {before, after}, its pseudo-elements, or null;
+//   rectOf          element -> its border box bounds, {left, top, width, height}.
+// Wherever this layout takes an element, a pseudo-element will do.
 function createTextLayout(env) {
   const TEXT_NODE = 3;
   const ELEMENT_NODE = 1;
@@ -232,6 +245,11 @@ function createTextLayout(env) {
   }
 
   // ─── grouping ────────────────────────────────────────────────────────
+  // An element's tag name in lower case; a pseudo-element's is '::before' or '::after'.
+  function nameOf(element) {
+    return env.isPseudo(element) ? element.name : String(dom.tagName(element) || '').toLowerCase();
+  }
+
   // How a child element takes part in its block container's inline content.
   function inlineRole(name, cs) {
     if (cs.position === 'absolute' || cs.position === 'fixed' || (cs.float && cs.float !== 'none')) {
@@ -254,7 +272,9 @@ function createTextLayout(env) {
   //   clip        what clips it (snapshot.mjs shownPart): its block's content clip,
   //               narrowed by each inline ancestor's own clip-path.
   // `closesWith` is a piece the run takes once the node's children are done, or
-  // null. Returns whether the children were opened.
+  // null. Returns whether the children were opened. An element's children are
+  // its child nodes between its own ::before and ::after; a pseudo-element's
+  // are the pieces of its generated text (`generated`).
   function openChildren(stack, node, context, depth, closesWith) {
     if (depth > WALK_STEP_LIMIT) {
       if (!truncated) {
@@ -264,10 +284,38 @@ function createTextLayout(env) {
       return false;
     }
     if (budget <= 0) return false;
-    const nodes = childNodesOf(node);
+    const generated = env.isPseudo(node);
+    const nodes = generated ? node.pieces : childNodesOf(node);
     if (!spend(nodes.length)) return false;
-    stack.push({ nodes, index: 0, context, depth, closesWith: closesWith || null });
+    const pseudo = generated ? null : env.pseudoOf(node);
+    stack.push({
+      nodes,
+      index: 0,
+      context,
+      depth,
+      closesWith: closesWith || null,
+      generated,
+      before: pseudo ? pseudo.before : null,
+      after: pseudo ? pseudo.after : null,
+    });
     return true;
+  }
+
+  // The next child of a frame: its ::before, then its child nodes, then its
+  // ::after. Null once all are taken.
+  function nextChild(frame) {
+    if (frame.before) {
+      const before = frame.before;
+      frame.before = null;
+      return before;
+    }
+    if (frame.index < frame.nodes.length) return frame.nodes[frame.index++];
+    if (frame.after) {
+      const after = frame.after;
+      frame.after = null;
+      return after;
+    }
+    return null;
   }
 
   // The horizontal space an inline element takes on one side of what it holds:
@@ -316,8 +364,12 @@ function createTextLayout(env) {
   //                                 edges (hasInlineEdges): an opening one
   //                                 before the pieces it holds and a closing
   //                                 one after, so its lines are cut there, as
-  //                                 at an atomic inline.
-  // display:contents children are transparent: no box, so no opacity,
+  //                                 at an atomic inline;
+  //   {kind:'generated', piece, context}
+  //                                 one piece of a pseudo-element's generated
+  //                                 text and what it paints with.
+  // A pseudo-element takes part like an element child, at its host's start or
+  // end. display:contents children are transparent: no box, so no opacity,
   // background, decoration or clip of their own. display:none ones are skipped.
   // A transparent inline element's text is still read: it keeps its room in
   // the line, so it is a gap there (readTokens).
@@ -339,20 +391,25 @@ function createTextLayout(env) {
     }, 1);
     while (stack.length) {
       const frame = stack[stack.length - 1];
-      if (frame.index >= frame.nodes.length) {
+      const node = nextChild(frame);
+      if (!node) {
         stack.pop();
         if (frame.closesWith) run.push(frame.closesWith);
         continue;
       }
-      const node = frame.nodes[frame.index++];
-      const type = dom.nodeType(node);
+      if (frame.generated) {
+        run.push({ kind: 'generated', piece: node, context: frame.context });
+        continue;
+      }
+      const generated = env.isPseudo(node);
+      const type = generated ? ELEMENT_NODE : dom.nodeType(node);
       if (type === TEXT_NODE) {
         run.push({ kind: 'text', node, context: frame.context });
         continue;
       }
       if (type !== ELEMENT_NODE) continue;
-      const name = String(dom.tagName(node) || '').toLowerCase();
-      const cs = window.getComputedStyle(node);
+      const name = nameOf(node);
+      const cs = generated ? node.style : window.getComputedStyle(node);
       if (cs.display === 'none') continue;
       if (cs.display === 'contents') {
         const outer = frame.context;
@@ -461,7 +518,7 @@ function createTextLayout(env) {
   // the text of an element the snapshot walk visits, given its parent's (null
   // at the root).
   function decorationOf(outer, element, s) {
-    const role = inlineRole(String(dom.tagName(element) || '').toLowerCase(), s);
+    const role = inlineRole(nameOf(element), s);
     return decorationInside(outer, s, role === 'out-of-flow' || role === 'atomic');
   }
 
@@ -676,8 +733,16 @@ function createTextLayout(env) {
   // per line box it lies on, so a list longer than WALK_STEP_LIMIT is a lie:
   // the read stops there and the loss is announced. Every rect read spends from
   // the layout's budget. A rect whose values are not finite numbers is dropped.
+  // A pseudo-element's fragments were read through the DevTools protocol
+  // (snapshot.mjs PseudoRecord), already bounded and checked.
   function fragmentsOf(element) {
     const fragments = [];
+    if (env.isPseudo(element)) {
+      const read = element.fragments;
+      if (!spend(read.length)) return fragments;
+      for (let index = 0; index < read.length; index++) fragments.push(read[index]);
+      return fragments;
+    }
     let list;
     let reported;
     try {
@@ -911,6 +976,67 @@ function createTextLayout(env) {
     }
   }
 
+  // A generated text box's characters as a run writes them. Where white space
+  // collapses, a run of it is one space (the browser leaves what it collapsed
+  // out of the boxes, splitting a box there, so a run rarely reaches one);
+  // where it is preserved, a space is a NBSP and a tab stays a tab until its
+  // line is assembled, as in a text node's tokens. A newline that breaks the
+  // line ends its box, so it adds nothing.
+  function generatedText(text, mode) {
+    let result = '';
+    let spaced = false;
+    const length = Math.min(text.length, COLLECTION_ITEM_LIMIT);
+    for (let index = 0; index < length; index++) {
+      const kind = characterKind(text.charCodeAt(index), mode);
+      if (kind === 'word') {
+        result += text[index];
+        spaced = false;
+      } else if (kind === 'space' && mode.spaces) {
+        result += text[index] === '\t' ? '\t' : NBSP;
+      } else if (kind === 'space' && !spaced) {
+        result += ' ';
+        spaced = true;
+      }
+    }
+    return result;
+  }
+
+  // The tokens of one piece of a pseudo-element's generated text, and its
+  // gaps. Each token is one inline text box the browser laid the piece out in
+  // (pseudo.mjs), with its text as painted (text-transform applied, counters
+  // and quotes evaluated) at the box's rect, so it clusters into lines with
+  // the words around it. Text that paints nothing (hidden, transparent, or
+  // shown under 2 px by its clip) is a gap that keeps its room. Generated text
+  // is no part of the page's innerText, so it is never hidden text.
+  function readGeneratedTokens(piece, scale, tokens, words) {
+    const ps = piece.context.style;
+    const mode = whiteSpaceOf(ps);
+    const style = runStyle(piece.context, scale);
+    const source = {
+      style,
+      face: probeFaceOf(ps, style.family, scale),
+      tabSize: mode.spaces ? tabSizeOf(ps) : DEFAULT_TAB_SIZE,
+      segment: words.segment,
+      recordsHidden: false,
+      clip: piece.context.clip,
+    };
+    const paints = ps.visibility === 'visible' && piece.context.opacity > 0;
+    const boxes = piece.piece.boxes;
+    if (!spend(boxes.length)) return;
+    for (let index = 0; index < boxes.length; index++) {
+      const box = boxes[index];
+      const text = generatedText(box.text, mode);
+      if (!text) continue;
+      const rect = { left: box.left, top: box.top, right: box.right, bottom: box.bottom };
+      if (!paints || !anyShown([rect], source.clip)) {
+        dropToken(source, text, [rect], tokens);
+      } else {
+        pushTextToken(source, text, rect, text === ' ' && !mode.spaces, tokens);
+      }
+      words.previous = lastCodePoint(text, 0, text.length);
+    }
+  }
+
   // ─── lines ───────────────────────────────────────────────────────────
   // A token starts a new line when it is a <br> (or a preserved newline), or
   // when both hold: its vertical overlap with the current line is at most half
@@ -1126,9 +1252,10 @@ function createTextLayout(env) {
     dropping = false;
     for (let index = 0; index < nodes.length; index++) {
       const piece = nodes[index];
-      if (piece.kind === 'text') {
+      if (piece.kind === 'text' || piece.kind === 'generated') {
         const from = tokens.length;
-        readTokens(piece, scale, range, tokens, words);
+        if (piece.kind === 'text') readTokens(piece, scale, range, tokens, words);
+        else readGeneratedTokens(piece, scale, tokens, words);
         markAfterOpening(tokens, from, edges);
         continue;
       }
@@ -1282,7 +1409,7 @@ function createTextLayout(env) {
     let x = left;
     let w = right - left;
     if (align !== 'left' && placement === 'container') {
-      const box = env.boxGeometry(element, element.getBoundingClientRect(), frame);
+      const box = env.boxGeometry(element, env.rectOf(element), frame);
       const area = box ? env.contentBox(s, box) : null;
       if (area) {
         x = Math.min(area.x, left);
@@ -1545,7 +1672,7 @@ function createTextLayout(env) {
   // The text of an inline element belongs to the block that contains it, so an
   // inline element, a replaced element or a box-less one holds no block of its own.
   function collectTextBlocks(el, s, walk) {
-    const name = String(dom.tagName(el) || '').toLowerCase();
+    const name = nameOf(el);
     const display = String(s.display);
     if (env.replaced.has(name) || display === 'inline' || display === 'none' ||
         display === 'contents' || /^ruby/.test(display) || budget <= 0) {

@@ -9,6 +9,11 @@
 // Every DOM traversal goes through DOM_ACCESS_SOURCE (pristine-realm accessors,
 // bounded collections), because slide script runs in this page before we do.
 //
+// Pseudo-elements (::before, ::after) are no DOM nodes. pseudo.mjs reads them
+// from Node through the DevTools protocol, and SNAPSHOT_SOURCE is a function
+// of what it read (PseudoData): each one is walked and laid out as its host's
+// first child (::before) or last (::after).
+//
 // /**
 //  * SlideModel = {
 //  *   width, height,                       // CSS px; the slide is 1280x720
@@ -20,7 +25,7 @@
 //  *   reference: {hiddenText: string},      // the words the page reads (its innerText)
 //  *                                         // that the slide does not show, single-spaced:
 //  *                                         // clipped, transparent and off-slide text
-//  *   stats: {elements, shapes, images, texts, truncated},
+//  *   stats: {elements, pseudoElements, shapes, lines, images, texts, truncated},
 //  * }
 //  *
 //  * Every Item carries:
@@ -34,7 +39,8 @@
 //  *   path:[{x,y}[]], closed:boolean}   (path and closed for geometry 'path' only: the
 //  *   polylines it draws, in px from its top left, each closed or each open; a
 //  *   shape a clip cuts that is not a plain rect, see pushClippedShape)
-//  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}
+//  *  {kind:'line', x1,y1,x2,y2, color, alpha, widthPx, dash}   (one painted side of a
+//  *   border that differs between sides, along its centre line; see pushSideLines)
 //  *  {kind:'image', x,y,w,h, src:'data:…'|null, captureId:'c<n>'|null, alpha, rotate}
 //  *  {kind:'text', x,y,w,h, rotate:null, wrap:boolean, align:'left'|'center'|'right',
 //  *   rtl:boolean, paragraphs:[{sizePx, lineHeightPx:number|null, ascentPx:number|null,
@@ -42,8 +48,11 @@
 //  *   (one text block; snapshot_text.mjs documents Run, lines, the metrics and the geometry)
 //  *
 //  * Capture = {id, x,y,w,h, mode:'subtree'|'box', selector:'[data-tellr-capture="c<n>"]',
-//  *   hiddenWithin:boolean, paint:{borderColors:string[4], boxShadow:string}|null}
-//  *   (the picture's rect, which its image item shares; hiddenWithin when
+//  *   pseudo:null|'before'|'after', hiddenWithin:boolean,
+//  *   paint:{borderColors:string[4], boxShadow:string}|null}
+//  *   (the picture's rect, which its image item shares; selector, the target
+//  *   element, or for a pseudo-element target (pseudo set) its host, named by
+//  *   the host marker '[data-tellr-pseudo-host="<n>"]'; hiddenWithin when
 //  *   descendants of a subtree target carry data-tellr-capture-hidden; paint,
 //  *   for a box target, its computed border colours and shadow; capture.cjs
 //  *   reads them. `failed` when the target could not be named.)
@@ -61,6 +70,7 @@ import { DOM_ACCESS_SOURCE } from './dom_access.mjs';
 import { blendOver } from './emit_typography.cjs';
 import { GRADIENT_SOURCE } from './gradient.mjs';
 import { SLIDE_ROOT_MARKER } from './preprocess.mjs';
+import { PSEUDO_HOST_ATTRIBUTE } from './pseudo.mjs';
 import { TEXT_SOURCE } from './snapshot_text.mjs';
 
 // Runs in the page, inside the IIFE below, after DOM_ACCESS_SOURCE,
@@ -68,8 +78,9 @@ import { TEXT_SOURCE } from './snapshot_text.mjs';
 // domAccess, reportCollectionLoss, the two limits, splitTopLevelCommas,
 // parseLinearGradient, createTextLayout and blendOver are its free names. It is
 // stringified, so it closes over nothing on the Node side; everything it needs
-// from here arrives in `config`.
-async function snapshotPage(config) {
+// from here arrives in `config`, and what pseudo.mjs read of the page's
+// pseudo-elements in `pseudoData` (PseudoData).
+async function snapshotPage(config, pseudoData) {
   const SLIDE_WIDTH = 1280;
   const SLIDE_HEIGHT = 720;
   // Replaced elements paint content the walker cannot read as boxes, so they are
@@ -89,7 +100,7 @@ async function snapshotPage(config) {
 
   const items = [];
   const captures = [];
-  const stats = { elements: 0, shapes: 0, images: 0, texts: 0, truncated: false };
+  const stats = { elements: 0, pseudoElements: 0, shapes: 0, lines: 0, images: 0, texts: 0, truncated: false };
   let nextItemId = 0;
 
   // ─── colours ─────────────────────────────────────────────────────────
@@ -408,6 +419,140 @@ async function snapshotPage(config) {
     return a.id - b.id;
   }
 
+  // ─── pseudo-elements ─────────────────────────────────────────────────
+  // Each ::before and ::after the page generates, as pseudo.mjs read it through
+  // the DevTools protocol: its border box, its box fragments and its rendered
+  // text. Its host carries config.pseudoHostAttribute, whose value is the
+  // host's index in pseudoData.hosts. The walk visits each one as its host's
+  // first child (::before) or last (::after), and the text layout lays out its
+  // text there, so it is drawn like an element at that place in paint order.
+  // Its computed style is the page's own, getComputedStyle(host, '::before'),
+  // read by property name like every element's.
+  //   PseudoRecord = {host, type, name, style, rect, edges, fragments, pieces, selector}
+  //   type       'before' | 'after'; name '::before' | '::after';
+  //   rect       its border box's bounds, {left, top, width, height} as a DOMRect has them;
+  //   edges      {width, height}: its border box's own sides, the quad's, which a
+  //              rotation does not change (boxGeometry);
+  //   fragments  its box fragments' bounds, as rect, in the browser's order;
+  //   pieces     its text: [{boxes: [{text, left, top, right, bottom}]}], one piece
+  //              per layout text object, each box one line fragment of it;
+  //   selector   its host's marker, '[data-tellr-pseudo-host="<n>"]', for a capture.
+  // A record is no node: the walk and the text layout tell one apart with
+  // isPseudo, which reads nothing of a DOM node.
+  const pseudoRecords = new Set();
+  // host element -> {before: PseudoRecord | null, after: PseudoRecord | null}
+  const pseudoHosts = new Map();
+
+  function isPseudo(node) {
+    return pseudoRecords.has(node);
+  }
+
+  // What the walk reads of an element or a pseudo-element: its tag name
+  // ('::before' for a pseudo-element), its computed style and its border box.
+  function tagNameOf(element) {
+    return isPseudo(element) ? element.name : String(dom.tagName(element) || '').toLowerCase();
+  }
+
+  function styleOf(element) {
+    return isPseudo(element) ? element.style : window.getComputedStyle(element);
+  }
+
+  function rectOf(element) {
+    return isPseudo(element) ? element.rect : element.getBoundingClientRect();
+  }
+
+  // The bounds of a quad (four corners as x, y pairs), as rect.
+  function quadBounds(quad) {
+    const xs = [quad[0], quad[2], quad[4], quad[6]];
+    const ys = [quad[1], quad[3], quad[5], quad[7]];
+    const left = Math.min(xs[0], xs[1], xs[2], xs[3]);
+    const top = Math.min(ys[0], ys[1], ys[2], ys[3]);
+    return { left, top, width: Math.max(xs[0], xs[1], xs[2], xs[3]) - left, height: Math.max(ys[0], ys[1], ys[2], ys[3]) - top };
+  }
+
+  // Eight finite numbers, or null.
+  function quadOf(value) {
+    if (!Array.isArray(value) || value.length !== 8) return null;
+    const quad = [];
+    for (let index = 0; index < 8; index++) {
+      const number = Number(value[index]);
+      if (!Number.isFinite(number)) return null;
+      quad.push(number);
+    }
+    return quad;
+  }
+
+  // Every pseudo-element box and text box handed in spends from one budget,
+  // as the text layout's reads do.
+  let pseudoBudget = COLLECTION_ITEM_LIMIT;
+
+  function pseudoPieces(listed) {
+    const pieces = [];
+    const length = Array.isArray(listed) ? listed.length : 0;
+    for (let index = 0; index < length && pseudoBudget > 0; index++) {
+      const boxes = [];
+      const listedBoxes = Array.isArray(listed[index]) ? listed[index] : [];
+      for (let box = 0; box < listedBoxes.length && pseudoBudget > 0; box++, pseudoBudget--) {
+        const read = listedBoxes[box] || {};
+        const left = Number(read.x);
+        const top = Number(read.y);
+        const width = Number(read.w);
+        const height = Number(read.h);
+        if (typeof read.text !== 'string' || !read.text ||
+            !(Number.isFinite(left) && Number.isFinite(top) && width >= 0 && height >= 0)) continue;
+        boxes.push({ text: read.text, left, top, right: left + width, bottom: top + height });
+      }
+      if (boxes.length) pieces.push({ boxes });
+    }
+    return pieces;
+  }
+
+  function pseudoRecord(host, type, read, hostIndex) {
+    const quad = read ? quadOf(read.quad) : null;
+    if (!quad || pseudoBudget <= 0) return null;
+    pseudoBudget--;
+    const fragments = [];
+    const listed = Array.isArray(read.fragments) ? read.fragments : [];
+    for (let index = 0; index < listed.length && index < WALK_STEP_LIMIT && pseudoBudget > 0; index++, pseudoBudget--) {
+      const fragment = quadOf(listed[index]);
+      if (fragment) fragments.push(quadBounds(fragment));
+    }
+    const record = {
+      host,
+      type,
+      name: '::' + type,
+      style: window.getComputedStyle(host, '::' + type),
+      rect: quadBounds(quad),
+      edges: { width: Math.hypot(quad[2] - quad[0], quad[3] - quad[1]), height: Math.hypot(quad[6] - quad[0], quad[7] - quad[1]) },
+      fragments,
+      pieces: pseudoPieces(read.pieces),
+      selector: '[' + config.pseudoHostAttribute + '="' + hostIndex + '"]',
+    };
+    pseudoRecords.add(record);
+    return record;
+  }
+
+  // The marked hosts, through the pristine realm and bounded like every lookup:
+  // each marker value names one entry of pseudoData.hosts, and the first
+  // element in document order that carries it is that host.
+  function readPseudoHosts() {
+    const hosts = pseudoData && Array.isArray(pseudoData.hosts) ? pseudoData.hosts : [];
+    if (!hosts.length) return;
+    const claimed = [];
+    const marked = queryAll('[' + config.pseudoHostAttribute + ']');
+    for (let index = 0; index < marked.length; index++) {
+      const element = marked[index];
+      const value = String(dom.getAttribute(element, config.pseudoHostAttribute));
+      const hostIndex = /^\d{1,7}$/.test(value) ? Number(value) : -1;
+      if (!(hostIndex >= 0 && hostIndex < hosts.length) || claimed[hostIndex]) continue;
+      claimed[hostIndex] = true;
+      const entry = hosts[hostIndex] || {};
+      const before = pseudoRecord(element, 'before', entry.before, hostIndex);
+      const after = pseudoRecord(element, 'after', entry.after, hostIndex);
+      if (before || after) pseudoHosts.set(element, { before, after });
+    }
+  }
+
   // ─── geometry ────────────────────────────────────────────────────────
   // getBoundingClientRect is the transformed box's axis-aligned bounds. For a
   // rotated element the emitted box is the untransformed layout box (offset
@@ -459,15 +604,18 @@ async function snapshotPage(config) {
     };
   }
 
+  // A pseudo-element has no offset size; its quad's sides are its box's own
+  // sides, scaled as it is drawn.
   function boxGeometry(element, rect, frame) {
     if (!(rect.width > 0 && rect.height > 0)) return null;
     const bounds = { x: rect.left, y: rect.top, w: rect.width, h: rect.height, scale: frame.scale, rotate: null };
     if (!frame.angle) return bounds;
-    const layoutWidth = Number(element.offsetWidth);
-    const layoutHeight = Number(element.offsetHeight);
+    const generated = isPseudo(element);
+    const layoutWidth = generated ? element.edges.width : Number(element.offsetWidth);
+    const layoutHeight = generated ? element.edges.height : Number(element.offsetHeight);
     if (!(layoutWidth > 0 && layoutHeight > 0)) return bounds;
-    const w = layoutWidth * frame.scaleX;
-    const h = layoutHeight * frame.scaleY;
+    const w = generated ? layoutWidth : layoutWidth * frame.scaleX;
+    const h = generated ? layoutHeight : layoutHeight * frame.scaleY;
     const centreX = rect.left + rect.width / 2;
     const centreY = rect.top + rect.height / 2;
     return { x: centreX - w / 2, y: centreY - h / 2, w, h, scale: frame.scale, rotate: frame.angle };
@@ -682,7 +830,7 @@ async function snapshotPage(config) {
   function clipsOf(clips, element, s, frame, overflowToViewport) {
     const overflows = !overflowToViewport && clipsOverflow(s);
     const own = hasOwnClip(s);
-    const rect = overflows || own ? element.getBoundingClientRect() : null;
+    const rect = overflows || own ? rectOf(element) : null;
     const bounds = rect ? boundsOfRect(rect) : null;
     const tree = own ? intersectClips(clips.tree, intersectClips(clipRectOf(s, bounds, frame), clipPathOf(s, bounds, frame))) : clips.tree;
     const outer = s.position === 'absolute' ? clips.absolute : s.position === 'fixed' ? clips.fixed : clips.flow;
@@ -705,7 +853,7 @@ async function snapshotPage(config) {
   // clip needs an absolutely positioned box.
   function inlineClip(clip, element, s, frame) {
     if (!hasOwnClip(s)) return clip;
-    const bounds = boundsOfRect(element.getBoundingClientRect());
+    const bounds = boundsOfRect(rectOf(element));
     return intersectClips(clip, intersectClips(clipRectOf(s, bounds, frame), clipPathOf(s, bounds, frame)));
   }
 
@@ -761,9 +909,19 @@ async function snapshotPage(config) {
     return { geometry: largest > 0 ? 'roundRect' : 'rect', radius: largest };
   }
 
-  // A border that is the same on all four sides is the shape's outline. Per-side
-  // borders paint as separate lines and are not an outline.
+  // ─── borders and rings ───────────────────────────────────────────────
+  // A border that is the same on all four sides is the shape's outline. A
+  // border that differs between sides is a line per painted side (pushSideLines).
+  // A spread-only box-shadow is an outline ring (spreadRings).
   const SIDES = ['Top', 'Right', 'Bottom', 'Left'];
+
+  // The dash a border style paints with: dashed and dotted keep theirs, and
+  // every other style that paints (solid, double, groove, ridge, inset,
+  // outset) is drawn solid.
+  function borderDash(style) {
+    return style === 'dashed' ? 'dash' : style === 'dotted' ? 'dot' : 'solid';
+  }
+
   function uniformBorder(s, opacity, scale) {
     const width = parseFloat(s.borderTopWidth) || 0;
     const style = s.borderTopStyle;
@@ -778,8 +936,30 @@ async function snapshotPage(config) {
     }
     const painted = paintedColour(colour, opacity);
     if (!painted) return null;
-    const dash = style === 'dashed' ? 'dash' : style === 'dotted' ? 'dot' : 'solid';
-    return { color: painted.color, alpha: painted.alpha, widthPx: width * scale, dash };
+    return { color: painted.color, alpha: painted.alpha, widthPx: width * scale, dash: borderDash(style) };
+  }
+
+  // A border that is no single outline, side by side: {widths, painted}.
+  //   widths   every side's width in slide px, by side name: 0 where its style
+  //            paints nothing or `slice` takes it off. They shape the corners;
+  //   painted  {side, color, alpha, widthPx, dash} for each side with a width
+  //            and a colour that shows, in Top, Right, Bottom, Left order.
+  // `slice` ({Left, Right} booleans, or null) names the sides that
+  // box-decoration-break: slice takes off one fragment of an inline box (sliceOf).
+  function sideBorders(s, opacity, scale, slice) {
+    const widths = {};
+    const painted = [];
+    for (let index = 0; index < SIDES.length; index++) {
+      const side = SIDES[index];
+      const style = s['border' + side + 'Style'];
+      const off = style === 'none' || style === 'hidden' || Boolean(slice && slice[side]);
+      const width = off ? 0 : (parseFloat(s['border' + side + 'Width']) || 0) * scale;
+      widths[side] = width;
+      if (!(width > 0)) continue;
+      const colour = paintedColour(s['border' + side + 'Color'], opacity);
+      if (colour) painted.push({ side, color: colour.color, alpha: colour.alpha, widthPx: width, dash: borderDash(style) });
+    }
+    return { widths, painted };
   }
 
   // The outer layers of a computed box-shadow, in order: {colourText,
@@ -833,65 +1013,140 @@ async function snapshotPage(config) {
     return null;
   }
 
+  // The spread-only layers of a computed box-shadow, in the order listed,
+  // which is top first: a layer with no offset and no blur paints a ring as
+  // wide as its spread around the border box. Each is the outline it draws,
+  // {color, alpha, widthPx, dash: 'solid'}. A spread of 0 or less paints
+  // nothing outside the box.
+  function spreadRings(value, opacity, box) {
+    const rings = [];
+    const layers = outerShadowLayers(value);
+    for (let index = 0; index < layers.length; index++) {
+      const layer = layers[index];
+      if (!(layer.spread > 0) || layer.blur !== 0 || layer.offsetX !== 0 || layer.offsetY !== 0) continue;
+      const painted = paintedColour(layer.colourText, opacity);
+      if (painted) rings.push({ color: painted.color, alpha: painted.alpha, widthPx: layer.spread * box.scale, dash: 'solid' });
+    }
+    return rings;
+  }
+
+  // The corner radius of a ring's centre line, for a border box corner of
+  // `radius` and a ring as wide as `spread`. The spread shadow's corner is the
+  // border radius plus the spread, the spread first scaled by 1 + (r - 1)^3
+  // where r = radius / spread is under 1 (CSS Backgrounds 3, box-shadow), so a
+  // square corner stays square; the ring runs half way between the two.
+  function ringRadius(radius, spread) {
+    if (!(radius > 0)) return 0;
+    const ratio = radius / spread;
+    const outer = radius + (ratio < 1 ? spread * (1 + Math.pow(ratio - 1, 3)) : spread);
+    return (radius + outer) / 2;
+  }
+
   // background-clip: text paints the background inside the glyphs only, where
   // the text's own colour carries it (textColour), so it fills no box.
   function clipsToText(s) {
     return /\btext\b/.test(String(s.backgroundClip || '')) || /\btext\b/.test(String(s.webkitBackgroundClip || ''));
   }
 
-  // Whether an element's box paints anything emitBox draws: a fill, a uniform
-  // border or an outer shadow, at its cumulative opacity. Its geometry changes
-  // none of the three, so an untransformed unit box stands in for it.
+  // Whether an element's box paints anything emitBox draws: a fill, a border,
+  // an outer shadow or a ring, at its cumulative opacity. Its geometry changes
+  // none of them, so an untransformed unit box stands in for it.
   const UNIT_BOX = { scale: 1, rotate: null };
   function paintsBox(s, opacity) {
     return Boolean((!clipsToText(s) && paintedColour(s.backgroundColor, opacity)) ||
-      uniformBorder(s, opacity, UNIT_BOX.scale) || outerShadow(s.boxShadow, opacity, UNIT_BOX));
+      uniformBorder(s, opacity, UNIT_BOX.scale) || outerShadow(s.boxShadow, opacity, UNIT_BOX) ||
+      spreadRings(s.boxShadow, opacity, UNIT_BOX).length ||
+      sideBorders(s, opacity, UNIT_BOX.scale, null).painted.length);
   }
 
-  // A painted box becomes a shape: background colour, uniform border and outer
-  // shadow, cut to its clip. The slide root's ground is the slide background
-  // (BG_TRANSFER put it on body), so its fill and shadow are never painted a
-  // second time here.
-  function emitBox(s, box, opacity, order, isSlideRoot, clip) {
+  // A painted box becomes shapes and lines, cut to its clip, in the order CSS
+  // paints a box (CSS 2.1 Appendix E: its shadows under its background, its
+  // border over it):
+  // * every spread-only ring but the one that is the box's outline, each an
+  //   unfilled shape of its own, the last listed lowest;
+  // * the box's own shape: its background colour and outer shadow, outlined
+  //   by its uniform border or, with none, by its first ring (ringedShape);
+  // * a border that differs between sides, over the fill (pushSideLines).
+  // The slide root's ground is the slide background (BG_TRANSFER put it on
+  // body), so its fill, shadow and rings are never painted a second time here.
+  // `slice` is sideBorders': the sides a fragment of an inline box loses.
+  function emitBox(s, box, opacity, order, isSlideRoot, clip, slice) {
     const fill = isSlideRoot || clipsToText(s) ? null : paintedColour(s.backgroundColor, opacity);
-    let line = uniformBorder(s, opacity, box.scale);
+    const sliced = Boolean(slice && (slice.Left || slice.Right));
+    let line = sliced ? null : uniformBorder(s, opacity, box.scale);
     const shadow = isSlideRoot ? null : outerShadow(s.boxShadow, opacity, box);
-    if (!fill && !line && !shadow) return;
-    const shown = shownPart(boundsOf(box), clip);
-    if (!shown) return;
-    // The outline is stroked on the shape's edge, centred on it; CSS paints the
-    // border inside the border box. Inset by half the width so the two coincide.
-    let inset = line ? line.widthPx / 2 : 0;
-    if (!(box.w - 2 * inset > 0 && box.h - 2 * inset > 0)) {
-      line = null;
-      inset = 0;
-      if (!fill && !shadow) return;
+    const rings = isSlideRoot ? [] : spreadRings(s.boxShadow, opacity, box);
+    const sides = line ? null : sideBorders(s, opacity, box.scale, slice);
+    if (!fill && !line && !shadow && !rings.length && !(sides && sides.painted.length)) return;
+    const corners = cornerShape(s, box);
+    // The stroke centred on a bordered shape's edge needs a shape left inside the border box.
+    if (line && !(box.w - line.widthPx > 0 && box.h - line.widthPx > 0)) line = null;
+    const outlineRing = !line && rings.length ? rings[0] : null;
+    for (let index = rings.length - 1; index >= (outlineRing ? 1 : 0); index--) {
+      pushBoxShape(ringedShape(box, corners, null, rings[index], null, order), clip);
     }
+    if (fill || line || shadow || outlineRing) {
+      pushBoxShape(outlineRing
+        ? ringedShape(box, corners, fill, outlineRing, shadow, order)
+        : borderedShape(box, corners, fill, line, shadow, order), clip);
+    }
+    if (sides) pushSideLines(box, sides, order, clip);
+  }
+
+  // The shape of a box outlined by `line` (or null), which CSS paints inside
+  // the border box: the stroke is centred on the shape's edge, so the shape is
+  // inset by half the width, its corner radius with it.
+  function borderedShape(box, corners, fill, line, shadow, order) {
+    const inset = line ? line.widthPx / 2 : 0;
+    return boxShape(box, corners, inset, corners.radius - inset, { fill, line, shadow, order, extent: box });
+  }
+
+  // The shape of a box outlined by `ring`, which paints outside the border
+  // box: grown by half the spread, its corner radius to the ring's centre
+  // line. What it paints reaches the ring's outer edge.
+  function ringedShape(box, corners, fill, ring, shadow, order) {
+    const half = ring.widthPx / 2;
+    const extent = { x: box.x - ring.widthPx, y: box.y - ring.widthPx, w: box.w + 2 * ring.widthPx, h: box.h + 2 * ring.widthPx, rotate: box.rotate };
+    return boxShape(box, corners, -half, ringRadius(corners.radius, ring.widthPx), { fill, line: ring, shadow, order, extent });
+  }
+
+  // `box` moved in by `inset` on every side (out, for a negative one), with
+  // the corner geometry and `radius` it keeps. `paint` is {fill, line, shadow,
+  // order, extent}: extent is the box whose bounds a clip is held against.
+  function boxShape(box, corners, inset, radius, paint) {
     const w = box.w - 2 * inset;
     const h = box.h - 2 * inset;
-    const corners = cornerShape(s, box);
     let geometry = corners.geometry;
-    let radius = 0;
+    let cornerRadius = 0;
     if (geometry === 'roundRect') {
-      radius = Math.min(corners.radius - inset, Math.min(w, h) / 2);
-      if (!(radius > 0)) geometry = 'rect';
+      cornerRadius = Math.min(radius, Math.min(w, h) / 2);
+      if (!(cornerRadius > 0)) geometry = 'rect';
     }
-    const shape = {
-      order,
+    return {
+      order: paint.order,
       x: box.x + inset,
       y: box.y + inset,
       w,
       h,
       geometry,
-      radius: geometry === 'roundRect' ? radius : 0,
-      fill,
-      line,
-      shadow,
+      radius: geometry === 'roundRect' ? cornerRadius : 0,
+      fill: paint.fill,
+      line: paint.line,
+      shadow: paint.shadow,
       rotate: box.rotate,
+      extent: paint.extent,
     };
+  }
+
+  // A shape cut to its clip: whole when the clip cuts nothing it paints (its
+  // extent), the part shown of a plain rect, or else the part shown of its
+  // outline (pushClippedShape). Nothing when the clip hides it.
+  function pushBoxShape(shape, clip) {
+    const shown = shownPart(boundsOf(shape.extent), clip);
+    if (!shown) return;
     if (!shown.cut) {
       pushShape(shape);
-    } else if (geometry === 'rect' && !box.rotate && !line) {
+    } else if (shape.geometry === 'rect' && !shape.rotate && !shape.line) {
       // A plain rect the clip cuts is the rect it shows (no line, so no inset).
       pushShape({
         ...shape,
@@ -903,6 +1158,108 @@ async function snapshotPage(config) {
     } else {
       pushClippedShape(shape, clip);
     }
+  }
+
+  // The sides box-decoration-break: slice takes off one fragment of an inline
+  // box: its inline start on every fragment but the first, its inline end on
+  // every fragment but the last. Null for a box in one fragment, or one that
+  // clones its decoration onto each.
+  function sliceOf(decoration, fragment) {
+    const count = decoration.boxes.length;
+    const s = decoration.style;
+    const mode = String(s.boxDecorationBreak || s.webkitBoxDecorationBreak || 'slice');
+    if (count < 2 || mode === 'clone') return null;
+    const notFirst = fragment > 0;
+    const notLast = fragment < count - 1;
+    return s.direction === 'rtl' ? { Left: notLast, Right: notFirst } : { Left: notFirst, Right: notLast };
+  }
+
+  // ─── side lines ──────────────────────────────────────────────────────
+  // Each painted side of a border that differs between sides is one line item
+  // along its centre line: half its width in from its edge, over the box's
+  // whole side, so neighbouring sides overlap at their corners. It is turned
+  // with the box, cut to the clip, and painted over the box's fill (the same
+  // order, emitted after it). A side with no inner edge left (a box that is
+  // all border along it, as in the CSS triangle of an arrowhead) cannot be a
+  // line along it: it is the region CSS paints for it, the triangle between
+  // its outer edge and where its two corner diagonals meet, a filled path.
+  // The sides run clockwise: from corner `from` to corner `to`, along `along`
+  // (a unit vector), with `inward` pointing into the box, and the widths of the
+  // sides before and after it at those corners.
+  function sideFrames(box, widths) {
+    const left = box.x;
+    const top = box.y;
+    const right = box.x + box.w;
+    const bottom = box.y + box.h;
+    return {
+      Top: { from: { x: left, y: top }, to: { x: right, y: top }, along: { x: 1, y: 0 }, inward: { x: 0, y: 1 }, length: box.w, before: widths.Left, after: widths.Right },
+      Right: { from: { x: right, y: top }, to: { x: right, y: bottom }, along: { x: 0, y: 1 }, inward: { x: -1, y: 0 }, length: box.h, before: widths.Top, after: widths.Bottom },
+      Bottom: { from: { x: right, y: bottom }, to: { x: left, y: bottom }, along: { x: -1, y: 0 }, inward: { x: 0, y: -1 }, length: box.w, before: widths.Right, after: widths.Left },
+      Left: { from: { x: left, y: bottom }, to: { x: left, y: top }, along: { x: 0, y: -1 }, inward: { x: 1, y: 0 }, length: box.h, before: widths.Bottom, after: widths.Top },
+    };
+  }
+
+  function pushSideLines(box, sides, order, clip) {
+    const frames = sideFrames(box, sides.widths);
+    const centreX = box.x + box.w / 2;
+    const centreY = box.y + box.h / 2;
+    const radians = (box.rotate || 0) * Math.PI / 180;
+    const turned = (point) => (radians
+      ? {
+        x: centreX + (point.x - centreX) * Math.cos(radians) - (point.y - centreY) * Math.sin(radians),
+        y: centreY + (point.x - centreX) * Math.sin(radians) + (point.y - centreY) * Math.cos(radians),
+      }
+      : point);
+    const offset = (point, vector, distance) => ({ x: point.x + vector.x * distance, y: point.y + vector.y * distance });
+    // Widened by the rounding a clip edge may differ by, so a side that only
+    // touches the clip is not cut.
+    const lineClip = {
+      left: clip.left - CUT_EPSILON_PX,
+      top: clip.top - CUT_EPSILON_PX,
+      right: clip.right + CUT_EPSILON_PX,
+      bottom: clip.bottom + CUT_EPSILON_PX,
+    };
+    for (let index = 0; index < sides.painted.length; index++) {
+      const side = sides.painted[index];
+      const frame = frames[side.side];
+      if (!(frame.length > 0)) continue;
+      const corners = frame.before + frame.after;
+      if (corners > 0 && frame.length - corners <= CUT_EPSILON_PX) {
+        // The diagonals from both corners meet at `reach` along the side.
+        const reach = frame.length / corners;
+        const apex = offset(offset(frame.from, frame.along, reach * frame.before), frame.inward, reach * side.widthPx);
+        const region = clipPolygon([turned(frame.from), turned(apex), turned(frame.to)], clip);
+        if (region.length >= 3) pushPath(order, [region], true, { color: side.color, alpha: side.alpha }, null, null);
+        continue;
+      }
+      const start = turned(offset(frame.from, frame.inward, side.widthPx / 2));
+      const end = turned(offset(frame.to, frame.inward, side.widthPx / 2));
+      const shown = clipSegment(start, end, lineClip);
+      if (!shown) continue;
+      if ((shown.cutsStart || shown.cutsEnd) &&
+          Math.hypot(shown.to.x - shown.from.x, shown.to.y - shown.from.y) < MINIMUM_VISIBLE_PX) continue;
+      // Written left to right, or top to bottom: the same line whichever corner it ran from.
+      const forward = shown.from.x < shown.to.x - SAME_POINT_PX ||
+        (Math.abs(shown.from.x - shown.to.x) <= SAME_POINT_PX && shown.from.y <= shown.to.y);
+      pushLine(order, forward ? shown.from : shown.to, forward ? shown.to : shown.from, side);
+    }
+  }
+
+  function pushLine(order, from, to, side) {
+    items.push({
+      kind: 'line',
+      id: nextItemId++,
+      order,
+      x1: from.x,
+      y1: from.y,
+      x2: to.x,
+      y2: to.y,
+      color: side.color,
+      alpha: side.alpha,
+      widthPx: side.widthPx,
+      dash: side.dash,
+    });
+    stats.lines++;
   }
 
   function pushShape(shape) {
@@ -1178,8 +1535,12 @@ async function snapshotPage(config) {
   //            cannot be embedded as it is (emitReplaced): the element and
   //            everything it holds, its own box included;
   //   box      an element whose own box paints what no shape can (capturesBox):
-  //            its box alone, its text and children staying native. The
-  //            picture replaces its native box (fill, outline and shadow).
+  //            its box alone, its text, children and own ::before and ::after
+  //            staying native (ruling R8b). The picture replaces its native box
+  //            (fill, outline and shadow). A pseudo-element's box is captured
+  //            the same way, on its own: capture.cjs isolates its host's
+  //            ::before or ::after, named by the host marker, which is already
+  //            on the page (pseudo.mjs).
   // The picture is what the target's clip shows of all it paints: its bounds,
   // grown by the reach of its outer shadow and filter (paintReach), cut to the
   // clip (C7.3). Its pixels already carry the target's cumulative opacity, so
@@ -1300,9 +1661,8 @@ async function snapshotPage(config) {
     const y = shown.top;
     const w = shown.right - shown.left;
     const h = shown.bottom - shown.top;
-    const hidden = mode === 'subtree' && String(dom.tagName(element) || '').toLowerCase() === 'svg'
-      ? hiddenDescendants(element)
-      : [];
+    const generated = isPseudo(element);
+    const hidden = mode === 'subtree' && tagNameOf(element) === 'svg' ? hiddenDescendants(element) : [];
     const capture = {
       id,
       x,
@@ -1310,7 +1670,8 @@ async function snapshotPage(config) {
       w,
       h,
       mode,
-      selector: '[' + config.captureAttribute + '="' + id + '"]',
+      selector: generated ? element.selector : '[' + config.captureAttribute + '="' + id + '"]',
+      pseudo: generated ? element.type : null,
       hiddenWithin: hidden.length > 0,
       // What box mode's transparent text colour must not take from the box:
       // a border or shadow painted in currentColor (capture.cjs retainedCss).
@@ -1319,7 +1680,8 @@ async function snapshotPage(config) {
         : null,
     };
     captures.push(capture);
-    captureTargets.push({ element, capture, hidden });
+    // A pseudo-element's host is named already; every other target is named once the reads are done.
+    if (!generated) captureTargets.push({ element, capture, hidden });
     items.push({ kind: 'image', id: nextItemId++, order, x, y, w, h, src: null, captureId: id, alpha: 1, rotate: null });
     stats.images++;
   }
@@ -1486,6 +1848,9 @@ async function snapshotPage(config) {
     paintsBox: (s, opacity) => paintsBox(s, opacity) || capturesBox(s, opacity),
     inlineClip,
     shows: (bounds, clip) => shownPart(bounds, clip) !== null,
+    isPseudo,
+    pseudoOf: (element) => pseudoHosts.get(element) || null,
+    rectOf,
   });
   // follows element -> its waiting {group, paint} entries, and every entry in the
   // order it was collected (the Map is only ever read by key).
@@ -1530,7 +1895,8 @@ async function snapshotPage(config) {
         continue;
       }
       for (let fragment = 0; fragment < decoration.boxes.length; fragment++) {
-        emitBox(decoration.style, decoration.boxes[fragment], decoration.opacity, order, false, decoration.clip);
+        emitBox(decoration.style, decoration.boxes[fragment], decoration.opacity, order, false, decoration.clip,
+          sliceOf(decoration, fragment));
       }
     }
     for (let index = 0; index < group.blocks.length; index++) {
@@ -1582,33 +1948,46 @@ async function snapshotPage(config) {
   // bounded by WALK_STEP_LIMIT and the elements visited by COLLECTION_ITEM_LIMIT,
   // so a realm lying about the tree cannot make it run forever; meeting either
   // bound is announced, because what lies past it is missing from the slide.
+  // An element's ::before is visited as its first child and its ::after as its
+  // last, so their items take those places in paint order and ids.
   const stack = [];
   let pushed = 0;
 
+  function pushEntry(element, state) {
+    if (pushed >= COLLECTION_ITEM_LIMIT) {
+      stats.truncated = true;
+      reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' elements', 'the snapshot walk');
+      return false;
+    }
+    stack.push({ element, state });
+    pushed++;
+    return true;
+  }
+
+  // Pushed last first, so the stack pops them in tree order. Generated content
+  // holds no elements, so a pseudo-element has no children.
   function pushChildren(element, state) {
     if (state.depth > WALK_STEP_LIMIT) {
       stats.truncated = true;
       reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'cut at depth ' + WALK_STEP_LIMIT, 'the snapshot walk');
       return;
     }
+    if (isPseudo(element)) return;
+    const pseudo = pseudoHosts.get(element) || null;
+    if (pseudo && pseudo.after && !pushEntry(pseudo.after, state)) return;
     const children = elementChildrenOf(element);
     for (let index = children.length - 1; index >= 0; index--) {
-      if (pushed >= COLLECTION_ITEM_LIMIT) {
-        stats.truncated = true;
-        reportCollectionLoss(DOM_ACCESS_LOG_PREFIX, 'truncated at ' + COLLECTION_ITEM_LIMIT + ' elements', 'the snapshot walk');
-        return;
-      }
-      stack.push({ element: children[index], state });
-      pushed++;
+      if (!pushEntry(children[index], state)) return;
     }
+    if (pseudo && pseudo.before) pushEntry(pseudo.before, state);
   }
 
   // A subtree that shows nothing still holds text the page reads (its
   // innerText, which a screen reader and the text-loss oracle read), so it is
   // the slide's hidden text. An inline box's text belongs to its block's
-  // layout, which records it there.
+  // layout, which records it there. Generated content is no part of innerText.
   function recordHiddenSubtree(element, name, s) {
-    if (textLayout.isInlineBox(name, s)) return;
+    if (isPseudo(element) || textLayout.isInlineBox(name, s)) return;
     let text;
     try {
       text = String(dom.innerText(element) || '');
@@ -1619,10 +1998,13 @@ async function snapshotPage(config) {
     textLayout.recordHiddenText(text);
   }
 
+  // `element` is an element or a pseudo-element (PseudoRecord), which is
+  // drawn the same way: its box, its text, at its place in paint order.
   function visit(element, state, seq) {
-    stats.elements++;
-    const name = String(dom.tagName(element) || '').toLowerCase();
-    const s = window.getComputedStyle(element);
+    if (isPseudo(element)) stats.pseudoElements++;
+    else stats.elements++;
+    const name = tagNameOf(element);
+    const s = styleOf(element);
     if (s.display === 'none') return;
     // display: contents generates no box: no paint, no opacity, no clip, no
     // context of its own. Its children lay out (and stack) as children of its parent.
@@ -1647,7 +2029,7 @@ async function snapshotPage(config) {
     // rect, which spans every line it is on, is never a box of its own.
     // A box-only capture is the element's box: no native shape beside it.
     if (s.visibility === 'visible' && !textLayout.isInlineBox(name, s)) {
-      const box = boxGeometry(element, clips.rect || element.getBoundingClientRect(), frame);
+      const box = boxGeometry(element, clips.rect || rectOf(element), frame);
       if (box && replaced) {
         emitReplaced(element, name, s, box, opacity, place, seq, clips.box);
       } else if (box && element !== slideRoot && capturesBox(s, opacity)) {
@@ -1673,6 +2055,7 @@ async function snapshotPage(config) {
     });
   }
 
+  readPseudoHosts();
   const htmlStyle = window.getComputedStyle(html);
   const bodyStyle = window.getComputedStyle(body);
   const background = slideBackground(htmlStyle, bodyStyle);
@@ -1742,8 +2125,10 @@ async function snapshotPage(config) {
   };
 }
 
+// A page function of one argument, the PseudoData pseudo.mjs read: render_slide.cjs
+// evaluates it applied to that data.
 export const SNAPSHOT_SOURCE = `
-(async function () {
+(async function (pseudoData) {
   const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${DOM_ACCESS_SOURCE}
 ${GRADIENT_SOURCE}
@@ -1753,6 +2138,7 @@ ${blendOver.toString()}
     slideRootMarker: SLIDE_ROOT_MARKER,
     captureAttribute: CAPTURE_ATTRIBUTE,
     hiddenAttribute: HIDDEN_ATTRIBUTE,
-  })});
-})()
+    pseudoHostAttribute: PSEUDO_HOST_ATTRIBUTE,
+  })}, pseudoData);
+})
 `;

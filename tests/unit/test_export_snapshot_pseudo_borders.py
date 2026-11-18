@@ -64,10 +64,12 @@ from PIL import Image
 from src.services import pptx_from_html_huashu
 from tests.fixtures.export_snapshot_support import (
     DECK_CSS,
+    EMU_PER_PX,
     NAMESPACES,
     PERCENT_UNITS,
     SNAPSHOT_FIXTURE_DIR,
     Shape,
+    browser_client_rects,
     browser_each_pseudo,
     browser_each_rect,
     browser_rect,
@@ -449,6 +451,34 @@ SIDED_LINES = (
     SideLine("left", "2F5BEA", 8.0, "sysDot"),
 )
 SIDED_WIDTHS = {"top": 2.0, "right": 4.0, "bottom": 6.0, "left": 8.0}
+
+# A CSS triangle, as an arrowhead is drawn: a box with no content whose one
+# painted side, a 70 px coral left border, lies between transparent 40 px top
+# and bottom sides, so that side has no inner edge for a line to run along.
+TRIANGLE_BODY = (
+    '<div class="slide"><div id="arrowhead" style="position: absolute; left: 200px; top: 200px; '
+    "width: 0; height: 0; border-left: 70px solid #FF5F46; border-top: 40px solid transparent; "
+    'border-bottom: 40px solid transparent;"></div></div>'
+)
+TRIANGLE_SIZE = (70.0, 80.0)
+# An inline box whose border differs by side, wrapping over lines.
+SLICED_BODY = (
+    '<div class="slide"><p style="width: 280px; font-size: 20px; line-height: 34px; '
+    'margin: 40px 0 0;">Lead <span id="sliced" style="border-left: 4px solid #7B2FBE; '
+    'border-right: 4px solid #2F5BEA; border-bottom: 2px solid #00A972;">an accented phrase '
+    "long enough to run onto a second line</span> and its tail.</p></div>"
+)
+SLICED_LEFT = SideLine("left", "7B2FBE", 4.0, "solid")
+SLICED_RIGHT = SideLine("right", "2F5BEA", 4.0, "solid")
+SLICED_BOTTOM = SideLine("bottom", "00A972", 2.0, "solid")
+# Two spread-only rings around one box: the first listed paints on top.
+STACKED_BODY = (
+    '<div class="slide"><div id="stacked" style="position: absolute; left: 200px; top: 200px; '
+    "width: 160px; height: 60px; background: #CDEDE1; "
+    'box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 5px #1B5162;"></div></div>'
+)
+STACKED_FILL = "CDEDE1"
+STACKED_RINGS = (("FFFFFF", 2.0), ("1B5162", 5.0))
 
 
 @dataclass(frozen=True)
@@ -1624,6 +1654,157 @@ class TestOutlineShadows:
         ), f"#{RINGED_DOT}: the ring's outline is {ring.line} {ring.line_w_pt} pt"
         assert ring.shadow is None, f"#{RINGED_DOT}: the ring is exported as a shadow"
         _assert_box(ring, _grown(rect, spread_px / 2), OUTLINE_TOLERANCE_PX, "the dot's ring")
+
+    def test_stacked_rings_are_shapes_from_the_box_outwards(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two spread-only rings: the first listed outlines the box, the second is a shape under it.
+
+        ``box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 5px #1B5162`` paints a 5 px
+        1B5162 ring around the box, and the 2 px white ring over its inner part
+        (the first layer listed is on top). The box is its CDEDE1 rect
+        outlined in 1.5 pt FFFFFF, grown by 1 px; painted before it is one
+        unfilled rect outlined in 3.75 pt 1B5162, grown by 2.5 px. Neither is a
+        shadow.
+        """
+        rect = browser_rect(_document(STACKED_BODY), "#stacked")
+        shapes = slide_shapes(_export(STACKED_BODY, monkeypatch))
+
+        (top_colour, top_px), (under_colour, under_px) = STACKED_RINGS
+        boxes = [position for position, shape in enumerate(shapes) if shape.fill == STACKED_FILL]
+        unders = [
+            position
+            for position, shape in enumerate(shapes)
+            if shape.kind == "shape" and shape.fill is None and shape.line == under_colour
+        ]
+        assert len(boxes) == 1 and len(unders) == 1, (
+            f"expected the box once and its outer ring once:\n{_describe(shapes)}"
+        )
+        box, under = shapes[boxes[0]], shapes[unders[0]]
+        for shape, colour, spread, what in (
+            (box, top_colour, top_px, "the box (its top ring)"),
+            (under, under_colour, under_px, "the outer ring"),
+        ):
+            assert shape.geometry == "rect" and shape.shadow is None, (
+                f"{what} is a {shape.geometry} with shadow {shape.shadow}"
+            )
+            assert (
+                shape.line == colour
+                and shape.line_w_pt is not None
+                and (abs(shape.line_w_pt - spread * PT_PER_PX) <= LINE_WIDTH_TOLERANCE_PT)
+            ), f"{what}: outline {shape.line} {shape.line_w_pt} pt, expected {colour}"
+            _assert_box(shape, _grown(rect, spread / 2), OUTLINE_TOLERANCE_PX, what)
+        assert unders[0] < boxes[0], (
+            f"the outer ring (spTree {unders[0]}) paints over the box and its top ring ({boxes[0]})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Border regions a line cannot draw, and borders of wrapping inline boxes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@requires_huashu_sidecar
+class TestBorderRegions:
+    def test_a_side_with_no_inner_edge_is_the_triangle_css_paints(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CSS triangle (an arrowhead) exports as the triangle the browser paints, not a bar.
+
+        ``#arrowhead`` is all border, and its painted left side has no inner
+        edge. CSS joins neighbouring sides along the corner diagonals, so it
+        paints the triangle between that side's outer edge and where the two
+        diagonals meet: (x, y), (x + 70, y + 40) and (x, y + 80) of its 70x80
+        border box. It is one coral filled path through exactly those corners,
+        within 0.5 px, and no line.
+        """
+        document = _document(TRIANGLE_BODY)
+        rect = browser_rect(document, "#arrowhead")
+        assert (rect["w"], rect["h"]) == TRIANGLE_SIZE, f"fixture drift: the arrowhead is {rect}"
+        pptx = _export(TRIANGLE_BODY, monkeypatch)
+        shapes = slide_shapes(pptx)
+        elements = slide_shape_elements(pptx)
+
+        coral = [position for position, shape in enumerate(shapes) if shape.fill == ACCENT]
+        assert len(coral) == 1 and shapes[coral[0]].geometry == "custGeom", (
+            f"expected the arrowhead as one FF5F46 path:\n{_describe(shapes)}"
+        )
+        assert [shape for shape in shapes if shape.kind == "line"] == [], (
+            f"the arrowhead is drawn as a line:\n{_describe(shapes)}"
+        )
+        shape = shapes[coral[0]]
+        points = [
+            (
+                shape.x + int(point.get("x")) / EMU_PER_PX,
+                shape.y + int(point.get("y")) / EMU_PER_PX,
+            )
+            for point in elements[coral[0]].iterfind(
+                "p:spPr/a:custGeom/a:pathLst/a:path//a:pt", NAMESPACES
+            )
+        ]
+        width, height = TRIANGLE_SIZE
+        expected = [
+            (rect["x"], rect["y"]),
+            (rect["x"] + width, rect["y"] + height / 2),
+            (rect["x"], rect["y"] + height),
+        ]
+        unmatched = [
+            corner
+            for corner in expected
+            if not any(
+                abs(x - corner[0]) <= RECT_TOLERANCE_PX and abs(y - corner[1]) <= RECT_TOLERANCE_PX
+                for x, y in points
+            )
+        ]
+        assert len(points) == len(expected) and not unmatched, (
+            f"the arrowhead's path runs through {points}; the browser paints the triangle "
+            f"{expected} (missing {unmatched})"
+        )
+
+    def test_a_wrapping_inline_boxs_side_borders_are_sliced_between_its_fragments(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wrapping inline box's side borders are where the browser paints them: sliced.
+
+        Under the default ``box-decoration-break: slice`` a wrapping inline
+        box's left border is on its first fragment only and its right border
+        on its last; its bottom border runs under every fragment. ``#sliced``
+        exports one 7B2FBE line at its first fragment's left edge and one
+        2F5BEA line at its last fragment's right edge, each half its width in,
+        and one 00A972 line under each fragment, each at its browser fragment
+        within 0.5 px.
+        """
+        fragments = [
+            fragment
+            for fragment in browser_client_rects(_document(SLICED_BODY), "#sliced")
+            if fragment["w"] > 0
+        ]
+        assert len(fragments) >= 2, f"fixture drift: #sliced does not wrap: {fragments}"
+        shapes = slide_shapes(_export(SLICED_BODY, monkeypatch))
+
+        for side, fragment, what in (
+            (SLICED_LEFT, fragments[0], "its first fragment's left border"),
+            (SLICED_RIGHT, fragments[-1], "its last fragment's right border"),
+        ):
+            lines = _lines(shapes, side.colour)
+            assert len(lines) == 1, (
+                f"#sliced: expected {what} as one {side.colour} line, got {len(lines)}:\n"
+                f"{_describe(shapes)}"
+            )
+            _assert_line_style(lines[0][1], side, f"#sliced: {what}")
+            _assert_box(lines[0][1], _side_line_box(fragment, side), RECT_TOLERANCE_PX, what)
+        bottoms = [line for _, line in _lines(shapes, SLICED_BOTTOM.colour)]
+        assert len(bottoms) == len(fragments), (
+            f"#sliced: expected one 00A972 bottom line per fragment ({len(fragments)}), got "
+            f"{len(bottoms)}:\n{_describe(shapes)}"
+        )
+        for number, fragment in enumerate(fragments, start=1):
+            expected = _side_line_box(fragment, SLICED_BOTTOM)
+            assert _at(bottoms, expected), (
+                f"#sliced: no bottom line under fragment {number} at {expected}:\n"
+                f"{_describe(shapes)}"
+            )
 
 
 # ---------------------------------------------------------------------------

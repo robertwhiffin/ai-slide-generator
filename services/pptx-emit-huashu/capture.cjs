@@ -6,12 +6,18 @@
 //   captureAll(page, captures) -> Map<captureId, 'data:image/png;base64,…'>
 //
 // `captures` is model.captures (snapshot.mjs): {id, x,y,w,h, mode, selector,
-// hiddenWithin, paint}. The snapshot has already named each target with
-// data-tellr-capture="<id>". For each capture, in id order and one at a time:
+// pseudo, hiddenWithin, paint}. The snapshot has already named each target
+// with data-tellr-capture="<id>"; a pseudo-element target is named by its
+// host's data-tellr-pseudo-host marker, which pseudo.mjs set. For each
+// capture, in id order and one at a time:
 //   1. an isolation stylesheet hides every element but the target: its whole
 //      subtree in 'subtree' mode (svg, canvas, video, img), its own box alone
 //      in 'box' mode, with its text transparent so the text and the children
-//      stay native and editable. Visibility changes no layout, and every
+//      stay native and editable. A box target's own ::before and ::after are
+//      drawn natively too (ruling R8b), so they are hidden with the rest. A
+//      pseudo-element target is a box target of its own: its host is hidden
+//      like everything else, and of every pseudo-element only the target
+//      shows, its text transparent. Visibility changes no layout, and every
 //      ancestor keeps its overflow clip and opacity, so the picture is cut and
 //      faded as the slide shows it;
 //   2. the target's rect is screenshotted at the page's device scale (2) on a
@@ -52,26 +58,52 @@ const CAPTURE_TIMEOUT_MS = 5000;
 // none of these can end a declaration or a rule.
 const COMPUTED_VALUE = /^[a-z0-9\s(),.%#+/-]*$/i;
 
+// The only targets the snapshot names, and the pseudo-elements it captures.
+// Anything else is no capture of ours and is not written into a stylesheet.
+const TARGET_SELECTOR = /^\[data-tellr-(?:capture|pseudo-host)="[a-z0-9]{1,16}"\]$/;
+const PSEUDO_ELEMENTS = new Set(['before', 'after']);
+
 // Each :not(#…) adds id-level specificity, so these rules beat the deck's own
 // !important rules on classes and elements (Review Focus 5); the trick of
-// SLIDE_ROOT_RESET_STYLE's #tellr-root-reset-boost. `*` never matches a
-// ::before or ::after, and a pseudo-element's own visibility beats the one it
-// would inherit from its hidden element, so every other element's
-// pseudo-elements are hidden by a rule of their own. The target's (and, in
-// subtree mode, those of what it holds) are left to inherit the visibility the
-// isolation gives their element, or to keep their own declaration, so a
-// pseudo-element the slide hides stays hidden in the picture.
-function isolationCss(id, mode) {
-  const target = `[data-tellr-capture="${id}"]`;
-  const boost = ':not(#tellr-capture-a):not(#tellr-capture-b):not(#tellr-capture-c)';
-  const others = mode === 'subtree' ? `*${boost}:not(${target}):not(${target} *)` : `*${boost}:not(${target})`;
-  return `html${boost}, body${boost} { background: transparent !important; }\n` +
-    `*${boost} { visibility: hidden !important; }\n` +
-    `${others}::before, ${others}::after { visibility: hidden !important; }\n` +
-    (mode === 'subtree'
-      ? `${target}${boost}, ${target} *${boost} { visibility: visible !important; }`
-      : `${target}${boost} { visibility: visible !important; color: transparent !important;` +
-        ` -webkit-text-fill-color: transparent !important; text-shadow: none !important; }`);
+// SLIDE_ROOT_RESET_STYLE's #tellr-root-reset-boost.
+const BOOST = ':not(#tellr-capture-a):not(#tellr-capture-b):not(#tellr-capture-c)';
+
+// {selector, pseudo}: the target element's selector (a pseudo-element's host)
+// and the pseudo-element captured, or null. Throws for anything else.
+function targetOf(capture) {
+  const selector = String(capture.selector || '');
+  if (!TARGET_SELECTOR.test(selector)) throw new Error(`the capture target ${selector.slice(0, 80)} is not one the snapshot names`);
+  const pseudo = capture.pseudo === null || capture.pseudo === undefined ? null : String(capture.pseudo);
+  if (pseudo !== null && !PSEUDO_ELEMENTS.has(pseudo)) throw new Error(`the capture pseudo-element ${pseudo.slice(0, 20)} is not ::before or ::after`);
+  return { selector, pseudo };
+}
+
+// `*` never matches a ::before or ::after, and a pseudo-element's own
+// visibility beats the one it would inherit from its hidden element, so the
+// pseudo-elements are hidden by a rule of their own:
+// * subtree mode hides every other element's. Those of the target and of what
+//   it holds are left to inherit the visibility the isolation gives their
+//   element, or to keep their own declaration, so a pseudo-element the slide
+//   hides stays hidden in the picture;
+// * box mode hides every one, the target's own included: those are native;
+// * a pseudo-element target shows alone, one class more specific than the rule
+//   that hides every pseudo-element.
+function isolationCss(capture) {
+  const { selector, pseudo } = targetOf(capture);
+  const transparentText = 'color: transparent !important; -webkit-text-fill-color: transparent !important;' +
+    ' text-shadow: none !important;';
+  const hidden = `html${BOOST}, body${BOOST} { background: transparent !important; }\n` +
+    `*${BOOST} { visibility: hidden !important; }\n`;
+  if (capture.mode === 'subtree' && !pseudo) {
+    const others = `*${BOOST}:not(${selector}):not(${selector} *)`;
+    return hidden +
+      `${others}::before, ${others}::after { visibility: hidden !important; }\n` +
+      `${selector}${BOOST}, ${selector} *${BOOST} { visibility: visible !important; }`;
+  }
+  const shown = pseudo ? `${selector}${BOOST}::${pseudo}` : `${selector}${BOOST}`;
+  return hidden +
+    `*${BOOST}::before, *${BOOST}::after { visibility: hidden !important; }\n` +
+    `${shown} { visibility: visible !important; ${transparentText} }`;
 }
 
 // What the isolation must not change about the target's own painting.
@@ -81,13 +113,15 @@ function isolationCss(id, mode) {
 //   inherit that, as they do on the slide.
 // * Box mode makes the target's text transparent by setting `color`, which a
 //   border or shadow drawn in currentColor follows; each is pinned to the
-//   colour the slide paints it in.
+//   colour the slide paints it in, on the pseudo-element for a pseudo-element
+//   target.
 function retainedCss(capture) {
-  const target = `[${CAPTURE_ATTRIBUTE}="${capture.id}"]`;
-  const boost = ':not(#tellr-capture-a):not(#tellr-capture-b):not(#tellr-capture-c)';
+  const { selector, pseudo } = targetOf(capture);
+  const boost = BOOST;
+  const target = pseudo ? `${selector}${boost}::${pseudo}` : `${selector}${boost}`;
   const rules = [];
   if (capture.mode === 'subtree' && capture.hiddenWithin) {
-    rules.push(`${target} [${HIDDEN_ATTRIBUTE}]${boost} { visibility: hidden !important; }`);
+    rules.push(`${selector} [${HIDDEN_ATTRIBUTE}]${boost} { visibility: hidden !important; }`);
   }
   const paint = capture.mode === 'box' && capture.paint ? capture.paint : null;
   if (paint) {
@@ -103,7 +137,7 @@ function retainedCss(capture) {
     if (typeof paint.boxShadow === 'string' && paint.boxShadow && COMPUTED_VALUE.test(paint.boxShadow)) {
       declarations.push(`box-shadow: ${paint.boxShadow} !important;`);
     }
-    if (declarations.length) rules.push(`${target}${boost} { ${declarations.join(' ')} }`);
+    if (declarations.length) rules.push(`${target} { ${declarations.join(' ')} }`);
   }
   return rules.join('\n');
 }
@@ -141,7 +175,7 @@ async function captureOne(page, capture, viewport) {
     type: 'png',
     scale: 'device',
     animations: 'disabled',
-    style: isolationCss(capture.id, capture.mode) + (retained ? '\n' + retained : ''),
+    style: isolationCss(capture) + (retained ? '\n' + retained : ''),
     timeout: CAPTURE_TIMEOUT_MS,
   });
   return 'data:image/png;base64,' + png.toString('base64');

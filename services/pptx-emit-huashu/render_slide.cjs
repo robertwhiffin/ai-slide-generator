@@ -6,11 +6,14 @@
 //   2. preprocess        BG_TRANSFER_SOURCE: the slide root's ground onto body,
 //                        nothing that moves layout;
 //   3. validate          the legacy converter's body and text-box checks;
-//   4. snapshot          SNAPSHOT_SOURCE: one read-only page.evaluate that
-//                        returns the slide model (snapshot.mjs);
-//   5. capture           capture.cjs: an element-isolated 2x screenshot of each
+//   4. pseudo-elements   pseudo.mjs: every ::before and ::after, read from Node
+//                        through the DevTools protocol, read-only; nothing is
+//                        inserted into the page for them (ruling R8);
+//   5. snapshot          SNAPSHOT_SOURCE: one read-only page.evaluate of what
+//                        step 4 read, which returns the slide model (snapshot.mjs);
+//   6. capture           capture.cjs: an element-isolated 2x screenshot of each
 //                        capture target the model names, from the same page;
-//   6. emit              emit_model.cjs writes the model to a pptxgenjs slide.
+//   7. emit              emit_model.cjs writes the model to a pptxgenjs slide.
 //
 // renderSlide(htmlFile, pres, { bypassValidation, preProcessSource })
 //   -> { slide, summary }
@@ -106,7 +109,7 @@ function pageBodyDimensions() {
   };
 }
 
-// The ESM page sources, loaded once per process.
+// The ESM page sources, and the Node-side pseudo-element read, loaded once per process.
 let pageSourcesPromise = null;
 function loadPageSources() {
   if (!pageSourcesPromise) {
@@ -114,8 +117,9 @@ function loadPageSources() {
       import('./dom_access.mjs'),
       import('./preprocess.mjs'),
       import('./snapshot.mjs'),
+      import('./pseudo.mjs'),
     ])
-      .then(([access, preprocess, snapshot]) => {
+      .then(([access, preprocess, snapshot, pseudo]) => {
         const withDomAccess = (pageFunction) => `(() => {
   const DOM_ACCESS_LOG_PREFIX = '[html2pptx]';
 ${access.DOM_ACCESS_SOURCE}
@@ -127,7 +131,10 @@ ${access.DOM_ACCESS_SOURCE}
           finishAnimations: withDomAccess(pageFinishAnimations),
           bodyDimensions: withDomAccess(pageBodyDimensions),
           bgTransfer: preprocess.BG_TRANSFER_SOURCE,
-          snapshot: snapshot.SNAPSHOT_SOURCE,
+          // The snapshot page function applied to what pseudo.mjs read: JSON is
+          // a JavaScript expression, so the data is the call's argument.
+          snapshotOf: (pseudoData) => `${snapshot.SNAPSHOT_SOURCE}(${JSON.stringify(pseudoData)})`,
+          readPseudoElements: pseudo.readPseudoElements,
         };
       });
   }
@@ -322,7 +329,10 @@ function reportValidation(validationErrors, bypassValidation) {
 }
 
 // ─── summary ───────────────────────────────────────────────────────────
-function summarise(model, captures, preprocessResult, animations) {
+// `pseudoElements` is how many ::before and ::after pseudo.mjs read, and how
+// many of them the snapshot walked (a pseudo-element inside a picture, an
+// <svg>'s, is in that picture instead).
+function summarise(model, captures, preprocessResult, animations, pseudoData) {
   const kinds = {};
   let pictures = 0;
   let skippedPictures = 0;
@@ -338,6 +348,7 @@ function summarise(model, captures, preprocessResult, animations) {
       : null,
     animations,
     elements: model.stats.elements,
+    pseudoElements: { read: pseudoData.count, walked: model.stats.pseudoElements },
     kinds,
     pictures,
     skippedPictures,
@@ -366,6 +377,7 @@ async function renderSlide(htmlFile, pres, options = {}) {
     let model;
     let preprocessResult;
     let animations;
+    let pseudoData;
     let captures;
     try {
       const page = await browser.newPage({ viewport: SLIDE_VIEWPORT, deviceScaleFactor: DEVICE_SCALE_FACTOR });
@@ -377,7 +389,9 @@ async function renderSlide(htmlFile, pres, options = {}) {
       // transition a deck declares on it; finish that too before reading.
       await finishAnimations(page, sources);
       bodyDimensions = await readBodyDimensions(page, sources);
-      model = await page.evaluate(sources.snapshot);
+      // Read from the settled page the snapshot reads, just before it.
+      pseudoData = await sources.readPseudoElements(page);
+      model = await page.evaluate(sources.snapshotOf(pseudoData));
       // Capture id -> data: PNG for the targets the model names in model.captures,
       // taken from this page as the snapshot left it. A target without an entry
       // is a failed capture: its picture is skipped.
@@ -393,7 +407,7 @@ async function renderSlide(htmlFile, pres, options = {}) {
     ], bypassValidation);
 
     const slide = emitSlide(pres, model, captures);
-    return { slide, summary: summarise(model, captures, preprocessResult, animations) };
+    return { slide, summary: summarise(model, captures, preprocessResult, animations, pseudoData) };
   } catch (error) {
     if (!error.message.startsWith(htmlFile)) {
       throw new Error(`${htmlFile}: ${error.message}`);

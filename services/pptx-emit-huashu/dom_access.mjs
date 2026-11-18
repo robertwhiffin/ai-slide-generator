@@ -30,16 +30,24 @@
 // only stream pptx_from_html_huashu.py echoes into the app log. The guard at the
 // top fails the pass immediately when the prefix is missing, rather than at the
 // first bound that is met.
+//
+// The two bounds are exported as well, for Node-side readers of the same page
+// (pseudo.mjs reads its pseudo-elements through the DevTools protocol), so a
+// tree read from either side stops at the same depth and breadth.
+
+// Hard stop on any descent: eight times Chromium's parsed-depth ceiling (512), so only a lying realm reaches it.
+export const WALK_STEP_LIMIT = 4096;
+
+// The same guarantee for breadth: a slide holding a million nodes could not render at 1280x720.
+export const COLLECTION_ITEM_LIMIT = 1000000;
+
 export const DOM_ACCESS_SOURCE = `
   if (typeof DOM_ACCESS_LOG_PREFIX !== 'string') {
     throw new Error('DOM_ACCESS_SOURCE needs DOM_ACCESS_LOG_PREFIX declared before it');
   }
 
-  // Hard stop on any descent: eight times Chromium's parsed-depth ceiling (512), so only a lying realm reaches it.
-  const WALK_STEP_LIMIT = 4096;
-
-  // The same guarantee for breadth: a slide holding a million nodes could not render at 1280x720.
-  const COLLECTION_ITEM_LIMIT = 1000000;
+  const WALK_STEP_LIMIT = ${WALK_STEP_LIMIT};
+  const COLLECTION_ITEM_LIMIT = ${COLLECTION_ITEM_LIMIT};
 
   // DOM reads through primitives from a src-less iframe's realm, which no page script has run in.
   function capturePristineDomAccess() {
@@ -83,6 +91,8 @@ export const DOM_ACCESS_SOURCE = `
       // How the snapshot names its capture targets, once it has read everything (snapshot.mjs nameCaptureTargets).
       const setAttribute = realm.Element.prototype.setAttribute;
       const removeAttribute = realm.Element.prototype.removeAttribute;
+      // How the snapshot reads the marker the DevTools protocol put on each pseudo-element host (snapshot.mjs pseudoHostsOf).
+      const getAttribute = realm.Element.prototype.getAttribute;
       if (typeof firstChild.get !== 'function' ||
           typeof nextSibling.get !== 'function' ||
           typeof tag.get !== 'function' ||
@@ -105,7 +115,8 @@ export const DOM_ACCESS_SOURCE = `
           typeof rectWidth.get !== 'function' ||
           typeof rectHeight.get !== 'function' ||
           typeof setAttribute !== 'function' ||
-          typeof removeAttribute !== 'function') return null;
+          typeof removeAttribute !== 'function' ||
+          typeof getAttribute !== 'function') return null;
       return {
         pristine: true,
         firstElementChild: (el) => firstChild.get.call(el),
@@ -135,6 +146,7 @@ export const DOM_ACCESS_SOURCE = `
         }),
         setAttribute: (el, name, value) => setAttribute.call(el, name, value),
         removeAttribute: (el, name) => removeAttribute.call(el, name),
+        getAttribute: (el, name) => getAttribute.call(el, name),
       };
     } catch (e) {
       return null;
@@ -169,6 +181,7 @@ export const DOM_ACCESS_SOURCE = `
     rectBounds: (rect) => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height }),
     setAttribute: (el, name, value) => el.setAttribute(name, value),
     removeAttribute: (el, name) => el.removeAttribute(name),
+    getAttribute: (el, name) => el.getAttribute(name),
   };
 
   // One capture per pass, made on first use, so no pass re-enters the iframe per call.
