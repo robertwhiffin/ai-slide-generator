@@ -18,7 +18,7 @@ During development the new engine sits behind `TELLR_EXPORT_ENGINE=snapshot`, so
 **Spec:** `docs/superpowers/specs/2026-11-16-export-fidelity-snapshot-emit-design.md`. RC numbers and § references below point into it.
 
 **Branch and environment:**
-- All work is on `export-enhance`. Commits are authored as RickTY94 (the repo-local git config is already set) and end with `Co-authored-by: Isaac <no-reply@databricks.com>`. Push to `origin export-enhance`; never `main`; no PR until the owner asks.
+- All work is on `feat/export-revamp`. Commits are authored as RickTY94 (the repo-local git config is already set) and end with `Co-authored-by: Isaac <no-reply@databricks.com>`. Push to `origin feat/export-revamp`; never `main`; no PR until the owner asks.
 - Run `uv sync --extra dev` once in the repo root.
 - `TMP` in commands below is the job scratch directory, `/Users/tariq.yaaqba/.claude/jobs/937bacb3/tmp`. The local design-system corpus is `$TMP/ds_fixture`; it is never committed.
 - The sidecar's `node_modules` is extracted from `services/pptx-emit-huashu/node_modules.tar.gz` (gitignored). DM Sans and DM Mono static fonts are installed in `~/Library/Fonts`.
@@ -717,15 +717,15 @@ Follow `.claude/skills/deploy-tellr-dev/SKILL.md` exactly. The owner's account i
 
 - [ ] **Step 1:**
   ```bash
-  git push origin export-enhance
-  gh workflow run publish-dev.yml --ref export-enhance
+  git push origin feat/export-revamp
+  gh workflow run publish-dev.yml --ref feat/export-revamp
   ```
   Then `gh run list --workflow publish-dev.yml --limit 1`, then `gh run watch <id> --exit-status`. Confirm `200 OK` and `View at: https://pypi.org/project/databricks-tellr-app/<version>/` from `gh run view <id> --log`. Never gate on an index listing.
 - [ ] **Step 2:**
   ```bash
-  ./scripts/deploy_local.sh create --env devloop --instance export-enhance --profile fe-vm-tellr-dev --from-pypi <version>
+  ./scripts/deploy_local.sh create --env devloop --instance export-revamp --profile fe-vm-tellr-dev --from-pypi <version>
   ```
-  This is the first deploy, so `create`. Then `databricks apps get db-tellr-dev-export-enhance --profile fe-vm-tellr-dev -o json` until `app_status.state=RUNNING` and `active_deployment.status.state=SUCCEEDED`. A 502 from `/health` during the startup backfill is normal.
+  This is the first deploy, so `create`. Then `databricks apps get db-tellr-dev-export-revamp --profile fe-vm-tellr-dev -o json` until `app_status.state=RUNNING` and `active_deployment.status.state=SUCCEEDED`. A 502 from `/health` during the startup backfill is normal.
 - [ ] **Step 3:** In the deployed app, check that `/api/export/pptx/editable/huashu/available` reports available. Then generate decks with the corpus patterns:
   - a balance sheet with two tables;
   - a scorecard with Harvey balls;

@@ -1,6 +1,6 @@
 # Exports that match the UI: snapshot-then-emit for PPTX and Google Slides — design
 
-Date: 2026-11-16. Status: draft for owner review. Branch: `export-enhance`.
+Date: 2026-11-16. Status: draft for owner review. Branch: `feat/export-revamp`.
 
 Decisions are marked **(decided)** when the owner made them and **(my call)** when the
 designer made them and the owner has not yet confirmed them. Unmarked text describes the
@@ -222,7 +222,7 @@ the owner's call and outside this spec.
   cannot represent becomes a picture. **(decided)**
 - Charts are high-resolution pictures taken from the slide, with their titles, legends and
   labels as editable text. **(decided)**
-- All work happens on `export-enhance`: commits and pushes there, nothing on `main`, and no
+- All work happens on `feat/export-revamp`: commits and pushes there, nothing on `main`, and no
   PR until the owner asks. **(decided)**
 - The owner reviews this spec and then the plan before implementation. After that, the work
   runs autonomously through implementation, tests and the dev deploy. **(decided)**
@@ -490,7 +490,7 @@ Writes the model with pptxgenjs, choosing constructs that both PowerPoint and Dr
   - per-slide difference scores, with none worse than the baseline;
   - text-loss results;
   - a visual check of every root cause.
-- **Dev deploy.** A `.devN` built from `export-enhance` is published to PyPI and deployed to
+- **Dev deploy.** A `.devN` built from `feat/export-revamp` is published to PyPI and deployed to
   a dedicated `devloop` instance. There, fresh decks (balance sheet, scorecards, charts,
   timelines, architecture) are generated and exported to both formats, then checked by the
   owner by hand. The app is kept for at least a week.
