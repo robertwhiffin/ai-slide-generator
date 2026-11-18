@@ -12,7 +12,7 @@ Line numbers below were checked at the commit that last changed this page. If th
 |---|---|---|
 | `POST /api/chat/async` on an Agent deck (`engine_mode == "graph"`) | Yes | The only path this page covers. |
 | Legacy decks (`deck_mode = "legacy"`, engine `"monolith"`) | No | Unchanged. The monolith takes its old code path, apart from the accepted deltas in §11.6. |
-| MCP jobs | No | Their payload has no `engine_mode` key, so they run on the monolith (`job_queue.process_chat_request`). |
+| MCP turns (`create_deck`, `edit_deck`) | Yes | They are Agent decks. `create_deck` makes one with `deck_mode="agent"`, and both tools enter their turn through `enter_chat_turn`, the same Enter as the async route, so they get the lock binding, the snapshot and the rollback. Their payload carries `engine_mode` and no `mode` key. |
 | `POST /api/chat/stream` (SSE, dev only) | No | No request row, no snapshot, no fence. The synchronous `POST /api/chat` was retired (#382); `test_app_wiring` pins that it stays gone. |
 | The arc-review sweeper's own graph turns (`spec_sync.run_arc_review`) | No | No request id is bound, so the fence issues no SQL. |
 
@@ -79,7 +79,7 @@ turn_is_live(request_id) -> bool                                  # read-only, o
 - **The claim** is `UPDATE chat_requests SET status = status WHERE request_id = :rid AND status IN ('pending','running')`. It matches only while the turn is live, and it takes the row lock (on SQLite, the database write lock).
   - A rollback that cancels the row waits for any writer that has already claimed it.
   - A writer that arrives after the cancel matches nothing and raises `TurnFencedError`.
-- **No request id means no SQL.** This covers the explicit argument, the ContextVar and the checkpointer's config. That is why the monolith, MCP, SSE and the sweeper are untouched.
+- **No request id means no SQL.** This covers the explicit argument, the ContextVar and the checkpointer's config. That is why the monolith, SSE and the sweeper are untouched.
 - **`allow_completed=True`** also admits a `completed` turn. Only the title thread uses it, because a slow title can land just after completion. It still refuses `cancelled` and `error`.
 - **Where the request id comes from:**
   - Graph nodes, including the `Send`-fanned slide pipelines, read the ContextVar.
@@ -162,7 +162,7 @@ A stop and a completion race on the same claim: `seal_generation`, `complete_cha
 - **Acquire:** `acquire_session_lock` (`SELECT … FOR UPDATE`). The lock is stale after `SESSION_LOCK_TIMEOUT_SECONDS = 300`. `bind_session_lock` then records the owning request straight after `create_chat_request`.
 - **Release:**
   - A graph turn releases only a lock it still owns: `release_session_lock(session_id, request_id)`, one conditional UPDATE. The job's `finally` releases only if the turn started, and either it completed or its snapshot is gone. A `restore_failed` snapshot keeps the deck locked to its sender until the retry.
-  - The monolith and MCP release unconditionally, as before.
+  - The monolith releases unconditionally, as before.
 - **Refresh:** `refresh_job_session_locks_once` (every 60 s) refreshes each lock this process holds. A graph entry refreshes only while the lock is bound to its own request. The orphan sweep reads exactly this heartbeat.
 - **Rollback:** the rollback releases the lock, matched, in its own transaction. The exceptions are `RESTORE_FAILED` (kept) and `KEPT_NEWER_TURN` (the newer turn owns it).
 
@@ -361,7 +361,7 @@ One exception: a retry that follows an in-flight call starts without a check, so
 
 ### 11.6 Legacy-path deltas, accepted
 
-The monolith (Legacy decks, MCP) takes its old code path, with these deltas. Each was checked and ruled harmless; none changes what a Legacy turn writes.
+The monolith (Legacy decks) takes its old code path, with these deltas. Each was checked and ruled harmless; none changes what a Legacy turn writes.
 
 - **The session lock is bound on Legacy `/chat/async` too.** `bind_session_lock` records the owning request straight after `create_chat_request`, before the engine is known. Once bound, the submit's error exits release the lock matched on that request id instead of unconditionally, which is equivalent because this request holds it. The monolith job's own `finally` still releases unconditionally.
 - **`release_session_lock`** is one Core UPDATE that acts, and logs, only when `is_processing` is true.

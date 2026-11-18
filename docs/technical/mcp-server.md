@@ -12,7 +12,7 @@ tellr exposes its deck-generation capabilities as a set of Model Context Protoco
 
 - `create_deck` — turn a natural-language prompt into a new deck
 - `get_deck_status` — poll for completion and receive the deck payload
-- `edit_deck` — refine an existing deck (whole-deck or contiguous slide range)
+- `edit_deck` — ask the architect for a change to an existing deck, or a question about it
 - `get_deck` — re-read the current state of a deck on demand
 
 **When to use it.** Reach for the MCP endpoint when another app or agent needs to generate slides on a user's behalf — for example, a sales-enablement app that kicks off a deck from a CRM record, or an internal assistant that produces a briefing on request. Reach for the browser UI when a human wants to interactively compose, reorder, or export a deck.
@@ -99,6 +99,8 @@ Tellr accepts these identity headers as a third priority in `extract_mcp_identit
 
 **Your app should not send `Authorization` or `x-forwarded-access-token` on the outbound call — both will be stripped and sending them is misleading.** Just send the JSON-RPC body; the proxy adds identity headers automatically.
 
+**Data tools need a user token.** On this path `create_deck` seeds no tool that needs the user's token (no Genie One, even when the admin default is on), so the architect builds from the prompt alone and its `reply` may say which data would help. An `edit_deck` on a deck that already has data tools, for example a deck made in the Tellr app with Genie One, runs the turn without them: the graph skips a tool that has no user client and logs a warning, so the `reply` may say the data isn't available. Open the deck in Tellr to use its data tools.
+
 For a complete worked example (Streamlit app, ~150 lines), see **[MCP Integration Guide Part A](./mcp-integration-guide.md#2-part-a--databricks-app--tellr)**.
 
 #### B. External MCP client (Claude Code, Claude Desktop, Cursor, etc.)
@@ -133,18 +135,16 @@ Each tool subsection below mirrors the `@mcp.tool` descriptions in `src/api/mcp_
 
 ### 5.1 `create_deck`
 
-**Description.** Generate a new slide deck from a natural-language prompt. Returns a `session_id` and a `request_id`; the caller polls `get_deck_status` for completion. The resulting deck is attributed to the calling user and appears in their tellr UI. v1 runs prompt-only: the agent does not invoke Genie, Vector Search, or other tools. Callers that want data-backed decks should gather the data themselves and include it in the prompt.
+**Description.** Generate a new slide deck from a natural-language prompt. Returns a `session_id` and a `request_id`; the caller polls `get_deck_status` for completion. The resulting deck is attributed to the calling user and appears in their tellr UI. The deck is an Agent deck, created and entered through `enter_chat_turn` (the same Enter the browser's async chat route uses), so it runs on the graph. It gets the app's default tools for a new deck: Genie One is added when an admin turned on "Add Genie One to new decks" and the call carries a user token (a token-less app-to-app call gets no data tools; see section 4.2 A). Any slide count belongs in the prompt, for example "make 6 slides".
 
 **Input schema**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `prompt` | string | yes | Natural-language description of the deck. Any length; longer prompts with explicit slide-by-slide structure tend to work best. |
-| `num_slides` | integer (1–50) | no | Target slide count. The agent is not strictly constrained; treat as a hint. |
 | `design_system_id` | integer | no | ID of a design system. Supplies the full brand package — tokens, fonts, brand assets, named templates. Omit to use the **org default design system**, if one is set. |
 | `template_name` | string | no | Human-readable name of one of that design system's named templates (e.g. `"Executive Events"`). Pins the template, so the deck receives that template's own layout HTML and CSS instead of only a catalog of names and descriptions. Resolved only when a design system is in play; an unmatched name is logged and generation continues without a pin. |
 | `slide_style_id` | integer | no | ID of a `SlideStyle` row. **Supplying this suppresses the org default design system** — see the precedence note below. |
-| `deck_prompt_id` | integer | no | ID of a `DeckPrompt` row. Omit for default. |
 | `correlation_id` | string | no | Opaque ID echoed in server logs for cross-system trace correlation. |
 
 **Style precedence for MCP callers.** This is the MCP branch only; the mutual-exclusion invariant and the other entry paths are documented in [Design System Library §4](./design-system-library.md).
@@ -177,7 +177,6 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
     "name": "create_deck",
     "arguments": {
       "prompt": "a three-slide briefing on Q3 renewals with headline metrics and risk summary",
-      "num_slides": 3,
       "correlation_id": "briefing-app-4f2e"
     }
   }
@@ -201,9 +200,11 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
 | Error message | Cause | Fix |
 |---------------|-------|-----|
 | `prompt must be a non-empty string` | Empty or whitespace-only prompt | Send a meaningful prompt |
-| `num_slides must be between 1 and 50` | Out-of-range `num_slides` | Clamp at the caller |
 | `Authentication failed: ...` | Missing/invalid token | See section 4 |
-| `Session is currently processing another request` | Re-submit before previous job cleared the lock | Retry after a short backoff |
+| `Tellr can't generate decks right now: no active Graph Release. An admin needs to publish one.` | No active Graph Release, so an Agent deck can't be created | Ask a Tellr admin to publish one |
+| `Tellr is temporarily unavailable. Please retry.` | The deck's engine could not be resolved | Retry after a short backoff |
+
+A call that still sends `num_slides` or `deck_prompt_id` succeeds and the value is ignored.
 
 ### 5.2 `get_deck_status`
 
@@ -247,7 +248,9 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
   "html_document": "<!doctype html>...</html>",       // complete, render-ready
   "deck_url": "https://<your-tellr-app-url>/sessions/c4d8.../edit",
   "deck_view_url": "https://<your-tellr-app-url>/sessions/c4d8.../view",
-  "replacement_info": null,                              // populated for edit_deck
+  "replacement_info": null,                              // null on Agent turns (the graph produces none)
+  "reply": "Here's a starter deck...",                   // the turn's last assistant llm_response message, or null
+  "deck_changed": true,                                  // false when the turn left the deck unchanged
   "messages": [ { "role": "assistant", "content": "...",
                    "message_type": "reasoning", "created_at": "..." } ],
   "metadata": {
@@ -255,13 +258,16 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
     "latency_ms": 47213,
     "experiment_url": "https://.../mlflow/...",
     "session_title": "Q3 renewals briefing",
-    "clarification_needed": false,                       // true when the agent asked a question instead of editing
-    "clarification": null                                // the question text, when clarification_needed is true
+    "clarification_needed": false,                       // always the opposite of deck_changed
+    "clarification": null                                // when clarification_needed is true: the reply (Agent turn) or the question (Legacy turn)
   }
 }
 ```
 
-**`status: "ready"` does not mean the edit was applied.** When the agent decides it needs more information, it asks a question rather than changing the deck — and the turn still completes, so `status` is `"ready"` and `replacement_info` is `null`. **An automated caller must check `metadata.clarification_needed`**, not `status` alone, or it will report success for a turn in which nothing changed. `metadata.clarification` carries the question text to relay back to the user.
+**`status: "ready"` does not mean the deck changed.** The assistant may answer a question or ask for more information instead of editing, and the turn still completes, so `status` is `"ready"` and `replacement_info` is `null`. **An automated caller must check `deck_changed`**, not `status` alone, or it will report success for a turn in which nothing changed. `reply` is the assistant's final message of the turn (the turn's last message with role `assistant` and type `llm_response`, or `null`); show it to the user. `metadata.clarification_needed` is always the opposite of `deck_changed`. The other rules depend on the turn's engine:
+
+- **Agent turn** (every turn `create_deck` and `edit_deck` start): `deck_changed` is `true` when the architect built or edited the deck, and `false` when it answered, asked a question or proposed a design change. When `deck_changed` is `false`, `metadata.clarification` carries the reply. An Agent turn that predates this release has no recorded intent and reports `deck_changed: false`.
+- **Legacy turn** (a request on a Legacy deck, such as one MCP made before this release): `deck_changed` is `false` only when the assistant asked a clarifying question instead of editing (for example, which slide to change). `metadata.clarification` is that question, and `reply` may be `null`.
 
 **`messages` after a clear or a message delete.** If the session's chat has been cleared (`DELETE /api/sessions/{id}/context`), a poll for the deck's first request can return the row the clear kept, with `message_type: "engine_mode_marker"`. After a message is deleted (`DELETE /api/sessions/{id}/messages/{message_id}`), a poll for that turn's request returns no messages. When the deleted message was the deck's first, the poll returns only the kept row, typed `engine_mode_marker`, as after a clear. That row is hidden from every transcript read the UI uses but not from this per-request poll. It is harmless: callers can ignore rows of that type. The web UI offers Clear chat on every deck the user can edit, including decks created through `create_deck`.
 
@@ -276,7 +282,13 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
 }
 ```
 
-**Status values.** `pending` → `running` → `ready` is the happy path. A terminal `failed` is returned for agent errors, tool failures, or timeouts (see section 9). A running job that exceeds 10 minutes is swept to `failed` by the server-side timeout sweeper.
+A stopped generation also reports `failed`, with `"error": "This generation was stopped in Tellr. The deck is unchanged."`: a stop rolls the deck back to how it was when the turn started. If that rollback's restore failed, the error is the restore-pending copy instead (`This deck is still being restored after a failed generation. Try again in a minute.`): the deck stays locked until a retry restores it.
+
+**Stopping a turn.** There is no stop tool over MCP. The Tellr editor's stop sign appears only for a turn sent from that browser tab, so opening the deck in Tellr does not let anyone stop an MCP turn. Tellr's own stop route, `POST /api/chat/cancel/{request_id}`, stops a turn for its sender only (the creator of the deck session it ran in, which for an MCP turn is the caller). It is an app REST route, not an MCP tool, so it authenticates the way the app's other `/api` routes do.
+
+**Status values.** `pending` → `running` → `ready` is the happy path. A terminal `failed` is returned for agent errors, tool failures, timeouts or a stop (see section 10).
+
+**How long a turn can take.** Every turn `create_deck` and `edit_deck` start is an Agent turn, and an Agent turn may run for up to 20 minutes (`GRAPH_JOB_HARD_TIMEOUT_SECONDS = 1200`). Past that, the server-side timeout sweeper (it wakes every 60 seconds) marks it `failed` and rolls the deck back. The limit counts from when the turn starts running. Before that it waits as `pending` in the app's chat queue, which MCP turns share with people using the Tellr app (by default eight turns at a time per app process, `TELLR_CHAT_JOB_CONCURRENCY`), so expect `pending` for as long as the queue ahead of it. Give your client a deadline of at least 20 minutes plus the queue wait you expect, or poll without one and back off; a 10-minute deadline abandons builds that are still running fine.
 
 **Common errors**
 
@@ -288,20 +300,17 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
 
 ### 5.3 `edit_deck`
 
-**Description.** Refine an existing deck through a natural-language instruction. Optionally target specific contiguous slides via `slide_indices`. The edit is applied in-place; the `session_id` and `deck_url` stay stable across edits. Returns a `request_id`; the caller polls `get_deck_status` for completion and receives the updated deck plus `replacement_info` summarising what changed.
+**Description.** Ask Tellr's architect about an existing deck: either a change to make or a question about it. Name slides by number in the instruction (for example, "On slides 1 and 4, shorten the titles"). A change is made to this same deck, so the `session_id` and `deck_url` stay stable across edits; `get_deck_status`'s `deck_changed` says whether the turn changed it. Returns a `request_id`; the caller polls `get_deck_status` until it completes and shows the user the `reply` it returns, which is the architect's answer or a summary of what changed. Only the deck's owner can edit it over MCP, and only decks made in Agent mode.
 
 **Input schema**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `session_id` | string | yes | The deck to edit |
-| `instruction` | string | yes | Natural-language change request |
-| `slide_indices` | array of integers | no | Contiguous range (e.g., `[2, 3, 4]`); omit to target the whole deck |
+| `instruction` | string | yes | A change request or a question; name slides by number. Sent to the architect verbatim |
 | `correlation_id` | string | no | Echoed in server logs |
 
-**Contiguity constraint.** `slide_indices` must be a single contiguous slice. `[2, 3, 4]` is valid; `[2, 4]` raises `slide_indices must be contiguous (e.g. [2, 3, 4], not [2, 4])`. For disjoint edits, issue one call per slice.
-
-**Output schema.** Identical shape to `create_deck` — `{ session_id, request_id, status: "pending" }`. Poll `get_deck_status` to receive the updated deck. `replacement_info` on the ready response describes what changed (the same structure as `ChatResponse.replacement_info`).
+**Output schema.** Identical shape to `create_deck` — `{ session_id, request_id, status: "pending" }`. Poll `get_deck_status` to receive the updated deck and the `reply`.
 
 **Example request**
 
@@ -312,8 +321,7 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
     "name": "edit_deck",
     "arguments": {
       "session_id": "c4d8...",
-      "instruction": "Make the EMEA section more prominent and add Q3 vs Q2 deltas",
-      "slide_indices": [1, 2],
+      "instruction": "On slides 2 and 3, make the EMEA section more prominent and add Q3 vs Q2 deltas",
       "correlation_id": "briefing-app-4f2e"
     }
   }
@@ -324,9 +332,18 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
 
 | Error message | Cause | Fix |
 |---------------|-------|-----|
-| `Deck not found or you do not have permission to edit it` | Caller lacks `CAN_EDIT` on the deck | Use an identity that is the creator or a shared editor |
-| `slide_indices must be contiguous ...` | Non-contiguous indices | Split into multiple calls |
-| `slide_indices contains out-of-range index: ...` | Index ≥ `slide_count` or negative | Fetch `get_deck` first to confirm current count |
+| `Deck not found or you do not have permission to edit it` | Caller lacks `CAN_EDIT` on the deck | Call as the deck's owner (only the owner can edit it over MCP) |
+| `Only the deck's owner can edit it over MCP. Open it in Tellr to keep working on it: <url>` | Caller is a collaborator or contributor, not the deck's owner | Open the deck in Tellr, or call as the owner |
+| `This deck was made in Legacy mode and can't be edited over MCP. Open it in Tellr to keep working on it: <url>` | The deck is a Legacy (monolith) deck | Open the deck in Tellr |
+| `This deck is locked by <name>.` | Someone else's live generation holds the deck | Try again when it finishes |
+| `This deck is busy with another request. Try again when it finishes.` | The deck already has a turn running | Poll `get_deck_status`, then retry |
+| `Tellr is temporarily unavailable. Please retry.` | The deck's engine mode could not be resolved | Retry shortly |
+| `This deck is still being restored after a failed generation. Try again in a minute.` | An earlier turn's rollback failed to restore the deck, and the deck stays locked until a retry restores it | Try again in a minute |
+| `This deck is being updated in the background. Try again in a few seconds.` | An arc review holds the deck | Try again in a few seconds |
+| `This deck changed while you sent your message. Try again.` | Another message locked the deck's mode while this turn was being entered | Retry the call |
+| `Tellr can't generate decks right now: no active Graph Release. An admin needs to publish one.` | No active Graph Release | Ask a Tellr admin to publish one |
+
+A caller that still sends `slide_indices` is not rejected: the argument is ignored. Name the slides in the instruction instead.
 
 ### 5.4 `get_deck`
 
@@ -367,8 +384,8 @@ MCP cannot see per-user browser-side defaults (they live in `localStorage`), so 
 |------|----------------|----------|
 | `src/api/mcp_server.py` | Declares `FastMCP` instance; registers the four `@mcp.tool` handlers; builds request-scoped auth scope for each call. | `ChatService`, `SessionManager`, `PermissionService`, `job_queue` |
 | `src/api/mcp_auth.py` | Dual-token resolution: reads `x-forwarded-access-token` or `Authorization: Bearer`, calls `current_user.me()`, binds `current_user` / `user_client` / `permission_context` ContextVars. | Databricks SDK (`WorkspaceClient`) |
-| `src/api/main.py` | Mounts the FastMCP sub-app at `/mcp` with `streamable_http_path="/"`, and registers a path-rewrite middleware so external POSTs to `/mcp` (or `/mcp/`) route correctly. Starts the 10-minute timeout sweeper on lifespan. | `tellr_mcp.streamable_http_app()` |
-| `src/api/services/job_queue.py` | In-process asyncio queue for chat jobs. Timeout sweeper flips stuck `running` jobs to `failed` after `JOB_HARD_TIMEOUT_SECONDS = 600`. | `chat_requests` table |
+| `src/api/main.py` | Mounts the FastMCP sub-app at `/mcp` with `streamable_http_path="/"`, and registers a path-rewrite middleware so external POSTs to `/mcp` (or `/mcp/`) route correctly. Starts the job timeout sweeper (`mark_timed_out_jobs_loop`) on lifespan. | `tellr_mcp.streamable_http_app()` |
+| `src/api/services/job_queue.py` | In-process asyncio queue for chat jobs, drained by the chat runner pool the app and MCP share. The timeout sweeper marks a `running` job `failed` past its limit: `GRAPH_JOB_HARD_TIMEOUT_SECONDS = 1200` for an Agent turn (every MCP turn, which it also rolls back) and `JOB_HARD_TIMEOUT_SECONDS = 600` for a Legacy one. | `chat_requests` table |
 | `src/domain/slide_deck.py` | `SlideDeck.to_html_document()` emits the standalone HTML payload returned in `html_document`. CSS is sanitized; slide content is HTML-escaped to prevent XSS through MCP consumers. | — |
 | `src/services/permission_service.py` | `can_view_deck` / `can_edit_deck` checks used before every tool that touches a deck. Creator short-circuit lets a freshly created session be viewed/edited before any `DeckContributor` row exists. | `user_sessions`, `deck_contributors` |
 
@@ -426,8 +443,12 @@ r.raise_for_status()
 payload = json.loads(decode(r)["result"]["content"][0]["text"])
 session_id, request_id = payload["session_id"], payload["request_id"]
 
-# 4. poll get_deck_status (10-min deadline matches JOB_HARD_TIMEOUT_SECONDS)
-deadline = time.time() + 600
+# 4. poll get_deck_status. An Agent turn may run for 20 minutes
+#    (GRAPH_JOB_HARD_TIMEOUT_SECONDS) once it starts, and it waits "pending"
+#    while turns ahead of it in the queue run: allow for both, and back off.
+QUEUE_ALLOWANCE = 10 * 60          # raise it if your app's queue is busier
+deadline = time.time() + 20 * 60 + QUEUE_ALLOWANCE
+delay = 2
 while time.time() < deadline:
     r = httpx.post(MCP_URL, headers=mcp_headers, timeout=60, json={
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -442,9 +463,10 @@ while time.time() < deadline:
         break
     if status == "failed":
         raise RuntimeError(payload.get("error"))
-    time.sleep(2)
+    time.sleep(delay)
+    delay = min(delay * 1.5, 15)
 else:
-    raise TimeoutError("generation did not complete within 10 minutes")
+    raise TimeoutError("generation did not complete before the deadline")
 ```
 
 ### 7.2 Claude Code / Claude Desktop / Cursor
@@ -538,6 +560,7 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 | Topic | Practice |
 |-------|----------|
 | Polling cadence | Poll `get_deck_status` every 1–2 seconds with a small backoff if the server is under load. Do not poll faster than 500 ms — the endpoint is not optimised for sub-second polling and you will see the timeout sweeper cost in headroom. |
+| Poll deadline | Allow at least 20 minutes of running (`GRAPH_JOB_HARD_TIMEOUT_SECONDS`) plus the time the turn waits `pending` in the shared queue, or poll without a deadline and back off. The server ends a running turn within its limit (section 5.2). |
 | Error retry | Respect any `retry_after_seconds` hint on rate-limit responses; otherwise back off exponentially. `isError: true` on a tool result is *application* failure, not transport failure — do not retry blindly. |
 | Identity | Forward the end user's OBO token (section 4.2 recipe A) for any user-initiated flow — it is the recommended path and guarantees the deck surfaces to that user. Service-principal tokens are accepted and legitimate for batch / automation use cases, but the resulting deck is attributed to the SP and will not appear in any human user's tellr UI. |
 | Correlation IDs | Pass a `correlation_id` on every `create_deck` / `edit_deck` call. It flows through server logs, worker state, and the chat request row, making cross-system traces trivial. |
@@ -553,9 +576,10 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 | Symptom | Likely cause | What to try |
 |---------|--------------|-------------|
 | `401` / `Authentication failed` with a token that works elsewhere | Proxy or gateway stripped `Authorization` on the way in; or `x-forwarded-access-token` absent when the caller expected it | Log the exact headers the tellr process received; if you are running behind an extra proxy, ensure it preserves `Authorization` unmodified |
-| `status: running` never transitions to `ready` | Worker stuck or generation truly slow | The timeout sweeper automatically transitions stuck jobs to `failed` after 10 minutes (`JOB_HARD_TIMEOUT_SECONDS = 600s`) — no manual intervention needed. Once the job surfaces as `failed`, server logs (keyed on `correlation_id` / `request_id`) are the primary diagnosis surface; the tellr UI's Run Details link on the owning session also exposes the same information. Note: `metadata.experiment_url` only appears on *ready* responses — it is an observability aid for completed runs (MLflow traces, tool-call spans, latency breakdown), not a stuck-job probe. |
+| `status: running` never transitions to `ready` | Worker stuck or generation truly slow | The timeout sweeper automatically marks a turn `failed` (and rolls the deck back) once it has run for 20 minutes (`GRAPH_JOB_HARD_TIMEOUT_SECONDS = 1200`), counted from when it started running — no manual intervention needed. A turn that stays `pending` is waiting in the shared queue behind other turns. Once the job surfaces as `failed`, server logs (keyed on `correlation_id` / `request_id`) are the primary diagnosis surface; the tellr UI's Run Details link on the owning session also exposes the same information. Note: `metadata.experiment_url` only appears on *ready* responses — it is an observability aid for completed runs (MLflow traces, tool-call spans, latency breakdown), not a stuck-job probe. |
 | Deck generated via MCP does not appear in the tellr UI for the intended user | Caller forwarded a service-principal token, so the deck was attributed to the SP rather than the user | For user-initiated flows, switch to OBO forwarding (section 4.2 recipe A). SP-authenticated calls are accepted but the resulting deck is attributed to the SP — expected behavior for batch / automation use cases, but not what you want if a specific user needs the deck in their UI. |
-| `isError: true` with a "permission" message on `get_deck_status` / `edit_deck` / `get_deck` | Caller identity does not match the deck's `created_by` or any `DeckContributor` row | Check `created_by` on the session. Either call with that user's token or share the deck to the calling user via tellr's UI. |
+| `isError: true` with a "permission" message on `get_deck_status` / `get_deck` | Caller identity does not match the deck's `created_by` or any `DeckContributor` row | Check `created_by` on the session. Either call with that user's token or share the deck to the calling user via tellr's UI. |
+| `isError: true` with a "permission" or "Only the deck's owner" message on `edit_deck` | `edit_deck` is owner-only: the caller is not the deck's creator (sharing the deck does not help) | Call with the owner's token, or open the deck in Tellr. |
 | Chart.js fails to load in an air-gapped environment | Default CDN unreachable | See section 8.3 — rewrite the CDN URL through a proxy; v1.1 will expose `chart_js_cdn` as a tool parameter. |
 | `initialize` returns no `mcp-session-id` header | Expected — tellr runs stateless (see section 3). If the endpoint also returns HTML or non-JSON, the deployment did not pick up the MCP router; redeploy and confirm `app.mount("/mcp", ...)` ran by looking for `MCP server mounted at /mcp` in the app logs. |
 | Intermittent HTTP 404 `Session not found` from a multi-worker deployment | Only applies if FastMCP is running stateful (`stateless_http=False`); a 3-step handshake can split across workers that don't share session state | Leave tellr in its default stateless mode (section 3). If you've deliberately flipped it back, either pin to a single worker (`UVICORN_WORKERS=1`) or re-enable stateless. |
@@ -569,6 +593,7 @@ The `.slide` wrapper invariant is preserved — tellr never emits a slide withou
 |---------|---------------|-------|
 | v1.0 | 0.3.0 | Initial release. Four tools: `create_deck`, `get_deck_status`, `edit_deck`, `get_deck`. Dual-token auth. Prompt-only generation (no Genie / Vector Search / other tools). 10-minute hard timeout. |
 | v1.1 | 0.4.2 | `create_deck` accepts `design_system_id` and `template_name`. With neither it, nor `slide_style_id`, supplied, the org default design system applies. `get_deck_status` surfaces `metadata.clarification_needed` and `metadata.clarification`. |
+| Unreleased | Next release | Breaking for MCP callers. `create_deck` makes an Agent deck (pinned to the active Graph Release; a clear error when none is active) with the app's default tools for a new deck. `edit_deck` runs Agent turns for the deck's owner only, and refuses Legacy decks (every deck MCP made before this release) and collaborators with the deck's Tellr link. `get_deck_status` adds `reply` and `deck_changed`, and reports a stopped turn as `failed` with the stopped copy. `create_deck`'s `num_slides` and `deck_prompt_id` and `edit_deck`'s `slide_indices` are removed; a call that still sends one succeeds and the value is ignored. New time bound: a turn may run for 20 minutes (was 10), plus its wait in the shared queue. |
 | v1.1 (planned) | TBD | Export tools (`export_pptx`, `export_google_slides`), structural edit tools (reorder / insert / delete at slide granularity), `chart_js_cdn` passthrough. See the design spec's "Deferred items" section for the full list. |
 
 ---

@@ -32,14 +32,17 @@ Two SDK-specific gotchas to keep in mind when reading these tests:
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from contextlib import contextmanager
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+
+from src.api.routes.chat import EnteredTurn
 
 
 # FastMCP's streamable-HTTP transport mounts its route at "/", and
@@ -319,24 +322,24 @@ def test_create_deck_returns_pending(client, mock_identity_client):
 
     The MCP tool handler, mcp_auth_scope, and FastMCP's JSON-RPC routing
     all run for real. The session manager's ``create_session`` and the
-    job-queue ``enqueue_create_job`` are the only pieces stubbed, so a
+    chat route's ``enter_chat_turn`` (the Agent turn's Enter, which takes
+    the session lock and queues the job) are the only pieces stubbed, so a
     success return of ``{session_id, request_id, status: pending}``
     exercises the whole tool pipeline without touching Databricks or
     the LLM.
     """
     session_id = _initialize_session(client)
 
-    async def _fake_enqueue(**kwargs):
-        return "req-int-1"
-
     # ``get_session_manager`` returns a module-level singleton; patching
     # the name in ``mcp_server`` intercepts the call site inside
-    # ``_create_deck_impl``. ``enqueue_create_job`` is an async helper;
-    # we patch with ``side_effect`` so the coroutine is awaited correctly.
+    # ``_create_deck_impl``. ``enter_chat_turn`` is async and imported into
+    # ``mcp_server`` by name, so it is patched there as an AsyncMock that
+    # returns the ``EnteredTurn`` Enter would.
     with patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch(
-             "src.api.mcp_server.enqueue_create_job",
-             side_effect=_fake_enqueue,
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-int-1", engine_mode="graph"),
          ):
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-int-1"}
@@ -361,6 +364,143 @@ def test_create_deck_returns_pending(client, mock_identity_client):
     assert parsed["session_id"] == "sess-int-1"
     assert parsed["request_id"] == "req-int-1"
     assert parsed["status"] == "pending"
+
+
+def test_create_deck_ignores_a_removed_num_slides_argument(client, mock_identity_client):
+    """A caller still sending ``num_slides`` or ``deck_prompt_id`` gets a deck, and
+    neither value has any effect.
+
+    Both parameters are gone from ``create_deck``, and FastMCP drops undeclared
+    arguments, so the call succeeds through the real tool-call path. Success
+    alone would also hold for a still-declared parameter, so this also pins
+    what the call did: the new session's ``agent_config`` carries neither value
+    (the style defaults and the Genie One default are off, so it holds only the
+    empty tools list), and the prompt reaches Enter unchanged.
+    """
+    session_id = _initialize_session(client)
+    prompt = "integration deck about churn, in 4 slides"
+    created = []
+
+    def _create_session(*args, **kwargs):
+        created.append((args, copy.deepcopy(kwargs)))
+        return {"session_id": "sess-int-2"}
+
+    with patch("src.api.mcp_server.get_session_manager") as get_sm, \
+         patch("src.api.mcp_server.get_default_design_system_id", return_value=None), \
+         patch("src.api.mcp_server.get_default_slide_style_id", return_value=None), \
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-int-2", engine_mode="graph"),
+         ) as enter:
+        sm = MagicMock()
+        sm.create_session.side_effect = _create_session
+        get_sm.return_value = sm
+
+        resp = client.post(
+            MCP_PATH,
+            headers=_mcp_headers(session_id=session_id),
+            json=_jsonrpc(
+                "tools/call",
+                {
+                    "name": "create_deck",
+                    "arguments": {
+                        "prompt": prompt,
+                        "num_slides": 4,
+                        "deck_prompt_id": 2,
+                    },
+                },
+            ),
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = _decode_mcp_response(resp)
+    assert not _is_tool_error(body), f"tool reported error: {body!r}"
+    assert _parse_tool_result(body) == {
+        "session_id": "sess-int-2",
+        "request_id": "req-int-2",
+        "status": "pending",
+    }
+    assert created == [
+        (
+            (),
+            {
+                "created_by": "alice@example.com",
+                "agent_config": {"tools": []},
+                "deck_mode": "agent",
+            },
+        )
+    ]
+    enter.assert_awaited_once_with(
+        session_id="sess-int-2",
+        message=prompt,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
+
+
+def test_edit_deck_ignores_a_removed_slide_indices_argument(client, mock_identity_client):
+    """A caller still sending ``slide_indices`` gets its edit entered, and the
+    value has no effect.
+
+    ``slide_indices`` is gone from ``edit_deck`` (slides are named by number in
+    the instruction), and FastMCP drops undeclared arguments, so the call
+    succeeds through the real tool-call path, even with indices that the old
+    contiguity check refused. The caller (``alice@example.com``, from
+    ``mock_identity_client``) owns the Agent deck and no live generation holds
+    it. The instruction reaches Enter unchanged, with no slide context.
+    """
+    session_id = _initialize_session(client)
+    instruction = "  On slides 1 and 3, shorten the titles.\nKeep the subtitles.  "
+
+    sm = MagicMock()
+    sm.get_session.return_value = {
+        "session_id": "sess-int-3",
+        "created_by": "alice@example.com",
+        "is_contributor_session": False,
+    }
+    sm.live_generation_holder.return_value = None
+
+    with patch(
+        "src.api.mcp_server.permission_service.can_edit_deck", return_value=True
+    ), patch("src.api.mcp_server.get_session_manager", return_value=sm), patch(
+        "src.api.mcp_server.resolve_engine_mode_or_unavailable", return_value="graph"
+    ), patch(
+        "src.api.mcp_server.enter_chat_turn",
+        new_callable=AsyncMock,
+        return_value=EnteredTurn(request_id="req-int-3", engine_mode="graph"),
+    ) as enter:
+        resp = client.post(
+            MCP_PATH,
+            headers=_mcp_headers(session_id=session_id),
+            json=_jsonrpc(
+                "tools/call",
+                {
+                    "name": "edit_deck",
+                    "arguments": {
+                        "session_id": "sess-int-3",
+                        "instruction": instruction,
+                        "slide_indices": [0, 2],
+                    },
+                },
+            ),
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = _decode_mcp_response(resp)
+    assert not _is_tool_error(body), f"tool reported error: {body!r}"
+    assert _parse_tool_result(body) == {
+        "session_id": "sess-int-3",
+        "request_id": "req-int-3",
+        "status": "pending",
+    }
+    enter.assert_awaited_once_with(
+        session_id="sess-int-3",
+        message=instruction,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
 
 
 def test_rejects_request_without_auth(client):

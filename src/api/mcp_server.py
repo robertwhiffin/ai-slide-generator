@@ -24,8 +24,23 @@ from fastapi import Request
 from mcp.server.fastmcp import Context, FastMCP
 
 from src.api.mcp_auth import MCPAuthError, mcp_auth_scope
-from src.api.services.job_queue import enqueue_job, get_job_status
-from src.api.services.session_manager import get_session_manager
+from src.api.routes.chat import (
+    _GENERATION_REFUSED_DETAILS,
+    ENGINE_RACE_DETAIL,
+    EngineModeUnresolvedError,
+    EngineRaceError,
+    EnteredTurn,
+    SessionBusyError,
+    apply_new_deck_tool_defaults,
+    enter_chat_turn,
+)
+from src.api.services.chat_service import resolve_engine_mode_or_unavailable
+from src.api.services.job_queue import get_job_status
+from src.api.services.session_manager import (
+    DeckModeLockedError,
+    GenerationRefusedError,
+    get_session_manager,
+)
 from src.core.database import get_db_session
 from src.core.permission_context import get_permission_context
 from src.core.settings_db import (
@@ -34,7 +49,13 @@ from src.core.settings_db import (
     get_default_template_id,
 )
 from src.domain.slide_deck import SlideDeck
+from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
+from src.services.generation_rollback import RESTORE_PENDING_MESSAGE, RollbackResult
+from src.services.identity_provider import resolve_display_name
 from src.services.permission_service import get_permission_service
+from src.services.persisted_graph_release import (
+    PersistedConfigurationUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,113 +187,78 @@ class MCPToolError(Exception):
     """
 
 
-# ---------------------------------------------------------------------------
-# Async submission helper
-# ---------------------------------------------------------------------------
+MCP_LEGACY_DECK_ERROR = (
+    "This deck was made in Legacy mode and can't be edited over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+MCP_OWNER_ONLY_ERROR = (
+    "Only the deck's owner can edit it over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+MCP_SESSION_BUSY_ERROR = (
+    "This deck is busy with another request. Try again when it finishes."
+)
+MCP_DECK_LOCKED_ERROR = "This deck is locked by {name}."
+MCP_NO_GRAPH_RELEASE_ERROR = (
+    "Tellr can't generate decks right now: no active Graph Release. "
+    "An admin needs to publish one."
+)
+MCP_UNAVAILABLE_ERROR = "Tellr is temporarily unavailable. Please retry."
+MCP_ENGINE_RACE_ERROR = ENGINE_RACE_DETAIL
+MCP_STOPPED_ERROR = "This generation was stopped in Tellr. The deck is unchanged."
 
 
-async def enqueue_create_job(
-    session_id: str,
-    prompt: str,
-    mode: str = "generate",
-    slide_context: Optional[dict] = None,
-    correlation_id: Optional[str] = None,
-) -> str:
-    """Submit a generate or edit job to tellr's existing chat async queue.
+def _deck_edit_url(session_id: str, *, base_url: Optional[str] = None) -> str:
+    """The Tellr editor URL for a deck (relative when no public base URL is set).
 
-    Mirrors the behaviour of ``POST /api/chat/async`` without re-using the
-    FastAPI route so the MCP call path stays framework-free: the route
-    depends on ``ChatRequest`` (Pydantic) and ``get_db`` (FastAPI), neither
-    of which is natural to call from a FastMCP tool handler. Instead we
-    invoke the underlying primitives directly:
-
-    1. Acquire the session processing lock.
-    2. Create a ``ChatRequest`` row (returns ``request_id``).
-    3. Persist the user's prompt as a ``session_messages`` row so the
-       chat history reflects the MCP call.
-    4. Enqueue the payload on the in-memory job queue; the worker picks
-       it up and runs the agent via ``ChatService.send_message_streaming``.
-
-    Tests patch this helper at a single call site rather than patching
-    the four primitives above, keeping the tool handler test focused on
-    the handler's own logic. Returns the generated ``request_id``.
-
-    Raises:
-        MCPToolError: If the session is already processing another request.
+    The one writer of this URL: the error copy and ``_render_deck_response``'s
+    ``deck_url`` both come from here. ``base_url`` defaults to
+    ``_public_app_url()``; a caller that already read it passes it in.
     """
-    session_manager = get_session_manager()
+    if base_url is None:
+        base_url = _public_app_url()
+    return f"{base_url}/sessions/{session_id}/edit"
 
-    # The caller is already authenticated and their identity is bound on
-    # the request-scoped ContextVars by mcp_auth_scope (see mcp_auth.py).
-    # create_chat_request's ``created_by`` kwarg is only consulted on the
-    # auto-create branch of SessionManager.create_chat_request; by the
-    # time we get here the session already exists (the tool handler created
-    # it just before calling this helper), so passing None is correct.
-    from src.core.user_context import get_current_user
 
-    locked = await asyncio.to_thread(
-        session_manager.acquire_session_lock, session_id
-    )
-    if not locked:
-        raise MCPToolError(
-            "Session is currently processing another request"
-        )
+async def _enter_turn_or_tool_error(
+    *,
+    session_id: str,
+    message: str,
+    correlation_id: Optional[str],
+) -> str:
+    """Enter an Agent turn for ``session_id`` and return its request id.
 
+    Goes through ``enter_chat_turn``, the same Enter the async chat route uses,
+    and turns each refusal into a tool error with its user-facing copy. Anything
+    unmapped propagates to the calling tool's own ``except Exception``.
+    """
     try:
-        request_id = await asyncio.to_thread(
-            session_manager.create_chat_request,
-            session_id,
-            get_current_user(),
-        )
-
-        # Match the /api/chat/async flow: capture first-message flag BEFORE
-        # persisting the user message (add_message increments message_count).
-        session_data = await asyncio.to_thread(
-            session_manager.get_session, session_id
-        )
-        is_first_message = session_data.get("message_count", 0) == 0
-
-        # Persist the user's prompt so MCP-initiated sessions have a chat
-        # transcript identical in shape to browser-initiated ones.
-        #
-        # MCP stays on the legacy monolith (its worker payload carries no engine
-        # key, and the graph's one-shot path, spec §6.4, is not built).
-        # create_deck stores that on the session it creates (deck_mode="legacy"),
-        # so no prompt has to say it: every prompt, create or edit, is persisted
-        # verbatim.
-        await asyncio.to_thread(
-            session_manager.add_message,
+        entered: EnteredTurn = await enter_chat_turn(
             session_id=session_id,
-            role="user",
-            content=prompt,
-            message_type="user_query",
-            request_id=request_id,
+            message=message,
+            requested_deck_mode="agent",
+            extra_payload={"correlation_id": correlation_id},
         )
-
-        await enqueue_job(
-            request_id,
-            {
-                "session_id": session_id,
-                "message": prompt,
-                "slide_context": slide_context,
-                "is_first_message": is_first_message,
-                "image_ids": None,
-                # Forward-looking: mode and correlation_id flow into the
-                # payload so the worker (and logs) can see them even
-                # though v1 only executes generate-mode jobs.
-                "mode": mode,
-                "correlation_id": correlation_id,
-            },
-        )
-
-        return request_id
-    except Exception:
-        # Ensure the session lock is released on any failure before the
-        # worker gets a chance to see the job (matches /api/chat/async).
-        await asyncio.to_thread(
-            session_manager.release_session_lock, session_id
-        )
+    except SessionBusyError as e:
+        raise MCPToolError(MCP_SESSION_BUSY_ERROR) from e
+    except GenerationRefusedError as e:
+        if e.reason == GenerationRefusedError.GENERATION_IN_FLIGHT:
+            name = await asyncio.to_thread(resolve_display_name, e.holder)
+            raise MCPToolError(MCP_DECK_LOCKED_ERROR.format(name=name)) from e
+        raise MCPToolError(_GENERATION_REFUSED_DETAILS[e.reason]) from e
+    except EngineRaceError as e:
+        raise MCPToolError(MCP_ENGINE_RACE_ERROR) from e
+    except EngineModeUnresolvedError as e:
+        raise MCPToolError(MCP_UNAVAILABLE_ERROR) from e
+    except ActiveGraphReleaseUnavailableError as e:
+        raise MCPToolError(MCP_NO_GRAPH_RELEASE_ERROR) from e
+    except DeckModeLockedError as e:
+        if e.deck_mode == "legacy":
+            raise MCPToolError(
+                MCP_LEGACY_DECK_ERROR.format(deck_url=_deck_edit_url(session_id))
+            ) from e
         raise
+    return entered.request_id
 
 
 # ---------------------------------------------------------------------------
@@ -408,10 +394,10 @@ def _resolve_template_name(design_system_id: int, template_name: str) -> Optiona
         "Generate a new slide deck from a natural-language prompt. Returns a "
         "session_id and a request_id; the caller polls get_deck_status for "
         "completion. The resulting deck is attributed to the calling user and "
-        "appears in their tellr UI. v1 runs prompt-only: the agent does not "
-        "invoke Genie, Vector Search, or other tools. Callers that want data-"
-        "backed decks should gather the data themselves and include it in the "
-        "prompt. The deck uses the org-default design system unless "
+        "appears in their tellr UI. It is an Agent deck with the app's default "
+        "tools for a new deck (for example Genie One, when an admin turned that "
+        "default on). Any slide count belongs in the prompt, for example "
+        "'make 6 slides'. The deck uses the org-default design system unless "
         "design_system_id or slide_style_id says otherwise; pass template_name "
         "to pin one of that design system's named templates (otherwise the "
         "model picks the best-matching one)."
@@ -420,21 +406,17 @@ def _resolve_template_name(design_system_id: int, template_name: str) -> Optiona
 async def create_deck(
     ctx: Context,
     prompt: str,
-    num_slides: Optional[int] = None,
     slide_style_id: Optional[int] = None,
     design_system_id: Optional[int] = None,
     template_name: Optional[str] = None,
-    deck_prompt_id: Optional[int] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
     return await _create_deck_impl(
         request=_request_from_context(ctx),
         prompt=prompt,
-        num_slides=num_slides,
         slide_style_id=slide_style_id,
         design_system_id=design_system_id,
         template_name=template_name,
-        deck_prompt_id=deck_prompt_id,
         correlation_id=correlation_id,
     )
 
@@ -442,11 +424,9 @@ async def create_deck(
 async def _create_deck_impl(
     request: Request,
     prompt: str,
-    num_slides: Optional[int] = None,
     slide_style_id: Optional[int] = None,
     design_system_id: Optional[int] = None,
     template_name: Optional[str] = None,
-    deck_prompt_id: Optional[int] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
     """Implementation, separated from the decorated tool for testability."""
@@ -454,8 +434,6 @@ async def _create_deck_impl(
         raise MCPToolError("prompt must be a non-empty string")
     if MCP_PROMPT_LIMIT is not None and len(prompt) > MCP_PROMPT_LIMIT:
         raise MCPToolError(f"prompt is too long (max {MCP_PROMPT_LIMIT} characters)")
-    if num_slides is not None and not (1 <= num_slides <= 50):
-        raise MCPToolError("num_slides must be between 1 and 50")
     # Same inbound prompt-injection guard as the browser chat endpoints (AISEC-248).
     from src.utils.pi_filter import scan_for_injection
     injection_matches = scan_for_injection(prompt)
@@ -517,19 +495,26 @@ async def _create_deck_impl(
                         "require a design system and none is selected",
                         template_name,
                     )
-            if deck_prompt_id is not None:
-                agent_config["deck_prompt_id"] = deck_prompt_id
-            if num_slides is not None:
-                agent_config["num_slides"] = num_slides
+
+            # The app's new-deck tool defaults, as the browser seeds them. A
+            # caller with no token can't use a tool, so it gets none.
+            apply_new_deck_tool_defaults(
+                agent_config,
+                client_set_fields=(
+                    frozenset({"tools"}) if identity.token is None else frozenset()
+                ),
+            )
 
             session_manager = get_session_manager()
-            session = session_manager.create_session(
-                created_by=identity.user_name,
-                agent_config=agent_config,
-                # Legacy deck: unpinned, and locked to the monolith from creation.
-                graph_capable=False,
-                deck_mode="legacy",
-            )
+            try:
+                session = session_manager.create_session(
+                    created_by=identity.user_name,
+                    agent_config=agent_config,
+                    # An Agent deck: deck_mode="agent" pins the active Graph Release.
+                    deck_mode="agent",
+                )
+            except ActiveGraphReleaseUnavailableError as e:
+                raise MCPToolError(MCP_NO_GRAPH_RELEASE_ERROR) from e
             # create_session returns a dict (see SessionManager.create_session);
             # guard against a model-object return defensively so this stays
             # robust if the service ever switches to returning a Pydantic model.
@@ -539,11 +524,9 @@ async def _create_deck_impl(
                 else session.session_id
             )
 
-            request_id = await enqueue_create_job(
+            request_id = await _enter_turn_or_tool_error(
                 session_id=session_id,
-                prompt=prompt,
-                mode="generate",
-                slide_context=None,
+                message=prompt,
                 correlation_id=correlation_id,
             )
 
@@ -637,11 +620,7 @@ def _render_deck_response(
     else:
         deck = SlideDeck(title=session.get("title"))
 
-    deck_url = (
-        f"{base_url}/sessions/{session_id}/edit"
-        if base_url
-        else f"/sessions/{session_id}/edit"
-    )
+    deck_url = _deck_edit_url(session_id, base_url=base_url)
     deck_view_url = (
         f"{base_url}/sessions/{session_id}/view"
         if base_url
@@ -669,9 +648,18 @@ def _render_deck_response(
         "lightweight status while pending/running; when ready, returns the "
         "complete deck as structured slide data, a standalone HTML "
         "document, and URLs into tellr's full editor and view-only surfaces. "
-        "A ready turn is not always an applied change: when "
-        "metadata.clarification_needed is true the deck was left UNCHANGED and "
-        "metadata.clarification carries the question to answer before retrying."
+        "A ready turn may leave the deck UNCHANGED (the assistant may "
+        "answer or ask a question instead of editing). Show `reply` (the "
+        "assistant's final message of the turn) to the user; `deck_changed` "
+        "says whether the deck was modified, and "
+        "metadata.clarification_needed is always its opposite. On an Agent "
+        "turn (every turn create_deck and edit_deck start), "
+        "metadata.clarification repeats the reply when deck_changed is false, "
+        "and a turn with no recorded intent reports deck_changed false. On a "
+        "Legacy turn, deck_changed is false only when the assistant asked a "
+        "clarifying question instead of editing: metadata.clarification is "
+        "that question, and reply may be null. A stopped generation reports "
+        "status failed."
     ),
 )
 async def get_deck_status(
@@ -769,6 +757,32 @@ async def _get_deck_status_impl(
                     "progress": None,
                 }
 
+            if db_status == "cancelled":
+                # Only a stop (``cancel_chat``, by the request's sender) writes
+                # ``cancelled``; timeouts and orphan sweeps write ``error``.
+                if (
+                    chat_request.get("rollback_outcome")
+                    == RollbackResult.RESTORE_FAILED.value
+                ):
+                    # The stop's restore failed: the deck may still hold the
+                    # turn's changes and stays locked until a retry restores
+                    # it, so it is not "unchanged". Report the request's own
+                    # restore-pending copy until a retry settles the request
+                    # (it then records the final outcome and clears the copy).
+                    return {
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "status": "failed",
+                        "error": chat_request.get("error_message")
+                        or RESTORE_PENDING_MESSAGE,
+                    }
+                return {
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "status": "failed",
+                    "error": MCP_STOPPED_ERROR,
+                }
+
             if db_status == "error":
                 return {
                     "session_id": session_id,
@@ -817,33 +831,60 @@ async def _get_deck_status_impl(
                 for m in db_messages
             ]
 
-            # WG2-01. An edit instruction that names no slide is DELIBERATELY not
-            # applied: chat_service asks which slide instead (its RC10 twins, plus the
-            # ambiguous add-vs-replace pair) and attaches ``clarification_needed`` to
-            # the COMPLETE event, which ``job_queue.process_chat_request`` copies
-            # verbatim into ``result["metadata"]``.
-            #
-            # Such a turn completes normally, so "ready" is the honest status and
-            # ``replacement_info`` is None — which is indistinguishable from an edit
-            # that applied but replaced nothing. Rebuilding ``metadata`` from
-            # hand-picked keys DROPPED the flag, so an automated caller reading
-            # ``status`` concluded the edit had landed when the deck was untouched; the
-            # only remaining trace was a ``message_type == "clarification"`` row in the
-            # transcript. Surfaced ADDITIVELY, and ``status`` keeps its existing meaning
-            # for clients already reading it.
-            clarification_needed = bool(result_metadata.get("clarification_needed"))
-            clarification = None
-            if clarification_needed:
-                # The question itself, so a caller can act on it without re-filtering
-                # the transcript. Last one wins: it is the turn's most recent ask.
-                clarification = next(
-                    (
-                        message.get("content")
-                        for message in reversed(messages)
-                        if message.get("message_type") == "clarification"
-                    ),
-                    None,
+            # ``reply``: the turn's last assistant ``llm_response`` row, for both
+            # engines (a graph turn writes it only from architect code).
+            reply = next(
+                (
+                    message.get("content")
+                    for message in reversed(messages)
+                    if message.get("role") == "assistant"
+                    and message.get("message_type") == "llm_response"
+                ),
+                None,
+            )
+
+            if result_metadata.get("engine_mode") == "graph":
+                # Agent turn: the architect's intent says whether the deck
+                # changed. ``discuss`` / ``confirm_design_contract`` return
+                # before any deck write, so the reply is the answer or question
+                # and is surfaced as the clarification. A missing intent is
+                # reported as unchanged (pre-pass Ruling 2: such a result comes
+                # only from an app turn made before this release).
+                deck_changed = result_metadata.get("architect_intent") in (
+                    "build",
+                    "edit",
                 )
+                clarification_needed = not deck_changed
+                clarification = reply if clarification_needed else None
+            else:
+                # WG2-01 (Legacy results, which carry no ``engine_mode``). An
+                # edit instruction that names no slide is DELIBERATELY not
+                # applied: chat_service asks which slide instead (its RC10 twins,
+                # plus the ambiguous add-vs-replace pair) and attaches
+                # ``clarification_needed`` to the COMPLETE event, which
+                # ``job_queue.process_chat_request`` copies verbatim into
+                # ``result["metadata"]``.
+                #
+                # Such a turn completes normally, so "ready" is the honest status
+                # and ``replacement_info`` is None, which is indistinguishable
+                # from an edit that applied but replaced nothing. Surfaced
+                # ADDITIVELY, and ``status`` keeps its existing meaning.
+                clarification_needed = bool(
+                    result_metadata.get("clarification_needed")
+                )
+                deck_changed = not clarification_needed
+                clarification = None
+                if clarification_needed:
+                    # The question itself, so a caller can act on it without
+                    # re-filtering the transcript. Last one wins.
+                    clarification = next(
+                        (
+                            message.get("content")
+                            for message in reversed(messages)
+                            if message.get("message_type") == "clarification"
+                        ),
+                        None,
+                    )
 
             return {
                 "session_id": session_id,
@@ -851,6 +892,8 @@ async def _get_deck_status_impl(
                 "status": "ready",
                 **deck_fields,
                 "replacement_info": result.get("replacement_info"),
+                "reply": reply,
+                "deck_changed": deck_changed,
                 "messages": messages,
                 "metadata": {
                     "tool_calls": result_metadata.get("tool_calls"),
@@ -876,52 +919,66 @@ async def _get_deck_status_impl(
 # ---------------------------------------------------------------------------
 
 
-def _check_contiguous(indices: list[int]) -> None:
-    """Raise MCPToolError unless indices form a contiguous run.
+def _require_agent_deck_owner(session_id: str, user_name: str) -> None:
+    """Refuse unless ``user_name`` owns an Agent deck nobody else is generating on.
 
-    The edit pipeline's ``_parse_slide_replacements`` / ``_apply_slide_
-    replacements`` helpers assume the caller-supplied slide range is a
-    single contiguous slice so replacement output can be spliced back in
-    at a single index. Callers that want to edit disjoint slides should
-    issue one ``edit_deck`` call per slice.
+    Mirrors the app route's owner and live-generation gate
+    (``_check_chat_permission(gate_owner_on_generation=True)``), so an MCP edit
+    cannot do what the same user in the app could not. Collaborators edit in the
+    Tellr app, not over MCP.
     """
-    if not indices:
-        return
-    sorted_idx = sorted(indices)
-    for a, b in zip(sorted_idx, sorted_idx[1:]):
-        if b - a != 1:
-            raise MCPToolError(
-                "slide_indices must be contiguous (e.g. [2, 3, 4], not [2, 4])"
-            )
+    session_manager = get_session_manager()
+    session_info = session_manager.get_session(session_id)
+    if session_info.get("created_by") != user_name or session_info.get(
+        "is_contributor_session", False
+    ):
+        raise MCPToolError(
+            MCP_OWNER_ONLY_ERROR.format(deck_url=_deck_edit_url(session_id))
+        )
+
+    try:
+        engine_mode = resolve_engine_mode_or_unavailable(session_id)
+    except PersistedConfigurationUnavailableError as e:
+        raise MCPToolError(MCP_UNAVAILABLE_ERROR) from e
+    if engine_mode == "monolith":
+        raise MCPToolError(
+            MCP_LEGACY_DECK_ERROR.format(deck_url=_deck_edit_url(session_id))
+        )
+
+    # Only a LIVE generation by someone else blocks the owner (an idle
+    # contributor's heartbeat lock never does).
+    holder = session_manager.live_generation_holder(session_id, live_only=True)
+    if holder and holder != user_name:
+        raise MCPToolError(
+            MCP_DECK_LOCKED_ERROR.format(name=resolve_display_name(holder))
+        )
 
 
 @mcp.tool(
     name="edit_deck",
     description=(
-        "Refine an existing deck through a natural-language instruction. "
-        "Optionally target specific contiguous slides via slide_indices. "
-        "The edit is applied in-place; the session_id and deck_url stay "
-        "stable across edits. Returns a request_id; the caller polls "
-        "get_deck_status for completion and receives the updated deck "
-        "plus replacement_info summarizing what changed. An instruction that "
-        "identifies no slide — neither via slide_indices nor by naming one in "
-        "the text — is answered with a clarifying question INSTEAD of an edit: "
-        "get_deck_status then reports metadata.clarification_needed with the "
-        "deck unchanged."
+        "Ask Tellr's architect about an existing deck: either a change to make "
+        "or a question about it. Name slides by number in the instruction "
+        "(e.g. \"On slides 1 and 4, shorten the titles\"). A change is made to "
+        "this same deck, so the session_id and deck_url stay stable; "
+        "get_deck_status's deck_changed says whether the turn changed it. "
+        "Returns a request_id; poll get_deck_status until it completes, and show the "
+        "user the `reply` it returns, which is the architect's answer or a "
+        "summary of what changed. Only the deck's owner can edit it over MCP, "
+        "and only decks made in Agent mode; for anything else, open the deck "
+        "in Tellr."
     ),
 )
 async def edit_deck(
     ctx: Context,
     session_id: str,
     instruction: str,
-    slide_indices: Optional[list[int]] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
     return await _edit_deck_impl(
         request=_request_from_context(ctx),
         session_id=session_id,
         instruction=instruction,
-        slide_indices=slide_indices,
         correlation_id=correlation_id,
     )
 
@@ -930,20 +987,13 @@ async def _edit_deck_impl(
     request: Request,
     session_id: str,
     instruction: str,
-    slide_indices: Optional[list[int]] = None,
     correlation_id: Optional[str] = None,
 ) -> dict:
     """Implementation, separated from the decorated tool for testability.
 
-    Reuses ``enqueue_create_job`` with ``mode="edit"`` so the worker
-    dispatches to the existing ChatService edit path (slide_context
-    present => editing_mode in ``agent.chat_async_streaming``). When
-    ``slide_indices`` is provided we pull the current slide HTMLs via
-    ``SessionManager.get_slide_deck`` and bundle them into the
-    ``slide_context`` dict the agent's ``_format_slide_context`` helper
-    expects (``{"indices": [...], "slide_htmls": [...]}``). Without
-    ``slide_indices`` the job is submitted with ``slide_context=None``
-    — still edit-mode, but the agent will operate against the full deck.
+    Enters an Agent turn on the caller's own deck with the instruction verbatim
+    (``_enter_turn_or_tool_error``). The owner and Agent-mode checks run first,
+    so a refused edit writes nothing.
     """
     if not instruction or not instruction.strip():
         raise MCPToolError("instruction must be a non-empty string")
@@ -963,8 +1013,6 @@ async def _edit_deck_impl(
         raise MCPToolError(
             "instruction was blocked because it resembles a prompt-injection attempt"
         )
-    if slide_indices is not None:
-        _check_contiguous(slide_indices)
 
     try:
         with mcp_auth_scope(request) as identity:
@@ -973,37 +1021,17 @@ async def _edit_deck_impl(
                     "Deck not found or you do not have permission to edit it"
                 )
 
-            slide_context: Optional[dict] = None
-            if slide_indices:
-                sm = get_session_manager()
-                deck = sm.get_slide_deck(session_id)
-                if deck is None:
-                    raise MCPToolError(
-                        f"Deck not found for session_id: {session_id}"
-                    )
-                all_slides = deck.get("slides") or []
-                try:
-                    slide_htmls = [
-                        all_slides[i]["html"] for i in slide_indices
-                    ]
-                except IndexError as e:
-                    raise MCPToolError(
-                        f"slide_indices contains out-of-range index: {e}"
-                    ) from e
-                except (TypeError, KeyError) as e:
-                    raise MCPToolError(
-                        f"Failed to read slide html at index: {e}"
-                    ) from e
-                slide_context = {
-                    "indices": slide_indices,
-                    "slide_htmls": slide_htmls,
-                }
+            # Off the event loop, as the app route's gate is: it reads the DB
+            # and, on a locked deck, may make a SCIM display-name call (cached
+            # per process only after a name's first lookup). ``to_thread``
+            # copies the ContextVars ``mcp_auth_scope`` bound.
+            await asyncio.to_thread(
+                _require_agent_deck_owner, session_id, identity.user_name
+            )
 
-            request_id = await enqueue_create_job(
+            request_id = await _enter_turn_or_tool_error(
                 session_id=session_id,
-                prompt=instruction,
-                mode="edit",
-                slide_context=slide_context,
+                message=instruction,
                 correlation_id=correlation_id,
             )
 
@@ -1015,7 +1043,6 @@ async def _edit_deck_impl(
                     "session_id": session_id,
                     "request_id": request_id,
                     "user_name": identity.user_name,
-                    "slide_indices": slide_indices,
                     "correlation_id": correlation_id,
                 },
             )

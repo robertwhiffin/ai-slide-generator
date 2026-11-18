@@ -6,9 +6,13 @@ tests/integration/test_mcp_endpoint.py (added in Task 11).
 """
 
 import base64
+import copy
+import inspect
 import json
+import re
+import threading
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -17,7 +21,21 @@ from sqlalchemy.pool import StaticPool
 
 import src.database.models  # noqa: F401 - register models with Base.metadata
 from src.api.mcp_auth import MCPIdentity
+from src.api.routes import chat as chat_routes
+from src.api.routes.chat import (
+    EngineModeUnresolvedError,
+    EngineRaceError,
+    EnteredTurn,
+    SessionBusyError,
+)
+from src.api.schemas.agent_config import GenieOneTool
+from src.api.services.session_manager import (
+    DeckModeLockedError,
+    GenerationRefusedError,
+    SessionNotFoundError,
+)
 from src.core.database import Base
+from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 
 
 @pytest.fixture
@@ -108,7 +126,12 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-777", engine_mode="graph"),
+         ) as enter:
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -117,17 +140,10 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
         sm.create_session.return_value = mock_session
         get_sm.return_value = sm
 
-        async def _fake_enqueue(**kwargs):
-            return "req-777"
-
-        enqueue.side_effect = _fake_enqueue
-
         result = await mcp_server._create_deck_impl(
             request=fake_request,
             prompt="make a deck about Q3",
-            num_slides=7,
             slide_style_id=4,
-            deck_prompt_id=2,
             correlation_id="vibe-xyz",
         )
 
@@ -137,14 +153,11 @@ async def test_create_deck_creates_session_and_submits_job(fake_request, identit
         agent_config = create_kwargs["agent_config"]
         assert agent_config["tools"] == []
         assert agent_config["slide_style_id"] == 4
-        assert agent_config["deck_prompt_id"] == 2
-        assert agent_config["num_slides"] == 7
 
-        enqueue.assert_called_once()
-        assert enqueue.call_args.kwargs["session_id"] == "sess-123"
-        assert enqueue.call_args.kwargs["prompt"] == "make a deck about Q3"
-        assert enqueue.call_args.kwargs["mode"] == "generate"
-        assert enqueue.call_args.kwargs["correlation_id"] == "vibe-xyz"
+        enter.assert_awaited_once()
+        assert enter.await_args.kwargs["session_id"] == "sess-123"
+        assert enter.await_args.kwargs["message"] == "make a deck about Q3"
+        assert enter.await_args.kwargs["extra_payload"] == {"correlation_id": "vibe-xyz"}
 
         assert result == {
             "session_id": "sess-123",
@@ -169,7 +182,12 @@ async def test_create_deck_falls_back_to_tellr_default_slide_style(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -179,11 +197,6 @@ async def test_create_deck_falls_back_to_tellr_default_slide_style(
         get_sm.return_value = sm
 
         get_default.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request,
@@ -207,7 +220,12 @@ async def test_create_deck_skips_default_lookup_when_slide_style_id_provided(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -215,11 +233,6 @@ async def test_create_deck_skips_default_lookup_when_slide_style_id_provided(
         sm = MagicMock()
         sm.create_session.return_value = mock_session
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request,
@@ -246,7 +259,12 @@ async def test_create_deck_defaults_to_org_default_design_system(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -256,11 +274,6 @@ async def test_create_deck_defaults_to_org_default_design_system(
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="a deck about widgets"
@@ -278,7 +291,12 @@ async def test_create_deck_explicit_design_system_wins(fake_request, identity):
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -286,11 +304,6 @@ async def test_create_deck_explicit_design_system_wins(fake_request, identity):
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", design_system_id=8
@@ -312,7 +325,12 @@ async def test_create_deck_explicit_slide_style_suppresses_default_ds(
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -321,11 +339,6 @@ async def test_create_deck_explicit_slide_style_suppresses_default_ds(
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
         get_default_ds.return_value = 5
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", slide_style_id=9
@@ -347,7 +360,12 @@ async def test_create_deck_falls_back_to_slide_style_when_no_default_ds(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -357,11 +375,6 @@ async def test_create_deck_falls_back_to_slide_style_when_no_default_ds(
         get_sm.return_value = sm
         get_default_ds.return_value = None
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(request=fake_request, prompt="deck")
 
@@ -382,7 +395,12 @@ async def test_create_deck_resolves_template_name_to_a_pin(fake_request, identit
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -392,11 +410,6 @@ async def test_create_deck_resolves_template_name_to_a_pin(fake_request, identit
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         resolve_name.return_value = 102
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -423,7 +436,12 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server._resolve_template_name") as resolve_name, \
          patch("src.api.mcp_server.get_default_template_id", return_value=None), \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -433,11 +451,6 @@ async def test_create_deck_ignores_unmatched_template_name_without_error(
         get_sm.return_value = sm
         get_default_ds.return_value = 5
         resolve_name.return_value = None  # no such template
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         with caplog.at_level(logging.WARNING):
             result = await mcp_server._create_deck_impl(
@@ -469,7 +482,12 @@ async def test_create_deck_pins_the_design_systems_default_template(
          patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
          patch("src.api.mcp_server._resolve_template_name", return_value=resolved), \
          patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -477,11 +495,6 @@ async def test_create_deck_pins_the_design_systems_default_template(
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name=template_name
@@ -503,7 +516,12 @@ async def test_create_deck_named_template_beats_the_default(fake_request, identi
          patch("src.api.mcp_server.get_default_design_system_id", return_value=5), \
          patch("src.api.mcp_server._resolve_template_name", return_value=102), \
          patch("src.api.mcp_server.get_default_template_id", return_value=50) as get_tmpl, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -511,11 +529,6 @@ async def test_create_deck_named_template_beats_the_default(fake_request, identi
         sm = MagicMock()
         sm.create_session.return_value = {"session_id": "sess-123"}
         get_sm.return_value = sm
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -537,7 +550,12 @@ async def test_create_deck_ignores_template_name_without_a_design_system(
          patch("src.api.mcp_server.get_session_manager") as get_sm, \
          patch("src.api.mcp_server.get_default_design_system_id") as get_default_ds, \
          patch("src.api.mcp_server.get_default_slide_style_id") as get_default_style, \
-         patch("src.api.mcp_server.enqueue_create_job") as enqueue:
+         patch("src.api.routes.chat.get_genie_one_default", return_value=False), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-42", engine_mode="graph"),
+         ):
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
@@ -547,11 +565,6 @@ async def test_create_deck_ignores_template_name_without_a_design_system(
         get_sm.return_value = sm
         get_default_ds.return_value = None
         get_default_style.return_value = 17
-
-        async def _fake_enqueue(**kwargs):
-            return "req-42"
-
-        enqueue.side_effect = _fake_enqueue
 
         result = await mcp_server._create_deck_impl(
             request=fake_request, prompt="deck", template_name="Two Column"
@@ -802,29 +815,6 @@ async def test_create_deck_rejects_injection_prompt(fake_request, identity):
 
 
 @pytest.mark.asyncio
-async def test_create_deck_rejects_num_slides_out_of_range(fake_request, identity):
-    from src.api import mcp_server
-    from src.api.mcp_server import MCPToolError
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope:
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-
-        with pytest.raises(MCPToolError):
-            await mcp_server._create_deck_impl(
-                request=fake_request,
-                prompt="foo",
-                num_slides=0,
-            )
-        with pytest.raises(MCPToolError):
-            await mcp_server._create_deck_impl(
-                request=fake_request,
-                prompt="foo",
-                num_slides=51,
-            )
-
-
-@pytest.mark.asyncio
 async def test_create_deck_surfaces_auth_error_as_tool_error(fake_request):
     from src.api import mcp_server
     from src.api.mcp_auth import MCPAuthError
@@ -839,6 +829,433 @@ async def test_create_deck_surfaces_auth_error_as_tool_error(fake_request):
                 prompt="foo",
             )
         assert "auth" in str(exc.value).lower() or "credentials" in str(exc.value).lower()
+
+
+# ---- create_deck: an Agent deck, entered through enter_chat_turn ---------
+#
+# create_deck creates a deck_mode="agent" session seeded with the app's new-deck
+# tool defaults, then enters its first turn through ``_enter_turn_or_tool_error``.
+# That helper calls the async chat route's ``enter_chat_turn`` and maps each of
+# Enter's refusals to MCP error copy; anything it does not map propagates.
+
+#: The MCP error copy, verbatim from the plan's Global Constraints. These are
+#: literals, never the module's constants, so a typo in a constant goes red.
+_LEGACY_DECK_COPY = (
+    "This deck was made in Legacy mode and can't be edited over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+_SESSION_BUSY_COPY = "This deck is busy with another request. Try again when it finishes."
+_DECK_LOCKED_COPY = "This deck is locked by {name}."
+_NO_GRAPH_RELEASE_COPY = (
+    "Tellr can't generate decks right now: no active Graph Release. "
+    "An admin needs to publish one."
+)
+_UNAVAILABLE_COPY = "Tellr is temporarily unavailable. Please retry."
+#: The async route's copy, which MCP reuses (``ENGINE_RACE_DETAIL`` and
+#: ``_GENERATION_REFUSED_DETAILS``).
+_ENGINE_RACE_COPY = "This deck changed while you sent your message. Try again."
+_RESTORE_PENDING_COPY = (
+    "This deck is still being restored after a failed generation. Try again in a minute."
+)
+_ARC_REVIEW_BUSY_COPY = (
+    "This deck is being updated in the background. Try again in a few seconds."
+)
+
+
+def _recording_session_manager(session_id="sess-123", *, create_error=None):
+    """A session manager whose ``create_session`` records a deep copy of each call.
+
+    The copy is taken at call time, so a config mutated after the session was
+    created can't pass for the config the session was created with.
+    """
+    sm = MagicMock()
+    sm.created = []
+
+    def _create_session(*args, **kwargs):
+        sm.created.append((args, copy.deepcopy(kwargs)))
+        if create_error is not None:
+            raise create_error
+        return {"session_id": session_id}
+
+    sm.create_session.side_effect = _create_session
+    return sm
+
+
+@contextmanager
+def _agent_create_deck_env(identity, session_manager, *, genie_one_default, request_id="req-777"):
+    """Patch what ``_create_deck_impl`` reaches, as the tests above patch it.
+
+    The style-source defaults are None, so the stored ``agent_config`` holds only
+    what the call itself put there. Genie One's admin default is patched where
+    the new-deck tool defaults read it (``src.api.routes.chat``).
+    """
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_session_manager", return_value=session_manager), \
+         patch("src.api.mcp_server.get_default_design_system_id", return_value=None), \
+         patch("src.api.mcp_server.get_default_slide_style_id", return_value=None), \
+         patch(
+             "src.api.routes.chat.get_genie_one_default",
+             return_value=genie_one_default,
+         ), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id=request_id, engine_mode="graph"),
+         ) as enter:
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        yield enter
+
+
+@pytest.mark.asyncio
+async def test_create_deck_creates_an_agent_deck_and_enters_it(fake_request, identity):
+    from src.api import mcp_server
+
+    # Whitespace and a slide count included: the prompt reaches Enter untouched.
+    prompt = "  Make a deck about Q3 revenue by region.\nUse 6 slides.  "
+    sm = _recording_session_manager("sess-123")
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        result = await mcp_server._create_deck_impl(
+            request=fake_request, prompt=prompt, correlation_id="vibe-xyz"
+        )
+
+    assert sm.created == [
+        (
+            (),
+            {
+                "created_by": "alice@example.com",
+                "agent_config": {"tools": []},
+                "deck_mode": "agent",
+            },
+        )
+    ]
+    enter.assert_awaited_once_with(
+        session_id="sess-123",
+        message=prompt,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": "vibe-xyz"},
+    )
+    assert result == {
+        "session_id": "sess-123",
+        "request_id": "req-777",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_deck_answers_an_agent_deck_refusal_with_its_copy(
+    fake_request, identity
+):
+    """create_deck enters through the refusal mapper: a refusal from Enter reaches
+    the caller as its copy, not as "Internal error"."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _recording_session_manager("sess-123")
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        enter.side_effect = EngineModeUnresolvedError()
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._create_deck_impl(
+                request=fake_request, prompt="a deck about churn", correlation_id="vibe-xyz"
+            )
+
+    assert str(exc.value) == _UNAVAILABLE_COPY
+    enter.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_create_deck_seeds_genie_one_when_the_admin_default_is_on(
+    fake_request, identity
+):
+    from src.api import mcp_server
+
+    sm = _recording_session_manager()
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=True):
+        await mcp_server._create_deck_impl(request=fake_request, prompt="a deck about churn")
+
+    [(_, create_kwargs)] = sm.created
+    assert create_kwargs["agent_config"] == {"tools": [GenieOneTool().model_dump()]}
+
+
+@pytest.mark.asyncio
+async def test_create_deck_seeds_no_tools_for_a_token_less_caller(fake_request):
+    """A forwarded-identity caller has no token to run Genie One with, so the admin
+    default is not applied. The deck is still created and entered."""
+    from src.api import mcp_server
+
+    token_less = MCPIdentity(
+        user_id="user-abc",
+        user_name="alice@example.com",
+        token=None,
+        source="x-forwarded-identity",
+    )
+    sm = _recording_session_manager("sess-tokenless")
+
+    with _agent_create_deck_env(
+        token_less, sm, genie_one_default=True, request_id="req-tokenless-3"
+    ) as enter:
+        result = await mcp_server._create_deck_impl(
+            request=fake_request, prompt="a deck about churn"
+        )
+
+    [(_, create_kwargs)] = sm.created
+    assert create_kwargs["agent_config"] == {"tools": []}
+    enter.assert_awaited_once()
+    assert result == {
+        "session_id": "sess-tokenless",
+        "request_id": "req-tokenless-3",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_deck_no_longer_stores_num_slides_or_deck_prompt_id(
+    fake_request, identity
+):
+    """Both parameters are gone. A slide count belongs in the prompt, and the deck
+    prompt no longer reaches an Agent deck."""
+    from src.api import mcp_server
+
+    for fn in (mcp_server._create_deck_impl, mcp_server.create_deck):
+        params = inspect.signature(fn).parameters
+        assert "num_slides" not in params, fn.__name__
+        assert "deck_prompt_id" not in params, fn.__name__
+    assert list(inspect.signature(mcp_server.create_deck).parameters) == [
+        "ctx",
+        "prompt",
+        "slide_style_id",
+        "design_system_id",
+        "template_name",
+        "correlation_id",
+    ]
+    # What MCP clients see in tools/list.
+    [tool] = [t for t in await mcp_server.mcp.list_tools() if t.name == "create_deck"]
+    assert set(tool.inputSchema["properties"]) == {
+        "prompt",
+        "slide_style_id",
+        "design_system_id",
+        "template_name",
+        "correlation_id",
+    }
+
+    sm = _recording_session_manager()
+    with _agent_create_deck_env(identity, sm, genie_one_default=False):
+        await mcp_server._create_deck_impl(
+            request=fake_request, prompt="a 4-slide deck about churn", slide_style_id=4
+        )
+
+    [(_, create_kwargs)] = sm.created
+    agent_config = create_kwargs["agent_config"]
+    assert "num_slides" not in agent_config
+    assert "deck_prompt_id" not in agent_config
+    assert agent_config == {"tools": [], "slide_style_id": 4}
+
+
+@pytest.mark.asyncio
+async def test_create_deck_maps_a_missing_graph_release_to_a_tool_error(
+    fake_request, identity
+):
+    """An Agent deck pins the active Graph Release when it is created. With none
+    published, create_session refuses, and the caller gets the copy (not
+    "Internal error"). Nothing is entered."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _recording_session_manager(create_error=ActiveGraphReleaseUnavailableError())
+
+    with _agent_create_deck_env(identity, sm, genie_one_default=False) as enter:
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._create_deck_impl(
+                request=fake_request, prompt="a deck about churn", correlation_id="vibe-xyz"
+            )
+
+    assert str(exc.value) == _NO_GRAPH_RELEASE_COPY
+    assert str(exc.value) == mcp_server.MCP_NO_GRAPH_RELEASE_ERROR
+    assert len(sm.created) == 1
+    enter.assert_not_called()
+    enter.assert_not_awaited()
+
+
+# ---- _enter_turn_or_tool_error ------------------------------------------
+#
+# Each case: the error Enter raises, the app URL the deck link is built on, the
+# exact copy (from the literals above), the same copy built from the module's own
+# constant (so both the text and the constant it comes from are pinned), and the
+# holders whose display name is looked up.
+
+_REFUSAL_CASES = [
+    pytest.param(
+        SessionBusyError,
+        "https://tellr.example",
+        _SESSION_BUSY_COPY,
+        lambda m: m.MCP_SESSION_BUSY_ERROR,
+        [],
+        id="session-busy",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(
+            GenerationRefusedError.GENERATION_IN_FLIGHT, holder="bob@example.com"
+        ),
+        "https://tellr.example",
+        "This deck is locked by Bob.",
+        lambda m: m.MCP_DECK_LOCKED_ERROR.format(name="Bob"),
+        ["bob@example.com"],
+        id="generation-in-flight",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(GenerationRefusedError.RESTORE_PENDING),
+        "https://tellr.example",
+        _RESTORE_PENDING_COPY,
+        lambda m: chat_routes._GENERATION_REFUSED_DETAILS[
+            GenerationRefusedError.RESTORE_PENDING
+        ],
+        [],
+        id="restore-pending",
+    ),
+    pytest.param(
+        lambda: GenerationRefusedError(GenerationRefusedError.ARC_REVIEW_IN_FLIGHT),
+        "https://tellr.example",
+        _ARC_REVIEW_BUSY_COPY,
+        lambda m: chat_routes._GENERATION_REFUSED_DETAILS[
+            GenerationRefusedError.ARC_REVIEW_IN_FLIGHT
+        ],
+        [],
+        id="arc-review-in-flight",
+    ),
+    pytest.param(
+        EngineRaceError,
+        "https://tellr.example",
+        _ENGINE_RACE_COPY,
+        lambda m: m.MCP_ENGINE_RACE_ERROR,
+        [],
+        id="engine-race",
+    ),
+    pytest.param(
+        EngineModeUnresolvedError,
+        "https://tellr.example",
+        _UNAVAILABLE_COPY,
+        lambda m: m.MCP_UNAVAILABLE_ERROR,
+        [],
+        id="engine-mode-unresolved",
+    ),
+    pytest.param(
+        ActiveGraphReleaseUnavailableError,
+        "https://tellr.example",
+        _NO_GRAPH_RELEASE_COPY,
+        lambda m: m.MCP_NO_GRAPH_RELEASE_ERROR,
+        [],
+        id="no-active-graph-release",
+    ),
+    pytest.param(
+        lambda: DeckModeLockedError("legacy"),
+        "https://tellr.example",
+        _LEGACY_DECK_COPY.format(deck_url="https://tellr.example/sessions/sess-9/edit"),
+        lambda m: m.MCP_LEGACY_DECK_ERROR.format(
+            deck_url="https://tellr.example/sessions/sess-9/edit"
+        ),
+        [],
+        id="legacy-deck-absolute-url",
+    ),
+    pytest.param(
+        lambda: DeckModeLockedError("legacy"),
+        "",
+        _LEGACY_DECK_COPY.format(deck_url="/sessions/sess-9/edit"),
+        lambda m: m.MCP_LEGACY_DECK_ERROR.format(deck_url="/sessions/sess-9/edit"),
+        [],
+        id="legacy-deck-relative-url",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("make_error", "app_url", "expected_copy", "copy_from_constant", "resolved_holders"),
+    _REFUSAL_CASES,
+)
+async def test_enter_turn_maps_every_refusal_to_its_copy(
+    make_error, app_url, expected_copy, copy_from_constant, resolved_holders
+):
+    from unittest.mock import call
+
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    error = make_error()
+    with patch(
+        "src.api.mcp_server.enter_chat_turn", new_callable=AsyncMock, side_effect=error
+    ) as enter, patch(
+        "src.api.mcp_server.resolve_display_name", return_value="Bob"
+    ) as resolve, patch("src.api.mcp_server._public_app_url", return_value=app_url):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._enter_turn_or_tool_error(
+                session_id="sess-9", message="Add a churn slide", correlation_id="corr-5"
+            )
+
+    assert str(exc.value) == expected_copy
+    assert str(exc.value) == copy_from_constant(mcp_server)
+    enter.assert_awaited_once()
+    # Only a live generation's holder is looked up, and it is the holder Enter named.
+    assert resolve.call_args_list == [call(holder) for holder in resolved_holders]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # requested_deck_mode="agent" can't meet a deck locked to agent, so only
+        # "legacy" has copy; any other locked mode is not a refusal MCP maps.
+        pytest.param(lambda: DeckModeLockedError("agent"), id="deck-mode-locked-not-legacy"),
+        pytest.param(lambda: SessionNotFoundError("sess-9"), id="session-not-found"),
+        pytest.param(lambda: RuntimeError("queue exploded"), id="unmapped-error"),
+    ],
+)
+async def test_enter_turn_maps_every_refusal_and_nothing_else(make_error):
+    """What the mapping doesn't name propagates unchanged, to the tool's own
+    ``except Exception`` ("Internal error")."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    error = make_error()
+    with patch(
+        "src.api.mcp_server.enter_chat_turn", new_callable=AsyncMock, side_effect=error
+    ), patch("src.api.mcp_server.resolve_display_name", return_value="Bob"), patch(
+        "src.api.mcp_server._public_app_url", return_value=""
+    ):
+        with pytest.raises(type(error)) as exc:
+            await mcp_server._enter_turn_or_tool_error(
+                session_id="sess-9", message="Add a churn slide", correlation_id="corr-5"
+            )
+
+    assert exc.value is error
+    assert not isinstance(exc.value, MCPToolError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("correlation_id", ["corr-5", None])
+async def test_enter_turn_enters_the_agent_deck_turn_and_returns_its_request_id(
+    correlation_id,
+):
+    from src.api import mcp_server
+
+    with patch(
+        "src.api.mcp_server.enter_chat_turn",
+        new_callable=AsyncMock,
+        return_value=EnteredTurn(request_id="req-success-91", engine_mode="graph"),
+    ) as enter:
+        request_id = await mcp_server._enter_turn_or_tool_error(
+            session_id="sess-9", message="Add a churn slide", correlation_id=correlation_id
+        )
+
+    assert request_id == "req-success-91"
+    enter.assert_awaited_once_with(
+        session_id="sess-9",
+        message="Add a churn slide",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": correlation_id},
+    )
 
 
 # ---- get_deck_status ----------------------------------------------------
@@ -1333,118 +1750,554 @@ async def test_both_clarification_kinds_are_reported_the_same_way(fake_request, 
     assert result["metadata"]["clarification"] == _AMBIGUOUS_INTENT_CLARIFICATION_TEXT
 
 
-# ---- edit_deck ----------------------------------------------------------
+# ---- get_deck_status: Agent turns, reply, deck_changed, stopped turns ----
+#
+# An Agent (graph) turn's COMPLETE metadata is exactly
+# ``{"engine_mode": "graph", "architect_intent": <intent or None>}`` (chat_service's
+# graph COMPLETE), which job_queue copies verbatim into ``result["metadata"]``. It
+# carries no replacement_info, counters or experiment URL. A turn stored before intents
+# were recorded has ``{"engine_mode": "graph"}`` only, and a Legacy (monolith) result
+# has no ``engine_mode`` at all.
+#
+# The architect speaks in ``role="assistant", message_type="llm_response"`` rows, and on
+# a graph turn only the architect does. The data analyst's answer, the deck reviewer's
+# advisory, Gateway notices and tool progress are assistant ``info`` / ``tool_call``
+# rows, and they can come AFTER the architect's reply. A turn that fetched data first
+# has two architect rows, and its second pass's intent is the turn's.
+
+#: Every top-level key of a ready payload before ``reply`` and ``deck_changed``.
+_READY_KEYS_BEFORE_REPLY = frozenset(
+    {
+        "session_id",
+        "request_id",
+        "status",
+        "slide_count",
+        "title",
+        "deck",
+        "html_document",
+        "deck_url",
+        "deck_view_url",
+        "replacement_info",
+        "messages",
+        "metadata",
+    }
+)
+#: Exactly two keys more.
+_READY_KEYS = _READY_KEYS_BEFORE_REPLY | {"reply", "deck_changed"}
+
+#: The Global Constraints copy, restated so that a changed constant also turns red.
+_STOPPED_COPY = "This generation was stopped in Tellr. The deck is unchanged."
+
+_STARTER_REPLY = (
+    "Here's a starter deck: five slides on Q3 revenue. You could explore next: "
+    "a split by region, or a slide on the Q4 forecast."
+)
+_REVIEWER_ADVISORY = "Deck review: slide 4's chart has no axis labels."
+_GATEWAY_NOTICE = "Glean couldn't be reached, so this turn carried on without it."
 
 
-@pytest.mark.asyncio
-async def test_edit_deck_submits_with_slide_context(fake_request, identity):
-    from src.api import mcp_server
+def _turn(*rows):
+    """A turn's persisted rows, in order, from ``(role, message_type, content)``."""
+    return [
+        {
+            "id": n,
+            "role": role,
+            "content": content,
+            "message_type": message_type,
+            "created_at": f"2026-11-18T09:00:{n:02d}",
+            "metadata": None,
+        }
+        for n, (role, message_type, content) in enumerate(rows, start=1)
+    ]
 
-    # session_manager.get_slide_deck returns the deck dict
-    fake_deck = {
-        "title": "x",
-        "slides": [
-            {"html": "<div class='slide'>0</div>", "scripts": ""},
-            {"html": "<div class='slide'>1</div>", "scripts": ""},
-            {"html": "<div class='slide'>2</div>", "scripts": ""},
-        ],
-        "css": "",
-        "external_scripts": [],
-        "head_meta": {},
+
+def _as_reported(rows):
+    """``rows`` as the ready payload's ``messages`` has always reported them."""
+    return [
+        {
+            "role": row["role"],
+            "content": row["content"],
+            "message_type": row["message_type"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def _graph_metadata(intent):
+    """The graph COMPLETE's metadata for a turn whose (final) intent is ``intent``."""
+    return {"engine_mode": "graph", "architect_intent": intent}
+
+
+async def _agent_status(fake_request, identity, *, result_metadata, turn):
+    return await _ready_status(
+        fake_request,
+        identity,
+        result_metadata=result_metadata,
+        replacement_info=None,  # the graph's COMPLETE carries none
+        turn_messages=turn,
+    )
+
+
+def _agent_turn_metadata(*, clarification_needed, clarification):
+    """A graph turn's reported ``metadata``: the pass-through fields as today (the
+    graph's COMPLETE leaves the counters and experiment URL empty) and the pair."""
+    return {
+        "tool_calls": None,
+        "latency_ms": None,
+        "experiment_url": None,
+        "session_title": "Q3 Pitch",
+        "clarification_needed": clarification_needed,
+        "clarification": clarification,
     }
 
-    async def _fake_enqueue(**kwargs):
-        return "req-edit-1"
+
+def _assert_ready_payload(result, turn, *, replacement_info=None):
+    """Everything in a ready payload except ``reply``, ``deck_changed`` and ``metadata``,
+    which each test asserts whole."""
+    assert set(result) == _READY_KEYS
+    assert result["status"] == "ready"
+    assert result["session_id"] == "sess-1"
+    assert result["request_id"] == "req-1"
+    assert result["slide_count"] == 1
+    assert result["title"] == "Q3 Pitch"
+    assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
+    assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
+    assert result["html_document"].lower().startswith("<!doctype")
+    assert result["replacement_info"] == replacement_info
+    assert result["messages"] == _as_reported(turn)
+
+
+async def _db_terminal_status(
+    fake_request, identity, *, db_status, error_message, **row_fields
+):
+    """Poll request ``r`` of deck ``s`` after the worker dropped its in-memory entry,
+    with the DB row ended ``db_status``. ``row_fields`` adds further
+    ``get_chat_request`` keys (e.g. ``rollback_outcome``)."""
+    from src.api import mcp_server
+
+    chat_request = {
+        "request_id": "r",
+        "session_id": 42,  # integer PK, as the real session_manager returns
+        "status": db_status,
+        "error_message": error_message,
+        "created_at": "2026-11-18T09:00:00",
+        "completed_at": "2026-11-18T09:00:05",
+        "result": None,
+        **row_fields,
+    }
 
     with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status", return_value=None), \
          patch("src.api.mcp_server.permission_service") as perm_svc, \
-         patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job", side_effect=_fake_enqueue) as enqueue:
+         patch("src.api.mcp_server.get_session_manager") as get_sm:
 
         auth_scope.return_value.__enter__.return_value = identity
         auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
+        perm_svc.can_view_deck.return_value = True
 
         sm = MagicMock()
-        sm.get_slide_deck.return_value = fake_deck
+        sm.get_chat_request.return_value = chat_request
+        sm.get_session_id_for_request.return_value = "s"
         get_sm.return_value = sm
 
-        result = await mcp_server._edit_deck_impl(
-            request=fake_request,
-            session_id="sess-1",
-            instruction="make slide 2 more exciting",
-            slide_indices=[1],
+        return await mcp_server._get_deck_status_impl(
+            request=fake_request, session_id="s", request_id="r"
         )
 
-        enqueue.assert_called_once()
-        kwargs = enqueue.call_args.kwargs
-        assert kwargs["session_id"] == "sess-1"
-        assert kwargs["prompt"] == "make slide 2 more exciting"
-        assert kwargs["mode"] == "edit"
-        assert kwargs["slide_context"]["indices"] == [1]
-        assert kwargs["slide_context"]["slide_htmls"] == ["<div class='slide'>1</div>"]
+
+class TestGetDeckStatusReportsAgentTurns:
+    """``reply``, ``deck_changed`` and stopped turns.
+
+    A class whose name says "status", so ``-k status`` selects every test here,
+    including those whose own names don't.
+    """
+
+    @pytest.mark.asyncio
+    async def test_status_of_an_agent_build_reports_the_reply_and_a_changed_deck(
+        self, fake_request, identity
+    ):
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "info", _GATEWAY_NOTICE),
+            ("assistant", "llm_response", _STARTER_REPLY),
+        )
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata("build"), turn=turn
+        )
+
+        assert result["reply"] == _STARTER_REPLY
+        assert result["deck_changed"] is True
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=False, clarification=None
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    async def test_status_of_an_agent_edit_reports_the_reply_and_a_changed_deck(
+        self, fake_request, identity
+    ):
+        """An edit changes the deck too. Its reply is the architect's row although
+        assistant rows follow it: the deck reviewer speaks last, in an ``info`` row."""
+        reply = "Done: slide 2's title is larger, and nothing else moved."
+        turn = _turn(
+            ("user", "user_query", "On slide 2, make the title bigger"),
+            ("assistant", "tool_call", "Searching Glean for the brand guide"),
+            ("assistant", "llm_response", reply),
+            ("assistant", "info", _REVIEWER_ADVISORY),
+        )
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata("edit"), turn=turn
+        )
+
+        assert result["reply"] == reply
+        assert result["deck_changed"] is True
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=False, clarification=None
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("intent", "query", "reply"),
+        [
+            (
+                "discuss",
+                "Does the arc of this deck hold up?",
+                "Mostly. Should slide 3's revenue be split by region or by product?",
+            ),
+            (
+                "confirm_design_contract",
+                "Use the Databricks brand",
+                "I'd restyle the deck in the Databricks brand: navy grounds and Inter "
+                "type. Shall I go ahead?",
+            ),
+        ],
+        ids=["discuss", "confirm_design_contract"],
+    )
+    async def test_status_of_an_agent_discussion_reports_an_unchanged_deck(
+        self, fake_request, identity, intent, query, reply
+    ):
+        """Nothing is built on these turns. The stored metadata has no
+        ``clarification_needed`` key, so the flag comes from the intent, and the
+        question is the architect's reply: a graph turn writes no ``clarification``
+        row."""
+        turn = _turn(
+            ("user", "user_query", query),
+            ("assistant", "tool_call", "Searching Glean for the Q3 plan"),
+            ("assistant", "llm_response", reply),
+        )
+        result_metadata = _graph_metadata(intent)
+        assert "clarification_needed" not in result_metadata
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=result_metadata, turn=turn
+        )
+
+        assert result["reply"] == reply
+        assert result["deck_changed"] is False
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=True, clarification=reply
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "result_metadata",
+        [
+            pytest.param({"engine_mode": "graph"}, id="stored-before-intents"),
+            pytest.param(_graph_metadata(None), id="graph-returned-no-intent"),
+        ],
+    )
+    async def test_status_of_an_agent_turn_with_no_intent_reports_an_unchanged_deck(
+        self, fake_request, identity, result_metadata
+    ):
+        """Pre-pass Ruling 2. With no intent to go on, a graph turn reports an unchanged
+        deck and its reply as the question. It is still a graph turn: it does not fall
+        back to the Legacy rule, which would read ``deck_changed`` as True."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "llm_response", _STARTER_REPLY),
+        )
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=result_metadata, turn=turn
+        )
+
+        assert result["reply"] == _STARTER_REPLY
+        assert result["deck_changed"] is False
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=True, clarification=_STARTER_REPLY
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("final_intent", "final_reply", "after_reply", "deck_changed"),
+        [
+            pytest.param(
+                "build",
+                "Built it: five slides on Q3 revenue, led by EMEA.",
+                [("assistant", "info", _REVIEWER_ADVISORY)],
+                True,
+                id="then-build",
+            ),
+            pytest.param(
+                "discuss",
+                "EMEA led Q3 with 41% of revenue. Want a slide on why?",
+                [],
+                False,
+                id="then-discuss",
+            ),
+        ],
+    )
+    async def test_reply_is_the_last_architect_message_of_the_turn(
+        self, fake_request, identity, final_intent, final_reply, after_reply, deck_changed
+    ):
+        """An ``ask_data`` turn runs the architect twice. It asks for data and says
+        so, the data analyst answers in an ``info`` row, and the architect's second
+        pass answers the user and sets the turn's intent. The reply is that second
+        architect row: not the first one, not the analyst's answer, and not the
+        reviewer's advisory that follows a build."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue by region"),
+            ("assistant", "llm_response", "Let me fetch the Q3 numbers from Genie One."),
+            ("assistant", "tool_call", "Asking Genie One: Q3 revenue by region"),
+            ("assistant", "info", "Q3 revenue by region: EMEA 41%, AMER 38%, APJ 21%."),
+            ("assistant", "llm_response", final_reply),
+            *after_reply,
+        )
+
+        result = await _agent_status(
+            fake_request,
+            identity,
+            result_metadata=_graph_metadata(final_intent),
+            turn=turn,
+        )
+
+        assert result["reply"] == final_reply
+        assert result["deck_changed"] is deck_changed
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=not deck_changed,
+            clarification=None if deck_changed else final_reply,
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("intent", "deck_changed"), [("build", True), ("discuss", False)])
+    async def test_status_of_an_agent_turn_without_an_architect_message_reports_no_reply(
+        self, fake_request, identity, intent, deck_changed
+    ):
+        """``reply`` is null when the architect said nothing this turn. The other
+        assistant rows are not a reply, so there is no question to report either."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "tool_call", "Asking Genie One: Q3 revenue"),
+            ("assistant", "info", _GATEWAY_NOTICE),
+        )
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata(intent), turn=turn
+        )
+
+        assert result["reply"] is None
+        assert result["deck_changed"] is deck_changed
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=not deck_changed, clarification=None
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_turn_reports_failed_with_the_stopped_copy(
+        self, fake_request, identity
+    ):
+        """Review Focus 2. A stop in the Tellr app ends the request ``cancelled``
+        (``cancel_chat`` writes no error message), and the worker drops the in-memory
+        entry. The poll terminates as ``failed`` with the stopped copy, never
+        "Unknown job status"."""
+        from src.api import mcp_server
+
+        result = await _db_terminal_status(
+            fake_request, identity, db_status="cancelled", error_message=None
+        )
 
         assert result == {
-            "session_id": "sess-1",
-            "request_id": "req-edit-1",
-            "status": "pending",
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": mcp_server.MCP_STOPPED_ERROR,
         }
+        assert result["error"] == _STOPPED_COPY
 
-
-@pytest.mark.asyncio
-async def test_edit_deck_submits_without_slide_context_when_indices_omitted(
-    fake_request, identity
-):
-    from src.api import mcp_server
-
-    async def _fake_enqueue(**kwargs):
-        return "req-edit-2"
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.permission_service") as perm_svc, \
-         patch("src.api.mcp_server.get_session_manager") as get_sm, \
-         patch("src.api.mcp_server.enqueue_create_job", side_effect=_fake_enqueue) as enqueue:
-
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
-
-        sm = MagicMock()
-        # If slide_indices is omitted, get_slide_deck should NOT be called
-        sm.get_slide_deck.return_value = None
-        get_sm.return_value = sm
-
-        await mcp_server._edit_deck_impl(
-            request=fake_request,
-            session_id="sess-1",
-            instruction="make it more exciting",
+    @pytest.mark.asyncio
+    async def test_a_stop_whose_restore_failed_reports_the_restore_pending_copy(
+        self, fake_request, identity
+    ):
+        """Review M1. A stop whose restore failed ends the request ``cancelled``
+        with ``rollback_outcome="restore_failed"`` and the restore-pending copy
+        (``generation_rollback._record_restore_failed``). The deck may still hold
+        the turn's changes and stays locked until a retry restores it, so the poll
+        reports that copy, never "The deck is unchanged"."""
+        result = await _db_terminal_status(
+            fake_request,
+            identity,
+            db_status="cancelled",
+            error_message=_RESTORE_PENDING_COPY,
+            rollback_outcome="restore_failed",
         )
 
-        kwargs = enqueue.call_args.kwargs
-        assert kwargs["mode"] == "edit"
-        assert kwargs["slide_context"] is None
+        assert result == {
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": _RESTORE_PENDING_COPY,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "rollback_outcome",
+        ["rolled_back", None],
+        ids=["rolled-back", "no-outcome"],
+    )
+    async def test_a_rolled_back_stop_keeps_the_stopped_copy(
+        self, fake_request, identity, rollback_outcome
+    ):
+        """Review M1, the converse: only ``restore_failed`` swaps the copy. A normal
+        stop's real row (``rolled_back``, no error message; also what a retry that
+        restored the deck leaves) and a row with no outcome report the stopped
+        copy."""
+        result = await _db_terminal_status(
+            fake_request,
+            identity,
+            db_status="cancelled",
+            error_message=None,
+            rollback_outcome=rollback_outcome,
+        )
+
+        assert result == {
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": _STOPPED_COPY,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error_message", "reported"),
+        [
+            (
+                "Generation exceeded maximum duration (10 minutes)",
+                "Generation exceeded maximum duration (10 minutes)",
+            ),
+            (None, "Generation failed"),
+        ],
+        ids=["timeout", "no-error-message"],
+    )
+    async def test_status_of_an_errored_turn_still_reports_its_own_error(
+        self, fake_request, identity, error_message, reported
+    ):
+        """C16. A timeout, an orphan sweep and a worker failure all end the request
+        ``error``. Only a stop writes ``cancelled``, so only a stop gets the stopped
+        copy."""
+        result = await _db_terminal_status(
+            fake_request, identity, db_status="error", error_message=error_message
+        )
+
+        assert result == {
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": reported,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_pre_existing_legacy_result_reports_as_before_plus_the_new_keys(
+        self, fake_request, identity
+    ):
+        """Review Focus 5. A Legacy MCP turn's stored result has no ``engine_mode``.
+        It reports what it reported before, field for field, plus ``reply`` (the
+        same rule as an Agent turn; neither transcript has an ``llm_response`` row)
+        and ``deck_changed = not clarification_needed``."""
+        clarified = await _clarification_status(fake_request, identity)
+        applied = await _applied_edit_status(fake_request, identity)
+
+        assert clarified["reply"] is None
+        assert clarified["deck_changed"] is False
+        assert clarified["metadata"] == {
+            "tool_calls": 0,
+            "latency_ms": 1300,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": True,
+            "clarification": _RC10_CLARIFICATION_TEXT,
+        }
+        _assert_ready_payload(clarified, _clarification_turn(_RC10_CLARIFICATION_TEXT))
+
+        assert applied["reply"] is None
+        assert applied["deck_changed"] is True
+        assert applied["metadata"] == {
+            "tool_calls": 3,
+            "latency_ms": 41000,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": False,
+            "clarification": None,
+        }
+        _assert_ready_payload(
+            applied, _applied_edit_turn(), replacement_info={"replaced": [2], "count": 1}
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_of_a_legacy_turn_reports_its_last_llm_response_as_the_reply(
+        self, fake_request, identity
+    ):
+        """Legacy turns write ``llm_response`` rows too (the monolith's LLM output),
+        so the same rule gives them a reply. Everything else is computed as before: no
+        clarification, so the deck changed, with or without a replacement_info."""
+        final = "Here are three slides on Q3 revenue, one per region."
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "llm_response", "Let me pull the Q3 numbers first."),
+            ("assistant", "tool_call", "Calling query_genie_space"),
+            ("tool", "tool_result", "| region | revenue |\n| EMEA | 41% |"),
+            ("assistant", "llm_response", final),
+        )
+
+        result = await _ready_status(
+            fake_request,
+            identity,
+            result_metadata={"tool_calls": 1, "latency_ms": 22000},
+            replacement_info=None,
+            turn_messages=turn,
+        )
+
+        assert result["reply"] == final
+        assert result["deck_changed"] is True
+        assert result["metadata"] == {
+            "tool_calls": 1,
+            "latency_ms": 22000,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": False,
+            "clarification": None,
+        }
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    async def test_the_status_tool_description_names_reply_and_deck_changed(self):
+        """What MCP clients read in tools/list points them at the new fields."""
+        from src.api import mcp_server
+
+        [tool] = [
+            t for t in await mcp_server.mcp.list_tools() if t.name == "get_deck_status"
+        ]
+        assert re.search(r"\breply\b", tool.description)
+        assert re.search(r"\bdeck_changed\b", tool.description)
 
 
-@pytest.mark.asyncio
-async def test_edit_deck_rejects_non_contiguous_indices(fake_request, identity):
-    from src.api import mcp_server
-    from src.api.mcp_server import MCPToolError
-
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.permission_service") as perm_svc:
-
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-        perm_svc.can_edit_deck.return_value = True
-
-        with pytest.raises(MCPToolError) as exc:
-            await mcp_server._edit_deck_impl(
-                request=fake_request,
-                session_id="sess-1",
-                instruction="edit",
-                slide_indices=[0, 2],  # not contiguous
-            )
-        assert "contiguous" in str(exc.value).lower()
+# ---- edit_deck ----------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1465,6 +2318,382 @@ async def test_edit_deck_denies_without_edit_permission(fake_request, identity):
                 session_id="sess-other",
                 instruction="edit",
             )
+
+
+# ---- edit_deck: owner-only, Agent-only, entered through enter_chat_turn ---
+#
+# edit_deck enters an Agent turn on the caller's own Agent deck through
+# ``_enter_turn_or_tool_error``, with the instruction verbatim (a change or a
+# question for the architect; slides are named by number in the text, so there
+# is no ``slide_indices``). Before Enter, after the edit-permission check,
+# ``_require_agent_deck_owner`` refuses, in this order: a deck the caller doesn't
+# own (or their contributor session on someone's deck), a Legacy deck, and a
+# deck someone else's live generation holds. A refusal enters nothing.
+
+#: Literal copy, as for create_deck above: never the module's constants.
+_OWNER_ONLY_COPY = (
+    "Only the deck's owner can edit it over MCP. "
+    "Open it in Tellr to keep working on it: {deck_url}"
+)
+_EDIT_DENIED_COPY = "Deck not found or you do not have permission to edit it"
+
+#: The only session-manager calls the owner gate makes. Both are reads.
+_EDIT_GATE_READS = {"get_session", "live_generation_holder"}
+
+#: What the patched display-name lookup answers (else the email, as SCIM's does).
+_EDIT_DISPLAY_NAMES = {"bob@example.com": "Bob", "carol@example.com": "Carol"}
+
+
+def _edit_deck_session_manager(
+    *,
+    created_by="alice@example.com",
+    is_contributor_session=False,
+    live_holder=None,
+    idle_holder=None,
+):
+    """A session manager that knows one deck, ``sess-1``.
+
+    ``live_generation_holder`` answers ``live_holder`` only for a
+    ``live_only=True`` lookup (the app route's). Without it, it answers
+    ``idle_holder``: an idle contributor's heartbeat lock, which never blocks
+    the owner.
+    """
+    sm = MagicMock()
+
+    def _get_session(session_id):
+        if session_id != "sess-1":
+            raise SessionNotFoundError(session_id)
+        return {
+            "session_id": "sess-1",
+            "created_by": created_by,
+            "is_contributor_session": is_contributor_session,
+        }
+
+    def _live_generation_holder(session_id, *, live_only=False):
+        if session_id != "sess-1":
+            return None
+        return live_holder if live_only else idle_holder
+
+    sm.get_session.side_effect = _get_session
+    sm.live_generation_holder.side_effect = _live_generation_holder
+    return sm
+
+
+@contextmanager
+def _edit_deck_env(identity, session_manager, *, engine="graph", can_edit=True):
+    """Patch what ``_edit_deck_impl`` reaches.
+
+    ``engine`` is what the engine resolver answers for ``sess-1`` (a missing
+    session resolves to "monolith", as the real resolver's does), or an
+    exception for it to raise. The public app URL is empty, so deck links are
+    relative. Display names come from ``_EDIT_DISPLAY_NAMES``.
+    """
+
+    def _resolve_engine(session_id):
+        if isinstance(engine, BaseException):
+            raise engine
+        return engine if session_id == "sess-1" else "monolith"
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager", return_value=session_manager), \
+         patch(
+             "src.api.mcp_server.resolve_engine_mode_or_unavailable",
+             side_effect=_resolve_engine,
+         ) as resolve_engine, \
+         patch(
+             "src.api.mcp_server.resolve_display_name",
+             side_effect=lambda email: _EDIT_DISPLAY_NAMES.get(email, email),
+         ) as resolve_name, \
+         patch("src.api.mcp_server._public_app_url", return_value=""), \
+         patch(
+             "src.api.mcp_server.enter_chat_turn",
+             new_callable=AsyncMock,
+             return_value=EnteredTurn(request_id="req-edit-1", engine_mode="graph"),
+         ) as enter:
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_edit_deck.return_value = can_edit
+        yield enter, resolve_engine, resolve_name
+
+
+def _assert_nothing_entered(enter, session_manager):
+    """No turn was entered, and the session manager was only read by the gate."""
+    enter.assert_not_called()
+    enter.assert_not_awaited()
+    made = {name for name, _args, _kwargs in session_manager.mock_calls}
+    assert made <= _EDIT_GATE_READS, session_manager.mock_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "On slides 1 and 4, shorten the titles",
+        # Surrounding whitespace and a newline: the instruction reaches Enter untouched.
+        "  On slides 1 and 4, shorten the titles.\nLeave slide 2 alone.  \n",
+    ],
+    ids=["plain", "whitespace-and-newline"],
+)
+async def test_edit_deck_enters_an_agent_turn_with_the_instruction_verbatim(
+    fake_request, identity, instruction
+):
+    from src.api import mcp_server
+
+    # An idle contributor's heartbeat lock doesn't block the owner; only a live
+    # generation does.
+    sm = _edit_deck_session_manager(idle_holder="carol@example.com")
+
+    with _edit_deck_env(identity, sm) as (enter, _resolve_engine, resolve_name):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction=instruction,
+            correlation_id="corr-edit-7",
+        )
+
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message=instruction,
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": "corr-edit-7"},
+    )
+    assert result == {
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+    # edit_deck itself only reads; Enter does the writing.
+    assert {name for name, _a, _k in sm.mock_calls} <= _EDIT_GATE_READS, sm.mock_calls
+    resolve_name.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_refuses_a_legacy_deck_and_writes_nothing(fake_request, identity):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager()
+
+    with _edit_deck_env(identity, sm, engine="monolith") as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _LEGACY_DECK_COPY.format(deck_url="/sessions/sess-1/edit")
+    resolve_engine.assert_called_once()
+    _assert_nothing_entered(enter, sm)
+    # The engine check comes before the live-generation check.
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("created_by", "is_contributor_session"),
+    [
+        ("bob@example.com", False),
+        # The caller's own contributor session on someone else's deck.
+        ("alice@example.com", True),
+    ],
+    ids=["someone-elses-deck", "callers-contributor-session"],
+)
+async def test_edit_deck_refuses_a_collaborator(
+    fake_request, identity, created_by, is_contributor_session
+):
+    """Edit permission isn't enough: only the deck's owner edits it over MCP. The
+    deck is an Agent deck, so the refusal is the owner check's alone."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(
+        created_by=created_by, is_contributor_session=is_contributor_session
+    )
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _OWNER_ONLY_COPY.format(deck_url="/sessions/sess-1/edit")
+    _assert_nothing_entered(enter, sm)
+    # The owner check is the first: neither the engine nor the holder is consulted.
+    resolve_engine.assert_not_called()
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_refuses_the_owner_while_someone_else_generates(
+    fake_request, identity
+):
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(live_holder="bob@example.com")
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, _engine, resolve_name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == "This deck is locked by Bob."
+    assert str(exc.value) == _DECK_LOCKED_COPY.format(name="Bob")
+    resolve_name.assert_called_once_with("bob@example.com")
+    _assert_nothing_entered(enter, sm)
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_proceeds_while_the_owner_holds_the_generation(
+    fake_request, identity
+):
+    """The owner's own live generation doesn't refuse the call here; Enter's
+    session lock decides."""
+    from src.api import mcp_server
+
+    sm = _edit_deck_session_manager(live_holder="alice@example.com")
+
+    with _edit_deck_env(identity, sm, engine="graph") as (enter, _engine, resolve_name):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="On slide 2, add a churn chart",
+        )
+
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message="On slide 2, add a churn chart",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
+    assert result == {
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+    resolve_name.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_answers_an_engine_lookup_failure_as_unavailable(
+    fake_request, identity
+):
+    """The engine resolver fails closed when it can't read the database. The
+    caller gets the unavailable copy, not "Internal error", and nothing is
+    entered."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+    from src.services.persisted_graph_release import (
+        PersistedConfigurationUnavailableError,
+    )
+
+    sm = _edit_deck_session_manager()
+    failure = PersistedConfigurationUnavailableError(code="lakebase_unavailable")
+
+    with _edit_deck_env(identity, sm, engine=failure) as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+                correlation_id="corr-edit-8",
+            )
+
+    assert str(exc.value) == _UNAVAILABLE_COPY
+    resolve_engine.assert_called_once()
+    _assert_nothing_entered(enter, sm)
+    sm.live_generation_holder.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_checks_edit_permission_before_ownership(fake_request, identity):
+    """A caller without edit permission gets the not-found-or-denied copy, never
+    the owner-only copy with its deck link, and the owner gate never runs."""
+    from src.api import mcp_server
+    from src.api.mcp_server import MCPToolError
+
+    sm = _edit_deck_session_manager(created_by="bob@example.com")
+
+    with _edit_deck_env(identity, sm, can_edit=False) as (enter, resolve_engine, _name):
+        with pytest.raises(MCPToolError) as exc:
+            await mcp_server._edit_deck_impl(
+                request=fake_request,
+                session_id="sess-1",
+                instruction="On slide 2, add a churn chart",
+            )
+
+    assert str(exc.value) == _EDIT_DENIED_COPY
+    assert sm.mock_calls == []
+    resolve_engine.assert_not_called()
+    enter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_runs_the_owner_gate_off_the_event_loop(fake_request, identity):
+    """Review M2. The owner gate reads the database and, on a locked deck, may call
+    SCIM for the holder's name, so it runs in a worker thread (as the app route's
+    gate does), never on the event loop. Enter follows it."""
+    from src.api import mcp_server
+
+    loop_thread = threading.get_ident()
+    gate_calls = []
+
+    def _recording_gate(session_id, user_name):
+        gate_calls.append((threading.get_ident(), session_id, user_name))
+
+    sm = _edit_deck_session_manager()
+
+    with _edit_deck_env(identity, sm) as (enter, _resolve_engine, _name), patch(
+        "src.api.mcp_server._require_agent_deck_owner", side_effect=_recording_gate
+    ):
+        result = await mcp_server._edit_deck_impl(
+            request=fake_request,
+            session_id="sess-1",
+            instruction="On slide 2, add a churn chart",
+        )
+
+    [(gate_thread, session_id, user_name)] = gate_calls
+    assert gate_thread != loop_thread
+    assert (session_id, user_name) == ("sess-1", "alice@example.com")
+    enter.assert_awaited_once_with(
+        session_id="sess-1",
+        message="On slide 2, add a churn chart",
+        requested_deck_mode="agent",
+        extra_payload={"correlation_id": None},
+    )
+    assert result == {
+        "session_id": "sess-1",
+        "request_id": "req-edit-1",
+        "status": "pending",
+    }
+
+
+@pytest.mark.asyncio
+async def test_edit_deck_takes_no_slide_indices():
+    """``slide_indices`` is gone: slides are named by number in the instruction.
+    A call that still sends it succeeds through FastMCP (which drops undeclared
+    arguments; see the integration test), so this pins the removal itself."""
+    from src.api import mcp_server
+
+    tool_params = inspect.signature(mcp_server.edit_deck).parameters
+    assert list(tool_params) == ["ctx", "session_id", "instruction", "correlation_id"]
+    assert tool_params["correlation_id"].default is None
+    assert "slide_indices" not in inspect.signature(mcp_server._edit_deck_impl).parameters
+    # What MCP clients see in tools/list.
+    [tool] = [t for t in await mcp_server.mcp.list_tools() if t.name == "edit_deck"]
+    assert set(tool.inputSchema["properties"]) == {
+        "session_id",
+        "instruction",
+        "correlation_id",
+    }
+    assert set(tool.inputSchema["required"]) == {"session_id", "instruction"}
 
 
 # ---- get_deck -----------------------------------------------------------
@@ -1679,112 +2908,3 @@ async def test_create_deck_length_guard_when_enabled(monkeypatch):
     monkeypatch.setattr(mcp_server, "MCP_PROMPT_LIMIT", 100)
     with pytest.raises(MCPToolError, match="too long"):
         await _create_deck_impl(request=None, prompt="x" * 200)
-
-
-# ---- create_deck: an MCP deck is stored legacy at creation --------------------
-#
-# MCP stays on the monolith (the graph's one-shot path is not built), so
-# create_deck creates its session with deck_mode="legacy": unpinned, and locked
-# to legacy from creation, so a later browser turn on it runs on the monolith
-# too.  The mode lives in the column, so every prompt -- create_deck's first one
-# included -- is persisted exactly as the caller sent it; the old
-# USE LEGACY MODE prepend is gone.  The manager here is a MagicMock: that a
-# legacy deck_mode is never pinned, whatever graph_capable says, is
-# SessionManager's pin rule, covered in test_deck_mode_resolution.py.
-
-# A literal, not the constant: the phrase constants are deleted in Task 6.
-_OLD_LEGACY_PHRASE = "USE LEGACY MODE"
-
-
-async def _drive_enqueue_create_job(*, mode, message_count):
-    from unittest.mock import AsyncMock
-
-    from src.api import mcp_server
-
-    sm = MagicMock()
-    sm.acquire_session_lock.return_value = True
-    sm.create_chat_request.return_value = "req-1"
-    sm.get_session.return_value = {"message_count": message_count}
-    enqueue = AsyncMock()
-    with patch("src.api.mcp_server.get_session_manager", return_value=sm), \
-         patch("src.api.mcp_server.enqueue_job", enqueue), \
-         patch("src.core.user_context.get_current_user", return_value="mcp@example.com"):
-        request_id = await mcp_server.enqueue_create_job(
-            session_id="sess-1", prompt="make a deck about Q3", mode=mode
-        )
-    assert request_id == "req-1"
-    persisted = sm.add_message.call_args.kwargs["content"]
-    payload = enqueue.await_args.args[1]
-    return persisted, payload
-
-
-@pytest.mark.asyncio
-async def test_mcp_create_deck_is_legacy_unpinned_and_persists_the_prompt_verbatim(
-    fake_request, identity
-):
-    """The whole create_deck path, through the real enqueue_create_job: the
-    session is created legacy (so unpinned), and its first message is the
-    caller's prompt, unchanged."""
-    from unittest.mock import AsyncMock
-
-    prompt = "make a deck about Q3 revenue by region"
-    sm = MagicMock()
-    sm.create_session.return_value = {"session_id": "sess-legacy"}
-    sm.acquire_session_lock.return_value = True
-    sm.create_chat_request.return_value = "req-1"
-    sm.get_session.return_value = {"message_count": 0}
-    enqueue = AsyncMock()
-    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
-         patch("src.api.mcp_server.get_session_manager", return_value=sm), \
-         patch("src.api.mcp_server.enqueue_job", enqueue), \
-         patch("src.core.user_context.get_current_user", return_value="alice@example.com"):
-        auth_scope.return_value.__enter__.return_value = identity
-        auth_scope.return_value.__exit__.return_value = False
-
-        result = await _create_deck_impl(
-            request=fake_request, prompt=prompt, slide_style_id=4
-        )
-
-    assert result == {
-        "session_id": "sess-legacy",
-        "request_id": "req-1",
-        "status": "pending",
-    }
-    sm.create_session.assert_called_once()
-    create_kwargs = sm.create_session.call_args.kwargs
-    assert (create_kwargs.get("deck_mode"), create_kwargs.get("graph_capable")) == (
-        "legacy",
-        False,
-    )
-    sm.add_message.assert_called_once()
-    saved = sm.add_message.call_args.kwargs
-    assert (saved["session_id"], saved["role"], saved["content"]) == (
-        "sess-legacy",
-        "user",
-        prompt,
-    )
-    assert _OLD_LEGACY_PHRASE not in saved["content"]
-    payload = enqueue.await_args.args[1]
-    assert (payload["message"], payload["is_first_message"]) == (prompt, True)
-    assert "engine_mode" not in payload
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "message_count"),
-    [("generate", 0), ("edit", 0), ("edit", 3), ("generate", 2)],
-    ids=["create-deck-first-message", "edit-on-empty-deck", "edit", "generate-not-first"],
-)
-async def test_every_enqueued_prompt_is_persisted_verbatim(mode, message_count):
-    """No prompt is altered, create_deck's first message included (it used to
-    get the opt-out prepended).  The first-message flag still reaches the
-    worker, and the payload still carries no engine key."""
-    persisted, payload = await _drive_enqueue_create_job(
-        mode=mode, message_count=message_count
-    )
-
-    assert persisted == "make a deck about Q3"
-    assert _OLD_LEGACY_PHRASE not in persisted
-    assert payload["message"] == "make a deck about Q3"
-    assert payload["is_first_message"] is (message_count == 0)
-    assert "engine_mode" not in payload

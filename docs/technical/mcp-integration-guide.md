@@ -143,11 +143,16 @@ def generate_deck(tellr_base: str, prompt_text: str, status) -> dict:
             raise RuntimeError(payload["result"]["content"][0]["text"])
         submit = json.loads(payload["result"]["content"][0]["text"])
 
-        # Poll — fresh MCP session per iteration; see gotcha below
-        deadline = time.time() + 600
+        # Poll — fresh MCP session per iteration; see gotcha below.
+        # A turn may run for 20 minutes once it starts, after waiting "pending"
+        # in tellr's shared queue (Gotcha 4): allow for both, and back off.
+        started = time.time()
+        deadline = started + 20 * 60 + 10 * 60  # 20 min running + queue allowance
+        delay = 2
         n = 100
         while time.time() < deadline:
-            time.sleep(2)
+            time.sleep(delay)
+            delay = min(delay * 1.5, 15)
             poll_hdrs = _open_session(c, mcp)
             _, payload = _rpc(c, mcp, "tools/call", params={
                 "name": "get_deck_status",
@@ -162,14 +167,14 @@ def generate_deck(tellr_base: str, prompt_text: str, status) -> dict:
             data = json.loads(payload["result"]["content"][0]["text"])
             status.info(
                 f"status={data['status']} "
-                f"elapsed={int(time.time() - (deadline - 600))}s"
+                f"elapsed={int(time.time() - started)}s"
             )
             if data["status"] == "ready":
                 return data
             if data["status"] == "failed":
                 raise RuntimeError(data.get("error", "generation failed"))
 
-    raise TimeoutError("Generation did not complete within 10 minutes")
+    raise TimeoutError("Generation did not complete before the deadline")
 
 
 # ---- Wire it up -----------------------------------------------------------
@@ -230,7 +235,7 @@ Tellr runs FastMCP with `stateless_http=True` because the app is served by multi
 If tellr's `DATABRICKS_APP_URL` env var is unset, `deck_url` comes back as a path-only string like `/sessions/.../edit`. Rendered in your app, the browser will resolve it against *your app's* origin, not tellr's. Databricks Apps sets `DATABRICKS_APP_URL` automatically on production deployments, so this should only bite during local dev or misconfigured environments.
 
 **Gotcha 4 — Generation time.**
-Single-slide prompts generate in ~10-30s, 10-slide decks take 3-8 minutes. The hard server-side timeout is 10 minutes (`JOB_HARD_TIMEOUT_SECONDS`). Match your client deadline to it or shorter.
+Decks are built in Agent mode, and a build takes minutes. A turn may run for up to 20 minutes (`GRAPH_JOB_HARD_TIMEOUT_SECONDS`) once it starts; past that the server marks it `failed` and rolls the deck back. Before it starts, it waits as `pending` while turns ahead of it in tellr's chat queue run, a queue it shares with people using the Tellr app (by default eight turns at a time per app process, `TELLR_CHAT_JOB_CONCURRENCY`). Set your client deadline to at least 20 minutes plus the queue wait you expect, or poll without one and back off. A shorter deadline abandons a build that is still running fine.
 
 **Gotcha 5 — `x-forwarded-email` is authoritative; you don't need to verify it.**
 The proxy sets it, strips any caller-supplied version, and signs the whole interaction with TLS. Trusting it at face value is safe *only* when you're behind the Databricks Apps proxy. Don't copy this pattern to services that aren't.
@@ -500,7 +505,7 @@ Genie should call the tellr MCP tools. The first call sends you through OAuth co
 
 **The client secret is shown once.** If it is lost, mint a new one in the account console and update the connection.
 
-**Ask for small decks first.** `create_deck` returns immediately and the caller must poll `get_deck_status`; a single-slide deck is ready in ~10-30s but a 10-slide deck takes 3-8 minutes (§2.4, Gotcha 4). Keep the first test small so the round-trip completes quickly.
+**Ask for small decks first.** `create_deck` returns immediately and the caller must poll `get_deck_status`; a build takes minutes, and a turn may run for up to 20 minutes plus its wait in the queue (§2.4, Gotcha 4). Keep the first test small so the round-trip completes quickly.
 
 ---
 
@@ -510,9 +515,9 @@ Genie should call the tellr MCP tools. The first call sends you through OAuth co
 
 | Tool | Purpose | Key inputs | Key outputs |
 |---|---|---|---|
-| `create_deck` | Generate a new deck from a prompt | `prompt`, `num_slides?` | `session_id`, `request_id`, `status: pending` |
-| `get_deck_status` | Poll for completion and retrieve ready deck | `session_id`, `request_id` | `status`, plus (on ready) `deck`, `html_document`, `deck_url`, `deck_view_url` |
-| `edit_deck` | Refine an existing deck via instruction | `session_id`, `instruction`, `slide_indices?` | `request_id` (poll via `get_deck_status`) |
+| `create_deck` | Generate a new deck from a prompt | `prompt`, `design_system_id?`, `template_name?`, `slide_style_id?` | `session_id`, `request_id`, `status: pending` |
+| `get_deck_status` | Poll for completion and retrieve ready deck | `session_id`, `request_id` | `status`, plus (on ready) `deck`, `html_document`, `deck_url`, `deck_view_url`, `reply`, `deck_changed` |
+| `edit_deck` | Ask for a change to an existing deck, or a question about it (owner only; Agent decks only) | `session_id`, `instruction` | `request_id` (poll via `get_deck_status`) |
 | `get_deck` | Re-read current deck state without submitting work | `session_id` | Same shape as `get_deck_status` ready response, minus `status`/`messages` |
 
 Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
@@ -533,10 +538,10 @@ Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
 
 ### 5.3 v1 limitations
 
-- **Prompt-only generation.** The agent does not call Genie, Vector Search, or other data tools on your behalf. If you want data-backed decks, gather the data yourself and include it in the prompt. (This is about tellr calling *out* to data tools; Genie One calling *in* to tellr is Part C and is supported.)
+- **Data tools come from the app's new-deck defaults.** `create_deck` gives the deck the app's default tools for a new deck (Genie One, when an admin turned that default on), and they run with your token. A token-less app-to-app caller (Part A) gets no data tools, so gather the data yourself and include it in the prompt. (This is about tellr calling *out* to data tools; Genie One calling *in* to tellr is Part C and is supported.)
 - **No exports over MCP.** `export_pptx` / `export_google_slides` are v1.1; for now, hand users to `deck_url` for exports in the tellr UI.
 - **No structural edits.** Reorder / delete / duplicate slides are v1.1.
-- **No cancellation.** There's a 10-minute hard timeout but no way to abort an in-flight generation.
+- **No stop tool.** A running turn ends within its 20-minute hard timeout, and there is no MCP tool to stop it sooner. The Tellr editor's stop sign appears only for a turn sent from that browser tab, so it can't stop an MCP turn; Tellr's REST stop route, `POST /api/chat/cancel/{request_id}`, stops a turn for its sender only (see [`mcp-server.md`](./mcp-server.md) section 5.2).
 - **No streaming progress.** Status transitions are polling-based; `notifications/progress` is v1.1.
 
 ### 5.4 Further reading

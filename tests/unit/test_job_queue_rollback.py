@@ -22,7 +22,8 @@ of ``ChatService.send_message_streaming`` decide how an Agent-deck turn ends:
   never overwritten by ``error``.  The ``finally`` releases the lock by request
   id, and not at all while the snapshot survives (a failed restore keeps the
   deck locked).
-* **Monolith** (Legacy decks, every MCP job) takes exactly today's path.
+* **Monolith** (Legacy decks, and a payload with no ``engine_mode`` key) takes
+  exactly today's path.
 
 How the tests are built
 -----------------------
@@ -228,7 +229,7 @@ def monolith_payload(session_id: str, shape: str) -> Dict[str, Any]:
     }
     if shape == "explicit":
         payload["engine_mode"] = "monolith"
-    else:  # mcp_server.py's payload: no engine_mode key, MCP's own `mode`
+    else:  # the old MCP payload shape: no engine_mode key, its own `mode` flag
         payload["mode"] = "generate"
         payload["correlation_id"] = "corr-1"
     return payload
@@ -297,7 +298,7 @@ def _graph_result(slides: Any) -> Dict[str, Any]:
                 "raw_html": None,
                 "replacement_info": None,
                 "experiment_url": None,
-                "metadata": {"engine_mode": "graph"},
+                "metadata": {"engine_mode": "graph", "architect_intent": None},
             }
         )
     )
@@ -977,7 +978,8 @@ class _MonolithService:
 
 
 def _monolith_request(env: JobEnv, shape: str) -> tuple:
-    """A Legacy deck's request as the route (or MCP) leaves it: locked, pending."""
+    """A Legacy deck's request as the route leaves it (bound) or as the old MCP
+    enqueue left one (unbound): locked, pending."""
     sid = env.rb.new_session(created_by=OWNER, title="MK-LEGACY")
     sm = get_session_manager()
     sm.add_user_message(
@@ -987,7 +989,7 @@ def _monolith_request(env: JobEnv, shape: str) -> tuple:
     assert sm.acquire_session_lock(sid)
     rid = sm.create_chat_request(sid, OWNER)
     if shape == "explicit":
-        sm.bind_session_lock(sid, rid)  # the async route binds; MCP never does
+        sm.bind_session_lock(sid, rid)  # the async route binds; the old MCP enqueue never did
     sm.add_message(sid, "user", USER_MESSAGE, message_type="user_query", request_id=rid)
     return sid, rid
 
