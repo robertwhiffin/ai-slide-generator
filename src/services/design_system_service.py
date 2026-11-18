@@ -61,6 +61,7 @@ import re
 import struct
 import unicodedata
 import zipfile
+from collections.abc import Iterable
 from typing import Any, NamedTuple, Optional
 
 from sqlalchemy.orm import Session, defer
@@ -2300,6 +2301,41 @@ def get_assets_base64(
         asset.id: (base64.b64encode(asset.data).decode("utf-8"), asset.mime)
         for asset in assets
     }
+
+
+def get_small_svg_assets(
+    db: Session,
+    asset_ids: Iterable[int],
+    *,
+    design_system_id: Optional[int],
+    max_bytes: int,
+) -> dict[int, str]:
+    """``{id: svg_text}`` for each of *asset_ids* that is an SVG of at most *max_bytes*.
+
+    Same confused-deputy scope as :func:`get_assets_base64` (one query, filtered on the
+    owning design system). No query runs for an empty id set or ``design_system_id=None``
+    (fail-closed). A row whose bytes are not valid UTF-8 is skipped.
+    """
+    ids = sorted({int(i) for i in asset_ids})
+    if not ids or design_system_id is None:
+        return {}
+    assets = (
+        db.query(DesignSystemAsset)
+        .filter(
+            DesignSystemAsset.id.in_(ids),
+            DesignSystemAsset.design_system_id == design_system_id,
+            DesignSystemAsset.mime == "image/svg+xml",
+            DesignSystemAsset.size_bytes <= max_bytes,
+        )
+        .all()
+    )
+    svgs: dict[int, str] = {}
+    for asset in assets:
+        try:
+            svgs[asset.id] = bytes(asset.data).decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return svgs
 
 
 # ---------------------------------------------------------------------------
