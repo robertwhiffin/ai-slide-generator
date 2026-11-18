@@ -1017,7 +1017,8 @@ def test_get_small_svg_assets_returns_empty_without_a_query(unseeded_session):
 
 
 # ---------------------------------------------------------------------------
-# Final review: linear time on unclosed markup (I1), line-wrapped base64 (M4)
+# Final review: linear time on unclosed markup (I1), line-wrapped base64 (M4), sweep case
+# (M3), and Task 2's three unguarded behaviours (R5-R7)
 # ---------------------------------------------------------------------------
 
 _HUGE = 100_000
@@ -1102,3 +1103,59 @@ def test_the_sweep_hides_a_line_wrapped_base64_payload_whole():
 
     out, hidden = hide_images_in_css(f'.b{{--i:"{payload}"}}', {})
     assert (out, hidden) == ('.b{--i:"none"}', 1)
+
+
+@pytest.mark.parametrize(
+    ("html", "uri"),
+    [
+        pytest.param(
+            '<video poster="DATA:IMAGE/PNG;base64,AAAA"></video>',
+            "DATA:IMAGE/PNG;base64,AAAA",
+            id="upper-case-scheme-and-type",
+        ),
+        pytest.param(
+            '<svg><image href="data:image/png;BASE64,AAAA"/></svg>',
+            "data:image/png;BASE64,AAAA",
+            id="upper-case-base64",
+        ),
+    ],
+)
+def test_the_sweep_matches_data_uris_in_any_case(html, uri):
+    """M3: ``data:`` and ``;base64`` are case-insensitive, so the sweep is too."""
+    out, hidden = hide_images_in_html(html, {})
+
+    assert hidden == 1
+    assert "base64" not in out.lower()
+    assert "AAAA" not in out
+    assert out == html.replace(uri, NOTICE_IMG_SRC)
+
+
+def test_svg_data_uri_encodes_an_ampersand():
+    """R5: ``&`` is always percent-encoded, so an entity in the SVG text cannot be
+    decoded by the HTML parser when the URI sits in an attribute."""
+    uri = svg_data_uri("<svg>a &amp; b</svg>")
+
+    assert "%26" in uri
+    assert "&" not in uri
+    assert unquote(uri[len(TEXT_SVG_PREFIX) :]) == "<svg>a &amp; b</svg>"
+
+
+def test_an_upper_case_css_url_is_resolved():
+    """R6: ``URL(`` is a ``url(`` (CSS is case-insensitive here)."""
+    out, hidden = hide_images_in_css(".a{background:URL({{ds-asset:4}})}", {4: DS_SVG_RAW})
+
+    assert hidden == 0
+    assert out == '.a{background:url("' + svg_data_uri(DS_SVG_RAW) + '")}'
+
+
+def test_a_source_loses_a_data_srcset_and_its_img_is_untouched():
+    """R7: inside ``<picture>`` the ``<source>`` loses its ``data:`` srcset (not
+    counted) and the https ``<img>`` beside it stays as written."""
+    html = (
+        '<picture><source srcset="data:image/webp;base64,AAAA">'
+        '<img src="https://e.com/a.png"></picture>'
+    )
+
+    out, hidden = hide_images_in_html(html, {})
+
+    assert (out, hidden) == ('<picture><source><img src="https://e.com/a.png"></picture>', 0)
