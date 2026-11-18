@@ -42,7 +42,7 @@ job_queue: asyncio.Queue = asyncio.Queue()
 # the chat jobs POSTed to it.  A session's turns are still serialised by its
 # database session lock, so runners only overlap different sessions.  Runners only
 # decide which turns start; model load is capped separately, per process, by
-# TELLR_MODEL_CALL_CONCURRENCY (default 10) in src/services/model_calls.py.
+# TELLR_MODEL_CALL_CONCURRENCY (default 6) in src/services/model_calls.py.
 CHAT_JOB_CONCURRENCY_ENV = "TELLR_CHAT_JOB_CONCURRENCY"
 DEFAULT_CHAT_JOB_CONCURRENCY = 8
 MAX_CHAT_JOB_CONCURRENCY = 16
