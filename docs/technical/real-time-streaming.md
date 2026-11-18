@@ -64,7 +64,7 @@ Frontend                    Backend
 
 **Key Components:**
 - **ChatRequest** – Database model tracking request status (`pending`/`running`/`completed`/`error`)
-- **Job Queue** – In-memory asyncio queue per uvicorn worker, with `TELLR_CHAT_JOB_CONCURRENCY` job runners (default 1) on a dedicated thread pool (`src/api/services/job_queue.py`). A turn waiting for a runner polls as `pending` with no `turn_progress`; the chat shows it as queued. See [Multi-User Concurrency](multi-user-concurrency.md#chat-job-runners).
+- **Job Queue** – In-memory asyncio queue per uvicorn worker, with `TELLR_CHAT_JOB_CONCURRENCY` job runners (default 8) on a dedicated thread pool (`src/api/services/job_queue.py`). A turn waiting for a runner polls as `pending` with no `turn_progress`; the chat shows it as queued. See [Multi-User Concurrency](multi-user-concurrency.md#chat-job-runners).
 - **request_id** – Links messages to specific chat requests for efficient polling
 - **Auto-creation** – Sessions are auto-created on first async request if they don't exist
 
@@ -611,8 +611,10 @@ A delete removes a turn's rows by role and order (the user message and the rows 
 | `progress_seq` | INTEGER NULL | `seq` of the stored `progress_json`; the conditional UPDATE only writes a higher value (#319) |
 | `created_at` | TIMESTAMP | Request creation time |
 | `completed_at` | TIMESTAMP | Request completion time |
+| `started_at` | TIMESTAMP NULL | When a runner starts the request; wait time is `started_at - created_at` |
+| `model_fault_kind` | VARCHAR(32) NULL | On a failed Agent turn: `rate_limited`, `server_error`, `timeout`, `connection` or `not_transient`; NULL otherwise |
 
-**Migration SQL:** See `scripts/migrate_polling_support.sql`. The two `progress_*` columns are not in that script; `_migrate_chat_request_progress()` adds them at startup (see [Database Configuration](database-configuration.md)).
+**Migration SQL:** See `scripts/migrate_polling_support.sql`. The two `progress_*` columns are not in that script; `_migrate_chat_request_progress()` adds them at startup (see [Database Configuration](database-configuration.md)). The same goes for `started_at` and `model_fault_kind`, which `_migrate_chat_request_measurement()` adds at startup.
 
 ---
 

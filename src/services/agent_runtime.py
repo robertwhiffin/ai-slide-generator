@@ -70,6 +70,15 @@ from src.services.graph_definition_manifest import (
     definition_content_hash,
     schema_contract_identity,
 )
+from src.services.model_calls import (
+    DEFAULT_RETRY_POLICY,
+    TRANSIENT_FAULT_KINDS,
+    FairCallLimiter,
+    RetryPolicy,
+    call_model,
+    get_model_call_limiter,
+    model_fault_kind,
+)
 from src.services.persisted_graph_release import (
     PersistedConfigurationUnavailableError,
     PersistedGraphReleaseLoader,
@@ -246,7 +255,8 @@ def bind_structured_output_model(
     runtime keeps collapsing both.  ``transport_options`` is a request bound
     for the two admin-request callers only: the #266 probe, and the #267
     test-run adapter built by ``get_agent_test_runtime``.  The production
-    runtime adapter passes none.
+    runtime adapter passes ``{"max_retries": 0}``: Tellr's own retries
+    (``call_model``) replace the SDK's.
 
     What is sent (ws2a follow-up A): the model is constructed with the endpoint
     and ``max_tokens`` only.  The saved ``temperature`` / ``top_p`` are never
@@ -508,6 +518,11 @@ def _tool_definition(tool: AgentTool) -> dict[str, Any]:
     }
 
 
+# Marks "use the production default" for ``retry_policy`` / ``limiter``; a
+# ``None`` is an explicit "no retries" / "no slot" and must win.
+_MANAGED: Any = object()
+
+
 class DatabricksModelAdapter:
     """Invoke one structured Databricks model.
 
@@ -522,14 +537,24 @@ class DatabricksModelAdapter:
         model_factory: Callable[..., Any] | None = None,
         client_factory: Callable[[], Any] | None = None,
         transport_options: Mapping[str, Any] | None = None,
+        retry_policy: RetryPolicy | None = _MANAGED,
+        limiter: FairCallLimiter | None = _MANAGED,
     ) -> None:
         self._model_factory = model_factory or self._default_model_factory
         self._client_factory = client_factory or self._default_client_factory
-        # ``None`` (production) hands the model factory exactly the kwargs it
-        # always had; only ``get_agent_test_runtime`` bounds the call (#267 C33).
-        self._transport_options = (
-            dict(transport_options) if transport_options is not None else None
-        )
+        # ``None`` (production): the SDK's own retries are off and Tellr's
+        # ``call_model`` retries under the process limiter.  An adapter given
+        # transport options (``get_agent_test_runtime``, #267 C33, and the eval
+        # harness) bounds the call itself, so it gets no retries and no slot
+        # unless asked.
+        if transport_options is None:
+            self._transport_options: dict[str, Any] = {"max_retries": 0}
+            self._retry_policy = DEFAULT_RETRY_POLICY if retry_policy is _MANAGED else retry_policy
+            self._limiter = get_model_call_limiter() if limiter is _MANAGED else limiter
+        else:
+            self._transport_options = dict(transport_options)
+            self._retry_policy = None if retry_policy is _MANAGED else retry_policy
+            self._limiter = None if limiter is _MANAGED else limiter
 
     @staticmethod
     def _default_model_factory(**kwargs: Any) -> Any:
@@ -555,8 +580,8 @@ class DatabricksModelAdapter:
         prompt: str,
     ) -> BaseModel:
         # ``agent_key`` is deliberately a separate selection seam.  In particular,
-        # Build Reviewer and Fix Reviewer have the same output schema.
-        del agent_key
+        # Build Reviewer and Fix Reviewer have the same output schema.  It also
+        # names the ``model_call_retry`` / ``model_call_gave_up`` log lines.
         with _model_provider_errors_collapsed():
             structured_model = bind_structured_output_model(
                 model_factory=self._model_factory,
@@ -565,7 +590,12 @@ class DatabricksModelAdapter:
                 schema=schema,
                 transport_options=self._transport_options,
             )
-            return structured_model.invoke(prompt)
+            return call_model(
+                lambda: structured_model.invoke(prompt),
+                agent_key=agent_key,
+                policy=self._retry_policy,
+                limiter=self._limiter,
+            )
 
     def invoke_with_tools(
         self,
@@ -600,7 +630,9 @@ class DatabricksModelAdapter:
         After ``max_calls + 3`` rounds without a schema call it raises
         ``OutputParserException``.  Only the model's own calls (construction,
         binding, each round) collapse provider failures into
-        ``ModelProviderUnavailableError``; a tool's failure never does.
+        ``ModelProviderUnavailableError``; a tool's failure never does.  Each
+        round's model call goes through ``call_model`` on its own (its own
+        retries, holding one limiter slot); tools run outside it, holding none.
 
         Every round after the first starts with ``raise_if_turn_ended``: a
         read-only tool writes nothing, so no fence would stop a turn stopped
@@ -608,7 +640,6 @@ class DatabricksModelAdapter:
         issues no SQL without a turn's request id (the sweeper, the evals, the
         previews).
         """
-        del agent_key
         from langchain_core.exceptions import OutputParserException
         from langchain_core.messages import HumanMessage, ToolMessage
         from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -640,7 +671,12 @@ class DatabricksModelAdapter:
             if round_index:
                 raise_if_turn_ended()
             with _model_provider_errors_collapsed():
-                reply = bound_model.invoke(messages)
+                reply = call_model(
+                    lambda: bound_model.invoke(messages),
+                    agent_key=agent_key,
+                    policy=self._retry_policy,
+                    limiter=self._limiter,
+                )
             tool_calls = list(reply.tool_calls)
             malformed_calls = list(reply.invalid_tool_calls)
             for call in tool_calls:
@@ -737,11 +773,6 @@ class DatabricksModelAdapter:
             )
 
 
-#: HTTP statuses a retry or a later turn can succeed on: request timeout,
-#: conflict, rate limit, and every server-side error.
-_TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429})
-
-
 def is_transient_model_failure(error: BaseException) -> bool:
     """True when *error* was caused by a provider fault that may clear by itself.
 
@@ -757,32 +788,7 @@ def is_transient_model_failure(error: BaseException) -> bool:
     cause at all) is NOT transient, so the pinned-failure contract is unchanged
     wherever the provider's own error is not a transient one.
     """
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(
-            current,
-            (
-                openai.APITimeoutError,
-                openai.APIConnectionError,
-                httpx.TimeoutException,
-                httpx.TransportError,
-                requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError,
-                TimeoutError,
-                ConnectionError,
-                DeadlineExceeded,
-                Aborted,
-                InternalError,
-            ),
-        ):
-            return True
-        if isinstance(current, openai.APIStatusError):
-            status = current.status_code
-            return status in _TRANSIENT_HTTP_STATUSES or status >= 500
-        current = current.__cause__ or current.__context__
-    return False
+    return model_fault_kind(error) in TRANSIENT_FAULT_KINDS
 
 
 def _supplied_output_keys(provider_output: BaseModel) -> Mapping[str, Any]:

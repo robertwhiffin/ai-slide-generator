@@ -10,6 +10,7 @@ waits for in-flight writers, and a writer arriving after the cancel is refused.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
@@ -79,13 +80,16 @@ def fence_turn_write(
 
 
 def start_chat_request(db: Session, request_id: str) -> bool:
-    """Move ``pending`` -> ``running``. True only if this call made the move."""
+    """Move ``pending`` -> ``running``, stamping ``started_at`` in the same UPDATE.
+
+    True only if this call made the move.
+    """
     result = db.execute(
         text(
-            "UPDATE chat_requests SET status = 'running' "
+            "UPDATE chat_requests SET status = 'running', started_at = :now "
             "WHERE request_id = :rid AND status = 'pending'"
         ),
-        {"rid": request_id},
+        {"rid": request_id, "now": datetime.utcnow()},
     )
     return result.rowcount == 1
 

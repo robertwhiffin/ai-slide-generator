@@ -97,6 +97,13 @@ class ChatRequest(Base):
     progress_json = Column(Text, nullable=True)
     progress_seq = Column(Integer, nullable=True)
 
+    # When a runner started the turn (NULL = never started); wait time is
+    # started_at - created_at.  Set by the pending -> running move.
+    started_at = Column(DateTime, nullable=True)
+    # Which kind of model fault ended a failed Agent turn (see
+    # src.services.model_calls.model_fault_kind); NULL for every other row.
+    model_fault_kind = Column(String(32), nullable=True)
+
     # Outcome of rolling back a stopped generation (NULL = never stopped).
     rollback_outcome = Column(String(32), nullable=True)
 

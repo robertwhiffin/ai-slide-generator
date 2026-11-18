@@ -54,6 +54,7 @@ class _BlockingGenerator:
         image_ids=None,
         engine_mode="monolith",
         stage_slide=None,
+        turn_deadline=None,
     ):
         with self.lock:
             self.started.append(request_id)
@@ -132,10 +133,30 @@ def _statuses(manager) -> dict[str, list[str]]:
 # --- how many runners ------------------------------------------------------------
 
 
-def test_default_concurrency_is_one(monkeypatch):
-    """One runner per process until 429 handling can take more concurrent turns."""
+def test_default_concurrency_is_eight(monkeypatch):
+    """Enough runners that a turn practically never waits; model load is capped per process by the
+    model-call limiter"""
     monkeypatch.delenv(job_queue.CHAT_JOB_CONCURRENCY_ENV, raising=False)
-    assert job_queue.chat_job_concurrency() == 1
+    assert job_queue.chat_job_concurrency() == 8
+
+
+@pytest.mark.parametrize("raw", ["0", "four"])
+def test_an_unusable_value_falls_back_to_eight(monkeypatch, raw):
+    """Pinned as a literal: the fallback is the shipped default, not a relative constant."""
+    monkeypatch.setenv(job_queue.CHAT_JOB_CONCURRENCY_ENV, raw)
+    assert job_queue.chat_job_concurrency() == 8
+
+
+@pytest.mark.asyncio
+async def test_start_workers_without_a_count_starts_eight_runners(env, monkeypatch):
+    """main.py calls start_workers() with no argument: that is what ships."""
+    monkeypatch.delenv(job_queue.CHAT_JOB_CONCURRENCY_ENV, raising=False)
+    tasks = await job_queue.start_workers()
+    try:
+        assert len(tasks) == 8
+        assert job_queue.get_chat_executor()._max_workers == 8
+    finally:
+        await job_queue.stop_workers(tasks)
 
 
 @pytest.mark.parametrize("raw, expected", [("1", 1), ("6", 6), (" 3 ", 3)])
@@ -185,7 +206,7 @@ async def test_two_runners_run_two_jobs_at_once(env):
 
 @pytest.mark.asyncio
 async def test_one_runner_still_runs_jobs_in_order(env):
-    """TELLR_CHAT_JOB_CONCURRENCY=1 keeps today's serial behaviour."""
+    """TELLR_CHAT_JOB_CONCURRENCY=1 keeps the old serial behaviour."""
     gen, manager = env
     tasks = await job_queue.start_workers(1)
     try:
