@@ -203,9 +203,10 @@ HOSTILE_RULES = {
     # A pseudo-element of an unrelated element, laid over the chart, that
     # declares itself visible: `*` never matches ::before/::after, and a
     # pseudo-element's own declaration beats the visibility it would inherit
-    # from its hidden element.
+    # from its hidden element. Its specificity (0,2,2) outranks the isolation's
+    # pseudo-element rule without its boost ((0,2,1) for a subtree target).
     "pseudo-forced-visible": (
-        ".dk-legend::after { content: ''; position: fixed; left: 100px; top: 200px; "
+        "body .slide .dk-legend::after { content: ''; position: fixed; left: 100px; top: 200px; "
         f"width: 500px; height: 150px; background: #{LEAK}; visibility: visible !important; }}"
     ),
 }
@@ -488,6 +489,46 @@ def _clip_body() -> str:
 
 
 CLIP_BODY = _clip_body()
+
+# Box-only targets the slide's own edge cuts at its right and at its bottom,
+# from a fractional origin: the shown rect ends exactly at the viewport.
+EDGE_CUT_BODY = (
+    '<div class="slide">'
+    '<div id="cut-right" style="position: absolute; left: 853.1px; top: 120.3px; width: 600px; '
+    f'height: 100px; background: linear-gradient(90deg, #{ACCENT_2}, #{ACCENT});"></div>'
+    '<div id="cut-bottom" style="position: absolute; left: 120.3px; top: 300.2px; width: 300px; '
+    f'height: 600px; background: linear-gradient(180deg, #{ACCENT_2}, #{ACCENT});"></div>'
+    "</div>"
+)
+SLIDE_RECT = {"x": 0.0, "y": 0.0, "w": 1280.0, "h": 720.0}
+
+# Pseudo-elements on and inside capture targets. The slide hides two of them
+# (#00FF00): one of a gradient box (a box target) and one of an HTML note in an
+# SVG's foreignObject (inside a subtree target); the picture must not show
+# what the browser does not. Two (#FFD400) the slide shows, which the picture
+# must keep.
+PSEUDO_TARGETS_BODY = (
+    '<div class="slide">'
+    "<style>"
+    "#pseudo-card::after { content: ''; position: absolute; left: 20px; top: 20px; "
+    f"width: 100px; height: 60px; background: #{LEAK}; visibility: hidden; }}"
+    "#pseudo-card::before { content: ''; position: absolute; right: 20px; bottom: 20px; "
+    f"width: 60px; height: 40px; background: #{CHIP_FILL}; }}"
+    ".fo-note::after { content: ''; display: block; width: 100px; height: 60px; "
+    f"background: #{LEAK}; visibility: hidden; }}"
+    ".fo-note::before { content: ''; display: block; width: 60px; height: 40px; "
+    f"background: #{CHIP_FILL}; }}"
+    "</style>"
+    '<div id="pseudo-card" style="position: absolute; left: 80px; top: 120px; width: 300px; '
+    f'height: 160px; background: linear-gradient(90deg, #{BLUE}, #{INK});"></div>'
+    '<svg id="pseudo-svg" width="300" height="200" viewBox="0 0 300 200" '
+    'style="position: absolute; left: 480px; top: 120px;">'
+    f'<rect width="300" height="200" fill="#{BLUE}"/>'
+    '<foreignObject x="20" y="20" width="200" height="160">'
+    '<div xmlns="http://www.w3.org/1999/xhtml" class="fo-note"></div>'
+    "</foreignObject></svg>"
+    "</div>"
+)
 
 
 @dataclass(frozen=True)
@@ -1114,9 +1155,9 @@ class TestSnapshotCaptureIsolation:
           chart (the brief's ``.dk-legend`` rule alone leaks nothing even
           without the boost: see the module docstring);
         * ``ground-forced``: ``html > body { background: … !important }``;
-        * ``pseudo-forced-visible``: a ``.dk-legend::after`` box fixed over the
-          chart with ``visibility: visible !important`` on the pseudo-element
-          itself, which no ``*`` rule matches.
+        * ``pseudo-forced-visible``: a ``body .slide .dk-legend::after`` box fixed
+          over the chart with ``visibility: visible !important`` on the
+          pseudo-element itself, which no ``*`` rule matches.
 
         The chart is still captured (its FY24 bar shows ``FF3621``), and its
         picture holds no ``#00FF00`` pixel.
@@ -1237,6 +1278,35 @@ class TestSnapshotCaptureIsolation:
             f"the chart picture shows {_show(centre)} at its centre, not #{ACCENT_2}: "
             "slide script defeated the capture"
         )
+
+    def test_pseudo_elements_are_captured_as_the_slide_shows_them(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A capture target's pseudo-elements, and those of what it holds, show as on the slide.
+
+        The isolation hides every other element's ::before and ::after, but it
+        must not decide for the target's own: a gradient box's ``::after`` the
+        slide hides, and the ``::after`` of an HTML note in an SVG's
+        foreignObject the slide hides, are not in their pictures (no
+        ``#00FF00`` pixel), while each one's ``::before`` the slide shows is
+        (``FFD400`` pixels).
+        """
+        document = _document(PSEUDO_TARGETS_BODY)
+        card = browser_rect(document, "#pseudo-card")
+        svg = browser_rect(document, "#pseudo-svg")
+        shapes = slide_shapes(_export_one(PSEUDO_TARGETS_BODY, monkeypatch))
+        wrong = []
+        for what, rect in (("the gradient box", card), ("the SVG", svg)):
+            _, picture = _picture_at(shapes, rect, what)
+            image = _image(picture, what)
+            hidden = _count(image, _is_leak)
+            shown = _count(image, lambda pixel: _is(pixel, CHIP_FILL))
+            if hidden or not shown:
+                wrong.append(
+                    f"{what}: {hidden} pixels of the ::after the slide hides, "
+                    f"{shown} of the ::before it shows"
+                )
+        assert not wrong, f"the pictures show pseudo-elements not as the slide does: {wrong}"
 
     def test_svg_parts_the_slide_hides_stay_hidden(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A subtree capture shows its target's descendants as the slide does, no more.
@@ -1649,9 +1719,47 @@ def clip_slide() -> dict:
     return {"shapes": slide_shapes(pptx), "targets": targets, "frames": frames}
 
 
+@pytest.fixture(scope="module")
+def edge_cut_slide() -> dict:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        pptx = _export_one(EDGE_CUT_BODY, monkeypatch)
+    document = _document(EDGE_CUT_BODY)
+    return {
+        "shapes": slide_shapes(pptx),
+        "right": browser_rect(document, "#cut-right"),
+        "bottom": browser_rect(document, "#cut-bottom"),
+    }
+
+
 @pytest.mark.slow
 @requires_huashu_sidecar
 class TestSnapshotClippedCapture:
+    @pytest.mark.parametrize("edge", ["right", "bottom"])
+    def test_target_cut_at_the_slide_edge_is_twice_its_shown_rect(
+        self, edge_cut_slide: dict, edge: str
+    ) -> None:
+        """A target the slide's right or bottom edge cuts, from a fractional origin, is whole.
+
+        Its picture is at the shown rect (the target's browser rect cut to the
+        slide, ending exactly at the viewport's edge) within 0.5 px, and its
+        PNG is twice that rect within one device pixel, so the part next to
+        the edge is in it, not lost to a clip that cannot reach past the viewport.
+        """
+        target = edge_cut_slide[edge]
+        shown = _intersection(target, SLIDE_RECT)
+        cut = {
+            "right": target["x"] + target["w"] > SLIDE_RECT["w"],
+            "bottom": target["y"] + target["h"] > SLIDE_RECT["h"],
+        }
+        assert cut[edge] and sum(cut.values()) == 1, (
+            f"fixture drift: the slide does not cut {target} at its {edge} alone"
+        )
+        _, picture = _picture_at(edge_cut_slide["shapes"], shown, f"the box cut at the {edge}")
+        image = _image(picture, f"the box cut at the {edge}")
+        _assert_twice_its_box(image, shown, f"the box cut at the {edge}")
+        centre = _pixel(image, picture, *_centre(shown))
+        assert centre[3] >= OPAQUE_ALPHA, f"the box cut at the {edge} is {_show(centre)} inside"
+
     @pytest.mark.parametrize("case", CLIP_CASES, ids=lambda case: f"{case.kind}-{case.direction}")
     def test_partly_clipped_target_is_its_visible_part(
         self, clip_slide: dict, case: ClipCase

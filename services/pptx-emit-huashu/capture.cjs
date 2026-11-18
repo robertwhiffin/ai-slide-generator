@@ -56,28 +56,29 @@ const COMPUTED_VALUE = /^[a-z0-9\s(),.%#+/-]*$/i;
 // !important rules on classes and elements (Review Focus 5); the trick of
 // SLIDE_ROOT_RESET_STYLE's #tellr-root-reset-boost. `*` never matches a
 // ::before or ::after, and a pseudo-element's own visibility beats the one it
-// would inherit from its hidden element, so pseudo-elements are hidden by
-// rules of their own, and shown again for the target (and, in subtree mode,
-// for what the target holds).
+// would inherit from its hidden element, so every other element's
+// pseudo-elements are hidden by a rule of their own. The target's (and, in
+// subtree mode, those of what it holds) are left to inherit the visibility the
+// isolation gives their element, or to keep their own declaration, so a
+// pseudo-element the slide hides stays hidden in the picture.
 function isolationCss(id, mode) {
   const target = `[data-tellr-capture="${id}"]`;
   const boost = ':not(#tellr-capture-a):not(#tellr-capture-b):not(#tellr-capture-c)';
+  const others = mode === 'subtree' ? `*${boost}:not(${target}):not(${target} *)` : `*${boost}:not(${target})`;
   return `html${boost}, body${boost} { background: transparent !important; }\n` +
     `*${boost} { visibility: hidden !important; }\n` +
-    `*${boost}::before, *${boost}::after { visibility: hidden !important; }\n` +
-    `${target}${boost}::before, ${target}${boost}::after { visibility: visible !important; }\n` +
+    `${others}::before, ${others}::after { visibility: hidden !important; }\n` +
     (mode === 'subtree'
-      ? `${target}${boost}, ${target} *${boost} { visibility: visible !important; }\n` +
-        `${target} *${boost}::before, ${target} *${boost}::after { visibility: visible !important; }`
+      ? `${target}${boost}, ${target} *${boost} { visibility: visible !important; }`
       : `${target}${boost} { visibility: visible !important; color: transparent !important;` +
         ` -webkit-text-fill-color: transparent !important; text-shadow: none !important; }`);
 }
 
 // What the isolation must not change about the target's own painting.
 // * Subtree mode shows every descendant, so a descendant the slide hides
-//   (an SVG group with visibility="hidden") is hidden again, with its
-//   pseudo-elements, one attribute selector more specific than the rules
-//   that show them.
+//   (an SVG group with visibility="hidden") is hidden again, one attribute
+//   selector more specific than the rule that shows it; its pseudo-elements
+//   inherit that, as they do on the slide.
 // * Box mode makes the target's text transparent by setting `color`, which a
 //   border or shadow drawn in currentColor follows; each is pinned to the
 //   colour the slide paints it in.
@@ -86,8 +87,7 @@ function retainedCss(capture) {
   const boost = ':not(#tellr-capture-a):not(#tellr-capture-b):not(#tellr-capture-c)';
   const rules = [];
   if (capture.mode === 'subtree' && capture.hiddenWithin) {
-    const hidden = `${target} [${HIDDEN_ATTRIBUTE}]${boost}`;
-    rules.push(`${hidden}, ${hidden}::before, ${hidden}::after { visibility: hidden !important; }`);
+    rules.push(`${target} [${HIDDEN_ATTRIBUTE}]${boost} { visibility: hidden !important; }`);
   }
   const paint = capture.mode === 'box' && capture.paint ? capture.paint : null;
   if (paint) {
@@ -112,24 +112,31 @@ function captureNumber(capture) {
   return Number(String(capture.id).slice(1));
 }
 
-// Playwright floors a page clip's width and height to whole CSS px
-// (helper.enclosingIntSize) and Chrome snaps its origin to a device pixel, so
-// a PNG can only cover a whole number of CSS px from about the rect's corner.
-// Half a pixel more turns the floor into a rounding: the PNG then covers the
-// picture's rect to within half a pixel at its far edges (a quarter at its
-// corner), and is twice the rect to within one device pixel. The picture
-// keeps the exact rect, so the PNG is stretched by at most half a pixel.
-const CLIP_ROUNDING_PX = 0.5;
+// The clip a capture's PNG is taken from. Playwright floors a page clip's
+// width and height to whole CSS px (helper.enclosingIntSize), first cutting
+// the clip to the viewport (trimClipToSize), and Chrome snaps its origin to a
+// device pixel: a PNG covers a whole number of CSS px from about its corner.
+// So the clip's size is the rect's, rounded to whole px, and where that would
+// pass the viewport's right or bottom edge (a rect the slide's edge cuts) its
+// origin moves in by the difference, at most half a pixel. The PNG then
+// covers the picture's rect to within half a pixel at each edge, and is twice
+// it to within one device pixel; the picture keeps the exact rect, so the
+// PNG is stretched or squeezed by at most half a pixel.
+function clipOf(capture, viewport) {
+  const width = Math.min(Math.max(1, Math.round(capture.w)), viewport.width);
+  const height = Math.min(Math.max(1, Math.round(capture.h)), viewport.height);
+  return {
+    x: Math.max(0, Math.min(capture.x, viewport.width - width)),
+    y: Math.max(0, Math.min(capture.y, viewport.height - height)),
+    width,
+    height,
+  };
+}
 
-async function captureOne(page, capture) {
+async function captureOne(page, capture, viewport) {
   const retained = retainedCss(capture);
   const png = await page.screenshot({
-    clip: {
-      x: capture.x,
-      y: capture.y,
-      width: capture.w + CLIP_ROUNDING_PX,
-      height: capture.h + CLIP_ROUNDING_PX,
-    },
+    clip: clipOf(capture, viewport),
     omitBackground: true,
     type: 'png',
     scale: 'device',
@@ -145,6 +152,8 @@ async function captureOne(page, capture) {
 async function captureAll(page, captures) {
   const pictures = new Map();
   const ordered = (captures || []).slice().sort((a, b) => captureNumber(a) - captureNumber(b));
+  // A page with no fixed viewport has no edge a clip must stay inside.
+  const viewport = page.viewportSize() || { width: Infinity, height: Infinity };
   let timedOut = false;
   for (let index = 0; index < ordered.length; index++) {
     const capture = ordered[index];
@@ -155,7 +164,7 @@ async function captureAll(page, captures) {
       continue;
     }
     try {
-      pictures.set(capture.id, await captureOne(page, capture));
+      pictures.set(capture.id, await captureOne(page, capture, viewport));
     } catch (error) {
       if (error && error.name === 'TimeoutError') timedOut = true;
       const message = String((error && error.message) || error).split('\n')[0];
