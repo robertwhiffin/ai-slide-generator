@@ -248,7 +248,7 @@ Content item 1 (JSON text):
   "title": "Q3 renewals briefing",
   "slide_count": 3,                                      // all slides in the deck, not only those previewed
   "preview": {
-    "included": true,                                    // false: no item 2 (no slides, or too large to preview)
+    "included": true,                                    // false: no item 2 (no slides, too large, or the preview could not be built)
     "slides_shown": 3,
     "slides_total": 3,
     "images_hidden": 2,                                  // images replaced by a notice in the preview
@@ -308,12 +308,14 @@ A stopped generation also reports `failed`, with `"error": "This generation was 
 
 `get_deck_status` (ready) and `get_deck` build the preview from the saved deck, after slide-number tokens are filled in. It is for a quick look; the full deck is at `deck_url`.
 
-- **At most 10 slides**, whole slides in order. A deck with more shows the first ones and a closing strip, "N more slides - see full deck in tellr".
+- **At most 10 slides**, whole slides in order. A deck with more shows the first ones and a closing strip, "N more slides — see full deck in tellr".
+- **One frame per slide.** Each slide sits in its own 1280×720 frame, as in the tellr editor, so slides stay in order down the page and never cover each other, the top strip or the closing strip. The two strips sit outside the frames.
 - **Under a 150 KB budget** for the whole result (the UTF-8 bytes of both content items). The JSON part is counted first, so a long `reply` leaves fewer slides; the preview shows the most slides that fit. If not even one slide fits, `preview.included` is `false`, there is only one content item, and `preview.note` says the deck is too large to preview.
 - **Standard fonts.** Embedded font files are dropped and named families load from Google Fonts instead.
-- **Images are not shown.** Every image (library images, brand-asset images, any base64 `data:` image) becomes a small notice, "image not shown in preview, see full deck in tellr"; `preview.images_hidden` counts them. The one exception is a small SVG (at most 10 KB) from the deck's own design system, which is inlined. No base64 and no `{{image:...}}` or `{{ds-asset:...}}` handle appears in the preview, and the image library is never read for it.
-- **Links.** A strip at the top reads "preview - open the full deck in tellr" and links to `deck_url`.
+- **Images are not shown.** Every `<img>` image (library images, brand-asset images, any base64 `data:` image) becomes a small notice, "image not shown in preview, see full deck in tellr". A raster CSS background has its `url()` dropped with no notice, so the slide keeps its colour or gradient. `preview.images_hidden` counts both. Two kinds of SVG stay: a small SVG (at most 10 KB) from the deck's own design system is inlined, and a small text SVG `data:` URI already in the deck is kept as written. No base64 and no `{{image:...}}` or `{{ds-asset:...}}` handle appears in the preview, and the image library is never read for it.
+- **Links.** A strip at the top reads "preview — open the full deck in tellr" and links to `deck_url`.
 - A deck with no slides has `preview.included: false` and one content item.
+- **If the preview cannot be built**, the result still has the links and the rest of item 1, with no item 2: `preview.included` is `false`, `slides_shown` is 0, `slides_total` is the deck's slide count, and `preview.note` is "A preview is not available for this deck. Open the full deck in tellr."
 
 ### 5.3 `edit_deck`
 

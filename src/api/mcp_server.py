@@ -56,6 +56,7 @@ from src.services.conversation_pins import ActiveGraphReleaseUnavailableError
 from src.services.generation_rollback import RESTORE_PENDING_MESSAGE, RollbackResult
 from src.services.identity_provider import resolve_display_name
 from src.services.mcp_deck_preview import (
+    MAX_PREVIEW_SLIDES,
     MCP_RESULT_BUDGET_BYTES,
     build_deck_preview,
     ds_asset_ids_in,
@@ -721,7 +722,7 @@ def _build_deck_reply(
         "(view-only); show `deck_url` to the user. Returns lightweight "
         "status while pending/running. When ready, the response is a JSON "
         "part (links first, then title, slide_count and the reply) plus a "
-        "second part that is a **preview** HTML page of at most 10 slides "
+        f"second part that is a **preview** HTML page of at most {MAX_PREVIEW_SLIDES} slides "
         "with standard fonts and images not shown. The full deck and all "
         "editing are at `deck_url`. "
         "A ready turn may leave the deck UNCHANGED (the assistant may "
@@ -1167,7 +1168,7 @@ async def _edit_deck_impl(
         "Retrieve the current state of a deck without submitting new work. "
         "The response is a JSON part (`deck_url` and `deck_view_url` first, "
         "then title and slide_count) plus a second part that is a **preview** "
-        "HTML page of at most 10 slides with standard fonts and images not "
+        f"HTML page of at most {MAX_PREVIEW_SLIDES} slides with standard fonts and images not "
         "shown. The full deck and all editing are at `deck_url`; show "
         "`deck_url` to the user. Idempotent; no job queue interaction. Use "
         "when you have a session_id from earlier and want to see the deck "
