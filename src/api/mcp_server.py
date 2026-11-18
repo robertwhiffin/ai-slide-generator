@@ -643,9 +643,13 @@ def _render_deck_response(
         "lightweight status while pending/running; when ready, returns the "
         "complete deck as structured slide data, a standalone HTML "
         "document, and URLs into tellr's full editor and view-only surfaces. "
-        "A ready turn is not always an applied change: when "
-        "metadata.clarification_needed is true the deck was left UNCHANGED and "
-        "metadata.clarification carries the question to answer before retrying."
+        "A ready turn may leave the deck UNCHANGED (the assistant may "
+        "answer or ask a question instead of editing). Show `reply` (the "
+        "assistant's final message of the turn) to the user; `deck_changed` "
+        "says whether the deck was modified. When deck_changed is false, "
+        "metadata.clarification_needed is true and metadata.clarification "
+        "repeats the reply. A generation stopped in the Tellr app reports "
+        "status failed."
     ),
 )
 async def get_deck_status(
@@ -743,6 +747,16 @@ async def _get_deck_status_impl(
                     "progress": None,
                 }
 
+            if db_status == "cancelled":
+                # Only a user stop in the Tellr app writes ``cancelled``
+                # (timeouts and orphan sweeps write ``error``).
+                return {
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "status": "failed",
+                    "error": MCP_STOPPED_ERROR,
+                }
+
             if db_status == "error":
                 return {
                     "session_id": session_id,
@@ -791,33 +805,60 @@ async def _get_deck_status_impl(
                 for m in db_messages
             ]
 
-            # WG2-01. An edit instruction that names no slide is DELIBERATELY not
-            # applied: chat_service asks which slide instead (its RC10 twins, plus the
-            # ambiguous add-vs-replace pair) and attaches ``clarification_needed`` to
-            # the COMPLETE event, which ``job_queue.process_chat_request`` copies
-            # verbatim into ``result["metadata"]``.
-            #
-            # Such a turn completes normally, so "ready" is the honest status and
-            # ``replacement_info`` is None — which is indistinguishable from an edit
-            # that applied but replaced nothing. Rebuilding ``metadata`` from
-            # hand-picked keys DROPPED the flag, so an automated caller reading
-            # ``status`` concluded the edit had landed when the deck was untouched; the
-            # only remaining trace was a ``message_type == "clarification"`` row in the
-            # transcript. Surfaced ADDITIVELY, and ``status`` keeps its existing meaning
-            # for clients already reading it.
-            clarification_needed = bool(result_metadata.get("clarification_needed"))
-            clarification = None
-            if clarification_needed:
-                # The question itself, so a caller can act on it without re-filtering
-                # the transcript. Last one wins: it is the turn's most recent ask.
-                clarification = next(
-                    (
-                        message.get("content")
-                        for message in reversed(messages)
-                        if message.get("message_type") == "clarification"
-                    ),
-                    None,
+            # ``reply``: the turn's last assistant ``llm_response`` row, for both
+            # engines (a graph turn writes it only from architect code).
+            reply = next(
+                (
+                    message.get("content")
+                    for message in reversed(messages)
+                    if message.get("role") == "assistant"
+                    and message.get("message_type") == "llm_response"
+                ),
+                None,
+            )
+
+            if result_metadata.get("engine_mode") == "graph":
+                # Agent turn: the architect's intent says whether the deck
+                # changed. ``discuss`` / ``confirm_design_contract`` (and a
+                # missing intent, e.g. an app-made turn from before this
+                # field existed) return before any deck write, so the reply
+                # is the answer or question and is surfaced as the
+                # clarification.
+                deck_changed = result_metadata.get("architect_intent") in (
+                    "build",
+                    "edit",
                 )
+                clarification_needed = not deck_changed
+                clarification = reply if clarification_needed else None
+            else:
+                # WG2-01 (Legacy results, which carry no ``engine_mode``). An
+                # edit instruction that names no slide is DELIBERATELY not
+                # applied: chat_service asks which slide instead (its RC10 twins,
+                # plus the ambiguous add-vs-replace pair) and attaches
+                # ``clarification_needed`` to the COMPLETE event, which
+                # ``job_queue.process_chat_request`` copies verbatim into
+                # ``result["metadata"]``.
+                #
+                # Such a turn completes normally, so "ready" is the honest status
+                # and ``replacement_info`` is None, which is indistinguishable
+                # from an edit that applied but replaced nothing. Surfaced
+                # ADDITIVELY, and ``status`` keeps its existing meaning.
+                clarification_needed = bool(
+                    result_metadata.get("clarification_needed")
+                )
+                deck_changed = not clarification_needed
+                clarification = None
+                if clarification_needed:
+                    # The question itself, so a caller can act on it without
+                    # re-filtering the transcript. Last one wins.
+                    clarification = next(
+                        (
+                            message.get("content")
+                            for message in reversed(messages)
+                            if message.get("message_type") == "clarification"
+                        ),
+                        None,
+                    )
 
             return {
                 "session_id": session_id,
@@ -825,6 +866,8 @@ async def _get_deck_status_impl(
                 "status": "ready",
                 **deck_fields,
                 "replacement_info": result.get("replacement_info"),
+                "reply": reply,
+                "deck_changed": deck_changed,
                 "messages": messages,
                 "metadata": {
                     "tool_calls": result_metadata.get("tool_calls"),

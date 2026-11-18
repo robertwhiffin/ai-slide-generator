@@ -246,7 +246,9 @@ A call that still sends `num_slides` or `deck_prompt_id` succeeds and the value 
   "html_document": "<!doctype html>...</html>",       // complete, render-ready
   "deck_url": "https://<your-tellr-app-url>/sessions/c4d8.../edit",
   "deck_view_url": "https://<your-tellr-app-url>/sessions/c4d8.../view",
-  "replacement_info": null,                              // populated for edit_deck
+  "replacement_info": null,                              // null on Agent turns (the graph produces none)
+  "reply": "Here's a starter deck...",                   // the turn's last assistant message, or null
+  "deck_changed": true,                                  // false when the turn left the deck unchanged
   "messages": [ { "role": "assistant", "content": "...",
                    "message_type": "reasoning", "created_at": "..." } ],
   "metadata": {
@@ -254,13 +256,13 @@ A call that still sends `num_slides` or `deck_prompt_id` succeeds and the value 
     "latency_ms": 47213,
     "experiment_url": "https://.../mlflow/...",
     "session_title": "Q3 renewals briefing",
-    "clarification_needed": false,                       // true when the agent asked a question instead of editing
-    "clarification": null                                // the question text, when clarification_needed is true
+    "clarification_needed": false,                       // true when deck_changed is false
+    "clarification": null                                // the reply, when clarification_needed is true
   }
 }
 ```
 
-**`status: "ready"` does not mean the edit was applied.** When the agent decides it needs more information, it asks a question rather than changing the deck — and the turn still completes, so `status` is `"ready"` and `replacement_info` is `null`. **An automated caller must check `metadata.clarification_needed`**, not `status` alone, or it will report success for a turn in which nothing changed. `metadata.clarification` carries the question text to relay back to the user.
+**`status: "ready"` does not mean the deck changed.** The assistant may answer a question or ask for more information instead of editing, and the turn still completes, so `status` is `"ready"` and `replacement_info` is `null`. **An automated caller must check `deck_changed`**, not `status` alone, or it will report success for a turn in which nothing changed. `reply` is the assistant's final message of the turn (the last assistant `llm_response` message, or `null`); show it to the user. When `deck_changed` is `false`, `metadata.clarification_needed` is `true` and `metadata.clarification` carries the reply. On an Agent turn `deck_changed` is true when the architect built or edited the deck. A turn that predates this release and has no recorded intent reports `deck_changed: false`.
 
 **`messages` after a clear or a message delete.** If the session's chat has been cleared (`DELETE /api/sessions/{id}/context`), a poll for the deck's first request can return the row the clear kept, with `message_type: "engine_mode_marker"`. After a message is deleted (`DELETE /api/sessions/{id}/messages/{message_id}`), a poll for that turn's request returns no messages. When the deleted message was the deck's first, the poll returns only the kept row, typed `engine_mode_marker`, as after a clear. That row is hidden from every transcript read the UI uses but not from this per-request poll. It is harmless: callers can ignore rows of that type. The web UI offers Clear chat on every deck the user can edit, including decks created through `create_deck`.
 
@@ -274,6 +276,8 @@ A call that still sends `num_slides` or `deck_prompt_id` succeeds and the value 
   "error": "Generation failed: <reason>"
 }
 ```
+
+A generation stopped in the Tellr app also reports `failed`, with `"error": "This generation was stopped in Tellr. The deck is unchanged."`.
 
 **Status values.** `pending` → `running` → `ready` is the happy path. A terminal `failed` is returned for agent errors, tool failures, or timeouts (see section 9). A running job that exceeds 10 minutes is swept to `failed` by the server-side timeout sweeper.
 

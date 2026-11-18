@@ -9,6 +9,7 @@ import base64
 import copy
 import inspect
 import json
+import re
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1746,6 +1747,497 @@ async def test_both_clarification_kinds_are_reported_the_same_way(fake_request, 
 
     assert result["metadata"]["clarification_needed"] is True
     assert result["metadata"]["clarification"] == _AMBIGUOUS_INTENT_CLARIFICATION_TEXT
+
+
+# ---- get_deck_status: Agent turns, reply, deck_changed, stopped turns ----
+#
+# An Agent (graph) turn's COMPLETE metadata is exactly
+# ``{"engine_mode": "graph", "architect_intent": <intent or None>}`` (chat_service's
+# graph COMPLETE), which job_queue copies verbatim into ``result["metadata"]``. It
+# carries no replacement_info, counters or experiment URL. A turn stored before intents
+# were recorded has ``{"engine_mode": "graph"}`` only, and a Legacy (monolith) result
+# has no ``engine_mode`` at all.
+#
+# The architect speaks in ``role="assistant", message_type="llm_response"`` rows, and on
+# a graph turn only the architect does. The data analyst's answer, the deck reviewer's
+# advisory, Gateway notices and tool progress are assistant ``info`` / ``tool_call``
+# rows, and they can come AFTER the architect's reply. A turn that fetched data first
+# has two architect rows, and its second pass's intent is the turn's.
+
+#: Every top-level key of a ready payload before ``reply`` and ``deck_changed``.
+_READY_KEYS_BEFORE_REPLY = frozenset(
+    {
+        "session_id",
+        "request_id",
+        "status",
+        "slide_count",
+        "title",
+        "deck",
+        "html_document",
+        "deck_url",
+        "deck_view_url",
+        "replacement_info",
+        "messages",
+        "metadata",
+    }
+)
+#: Exactly two keys more.
+_READY_KEYS = _READY_KEYS_BEFORE_REPLY | {"reply", "deck_changed"}
+
+#: The Global Constraints copy, restated so that a changed constant also turns red.
+_STOPPED_COPY = "This generation was stopped in Tellr. The deck is unchanged."
+
+_STARTER_REPLY = (
+    "Here's a starter deck: five slides on Q3 revenue. You could explore next: "
+    "a split by region, or a slide on the Q4 forecast."
+)
+_REVIEWER_ADVISORY = "Deck review: slide 4's chart has no axis labels."
+_GATEWAY_NOTICE = "Glean couldn't be reached, so this turn carried on without it."
+
+
+def _turn(*rows):
+    """A turn's persisted rows, in order, from ``(role, message_type, content)``."""
+    return [
+        {
+            "id": n,
+            "role": role,
+            "content": content,
+            "message_type": message_type,
+            "created_at": f"2026-11-18T09:00:{n:02d}",
+            "metadata": None,
+        }
+        for n, (role, message_type, content) in enumerate(rows, start=1)
+    ]
+
+
+def _as_reported(rows):
+    """``rows`` as the ready payload's ``messages`` has always reported them."""
+    return [
+        {
+            "role": row["role"],
+            "content": row["content"],
+            "message_type": row["message_type"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def _graph_metadata(intent):
+    """The graph COMPLETE's metadata for a turn whose (final) intent is ``intent``."""
+    return {"engine_mode": "graph", "architect_intent": intent}
+
+
+async def _agent_status(fake_request, identity, *, result_metadata, turn):
+    return await _ready_status(
+        fake_request,
+        identity,
+        result_metadata=result_metadata,
+        replacement_info=None,  # the graph's COMPLETE carries none
+        turn_messages=turn,
+    )
+
+
+def _agent_turn_metadata(*, clarification_needed, clarification):
+    """A graph turn's reported ``metadata``: the pass-through fields as today (the
+    graph's COMPLETE leaves the counters and experiment URL empty) and the pair."""
+    return {
+        "tool_calls": None,
+        "latency_ms": None,
+        "experiment_url": None,
+        "session_title": "Q3 Pitch",
+        "clarification_needed": clarification_needed,
+        "clarification": clarification,
+    }
+
+
+def _assert_ready_payload(result, turn, *, replacement_info=None):
+    """Everything in a ready payload except ``reply``, ``deck_changed`` and ``metadata``,
+    which each test asserts whole."""
+    assert set(result) == _READY_KEYS
+    assert result["status"] == "ready"
+    assert result["session_id"] == "sess-1"
+    assert result["request_id"] == "req-1"
+    assert result["slide_count"] == 1
+    assert result["title"] == "Q3 Pitch"
+    assert result["deck_url"] == "https://t.example/sessions/sess-1/edit"
+    assert result["deck_view_url"] == "https://t.example/sessions/sess-1/view"
+    assert result["html_document"].lower().startswith("<!doctype")
+    assert result["replacement_info"] == replacement_info
+    assert result["messages"] == _as_reported(turn)
+
+
+async def _db_terminal_status(fake_request, identity, *, db_status, error_message):
+    """Poll request ``r`` of deck ``s`` after the worker dropped its in-memory entry,
+    with the DB row ended ``db_status``."""
+    from src.api import mcp_server
+
+    chat_request = {
+        "request_id": "r",
+        "session_id": 42,  # integer PK, as the real session_manager returns
+        "status": db_status,
+        "error_message": error_message,
+        "created_at": "2026-11-18T09:00:00",
+        "completed_at": "2026-11-18T09:00:05",
+        "result": None,
+    }
+
+    with patch("src.api.mcp_server.mcp_auth_scope") as auth_scope, \
+         patch("src.api.mcp_server.get_job_status", return_value=None), \
+         patch("src.api.mcp_server.permission_service") as perm_svc, \
+         patch("src.api.mcp_server.get_session_manager") as get_sm:
+
+        auth_scope.return_value.__enter__.return_value = identity
+        auth_scope.return_value.__exit__.return_value = False
+        perm_svc.can_view_deck.return_value = True
+
+        sm = MagicMock()
+        sm.get_chat_request.return_value = chat_request
+        sm.get_session_id_for_request.return_value = "s"
+        get_sm.return_value = sm
+
+        return await mcp_server._get_deck_status_impl(
+            request=fake_request, session_id="s", request_id="r"
+        )
+
+
+class TestGetDeckStatusReportsAgentTurns:
+    """``reply``, ``deck_changed`` and stopped turns.
+
+    A class whose name says "status", so ``-k status`` selects every test here,
+    including those whose own names don't.
+    """
+
+    @pytest.mark.asyncio
+    async def test_status_of_an_agent_build_reports_the_reply_and_a_changed_deck(
+        self, fake_request, identity
+    ):
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "info", _GATEWAY_NOTICE),
+            ("assistant", "llm_response", _STARTER_REPLY),
+        )
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata("build"), turn=turn
+        )
+
+        assert result["reply"] == _STARTER_REPLY
+        assert result["deck_changed"] is True
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=False, clarification=None
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    async def test_status_of_an_agent_edit_reports_the_reply_and_a_changed_deck(
+        self, fake_request, identity
+    ):
+        """An edit changes the deck too. Its reply is the architect's row although
+        assistant rows follow it: the deck reviewer speaks last, in an ``info`` row."""
+        reply = "Done: slide 2's title is larger, and nothing else moved."
+        turn = _turn(
+            ("user", "user_query", "On slide 2, make the title bigger"),
+            ("assistant", "tool_call", "Searching Glean for the brand guide"),
+            ("assistant", "llm_response", reply),
+            ("assistant", "info", _REVIEWER_ADVISORY),
+        )
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata("edit"), turn=turn
+        )
+
+        assert result["reply"] == reply
+        assert result["deck_changed"] is True
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=False, clarification=None
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("intent", "query", "reply"),
+        [
+            (
+                "discuss",
+                "Does the arc of this deck hold up?",
+                "Mostly. Should slide 3's revenue be split by region or by product?",
+            ),
+            (
+                "confirm_design_contract",
+                "Use the Databricks brand",
+                "I'd restyle the deck in the Databricks brand: navy grounds and Inter "
+                "type. Shall I go ahead?",
+            ),
+        ],
+        ids=["discuss", "confirm_design_contract"],
+    )
+    async def test_status_of_an_agent_discussion_reports_an_unchanged_deck(
+        self, fake_request, identity, intent, query, reply
+    ):
+        """Nothing is built on these turns. The stored metadata has no
+        ``clarification_needed`` key, so the flag comes from the intent, and the
+        question is the architect's reply: a graph turn writes no ``clarification``
+        row."""
+        turn = _turn(
+            ("user", "user_query", query),
+            ("assistant", "tool_call", "Searching Glean for the Q3 plan"),
+            ("assistant", "llm_response", reply),
+        )
+        result_metadata = _graph_metadata(intent)
+        assert "clarification_needed" not in result_metadata
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=result_metadata, turn=turn
+        )
+
+        assert result["reply"] == reply
+        assert result["deck_changed"] is False
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=True, clarification=reply
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "result_metadata",
+        [
+            pytest.param({"engine_mode": "graph"}, id="stored-before-intents"),
+            pytest.param(_graph_metadata(None), id="graph-returned-no-intent"),
+        ],
+    )
+    async def test_status_of_an_agent_turn_with_no_intent_reports_an_unchanged_deck(
+        self, fake_request, identity, result_metadata
+    ):
+        """Pre-pass Ruling 2. With no intent to go on, a graph turn reports an unchanged
+        deck and its reply as the question. It is still a graph turn: it does not fall
+        back to the Legacy rule, which would read ``deck_changed`` as True."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "llm_response", _STARTER_REPLY),
+        )
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=result_metadata, turn=turn
+        )
+
+        assert result["reply"] == _STARTER_REPLY
+        assert result["deck_changed"] is False
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=True, clarification=_STARTER_REPLY
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("final_intent", "final_reply", "after_reply", "deck_changed"),
+        [
+            pytest.param(
+                "build",
+                "Built it: five slides on Q3 revenue, led by EMEA.",
+                [("assistant", "info", _REVIEWER_ADVISORY)],
+                True,
+                id="then-build",
+            ),
+            pytest.param(
+                "discuss",
+                "EMEA led Q3 with 41% of revenue. Want a slide on why?",
+                [],
+                False,
+                id="then-discuss",
+            ),
+        ],
+    )
+    async def test_reply_is_the_last_architect_message_of_the_turn(
+        self, fake_request, identity, final_intent, final_reply, after_reply, deck_changed
+    ):
+        """An ``ask_data`` turn runs the architect twice. It asks for data and says
+        so, the data analyst answers in an ``info`` row, and the architect's second
+        pass answers the user and sets the turn's intent. The reply is that second
+        architect row: not the first one, not the analyst's answer, and not the
+        reviewer's advisory that follows a build."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue by region"),
+            ("assistant", "llm_response", "Let me fetch the Q3 numbers from Genie One."),
+            ("assistant", "tool_call", "Asking Genie One: Q3 revenue by region"),
+            ("assistant", "info", "Q3 revenue by region: EMEA 41%, AMER 38%, APJ 21%."),
+            ("assistant", "llm_response", final_reply),
+            *after_reply,
+        )
+
+        result = await _agent_status(
+            fake_request,
+            identity,
+            result_metadata=_graph_metadata(final_intent),
+            turn=turn,
+        )
+
+        assert result["reply"] == final_reply
+        assert result["deck_changed"] is deck_changed
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=not deck_changed,
+            clarification=None if deck_changed else final_reply,
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("intent", "deck_changed"), [("build", True), ("discuss", False)])
+    async def test_status_of_an_agent_turn_without_an_architect_message_reports_no_reply(
+        self, fake_request, identity, intent, deck_changed
+    ):
+        """``reply`` is null when the architect said nothing this turn. The other
+        assistant rows are not a reply, so there is no question to report either."""
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "tool_call", "Asking Genie One: Q3 revenue"),
+            ("assistant", "info", _GATEWAY_NOTICE),
+        )
+
+        result = await _agent_status(
+            fake_request, identity, result_metadata=_graph_metadata(intent), turn=turn
+        )
+
+        assert result["reply"] is None
+        assert result["deck_changed"] is deck_changed
+        assert result["metadata"] == _agent_turn_metadata(
+            clarification_needed=not deck_changed, clarification=None
+        )
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_turn_reports_failed_with_the_stopped_copy(
+        self, fake_request, identity
+    ):
+        """Review Focus 2. A stop in the Tellr app ends the request ``cancelled``
+        (``cancel_chat`` writes no error message), and the worker drops the in-memory
+        entry. The poll terminates as ``failed`` with the stopped copy, never
+        "Unknown job status"."""
+        from src.api import mcp_server
+
+        result = await _db_terminal_status(
+            fake_request, identity, db_status="cancelled", error_message=None
+        )
+
+        assert result == {
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": mcp_server.MCP_STOPPED_ERROR,
+        }
+        assert result["error"] == _STOPPED_COPY
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error_message", "reported"),
+        [
+            (
+                "Generation exceeded maximum duration (10 minutes)",
+                "Generation exceeded maximum duration (10 minutes)",
+            ),
+            (None, "Generation failed"),
+        ],
+        ids=["timeout", "no-error-message"],
+    )
+    async def test_status_of_an_errored_turn_still_reports_its_own_error(
+        self, fake_request, identity, error_message, reported
+    ):
+        """C16. A timeout, an orphan sweep and a worker failure all end the request
+        ``error``. Only a stop writes ``cancelled``, so only a stop gets the stopped
+        copy."""
+        result = await _db_terminal_status(
+            fake_request, identity, db_status="error", error_message=error_message
+        )
+
+        assert result == {
+            "session_id": "s",
+            "request_id": "r",
+            "status": "failed",
+            "error": reported,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_pre_existing_legacy_result_reports_as_before_plus_the_new_keys(
+        self, fake_request, identity
+    ):
+        """Review Focus 5. A Legacy MCP turn's stored result has no ``engine_mode``.
+        It reports what it reported before, field for field, plus ``reply`` (the
+        same rule as an Agent turn; neither transcript has an ``llm_response`` row)
+        and ``deck_changed = not clarification_needed``."""
+        clarified = await _clarification_status(fake_request, identity)
+        applied = await _applied_edit_status(fake_request, identity)
+
+        assert clarified["reply"] is None
+        assert clarified["deck_changed"] is False
+        assert clarified["metadata"] == {
+            "tool_calls": 0,
+            "latency_ms": 1300,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": True,
+            "clarification": _RC10_CLARIFICATION_TEXT,
+        }
+        _assert_ready_payload(clarified, _clarification_turn(_RC10_CLARIFICATION_TEXT))
+
+        assert applied["reply"] is None
+        assert applied["deck_changed"] is True
+        assert applied["metadata"] == {
+            "tool_calls": 3,
+            "latency_ms": 41000,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": False,
+            "clarification": None,
+        }
+        _assert_ready_payload(
+            applied, _applied_edit_turn(), replacement_info={"replaced": [2], "count": 1}
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_of_a_legacy_turn_reports_its_last_llm_response_as_the_reply(
+        self, fake_request, identity
+    ):
+        """Legacy turns write ``llm_response`` rows too (the monolith's LLM output),
+        so the same rule gives them a reply. Everything else is computed as before: no
+        clarification, so the deck changed, with or without a replacement_info."""
+        final = "Here are three slides on Q3 revenue, one per region."
+        turn = _turn(
+            ("user", "user_query", "Make a deck on Q3 revenue"),
+            ("assistant", "llm_response", "Let me pull the Q3 numbers first."),
+            ("assistant", "tool_call", "Calling query_genie_space"),
+            ("tool", "tool_result", "| region | revenue |\n| EMEA | 41% |"),
+            ("assistant", "llm_response", final),
+        )
+
+        result = await _ready_status(
+            fake_request,
+            identity,
+            result_metadata={"tool_calls": 1, "latency_ms": 22000},
+            replacement_info=None,
+            turn_messages=turn,
+        )
+
+        assert result["reply"] == final
+        assert result["deck_changed"] is True
+        assert result["metadata"] == {
+            "tool_calls": 1,
+            "latency_ms": 22000,
+            "experiment_url": None,
+            "session_title": "Q3 Pitch",
+            "clarification_needed": False,
+            "clarification": None,
+        }
+        _assert_ready_payload(result, turn)
+
+    @pytest.mark.asyncio
+    async def test_the_status_tool_description_names_reply_and_deck_changed(self):
+        """What MCP clients read in tools/list points them at the new fields."""
+        from src.api import mcp_server
+
+        [tool] = [
+            t for t in await mcp_server.mcp.list_tools() if t.name == "get_deck_status"
+        ]
+        assert re.search(r"\breply\b", tool.description)
+        assert re.search(r"\bdeck_changed\b", tool.description)
 
 
 # ---- edit_deck ----------------------------------------------------------

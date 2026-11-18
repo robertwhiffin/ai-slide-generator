@@ -510,9 +510,9 @@ Genie should call the tellr MCP tools. The first call sends you through OAuth co
 
 | Tool | Purpose | Key inputs | Key outputs |
 |---|---|---|---|
-| `create_deck` | Generate a new deck from a prompt | `prompt`, `num_slides?` | `session_id`, `request_id`, `status: pending` |
-| `get_deck_status` | Poll for completion and retrieve ready deck | `session_id`, `request_id` | `status`, plus (on ready) `deck`, `html_document`, `deck_url`, `deck_view_url` |
-| `edit_deck` | Refine an existing deck via instruction | `session_id`, `instruction`, `slide_indices?` | `request_id` (poll via `get_deck_status`) |
+| `create_deck` | Generate a new deck from a prompt | `prompt`, `design_system_id?`, `template_name?`, `slide_style_id?` | `session_id`, `request_id`, `status: pending` |
+| `get_deck_status` | Poll for completion and retrieve ready deck | `session_id`, `request_id` | `status`, plus (on ready) `deck`, `html_document`, `deck_url`, `deck_view_url`, `reply`, `deck_changed` |
+| `edit_deck` | Refine an existing deck via instruction | `session_id`, `instruction` | `request_id` (poll via `get_deck_status`) |
 | `get_deck` | Re-read current deck state without submitting work | `session_id` | Same shape as `get_deck_status` ready response, minus `status`/`messages` |
 
 Full schemas and examples: [`mcp-server.md`](./mcp-server.md) section 5.
