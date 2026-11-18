@@ -3695,6 +3695,107 @@ async def test_whole_result_under_budget_counts_item_one_in_utf8_bytes(
     assert "4 more slides — see full deck in tellr" in item2.text
 
 
+#: The note a reply carries when its preview could not be built (final review I2).
+_PREVIEW_UNAVAILABLE_NOTE = "A preview is not available for this deck. Open the full deck in tellr."
+
+
+def _assert_links_without_preview(reply, tool, slide_count):
+    """The reply a failed preview leaves: one JSON item, links first, in the tool's key
+    order, with ``preview.included`` false and the unavailable note."""
+    [item] = _assert_one_item(reply)
+    payload = json.loads(item.text)
+    assert list(payload) == (_GET_DECK_KEYS if tool == "get_deck" else _READY_KEY_ORDER)
+    assert {key: payload[key] for key in _LINK_KEYS} == _links("sess-1")
+    assert payload["slide_count"] == slide_count
+    assert payload["preview"] == {
+        "included": False,
+        "slides_shown": 0,
+        "slides_total": slide_count,
+        "images_hidden": 0,
+        "note": _PREVIEW_UNAVAILABLE_NOTE,
+    }
+    return payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_deck_status", "get_deck"])
+async def test_a_preview_that_fails_to_build_still_returns_the_links(fake_request, identity, tool):
+    """Spec anti-goal "losing the links in any shape of response": when building the
+    preview raises, the ready poll and get_deck still answer, links first, with no
+    preview item (a caller polling a finished deck must not see a failure)."""
+    deck = _deck_of(_markers(3))
+    with patch(
+        "src.api.mcp_server.build_deck_preview",
+        side_effect=RuntimeError("preview exploded"),
+    ):
+        reply = await _reply_for(tool, fake_request, identity, deck)
+
+    payload = _assert_links_without_preview(reply, tool, 3)
+    assert payload["title"] == "Q3 Pitch"
+    if tool == "get_deck_status":
+        assert payload["status"] == "ready"
+        assert payload["reply"] == _STARTER_REPLY
+
+
+@pytest.mark.asyncio
+async def test_a_failed_design_system_svg_read_still_returns_the_links(identity):
+    """The SVG read is part of the preview: a database error there costs the preview,
+    not the reply."""
+    slide = {"html": '<div class="slide"><img src="{{ds-asset:4}}"></div>', "scripts": ""}
+    deck = {**_deck_of([]), "slides": [slide]}
+    with patch(
+        "src.api.mcp_server.design_system_service.get_small_svg_assets",
+        side_effect=RuntimeError("database went away"),
+    ) as read:
+        reply = await _get_deck_reply(identity, deck, db=MagicMock(), design_system_id=5)
+
+    assert read.call_count == 1
+    _assert_links_without_preview(reply, "get_deck", 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["get_deck_status", "get_deck"])
+async def test_css_nested_twelve_hundred_deep_still_returns_the_links(fake_request, identity, tool):
+    """Real input, nothing patched: css nested past Python's recursion limit used to
+    raise RecursionError out of the css scanners and turn the reply into a link-less
+    tool error."""
+    deck = _deck_of(_markers(2), css="@media a{" * 1200 + ".slide{color:red}" + "}" * 1200)
+
+    reply = await _reply_for(tool, fake_request, identity, deck)
+
+    items = reply.to_content()
+    payload = json.loads(items[0].text)
+    assert list(payload)[:2] == _LINK_KEYS
+    assert {key: payload[key] for key in _LINK_KEYS} == _links("sess-1")
+    assert payload["slide_count"] == 2
+    assert payload["preview"]["slides_total"] == 2
+
+
+def test_the_item_one_placeholder_note_is_at_least_as_long_as_every_preview_note():
+    """Item 1 is sized with ``_LONGEST_PREVIEW_NOTE`` before the preview exists; a
+    longer real note would push the whole result past the budget by the difference."""
+    from src.api import mcp_server
+    from src.services import mcp_deck_preview
+
+    def build(deck, max_html_bytes):
+        return mcp_deck_preview.build_deck_preview(
+            deck, title=None, deck_url="/d", svg_assets={}, max_html_bytes=max_html_bytes
+        )
+
+    notes = {
+        "no slides": build({"slides": []}, 150_000).note,
+        "too large": build(_deck_of(["MK-ONE"]), 10).note,
+        "one slide": build(_deck_of(["MK-ONE"]), 150_000).note,
+        "all, 6 digits": mcp_deck_preview._note(999_999, 999_999),
+        "some, 6 digits": mcp_deck_preview._note(999_998, 999_999),
+        "unavailable": mcp_server._PREVIEW_UNAVAILABLE_NOTE,
+    }
+    assert notes["unavailable"] == _PREVIEW_UNAVAILABLE_NOTE
+    longest = len(mcp_server._LONGEST_PREVIEW_NOTE.encode("utf-8"))
+    for name, note in notes.items():
+        assert len(note.encode("utf-8")) <= longest, name
+
+
 @pytest.mark.asyncio
 async def test_a_ready_poll_serialises_a_datetime_in_its_payload(fake_request, identity):
     """Item 1 is written with ``default=str``: a ``datetime`` inside

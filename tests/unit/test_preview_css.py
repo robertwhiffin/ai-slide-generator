@@ -35,6 +35,9 @@ colon), the tests assert what is kept, what is gone, and that braces balance.
 from __future__ import annotations
 
 import re
+import time
+
+import pytest
 
 from src.utils.preview_css import (
     FontFaces,
@@ -508,3 +511,57 @@ def test_minify_keeps_descendant_pseudo_space():
     assert (
         trim_css(".a{width:calc(1px + 2px)}", used_text='class="a"') == ".a{width:calc(1px + 2px)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# malformed css: never raises, never hangs (final review I1 / I2, the T1 minor)
+# ---------------------------------------------------------------------------
+
+_DEEP = 1_200
+
+
+@pytest.mark.parametrize(
+    "css",
+    [
+        pytest.param(".a{color:red;.b{x:y", id="unclosed-braces"),
+        pytest.param("}}.a{b:c}}.d{e:f}", id="stray-closers"),
+        pytest.param('.a{content:"abc}.b{c:d}', id="unclosed-string"),
+        pytest.param(".a{b:c}/* never closed .d{e:f}", id="unclosed-comment"),
+        pytest.param(".a{background:url(x.png;.b{c:d}", id="unclosed-url"),
+        pytest.param("@media a{" * _DEEP + ".x{a:b}" + "}" * _DEEP, id="nested-1200-deep"),
+        pytest.param("@media a{" * _DEEP + ".x{a:b}", id="nested-1200-deep-unclosed"),
+        pytest.param(
+            "@supports (x){" * _DEEP
+            + "@font-face{font-family:F;src:url(data:font/woff2;base64,AAAA)}"
+            + "}" * _DEEP,
+            id="font-face-1200-deep",
+        ),
+        pytest.param(
+            "@font-face{font-family:F;src:url(" + " " * 100_000 + "x.woff2)}",
+            id="font-face-src-whitespace",
+        ),
+    ],
+)
+def test_malformed_css_never_raises_or_hangs(css):
+    started = time.perf_counter()
+    stripped, faces = strip_embedded_font_faces(css)
+    trimmed = trim_css(css, used_text="a b d x")
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 2.0, f"{elapsed:.2f} s"
+    assert isinstance(stripped, str) and isinstance(faces, dict)
+    assert isinstance(trimmed, str)
+    if "base64" not in css:
+        # nothing embedded: stripping changes nothing
+        assert stripped == css
+        assert faces == {}
+
+
+def test_css_nested_past_the_recursion_limit_keeps_its_rules():
+    """A block nested deeper than the trimmer descends is kept as written."""
+    css = "@media a{" * _DEEP + ".x{a:b}.dead{c:d}" + "}" * _DEEP
+
+    trimmed = trim_css(css, used_text="x")
+
+    assert ".x{a:b}" in trimmed
+    assert _balanced(trimmed)

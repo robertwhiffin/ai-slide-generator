@@ -608,12 +608,14 @@ async def _create_deck_impl(
 # ---------------------------------------------------------------------------
 
 
-# The longest preview note the builder can write, with 6-digit counts: the placeholder
-# that sizes item 1 before the real preview exists.
+# The longest preview note the builder (or the fallback below) can write, with 6-digit
+# counts: the placeholder that sizes item 1 before the real preview exists.
 _LONGEST_PREVIEW_NOTE = (
     "Showing 999999 of 999999 slides as a preview "
     "(standard fonts, images not shown). Open the full deck in tellr."
 )
+# When building the preview fails, the reply still carries the links and this note.
+_PREVIEW_UNAVAILABLE_NOTE = "A preview is not available for this deck. Open the full deck in tellr."
 
 
 def _build_deck_reply(
@@ -634,12 +636,15 @@ def _build_deck_reply(
     the result budget minus the UTF-8 bytes of the JSON part, sized with a worst-case
     ``preview`` entry first, so a long ``reply`` shrinks the preview rather than
     pushing the whole result over budget.
+
+    A failure anywhere in building the preview (the css scanners, the SVG read) is
+    logged and costs only the preview: the reply is then the JSON part alone, links
+    first, with ``preview.included`` false and ``_PREVIEW_UNAVAILABLE_NOTE``.
     """
     from src.api.services.chat_service import resolve_active_design_system_id
     from src.utils.slide_number_tokens import substitute_deck_slide_numbers
 
     deck_dict = deck_dict or {}
-    substitute_deck_slide_numbers(deck_dict)
 
     title = session.get("title") or deck_dict.get("title")
     slide_count = len(deck_dict.get("slides") or [])
@@ -665,25 +670,40 @@ def _build_deck_reply(
     )
     max_html_bytes = MCP_RESULT_BUDGET_BYTES - item1_bytes - 256
 
-    asset_ids = ds_asset_ids_in(deck_dict)
-    svg_assets: dict[int, str] = {}
-    if asset_ids:
-        design_system_id = resolve_active_design_system_id(session_id)
-        with get_db_session() as db:
-            svg_assets = design_system_service.get_small_svg_assets(
-                db,
-                asset_ids,
-                design_system_id=design_system_id,
-                max_bytes=SVG_INLINE_MAX_BYTES,
-            )
+    try:
+        substitute_deck_slide_numbers(deck_dict)
+        asset_ids = ds_asset_ids_in(deck_dict)
+        svg_assets: dict[int, str] = {}
+        if asset_ids:
+            design_system_id = resolve_active_design_system_id(session_id)
+            with get_db_session() as db:
+                svg_assets = design_system_service.get_small_svg_assets(
+                    db,
+                    asset_ids,
+                    design_system_id=design_system_id,
+                    max_bytes=SVG_INLINE_MAX_BYTES,
+                )
 
-    preview = build_deck_preview(
-        deck_dict,
-        title=deck_dict.get("title") or session.get("title"),
-        deck_url=head["deck_url"],
-        svg_assets=svg_assets,
-        max_html_bytes=max_html_bytes,
-    )
+        preview = build_deck_preview(
+            deck_dict,
+            title=deck_dict.get("title") or session.get("title"),
+            deck_url=head["deck_url"],
+            svg_assets=svg_assets,
+            max_html_bytes=max_html_bytes,
+        )
+    except Exception:
+        logger.exception("MCP deck preview failed; replying without it (session_id=%s)", session_id)
+        return McpToolReply(
+            payload_with(
+                {
+                    "included": False,
+                    "slides_shown": 0,
+                    "slides_total": slide_count,
+                    "images_hidden": 0,
+                    "note": _PREVIEW_UNAVAILABLE_NOTE,
+                }
+            )
+        )
     return McpToolReply(payload_with(preview.as_payload()), preview.html)
 
 

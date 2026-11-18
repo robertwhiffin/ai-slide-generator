@@ -23,12 +23,20 @@ from urllib.parse import quote_plus
 # family name -> {(ital, weight)} with ital 0/1
 FontFaces = dict[str, set[tuple[int, int]]]
 
-_EMBEDDED_SRC = re.compile(r"url\(\s*['\"]?\s*(?:data:|\{\{ds-asset:)", re.IGNORECASE)
+# The whitespace after the quote belongs to the optional quote group, so a long run of
+# spaces has one way to match (``\s*['"]?\s*`` rescans it quadratically).
+_EMBEDDED_SRC = re.compile(r"url\(\s*(?:['\"]\s*)?(?:data:|\{\{ds-asset:)", re.IGNORECASE)
 _NAME_TOKEN = re.compile(r"[.#](-?[A-Za-z_][A-Za-z0-9_-]*)")
 _WORD = re.compile(r"[A-Za-z0-9_-]+")
 _AT_NAME = re.compile(r"@([\w-]+)")
 _IDENT_CHAR = re.compile(r"[\w-]")
 _TRIMMED_AT_RULES = frozenset({"media", "supports", "container", "layer"})
+# How many nested ``@media`` / ``@supports`` / ``@container`` / ``@layer`` blocks the two
+# recursive passes descend into. Real decks nest two or three; a deeper block is kept as
+# written (not trimmed; its font faces are left to the image pass, which hides any
+# embedded data). Each level rescans its block, so the cap bounds the work at a small
+# multiple of the css size, and a hostile 1,000-deep css cannot exhaust Python's stack.
+_MAX_NESTING = 8
 
 
 # ---------------------------------------------------------------------------
@@ -187,13 +195,14 @@ def strip_embedded_font_faces(css: str) -> tuple[str, FontFaces]:
     Returns the remaining CSS (otherwise byte-for-byte unchanged) and the
     removed faces as ``{family: {(ital, weight)}}``. Faces with only
     ``http(s):`` sources stay and are not reported. Faces nested in
-    ``@media`` / ``@supports`` / ``@container`` / ``@layer`` blocks go too.
+    ``@media`` / ``@supports`` / ``@container`` / ``@layer`` blocks go too, down
+    to ``_MAX_NESTING`` levels.
     """
     faces: FontFaces = {}
-    return _strip_faces(css, faces), faces
+    return _strip_faces(css, faces, 0), faces
 
 
-def _strip_faces(css: str, faces: FontFaces) -> str:
+def _strip_faces(css: str, faces: FontFaces, depth: int) -> str:
     out: list[str] = []
     pos = 0
     for item in _split_items(css):
@@ -202,9 +211,9 @@ def _strip_faces(css: str, faces: FontFaces) -> str:
         prelude = css[item.start : item.block].strip().lower()
         if not prelude.startswith("@font-face"):
             match = _AT_NAME.match(prelude)
-            if match and match.group(1) in _TRIMMED_AT_RULES:
+            if match and match.group(1) in _TRIMMED_AT_RULES and depth < _MAX_NESTING:
                 body = _block_body(css, item)
-                inner = _strip_faces(body, faces)
+                inner = _strip_faces(body, faces, depth + 1)
                 if inner != body:
                     out.append(css[pos : item.block + 1])
                     out.append(inner)
@@ -293,7 +302,7 @@ def _is_dead(selector: str, words: set[str]) -> bool:
     return any(name not in words for name in _selector_names(selector))
 
 
-def _trim_items(css: str, words: set[str]) -> str:
+def _trim_items(css: str, words: set[str], depth: int = 0) -> str:
     out: list[str] = []
     after_stray = False
     for item in _split_items(css):
@@ -314,8 +323,8 @@ def _trim_items(css: str, words: set[str]) -> str:
         body = _block_body(css, item)
         if prelude.startswith("@"):
             match = _AT_NAME.match(prelude)
-            if match and match.group(1).lower() in _TRIMMED_AT_RULES:
-                inner = _trim_items(body, words)
+            if match and match.group(1).lower() in _TRIMMED_AT_RULES and depth < _MAX_NESTING:
+                inner = _trim_items(body, words, depth + 1)
                 # an emptied named @layer still fixes that layer's cascade order
                 named_layer = match.group(1).lower() == "layer" and prelude[match.end() :].strip()
                 if inner or named_layer:
@@ -359,7 +368,8 @@ def trim_css(css: str, used_text: str) -> str:
     one ``.name`` / ``#name`` token (outside ``[...]``) is not a whole word of
     ``used_text``. Anything unclassifiable is kept. ``@media``, ``@supports``,
     ``@container`` and ``@layer`` blocks are trimmed recursively (and dropped
-    when empty); every other at-rule is kept verbatim.
+    when empty) down to ``_MAX_NESTING`` levels, below which a block is kept as
+    written; every other at-rule is kept verbatim.
     """
     words = set(_WORD.findall(used_text))
     return _minify(_trim_items(_strip_comments(css), words))
